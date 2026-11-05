@@ -7,9 +7,12 @@ the real Agent.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import aiosqlite
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from cross_channel_send import CrossChannelSendPlugin
+from llm_response_fixtures import _make_text_response
 
 from corvidae.agent import Agent
 from corvidae.channel import ChannelConfig, ChannelRegistry
@@ -18,9 +21,6 @@ from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin
 from corvidae.thinking import ThinkingPlugin
 from corvidae.trace import mint_trace_id
-from cross_channel_send import CrossChannelSendPlugin
-
-from llm_response_fixtures import _make_text_response
 
 
 async def _build_harness(
@@ -79,6 +79,7 @@ async def _init_plugin(
 def _reset_attribution():
     """Ensure attribution is clean between tests."""
     from corvidae.attribution import _attribution
+
     token = _attribution.set({})
     yield
     _attribution.reset(token)
@@ -96,11 +97,14 @@ class TestSendMessageDelivery:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {},
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify
@@ -132,14 +136,17 @@ class TestSendMessageDelivery:
 
         ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
-        ch_evil = registry.get_or_create("signal", "evil", config=ChannelConfig())
+        registry.get_or_create("signal", "evil", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {},
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify
@@ -182,11 +189,14 @@ class TestHopCount:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {"hop_count": 2},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {"hop_count": 2},
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify
@@ -206,11 +216,14 @@ class TestHopCount:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {"hop_count": 3},  # at the default max
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {"hop_count": 3},  # at the default max
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify
@@ -231,11 +244,14 @@ class TestHopCount:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {"hop_count": "three"},  # not an int
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {"hop_count": "three"},  # not an int
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify
@@ -255,11 +271,14 @@ class TestHopCount:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {"hop_count": True},  # bool, not int
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {"hop_count": True},  # bool, not int
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify
@@ -282,11 +301,14 @@ class TestInputValidation:
         ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {},
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify
@@ -308,11 +330,14 @@ class TestInputValidation:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {},
+            }
+        )
 
         result = await plugin.send_message(ch_b.id, "")
         assert "text" in result.lower()
@@ -329,11 +354,14 @@ class TestInputValidation:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {},
+            }
+        )
 
         result = await plugin.send_message(ch_b.id, "   ")
         assert "text" in result.lower()
@@ -350,11 +378,14 @@ class TestInputValidation:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {},
+            }
+        )
 
         long_text = "x" * 8001
         result = await plugin.send_message(ch_b.id, long_text)
@@ -371,11 +402,14 @@ class TestInputValidation:
         ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {},
+            }
+        )
 
         result = await plugin.send_message("", "hello")
         assert "channel_id" in result
@@ -523,12 +557,15 @@ class TestIntegration:
 
         # Set attribution to channel A
         from corvidae.attribution import _attribution
+
         trace_a = mint_trace_id()
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": trace_a,
-            "meta": {},
-        })
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": trace_a,
+                "meta": {},
+            }
+        )
 
         # Send from A to B
         result = await plugin.send_message(ch_b.id, "hello bob")
@@ -545,10 +582,7 @@ class TestIntegration:
         b_conv = ch_b.conversation.messages
         system_msgs = [m for m in b_conv if m.get("role") == "system"]
         assert len(system_msgs) >= 1
-        agent_send_msg = [
-            m for m in system_msgs
-            if "agent_send from" in m.get("content", "")
-        ]
+        agent_send_msg = [m for m in system_msgs if "agent_send from" in m.get("content", "")]
         assert len(agent_send_msg) == 1
         assert f"agent_send from {ch_a.id}" in agent_send_msg[0]["content"]
         assert "hello bob" in agent_send_msg[0]["content"]
@@ -601,6 +635,7 @@ class TestIntegration:
         # Mock LLM that always returns a tool call (to increment turn_counter)
         call_count = 0
         mock_client = MagicMock()
+
         async def chat_with_tools(*a, **kw):
             nonlocal call_count
             call_count += 1
@@ -611,6 +646,7 @@ class TestIntegration:
                 ]
                 return tc
             return _make_text_response("done")
+
         mock_client.chat = AsyncMock(side_effect=chat_with_tools)
         agent._client = mock_client
         agent._mark_started()
@@ -620,11 +656,14 @@ class TestIntegration:
         await _init_plugin(plugin, pm)
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": mint_trace_id(),
-            "meta": {},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": mint_trace_id(),
+                "meta": {},
+            }
+        )
 
         # Send 3 messages to B (more than max_turns=2)
         for i in range(3):
@@ -634,8 +673,7 @@ class TestIntegration:
                 await agent.queues[ch_b.id].drain()
                 # turn_counter should be reset for the next send
                 assert ch_b.turn_counter < 2, (
-                    f"turn_counter={ch_b.turn_counter} after send {i+1}; "
-                    f"should have been reset"
+                    f"turn_counter={ch_b.turn_counter} after send {i + 1}; should have been reset"
                 )
 
         await db.close()
@@ -694,11 +732,13 @@ class TestIntegration:
         from corvidae.attribution import _attribution
 
         # Simulate: A sends to B (hop 1), B sends to A (hop 2), A tries to send to B (hop 3 > max 2)
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": mint_trace_id(),
-            "meta": {"hop_count": 2},  # already at max
-        })
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": mint_trace_id(),
+                "meta": {"hop_count": 2},  # already at max
+            }
+        )
 
         result = await plugin.send_message(ch_b.id, "this should fail")
         assert "loop detected" in result
@@ -706,6 +746,7 @@ class TestIntegration:
         assert "max 2" in result
 
         await db.close()
+
 
 class TestNegativeHopCount:
     """Negative hop_count is clamped to 0, not accepted as-is."""
@@ -719,11 +760,14 @@ class TestNegativeHopCount:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {"hop_count": -100},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {"hop_count": -100},
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify
@@ -744,11 +788,14 @@ class TestNegativeHopCount:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {"hop_count": -1},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {"hop_count": -1},
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify
@@ -773,11 +820,14 @@ class TestNonDictMeta:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": "not a dict",
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": "not a dict",
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify
@@ -802,11 +852,14 @@ class TestOnNotifyFailure:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {},
+            }
+        )
 
         pm.ahook.on_notify = AsyncMock(side_effect=RuntimeError("boom"))
 
@@ -869,12 +922,15 @@ class TestHopPropagation:
         await _init_plugin(plugin, pm)
 
         from corvidae.attribution import _attribution
+
         trace_a = mint_trace_id()
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": trace_a,
-            "meta": {},
-        })
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": trace_a,
+                "meta": {},
+            }
+        )
 
         # Send from A to B
         await plugin.send_message(ch_b.id, "hello bob")
@@ -941,12 +997,15 @@ class TestHopPropagation:
         await _init_plugin(plugin, pm)
 
         from corvidae.attribution import _attribution
+
         trace_a = mint_trace_id()
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": trace_a,
-            "meta": {},
-        })
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": trace_a,
+                "meta": {},
+            }
+        )
 
         await plugin.send_message(ch_b.id, "hello bob")
 
@@ -969,18 +1028,20 @@ class TestHopDoesNotPersist:
         pm = agent.pm
         await _init_plugin(plugin, pm)
 
-        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        registry.get_or_create("signal", "alice", config=ChannelConfig())
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
         ch_c = registry.get_or_create("signal", "carol", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
 
         # Simulate: B is in the middle of a chain (hop_count=2)
-        _attribution.set({
-            "channel_id": ch_b.id,
-            "trace_id": mint_trace_id(),
-            "meta": {"hop_count": 2},
-        })
+        _attribution.set(
+            {
+                "channel_id": ch_b.id,
+                "trace_id": mint_trace_id(),
+                "meta": {"hop_count": 2},
+            }
+        )
 
         # B sends to C — this should use hop_count=3
         notify = AsyncMock()
@@ -990,11 +1051,13 @@ class TestHopDoesNotPersist:
         assert kwargs["meta"]["hop_count"] == 3
 
         # Now a fresh user turn starts on B (clean attribution)
-        _attribution.set({
-            "channel_id": ch_b.id,
-            "trace_id": mint_trace_id(),
-            "meta": {},  # clean, no hop_count
-        })
+        _attribution.set(
+            {
+                "channel_id": ch_b.id,
+                "trace_id": mint_trace_id(),
+                "meta": {},  # clean, no hop_count
+            }
+        )
 
         # B sends to C again — this should use hop_count=1
         notify2 = AsyncMock()
@@ -1036,11 +1099,14 @@ class TestMinorCoverage:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {},
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify
@@ -1061,11 +1127,14 @@ class TestMinorCoverage:
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {},
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify
@@ -1084,11 +1153,14 @@ class TestMinorCoverage:
         ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
 
         from corvidae.attribution import _attribution
-        _attribution.set({
-            "channel_id": ch_a.id,
-            "trace_id": "trace-123",
-            "meta": {},
-        })
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "meta": {},
+            }
+        )
 
         notify = AsyncMock()
         pm.ahook.on_notify = notify

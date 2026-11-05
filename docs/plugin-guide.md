@@ -588,17 +588,19 @@ As a last-resort safety net, `execute_tool_call` detects a sync callable registe
 ## What the kernel exports to plugins
 
 A plugin outside the `corvidae` package (the `corvidae-cognition` plugins,
-or your own) should import only these kernel modules. This is the API the
-cognition plugins use, and `tests/test_kernel_boundary.py` fails if
-`corvidae_cognition` imports any other kernel module. Changing a signature
-here is a plugin-API change and needs a line in this guide.
+`cross-channel-send`, or your own) should import only these kernel modules.
+This is the API the bundled plugins use, and
+`tests/test_kernel_boundary.py` fails if a bundled plugin imports any other
+kernel module. Changing a signature here is a plugin-API change and needs a
+line in this guide.
 
 | Module | Names |
 |---|---|
 | `corvidae.hooks` | `CorvidaePlugin`, `TransportPlugin`, `hookimpl`, `get_dependency`, `resolve_single_result`, `final_was_unsent` |
 | `corvidae.fork` | `fork_agent`, `quote`, `window_db_ids`, `ViewInputs`, `view_agent`, `view_call`, `ForkRefused`, `build_fork_prompt`, `snap_cut_forward`, `snap_cut_to_tool_boundary` (see [Forking the window](#forking-the-window) and [The view call](#the-view-call)) |
-| `corvidae.attribution` | `set_attribution`, `reset_attribution` |
+| `corvidae.attribution` | `get_attribution`, `set_attribution`, `reset_attribution` |
 | `corvidae.tuning` | `config_value`, `resolve_tunable` |
+| `corvidae.channel` | `ChannelRegistry` |
 | `corvidae.context` | `MessageType`, `ContextWindow`, `count_tokens`, `message_tokens` |
 | `corvidae.task` | `Task` |
 | `corvidae.tool` | `Tool`, `tool_to_schema` |

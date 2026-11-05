@@ -13,23 +13,32 @@ notification's meta. The receiving context's attribution carries the
 hop_count, so the next send from that context increments it again. When
 hop_count exceeds max_hops (config, default 3), the send is refused.
 
-Cognition consumers see origin "agent_send" in meta. Current behaviour:
-- critique._eligible: exempt (only "reminder" or an admitted user trace
-  is eligible for critique)
-- gates/funnel: origin is read from meta and treated as a non-user
-  origin (affects admission and withholding)
-- appraisal: stage 2 runs for anything but "critique"
-- outcome_log: the origin column records "agent_send"
+Cognition consumers see origin "agent_send" in meta. Verified against the
+cognition source (2026-11-05):
+- critique._eligible: exempt. Eligible iff origin == "reminder", or origin
+  is absent and the trace was admitted (user). "agent_send" matches
+  neither, so a sent instruction never forks a critique.
+- funnel: neutral. Origin keys the deferred-registration queue as
+  (channel.id, origin); "agent_send" is just a new vocabulary value,
+  queued and drained on the next same-origin turn of the channel.
+- gates: the send's final response is a non-user origin, so the decide
+  gate's salience withholding applies to it exactly as to a reminder's
+  reply (engaged inbound messages are unaffected; the engagement gate is
+  inbound-only).
+- appraisal: stage 2 runs (it skips only origin "critique") — one silent
+  appraisal task per sent instruction.
+- outcome_log: the exchange row's origin column records "agent_send"
+  (record_exchange takes meta["origin"] verbatim, default "task").
 """
 
 from __future__ import annotations
 
 import logging
 
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.attribution import get_attribution
-from corvidae.tuning import config_value
 from corvidae.channel import ChannelRegistry
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.tuning import config_value
 
 logger = logging.getLogger("cross_channel_send")
 
@@ -52,9 +61,7 @@ class CrossChannelSendPlugin(CorvidaePlugin):
         await super().on_init(pm, config)
         raw = config_value(config, "cross_channel_send.max_hops", DEFAULT_MAX_HOPS)
         if type(raw) is bool or isinstance(raw, float):
-            raise ValueError(
-                f"cross_channel_send.max_hops must be an integer, got {raw!r}"
-            )
+            raise ValueError(f"cross_channel_send.max_hops must be an integer, got {raw!r}")
         try:
             self._max_hops = int(raw)
         except (TypeError, ValueError, OverflowError) as exc:
@@ -62,9 +69,7 @@ class CrossChannelSendPlugin(CorvidaePlugin):
                 f"cross_channel_send.max_hops must be an integer, got {raw!r}"
             ) from exc
         if self._max_hops < 1:
-            raise ValueError(
-                f"cross_channel_send.max_hops must be >= 1, got {self._max_hops}"
-            )
+            raise ValueError(f"cross_channel_send.max_hops must be >= 1, got {self._max_hops}")
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -99,22 +104,15 @@ class CrossChannelSendPlugin(CorvidaePlugin):
         if not isinstance(text, str) or not text.strip():
             return "Could not send: text must be a non-empty string."
         if len(text) > MAX_TEXT_CHARS:
-            return (
-                f"Could not send: text is {len(text)} chars, "
-                f"limit is {MAX_TEXT_CHARS}."
-            )
+            return f"Could not send: text is {len(text)} chars, limit is {MAX_TEXT_CHARS}."
 
         try:
             attribution = get_attribution()
             if not attribution:
-                return (
-                    "Could not send: no source channel in the current context."
-                )
+                return "Could not send: no source channel in the current context."
             source_channel = attribution.get("channel_id")
             if not source_channel:
-                return (
-                    "Could not send: no source channel in the current context."
-                )
+                return "Could not send: no source channel in the current context."
 
             meta = attribution.get("meta")
             if not isinstance(meta, dict):
