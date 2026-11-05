@@ -213,7 +213,6 @@ agent:
 # memory; it reviews the newest records of the whole memory, every channel's.
 # heartbeat:
 #   after: 3600                        # seconds of quiet before a beat; also the gap between beats
-#   keep_beats: 3                      # earlier beats a beat still sees; 0 = each beat starts empty
 #   prompt: {file: my-heartbeat.md}                         # or an inline string / list of paths; absent = built-in
 #   goals_instruction: {file: prompts/heartbeat-goals.md}   # goals paragraph; absent = built-in
 #   # Point `prompt` at your own file, not prompts/heartbeat.md: the shipped
