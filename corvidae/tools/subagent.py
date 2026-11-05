@@ -36,6 +36,43 @@ logger = logging.getLogger(__name__)
 # Note: same text as MAX_TURNS_FALLBACK_MESSAGE in agent.py — kept in sync.
 MAX_ROUNDS_REACHED_MESSAGE = "(max tool-calling rounds reached)"
 
+DEFAULT_SUBAGENT_MAX_TURNS = 10
+
+
+def parse_subagent_max_turns(config: object) -> int:
+    """Parse ``subagent.max_turns`` into the per-subagent tool-round budget.
+
+    Raises ValueError naming the key, the rejected value and the accepted
+    values. An absent key gives the 10-round default. Called at startup
+    (runtime step 7, clean one-line config error) and again in
+    SubagentPlugin.on_start, which re-parses like every other plugin.
+    """
+    if config is None:
+        return DEFAULT_SUBAGENT_MAX_TURNS
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"config must be a mapping; got {config!r} ({type(config).__name__})"
+        )
+    section = config.get("subagent")
+    if section is None:
+        return DEFAULT_SUBAGENT_MAX_TURNS
+    if not isinstance(section, dict):
+        raise ValueError(
+            "subagent must be a mapping of subagent settings "
+            f"(e.g. {{max_turns: 40}}); got {section!r} ({type(section).__name__})"
+        )
+    raw = section.get("max_turns", DEFAULT_SUBAGENT_MAX_TURNS)
+    # bool is a subclass of int: int(False) == 0 would make every subagent
+    # return the bare marker without ever calling the model, so reject it
+    # explicitly. A non-positive budget is a no-op, never a valid setting.
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ValueError(
+            "subagent.max_turns must be a positive integer "
+            f"(e.g. 40); got {raw!r} ({type(raw).__name__})"
+        )
+    return raw
+
+
 SUBAGENT_SYSTEM_PROMPT = (
     "You are executing a background task. "
     "Work through the instructions step by step. Be thorough. "
@@ -146,9 +183,10 @@ class SubagentPlugin(CorvidaePlugin):
             config, "tools.subagent.system_prompt", SUBAGENT_SYSTEM_PROMPT
         )
         # Tool-round budget per subagent (#494): fetch-heavy research tasks
-        # need more than the default 10. Non-int values raise at startup —
-        # the standard config-error path.
-        self._max_turns = int((config.get("subagent") or {}).get("max_turns", 10))
+        # need more than the default 10. Non-positive-integer values are
+        # rejected at startup with a one-line config error (runtime step 7
+        # calls the parser; on_start re-parses like every other plugin).
+        self._max_turns = parse_subagent_max_turns(config)
         logger.debug("SubagentPlugin started")
 
     @hookimpl

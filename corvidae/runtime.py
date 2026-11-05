@@ -34,6 +34,7 @@ from corvidae.idle import IdleTracker, validate_daemon_config
 from corvidae.llm_plugin import parse_llm_config
 from corvidae.logging import configure_logging
 from corvidae.tool_collection import parse_tool_timeouts
+from corvidae.tools.subagent import parse_subagent_max_turns
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +253,9 @@ class Runtime:
             disabled_plugins = disabled_plugins_from(config)
             # tools.call_timeout / tools.timeouts: reject a bad value at startup.
             parse_tool_timeouts(config.get("tools"))
+            # subagent.max_turns: reject a non-positive-integer budget at
+            # startup (int(False) == 0 would no-op every subagent silently).
+            parse_subagent_max_turns(config)
             self.registry.agent_defaults = config.get("agent", {})
             load_channel_config(config, self.registry)
         except ValueError as exc:

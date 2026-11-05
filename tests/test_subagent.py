@@ -11,7 +11,11 @@ from corvidae.task import Task, TaskQueue
 from corvidae.tool import Tool, ToolContext, ToolRegistry
 
 from corvidae.llm_plugin import LLMPlugin
-from corvidae.tools.subagent import SubagentPlugin, run_agent_loop
+from corvidae.tools.subagent import (
+    SubagentPlugin,
+    parse_subagent_max_turns,
+    run_agent_loop,
+)
 
 from helpers import CORE_LLM_STAGES, collect_llm_stages, stub_llm_config
 from llm_response_fixtures import (
@@ -1556,6 +1560,32 @@ class TestSubagentMaxTurns:
         observed = await self._launch_and_capture_max_turns(BASE_CONFIG)
         assert observed == 10
 
+    @pytest.mark.parametrize(
+        "bad", [True, False, 10.5, "10", 0, -1],
+        ids=["bool-true", "bool-false", "float", "numeric-string", "zero", "negative"],
+    )
+    async def test_on_start_rejects_non_integer_max_turns(self, bad):
+        """A non-positive-integer max_turns is an operator error, not a
+        silent coerce: int(False) == 0 would make every subagent return the
+        bare marker without ever calling the model."""
+        pm, _ = _make_pm_with_tool_registry()
+        plugin = SubagentPlugin(pm)
+        config = dict(BASE_CONFIG)
+        config["subagent"] = {"max_turns": bad}
+        with pytest.raises(ValueError, match="subagent.max_turns"):
+            await plugin.on_start(config=config)
+
+    async def test_on_start_rejects_non_mapping_subagent_section(self):
+        pm, _ = _make_pm_with_tool_registry()
+        plugin = SubagentPlugin(pm)
+        with pytest.raises(ValueError, match="subagent must be a mapping"):
+            await plugin.on_start(config={"subagent": 5})
+
+    async def test_parse_subagent_max_turns_defaults(self):
+        assert parse_subagent_max_turns(None) == 10
+        assert parse_subagent_max_turns(dict(BASE_CONFIG)) == 10
+        assert parse_subagent_max_turns({"subagent": {"max_turns": 40}}) == 40
+
 
 async def test_max_turns_exceeded_includes_last_assistant_text():
     """Budget exhaustion must carry the subagent's last progress note (#494 part 2).
@@ -1606,6 +1636,55 @@ async def test_max_turns_exceeded_bare_marker_when_no_assistant_text():
         tools={"noop": noop},
         tool_schemas=[],
         max_turns=3,
+    )
+
+    assert result == "(max tool-calling rounds reached)"
+
+
+async def test_max_turns_exceeded_picks_latest_assistant_text():
+    """The backward scan picks the most recent non-empty assistant text,
+    not the first one the subagent said."""
+    client = MagicMock()
+    # Round 1: "First note" + tool call. Round 2: "Second note" + tool call.
+    # Round 3: tool call only (no text). The scan must return "Second note".
+    client.chat = AsyncMock(side_effect=[
+        _make_mixed_response("First note.", [_make_tool_call("c1", "noop", {})]),
+        _make_mixed_response("Second note.", [_make_tool_call("c2", "noop", {})]),
+        _make_tool_call_response([_make_tool_call("c3", "noop", {})]),
+    ])
+
+    noop = AsyncMock(return_value="noop result")
+    messages = [{"role": "user", "content": "spin"}]
+    result = await run_agent_loop(
+        client,
+        messages,
+        tools={"noop": noop},
+        tool_schemas=[],
+        max_turns=3,
+    )
+
+    assert result.startswith("(max tool-calling rounds reached)")
+    assert "Second note." in result
+    assert "First note." not in result
+
+
+async def test_max_turns_exceeded_whitespace_only_assistant_text():
+    """Whitespace-only assistant content is not progress: the result
+    stays the bare marker."""
+    client = MagicMock()
+    client.chat = AsyncMock(side_effect=[
+        _make_mixed_response("   \n  ", [_make_tool_call("c1", "noop", {})]),
+        _make_tool_call_response([_make_tool_call("c2", "noop", {})]),
+    ])
+
+    noop = AsyncMock(return_value="noop result")
+    messages = [{"role": "user", "content": "spin"}]
+    result = await run_agent_loop(
+        client,
+        messages,
+        tools={"noop": noop},
+        tool_schemas=[],
+        max_turns=2,
     )
 
     assert result == "(max tool-calling rounds reached)"
