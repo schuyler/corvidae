@@ -929,12 +929,18 @@ class CritiquePlugin(CorvidaePlugin):
                 channel, trace_id, "the fork failed", exc_info=True)
             return
         else:
-            outcome = {"provenance": {
+            prov = {
                 "claims": len(evidence),
                 "candidates": sum(len(e["candidates"]) for e in evidence),
                 "supported": supported,
                 "objections": len(objections),
-            }}
+            }
+            # The objection objects, not just the count: the envelope is
+            # where deviation clustering reads from (dream's audit pass).
+            # Empty runs stay count-only.
+            if objections:
+                prov["detail"] = objections
+            outcome = {"provenance": prov}
             await self._record_and_register(channel, trace_id, outcome, objections, wake=True)
         finally:
             reset_attribution(token)
@@ -1087,11 +1093,14 @@ class CritiquePlugin(CorvidaePlugin):
             # Nothing ran: record nothing (like provenance's skip).
             if not ran:
                 return
-            outcome = {"critique": {
+            crit = {
                 "lenses": ran,
                 "objections": len(objections),
                 "sampled_below_threshold": sampled,
-            }}
+            }
+            if objections:
+                crit["detail"] = objections
+            outcome = {"critique": crit}
             await self._record_and_register(channel, trace_id, outcome, objections, wake=False)
         finally:
             reset_attribution(token)
