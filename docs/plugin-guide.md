@@ -585,6 +585,28 @@ For common cases the standard library and ecosystem offer native async alternati
 
 As a last-resort safety net, `execute_tool_call` detects a sync callable registered as a bare `Tool(name=..., fn=sync_fn, schema=...)` (bypassing `Tool.from_function()`) and wraps the call in `asyncio.to_thread()`, logging a warning. Treat that warning as a bug to fix in the plugin, not a supported registration path.
 
+## Use what already exists
+
+The kernel holds mechanism and plugins hold capability (PRD principle 1).
+Before asking for a new hook, kernel API or queue type, build the
+capability from what is already there:
+
+- **A hook** for a decision point or an observation: see
+  [Available hooks](#available-hooks).
+- **A notification** (`on_notify`) to put work on a channel's queue.
+- **A CONTEXT row** at the tail of a window: see
+  [Injecting context before agent turns](#injecting-context-before-agent-turns).
+- **A task** on the shared task queue for background work: see
+  [Tool registration](#tool-registration).
+- **The clock and idle signals** for time-driven work: see
+  [Acting on time and quiet](#acting-on-time-and-quiet).
+
+A mechanism only your plugin needs lives in your plugin. Plugin-owned hooks
+are the pattern ([Declaring hooks in a plugin](#declaring-hooks-in-a-plugin)):
+`hookspecs` on your class, named after your plugin. When a second plugin
+needs the same mechanism, it can move into the kernel. New kernel
+mechanisms are admitted rarely, and adding one is a PRD change.
+
 ## What the kernel exports to plugins
 
 A plugin outside the `corvidae` package (the `corvidae-cognition` plugins,

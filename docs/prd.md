@@ -49,9 +49,22 @@ is load-bearing: renamed hooks get no compatibility aliases.
 Every requirement in §3 is filtered through these. A change that violates
 one is a bug even if its tests pass.
 
-1. **Every capability is an optional plugin.** The kernel is the agent
-   loop, the queues, the context window, channels, hooks, tools, the LLM
-   client, the task queue, the clock, and persistence. Everything else loads
+1. **The kernel holds mechanism; plugins hold capability.** The kernel
+   contains only the mechanisms plugins need to exercise their
+   capabilities: the queues, the context window, channels, hooks, tools,
+   the LLM client, the task queue, the clock, and persistence. A mechanism
+   only one plugin uses is not kernel: it lives in the plugin that needs
+   it and moves into the kernel when a second plugin needs it (§3.1.10–11
+   apply this to hooks). New kernel mechanisms are admitted rarely: a
+   plugin author reaches first for an established mechanism (a hook, a
+   notification, a CONTEXT row, a task, the clock) and proposes a new one
+   only when none can express the capability; the proposal is a PRD
+   change. The agent loop is a plugin, not kernel, because another
+   implementer may want different main-loop logic. It is required rather
+   than optional: the runtime starts whichever plugin registers as the
+   agent, and replacing it means registering another under that name.
+
+   Every capability is an optional plugin, the agent loop aside: it loads
    from an entry point, can be disabled by name in `plugins.disabled`,
    declares its dependencies in `depends_on` (or `optional_depends_on`
    for one it works without), and documents what the system
@@ -295,7 +308,7 @@ one is a bug even if its tests pass.
 
 ## 3. Requirements
 
-### 3.1 Kernel: agent loop, queues, traces
+### 3.1 Kernel and agent loop: queues, traces
 
 1. One serial queue per channel. A channel never has two turns in flight;
    a coalesced turn (item 19) answers several messages in one call. Queues
@@ -1562,6 +1575,7 @@ record that holds the reasoning.
 | `transform_system_prompt` is append-only: a transform that modifies the identity+register prefix is rejected with a WARNING listing the hook's implementors (the seed plugin among them; the offending wrapper is not singled out); the untransformed prompt is used. The seed is re-composed from config at each boundary, so there is no accumulation. The hook re-runs at every boundary (conversation start, restart, compaction), not just conversation start | #136; proposed 2026-11-01, implemented 2026-11-04 |
 | Same repository, second distribution for cognition; no compatibility aliases on renamed hooks | principle 1; §1 |
 | No typed event bus unless the observe class passes 20 hooks or a third `send`-shaped consolidation appears | §3.1.11 |
+| The kernel holds mechanism, plugins hold capability: a mechanism one plugin uses lives in that plugin and moves into the kernel when a second needs it; new kernel mechanisms are admitted rarely and by PRD change; the agent loop is a required, replaceable plugin, not kernel | principle 1; §3.1.10–11; owner, 2026-11-05 |
 | `thinking.py` is kernel | principle 1 |
 | A hook only one plugin calls is owned by that plugin, not `AgentSpec`; names are `<prefix><owner>_<name>`, one owner per hook, checked at startup; the admission criterion (§3.1.11) still applies | #229 |
 | Review findings gate on consequence, not reachability; tests derive from acceptance criteria, not the design's test list; new capability goes through requirements | principle 12 |
