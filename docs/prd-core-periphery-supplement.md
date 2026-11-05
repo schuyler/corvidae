@@ -360,10 +360,14 @@ thought, or to respond to an escalation.
    knowledge in its window. The join is the core's version of
    "incorporating what I just learned."
 
-4. **Checkpoint and rollback.** The core's state is checkpointed before
-   the fork. If the fork produces a bad outcome, the core can roll back
-   to its checkpoint and try a different approach. Long-running thinking
-   can be preserved on disk and resumed later.
+4. **Checkpoint and rollback.** The core's state at the fork point is
+   kept as a checkpoint; in yield mode, the paused main context is the
+   checkpoint. If the fork's approach fails, the core can abandon it and
+   start a new fork from the same checkpoint. Abandoning a fork discards
+   its reasoning, not its effects: messages it sent and tools it ran have
+   happened, so the parent still receives a report of the fork's
+   external actions and the notifications it handled. Long-running
+   thinking can be preserved on disk and resumed later.
 
 5. **Escalation is a special case of forking.** When a peripheral
    escalates, the core performs an attentional shift:
@@ -377,9 +381,10 @@ thought, or to respond to an escalation.
      periphery (or operates the channel directly). Whether the core
      pauses or keeps receiving notifications meanwhile depends on the
      mode (item 7).
-   - **Join.** When the fork's work is done, the core pages itself back
-     in with a summary of the fork's outcome appended. The fork is
-     discarded. The core resumes from its checkpoint.
+   - **Join.** When the fork's work is done, its report is appended at
+     the core's tail and the fork is discarded. In yield mode the core
+     resumes from its paused main context; in detach mode it has kept
+     working.
 
 6. **The core can operate a channel directly** when the situation calls
    for it (a complex multi-turn exchange that the periphery can't
