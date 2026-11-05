@@ -28,6 +28,9 @@ acp = [
 discord = [
     "discord-py>=2.4",
 ]
+cross-channel-send = [
+    "cross-channel-send",
+]
 # Memory, appraisal, critique, funnel and outcome log
 # (packages/corvidae-cognition, docs/cognition.md). Includes the `vec`
 # sub-extra, so the documented install keeps vector memory (#130). For the
@@ -133,3 +136,4 @@ members = ["packages/*"]
 
 [tool.uv.sources]
 corvidae-cognition = { workspace = true }
+cross-channel-send = { workspace = true }

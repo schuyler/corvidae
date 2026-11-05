@@ -524,6 +524,9 @@ acp = [
 cognition = [
     { name = "corvidae-cognition", extra = ["vec"] },
 ]
+cross-channel-send = [
+    { name = "cross-channel-send" },
+]
 dev = [
     { name = "jinja2" },
     { name = "pytest" },
@@ -549,6 +552,7 @@ requires-dist = [
     { name = "apluggy", git = "https://github.com/schuyler/apluggy.git?rev=main" },
     { name = "click", specifier = ">=8.0" },
     { name = "corvidae-cognition", extras = ["vec"], marker = "extra == 'cognition'", editable = "packages/corvidae-cognition" },
+    { name = "cross-channel-send", marker = "extra == 'cross-channel-send'", editable = "packages/cross-channel-send" },
     { name = "ddgs", specifier = ">=9.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.4" },
     { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1" },
@@ -560,7 +564,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "tiktoken", specifier = ">=0.7" },
 ]
-provides-extras = ["dev", "acp", "discord", "cognition"]
+provides-extras = ["dev", "acp", "discord", "cross-channel-send", "cognition"]
 
 [package.metadata.requires-dev]
 dev = [

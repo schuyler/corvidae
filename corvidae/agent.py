@@ -62,11 +62,7 @@ from corvidae.context import (
 )
 # Re-exported: mint_trace_id lives in a leaf module so transports can
 # import it without this module; existing imports from here keep working.
-from corvidae.trace import mint_trace_id
-
-
-
-
+from corvidae.trace import mint_trace_id  # noqa: F401
 from corvidae.fork import (
     ForkRefused,
     ForkResult,
@@ -177,7 +173,6 @@ def _llm_error_message(exc: Exception, retry_armed: bool = False) -> str:
 class QueueItemRole(Enum):
     USER = "user"
     NOTIFICATION = "notification"
-    AGENT_SEND = "agent_send"
 
 
 @dataclass
@@ -546,69 +541,6 @@ class Agent(CorvidaePlugin):
         self._note_activity(channel.id)
         return True
 
-    async def enqueue_agent_send(
-        self,
-        channel_id: str,
-        text: str,
-        source_channel_id: str,
-        trace_id: str | None = None,
-        hop_count: int = 1,
-    ) -> None:
-        """Enqueue an agent send on a channel's queue (#234).
-
-        The message triggers an inference turn on the target channel. The
-        receiving context sees a provenance frame identifying the source
-        channel and mechanism. The queue serializes it between exchanges.
-
-        hop_count tracks cross-channel bounces for loop prevention. The
-        sending plugin increments it from the current attribution's meta.
-        """
-        if not self._started or self._registry is None:
-            raise RuntimeError("Agent is not started")
-
-        if not isinstance(channel_id, str) or not channel_id:
-            raise ValueError("channel_id must be a non-empty string")
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("text must be a non-empty string")
-        if len(text) > 8000:
-            raise ValueError("text is too long (max 8000 chars)")
-        if not isinstance(source_channel_id, str) or not source_channel_id:
-            raise ValueError("source_channel_id must be a non-empty string")
-        if trace_id is not None and not isinstance(trace_id, str):
-            raise ValueError("trace_id must be a string or None")
-
-        # Source must be a registered channel — provenance integrity.
-        if self._registry.get(source_channel_id) is None:
-            raise ValueError(f"source_channel_id {source_channel_id!r} is not registered")
-
-        channel = self._registry.get(channel_id)
-        if channel is None:
-            raise KeyError(f"channel {channel_id!r} is not registered")
-
-        if isinstance(hop_count, bool) or not isinstance(hop_count, int) or hop_count < 1:
-            raise ValueError("hop_count must be a positive integer")
-
-        item = QueueItem(
-            role=QueueItemRole.AGENT_SEND,
-            content=text,
-            channel=channel,
-            trace_id=trace_id,
-            meta={
-                "origin": "agent_send",
-                "source_channel": source_channel_id,
-                "hop_count": hop_count,
-            },
-        )
-        self._note_activity(channel.id)
-        queue = self._get_or_create_queue(channel)
-        await queue.enqueue(item)
-
-    def list_channels(self) -> list[str]:
-        """Return all registered channel IDs (sorted for stable output)."""
-        if self._registry is None:
-            return []
-        return sorted(self._registry.list_channels())
-
     def _get_or_create_queue(self, channel) -> SerialQueue:
         """Return existing SerialQueue for channel or create and start a new one."""
         channel_id = channel.id
@@ -642,28 +574,6 @@ class Agent(CorvidaePlugin):
                     "content": f"[{item.source}]\n\n{item.content}",
                 }
             request_text = item.content
-        elif item.role == QueueItemRole.AGENT_SEND:
-            from html import escape as _html_escape
-            meta = item.meta if isinstance(item.meta, dict) else {}
-            source = meta.get("source_channel")
-            if not isinstance(source, str) or not source:
-                source = "unknown"
-            trace = item.trace_id
-            if not isinstance(trace, str) or not trace:
-                trace = "unknown"
-            text = item.content if isinstance(item.content, str) else str(item.content or "")
-            frame = (
-                f'<agent_send source_channel="{_html_escape(source, quote=True)}" '
-                f'trace_id="{_html_escape(trace, quote=True)}" '
-                f'mechanism="agent_send">\n'
-                f'{_html_escape(text)}\n'
-                f'</agent_send>'
-            )
-            conversation_message = {
-                "role": "user",
-                "content": frame,
-            }
-            request_text = text
         else:
             logger.error("_build_conversation_message: unknown item role %r", item.role)
             return None
@@ -1319,7 +1229,7 @@ class Agent(CorvidaePlugin):
         # max_turns. Keying on `originating` rather than USER role lets a
         # notification-only channel (scheduler reminders, heartbeat) get a
         # fresh per-exchange budget instead of exhausting it permanently.
-        if not item.retry and (item.originating or item.role == QueueItemRole.AGENT_SEND) and not channel.pending_tool_call_ids:
+        if not item.retry and item.originating and not channel.pending_tool_call_ids:
             channel.turn_counter = 0
 
         # 3. Resolve config and read max_turns_limit
