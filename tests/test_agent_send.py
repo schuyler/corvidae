@@ -80,7 +80,7 @@ class TestEnqueueAgentSend:
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
 
-        with pytest.raises(ValueError, match="invalid"):
+        with pytest.raises(ValueError, match="non-empty string"):
             await plugin.enqueue_agent_send(
                 channel.id, "hello",
                 source_channel_id="",
@@ -89,11 +89,11 @@ class TestEnqueueAgentSend:
         await db.close()
 
     async def test_rejects_whitespace_source_channel_id(self):
-        """enqueue_agent_send rejects whitespace-only source_channel_id."""
+        """enqueue_agent_send rejects whitespace-only source_channel_id (not registered)."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
 
-        with pytest.raises(ValueError, match="invalid"):
+        with pytest.raises(ValueError, match="not registered"):
             await plugin.enqueue_agent_send(
                 channel.id, "hello",
                 source_channel_id="   ",
@@ -102,11 +102,11 @@ class TestEnqueueAgentSend:
         await db.close()
 
     async def test_rejects_control_char_source_channel_id(self):
-        """enqueue_agent_send rejects source_channel_id with control characters."""
+        """enqueue_agent_send rejects source_channel_id with control characters (not registered)."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
 
-        with pytest.raises(ValueError, match="invalid"):
+        with pytest.raises(ValueError, match="not registered"):
             await plugin.enqueue_agent_send(
                 channel.id, "hello",
                 source_channel_id="channel\nid",
@@ -115,11 +115,11 @@ class TestEnqueueAgentSend:
         await db.close()
 
     async def test_rejects_padded_source_channel_id(self):
-        """enqueue_agent_send rejects source_channel_id with padding (no stripping)."""
+        """enqueue_agent_send rejects source_channel_id with padding (not registered)."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
 
-        with pytest.raises(ValueError, match="invalid"):
+        with pytest.raises(ValueError, match="not registered"):
             await plugin.enqueue_agent_send(
                 channel.id, "hello",
                 source_channel_id=f"  {channel.id}  ",
@@ -658,7 +658,7 @@ class TestStrictIdValidation:
     async def test_rejects_non_string_channel_id(self):
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
-        with pytest.raises(ValueError, match="must be a string"):
+        with pytest.raises(ValueError, match="non-empty string"):
             await plugin.enqueue_agent_send(
                 123, "hello", source_channel_id=channel.id,
             )
@@ -676,7 +676,7 @@ class TestStrictIdValidation:
     async def test_rejects_non_string_source_channel_id(self):
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
-        with pytest.raises(ValueError, match="must be a string"):
+        with pytest.raises(ValueError, match="non-empty string"):
             await plugin.enqueue_agent_send(
                 channel.id, "hello", source_channel_id=123,
             )
@@ -703,40 +703,52 @@ class TestStrictIdValidation:
         await db.close()
 
     async def test_rejects_bidi_override_in_source(self):
+        """Bidi override chars pass string check but fail registration."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
-        with pytest.raises(ValueError, match="invalid"):
+        with pytest.raises(ValueError, match="not registered"):
             await plugin.enqueue_agent_send(
                 channel.id, "hello", source_channel_id="admin\u202e",
             )
         await db.close()
 
     async def test_rejects_del_in_source(self):
+        """DEL char passes string check but fails registration."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
-        with pytest.raises(ValueError, match="invalid"):
+        with pytest.raises(ValueError, match="not registered"):
             await plugin.enqueue_agent_send(
                 channel.id, "hello", source_channel_id="admin\x7f",
             )
         await db.close()
 
     async def test_rejects_unicode_line_separator(self):
+        """Unicode line separator passes string check but fails registration."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
-        with pytest.raises(ValueError, match="invalid"):
+        with pytest.raises(ValueError, match="not registered"):
             await plugin.enqueue_agent_send(
                 channel.id, "hello", source_channel_id="admin\u2028",
             )
         await db.close()
 
-    async def test_rejects_invalid_trace_id(self):
+    async def test_accepts_any_string_trace_id(self):
+        """trace_id is not format-validated in enqueue; the frame builder
+        falls back to 'unknown' for values it can't render safely."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
-        with pytest.raises(ValueError, match="trace_id is invalid"):
-            await plugin.enqueue_agent_send(
-                channel.id, "hello", source_channel_id=channel.id,
-                trace_id="bad\ntrace",
-            )
+
+        items = []
+        async def spy_enqueue(item):
+            items.append(item)
+        plugin._get_or_create_queue(channel).enqueue = spy_enqueue
+
+        await plugin.enqueue_agent_send(
+            channel.id, "hello", source_channel_id=channel.id,
+            trace_id="bad\ntrace",
+        )
+        assert len(items) == 1
+        assert items[0].trace_id == "bad\ntrace"
         await db.close()
 
     async def test_accepts_valid_trace_id(self):

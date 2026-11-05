@@ -70,20 +70,6 @@ _CHANNEL_ID_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 _TRACE_ID_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
-def _validate_channel_id(value: object, field: str = "channel_id") -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"{field} must be a string")
-    if not _CHANNEL_ID_RE.fullmatch(value):
-        raise ValueError(f"{field} is invalid")
-    return value
-
-
-def _validate_trace_id(value: object) -> str:
-    if not isinstance(value, str):
-        raise ValueError("trace_id must be a string")
-    if not _TRACE_ID_RE.fullmatch(value):
-        raise ValueError("trace_id is invalid")
-    return value  # noqa: F401
 from corvidae.fork import (
     ForkRefused,
     ForkResult,
@@ -583,14 +569,16 @@ class Agent(CorvidaePlugin):
         if not self._started or self._registry is None:
             raise RuntimeError("Agent is not started")
 
-        channel_id = _validate_channel_id(channel_id, "channel_id")
+        if not isinstance(channel_id, str) or not channel_id:
+            raise ValueError("channel_id must be a non-empty string")
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text must be a non-empty string")
         if len(text) > 8000:
             raise ValueError("text is too long (max 8000 chars)")
-        source_channel_id = _validate_channel_id(source_channel_id, "source_channel_id")
-        if trace_id is not None:
-            trace_id = _validate_trace_id(trace_id)
+        if not isinstance(source_channel_id, str) or not source_channel_id:
+            raise ValueError("source_channel_id must be a non-empty string")
+        if trace_id is not None and not isinstance(trace_id, str):
+            raise ValueError("trace_id must be a string or None")
 
         # Source must be a registered channel — provenance integrity.
         if self._registry.get(source_channel_id) is None:

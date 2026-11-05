@@ -40,9 +40,11 @@ class CrossChannelSendPlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         raw = config.get("max_hops", DEFAULT_MAX_HOPS)
+        if type(raw) is bool or isinstance(raw, float):
+            raise ValueError(f"max_hops must be an integer, got {raw!r}")
         try:
             self._max_hops = int(raw)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError(f"max_hops must be an integer, got {raw!r}") from exc
         if self._max_hops < 1:
             raise ValueError(f"max_hops must be >= 1, got {self._max_hops}")
