@@ -173,6 +173,7 @@ def _llm_error_message(exc: Exception, retry_armed: bool = False) -> str:
 class QueueItemRole(Enum):
     USER = "user"
     NOTIFICATION = "notification"
+    AGENT_SEND = "agent_send"
 
 
 @dataclass
@@ -540,6 +541,86 @@ class Agent(CorvidaePlugin):
         # The error result is inbound work like any notification.
         self._note_activity(channel.id)
         return True
+
+    async def enqueue_agent_send(
+        self, channel_id: str, text: str, trace_id: str | None = None
+    ) -> None:
+        """Enqueue an agent send on a channel's queue (#234).
+
+        The message is delivered through the channel's owning transport and
+        recorded in the channel's history. No new agent turn is started on
+        the target channel. The queue serializes it between exchanges.
+        """
+        if not self._started or self._registry is None:
+            raise RuntimeError("Agent is not started")
+        channel = self._registry.get(channel_id)
+        if channel is None:
+            raise KeyError(f"channel {channel_id!r} is not registered")
+        item = QueueItem(
+            role=QueueItemRole.AGENT_SEND,
+            content=text,
+            channel=channel,
+            trace_id=trace_id,
+            meta={"origin": "agent_send"},
+        )
+        self._note_activity(channel.id)
+        queue = self._get_or_create_queue(channel)
+        await queue.enqueue(item)
+
+    async def _process_agent_send(self, item: QueueItem, channel: Channel) -> None:
+        """Process an AGENT_SEND item: record in history, deliver, no turn."""
+        logger.info(
+            "agent send on channel %s (%d chars, trace_id %s)",
+            channel.id, len(item.content), item.trace_id,
+            extra={"channel": channel.id, "trace_id": item.trace_id},
+        )
+        # Ensure the channel's conversation is initialized.
+        if channel.conversation is None:
+            conv = ContextWindow(channel.id, chars_per_token=self._chars_per_token)
+            conv.system_prompt = await self.channel_system_prompt(channel)
+            conv.tool_view = self._build_tool_view(channel)
+            history = await self.pm.ahook.resolve_conversation(channel=channel)
+            if history:
+                conv.messages = history
+            channel.conversation = conv
+        conv = channel.conversation
+
+        # Append the agent's message to the conversation and persist it.
+        conversation_message = {"role": "assistant", "content": item.content}
+        conv.append(conversation_message)
+        rowid = None
+        try:
+            results = await self.pm.ahook.persist_message(
+                channel=channel,
+                message=conversation_message,
+                message_type=MessageType.MESSAGE,
+            )
+            rowid = resolve_single_result(results, "persist_message")
+            if rowid is not None:
+                conv.messages[-1]["_db_id"] = rowid
+        except Exception:
+            logger.warning(
+                "persist_message failed for agent send on channel %s; "
+                "it stays in the window but not in the log",
+                channel.id, exc_info=True,
+                extra={"channel": channel.id},
+            )
+
+        # Deliver through the owning transport.
+        try:
+            await self.pm.ahook.send(
+                channel=channel,
+                event=OutboundMessage(
+                    text=item.content,
+                    trace_id=item.trace_id,
+                ),
+            )
+        except Exception:
+            logger.warning(
+                "transport delivery failed for agent send on channel %s",
+                channel.id, exc_info=True,
+                extra={"channel": channel.id},
+            )
 
     def _get_or_create_queue(self, channel) -> SerialQueue:
         """Return existing SerialQueue for channel or create and start a new one."""
@@ -1103,6 +1184,13 @@ class Agent(CorvidaePlugin):
                     len(absorbed) + 1, channel.id, item.trace_id,
                     extra={"channel": channel.id, "trace_id": item.trace_id},
                 )
+
+            # Agent send: deliver on this channel without starting a turn (#234).
+            # The message is recorded in the channel's history and delivered
+            # through the owning transport. No LLM call, no attribution.
+            if item.role == QueueItemRole.AGENT_SEND:
+                await self._process_agent_send(item, channel)
+                return
 
             # Attribute all LLM activity in this turn (including tool Tasks
             # created during dispatch, which capture the context at creation)
