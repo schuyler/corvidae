@@ -218,6 +218,11 @@ its tests pass; until then they are proposals.
      rewrites it (§3.1.5).
    - **Auditable.** Every rewrite has a revision history. The core's edits
      are themselves subject to critique.
+   - **Lockable.** The core's edits are self-modification (base PRD
+     principle 15): the operator can freeze the periphery prompts or
+     bound what the core may change, and operator config lifts any lock.
+     A rewrite takes effect at the periphery's next compaction boundary
+     or conversation start, not mid-window (base PRD §3.3.8).
    - **Aggressively telegraphic.** The periphery thinks in the most
      compressed form possible. Research on telegraphic thinking
      (Sketch-of-Thought, token budgets) indicates that shorter reasoning
@@ -325,8 +330,7 @@ its tests pass; until then they are proposals.
    periphery writes from untrusted input carries the trust of that
    input, never the periphery's or the core's. The core can always
    import the raw message (§3.1.12) to check a summary against what
-   arrived. `docs/threat-model.md` records the path from a peripheral's
-   input to the core's tools.
+   arrived.
 
 ### 3.5 Forking and joining: the core directs its own focus
 

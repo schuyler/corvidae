@@ -91,7 +91,7 @@ Things that are easy to get wrong and won't fail loudly:
 - **Plugins can be switched off** via `plugins.disabled` in `agent.yaml`.
   `agent.minimal.yaml.example` uses it to run the agent loop without the
   cognition set (memory, appraisal, critique, funnel, outcome_log, goals),
-  which is the fastest config to reproduce a agent-loop bug against.
+  which is the fastest config to reproduce an agent-loop bug against.
 
 `harness/` drives the agent end-to-end over local IRC against a real
 llama-server and greps mechanical pass criteria out of the replies and
