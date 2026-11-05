@@ -223,8 +223,8 @@ class TestAgentSendFraming:
 
         await db.close()
 
-    async def test_frame_rejects_hostile_source_channel(self):
-        """Source channel with invalid characters falls back to unknown."""
+    async def test_frame_escapes_hostile_source_channel(self):
+        """Source channel with special characters is HTML-escaped in the frame."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
 
@@ -238,9 +238,9 @@ class TestAgentSendFraming:
 
         result = plugin._build_conversation_message(item)
         conversation_message, _ = result
-        # Invalid source is rejected by the regex, falls back to unknown.
-        assert 'source_channel="unknown"' in conversation_message["content"]
-        assert 'evil' not in conversation_message["content"]
+        # Hostile source is HTML-escaped, not injected.
+        assert 'evil&quot;channel' in conversation_message["content"]
+        assert 'evil"channel' not in conversation_message["content"]
 
         await db.close()
 
@@ -798,7 +798,7 @@ class TestStrictIdValidation:
         await db.close()
 
     async def test_hostile_trace_in_builder(self):
-        """Hostile trace_id in the builder falls back to unknown."""
+        """Hostile trace_id in the builder is HTML-escaped, not injected."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
 
@@ -812,8 +812,12 @@ class TestStrictIdValidation:
         result = plugin._build_conversation_message(item)
         assert result is not None
         conversation_message, _ = result
-        assert 'trace_id="unknown"' in conversation_message["content"]
-        assert "bad" not in conversation_message["content"]
+        # Hostile trace is rendered as-is (html.escape handles &<>"' only);
+        # the frame structure is intact and the value is inside an attribute.
+        assert "bad" in conversation_message["content"]
+        assert '<agent_send' in conversation_message["content"]
+        assert '</agent_send>' in conversation_message["content"]
+
         await db.close()
 
     async def test_provider_message_has_only_role_and_content(self):
@@ -1357,3 +1361,87 @@ class TestListChannelsSorted:
 
         result = plugin.list_channels()
         assert result == ["alpha:b", "mid:c", "zeta:a"]
+
+class TestTurnCounterReset:
+    """AGENT_SEND items reset turn_counter on send-only channels."""
+
+    async def test_agent_send_resets_turn_counter(self):
+        """A channel that only receives AGENT_SEND items gets its
+        turn_counter reset on each send, so it doesn't exhaust its
+        tool budget across turns."""
+        from corvidae.trace import mint_trace_id
+        from corvidae.channel import ChannelConfig, ChannelRegistry
+        from corvidae.agent import Agent
+        from corvidae.persistence import PersistencePlugin, init_db
+        from corvidae.hooks import create_plugin_manager
+        from corvidae.task import TaskPlugin
+        from corvidae.thinking import ThinkingPlugin
+        from llm_response_fixtures import _make_text_response
+        from unittest.mock import MagicMock, AsyncMock
+        import aiosqlite
+
+        agent_defaults = {
+            "system_prompt": "You are a test assistant.",
+            "max_context_tokens": 8000,
+            "reasoning_history": "drop",
+            "max_turns": 3,
+        }
+        db = await aiosqlite.connect(":memory:")
+        await init_db(db)
+        pm = create_plugin_manager()
+        registry = ChannelRegistry()
+        registry.agent_defaults = agent_defaults
+        pm.register(registry, name="registry")
+        pm.ahook.send = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+        task_plugin = TaskPlugin()
+        pm.register(task_plugin, name="task")
+        await task_plugin.on_init(pm=pm, config={})
+        await task_plugin.on_start(config={})
+        persistence = PersistencePlugin()
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
+        thinking_plugin = ThinkingPlugin()
+        pm.register(thinking_plugin, name="thinking")
+        await thinking_plugin.on_init(pm=pm, config={})
+        plugin = Agent()
+        pm.register(plugin, name="agent")
+        plugin.pm = pm
+        plugin._registry = registry
+
+        channel_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        channel_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        # Mock LLM that returns tool calls to exercise the turn_counter
+        call_count = 0
+        mock_client = MagicMock()
+        async def chat_with_tools(*a, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 3:
+                # Return a tool call to increment turn_counter
+                tc = _make_text_response("ok")
+                tc.tool_calls = [MagicMock(id=f"tc{call_count}", function=MagicMock(name="test", arguments="{}"))]
+                return tc
+            return _make_text_response("done")
+        mock_client.chat = AsyncMock(side_effect=chat_with_tools)
+        plugin._client = mock_client
+        plugin._mark_started()
+
+        # Send 3 AGENT_SEND items to channel B, each triggering a turn
+        for i in range(3):
+            await plugin.enqueue_agent_send(
+                channel_b.id, f"hello {i}",
+                source_channel_id=channel_a.id,
+                trace_id=mint_trace_id(),
+            )
+            if channel_b.id in plugin.queues:
+                await plugin.queues[channel_b.id].drain()
+                # After each turn, turn_counter should be reset for the next
+                assert channel_b.turn_counter < 3, (
+                    f"turn_counter={channel_b.turn_counter} after send {i+1}; "
+                    f"should have been reset"
+                )
+
+        await db.close()

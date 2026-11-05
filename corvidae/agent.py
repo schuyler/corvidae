@@ -64,10 +64,7 @@ from corvidae.context import (
 # import it without this module; existing imports from here keep working.
 from corvidae.trace import mint_trace_id
 
-import re as _re
 
-_CHANNEL_ID_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
-_TRACE_ID_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 from corvidae.fork import (
@@ -649,10 +646,10 @@ class Agent(CorvidaePlugin):
             from html import escape as _html_escape
             meta = item.meta if isinstance(item.meta, dict) else {}
             source = meta.get("source_channel")
-            if not isinstance(source, str) or not _CHANNEL_ID_RE.fullmatch(source):
+            if not isinstance(source, str) or not source:
                 source = "unknown"
             trace = item.trace_id
-            if not isinstance(trace, str) or not _TRACE_ID_RE.fullmatch(trace):
+            if not isinstance(trace, str) or not trace:
                 trace = "unknown"
             text = item.content if isinstance(item.content, str) else str(item.content or "")
             frame = (
@@ -1322,7 +1319,7 @@ class Agent(CorvidaePlugin):
         # max_turns. Keying on `originating` rather than USER role lets a
         # notification-only channel (scheduler reminders, heartbeat) get a
         # fresh per-exchange budget instead of exhausting it permanently.
-        if not item.retry and item.originating and not channel.pending_tool_call_ids:
+        if not item.retry and (item.originating or item.role == QueueItemRole.AGENT_SEND) and not channel.pending_tool_call_ids:
             channel.turn_counter = 0
 
         # 3. Resolve config and read max_turns_limit

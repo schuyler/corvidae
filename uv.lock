@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -10,6 +10,7 @@ resolution-markers = [
 members = [
     "corvidae",
     "corvidae-cognition",
+    "cross-channel-send",
 ]
 
 [[package]]
@@ -588,6 +589,17 @@ requires-dist = [
     { name = "sqlite-vec", marker = "extra == 'vec'", specifier = ">=0.1.9" },
 ]
 provides-extras = ["vec"]
+
+[[package]]
+name = "cross-channel-send"
+version = "0.0.1"
+source = { editable = "packages/cross-channel-send" }
+dependencies = [
+    { name = "corvidae" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "corvidae", editable = "." }]
 
 [[package]]
 name = "cryptography"
