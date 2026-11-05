@@ -432,8 +432,10 @@ thought, or to respond to an escalation.
 
 5. The model server must support running multiple models concurrently,
    with the KV cache allocation (§3.3) managing which model's contexts
-   are resident. The specific server (llama.cpp, vLLM, or other) is a
-   deployment decision (Appendix A).
+   are resident. The reference deployment is llama.cpp's llama-server
+   (Appendix A.4). Other providers are supported through the base PRD's
+   provider-neutral profiles and pools (§3.6, §3.13); a provider without
+   the tier levers gets the degenerate case (§3.3.4).
 
 ### 3.9 Core-initiated exchanges
 
@@ -552,9 +554,9 @@ answer:
    If it's small (last few messages + identity files), the KV cache is
    tiny. If it needs the full conversation history, the KV cache grows.
 
-6. **Model server.** llama.cpp server vs vLLM for running both models.
-   llama.cpp is simpler for single-GPU; vLLM is better for concurrent
-   serving.
+6. **Model server levers.** How the tiers and operations in A.2 map onto
+   llama-server's features (A.4), and which of them the kernel drives
+   versus the core.
 
 7. **Channel-to-peripheral mapping.** One peripheral per channel, or can
    a peripheral serve multiple channels?
@@ -638,15 +640,31 @@ The threshold for the confidence signal is an open calibration question.
 The outcome log records false alarm rate and miss rate, which the core
 can use to tune the periphery's judgment prompt over time.
 
-### A.4 Model server options
+### A.4 Model server: llama.cpp
 
-- **llama.cpp server:** Simpler for single-GPU deployments. Supports
-  multiple models, KV cache management, and the tier hierarchy.
-- **vLLM:** Better for concurrent serving of multiple models. More
-  complex setup.
+The reference deployment is llama.cpp's llama-server. This appendix
+records the levers it offers, not a comparison with other servers; other
+providers are supported through the base PRD's provider-neutral profiles
+and pools (§3.6, §3.13) and get the degenerate case of §3.3.4 when they
+lack these levers. Flags and endpoints below are from the llama-server
+README (`tools/server/README.md` in ggml-org/llama.cpp) as of
+2026-11-05; the TRD should confirm them against the pinned build.
 
-The choice depends on the deployment: single-GPU with tier management
-favors llama.cpp; multi-model concurrent serving favors vLLM.
+- **VRAM tier:** server slots (`-np, --parallel`), each holding one
+  resident context. Prefix reuse within a slot is `--cache-prompt` (on by
+  default) and `--cache-reuse` (KV shifting).
+- **RAM tier:** the prompt cache, `--cache-ram` (MiB; default 8192), with
+  `--cache-idle-slots` saving idle slots into it on a new task.
+- **Disk tier and checkpoints:** `POST /slots/{id}?action=save` and
+  `?action=restore` write and read a slot's prompt cache under
+  `--slot-save-path`.
+- **Multiple models:** router mode (`--models-dir` or `--models-preset`),
+  with `--models-max` bounding how many load at once,
+  `--models-memory-margin` unloading least-recently-used models to fit,
+  and `POST /models/load` / `POST /models/unload` for explicit control.
+- **Measurement:** each response's `timings` reports `cache_n` (prompt
+  tokens reused from cache) and `prompt_n` (prompt tokens processed),
+  which base PRD §3.13.10 already records.
 
 ---
 
