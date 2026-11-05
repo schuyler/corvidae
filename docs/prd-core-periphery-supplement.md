@@ -1,9 +1,12 @@
 # Corvidae: product requirements supplement — core/periphery architecture
 
-This supplement reframes the requirements in `docs/prd.md` around the
-core/periphery architecture described in
-`Research/Core-Peripheral-Architecture-Design`. It specifies desired
-outcomes, not implementation mechanisms. Where it and the base PRD
+**Status: draft.** This supplement binds nothing until the owner accepts
+it. Until then `docs/prd.md` alone is the reference, and work is not
+measured against this document.
+
+This supplement reframes the requirements in `docs/prd.md` around a
+core/periphery architecture. It specifies desired outcomes, not
+implementation mechanisms. Where it and the base PRD
 disagree, the base PRD's principles (especially 2, 3, 8, 13, 14, 16)
 still bind; this supplement adds the architectural frame within which
 those principles operate.
@@ -55,8 +58,9 @@ allocated.
 
 ## 2. New principles
 
-These principles supplement the base PRD's sixteen. A change that
-violates one is a bug even if its tests pass.
+These proposed principles would supplement the base PRD's sixteen. Once
+the supplement is accepted, a change that violates one is a bug even if
+its tests pass; until then they are proposals.
 
 17. **One mind, many senses.** The agent is one actor with one identity
     (base PRD principle 14), but its cognition is organized into a core
@@ -536,8 +540,7 @@ These are not requirements; they are design questions that the TRD must
 answer:
 
 1. **KV swap policy.** What triggers a page-in/page-out? How much to keep
-   in RAM vs disk? The DMA benchmark methodology will help quantify
-   costs.
+   in RAM vs disk? Swap costs need measuring before the policy is set.
 
 2. **Escalation trigger tuning.** The message-type rules + confidence
    signal combination needs to be calibrated. What's the right threshold?
@@ -623,9 +626,7 @@ The core manages four operations: page-in (RAM/disk → VRAM), page-out
 (VRAM → RAM/disk), checkpoint (core context → RAM/disk for
 rollback/resumption), and reheat (disk → VRAM on new notification).
 
-The DMA benchmark methodology (Research/Dma-Benchmark-Methodology)
-provides the measurement framework for quantifying swap costs. The
-tail-invalidation benchmark showed that any in-place mutation triggers
+A tail-invalidation benchmark showed that any in-place mutation triggers
 full re-prefill at ~26x cost, which constrains the swap policy.
 
 ### A.3 Escalation detection
@@ -668,8 +669,8 @@ README (`tools/server/README.md` in ggml-org/llama.cpp) as of
 
 ---
 
-*This supplement is a goal for exploration, not a build plan. It
-specifies desired outcomes for the core/periphery architecture. The TRD
+*This supplement is a draft and a goal for exploration, not a build
+plan. It specifies desired outcomes for the core/periphery architecture. The TRD
 will specify how those outcomes are achieved and in what order. Appendix
 A collects the research and design ideas that informed the requirements;
 the TRD may adopt, modify, or discard any of them.*
