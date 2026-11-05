@@ -29,14 +29,20 @@ class TestEnqueueAgentSend:
         plugin, channel, db = await build_plugin_and_channel()
         plugin._mark_started()
 
+        processed = []
+        orig_process = plugin._process_agent_send
+        async def spy_process(item, ch):
+            processed.append(item)
+            await orig_process(item, ch)
+        plugin._process_agent_send = spy_process
+
         await plugin.enqueue_agent_send(channel.id, "hello from elsewhere", trace_id=mint_trace_id())
-
-        queue = plugin.queues.get(channel.id)
-        assert queue is not None
-        # The item is in the queue (drain will process it).
-        assert not queue.is_empty
-
         await drain(plugin, channel)
+
+        assert len(processed) == 1
+        assert processed[0].role == QueueItemRole.AGENT_SEND
+        assert processed[0].content == "hello from elsewhere"
+
         await db.close()
 
     async def test_raises_for_unregistered_channel(self):
@@ -207,5 +213,73 @@ class TestAgentSendSerialization:
         assistant_msgs = [m for m in conv.messages if m["role"] == "assistant"]
         assert user_msgs[0]["content"] == "do work"
         assert assistant_msgs[-1]["content"] == "queued while working"
+
+        await db.close()
+
+# ---------------------------------------------------------------------------
+# Section 5 — edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestAgentSendEdgeCases:
+    async def test_consecutive_assistant_messages(self):
+        """An AGENT_SEND after a completed turn produces consecutive assistant
+        messages. This is acceptable: ContextWindow does not require
+        alternating roles, and the agent's send is a distinct utterance."""
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        # Simulate a completed turn: user message + assistant response.
+        conv = ContextWindow(channel.id)
+        conv.system_prompt = "You are a test assistant."
+        conv.messages = [
+            {"role": "user", "content": "earlier question"},
+            {"role": "assistant", "content": "earlier answer"},
+        ]
+        channel.conversation = conv
+
+        await plugin.enqueue_agent_send(channel.id, "cross-channel note", trace_id=mint_trace_id())
+        await drain(plugin, channel)
+
+        # Two consecutive assistant messages — this is the expected shape.
+        assistant_msgs = [m for m in conv.messages if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 2
+        assert assistant_msgs[0]["content"] == "earlier answer"
+        assert assistant_msgs[1]["content"] == "cross-channel note"
+
+        await db.close()
+
+    async def test_transport_failure_still_records_in_history(self):
+        """If transport delivery fails, the message stays in the channel's
+        conversation history. The agent's intent to send is recorded
+        regardless of transport success (same semantics as a normal turn
+        whose reply fails to deliver)."""
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        # Make the send hook raise (the helper already mocks it as AsyncMock).
+        plugin.pm.ahook.send.side_effect = RuntimeError("transport down")
+
+        await plugin.enqueue_agent_send(channel.id, "undelivered message", trace_id=mint_trace_id())
+        await drain(plugin, channel)
+
+        # The message is in the conversation despite the transport failure.
+        conv = channel.conversation
+        assistant_msgs = [m for m in conv.messages if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["content"] == "undelivered message"
+
+        await db.close()
+
+    async def test_empty_text_rejected(self):
+        """enqueue_agent_send rejects empty or whitespace-only text."""
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            await plugin.enqueue_agent_send(channel.id, "", trace_id=mint_trace_id())
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            await plugin.enqueue_agent_send(channel.id, "   ", trace_id=mint_trace_id())
 
         await db.close()

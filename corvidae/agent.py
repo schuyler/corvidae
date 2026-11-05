@@ -553,6 +553,8 @@ class Agent(CorvidaePlugin):
         """
         if not self._started or self._registry is None:
             raise RuntimeError("Agent is not started")
+        if not text or not text.strip():
+            raise ValueError("text must not be empty")
         channel = self._registry.get(channel_id)
         if channel is None:
             raise KeyError(f"channel {channel_id!r} is not registered")
