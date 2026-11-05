@@ -569,12 +569,16 @@ class Agent(CorvidaePlugin):
         text: str,
         source_channel_id: str,
         trace_id: str | None = None,
+        hop_count: int = 1,
     ) -> None:
         """Enqueue an agent send on a channel's queue (#234).
 
         The message triggers an inference turn on the target channel. The
         receiving context sees a provenance frame identifying the source
         channel and mechanism. The queue serializes it between exchanges.
+
+        hop_count tracks cross-channel bounces for loop prevention. The
+        sending plugin increments it from the current attribution's meta.
         """
         if not self._started or self._registry is None:
             raise RuntimeError("Agent is not started")
@@ -604,6 +608,7 @@ class Agent(CorvidaePlugin):
             meta={
                 "origin": "agent_send",
                 "source_channel": source_channel_id,
+                "hop_count": hop_count,
             },
         )
         self._note_activity(channel.id)

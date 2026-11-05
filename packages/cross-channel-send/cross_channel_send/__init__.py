@@ -7,16 +7,23 @@ and mechanism.
 
 The list_channels tool returns registered channel IDs so the sending
 context knows its available targets.
+
+Loop prevention: each send increments a hop_count tracked in the item's
+meta. The receiving context's attribution carries the hop_count, so the
+next send from that context increments it again. When hop_count exceeds
+max_hops (config, default 3), the send is refused.
 """
 
 from __future__ import annotations
 
 import logging
 
-from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.attribution import get_attribution
 
 logger = logging.getLogger("cross_channel_send")
+
+DEFAULT_MAX_HOPS = 3
 
 
 class CrossChannelSendPlugin(CorvidaePlugin):
@@ -27,16 +34,17 @@ class CrossChannelSendPlugin(CorvidaePlugin):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._agent = None
+        self._max_hops: int = DEFAULT_MAX_HOPS
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
+        self._max_hops = int(config.get("max_hops", DEFAULT_MAX_HOPS))
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        self._agent = self.pm.get_plugin("agent")
-        if self._agent is None:
-            raise RuntimeError("cross_channel_send requires the agent plugin")
+        from corvidae.agent import Agent
+        self._agent = get_dependency(self.pm, "agent", Agent)
 
     @hookimpl
     def register_tools(self, tool_registry):
@@ -67,16 +75,28 @@ class CrossChannelSendPlugin(CorvidaePlugin):
         try:
             trace_id = None
             source_channel = None
+            hop_count = 1
             attribution = get_attribution()
             if attribution:
                 trace_id = attribution.get("trace_id")
                 source_channel = attribution.get("channel_id")
+                meta = attribution.get("meta") or {}
+                if isinstance(meta, dict):
+                    prev_hops = meta.get("hop_count")
+                    if isinstance(prev_hops, int):
+                        hop_count = prev_hops + 1
             if not source_channel:
                 return "Could not send: no source channel in current context."
+            if hop_count > self._max_hops:
+                return (
+                    f"Could not send: cross-channel loop detected "
+                    f"(hop {hop_count} > max {self._max_hops})."
+                )
             await self._agent.enqueue_agent_send(
                 channel_id, text,
                 source_channel_id=source_channel,
                 trace_id=trace_id,
+                hop_count=hop_count,
             )
             return f"Queued on {channel_id}."
         except KeyError:
