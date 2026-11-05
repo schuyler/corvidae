@@ -105,7 +105,21 @@ async def run_agent_loop(
             })
 
     logger.warning("max tool-calling rounds reached")
-    return MAX_ROUNDS_REACHED_MESSAGE
+    # Carry the subagent's last progress note so the parent channel gets a
+    # partial result, not a bare four-word marker (#494).
+    last_text = next(
+        (
+            m["content"]
+            for m in reversed(messages)
+            if m.get("role") == "assistant"
+            and isinstance(m.get("content"), str)
+            and m["content"].strip()
+        ),
+        None,
+    )
+    if last_text is None:
+        return MAX_ROUNDS_REACHED_MESSAGE
+    return f"{MAX_ROUNDS_REACHED_MESSAGE}\n\nLast progress: {last_text.strip()}"
 
 
 class SubagentPlugin(CorvidaePlugin):
@@ -131,6 +145,10 @@ class SubagentPlugin(CorvidaePlugin):
         self._system_prompt = resolve_prompt(
             config, "tools.subagent.system_prompt", SUBAGENT_SYSTEM_PROMPT
         )
+        # Tool-round budget per subagent (#494): fetch-heavy research tasks
+        # need more than the default 10. Non-int values raise at startup —
+        # the standard config-error path.
+        self._max_turns = int((config.get("subagent") or {}).get("max_turns", 10))
         logger.debug("SubagentPlugin started")
 
     @hookimpl
@@ -220,6 +238,7 @@ class SubagentPlugin(CorvidaePlugin):
                     client, messages, tools_dict, tool_schemas,
                     channel=channel,
                     task_queue=task_queue,
+                    max_turns=self._max_turns,
                     max_result_chars=max_result_chars,
                     call_timeouts=call_timeouts,
                 )

@@ -19,6 +19,7 @@ from llm_response_fixtures import (
     _make_tool_call_response,
     _make_tool_call,
     _make_tool_call_malformed_args,
+    _make_mixed_response,
 )
 
 
@@ -1485,3 +1486,126 @@ async def test_launch_passes_call_timeouts():
         await task_queue.enqueue.call_args[0][0].work()
 
     assert captured_kwargs.get("call_timeouts") is tools_plugin.call_timeouts
+
+# ---------------------------------------------------------------------------
+# subagent.max_turns config + partial result on budget exhaustion (#494)
+# ---------------------------------------------------------------------------
+
+
+class TestSubagentMaxTurns:
+    """The subagent.max_turns config knob (#494 part 1).
+
+    Before the fix, _launch never passed max_turns, so every subagent ran
+    with run_agent_loop's default of 10 rounds with no way to change it.
+    """
+
+    async def _launch_and_capture_max_turns(self, config: dict) -> object:
+        """Helper: run _launch with a capture stub and return the max_turns
+        value seen by run_agent_loop."""
+        pm, _ = _make_pm_with_tool_registry("shell", "subagent")
+        plugin = SubagentPlugin(pm)
+        await plugin.on_start(config=config)
+
+        channel = _make_channel()
+        task_queue = MagicMock(spec=TaskQueue)
+        task_queue.enqueue = AsyncMock()
+
+        ctx = ToolContext(
+            channel=channel,
+            tool_call_id="call-max-turns",
+            task_queue=task_queue,
+        )
+
+        captured = {}
+
+        async def capture_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
+            captured["max_turns"] = kwargs.get("max_turns")
+            return "done"
+
+        with patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
+             patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
+            await plugin._launch("instructions", "desc", ctx)
+            await task_queue.enqueue.call_args[0][0].work()
+
+        return captured["max_turns"]
+
+    async def test_on_start_reads_max_turns_from_config(self):
+        pm, _ = _make_pm_with_tool_registry()
+        plugin = SubagentPlugin(pm)
+        config = dict(BASE_CONFIG)
+        config["subagent"] = {"max_turns": 25}
+        await plugin.on_start(config=config)
+        assert plugin._max_turns == 25
+
+    async def test_on_start_defaults_max_turns_to_10(self):
+        pm, _ = _make_pm_with_tool_registry()
+        plugin = SubagentPlugin(pm)
+        await plugin.on_start(config=BASE_CONFIG)
+        assert plugin._max_turns == 10
+
+    async def test_launch_passes_configured_max_turns_to_run_agent_loop(self):
+        config = dict(BASE_CONFIG)
+        config["subagent"] = {"max_turns": 40}
+        observed = await self._launch_and_capture_max_turns(config)
+        assert observed == 40, (
+            f"run_agent_loop received max_turns={observed}, expected 40 from "
+            "subagent.max_turns config."
+        )
+
+    async def test_launch_defaults_to_10_without_config(self):
+        observed = await self._launch_and_capture_max_turns(BASE_CONFIG)
+        assert observed == 10
+
+
+async def test_max_turns_exceeded_includes_last_assistant_text():
+    """Budget exhaustion must carry the subagent's last progress note (#494 part 2).
+
+    Before the fix, the loop returned only the bare marker string, discarding
+    everything the subagent had said — the parent channel received a
+    four-word notification with no partial result.
+    """
+    client = MagicMock()
+    # Every turn: progress text plus a tool call (never terminates naturally)
+    client.chat = AsyncMock(
+        return_value=_make_mixed_response(
+            "Fetched 2 of 5 sources; writing notes.",
+            [_make_tool_call("call_loop", "noop", {})],
+        )
+    )
+
+    noop = AsyncMock(return_value="noop result")
+    messages = [{"role": "user", "content": "spin"}]
+    result = await run_agent_loop(
+        client,
+        messages,
+        tools={"noop": noop},
+        tool_schemas=[],
+        max_turns=3,
+    )
+
+    assert result.startswith("(max tool-calling rounds reached)")
+    assert "Fetched 2 of 5 sources" in result
+
+
+async def test_max_turns_exceeded_bare_marker_when_no_assistant_text():
+    """With no assistant text at exhaustion, the result stays the bare marker
+    (preserves the pre-existing contract asserted by test_max_turns_exceeded).
+    """
+    client = MagicMock()
+    client.chat = AsyncMock(
+        return_value=_make_tool_call_response(
+            [_make_tool_call("call_loop", "noop", {})]
+        )
+    )
+
+    noop = AsyncMock(return_value="noop result")
+    messages = [{"role": "user", "content": "spin"}]
+    result = await run_agent_loop(
+        client,
+        messages,
+        tools={"noop": noop},
+        tool_schemas=[],
+        max_turns=3,
+    )
+
+    assert result == "(max tool-calling rounds reached)"
