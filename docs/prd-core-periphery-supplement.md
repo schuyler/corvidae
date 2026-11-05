@@ -247,10 +247,11 @@ its tests pass; until then they are proposals.
 9. **Task-based subagents are peripherals with blank context.** A
    subagent is not a separate mechanism; it is a peripheral that starts
    with no conversation history and is assigned a task by the core when
-   launched. The core forks, creates a task-bound peripheral with a
-   blank context and a task description, and the peripheral works the
-   task. When the task is done, the peripheral's results are joined back
-   to the core (§3.5.3) and the peripheral is discarded. Channel-bound
+   launched. It is not a fork: a blank context copies nothing from the
+   core. The core creates a task-bound peripheral with a blank context
+   and a task description, and the peripheral runs as an independent
+   subagent loop until the task is done. Its results are then joined
+   back to the core (§3.5.3) and the peripheral is discarded. Channel-bound
    peripherals have conversation history and a persistent identity;
    task-bound peripherals are ephemeral, scoped to their task, and
    discarded on completion. Both are the same architectural primitive:
