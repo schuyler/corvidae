@@ -152,8 +152,9 @@ its tests pass; until then they are proposals.
 7. The core directs its own focus through forking and joining
    (§3.5). It can fork its context window to work a sub-problem, explore
    a question, or operate a channel directly, then join the results back
-   into its main context. The fork is temporary; the main context
-   continues to receive notifications.
+   into its main context. The fork is temporary. The core either yields
+   to it, pausing its main context while the fork takes its
+   notifications, or detaches it and keeps working (§3.5.7).
 
 8. The core sends telegraphic instructions to the periphery by default.
    The instruction is compressed — the precision that matters is in the
@@ -324,9 +325,13 @@ Corvidae has two kinds of context fork. A **one-shot fork** is base PRD
 dispatches no tools, fires no hooks, persists nothing, and runs under the
 lease that holds its prefix. A **long-lived fork** starts from a copy of
 the core's window and then runs as its own queue: it takes turns,
-dispatches tools, and exchanges messages with peripherals, and its
-outcome is joined back into the core. It acts only through its own turns,
-so the core's window and log change only at the join. The rest of this
+dispatches tools, and exchanges messages with peripherals. Its purpose is
+to let the core spend window depth on a focused task without forcing
+compaction of its longer horizon. At the join, the parent receives a
+consolidated report of the fork from its start, since the parent already
+holds everything before the fork point. The report is appended at the
+tail of the parent's window; the fork's rows stay in the log (base
+principle 4) and never enter the parent's window. The rest of this
 section concerns long-lived forks. Base §3.8 governs one-shot forks, and
 only those.
 
@@ -340,8 +345,9 @@ thought, or to respond to an escalation.
 1. **The core can fork its context window proactively.** When the core
    decides to focus on a sub-problem (a goal that needs work, a question
    that needs exploration, a consolidation pass), it forks its current
-   window. The fork is a temporary working context; the main context
-   continues to receive notifications. The core is not blocked.
+   window. The fork is a temporary working context. In yield mode the
+   main context pauses and the fork receives the core's notifications;
+   in detach mode the main context keeps receiving them (item 7).
 
 2. **The fork pages in what it needs.** The fork can page in peripheral
    contexts from RAM/disk, retrieve memories, and access tools. It
@@ -368,8 +374,9 @@ thought, or to respond to an escalation.
    - **Fork.** The core creates a working context that pages in the
      needed peripheral context from RAM/disk.
    - **Work.** The fork operates: it exchanges messages with the
-     periphery (or operates the channel directly) while the core still
-     receives other notifications.
+     periphery (or operates the channel directly). Whether the core
+     pauses or keeps receiving notifications meanwhile depends on the
+     mode (item 7).
    - **Join.** When the fork's work is done, the core pages itself back
      in with a summary of the fork's outcome appended. The fork is
      discarded. The core resumes from its checkpoint.
@@ -380,10 +387,16 @@ thought, or to respond to an escalation.
    works the channel itself in a fork, and joins the results back. The
    periphery steps back while the fork is active.
 
-7. Base PRD §3.8 governs one-shot forks only. A long-lived fork does
-   not run under the core's lease, since holding it would block the
-   core; it waits for a lease of its own like any other queue (base PRD
-   §3.13.3).
+7. Base PRD §3.8 governs one-shot forks only. The core runs a
+   long-lived fork in one of two ways, chosen when it forks:
+   - **Yield.** The core pauses its main context and yields to the
+     fork, which runs under the core's lease, extends the core's warm
+     prefix, and receives the core's notifications until the join. The
+     join's report covers the notifications the fork handled as well as
+     its own work.
+   - **Detach.** The core keeps working and receiving its
+     notifications. The fork waits for a lease of its own like any other
+     queue (base PRD §3.13.3).
 
 ### 3.6 Goal block / commitment floor
 
