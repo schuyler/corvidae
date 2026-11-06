@@ -52,7 +52,9 @@ base PRD say "base".
    unstated whether idle notifications fire on system idle or per
    channel (base §3.1.16 has both).
 
-4. **The agent pausing itself.** Base §3.13.7 guarantees the agent can't
+4. **The agent pausing itself.** *Resolved:* the framework must not let
+   the agent's own actions leave the core unable to receive work
+   (supplement §3.3.7). Original finding: base §3.13.7 guarantees the agent can't
    pause itself into a state no turn can leave. Supplement §3.3.7 makes
    pauses last until the core lifts them, and nothing stops the core's
    own queue being paused.

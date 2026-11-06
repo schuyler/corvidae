@@ -442,7 +442,10 @@ its tests pass; until then they are proposals.
    - A paused channel MUST stay paused until the core unpauses it; a
      pause MUST NOT lapse at a latency bound. The framework MUST let the
      operator unpause any channel at any time without going through a
-     channel's queue (base PRD §3.13.7).
+     channel's queue (base PRD §3.13.7). The framework MUST NOT let the
+     agent's own actions leave the core unable to receive work, so the
+     agent still cannot pause itself into a state no turn can leave
+     (base PRD §3.13.7).
    - An active channel's queue MUST behave as base PRD §3.1 describes.
      Among active queues, the slot-management plugin MUST decide the
      order: a queue keeps its head until it drains, and the next waiting
