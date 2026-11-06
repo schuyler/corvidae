@@ -670,9 +670,12 @@ With the goals plugin loaded:
    is not a requirement. This amends base PRD §1's single-slot clause:
    correctness on one slot, not speed.
 
-   *Rationale:* On one warm head every switch costs a prefill, but
-   nothing fails. The performance expectations assume a pool large
-   enough to keep the core and the active peripherals warm.
+   *Rationale:* On one warm head, where the backend has the tier levers,
+   a switch costs the slot-management plugin a save and a restore of KV
+   state (§3.3.6, Appendix A.4), not a fresh prefill; only a backend
+   without the levers pays a prefill per switch. Either way nothing
+   fails. The performance expectations assume a pool large enough to
+   keep the core and the active peripherals warm.
 
 ### 3.9 Core-initiated exchanges
 
