@@ -133,11 +133,11 @@ its tests pass; until then they are proposals.
 
 ### 3.1 The core (System Two)
 
-1. The core is a channel with an input queue, running a single context
-   that favours depth over latency. Its transport is the internal notification bus:
-   escalations from peripherals, idle events, task completions, and
-   scheduler firings. It performs deliberative reasoning, multi-step
-   tasks, goal management, and appraisal.
+1. The core is a channel with an input queue, running a single context that
+   favours depth over latency. Its transport is the internal notification
+   bus: escalations from peripherals, idle events, task completions, and
+   scheduler firings. It performs deliberative reasoning, multi-step tasks,
+   goal management, and appraisal.
 
 2. Under the core/periphery strategy the heartbeat (base PRD §3.7
    Heartbeat) is retired. In its place the core receives idle
@@ -183,8 +183,8 @@ its tests pass; until then they are proposals.
 
 10. The core performs appraisal (base PRD §3.7 Appraisal) in addition to the
     consolidation, compaction, and critique that all contexts perform
-    (§3.7). Appraisal evaluates patterns across channels and over time,
-    not just individual responses.
+    (§3.7). Appraisal evaluates patterns across channels and over time, not
+    just individual responses.
 
 11. The core can see the system's **channel observables** whenever it
     needs them, without being woken to be shown them: queue depth per
@@ -534,12 +534,12 @@ thought, or to respond to an escalation.
    and periphery on the same model (degenerate case) to isolate the
    architectural effects from the model effects.
 
-5. When the core and peripherals use different models, switching
-   between them does not reload a model each time, and the KV cache
-   allocation (§3.3) covers both. The reference deployment is llama.cpp's llama-server
+5. When the core and peripherals use different models, switching between
+   them does not reload a model each time, and the KV cache allocation
+   (§3.3) covers both. The reference deployment is llama.cpp's llama-server
    (Appendix A.4). Other providers are supported through the base PRD's
-   provider-neutral profiles and pools (§3.6, §3.13); a provider without
-   the tier levers gets the degenerate case (§3.3.4).
+   provider-neutral profiles and pools (§3.6, §3.13); a provider without the
+   tier levers gets the degenerate case (§3.3.4).
 
 6. Core/periphery stays correct on a pool of one warm head, in the
    same-model case (§3.8.4): every switch costs a prefill, but nothing
@@ -581,11 +581,11 @@ thought, or to respond to an escalation.
 2. The escalation quality metrics (§3.4.5) are recorded in the outcome
    log: false alarm rate, miss rate, per-peripheral and in aggregate.
 
-3. KV cache allocation events (page-in, page-out, checkpoint) are
-   logged with the context ID, the tier transition, and the trigger. On local LLM deployments these events are the
-   slot-management plugin's placement decisions, each naming the core's
-   direction it followed, if any. On frontier APIs they are
-   context-switch boundaries.
+3. KV cache allocation events (page-in, page-out, checkpoint) are logged
+   with the context ID, the tier transition, and the trigger. On local LLM
+   deployments these events are the slot-management plugin's placement
+   decisions, each naming the core's direction it followed, if any. On
+   frontier APIs they are context-switch boundaries.
 
 4. A fork's lifecycle (start, join, abandonment) is logged. A fork that
    is discarded without completion is logged at WARNING with the reason
@@ -772,8 +772,8 @@ three-tier hierarchy is the working model:
   capacity.
 - **Disk (cold):** Inactive contexts. Slowest access, largest capacity.
 
-The slot-management plugin carries out four operations: page-in (RAM/disk → VRAM), page-out
-(VRAM → RAM/disk), checkpoint (core context → RAM/disk for
+The slot-management plugin carries out four operations: page-in (RAM/disk →
+VRAM), page-out (VRAM → RAM/disk), checkpoint (core context → RAM/disk for
 rollback/resumption), and reheat (disk → VRAM on new notification).
 
 A tail-invalidation benchmark showed that any in-place mutation triggers
@@ -842,8 +842,8 @@ prompts remain the agent's to change (base PRD principle 15).
 
 ---
 
-*This supplement is a draft and a goal for exploration, not a build
-plan. It specifies desired outcomes for the core/periphery architecture. The TRD
-will specify how those outcomes are achieved and in what order. Appendix
-A collects the research and design ideas that informed the requirements;
-the TRD may adopt, modify, or discard any of them.*
+*This supplement is a draft and a goal for exploration, not a build plan. It
+specifies desired outcomes for the core/periphery architecture. The TRD will
+specify how those outcomes are achieved and in what order. Appendix A
+collects the research and design ideas that informed the requirements; the
+TRD may adopt, modify, or discard any of them.*
