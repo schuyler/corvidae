@@ -737,6 +737,67 @@ With the goals plugin loaded:
    as a benchmark, from the outcome log's miss and false-alarm rates
    (§3.4.5), never as a gate (base PRD principle 6).
 
+### 3.12 Chain budgets and the write-ahead log ceiling
+
+This section amends base PRD §3.1.3 and §3.4.8 once the supplement is
+accepted.
+
+1. Every item the framework enqueues during a turn MUST be charged to
+   that turn's chain (base PRD §3.1.3), across every link this
+   supplement adds: instructions, dictation, escalations, forks, joins,
+   task-bound peripherals, and the notifications each produces. The
+   kernel MUST attach the chain from the turn's task context when the
+   item is enqueued, so that no link has to pass it on itself.
+
+2. A new chain MUST start only from an accepted inbound message
+   (§3.3.7) or an agency start: an idle notification (§3.1.2) or a
+   scheduler firing (base PRD §3.9).
+
+3. A peripheral's turns MUST spend their chain's budget. The core's
+   main-context turns MUST NOT spend any chain's budget; instead, each
+   item a core turn emits MUST be charged to the chain of the newest
+   item that turn took from its queue. The kernel MUST make that choice,
+   never the model. A long-lived fork's turns MUST spend a fork budget,
+   allocated per fork from operator config with a default, instead of
+   the chain's; items the fork emits MUST be charged to the fork's
+   chain.
+
+4. When a budget is spent, the framework MUST NOT drop the items charged
+   to it. They MUST still be delivered, and a turn that takes them MUST
+   run with tool calls and emissions to other contexts suppressed, as
+   `max_turns` exhaustion does in a base channel. The framework MUST log
+   each exhaustion at WARNING naming the chain and the channel.
+
+5. The framework MUST cap how many tool calls one response may dispatch,
+   set in operator config with a default (base PRD principle 15 makes it
+   lockable). Calls over the cap MUST NOT run, and each MUST get an error
+   result naming the cap.
+
+6. The kernel MUST hold a ceiling on the total number of pending entries
+   in the write-ahead log of accepted work (base PRD §3.4.8), of every
+   kind, set in operator config with a default. At the ceiling the
+   kernel MUST stop starting new chains: inbound messages are rejected
+   as in §3.3.7, agency starts MUST be deferred until the log is back
+   under the ceiling, and creating a fork or a task-bound peripheral
+   MUST fail with a tool error naming the ceiling. Items of chains
+   already running MUST still be accepted and processed. The kernel MUST
+   log a warning and notify the operator, rate-limited as in §3.3.7.
+
+*Rationale:* Internal work (tool results, notes, escalations) follows
+from work already accepted, so refusing it would lose accepted work one
+step later: a refused escalation leaves an accepted message unhandled.
+It is bounded where it starts instead. The budget is what guarantees
+that running chains end, which the core/periphery loop (core,
+instruction, periphery, escalation, core) would otherwise defeat by
+starting a fresh trace each time round. The ceiling is what bounds the
+disk. Each needs the other: a ceiling alone would let a self-feeding
+loop sit at the ceiling and refuse every new message indefinitely, and
+budgets alone bound each chain but not how many run at once. The core is
+exempt from charging because it multiplexes chains: one core turn can
+coalesce escalations from several, and charging all of them would starve
+quiet chains. A chain's total output is at most its budget times the per-turn
+fan-out, which is why §3.12.5 caps fan-out.
+
 ## 4. What carries over
 
 The base PRD's requirements MUST continue to hold, except where this
@@ -749,7 +810,11 @@ supplement amends them once accepted:
 - base §3.8 governs one-shot forks only; long-lived forks follow §3.5;
 - pauses do not lapse, channel queues have a fixed capacity for inbound
   messages, and the write-ahead log has a total cap on them, amending
-  base §3.13.5, §3.13.6, §3.13.7, §3.13.9 and §3.4.8 (§3.3.7).
+  base §3.13.5, §3.13.6, §3.13.7, §3.13.9 and §3.4.8 (§3.3.7);
+- an exchange's budget follows every link the supplement adds, the
+  core's own turns are not charged, responses have a tool-call cap, and
+  the write-ahead log has a ceiling past which no new chain starts,
+  amending base §3.1.3 and §3.4.8 (§3.12).
 
 Under the core/periphery strategy each transport channel MUST be served
 by a peripheral, and the core MUST be a channel of its own (principle
@@ -910,13 +975,12 @@ answer:
     I do?" which is explicitly rejected here; the TRD needs a
     replacement behavior for the no-goals case.
 
-21. **Bounding internal work in the write-ahead log.** §3.3.7 caps
-    inbound transport messages per channel and in total, but tool
-    results, task completions, notes and escalations are never dropped
-    and so are not capped. A runaway producer (a fork or task loop that
-    keeps generating work) could still grow the log. Should internal
-    items have a hard cap too, and if so, what does refusal mean for the
-    producer?
+21. **Fork budgets and core attribution.** How large should the default
+    fork budget be (§3.12.3)? Deep core work may need far more turns than
+    a chat exchange's `max_turns`. And does charging a core turn's
+    emissions to the newest item it took leave some chains carrying cost
+    that others caused, often enough to matter? Measure before changing
+    the rule.
 
 ## Appendix A: Design ideas and research notes
 
