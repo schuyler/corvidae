@@ -25,24 +25,22 @@ peripherals. The transition is not a replacement of the base PRD's
 requirements; it is a reorganization of them around a different
 topology. Requirements that are topology-independent (plugin architecture,
 append-only log, fail-soft, metering) carry over unchanged. Requirements
-that assume stovepiped channels (per-channel KV cache, per-channel
-heartbeat, per-channel identity) are reframed below.
+that assume independent channel contexts (each channel its own window
+and KV prefix) are reframed below.
 
 ## 1. What changes
 
 The base PRD's deployment shape "a personal instance (Lex): a
 strict-template model (Swift-1.5, a Qwen 3.8 fine-tune) on a single-KV-slot
 llama-server router, Signal as the primary transport, running unattended
-for weeks" assumed one context
-per channel, each with its own KV cache slot. The single-slot constraint
-meant the channels time-shared one prefill cache, and the heartbeat was a
-separate context that got timed ticks.
+for weeks" assumed one context per channel, time-sharing a single KV
+slot.
 
 The core/periphery architecture changes the topology:
 
 - **One core context** (System Two) is where depth goes. It is the
   cognitive center: deliberative reasoning, goal management,
-  appraisal, and the system's heartbeat.
+  appraisal, and acting on idle notifications.
 - **Peripheral contexts** (System One) are cheap monitors that favour
   low latency over depth.
   They are the sensory apparatus: they receive messages, recognize cues,
@@ -52,8 +50,8 @@ The core/periphery architecture changes the topology:
 - **The KV cache is a shared resource** owned by the core, which
   manages context allocation across memory tiers when it has the levers
   to do so (local LLM deployments).
-- **The heartbeat is dissolved** into the core. There is no separate
-  heartbeat context; the core sees idle notifications and acts.
+- **The heartbeat is retired.** The core receives idle notifications and
+  acts on them (§3.1.2).
 
 The operator still runs one process on one machine (base PRD principle 8).
 The model endpoints are still wherever the operator points them (base PRD
@@ -139,12 +137,12 @@ its tests pass; until then they are proposals.
    scheduler firings. It performs deliberative reasoning, multi-step
    tasks, goal management, and appraisal.
 
-2. The core is the system's heartbeat. It receives idle notifications
-   (base PRD §3.1.16) and acts on them by checking its goal block and
-   deciding whether any goal needs attention. There is no separate
-   heartbeat context, no timed ticks to a separate context, and no
-   "what should I do?" prompt. The idle notification is an event, like a
-   new message or a task completion.
+2. Under the core/periphery strategy the heartbeat (base PRD §3.7
+   Heartbeat) is retired. In its place the core receives idle
+   notifications (base PRD §3.1.16) at an operator-configured rate
+   limit, reads its goal block, and decides whether anything needs
+   attention. The operator can turn the notifications off, as putting
+   the heartbeat to sleep did.
 
 3. The core directs KV cache allocation (§3.3). It controls queue
    multiplexing through tools, and a slot-management plugin decides from
@@ -553,12 +551,9 @@ thought, or to respond to an escalation.
    peripheral, sends it an instruction, and the periphery composes and
    sends the message.
 
-2. This is the mechanism by which the core's agency reaches the user.
-   The old heartbeat was a separate context that got timed ticks and had
-   to figure out what to do. In the core/periphery architecture, the core
-   *is* the heartbeat: when it sees an idle notification, it checks its
-   goals, and if something needs attention, it pages a peripheral and
-   tells it to contact the user.
+2. This is how the core's agency reaches the user: when an idle
+   notification arrives, it checks its goals, and if something needs
+   attention, it directs a peripheral to contact the user.
 
 3. The architectural requirement is that plugins can send each other
    notifications. The core can direct any peripheral to contact the
@@ -647,8 +642,8 @@ requirements (§3.13) carry over, except where this supplement amends
 them once accepted:
 
 - base §1's single-slot clause holds as correctness, not speed (§3.8.6);
-- the heartbeat (base §3.7 Heartbeat) is the core acting on idle
-  notifications (§3.1.2);
+- the heartbeat is retired; the core receives idle notifications at an
+  operator-configured rate limit (§3.1.2);
 - goals sit in a pinned block with tail updates (base §3.7 Goals; §3.6);
 - base §3.8 governs one-shot forks only; long-lived forks follow §3.5;
 - pauses do not lapse and queues have a fixed capacity, amending base
