@@ -590,9 +590,11 @@ thought, or to respond to an escalation.
    user on any channel the peripheral owns, without a user turn
    mediating. The transport mechanism is a design decision.
 
-4. Core-initiated exchanges are subject to the same inbound gate and
-   trust model as user-initiated exchanges (base PRD principle 9). The
-   core is trusted; the periphery is the core's voice.
+4. Core-initiated exchanges follow the base PRD's rules for messages
+   the agent starts (base PRD §3.5.9): a message to someone outside the
+   inbound allowlist on a one-to-one channel admits their replies, the
+   operator can lock that, and a per-destination limit applies if set.
+   Replies that come back pass the inbound gate like any message.
 
 ### 3.10 Observability
 
