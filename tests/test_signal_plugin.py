@@ -903,6 +903,114 @@ class TestInboundFiltering:
 
         finally:
             await _stop_plugin(h)
+
+    async def test_application_mime_params_in_type_name(self, tmp_path):
+        """application/json; charset=utf-8 → [json: ...] not [json; charset=utf-8: ...]."""
+        import base64
+        data = b'{"key": "value"}'
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(data).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text="data",
+                    attachments=[{"id": "1735-json", "type": 0,
+                                   "contentType": "application/json; charset=utf-8",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[json:" in text, f"expected [json: in {text!r}"
+            assert "charset" not in text, f"charset leaked into type name: {text!r}"
+        finally:
+            await _stop_plugin(h)
+
+    async def test_mime_extension_overrides_id_extension(self, tmp_path):
+        """id=photo.jpg + contentType=image/png → file saved as .png."""
+        import base64
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "photo.jpg", "type": 0,
+                                   "contentType": "image/png",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            path_str = text.split("[image: ")[1].split("]")[0]
+            assert path_str.endswith(".png"), (
+                f"MIME extension should override id extension: {path_str}"
+            )
+        finally:
+            await _stop_plugin(h)
+
+    async def test_extension_from_filename(self, tmp_path):
+        """filename=photo.webp + contentType=image/webp → .webp extension."""
+        import base64
+        data = b"RIFF\x00\x00\x00\x00WEBP"
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(data).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "abc123", "type": 0,
+                                   "contentType": "image/webp",
+                                   "filename": "photo.webp"}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            path_str = text.split("[image: ")[1].split("]")[0]
+            assert path_str.endswith(".webp"), f"expected .webp: {path_str}"
+        finally:
+            await _stop_plugin(h)
+
+    async def test_fallback_to_type_enum_when_no_content_type(self, tmp_path):
+        """No contentType, type=1 (image) → still downloaded via legacy path."""
+        import base64
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "1736-legacy", "type": 1,
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[image:" in text, f"expected [image: in {text!r}"
+            assert "download failed" not in text
+        finally:
+            await _stop_plugin(h)
+
+
+
     async def test_malformed_frame_is_logged_and_loop_survives(self, tmp_path, caplog):
         h = await _start_plugin(tmp_path)
         try:

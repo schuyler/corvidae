@@ -69,7 +69,7 @@ def _is_downloadable(attachment: dict) -> bool:
     Primary signal: contentType MIME prefix.
     Fallback: protobuf type enum (if contentType is absent).
     """
-    mime = (attachment.get("contentType") or "").lower()
+    mime = _mime_base(attachment.get("contentType") or "")
     if mime:
         return any(mime.startswith(p) for p in _DOWNLOADABLE_MIME_PREFIXES)
     # Fallback for older signal-cli versions that send type but not contentType.
@@ -538,7 +538,7 @@ class SignalPlugin(TransportPlugin):
         attachment_notes: list[str] = []
         for att in attachments:
             att_type = att.get("type", 0)
-            mime = (att.get("contentType") or "").lower()
+            mime = _mime_base(att.get("contentType") or "")
             # Derive a human-readable name: MIME subtype if available,
             # else the protobuf type name, else "type<N>".
             if mime and "/" in mime:
@@ -653,7 +653,8 @@ class SignalPlugin(TransportPlugin):
         # the MIME mapping. When the id already carries the suffix, don't
         # double it (e.g. id="foo.txt" + suffix=".txt" → "foo.txt").
         suffix = ""
-        for source in (attachment.get("filename"), attachment.get("id")):
+        for src in (attachment.get("filename"), attachment.get("id")):
+            source = str(src) if src is not None else ""
             if source and "." in source:
                 candidate = source[source.rindex("."):].lower()
                 if _SAFE_SUFFIX.fullmatch(candidate):
