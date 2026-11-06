@@ -1172,3 +1172,29 @@ behaviour the evals depend on. Item 8 is a project. (Two further items
 from the original review — documenting the real tunable keys and
 correcting the design doc's sandboxing paragraph — were done alongside
 this document.)
+
+---
+
+## Restart plugin
+
+The `restart` tool (requires the `restart` extra) can terminate the daemon process. This is a privileged capability: a compromised or looped agent could use it to deny service.
+
+### Loop guard
+
+Three checks, in order, prevent restart loops:
+
+1. **Human-message latch.** No restart is allowed until a human has sent a message since boot. This is a speed bump against loops, not an authorization control. A compromised agent could send itself a message on any transport to set the latch. The latch's purpose is to break the tightest loop: restart → boot → restart → boot, with no human in the cycle.
+2. **Minimum uptime.** A restart is refused within `min_uptime_seconds` (default 120s) of boot. This prevents a config change from triggering an immediate restart that triggers another restart.
+3. **Rate limit.** No more than `max_restarts` (default 3) restarts within `window_seconds` (default 6h). After the limit is reached, only a human can restart the daemon (e.g., `systemctl restart`).
+
+### Pre-flight
+
+Before the daemon is killed, a pre-flight subprocess validates the config file using the daemon's own validation functions (`validate_agent_config`, `validate_daemon_config`). A config that fails validation refuses the restart with the error message. This prevents a bad config change from bricking the daemon on restart.
+
+### Post-restart notification
+
+A marker file (`state/restart.json`) survives the restart. On the next boot, the plugin reads the marker and delivers a notification to the originating channel (matched by `tool_call_id`) or the home channel (fallback). The marker is deleted after delivery, so a crash during delivery cannot cause a re-delivery loop.
+
+### Boot notice
+
+On safe-mode boot (plugins disabled after a crash loop) or after an abnormal previous run (detected from `state/boot-history.jsonl`, written by an external boot supervisor), the plugin sends a notice to the home channel. This is the only notification that does not require a prior restart request.

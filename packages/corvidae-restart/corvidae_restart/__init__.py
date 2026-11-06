@@ -158,19 +158,21 @@ def _is_number(value) -> bool:
 
 
 def _coerce_int(value, name: str) -> int:
-    """Coerce a config value to int, logging a warning on failure."""
+    """Coerce a config value to int. Raises on bad values."""
     if _is_number(value):
         return int(value)
-    logger.warning("restart config %s is not a number: %r; using 0", name, value)
-    return 0
+    raise ValueError(
+        f"restart config '{name}' must be an integer, got {value!r}"
+    )
 
 
 def _coerce_float(value, name: str) -> float:
-    """Coerce a config value to float, logging a warning on failure."""
+    """Coerce a config value to float. Raises on bad values."""
     if _is_number(value):
         return float(value)
-    logger.warning("restart config %s is not a number: %r; using 0.0", name, value)
-    return 0.0
+    raise ValueError(
+        f"restart config '{name}' must be a number, got {value!r}"
+    )
 
 
 class RestartPlugin(CorvidaePlugin):

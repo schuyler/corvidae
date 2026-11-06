@@ -961,3 +961,29 @@ Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `cross_channel_send.max_hops` | integer | `3` | Maximum send hops before a `send_message` call is refused. A send from a context whose attribution carries `hop_count` n is refused when n + 1 exceeds this limit. Must be an integer ≥ 1 (bools and floats are rejected); a non-integer value fails startup naming the key and the value. A missing block keeps the default silently. |
+
+---
+
+## `restart` — Daemon restart plugin
+
+Requires the restart extra (`--extra restart` on your `uv sync` line). Without it the `restart` tool does not exist.
+
+`RestartPlugin` provides a `restart` tool that the agent can call to restart the daemon after plugin, prompt, or config changes. A loop guard prevents restart loops: no restart until a human has messaged since boot, a minimum uptime, and a maximum number of restarts per time window. A pre-flight check validates the config before the daemon is killed. After the restart, a notification is delivered to the originating channel (or the home channel as fallback) with the reason, downtime, and plugin list.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `restart.home_channel` | string | none | Channel id for boot notices and fallback notifications. When absent, notices are logged but not sent. |
+| `restart.config_path` | string | `agent.yaml` | Path to the config file the pre-flight validates, relative to the config directory. |
+| `restart.min_uptime_seconds` | integer | `120` | Minimum seconds since boot before a restart is allowed. Must be an integer ≥ 0; a non-integer value fails startup naming the key. |
+| `restart.max_restarts` | integer | `3` | Maximum number of restarts allowed within `window_seconds`. Must be an integer ≥ 0; a non-integer value fails startup naming the key. |
+| `restart.window_seconds` | integer | `21600` | Time window (seconds) for the `max_restarts` count. Must be an integer ≥ 0; a non-integer value fails startup naming the key. |
+| `restart.preflight_timeout_seconds` | number | `120` | Timeout for the pre-flight subprocess. Must be a number > 0; a non-numeric value fails startup naming the key. |
+| `restart.notify_delay_seconds` | number | `5` | Delay after the agent is ready before sending the post-restart notification. Must be a number ≥ 0; a non-numeric value fails startup naming the key. |
+
+### State files
+
+The plugin reads and writes files under `<config_dir>/state/`:
+
+- `restart.json` — pending restart marker (written before SIGTERM, read and deleted on next boot).
+- `restart-history.jsonl` — append-only log of restart requests and deliveries.
+- `boot-history.jsonl` — written by an **external boot supervisor** (not by this plugin). The plugin reads it to determine the boot mode (normal vs. safe) and whether the previous run ended abnormally. Record format: one JSON object per line; start records have a `mode` key, exit records have a `service_result` key, reset records have a `reset` key. Nothing in this repository writes this file; the boot supervisor is deployment-specific.

@@ -418,14 +418,33 @@ def test_coerce_int_valid():
     from corvidae_restart import _coerce_int
     assert _coerce_int(42, "test") == 42
     assert _coerce_int(3.9, "test") == 3
-    assert _coerce_int(True, "test") == 0  # bool is not a number
+
+
+def test_coerce_int_raises_on_bool():
+    from corvidae_restart import _coerce_int
+    import pytest
+    with pytest.raises(ValueError, match="must be an integer"):
+        _coerce_int(True, "test")
+
+
+def test_coerce_int_raises_on_string():
+    from corvidae_restart import _coerce_int
+    import pytest
+    with pytest.raises(ValueError, match="must be an integer"):
+        _coerce_int("fast", "min_uptime_seconds")
 
 
 def test_coerce_float_valid():
     from corvidae_restart import _coerce_float
     assert _coerce_float(42, "test") == 42.0
     assert _coerce_float(3.9, "test") == 3.9
-    assert _coerce_float(True, "test") == 0.0
+
+
+def test_coerce_float_raises_on_string():
+    from corvidae_restart import _coerce_float
+    import pytest
+    with pytest.raises(ValueError, match="must be a number"):
+        _coerce_float("fast", "notify_delay_seconds")
 
 
 async def test_marker_event_cannot_override_delivered(tmp_path):

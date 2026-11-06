@@ -1,7 +1,8 @@
 """Pre-flight check for the restart plugin.
 
-Validates the config file and reports problems. Run as a subprocess by
-the restart tool before the daemon is killed.
+Validates the config file using the daemon's own validation functions,
+so a config that passes the pre-flight can actually boot. Run as a
+subprocess by the restart tool before the daemon is killed.
 
 Usage:
     python -P -m corvidae_restart.preflight --config <path>
@@ -39,11 +40,18 @@ def main() -> int:
         print("config file is not a YAML mapping", file=sys.stderr)
         return 1
 
-    # Basic validation: required sections exist
-    for section in ("agent", "llm", "channels"):
-        if section not in config:
-            print(f"missing required section: {section}", file=sys.stderr)
-            return 1
+    # Run the daemon's own validation, same as `corvidae serve`.
+    try:
+        from corvidae.channel import validate_agent_config
+        from corvidae.idle import validate_daemon_config
+
+        if "agent" in config:
+            validate_agent_config(config["agent"])
+        if "daemon" in config:
+            validate_daemon_config(config["daemon"])
+    except Exception as exc:
+        print(f"config validation failed: {exc}", file=sys.stderr)
+        return 1
 
     print("pre-flight OK", file=sys.stderr)
     return 0

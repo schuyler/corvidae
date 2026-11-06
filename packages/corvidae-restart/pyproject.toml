@@ -9,5 +9,8 @@ description = "Restart plugin for corvidae: restart tool with loop guard, pre-fl
 requires-python = ">=3.13"
 dependencies = ["corvidae"]
 
+[tool.uv.sources]
+corvidae = { workspace = true }
+
 [project.entry-points.corvidae]
 restart = "corvidae_restart:RestartPlugin"

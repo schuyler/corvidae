@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -10,6 +10,7 @@ resolution-markers = [
 members = [
     "corvidae",
     "corvidae-cognition",
+    "corvidae-restart",
     "cross-channel-send",
 ]
 
@@ -535,6 +536,9 @@ dev = [
 discord = [
     { name = "discord-py" },
 ]
+restart = [
+    { name = "corvidae-restart" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -552,6 +556,7 @@ requires-dist = [
     { name = "apluggy", git = "https://github.com/schuyler/apluggy.git?rev=main" },
     { name = "click", specifier = ">=8.0" },
     { name = "corvidae-cognition", extras = ["vec"], marker = "extra == 'cognition'", editable = "packages/corvidae-cognition" },
+    { name = "corvidae-restart", marker = "extra == 'restart'", editable = "packages/corvidae-restart" },
     { name = "cross-channel-send", marker = "extra == 'cross-channel-send'", editable = "packages/cross-channel-send" },
     { name = "ddgs", specifier = ">=9.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.4" },
@@ -564,7 +569,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "tiktoken", specifier = ">=0.7" },
 ]
-provides-extras = ["dev", "acp", "discord", "cross-channel-send", "cognition"]
+provides-extras = ["dev", "acp", "discord", "cross-channel-send", "cognition", "restart"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -593,6 +598,17 @@ requires-dist = [
     { name = "sqlite-vec", marker = "extra == 'vec'", specifier = ">=0.1.9" },
 ]
 provides-extras = ["vec"]
+
+[[package]]
+name = "corvidae-restart"
+version = "0.0.1"
+source = { editable = "packages/corvidae-restart" }
+dependencies = [
+    { name = "corvidae" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "corvidae", editable = "." }]
 
 [[package]]
 name = "cross-channel-send"

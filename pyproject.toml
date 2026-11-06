@@ -39,6 +39,9 @@ cross-channel-send = [
 cognition = [
     "corvidae-cognition[vec]",
 ]
+restart = [
+    "corvidae-restart",
+]
 
 [project.scripts]
 corvidae = "corvidae.main:corvidae"
@@ -122,7 +125,7 @@ reportMissingTypeStubs = "none"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-pythonpath = ["tests", "."]
+pythonpath = ["tests", ".", "packages/corvidae-restart"]
 markers = ["eval: live LLM evaluation tests (deselected by default, run with --run-eval)"]
 filterwarnings = [
     "ignore::DeprecationWarning:_pytest",
@@ -137,3 +140,4 @@ members = ["packages/*"]
 [tool.uv.sources]
 corvidae-cognition = { workspace = true }
 cross-channel-send = { workspace = true }
+corvidae-restart = { workspace = true }
