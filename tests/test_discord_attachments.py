@@ -56,6 +56,9 @@ class _Session:
     async def __aexit__(self, *exc):
         return None
 
+    async def close(self):
+        return None
+
 
 @pytest.fixture()
 def fetches(monkeypatch):
@@ -281,3 +284,52 @@ class TestSharedHelper:
 def test_bytes_are_base64_safe_png():
     """Guard: the fixture above is the PNG signature, not random bytes."""
     assert base64.b64encode(PNG)[:6] == b"iVBORw"
+
+
+class TestOutboundArguments:
+    """The tool is called by a model, so its arguments are untrusted too."""
+
+    async def _ready(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            dmod, "_sdk", lambda: SimpleNamespace(
+                File=lambda p: p, AllowedMentions=SimpleNamespace(none=lambda: "none"),
+            ),
+        )
+        h = await _start_plugin(discord_overrides={"send_attachment_root": str(tmp_path)})
+        channel = h.registry.get_or_create("discord", str(4343))
+        target = FakeMessageable()
+        h.plugin._messageable = AsyncMock(return_value=target)
+        return h, channel, target
+
+    async def test_null_caption_is_allowed(self, tmp_path, monkeypatch):
+        h, channel, target = await self._ready(tmp_path, monkeypatch)
+        try:
+            f = tmp_path / "a.png"
+            f.write_bytes(PNG)
+            out = await h.plugin.send_attachment(channel.id, str(f), None)
+            assert "Sent a.png" in out
+            assert target.sends[0][0] is None
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_non_string_caption_is_refused(self, tmp_path, monkeypatch):
+        h, channel, target = await self._ready(tmp_path, monkeypatch)
+        try:
+            out = await h.plugin.send_attachment(channel.id, str(tmp_path), 42)
+            assert "caption must be a string" in out
+            assert target.sends == []
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_long_caption_splits_and_the_file_rides_first(self, tmp_path, monkeypatch):
+        h, channel, target = await self._ready(tmp_path, monkeypatch)
+        try:
+            f = tmp_path / "a.png"
+            f.write_bytes(PNG)
+            out = await h.plugin.send_attachment(channel.id, str(f), "x" * 2500)
+            assert "Sent a.png" in out
+            assert len(target.sends) == 2
+            assert "file" in target.sends[0][1]
+            assert "file" not in target.sends[1][1]
+        finally:
+            await h.plugin.on_stop()

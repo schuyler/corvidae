@@ -756,28 +756,35 @@ class DiscordPlugin(TransportPlugin):
         left where they are. Only an allowlisted sender's files are fetched.
         """
         notes: list[str] = []
-        for index, att in enumerate(attachments):
-            content_type = str(getattr(att, "content_type", "") or "").lower()
-            if content_type not in _IMAGE_CONTENT_TYPES:
-                notes.append(f"[{_attachment_kind(att)} attached]")
-                continue
-            if not allowed:
-                notes.append(f"[{_attachment_kind(att)} attached]")
-                continue
-            data = await self._download_attachment(att)
-            path = None
-            if data is not None:
-                path = await save_attachment(
-                    data,
-                    self._attachment_dir,
-                    f"{message.id}-{index}",
-                    filename=getattr(att, "filename", None),
-                    max_bytes=self._max_attachment_size,
-                )
-            notes.append(f"[image: {path}]" if path else "[image: download failed]")
+        session = None
+        try:
+            for index, att in enumerate(attachments):
+                content_type = str(getattr(att, "content_type", "") or "").lower()
+                if not allowed or content_type not in _IMAGE_CONTENT_TYPES:
+                    notes.append(f"[{_attachment_kind(att)} attached]")
+                    continue
+                if session is None:
+                    # One session for the message: a burst of images is the
+                    # common case, and a session per file pays TLS each time.
+                    timeout = aiohttp.ClientTimeout(total=ATTACHMENT_DOWNLOAD_TIMEOUT)
+                    session = aiohttp.ClientSession(timeout=timeout)
+                data = await self._download_attachment(session, att)
+                path = None
+                if data is not None:
+                    path = await save_attachment(
+                        data,
+                        self._attachment_dir,
+                        f"{message.id}-{index}",
+                        filename=getattr(att, "filename", None),
+                        max_bytes=self._max_attachment_size,
+                    )
+                notes.append(f"[image: {path}]" if path else "[image: download failed]")
+        finally:
+            if session is not None:
+                await session.close()
         return "\n".join(notes)
 
-    async def _download_attachment(self, att: Any) -> bytes | None:
+    async def _download_attachment(self, session: Any, att: Any) -> bytes | None:
         """Fetch one attachment's bytes, or None. Never raises."""
         url = getattr(att, "url", None)
         if not url:
@@ -792,16 +799,14 @@ class DiscordPlugin(TransportPlugin):
             )
             return None
         try:
-            timeout = aiohttp.ClientTimeout(total=ATTACHMENT_DOWNLOAD_TIMEOUT)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(str(url)) as resp:
-                    if resp.status != 200:
-                        logger.warning(
-                            "discord: attachment download returned %s", resp.status
-                        )
-                        return None
-                    # One byte over the cap is enough to know it is too big.
-                    return await resp.content.read(self._max_attachment_size + 1)
+            async with session.get(str(url)) as resp:
+                if resp.status != 200:
+                    logger.warning(
+                        "discord: attachment download returned %s", resp.status
+                    )
+                    return None
+                # One byte over the cap is enough to know it is too big.
+                return await resp.content.read(self._max_attachment_size + 1)
         except Exception:
             logger.warning("discord: attachment download failed", exc_info=True)
             return None
@@ -1057,6 +1062,10 @@ class DiscordPlugin(TransportPlugin):
             return "Could not send: channel_id must be a non-empty string."
         if not isinstance(path, str) or not path.strip():
             return "Could not send: path must be a non-empty string."
+        if caption is None:
+            caption = ""
+        if not isinstance(caption, str):
+            return "Could not send: caption must be a string."
 
         channel = self._registry.get(channel_id)
         if channel is None or not self.owns(channel):
@@ -1072,9 +1081,12 @@ class DiscordPlugin(TransportPlugin):
                 f"Could not send: {path!r} is outside the allowed root "
                 f"{root}; put the file there or set discord.send_attachment_root."
             )
-        if not target_path.is_file():
-            return f"Could not send: {target_path} is not a readable file."
-        size = target_path.stat().st_size
+        try:
+            if not target_path.is_file():
+                return f"Could not send: {target_path} is not a readable file."
+            size = target_path.stat().st_size
+        except OSError as exc:
+            return f"Could not send: cannot read {target_path} ({exc})."
         if size > self._max_attachment_size:
             return (
                 f"Could not send: {target_path.name} is {size} bytes, over the "
@@ -1085,12 +1097,17 @@ class DiscordPlugin(TransportPlugin):
         messageable = await self._messageable(channel)
         if messageable is None:
             return f"Could not send: no live destination for {channel_id}."
+        # The caption shares the message with the file, so it splits like any
+        # other text: first chunk rides with the file, the rest follow it.
+        chunks = [c for c in split_discord_message(caption, self._message_chunk_size) if c.strip()]
         try:
             await messageable.send(
-                content=caption.strip() or None,
+                content=chunks[0] if chunks else None,
                 file=_sdk().File(str(target_path)),
                 allowed_mentions=_sdk().AllowedMentions.none(),
             )
+            for chunk in chunks[1:]:
+                await messageable.send(chunk, allowed_mentions=_sdk().AllowedMentions.none())
         except Exception as exc:
             logger.warning("discord: send_attachment failed: %s", exc, exc_info=True)
             return f"Could not send: Discord rejected the upload ({exc})."
