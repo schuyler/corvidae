@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from corvidae.attachments import save_attachment
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.channels.split import split_message
 from corvidae.trace import mint_trace_id
@@ -570,45 +571,13 @@ class SignalPlugin(TransportPlugin):
             logger.exception("signal: attachment data is not valid base64")
             return None
 
-        if len(raw) > self._max_attachment_size:
-            logger.warning(
-                "signal: attachment %s is %d bytes, exceeds %d byte cap",
-                att_id, len(raw), self._max_attachment_size,
-            )
-            return None
-
-        # Extension: from the incoming attachment's filename field (not the
-        # RPC response, which carries only base64 data). Sanitised to a
-        # safe suffix to prevent path traversal via a crafted filename.
-        _SAFE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,10}")
-        incoming_name = attachment.get("filename") or ""
-        suffix = ""
-        if "." in incoming_name:
-            candidate = incoming_name[incoming_name.rindex("."):].lower()
-            if _SAFE_SUFFIX.fullmatch(candidate):
-                suffix = candidate
-
-        # Ensure the directory exists (blocking I/O off the event loop).
-        await asyncio.to_thread(self._attachment_dir.mkdir, parents=True, exist_ok=True)
-
-        # Filename: timestamp-type-id to avoid collisions.
-        ts = envelope.get("timestamp", 0)
-        att_type = attachment.get("type", 0)
-        filename = f"{ts}-{att_type}-{att_id}{suffix}"
-        path = self._attachment_dir / filename
-
-        # Belt and braces: assert the resolved path is under the attachment dir.
-        if not path.resolve().is_relative_to(self._attachment_dir.resolve()):
-            logger.warning("signal: resolved path %s escapes attachment dir, refusing", path)
-            return None
-
-        try:
-            await asyncio.to_thread(path.write_bytes, raw)
-        except OSError:
-            logger.exception("signal: cannot write attachment to %s", path)
-            return None
-
-        logger.info("signal: downloaded attachment to %s (%d bytes)", path, len(raw))
+        path = await save_attachment(
+            raw,
+            self._attachment_dir,
+            f"{envelope.get('timestamp', 0)}-{attachment.get('type', 0)}-{att_id}",
+            filename=attachment.get("filename"),
+            max_bytes=self._max_attachment_size,
+        )
         return path
 
     def _pop_pending(self, channel: Channel, trace_id: str) -> int | None:

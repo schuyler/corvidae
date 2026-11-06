@@ -626,26 +626,37 @@ class TestInboundFiltering:
         finally:
             await h.plugin.on_stop()
 
-    async def test_attachment_only_dropped_with_debug_log(self, caplog):
-        """R5: attachment-only messages are dropped; attachments are logged at DEBUG."""
+    async def test_attachment_only_message_is_surfaced(self):
+        """#521: an attachment-only message reaches the agent as a note.
+
+        A type we do not download keeps this test off the network; the
+        download path has its own tests in test_discord_attachments.py.
+        """
         h = await _start_plugin()
         try:
-            with caplog.at_level(logging.DEBUG):
-                await _deliver(h, make_dm("", attachments=[SimpleNamespace(filename="a.png")]))
-            assert _delivered(h) == []
-            assert any(
-                r.levelno == logging.DEBUG and "attach" in r.getMessage().lower()
-                for r in caplog.records
+            await _deliver(
+                h,
+                make_dm(
+                    "",
+                    attachments=[SimpleNamespace(filename="a.pdf", content_type="application/pdf")],
+                ),
             )
+            assert _delivered(h) == ["[document attached]"]
         finally:
             await h.plugin.on_stop()
 
     async def test_text_with_attachments_kept(self):
-        """R5: text sent along with attachments is delivered (attachments discarded)."""
+        """#521: text sent with an attachment is delivered, note first."""
         h = await _start_plugin()
         try:
-            await _deliver(h, make_dm("look", attachments=[SimpleNamespace(filename="a.png")]))
-            assert _delivered(h) == ["look"]
+            await _deliver(
+                h,
+                make_dm(
+                    "look",
+                    attachments=[SimpleNamespace(filename="a.pdf", content_type="application/pdf")],
+                ),
+            )
+            assert _delivered(h) == ["[document attached]\nlook"]
         finally:
             await h.plugin.on_stop()
 
