@@ -366,8 +366,13 @@ its tests pass; until then they are proposals.
    without the tools that change things outside the conversation (shell,
    file writes and the like). The operator MAY change each peripheral's
    tools through the base PRD's per-channel tool sets (base PRD §3.5.2).
-   The framework MUST give a task-bound peripheral the tools its task
-   needs, within operator configuration.
+   The framework MUST NOT give a task-bound peripheral a tool its
+   launcher lacks, and MAY let the core give it fewer than the
+   launcher's tools.
+
+   *Rationale:* This keeps base PRD §3.5.7's ceiling, that a subagent
+   never exceeds its launcher, while letting the core scope a task's
+   tools down to what it needs.
 
 9. **Task-based subagents are peripherals with blank context.** A
    framework MUST start a task-bound peripheral with no conversation
@@ -784,6 +789,8 @@ supplement amends them once accepted:
   lose the heartbeat's critique exemption, amending base §3.7
   Heartbeat and §3.7 Critique 3 (§3.1.2);
 - goals sit in a pinned block with tail updates (base §3.7 Goals; §3.6);
+- the core MAY give a task-bound peripheral fewer tools than it holds,
+  amending base §3.5.7's full inherited set (§3.2.8);
 - base §3.8 and §3.13.4 govern one-shot forks only; long-lived forks
   follow §3.5;
 - pauses do not lapse, channel queues have a fixed capacity for inbound

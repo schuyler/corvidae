@@ -71,7 +71,9 @@ base PRD say "base".
    §3.3.6); base §3.13.7 allows a replacement scheduler to call one.
    Unlisted narrowing.
 
-7. **Task-bound peripheral tools.** Supplement §3.2.8 gives a task-bound
+7. **Task-bound peripheral tools.** *Resolved:* never more than the
+   launcher's tools, and the core may give fewer (supplement §3.2.8,
+   listed in §4). Original finding: supplement §3.2.8 gives a task-bound
    peripheral "the tools its task needs"; base §3.5.7 gives a subagent
    the calling channel's tool set minus itself.
 
