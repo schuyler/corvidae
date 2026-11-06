@@ -743,6 +743,11 @@ for the periphery to compose replies that sound like the core. IQ2
 spikes, instruction-following degrades, hallucinations rise. Q4_K_M is
 the practical floor for a periphery that composes user-facing replies.
 
+The recommendation names stock models. Lex's deployed core is Swift-1.5,
+a Qwen 3.8 fine-tune that mainly changes thinking effort (base PRD §1).
+It may also carry undiscovered differences in tone from the stock
+models; that hazard is accepted until it shows up as a problem.
+
 ### A.2 KV cache tier design
 
 When context memory can be managed (local LLM deployments), a
