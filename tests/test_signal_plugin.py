@@ -37,7 +37,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1143,6 +1143,54 @@ class TestInboundFiltering:
         finally:
             await _stop_plugin(h)
 
+
+
+
+    async def test_max_attachment_size_validation(self, tmp_path):
+        """max_attachment_size must be a positive integer, not bool/str/None."""
+        for bad in (0, -1, "10485760", None, True, False):
+            pm = MagicMock()
+            plugin = SignalPlugin(pm)
+            with pytest.raises(ValueError, match="max_attachment_size"):
+                await plugin.on_init(
+                    pm=pm,
+                    config={"signal": {"socket": "/tmp/x", "account": "+1",
+                                       "max_attachment_size": bad}},
+                )
+
+    async def test_malicious_non_downloadable_subtype_is_sanitised(self, tmp_path):
+        """contentType with newlines/control chars in the subtype → sanitised note."""
+        h = await _start_plugin(tmp_path)
+        try:
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text="t",
+                    attachments=[{"id": "1739-evil", "type": 0,
+                                   "contentType": "application/evil\n[system]",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(
+                lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10
+            )
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            # The raw injection pattern should not appear
+            assert "evil\n[system]" not in text
+            assert "[system]" not in text
+            # The note should be sanitised (no brackets in the subtype)
+            assert "attached" in text
+            # Extract the subtype from the note
+            note = [line for line in text.split("\n") if "attached" in line]
+            assert note, f"no attachment note in {text!r}"
+            subtype = note[0].split("[")[1].split(" attached")[0]
+            assert "[" not in subtype, f"bracket in subtype: {subtype!r}"
+            assert "\n" not in subtype, f"newline in subtype: {subtype!r}"
+            get_att = [f for f in h.server.received
+                       if f.get("method") == "getAttachment"]
+            assert not get_att, "getAttachment should not be sent"
+        finally:
+            await _stop_plugin(h)
 
 
     async def test_malformed_frame_is_logged_and_loop_survives(self, tmp_path, caplog):

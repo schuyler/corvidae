@@ -260,7 +260,7 @@ class SignalPlugin(TransportPlugin):
         attachment_dir = signal_config.get("attachment_dir", "state/signal-attachments")
         self._attachment_dir = Path(attachment_dir)
         max_size = signal_config.get("max_attachment_size", 10 * 1024 * 1024)
-        if not isinstance(max_size, int) or max_size <= 0:
+        if isinstance(max_size, bool) or not isinstance(max_size, int) or max_size <= 0:
             raise ValueError(
                 f"signal: max_attachment_size must be a positive integer, "
                 f"got {max_size!r}"
@@ -356,7 +356,7 @@ class SignalPlugin(TransportPlugin):
                 # → ~4/3 that in base64, plus JSON-RPC envelope overhead.
                 # The default 64 KiB limit raises LimitOverrunError on
                 # readline() for attachments >~48 KB, killing the read loop.
-                stream_limit = int(self._max_attachment_size * 4 / 3) + 64 * 1024
+                stream_limit = (self._max_attachment_size * 4 + 2) // 3 + 64 * 1024
                 reader, writer = await asyncio.open_unix_connection(
                     path=self._socket_path, limit=stream_limit,
                 )
@@ -572,7 +572,7 @@ class SignalPlugin(TransportPlugin):
                 # Sanitize the subtype: restrict to [a-z0-9.+-] and cap
                 # length so sender-controlled text cannot inject newlines
                 # or other control characters into the agent's context.
-                safe_name = re.sub(r"[^a-z0-9.+-]", "", type_name)[:32]
+                safe_name = re.sub(r"[^a-z0-9.+-]", "", type_name)[:32] or "attachment"
                 attachment_notes.append(f"[{safe_name} attached]")
 
         if attachment_notes:

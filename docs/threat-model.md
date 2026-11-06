@@ -1050,10 +1050,11 @@ separate locks.
   `state/signal-attachments/` and surfaced as file paths in the message
   text. The downloadable set is gated on `contentType`: `image/*`,
   `text/*`, `audio/*`, `application/pdf`, `application/json`,
-  `application/xml`. `image/svg+xml` and `text/html` are in the set via
-  their category prefixes; they can carry scripts, but the agent reads
-  them as files (via `view_image` or `read_file`), not renders them in a
-  browser. The allowlist is the primary gate: a sender not in `allow:`
+  `application/xml`; if `contentType` is absent, the legacy protobuf
+  `type` enum is used as a fallback for image/GIF attachments.
+  `image/svg+xml` and `text/html` are in the set via their category
+  prefixes; they can carry scripts, but the agent reads them as untrusted
+  file content, not renders them in a browser. The allowlist is the primary gate: a sender not in `allow:`
   gets metadata only, no disk write. The file extension is derived from
   the MIME type when available, falling back to the filename or id; the
   suffix is validated against a `[.A-Za-z0-9]{1,10}` pattern and the

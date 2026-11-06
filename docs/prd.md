@@ -491,8 +491,10 @@ Per transport:
   processed; allowlisted senders' attachments are downloaded to
   `state/signal-attachments/` when the `contentType` is in the
   allowlist (`image/*`, `text/*`, `audio/*`, `application/pdf`,
-  `application/json`, `application/xml`), and surfaced as file paths in
-  the message text; non-allowlisted senders get metadata only;
+  `application/json`, `application/xml`); if `contentType` is absent,
+  the legacy protobuf `type` enum is used as a fallback for image/GIF
+  attachments; surfaced as file paths in the message text;
+  non-allowlisted senders get metadata only;
   `max_attachment_size` (default 10 MB) caps the download and sizes the
   StreamReader limit; backlog older than five minutes is prefixed with
   its send time. Typing
