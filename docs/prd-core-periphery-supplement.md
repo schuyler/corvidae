@@ -607,6 +607,17 @@ thought, or to respond to an escalation.
    activity. The periodic notification to the core is at INFO level;
    the underlying data is at DEBUG for post-hoc analysis.
 
+### 3.11 Evaluation
+
+1. The harness (base PRD §3.12) can pin the escalation route: an
+   operator-config switch makes a periphery always escalate or never
+   escalate, so probes of forks, joins, pausing, overflow and paging get
+   mechanical pass criteria whatever the periphery's model would judge.
+
+2. Escalation judgment itself is measured out of band, as a benchmark,
+   from the outcome log's miss and false-alarm rates (§3.4.5; base PRD
+   principle 6).
+
 ## 4. What carries over unchanged
 
 The following base PRD requirements are topology-independent and carry
