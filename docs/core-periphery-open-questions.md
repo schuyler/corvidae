@@ -30,7 +30,10 @@ base PRD say "base".
    those principles still bind. On a one-head pool, one chatty
    peripheral could starve consolidation indefinitely.
 
-2. **Who may speak to users.** Principle 21 makes the periphery own the
+2. **Who may speak to users.** *Resolved:* principle 21 now states
+   outcomes only (exact wording arrives unaltered; everything said on a
+   channel reaches its peripheral context), so base principle 14 is
+   untouched. Original finding: principle 21 made the periphery own the
    user-facing seam. Base principle 14 and §3.5.9 let any turn speak on
    any channel, the core's included, and framework-generated error and
    status text (base principle 5) is neither the core's nor a

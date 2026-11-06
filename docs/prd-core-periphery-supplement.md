@@ -178,20 +178,21 @@ its tests pass; until then they are proposals.
     lives between messages) realized directly: the context that
     receives the idle event is the same context that holds the goals.
 
-21. **The mind directs; the voice speaks.** The framework MUST give the
-    core two ways to reply through a peripheral: an *instruction*, which
-    the periphery expands into a reply, and *dictation*, which is sent
-    verbatim. The core's default prompt MUST present instruction as the
-    default and dictation as the override. Apart from dictation and a
-    fork working a channel directly (§3.5.6), text a user receives MUST
-    be composed by a peripheral.
+21. **The mind directs; the voice speaks.** The framework MUST let the
+    core get a message to a user on any channel a transport owns, either
+    by having the periphery compose it or by supplying the exact
+    wording; exact wording MUST reach the user unaltered. Whatever
+    reaches a user on a channel, whoever composed it, MUST appear in
+    that channel's peripheral context (base PRD §3.5.9).
 
-    *Rationale:* The core sends telegraphic instructions; the periphery
-    writes the actual message in the channel's natural register. The
-    core dictates when precision is warranted (security warnings,
-    precision-critical content). The user-facing seam is owned by the
-    periphery. How often the core dictates is model behaviour, and is
-    measured.
+    *Rationale:* The intent is that the core sends telegraphic
+    instructions and the periphery writes the actual message in the
+    channel's natural register, so the user-facing seam belongs to the
+    periphery. The core supplies exact wording when precision is
+    warranted (security warnings, precision-critical content). How
+    often it does is model behaviour, and is measured. How a message
+    with exact wording is sent, and how it reaches the periphery's
+    context, are design decisions.
 
 ## 3. Requirements
 
@@ -252,13 +253,14 @@ its tests pass; until then they are proposals.
 
 8. The framework MUST let the core send a peripheral an instruction,
    which the periphery expands into a natural-language reply in the
-   channel's register.
+   channel's register (principle 21).
 
    *Rationale:* The instruction is compressed: the precision that
    matters is in the instruction, not the prose.
 
-9. The framework MUST let the core dictate a reply, and dictated text
-   MUST be sent verbatim.
+9. The framework MUST let the core supply the exact wording of a
+   message to a user, which MUST reach the user unaltered (principle
+   21).
 
 10. With the appraisal plugin loaded, appraisal (base PRD §3.7 Appraisal)
     MUST run in the core, over patterns across channels and over time,
@@ -340,11 +342,11 @@ its tests pass; until then they are proposals.
 
 6. The framework MUST give each peripheral its channel's register (base
    PRD §3.3.10), and MUST make it available to the core when the core
-   dictates.
+   supplies exact wording.
 
    *Rationale:* The peripheral knows the channel's conventions (Signal
    is plain text, Discord is Markdown, IRC is short). The core doesn't
-   need to know or care unless it's dictating.
+   need to know or care unless it's supplying the exact wording.
 
 7. Which model a peripheral uses, and whether it differs from the
    core's, MUST be operator configuration (§3.8.1).
@@ -649,8 +651,8 @@ With the goals plugin loaded:
 3. Critique, consolidation and compaction MUST each run over each
    context's own window independently, as base PRD §3.7 and §3.8
    describe; nothing about them changes. Whatever a context's window
-   holds MUST be in scope, including instructions and dictated text from
-   the core.
+   holds MUST be in scope, including the core's instructions and the
+   messages it worded itself.
 
    *Rationale:* Because each context consolidates its own window, the
    agent forms separate memories of a peripheral exchange and of the
