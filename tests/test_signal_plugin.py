@@ -722,6 +722,51 @@ class TestInboundFiltering:
         finally:
             await _stop_plugin(h)
 
+
+    async def test_large_attachment_exceeds_default_stream_limit(self, tmp_path):
+        """A getAttachment response larger than the default 64 KiB
+        StreamReader limit must not kill the read loop.
+
+        The default asyncio.StreamReader limit is 64 * 1024 bytes. A
+        100 KB image becomes ~133 KB of base64 on one JSON line, which
+        exceeds the default and raises LimitOverrunError in readline().
+        The fix passes limit= to open_unix_connection sized to
+        max_attachment_size * 4/3 + 64 KiB.
+        """
+        import base64
+        # 100 KB of data → ~133 KB base64, well over the 64 KiB default.
+        big_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * (100 * 1024)
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(big_png).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "1730-big", "type": 1,
+                                   "contentType": "image/png",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[image:" in text
+            assert "download failed" not in text
+            # The file should exist on disk with the right size.
+            path_str = text.split("[image: ")[1].split("]")[0]
+            path = Path(path_str)
+            assert path.exists(), f"attachment file not found: {path}"
+            assert path.read_bytes() == big_png
+            # The connection should still be alive (no reconnect).
+            assert h.server.connection_count == 1, (
+                f"read loop died and reconnected: {h.server.connection_count} connections"
+            )
+        finally:
+            await _stop_plugin(h)
+
     async def test_malformed_frame_is_logged_and_loop_survives(self, tmp_path, caplog):
         h = await _start_plugin(tmp_path)
         try:

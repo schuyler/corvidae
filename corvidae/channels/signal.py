@@ -326,7 +326,10 @@ class SignalPlugin(TransportPlugin):
         delay = _INITIAL_BACKOFF
         while self._connect_task is not None:
             try:
-                reader, writer = await asyncio.open_unix_connection(path=self._socket_path)
+                reader, writer = await asyncio.open_unix_connection(
+                    path=self._socket_path,
+                    limit=int(self._max_attachment_size * 4 / 3) + 64 * 1024,
+                )
             except OSError as exc:
                 logger.warning("signal: connection error, retrying: %s", exc, exc_info=True)
                 if self._connect_task is None:
@@ -593,12 +596,9 @@ class SignalPlugin(TransportPlugin):
             )
             return None
 
-        recipient = envelope.get("sourceNumber") or envelope.get("sourceUuid")
-        if not recipient:
-            logger.warning("signal: no recipient for getAttachment RPC")
-            return None
-
-        params = {"id": str(att_id), "recipient": str(recipient)}
+        # signal-cli looks up the attachment by id alone; recipient is
+        # ignored by GetAttachmentCommand (confirmed in source).
+        params = {"id": str(att_id)}
         try:
             result = await asyncio.wait_for(
                 self._send_rpc("getAttachment", params),
@@ -642,6 +642,11 @@ class SignalPlugin(TransportPlugin):
         if not suffix:
             mime = (attachment.get("contentType") or "").lower()
             suffix = _MIME_TO_EXT.get(mime, "")
+        # Guard against double extension: if the id already ends with the
+        # suffix we're about to add, don't add it again (e.g. id="foo.txt"
+        # + suffix=".txt" → "foo.txt", not "foo.txt.txt").
+        if suffix and str(att_id).lower().endswith(suffix):
+            suffix = ""
 
         # Ensure the directory exists (blocking I/O off the event loop).
         await asyncio.to_thread(self._attachment_dir.mkdir, parents=True, exist_ok=True)
