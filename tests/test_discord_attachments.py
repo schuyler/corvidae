@@ -23,16 +23,35 @@ from tests.test_discord_plugin import (
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
 
 
-class _Resp:
-    """A minimal aiohttp response: status plus a readable body."""
+class _Content:
+    """A StreamReader double: the body arrives in pieces, like a socket.
 
-    def __init__(self, body: bytes = PNG, status: int = 200) -> None:
-        self.status = status
-        self.content = SimpleNamespace(read=self._read)
+    ``iter_chunked(n)`` yields at most ``n`` bytes per chunk, in several
+    chunks, which is what aiohttp does for any body bigger than one read —
+    the bug this models is a client that keeps only the first chunk.
+    """
+
+    def __init__(self, body: bytes, chunks: int = 4) -> None:
         self._body = body
+        self._chunks = max(1, chunks)
 
-    async def _read(self, n: int = -1) -> bytes:
-        return self._body if n < 0 else self._body[:n]
+    async def iter_chunked(self, n: int):
+        size = max(1, len(self._body) // self._chunks)
+        for start in range(0, len(self._body), size):
+            yield self._body[start:start + size]
+
+    async def read(self, n: int = -1) -> bytes:
+        # aiohttp's read(n) returns at most one buffered piece, not n bytes.
+        return self._body if n < 0 else self._body[: max(1, len(self._body) // self._chunks)]
+
+
+class _Resp:
+    """A minimal aiohttp response: status plus a streaming body."""
+
+    def __init__(self, body: bytes = PNG, status: int = 200, chunks: int = 4) -> None:
+        self.status = status
+        self.content = _Content(body, chunks)
+        self._body = body
 
     async def __aenter__(self):
         return self
@@ -331,5 +350,44 @@ class TestOutboundArguments:
             assert len(target.sends) == 2
             assert "file" in target.sends[0][1]
             assert "file" not in target.sends[1][1]
+        finally:
+            await h.plugin.on_stop()
+
+
+class TestTruncation:
+    """A body that arrives in several chunks must be stored whole.
+
+    Regression for the cold review's blocking finding: the first version used
+    ``resp.content.read(cap + 1)``, which returns only what one socket read
+    delivered, so every real screenshot was written truncated and reported as
+    a success.
+    """
+
+    async def test_a_multi_chunk_body_is_written_whole(self, tmp_path, fetches):
+        big = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 900  # ~230 KB
+        fetches.set(_Resp(body=big, chunks=7))
+        h = await _start_plugin(
+            discord_overrides={"attachment_dir": str(tmp_path), "max_attachment_size": len(big) + 1},
+        )
+        try:
+            await h.plugin._handle_message(make_dm("", attachments=[_att(size=len(big))]), BOT_ID)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            path = Path(text.split("[image: ")[1].rstrip("]"))
+            assert path.read_bytes() == big
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_a_body_that_grows_past_the_cap_is_refused(self, tmp_path, fetches):
+        big = b"\x00" * 5000
+        fetches.set(_Resp(body=big, chunks=10))
+        h = await _start_plugin(
+            discord_overrides={"attachment_dir": str(tmp_path), "max_attachment_size": 1000},
+        )
+        try:
+            # Discord's stated size says it is small; the body is not.
+            await h.plugin._handle_message(make_dm("", attachments=[_att(size=10)]), BOT_ID)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert text == "[image: download failed]"
+            assert list(tmp_path.iterdir()) == []
         finally:
             await h.plugin.on_stop()

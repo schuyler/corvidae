@@ -54,6 +54,9 @@ TYPING_REFRESH_SECONDS = 8
 # Discord's hard limit on a single message's length, in characters.
 DISCORD_MESSAGE_LIMIT = 2000
 
+# Read granularity for an attachment body; also the unit the cap is checked in.
+_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+
 # How long one attachment download may take before it is given up on. Images
 # are small; this is a stuck-CDN guard, not a throughput target.
 ATTACHMENT_DOWNLOAD_TIMEOUT = 30.0
@@ -756,11 +759,17 @@ class DiscordPlugin(TransportPlugin):
         left where they are. Only an allowlisted sender's files are fetched.
         """
         notes: list[str] = []
+        for _ in getattr(message, "stickers", None) or ():
+            # Discord puts stickers outside .attachments; name them, never fetch.
+            notes.append("[sticker attached]")
         session = None
         try:
             for index, att in enumerate(attachments):
                 content_type = str(getattr(att, "content_type", "") or "").lower()
-                if not allowed or content_type not in _IMAGE_CONTENT_TYPES:
+                is_image = content_type in _IMAGE_CONTENT_TYPES or (
+                    not content_type and _attachment_kind(att) == "image"
+                )
+                if not allowed or not is_image:
                     notes.append(f"[{_attachment_kind(att)} attached]")
                     continue
                 if session is None:
@@ -768,20 +777,28 @@ class DiscordPlugin(TransportPlugin):
                     # common case, and a session per file pays TLS each time.
                     timeout = aiohttp.ClientTimeout(total=ATTACHMENT_DOWNLOAD_TIMEOUT)
                     session = aiohttp.ClientSession(timeout=timeout)
-                data = await self._download_attachment(session, att)
-                path = None
-                if data is not None:
-                    path = await save_attachment(
-                        data,
-                        self._attachment_dir,
-                        f"{message.id}-{index}",
-                        filename=getattr(att, "filename", None),
-                        max_bytes=self._max_attachment_size,
-                    )
+                try:
+                    data = await self._download_attachment(session, att)
+                    path = None
+                    if data is not None:
+                        path = await save_attachment(
+                            data,
+                            self._attachment_dir,
+                            f"{message.id}-{index}",
+                            filename=getattr(att, "filename", None),
+                            max_bytes=self._max_attachment_size,
+                        )
+                except Exception:
+                    # One odd file must not cost the message its text.
+                    logger.warning("discord: attachment handling failed", exc_info=True)
+                    path = None
                 notes.append(f"[image: {path}]" if path else "[image: download failed]")
         finally:
             if session is not None:
-                await session.close()
+                try:
+                    await session.close()
+                except Exception:
+                    logger.debug("discord: closing the attachment session failed", exc_info=True)
         return "\n".join(notes)
 
     async def _download_attachment(self, session: Any, att: Any) -> bytes | None:
@@ -805,8 +822,18 @@ class DiscordPlugin(TransportPlugin):
                         "discord: attachment download returned %s", resp.status
                     )
                     return None
-                # One byte over the cap is enough to know it is too big.
-                return await resp.content.read(self._max_attachment_size + 1)
+                # read(n) returns whatever one socket read delivered, so the
+                # body has to be accumulated and the cap checked as it grows.
+                buf = bytearray()
+                async for chunk in resp.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES):
+                    buf += chunk
+                    if len(buf) > self._max_attachment_size:
+                        logger.warning(
+                            "discord: attachment body over the %d byte cap",
+                            self._max_attachment_size,
+                        )
+                        return None
+                return bytes(buf) if buf else None
         except Exception:
             logger.warning("discord: attachment download failed", exc_info=True)
             return None
@@ -1036,8 +1063,13 @@ class DiscordPlugin(TransportPlugin):
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
-        """Offer the agent one way to post a file (#521)."""
-        tool_registry.append(self.send_attachment)
+        """Offer the agent one way to post a file (#521).
+
+        Only when the transport is configured: without a token there is no
+        Discord to send to, and the tool would only ever say so.
+        """
+        if self._token is not None:
+            tool_registry.append(self.send_attachment)
 
     async def send_attachment(
         self, channel_id: str, path: str, caption: str = "",

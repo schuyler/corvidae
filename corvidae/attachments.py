@@ -68,5 +68,8 @@ async def save_attachment(
         logger.exception("cannot write attachment to %s", path)
         return None
 
-    logger.info("wrote attachment to %s (%d bytes)", path, len(data))
-    return path
+    resolved = path.resolve()
+    logger.info("wrote attachment to %s (%d bytes)", resolved, len(data))
+    # Absolute: the path goes into a message text the agent may read from any
+    # working directory, so a relative one would be a trap.
+    return resolved
