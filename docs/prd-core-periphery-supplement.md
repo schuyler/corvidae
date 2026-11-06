@@ -13,7 +13,11 @@ those principles operate.
 
 Terminology: in this supplement, **core** means the System Two context
 (§3.1) and never the framework. The framework's centre is the
-**kernel**, as in base PRD principle 1.
+**kernel**, as in base PRD principle 1. Code names in which "core" means
+the kernel (`core_tools`, `CoreToolsPlugin`, `CORE_LLM_STAGES`,
+`CorePluginManager` and the like) are renamed to "kernel" as part of
+implementing this supplement, with no compatibility aliases (base PRD
+§1).
 
 The base PRD describes a system of independent channel contexts. This
 supplement describes a system of one cognitive center and many sensory
