@@ -36,10 +36,11 @@ separate context that got timed ticks.
 
 The core/periphery architecture changes the topology:
 
-- **One core context** (System Two) owns the xhigh thinking allocation.
-  It is the cognitive center: deliberative reasoning, goal management,
+- **One core context** (System Two) is where depth goes. It is the
+  cognitive center: deliberative reasoning, goal management,
   appraisal, and the system's heartbeat.
-- **Peripheral contexts** (System One) are cheap, no-thinking monitors.
+- **Peripheral contexts** (System One) are cheap monitors that favour
+  low latency over depth.
   They are the sensory apparatus: they receive messages, recognize cues,
   respond instinctively to trivial inputs, compose user-facing replies,
   and escalate to the core when a message is outside their
@@ -128,12 +129,11 @@ its tests pass; until then they are proposals.
 
 ### 3.1 The core (System Two)
 
-1. The core is a channel with an input queue, running a single xhigh
-   thinking context. Its transport is the internal notification bus:
+1. The core is a channel with an input queue, running a single context
+   that favours depth over latency. Its transport is the internal notification bus:
    escalations from peripherals, idle events, task completions, and
    scheduler firings. It performs deliberative reasoning, multi-step
-   tasks, goal management, and appraisal. It is the only context with the
-   full reasoning allocation.
+   tasks, goal management, and appraisal.
 
 2. The core is the system's heartbeat. It receives idle notifications
    (base PRD §3.1.16) and acts on them by checking its goal block and
@@ -208,9 +208,11 @@ its tests pass; until then they are proposals.
 
 ### 3.2 The peripherals (System One)
 
-1. Each peripheral is a cheap, no-thinking monitor on its transport
-   channel. It does not perform deliberative reasoning. It recognizes
-   cues and responds instinctively.
+1. Each peripheral monitors its transport channel and favours low
+   latency over depth: it recognizes cues and responds quickly, and
+   relies on escalation to the core for anything that needs depth. How
+   much thinking effort a periphery's model spends is operator
+   configuration (base PRD §3.6), not a requirement.
 
 2. The peripheral handles: receiving and sensing messages;
    acknowledgements; simple factual questions it can answer from its
@@ -221,7 +223,7 @@ its tests pass; until then they are proposals.
 
 3. The peripheral does not handle: complex reasoning; multi-step tasks;
    goal management; novel situations outside its pattern-matching range;
-   anything that requires the xhigh thinking context.
+   anything that needs the core's depth.
 
 4. The peripheral's prompt is a living artifact. It is:
    - **Flexible.** Not hardcoded. It can be rewritten without
@@ -236,15 +238,11 @@ its tests pass; until then they are proposals.
      bound what the core may change, and operator config lifts any lock.
      A rewrite takes effect at the periphery's next compaction boundary
      or conversation start, not mid-window (base PRD §3.3.8).
-   - **Aggressively telegraphic.** The periphery thinks in the most
-     compressed form possible. Research on telegraphic thinking
-     (Sketch-of-Thought, token budgets) indicates that shorter reasoning
-     is more accurate and cheaper.
 
 5. A channel-bound peripheral has access to the same identity files
    (SOUL.md, USER.md, autobiography), the same memory system, and the
    same values as the core. It operates with a subset of the cognitive
-   machinery (no xhigh thinking) but the full identity. Task-bound
+   machinery (it hands depth to the core) but the full identity. Task-bound
    peripherals are the exception (§3.2.9).
 
 6. The peripheral knows the channel's conventions (Signal is plain text,
@@ -280,6 +278,10 @@ its tests pass; until then they are proposals.
    prompt (base PRD §3.5.7) plus whatever the core appends when it
    launches it. Both are the same architectural primitive: a peripheral
    with a context, a tool set, and a model.
+
+10. The periphery communicates with the core concisely: an escalation
+    carries what the core needs and nothing more, as the core's
+    instructions to the periphery do (§3.1.8).
 
 ### 3.3 KV cache allocation
 
@@ -678,7 +680,8 @@ answer:
    signal combination needs to be calibrated. What's the right threshold?
 
 3. **System One prompt design.** The initial prompt needs to be written.
-   The telegraphic thinking research will inform it.
+   The telegraphic thinking research (Sketch-of-Thought, token budgets)
+   will inform it.
 
 4. **Tone continuity test.** Empirical comparison of 4B and 27B outputs
    on the same telegraphic instructions. If the 4B's output is clearly
