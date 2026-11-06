@@ -795,8 +795,8 @@ loop sit at the ceiling and refuse every new message indefinitely, and
 budgets alone bound each chain but not how many run at once. The core is
 exempt from charging because it multiplexes chains: one core turn can
 coalesce escalations from several, and charging all of them would starve
-quiet chains. A chain's total output is at most its budget times the per-turn
-fan-out, which is why §3.12.5 caps fan-out.
+quiet chains. A chain's total output is at most its budget times the
+per-turn fan-out, which is why §3.12.5 caps fan-out.
 
 ## 4. What carries over
 
