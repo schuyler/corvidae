@@ -136,9 +136,9 @@ its tests pass; until then they are proposals.
    "what should I do?" prompt. The idle notification is an event, like a
    new message or a task completion.
 
-3. The core manages KV cache allocation (§3.3). It decides which
-   contexts are resident in VRAM, RAM, or disk, and when contexts are
-   paged in, paged out, or checkpointed.
+3. The core manages KV cache allocation (§3.3). It decides, through
+   tools (§3.3.6), which contexts are resident in VRAM, RAM, or disk,
+   and when contexts are paged in, paged out, or checkpointed.
 
 4. The core owns the goal block (§3.6). The goal block is pinned, rebuilt
    at conversation boundaries, and byte-stable between boundaries. It
@@ -300,6 +300,15 @@ its tests pass; until then they are proposals.
 5. The existing base PRD requirements for pool capacity (leases, warm
    heads, background work bounds, §3.13) apply regardless of whether the
    core manages tiers or minimizes switches.
+
+6. The core decides when to page contexts in and out, through tools.
+   Waiting work alone does not page a context in: a queue that fills
+   while the core is focused elsewhere waits until the core turns to it.
+   Two backstops keep that from becoming a stall. Holding a context out
+   is a deferral, so it lapses at that queue's latency bound (base PRD
+   §3.13.5, §3.13.7). And the core's own residency never depends on a
+   core turn: a notification for a paged-out core pages it in through
+   the lease order, which calls no model.
 
 ### 3.4 Escalation
 
