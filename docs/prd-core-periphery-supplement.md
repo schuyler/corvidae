@@ -254,14 +254,12 @@ its tests pass; until then they are proposals.
    that is, and whether it differs from the core's, is operator
    configuration (§3.8.1).
 
-8. The peripheral has a **diminished tool set** relative to the core.
-   The periphery needs enough tools to compose replies, detect
-   escalation, and perform simple lookups — not the full range of tools
-   available to the core (shell, file editing, web search, wiki
-   writes). The tool set is configured per peripheral type:
-   channel-bound peripherals get messaging and lookup tools; task-bound
-   peripherals (§3.2.9) get the tools their task requires. The core
-   retains the full tool set.
+8. By default a peripheral's tool set is narrower than the core's:
+   enough to compose replies, escalate and look things up, without the
+   tools that change things outside the conversation (shell, file writes
+   and the like). Which tools each peripheral gets is operator
+   configuration, through the base PRD's per-channel tool sets (base PRD
+   §3.5.2); a task-bound peripheral gets the tools its task needs.
 
 9. **Task-based subagents are peripherals with blank context.** A
    subagent is not a separate mechanism; it is a peripheral that starts
@@ -741,6 +739,10 @@ answer:
     ground than peripheral consolidation. Measure before changing that
     default.
 
+15. **Safe mode.** What safe mode covers beyond skipping cache restore
+    (A.4), and when it applies: after a model or template change, a crash
+    loop, or a cache suspected of being stale.
+
 ## Appendix A: Design ideas and research notes
 
 This appendix collects research findings and design ideas that informed
@@ -825,6 +827,15 @@ README (`tools/server/README.md` in ggml-org/llama.cpp) as of
 - **Measurement:** each response's `timings` reports `cache_n` (prompt
   tokens reused from cache) and `prompt_n` (prompt tokens processed),
   which base PRD §3.13.10 already records.
+- **Suspend and resume.** Because slots can be saved to disk, an agent
+  can be suspended, or suspend itself and exit, and later be restored
+  with its contexts warm instead of re-prefilled. This should be the
+  default, except when the agent starts in safe mode, which rebuilds
+  every context from the log and prefills it fresh. The log stays the
+  source of truth either way (base PRD §3.4.8); a restored cache only
+  saves the prefill. A saved cache is valid only for the model, build
+  and prompt it was saved with; the TRD should confirm whether
+  llama-server refuses a mismatched restore.
 
 ### A.5 Goal block size
 
