@@ -29,15 +29,19 @@ import functools
 import logging
 import os
 import re
+from pathlib import Path
 from types import ModuleType
 from typing import Any, Optional
 
+import aiohttp
+
+from corvidae.attachments import save_attachment
 from corvidae.channel import Channel, ChannelRegistry
-from corvidae.channels.split import split_message
-from corvidae.trace import mint_trace_id
-from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.channels._registers import shipped_register
+from corvidae.channels.split import split_message
+from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress
+from corvidae.trace import mint_trace_id
 
 logger = logging.getLogger("corvidae.discord_plugin")
 
@@ -49,6 +53,33 @@ TYPING_REFRESH_SECONDS = 8
 
 # Discord's hard limit on a single message's length, in characters.
 DISCORD_MESSAGE_LIMIT = 2000
+
+# Read granularity for an attachment body; also the unit the cap is checked in.
+_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+
+# How long one attachment download may take before it is given up on. Images
+# are small; this is a stuck-CDN guard, not a throughput target.
+ATTACHMENT_DOWNLOAD_TIMEOUT = 30.0
+
+# The extension we choose for a downloaded image, keyed by the content type
+# Discord asserts. A remote filename is only a fallback: the suffix decides how
+# the file is read later, so it should be ours.
+_IMAGE_SUFFIX = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+
+# Attachment kinds we fetch and store. Everything else is named in the note and
+# left on Discord's CDN (video, audio, stickers): #521.
+_IMAGE_CONTENT_TYPES = frozenset({
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+})
+
+# Default location for downloaded files, and the default cap for one file.
+DEFAULT_ATTACHMENT_DIR = "state/discord-attachments"
+DEFAULT_MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
 
 # Connection retry backoff ladder -- the same one IRC and Signal use.
 _INITIAL_BACKOFF = 10
@@ -262,6 +293,20 @@ def _channel_name(channel: Any) -> str | None:
     return f"#{name}"
 
 
+def _attachment_kind(att: Any) -> str:
+    """A short word for an attachment we do not download: image, video, ..."""
+    content_type = str(getattr(att, "content_type", "") or "").lower()
+    for prefix, kind in (
+        ("image/", "image"), ("video/", "video"), ("audio/", "audio"),
+    ):
+        if content_type.startswith(prefix):
+            return kind
+    name = str(getattr(att, "filename", "") or "").lower()
+    if name.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+        return "image"
+    return "document"
+
+
 class DiscordPlugin(TransportPlugin):
     """Transport plugin for Discord DMs, server channels, and threads."""
 
@@ -279,6 +324,9 @@ class DiscordPlugin(TransportPlugin):
         self._token: Optional[str] = None
         self._allow: set[str] = set()
         self._message_chunk_size: int = DISCORD_MESSAGE_LIMIT
+        self._attachment_dir: Path = Path(DEFAULT_ATTACHMENT_DIR)
+        self._max_attachment_size: int = DEFAULT_MAX_ATTACHMENT_SIZE
+        self._send_attachment_root: Path = Path("state")
         self._require_mention: bool = True
         #: Per-channel overrides of the transport default (#512), keyed by the
         #: Discord channel id as a string. A thread looks up its parent's entry.
@@ -437,7 +485,30 @@ class DiscordPlugin(TransportPlugin):
                 )
             channel_overrides[key] = value
 
+        attachment_dir = block.get("attachment_dir", DEFAULT_ATTACHMENT_DIR)
+        if not isinstance(attachment_dir, str) or not attachment_dir:
+            raise ValueError(
+                "discord: config field 'attachment_dir' must be a non-empty path"
+            )
+
+        max_size = block.get("max_attachment_size", DEFAULT_MAX_ATTACHMENT_SIZE)
+        if isinstance(max_size, bool) or not isinstance(max_size, int) or max_size < 1:
+            raise ValueError(
+                "discord: config field 'max_attachment_size' must be a positive "
+                f"integer number of bytes, got {max_size!r}"
+            )
+
+        send_root = block.get("send_attachment_root", None)
+        if send_root is not None and (not isinstance(send_root, str) or not send_root):
+            raise ValueError(
+                "discord: config field 'send_attachment_root' must be a non-empty "
+                "path, or absent to use state/"
+            )
+
         self._token = str(token)
+        self._attachment_dir = Path(attachment_dir)
+        self._max_attachment_size = max_size
+        self._send_attachment_root = Path(send_root) if send_root else Path("state")
         # Ids are compared as strings against str(author.id); YAML parses
         # them as ints.
         self._allow = {str(entry) for entry in allow}
@@ -578,12 +649,9 @@ class DiscordPlugin(TransportPlugin):
             logger.debug("discord: ignoring message from bot account %s", author.id)
             return
 
-        # Attachments are not supported; note and discard them.
-        if message.attachments:
-            logger.debug("discord: dropping %d attachment(s)", len(message.attachments))
-
         is_dm = message.guild is None
         text = message.content or ""
+        attachments = list(message.attachments or ())
 
         if not is_dm:
             # With require_mention (the default) the bot only reacts when it
@@ -594,7 +662,7 @@ class DiscordPlugin(TransportPlugin):
                 if not any(u.id == bot_user_id for u in message.mentions):
                     logger.debug("discord: ignoring guild message that does not mention the bot")
                     return
-                if not text:
+                if not text and not attachments:
                     # Discord should deliver content for mentions even without
                     # the privileged intent; flag it if that ever changes.
                     logger.warning(
@@ -605,12 +673,6 @@ class DiscordPlugin(TransportPlugin):
             # Remove the bot's own mention token (both forms); a no-op when
             # the message does not mention the bot.
             text = re.sub(rf"<@!?{bot_user_id}>", "", text)
-
-        # Nothing left to say (empty, whitespace, attachment-only, or a bare mention).
-        text = text.strip()
-        if not text:
-            logger.debug("discord: ignoring message with no text content")
-            return
 
         # Scope: DMs key on the user (stable across DM channel ids), servers
         # and threads on their own channel id.
@@ -643,6 +705,18 @@ class DiscordPlugin(TransportPlugin):
         # rename is picked up on the message that carries it.
         if sender_name:
             remember_sender_name(channel.sender_names, sender, sender_name)
+
+        # Attachments last, once the gate above has decided who this is: a
+        # refused sender's file is named, never fetched (#103, #520).
+        if attachments:
+            note = await self._attachment_note(message, attachments, allowed)
+            text = f"{note}\n{text}".strip() if text.strip() else note
+
+        # Nothing left to say (empty, whitespace, or a bare mention).
+        text = text.strip()
+        if not text:
+            logger.debug("discord: ignoring message with no text content")
+            return
 
         # Typing only ever applies to an allowlisted sender -- others get no
         # sign the bot is live. on_message still fires so the real
@@ -684,6 +758,97 @@ class DiscordPlugin(TransportPlugin):
             if listed is not None:
                 return listed
         return self._require_mention
+
+    async def _attachment_note(
+        self, message: Any, attachments: list, allowed: bool,
+    ) -> str:
+        """The note that stands in for attachments, one line per file.
+
+        Downloaded images become ``[image: <path>]``; anything refused or
+        failed becomes ``[image: download failed]``; other kinds are named and
+        left where they are. Only an allowlisted sender's files are fetched.
+        """
+        notes: list[str] = []
+        for _ in getattr(message, "stickers", None) or ():
+            # Discord puts stickers outside .attachments; name them, never fetch.
+            notes.append("[sticker attached]")
+        session = None
+        try:
+            for index, att in enumerate(attachments):
+                content_type = str(getattr(att, "content_type", "") or "").lower()
+                is_image = content_type in _IMAGE_CONTENT_TYPES or (
+                    not content_type and _attachment_kind(att) == "image"
+                )
+                if not allowed or not is_image:
+                    notes.append(f"[{_attachment_kind(att)} attached]")
+                    continue
+                if session is None:
+                    # One session for the message: a burst of images is the
+                    # common case, and a session per file pays TLS each time.
+                    timeout = aiohttp.ClientTimeout(total=ATTACHMENT_DOWNLOAD_TIMEOUT)
+                    session = aiohttp.ClientSession(timeout=timeout)
+                try:
+                    data = await self._download_attachment(session, att)
+                    path = None
+                    if data is not None:
+                        path = await save_attachment(
+                            data,
+                            self._attachment_dir,
+                            f"{message.id}-{index}",
+                            filename=getattr(att, "filename", None),
+                            suffix=_IMAGE_SUFFIX.get(content_type, ""),
+                            max_bytes=self._max_attachment_size,
+                            transport="discord",
+                        )
+                except Exception:
+                    # One odd file must not cost the message its text.
+                    logger.warning("discord: attachment handling failed", exc_info=True)
+                    path = None
+                notes.append(f"[image: {path}]" if path else "[image: download failed]")
+        finally:
+            if session is not None:
+                try:
+                    await session.close()
+                except Exception:
+                    logger.debug("discord: closing the attachment session failed", exc_info=True)
+        return "\n".join(notes)
+
+    async def _download_attachment(self, session: Any, att: Any) -> bytes | None:
+        """Fetch one attachment's bytes, or None. Never raises."""
+        url = getattr(att, "url", None)
+        if not url:
+            logger.warning("discord: attachment has no url, refusing download")
+            return None
+        # Discord states the size up front; a stated oversize needs no fetch.
+        size = getattr(att, "size", None)
+        if isinstance(size, int) and size > self._max_attachment_size:
+            logger.warning(
+                "discord: attachment is %d bytes, over the %d byte cap",
+                size, self._max_attachment_size,
+            )
+            return None
+        try:
+            async with session.get(str(url)) as resp:
+                if resp.status != 200:
+                    logger.warning(
+                        "discord: attachment download returned %s", resp.status
+                    )
+                    return None
+                # read(n) returns whatever one socket read delivered, so the
+                # body has to be accumulated and the cap checked as it grows.
+                buf = bytearray()
+                async for chunk in resp.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES):
+                    buf += chunk
+                    if len(buf) > self._max_attachment_size:
+                        logger.warning(
+                            "discord: attachment body over the %d byte cap",
+                            self._max_attachment_size,
+                        )
+                        return None
+                return bytes(buf) if buf else None
+        except Exception:
+            logger.warning("discord: attachment download failed", exc_info=True)
+            return None
 
     def _transient_channel(self, scope: str) -> Channel:
         """The channel a refused sender's message is gated on.
@@ -907,3 +1072,92 @@ class DiscordPlugin(TransportPlugin):
         """Deliver intermediate assistant text without closing out the
         outstanding slots (the final reply still owes them)."""
         await self._deliver(channel, event.text)
+
+    @hookimpl
+    def register_tools(self, tool_registry: list) -> None:
+        """Offer the agent one way to post a file (#521).
+
+        Only when the transport is configured: without a token there is no
+        Discord to send to, and the tool would only ever say so.
+        """
+        if self._token is not None:
+            tool_registry.append(self.send_attachment)
+
+    async def send_attachment(
+        self, channel_id: str, path: str, caption: str = "",
+    ) -> str:
+        """Send a file from the workspace to a Discord channel.
+
+        Args:
+            channel_id: The target channel in "discord:<scope>" form, as
+                list_channels reports it.
+            path: The file to send, relative to the working directory or
+                inside send_attachment_root. Paths outside that root are
+                refused.
+            caption: Optional text to send alongside the file.
+
+        Returns:
+            A confirmation naming the file and channel, or an error saying
+            what was wrong and how to fix it.
+        """
+        if self._registry is None:
+            return "Could not send: the channel registry is not available."
+        if not isinstance(channel_id, str) or not channel_id:
+            return "Could not send: channel_id must be a non-empty string."
+        if not isinstance(path, str) or not path.strip():
+            return "Could not send: path must be a non-empty string."
+        if caption is None:
+            caption = ""
+        if not isinstance(caption, str):
+            return "Could not send: caption must be a string."
+
+        channel = self._registry.get(channel_id)
+        if channel is None or not self.owns(channel):
+            return (
+                f"Could not send: {channel_id!r} is not a Discord channel; "
+                "the target must start with 'discord:'."
+            )
+
+        root = self._send_attachment_root.resolve()
+        raw = Path(path)
+        # A relative path is relative to the root, which is what the docstring
+        # promises and what a reader of an error message expects.
+        target_path = (raw if raw.is_absolute() else root / raw).resolve()
+        if not target_path.is_relative_to(root):
+            return (
+                f"Could not send: {path!r} is outside the allowed root "
+                f"{root}; put the file there or set discord.send_attachment_root."
+            )
+        try:
+            if not target_path.is_file():
+                return f"Could not send: {target_path} is not a readable file."
+            size = target_path.stat().st_size
+        except OSError as exc:
+            return f"Could not send: cannot read {target_path} ({exc})."
+        if size > self._max_attachment_size:
+            return (
+                f"Could not send: {target_path.name} is {size} bytes, over the "
+                f"{self._max_attachment_size} byte limit "
+                "(discord.max_attachment_size)."
+            )
+
+        messageable = await self._messageable(channel)
+        if messageable is None:
+            return f"Could not send: no live destination for {channel_id}."
+        # The caption shares the message with the file, so it splits like any
+        # other text: first chunk rides with the file, the rest follow it.
+        chunks = [c for c in split_discord_message(caption, self._message_chunk_size) if c.strip()]
+        try:
+            # discord.File opens the file synchronously; at the 10 MB cap that
+            # is a few milliseconds, so it stays on the loop.
+            await messageable.send(
+                content=chunks[0] if chunks else None,
+                file=_sdk().File(str(target_path)),
+                allowed_mentions=_sdk().AllowedMentions.none(),
+            )
+            for chunk in chunks[1:]:
+                await messageable.send(chunk, allowed_mentions=_sdk().AllowedMentions.none())
+        except Exception as exc:
+            logger.warning("discord: send_attachment failed: %s", exc, exc_info=True)
+            return f"Could not send: Discord rejected the upload ({exc})."
+        return f"Sent {target_path.name} to {channel_id}."

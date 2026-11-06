@@ -190,6 +190,9 @@ agent:
 #   channels:                          # per-channel override; the key is the
 #     "1568093636044787772":           # channel id alone (digits, quoted or not),
 #       require_mention: false         # and a thread uses its parent's entry
+#   attachment_dir: state/discord-attachments   # where inbound images are saved
+#   max_attachment_size: 10485760      # bytes, per file, in either direction
+#   send_attachment_root: state        # send_attachment may only read under here
 
 # Web transport: a browser chat UI (optional — omit to disable). Log in at
 # http://127.0.0.1:8765/?token=<token>. The token is shell access to this

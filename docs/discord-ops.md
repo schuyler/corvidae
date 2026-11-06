@@ -144,8 +144,11 @@ bot, and it will not tell them so.
 - **Long replies:** split at 2000 bytes by default, keeping code blocks
   intact, and sent as several messages.
 - **Mentions in replies** never ping anyone, whatever the model writes.
-- **Attachments** are discarded; text sent with them is still read.
-  Outbound is text only.
+- **Attachments** in are downloaded for allowed users — images only, up to
+  `discord.max_attachment_size` — and named in the text as `[image: /abs/path]`.
+  Other kinds are named and left on Discord's CDN. Outbound, the
+  `send_attachment` tool posts one file from `discord.send_attachment_root`
+  with an optional caption.
 - **Reasoning and tool-status** messages are not sent to Discord.
 
 ## Answering without a mention (experimental)

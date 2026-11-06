@@ -26,3 +26,6 @@ eval_results.json
 
 # harness host config — names a machine, never committed
 config.local.sh
+
+# Attachment files written by tests and at runtime (transports use state/)
+state/

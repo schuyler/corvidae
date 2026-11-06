@@ -2960,8 +2960,9 @@ channel and the unresolved aliases. An E.164 `channels:` key missing from
 account, outside a group. Dropping non-`dataMessage` envelopes is what
 keeps a `syncMessage` — the account's own traffic echoed from another
 device signed into it — from being read as input and driving the agent in
-a loop. Attachments are logged and discarded; any text accompanying them is
-still processed. Reactions, quotes, edits, and remote deletes all fall out
+a loop. Attachments are downloaded under a size cap once the sender passes the
+allowlist, written under `signal.attachment_dir` and named in the message text
+(`[image: /abs/path]`); a refused sender's file is named, never fetched. Reactions, quotes, edits, and remote deletes all fall out
 of the empty-text rule, since none of them carry a `message` field. An
 envelope whose send timestamp is more than five minutes old gets a
 `[sent YYYY-MM-DD HH:MM UTC]` prefix prepended, so backlog delivered after
@@ -3124,10 +3125,23 @@ other into a loop). In DMs every message from a human is processed. In
 guild channels and threads the bot must itself appear in
 `message.mentions`. `@everyone`, `@here`, and role pings do not count, even
 though discord.py's `mentioned_in` would accept some of them. The bot's
-mention token (`<@id>` or `<@!id>`) is stripped, the text is trimmed, and
-a message with nothing left (a bare mention, whitespace, attachment only)
-is dropped. Attachments are logged at DEBUG and discarded; any text with
-them is still processed.
+mention token (`<@id>` or `<@!id>`) is stripped and the text is trimmed.
+
+**Attachments.** Images attached to a message from an allowlisted sender are
+downloaded after the allowlist check (never before it), streamed under
+`discord.max_attachment_size`, and written to `discord.attachment_dir` with an
+extension taken from the content type rather than the remote filename. The
+message text carries `[image: /abs/path]` for each, `[image: download failed]`
+for one that was over the cap or failed, and `[video attached]` /
+`[document attached]` / `[sticker attached]` for kinds this transport does not
+fetch. A message whose only content is an attachment is no longer dropped; a
+refused sender's file is named and never fetched.
+
+**Outbound files.** The `send_attachment` tool posts a file from
+`discord.send_attachment_root` (default `state/`) to a channel the model names,
+with the caption split like any other reply. The path is resolved and refused
+if it lands outside that root, and the file is refused above
+`discord.max_attachment_size`.
 
 **Ordering.** discord.py runs every gateway event as its own task, so
 handling a message inside `on_message` would let two quick messages
@@ -3244,8 +3258,9 @@ not provided by the transport: PRD §3.5.9 (operator allowlist that starts
 empty, plus a budget); see the scheduler's "Not in phase one: a
 `send_to_channel` tool" note and `docs/threat-model.md`.
 
-Out of scope: voice, slash commands, embeds, attachments in either
-direction, and reactions.
+Out of scope: voice, slash commands, embeds, and reactions. Attachments are in
+scope in both directions — see **Attachments** above for the inbound rules and
+`send_attachment` for the outbound one.
 
 ### Web (`channels/web.py`)
 

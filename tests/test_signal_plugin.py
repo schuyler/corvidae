@@ -714,8 +714,9 @@ class TestInboundFiltering:
             assert "[image:" in text
             path_str = text.split("[image: ")[1].split("]")[0]
             path = Path(path_str)
-            # The file must be under the attachment dir, not in /etc.
-            assert str(path).startswith(str(h.plugin._attachment_dir)), (
+            # The file must be under the attachment dir, not in /etc. The
+            # note carries a resolved path, so compare resolved forms.
+            assert path.resolve().is_relative_to(h.plugin._attachment_dir.resolve()), (
                 f"path escaped attachment dir: {path}"
             )
             assert path.exists()
