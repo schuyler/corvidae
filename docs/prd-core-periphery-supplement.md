@@ -60,7 +60,10 @@ The unified core context is a plugin by design (base PRD principle 1), so
 that other context-coordination strategies can be built on the same
 kernel. The kernel supplies the mechanisms a strategy needs; which
 strategy runs is the operator's choice. The base PRD's topology, every
-channel a full agent context, is one such strategy.
+channel a full agent context, is one such strategy. The editor session
+(base PRD §1) runs as its own process, one per editor connection, under
+whichever strategy its configuration selects; it is not a peripheral of
+the daemon's core.
 
 ## 2. New principles
 
@@ -698,6 +701,10 @@ answer:
     notification came from a specific plugin, not from a compromised
     context? Complementary to the source-channel trust boundary.
     Deferred to post-architecture-redesign.
+
+13. **Editor sessions and the core.** Should an editor session reach the
+    daemon's core as a peripheral? That needs communication between
+    processes, which the base PRD does not provide.
 
 ## Appendix A: Design ideas and research notes
 
