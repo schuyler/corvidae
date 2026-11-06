@@ -80,17 +80,19 @@ its tests pass; until then they are proposals.
     cognitive mode, not capability or identity. Task-bound peripherals
     (§3.2.9) carry no persona.
 
-18. **The KV cache is a shared resource.** When the core has the levers
-    to allocate context memory (local LLM deployments), it manages a
-    hierarchy of memory tiers for all contexts — its own and the
-    peripherals' — so that active contexts are fast and idle contexts
-    are cheap. Both the core and the peripherals can be paged out. When
+18. **The KV cache is a shared resource.** When there are levers to
+    allocate context memory (local LLM deployments), a hierarchy of
+    memory tiers serves all contexts — the core's and the peripherals' —
+    so that active contexts are fast and idle contexts are cheap. The
+    core directs which contexts get attention; a slot-management plugin
+    places them in the tiers (§3.3.6). Both the core and the peripherals can be paged out. When
     the model endpoint is a frontier API that manages its own cache, the
     hierarchy degenerates to the API's own scheduling; the core's role
     is to minimize context switches, not to manage tiers. This is base
     PRD principle 16 (compute is finite, a context switch is what it
     costs) applied to a multi-context topology: the operator declares the
-    pool's capacity, and the core manages which contexts are active.
+    pool's capacity, the core directs which contexts are active, and
+    the slot-management plugin keeps them within it.
 
 19. **The periphery is a boundary detector, not a decision maker.** The
     peripheral's whole job is to recognize what it can handle and what it
@@ -136,9 +138,10 @@ its tests pass; until then they are proposals.
    "what should I do?" prompt. The idle notification is an event, like a
    new message or a task completion.
 
-3. The core manages KV cache allocation (§3.3). It decides, through
-   tools (§3.3.6), which contexts are resident in VRAM, RAM, or disk,
-   and when contexts are paged in, paged out, or checkpointed.
+3. The core directs KV cache allocation (§3.3). It controls queue
+   multiplexing through tools, and a slot-management plugin decides from
+   that which contexts are resident in VRAM, RAM, or disk, and when they
+   are paged in, paged out, or checkpointed (§3.3.6).
 
 4. The core owns the goal block (§3.6). The goal block is pinned, rebuilt
    at conversation boundaries, and byte-stable between boundaries. It
@@ -276,21 +279,22 @@ its tests pass; until then they are proposals.
 
 ### 3.3 KV cache allocation
 
-1. When the core has the levers to allocate context memory (local LLM
-   deployments), it manages which contexts are resident in fast memory
-   and which are paged out. Active contexts are fast; idle contexts are
-   cheap. The core can page a context in when it needs attention and page
-   it out when it doesn't. The specific tier structure and swap policy
+1. When there are levers to allocate context memory (local LLM
+   deployments), contexts are resident in fast memory or paged out
+   according to where the core's attention is. Active contexts are fast;
+   idle contexts are cheap. The core directs attention and the
+   slot-management plugin places contexts to match (§3.3.6). The specific tier structure and swap policy
    are design decisions (Appendix A).
 
 2. Both the core and the peripherals can be paged out. Long-running core
    thinking can be checkpointed, preserved, and rolled back.
 
 3. The operator declares the pool's capacity (base PRD principle 16,
-   §3.13). The core manages which contexts are resident within that
-   capacity. The requirement is that the core has the authority and the
-   information to make allocation decisions; the specific policy is a
-   design decision (Appendix A, open question 1).
+   §3.13). The slot-management plugin keeps contexts resident within
+   that capacity, following the core's direction. The requirement is
+   that the core has the authority and the information to direct
+   attention, and the plugin the information to place contexts; the
+   specific policy is a design decision (Appendix A, open question 1).
 
 4. When the model endpoint is a frontier API that manages its own cache,
    the core's role is to minimize context switches (base PRD principle
@@ -298,18 +302,25 @@ its tests pass; until then they are proposals.
    optimizes for prefix reuse, not tier management.
 
 5. The existing base PRD requirements for pool capacity (leases, warm
-   heads, background work bounds, §3.13) apply regardless of whether the
-   core manages tiers or minimizes switches.
+   heads, background work bounds, §3.13) apply regardless of whether
+   tiers are managed or the core only minimizes switches.
 
-6. The core decides when to page contexts in and out, through tools.
-   Waiting work alone does not page a context in: a queue that fills
-   while the core is focused elsewhere waits until the core turns to it.
-   Two backstops keep that from becoming a stall. Holding a context out
-   is a deferral, so it lapses at that queue's latency bound (base PRD
-   §3.13.5, §3.13.7). And the core itself is the exception to waiting:
-   work on the core's own queue pages it in through the lease order,
-   which calls no model, so the core needs no turn to decide to come
-   back; the turn that follows handles the work.
+6. The core controls queue multiplexing; a slot-management plugin
+   carries out the resulting placement. The core decides, through tools,
+   which queues it attends to and in what order: it can hold a queue,
+   bring one forward, pin a context warm, or ask for a checkpoint.
+   Waiting work alone does not shift its focus. The slot-management
+   plugin turns those decisions into memory placement: which contexts
+   stay in VRAM, which move to RAM or disk, and when to restore one
+   ahead of need. It calls no model, so its decisions are cheap enough
+   for every call boundary (base PRD §3.13.8), and it is where
+   backend-specific operations live (Appendix A.4); on a backend without
+   tier levers it has nothing to place (§3.3.4). Two backstops keep this
+   from becoming a stall. Holding a queue is a deferral, so it lapses at
+   that queue's latency bound (base PRD §3.13.5, §3.13.7). And the core
+   itself is the exception to waiting: work on the core's own queue has
+   the slot-management plugin bring the core back, so the core needs no
+   turn to decide to return; the turn that follows handles the work.
 
 ### 3.4 Escalation
 
@@ -509,6 +520,13 @@ thought, or to respond to an escalation.
    provider-neutral profiles and pools (§3.6, §3.13); a provider without
    the tier levers gets the degenerate case (§3.3.4).
 
+6. Core/periphery stays correct on a pool of one warm head, in the
+   same-model case (§3.8.4): every switch costs a prefill, but nothing
+   fails. Its performance expectations assume a pool large enough to
+   keep the core and the active peripherals warm. Base PRD §1's
+   single-slot clause applies in that sense: correctness on one slot,
+   not speed.
+
 ### 3.9 Core-initiated exchanges
 
 1. The core can initiate a user exchange by directing a peripheral to
@@ -546,10 +564,10 @@ thought, or to respond to an escalation.
 
 3. KV cache allocation events (page-in, page-out, checkpoint) are
    logged at INFO level with the context ID, the tier transition, and
-   the trigger. When the core manages tiers (local LLM deployments),
-   these events are the core's allocation decisions. When the core
-   minimizes switches (frontier APIs), these events are context-switch
-   boundaries.
+   the trigger. On local LLM deployments these events are the
+   slot-management plugin's placement decisions, each naming the core's
+   direction it followed, if any. On frontier APIs they are
+   context-switch boundaries.
 
 4. The fork pattern's lifecycle (evaluate, checkpoint, fork, work,
    complete, rollback) is logged at INFO level. A fork that is discarded
@@ -683,14 +701,14 @@ the practical floor for a periphery that composes user-facing replies.
 
 ### A.2 KV cache tier design
 
-When the core manages context memory (local LLM deployments), a
+When context memory can be managed (local LLM deployments), a
 three-tier hierarchy is the working model:
 - **VRAM (hot):** Active contexts. Fast access, limited capacity.
 - **RAM (warm):** Recently active contexts. Slower access, larger
   capacity.
 - **Disk (cold):** Inactive contexts. Slowest access, largest capacity.
 
-The core manages four operations: page-in (RAM/disk → VRAM), page-out
+The slot-management plugin carries out four operations: page-in (RAM/disk → VRAM), page-out
 (VRAM → RAM/disk), checkpoint (core context → RAM/disk for
 rollback/resumption), and reheat (disk → VRAM on new notification).
 
