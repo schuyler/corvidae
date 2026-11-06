@@ -47,9 +47,10 @@ The core/periphery architecture changes the topology:
   respond instinctively to trivial inputs, compose user-facing replies,
   and escalate to the core when a message is outside their
   pattern-matching range.
-- **The KV cache is a shared resource** owned by the core, which
-  manages context allocation across memory tiers when it has the levers
-  to do so (local LLM deployments).
+- **The KV cache is a shared resource.** The core directs which
+  contexts get attention, and a slot-management plugin places them
+  across memory tiers when the backend has the levers (local LLM
+  deployments) (§3.3.6).
 - **The heartbeat is retired.** The core receives idle notifications and
   acts on them (§3.1.2).
 
@@ -91,10 +92,11 @@ its tests pass; until then they are proposals.
     memory tiers serves all contexts — the core's and the peripherals' —
     so that active contexts are fast and idle contexts are cheap. The
     core directs which contexts get attention; a slot-management plugin
-    places them in the tiers (§3.3.6). Both the core and the peripherals can be paged out. When
-    the model endpoint is a frontier API that manages its own cache, the
-    hierarchy degenerates to the API's own scheduling; the core's role
-    is to minimize context switches, not to manage tiers. This is base
+    places them in the tiers (§3.3.6). Both the core and the peripherals
+    can be paged out. When the model endpoint is a frontier API that
+    manages its own cache, the hierarchy degenerates to the API's own
+    scheduling; the core's role is to minimize context switches, not to
+    manage tiers. This is base
     PRD principle 16 (compute is finite, a context switch is what it
     costs) applied to a multi-context topology: the operator declares the
     pool's capacity, the core directs which contexts are active, and
@@ -284,8 +286,9 @@ its tests pass; until then they are proposals.
    deployments), contexts are resident in fast memory or paged out
    according to where the core's attention is. Active contexts are fast;
    idle contexts are cheap. The core directs attention and the
-   slot-management plugin places contexts to match (§3.3.6). The specific tier structure and swap policy
-   are design decisions (Appendix A).
+   slot-management plugin places contexts to match (§3.3.6). The
+   specific tier structure and swap policy are design decisions
+   (Appendix A).
 
 2. Both the core and the peripherals can be paged out. Long-running core
    thinking can be checkpointed, preserved, and rolled back.
@@ -423,8 +426,8 @@ thought, or to respond to an escalation.
    main context pauses and the fork receives the core's notifications;
    in detach mode the main context keeps receiving them (item 7).
 
-2. **The fork pages in what it needs.** The fork can page in peripheral
-   contexts from RAM/disk, retrieve memories, and access tools. It
+2. **The fork reaches what it needs.** It can direct attention to
+   peripheral contexts (§3.3.6), retrieve memories, and use tools. It
    operates with the same identity and values as the core but with a
    scoped working context.
 
@@ -450,8 +453,9 @@ thought, or to respond to an escalation.
 
 6. **The core can operate a channel directly** when the situation calls
    for it (a complex multi-turn exchange that the periphery can't
-   handle). In that case, the core pages the peripheral's context in,
-   works the channel itself in a fork, and joins the results back. The
+   handle). In that case, the core works the channel itself in a fork,
+   with the peripheral's context brought in (§3.3.6), and joins the
+   results back. The
    periphery steps back while the fork is active.
 
 7. Base PRD §3.8 governs one-shot forks only. The core runs a
@@ -547,9 +551,9 @@ thought, or to respond to an escalation.
 ### 3.9 Core-initiated exchanges
 
 1. The core can initiate a user exchange by directing a peripheral to
-   contact the user, without a user turn mediating. The core pages the
-   peripheral, sends it an instruction, and the periphery composes and
-   sends the message.
+   contact the user, without a user turn mediating. The core sends the
+   peripheral an instruction, unpausing its channel first if it is
+   paused (§3.3.7), and the periphery composes and sends the message.
 
 2. This is how the core's agency reaches the user: when an idle
    notification arrives, it checks its goals, and if something needs
