@@ -528,12 +528,10 @@ thought, or to respond to an escalation.
    persona. The specific wording is a prompt-engineering decision, not
    an architectural requirement.
 
-4. Judgment of a reply (base PRD §3.8.2) runs in the window of the
-   context that wrote it. A reply the periphery composed from the core's
-   instruction is judged in the periphery's window, where the
-   instruction arrived, so critique can check both the reply and its
-   fidelity to the instruction. The instruction itself, and any reply
-   the core dictated, are judged in the core's window.
+4. Critique, consolidation and compaction run over each context's own
+   window independently, as base PRD §3.7 and §3.8 describe; nothing
+   about them changes. Whatever a context's window holds is in scope,
+   including instructions and dictated text from the core.
 
 ### 3.8 Model requirements
 
