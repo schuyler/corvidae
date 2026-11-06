@@ -8,10 +8,12 @@ signal-cli itself.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
@@ -22,6 +24,29 @@ from corvidae.channels._registers import shipped_register
 from corvidae.outbound import OutboundMessage, OutboundProgress
 
 logger = logging.getLogger("corvidae.signal_plugin")
+
+
+# Signal attachment types (protobuf enum AttachmentType).
+ATT_IMAGE = 1
+ATT_AUDIO = 2
+ATT_CONTACT = 3
+ATT_VIDEO = 4
+ATT_DOCUMENT = 5
+ATT_GIF = 6
+ATT_STICKER = 7
+
+# Types we download to disk (the rest are surfaced as metadata only).
+_DOWNLOADABLE_TYPES = {ATT_IMAGE, ATT_GIF}
+
+ATTACHMENT_TYPE_NAMES = {
+    ATT_IMAGE: "image",
+    ATT_AUDIO: "audio",
+    ATT_CONTACT: "contact",
+    ATT_VIDEO: "video",
+    ATT_DOCUMENT: "document",
+    ATT_GIF: "gif",
+    ATT_STICKER: "sticker",
+}
 
 # How often the per-channel typing-indicator refresh loop re-sends "typing"
 # while a turn is outstanding. Signal clients expire an indicator after
@@ -81,6 +106,7 @@ class SignalPlugin(TransportPlugin):
         self._account: Optional[str] = None
         self._allow: set[str] = set()
         self._message_chunk_size: int = 2000
+        self._attachment_dir: Path = Path("state/signal-attachments")
 
         # Connection state.
         self._connect_task: Optional[asyncio.Task] = None
@@ -161,6 +187,8 @@ class SignalPlugin(TransportPlugin):
         self._account = account
         self._allow = set(allow)
         self._message_chunk_size = signal_config.get("message_chunk_size", 2000)
+        attachment_dir = signal_config.get("attachment_dir", "state/signal-attachments")
+        self._attachment_dir = Path(attachment_dir)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -407,13 +435,32 @@ class SignalPlugin(TransportPlugin):
             logger.debug("signal: ignoring group message")
             return
 
-        # Rule 4: text must be non-empty after attachments are dropped.
-        # Reactions, quotes, edits, and remote deletes all fall out here
-        # since none of them carry a "message" field.
-        attachments = data_message.get("attachments")
-        if attachments:
-            logger.debug("signal: dropping %d attachment(s)", len(attachments))
-        text = data_message.get("message")
+        # Rule 4: text must be non-empty, or there must be a downloadable
+        # attachment. Reactions, quotes, edits, and remote deletes all fall
+        # out here since none of them carry a "message" field.
+        attachments = data_message.get("attachments") or []
+        text = data_message.get("message") or ""
+
+        # Surface attachments: download images to disk, note the rest.
+        attachment_notes: list[str] = []
+        for att in attachments:
+            att_type = att.get("type", 0)
+            type_name = ATTACHMENT_TYPE_NAMES.get(att_type, f"type{att_type}")
+            if att_type in _DOWNLOADABLE_TYPES:
+                path = await self._download_attachment(
+                    envelope, data_message, att,
+                )
+                if path is not None:
+                    attachment_notes.append(f"[{type_name}: {path}]")
+                else:
+                    attachment_notes.append(f"[{type_name}: download failed]")
+            else:
+                attachment_notes.append(f"[{type_name} attached]")
+
+        if attachment_notes:
+            prefix = "\n".join(attachment_notes)
+            text = f"{prefix}\n{text}" if text else prefix
+
         if not text:
             logger.debug("signal: ignoring envelope with no text content")
             return
@@ -462,6 +509,61 @@ class SignalPlugin(TransportPlugin):
                 if self._pop_pending(channel, trace_id) is not None:
                     await self._decrement_outstanding(channel)
             self._admitted.discard(trace_id)
+
+
+    async def _download_attachment(
+        self,
+        envelope: dict,
+        data_message: dict,
+        attachment: dict,
+    ) -> Path | None:
+        """Download a signal-cli attachment to disk. Returns the path or None."""
+        att_id = attachment.get("id", 0)
+        params = {
+            "dataMessage": {
+                "sourceUuid": envelope.get("sourceUuid", ""),
+                "sourceNumber": envelope.get("sourceNumber", ""),
+                "timestamp": envelope.get("timestamp", data_message.get("timestamp", 0)),
+                "attachmentId": att_id,
+            }
+        }
+        try:
+            result = await self._send_rpc("attachment", params)
+        except Exception:
+            logger.exception("signal: attachment download RPC failed")
+            return None
+
+        if not result or "data" not in result:
+            logger.warning("signal: attachment response has no data")
+            return None
+
+        try:
+            raw = base64.b64decode(result["data"])
+        except Exception:
+            logger.exception("signal: attachment data is not valid base64")
+            return None
+
+        # Ensure the directory exists.
+        self._attachment_dir.mkdir(parents=True, exist_ok=True)
+
+        # Filename: timestamp-type-id to avoid collisions.
+        ts = envelope.get("timestamp", 0)
+        att_type = attachment.get("type", 0)
+        filename = f"{ts}-{att_type}-{att_id}"
+        # Preserve the extension if signal-cli provides one.
+        file_name = result.get("fileName", "")
+        if "." in file_name:
+            filename += file_name[file_name.rindex("."):]
+        path = self._attachment_dir / filename
+
+        try:
+            path.write_bytes(raw)
+        except OSError:
+            logger.exception("signal: cannot write attachment to %s", path)
+            return None
+
+        logger.info("signal: downloaded attachment to %s (%d bytes)", path, len(raw))
+        return path
 
     def _pop_pending(self, channel: Channel, trace_id: str) -> int | None:
         """Remove and return a message's pending receipt timestamp, or None
