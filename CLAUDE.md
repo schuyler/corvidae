@@ -4,7 +4,7 @@
 
 Dependencies are installed by `.claude/hooks/session-start.sh` in Claude Code on
 the web. If an import fails, run
-`uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send` —
+`uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra restart` —
 that installs the `dev` extra (pytest, pytest-asyncio), the `dev` dependency
 group (pytest-timeout), which the pytest config needs, the `acp` and `discord`
 extras, whose transport tests import the SDKs, the `cognition` extra
@@ -21,7 +21,7 @@ that way, so a kernel module must never import `corvidae_cognition`
 (`tests/test_kernel_boundary.py`).
 
 ```sh
-uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send  # everything
+uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra restart  # everything
 uv run pytest                    # full suite
 uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send  # the kernel suite
 uv run pytest tests/test_foo.py  # one file

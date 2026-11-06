@@ -293,3 +293,12 @@ channels:
   #                                   # the next compaction or conversation start.
   # signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f:   # ACI-keyed form (signal:<aci>) is recommended
   #   register_prompt: []           # this contact gets no register at all
+
+# --- Restart plugin (requires --extra restart) ---
+# restart:
+#   home_channel: "irc:general"
+#   min_uptime_seconds: 120
+#   max_restarts: 3
+#   window_seconds: 21600
+#   preflight_timeout_seconds: 120
+#   notify_delay_seconds: 5
