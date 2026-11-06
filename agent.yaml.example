@@ -147,6 +147,11 @@ agent:
 #   subagent:
 #     system_prompt: "You are..."  # or a file path; the subagent's system prompt
 
+# Cross-channel send (optional; cross-channel-send extra, see
+# docs/configuration.md). Registers send_message and list_channels.
+# cross_channel_send:
+#   max_hops: 3                     # refuse sends past this hop count (int >= 1)
+
 # IRC transport connection settings (optional — omit to disable IRC)
 # irc:
 #   host: irc.libera.chat              # IRC server hostname

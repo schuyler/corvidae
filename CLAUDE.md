@@ -4,23 +4,26 @@
 
 Dependencies are installed by `.claude/hooks/session-start.sh` in Claude Code on
 the web. If an import fails, run
-`uv sync --extra dev --extra acp --extra discord --extra cognition` — that
-installs the `dev` extra (pytest, pytest-asyncio), the `dev` dependency group
-(pytest-timeout), which the pytest config needs, the `acp` and `discord`
-extras, whose transport tests import the SDKs, and the `cognition` extra
+`uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send` —
+that installs the `dev` extra (pytest, pytest-asyncio), the `dev` dependency
+group (pytest-timeout), which the pytest config needs, the `acp` and `discord`
+extras, whose transport tests import the SDKs, the `cognition` extra
 (`packages/corvidae-cognition`: memory, appraisal, critique, funnel,
-outcome_log, goals), which `tests/cognition/` imports. The `cognition` extra
-includes `sqlite-vec` through the distribution's `vec` sub-extra; leave it out
-to exercise the FTS5-only path (`docs/cognition.md`), which is what CI's
-`cognition-fts` job does. That is CI's `full`
+outcome_log, goals), which `tests/cognition/` imports, and the
+`cross-channel-send` extra (`packages/cross-channel-send`: the send_message
+and list_channels tools), which `tests/test_cross_channel_send/` imports. The
+`cognition` extra includes `sqlite-vec` through the distribution's `vec`
+sub-extra; leave it out to exercise the FTS5-only path (`docs/cognition.md`),
+which is what CI's `cognition-fts` job does. That is CI's `full`
 job. The kernel alone is `--extra dev --extra acp`; CI's `kernel` job runs
-everything outside `tests/cognition/` that way, so a kernel module must never
-import `corvidae_cognition` (`tests/test_kernel_boundary.py`).
+everything outside `tests/cognition/` and `tests/test_cross_channel_send/`
+that way, so a kernel module must never import `corvidae_cognition`
+(`tests/test_kernel_boundary.py`).
 
 ```sh
-uv sync --extra dev --extra acp --extra discord --extra cognition  # everything
+uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send  # everything
 uv run pytest                    # full suite
-uv run pytest --ignore=tests/cognition  # the kernel suite
+uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send  # the kernel suite
 uv run pytest tests/test_foo.py  # one file
 uv run pytest --run-eval         # include live-LLM eval tests (deselected by default)
 uv run ruff check .              # lint

@@ -36,6 +36,7 @@ ALLOWED_KERNEL_MODULES = {
     "corvidae.llm_plugin",
     "corvidae.clock",
     "corvidae.idle",
+    "corvidae.channel",
 }
 
 
@@ -66,19 +67,27 @@ def test_kernel_does_not_import_cognition() -> None:
 
 
 def test_cognition_imports_only_the_kernel_api() -> None:
-    """Check 2: the cognition package imports only allowlisted kernel modules."""
-    if not COGNITION.is_dir():
-        pytest.skip("packages/corvidae-cognition/ does not exist yet")
-    # Collect every import of a corvidae.* module that is not on the list.
-    offenders = [
-        f"{path.relative_to(REPO)}:{line}: {module}"
-        for path in sorted(COGNITION.rglob("*.py"))
-        for line, module in _imported_modules(path)
-        if (module == "corvidae" or module.startswith("corvidae."))
-        and module not in ALLOWED_KERNEL_MODULES
-    ]
+    """Check 2: every package under packages/ imports only allowlisted
+    kernel modules. Scans all workspace members, not just cognition."""
+    packages_dir = REPO / "packages"
+    if not packages_dir.is_dir():
+        pytest.skip("packages/ does not exist yet")
+    # Collect every import of a corvidae.* module that is not on the list,
+    # across all packages.
+    offenders: list[str] = []
+    for pkg_dir in sorted(packages_dir.iterdir()):
+        if not pkg_dir.is_dir():
+            continue
+        for path in sorted(pkg_dir.rglob("*.py")):
+            for line, module in _imported_modules(path):
+                is_kernel = (module == "corvidae"
+                             or module.startswith("corvidae."))
+                if is_kernel and module not in ALLOWED_KERNEL_MODULES:
+                    offenders.append(
+                        f"{path.relative_to(REPO)}:{line}: {module}"
+                    )
     assert offenders == [], (
-        "cognition imports kernel modules outside the plugin API "
+        "a package imports kernel modules outside the plugin API "
         "(add to the allowlist and docs/plugin-guide.md only deliberately):\n"
         + "\n".join(offenders)
     )

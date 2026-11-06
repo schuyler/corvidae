@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cross-channel-send"
+version = "0.0.1"
+description = "Cross-channel send plugin for corvidae: send_message and list_channels tools"
+requires-python = ">=3.13"
+dependencies = ["corvidae"]
+
+[project.entry-points.corvidae]
+cross_channel_send = "cross_channel_send:CrossChannelSendPlugin"
+
+[tool.uv.sources]
+corvidae = { workspace = true }
+
+# Explicit, so a later docs/ directory here can't break the build.
+[tool.setuptools.packages.find]
+include = ["cross_channel_send*"]
