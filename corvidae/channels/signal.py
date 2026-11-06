@@ -54,10 +54,12 @@ ATTACHMENT_TYPE_NAMES = {
 # (e.g. "image/jpeg", "application/pdf") but no "type" field, so the
 # MIME type is the primary downloadability signal.
 _DOWNLOADABLE_MIME_PREFIXES = (
-    "image/",          # images, gifs
-    "application/pdf", # pdfs
-    "text/",           # plain text, markdown, csv, etc.
-    "audio/",          # voice notes
+    "image/",           # images, gifs
+    "application/pdf",  # pdfs
+    "application/json", # structured data I can parse
+    "application/xml",  # structured data I can parse
+    "text/",            # plain text, markdown, csv, yaml, etc.
+    "audio/",           # voice notes
 )
 
 
@@ -89,7 +91,20 @@ _MIME_TO_EXT = {
     "audio/mpeg": ".mp3",
     "audio/wav": ".wav",
     "audio/mp4": ".m4a",
+    "image/svg+xml": ".svg",
+    "text/html": ".html",
+    "audio/webm": ".webm",
+    "application/json": ".json",
+    "application/xml": ".xml",
+    "text/yaml": ".yaml",
+    "text/x-yaml": ".yaml",
 }
+
+
+def _mime_base(mime: str) -> str:
+    """Normalize a MIME type: lowercase, strip parameters (; charset=...)."""
+    return mime.split(";", 1)[0].strip().lower()
+
 
 # How often the per-channel typing-indicator refresh loop re-sends "typing"
 # while a turn is outstanding. Signal clients expire an indicator after
@@ -632,6 +647,11 @@ class SignalPlugin(TransportPlugin):
         # signal-cli sends filename=None for most attachments; the id
         # field often carries an extension (e.g. "A5mQhazUQ7j6rodCKRNv.jpg").
         _SAFE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,10}")
+        mime = _mime_base(attachment.get("contentType") or "")
+        mime_suffix = _MIME_TO_EXT.get(mime, "")
+        # Prefer a safe extension from filename or id, but fall back to
+        # the MIME mapping. When the id already carries the suffix, don't
+        # double it (e.g. id="foo.txt" + suffix=".txt" → "foo.txt").
         suffix = ""
         for source in (attachment.get("filename"), attachment.get("id")):
             if source and "." in source:
@@ -640,11 +660,12 @@ class SignalPlugin(TransportPlugin):
                     suffix = candidate
                     break
         if not suffix:
-            mime = (attachment.get("contentType") or "").lower()
-            suffix = _MIME_TO_EXT.get(mime, "")
-        # Guard against double extension: if the id already ends with the
-        # suffix we're about to add, don't add it again (e.g. id="foo.txt"
-        # + suffix=".txt" → "foo.txt", not "foo.txt.txt").
+            suffix = mime_suffix
+        elif mime_suffix and suffix != mime_suffix:
+            # Id/filename extension disagrees with MIME type: trust the
+            # MIME type (server-declared content type is more reliable
+            # than a client-supplied filename).
+            suffix = mime_suffix
         if suffix and str(att_id).lower().endswith(suffix):
             suffix = ""
 
