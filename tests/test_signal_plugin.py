@@ -28,6 +28,7 @@ design):
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import shutil
 import tempfile
@@ -559,7 +560,6 @@ class TestInboundFiltering:
         """An image-only message (no caption) is now surfaced with an
         attachment note, not dropped. The fake server returns a payload
         for getAttachment, so the note carries the file path."""
-        import base64
         png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
         h = await _start_plugin(tmp_path)
         try:
@@ -592,7 +592,6 @@ class TestInboundFiltering:
 
     async def test_attachment_plus_text_includes_attachment_note(self, tmp_path):
         """An image + caption message includes the attachment note prefix."""
-        import base64
         png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
         h = await _start_plugin(tmp_path)
         try:
@@ -618,7 +617,6 @@ class TestInboundFiltering:
 
     async def test_download_only_for_allowed_senders(self, tmp_path):
         """A sender not on the allowlist gets metadata only, no disk write."""
-        import base64
         png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
         h = await _start_plugin(tmp_path)
         try:
@@ -649,7 +647,6 @@ class TestInboundFiltering:
 
     async def test_attachment_size_cap(self, tmp_path):
         """An attachment exceeding max_attachment_size is rejected."""
-        import base64
         # 11 MB of data, exceeding the default 10 MB cap.
         big_bytes = b"\x00" * (11 * 1024 * 1024)
         h = await _start_plugin(tmp_path)
@@ -693,7 +690,6 @@ class TestInboundFiltering:
 
     async def test_attachment_malicious_filename_is_sanitised(self, tmp_path):
         """A crafted filename with path traversal is reduced to a safe suffix."""
-        import base64
         png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
         h = await _start_plugin(tmp_path)
         try:
@@ -721,6 +717,433 @@ class TestInboundFiltering:
             assert path.exists()
         finally:
             await _stop_plugin(h)
+
+    async def test_large_attachment_exceeds_default_stream_limit(self, tmp_path):
+        """A getAttachment response larger than the default 64 KiB
+        StreamReader limit must not kill the read loop.
+
+        The default asyncio.StreamReader limit is 64 * 1024 bytes. A
+        100 KB image becomes ~133 KB of base64 on one JSON line, which
+        exceeds the default and raises LimitOverrunError in readline().
+        The fix passes limit= to open_unix_connection sized to
+        max_attachment_size * 4/3 + 64 KiB.
+        """
+        # 100 KB of data → ~133 KB base64, well over the 64 KiB default.
+        big_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * (100 * 1024)
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(big_png).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "1730-big", "type": 1,
+                                   "contentType": "image/png",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[image:" in text
+            assert "download failed" not in text
+            # The file should exist on disk with the right size.
+            path_str = text.split("[image: ")[1].split("]")[0]
+            path = Path(path_str)
+            assert path.exists(), f"attachment file not found: {path}"
+            assert path.read_bytes() == big_png
+            # The connection should still be alive (no reconnect).
+            assert h.server.connection_count == 1, (
+                f"read loop died and reconnected: {h.server.connection_count} connections"
+            )
+        finally:
+            await _stop_plugin(h)
+
+
+    async def test_pdf_attachment_downloads_with_pdf_type_name(self, tmp_path):
+        """application/pdf downloads and is tagged [pdf: ...]."""
+        pdf_bytes = b"%PDF-1.4 fake pdf content"
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(pdf_bytes).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text="see file",
+                    attachments=[{"id": "1731-pdf", "type": 0,
+                                   "contentType": "application/pdf",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[pdf:" in text
+            assert "see file" in text
+            path_str = text.split("[pdf: ")[1].split("]")[0]
+            assert Path(path_str).read_bytes() == pdf_bytes
+        finally:
+            await _stop_plugin(h)
+
+    async def test_video_attachment_not_downloaded(self, tmp_path):
+        """video/mp4 is not in the downloadable set → metadata-only note."""
+        h = await _start_plugin(tmp_path)
+        try:
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text="check this",
+                    attachments=[{"id": "1732-vid", "type": 0,
+                                   "contentType": "video/mp4",
+                                   "filename": None, "size": 5000000}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "check this" in text
+            assert "[video" in text  # metadata note
+            assert "download" not in text.lower()
+            get_att = [f for f in h.server.received
+                       if f.get("method") == "getAttachment"]
+            assert not get_att, "getAttachment should not be sent for video"
+        finally:
+            await _stop_plugin(h)
+
+    async def test_extension_from_id_no_double(self, tmp_path):
+        """id with .jpg + contentType image/jpeg → single .jpg extension."""
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "abc123.jpg", "type": 0,
+                                   "contentType": "image/jpeg",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            path_str = text.split("[image: ")[1].split("]")[0]
+            assert path_str.endswith(".jpg"), f"double extension: {path_str}"
+            assert not path_str.endswith(".jpg.jpg"), f"double extension: {path_str}"
+        finally:
+            await _stop_plugin(h)
+
+    async def test_mime_with_params_stripped(self, tmp_path):
+        """contentType with ; charset=utf-8 is normalized for extension lookup."""
+        txt = b"hello world"
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(txt).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text="notes",
+                    attachments=[{"id": "1733-txt", "type": 0,
+                                   "contentType": "text/plain; charset=utf-8",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[text:" in text
+            path_str = text.split("[text: ")[1].split("]")[0]
+            assert path_str.endswith(".txt"), f"expected .txt, got: {path_str}"
+        finally:
+            await _stop_plugin(h)
+
+    async def test_get_attachment_rpc_has_no_recipient(self, tmp_path):
+        """getAttachment params must be exactly {"id": ...} — no recipient."""
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "1734-norec", "type": 0,
+                                   "contentType": "image/png",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            # Check the RPC request that was sent.
+            get_att = [f for f in h.server.received
+                       if f.get("method") == "getAttachment"]
+            assert get_att, "no getAttachment request received"
+            params = get_att[-1].get("params", {})
+            assert params == {"id": "1734-norec"}, (
+                f"unexpected params: {params}"
+            )
+
+
+        finally:
+            await _stop_plugin(h)
+
+    async def test_application_mime_params_in_type_name(self, tmp_path):
+        """application/json; charset=utf-8 → [json: ...] not [json; charset=utf-8: ...]."""
+        data = b'{"key": "value"}'
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(data).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text="data",
+                    attachments=[{"id": "1735-json", "type": 0,
+                                   "contentType": "application/json; charset=utf-8",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[json:" in text, f"expected [json: in {text!r}"
+            assert "charset" not in text, f"charset leaked into type name: {text!r}"
+        finally:
+            await _stop_plugin(h)
+
+    async def test_mime_extension_overrides_id_extension(self, tmp_path):
+        """id=photo.jpg + contentType=image/png → file saved as .png."""
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "photo.jpg", "type": 0,
+                                   "contentType": "image/png",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            path_str = text.split("[image: ")[1].split("]")[0]
+            assert path_str.endswith(".png"), (
+                f"MIME extension should override id extension: {path_str}"
+            )
+        finally:
+            await _stop_plugin(h)
+
+    async def test_extension_from_filename(self, tmp_path):
+        """filename=photo.webp + contentType=image/webp → .webp extension."""
+        data = b"RIFF\x00\x00\x00\x00WEBP"
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(data).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "abc123", "type": 0,
+                                   "contentType": "image/webp",
+                                   "filename": "photo.webp"}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            path_str = text.split("[image: ")[1].split("]")[0]
+            assert path_str.endswith(".webp"), f"expected .webp: {path_str}"
+        finally:
+            await _stop_plugin(h)
+
+    async def test_fallback_to_type_enum_when_no_content_type(self, tmp_path):
+        """No contentType, type=1 (image) → still downloaded via legacy path."""
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "1736-legacy", "type": 1,
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[image:" in text, f"expected [image: in {text!r}"
+            assert "download failed" not in text
+        finally:
+            await _stop_plugin(h)
+
+
+
+
+    async def test_application_prefix_not_matched_as_category(self, tmp_path):
+        """application/pdfx, application/json-seq must NOT be downloaded."""
+        for mime in ("application/pdfx", "application/json-seq", "application/xml-dtd"):
+            h = await _start_plugin(tmp_path)
+            try:
+                await h.server.push_notification(
+                    "receive",
+                    make_data_envelope(
+                        source_uuid=AUTH_ACI, source_number=None, text="t",
+                        attachments=[{"id": "neg-1", "type": 0,
+                                       "contentType": mime,
+                                       "filename": None}],
+                    ),
+                )
+                await _wait_until(
+                    lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10
+                )
+                text = h.pm.ahook.on_message.await_args.kwargs["text"]
+                assert "download" not in text.lower(), (
+                    f"{mime} should not be downloadable: {text!r}"
+                )
+                get_att = [f for f in h.server.received
+                           if f.get("method") == "getAttachment"]
+                assert not get_att, (
+                    f"getAttachment should not be sent for {mime}"
+                )
+            finally:
+                await _stop_plugin(h)
+
+    async def test_content_type_overrides_legacy_type_enum(self, tmp_path):
+        """type=1 (image) + contentType=video/mp4 → not downloaded."""
+        h = await _start_plugin(tmp_path)
+        try:
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text="vid",
+                    attachments=[{"id": "1737-ct-override", "type": 1,
+                                   "contentType": "video/mp4",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(
+                lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10
+            )
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "download" not in text.lower(), (
+                f"contentType should override type enum: {text!r}"
+            )
+            get_att = [f for f in h.server.received
+                       if f.get("method") == "getAttachment"]
+            assert not get_att, (
+                "getAttachment should not be sent when contentType overrides"
+            )
+        finally:
+            await _stop_plugin(h)
+
+    async def test_filename_extension_conflicts_with_mime(self, tmp_path):
+        """filename=photo.jpg + contentType=image/png → .png wins."""
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "abc", "type": 0,
+                                   "contentType": "image/png",
+                                   "filename": "photo.jpg"}],
+                ),
+            )
+            await _wait_until(
+                lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10
+            )
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            path_str = text.split("[image: ")[1].split("]")[0]
+            assert path_str.endswith(".png"), (
+                f"MIME should override filename extension: {path_str}"
+            )
+        finally:
+            await _stop_plugin(h)
+
+    async def test_audio_attachment_downloads(self, tmp_path):
+        """audio/ogg downloads and is tagged [audio: ...]."""
+        ogg = b"OggS" + b"\x00" * 64
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(ogg).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text="voicemail",
+                    attachments=[{"id": "1738-audio", "type": 0,
+                                   "contentType": "audio/ogg",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(
+                lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10
+            )
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[audio:" in text, f"expected [audio: in {text!r}"
+            path_str = text.split("[audio: ")[1].split("]")[0]
+            assert path_str.endswith(".ogg"), f"expected .ogg: {path_str}"
+        finally:
+            await _stop_plugin(h)
+
+    async def test_legacy_type_enum_with_id_extension(self, tmp_path):
+        """type=1, id=abc.jpg, no contentType → downloaded, keeps .jpg."""
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "abc.jpg", "type": 1,
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(
+                lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10
+            )
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[image:" in text, f"expected [image: in {text!r}"
+            path_str = text.split("[image: ")[1].split("]")[0]
+            assert path_str.endswith(".jpg"), f"expected .jpg: {path_str}"
+            assert not path_str.endswith(".jpg.jpg"), f"double ext: {path_str}"
+        finally:
+            await _stop_plugin(h)
+
+
 
     async def test_malformed_frame_is_logged_and_loop_survives(self, tmp_path, caplog):
         h = await _start_plugin(tmp_path)

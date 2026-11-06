@@ -487,8 +487,15 @@ Per transport:
   `channels:`; those resolve forward to ACIs in one batched call after each
   connect, never at startup, and a failed resolution retries after the next
   connect. Non-`dataMessage` envelopes (including the account's own sync
-  traffic) are dropped; text that arrives with an attachment is processed;
-  backlog older than five minutes is prefixed with its send time. Typing
+  traffic) are dropped; text that arrives with an attachment is
+  processed; allowlisted senders' attachments are downloaded to
+  `state/signal-attachments/` when the `contentType` is in the
+  allowlist (`image/*`, `text/*`, `audio/*`, `application/pdf`,
+  `application/json`, `application/xml`), and surfaced as file paths in
+  the message text; non-allowlisted senders get metadata only;
+  `max_attachment_size` (default 10 MB) caps the download and sizes the
+  StreamReader limit; backlog older than five minutes is prefixed with
+  its send time. Typing
   starts on the first outstanding message and refreshes every 10 s; the
   read receipt is sent at processing start, not arrival. Notifications are
   never handled inline in the read loop.

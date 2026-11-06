@@ -1046,6 +1046,21 @@ separate locks.
   callers parse `Exit code: N` out of the text (#105).
 - `web_search` sends conversation-derived queries to DuckDuckGo. By
   design, but it is an off-box data flow nobody sees.
+- Signal attachments from allowlisted senders are downloaded to
+  `state/signal-attachments/` and surfaced as file paths in the message
+  text. The downloadable set is gated on `contentType`: `image/*`,
+  `text/*`, `audio/*`, `application/pdf`, `application/json`,
+  `application/xml`. `image/svg+xml` and `text/html` are in the set via
+  their category prefixes; they can carry scripts, but the agent reads
+  them as files (via `view_image` or `read_file`), not renders them in a
+  browser. The allowlist is the primary gate: a sender not in `allow:`
+  gets metadata only, no disk write. The file extension is derived from
+  the MIME type when available, falling back to the filename or id; the
+  suffix is validated against a `[.A-Za-z0-9]{1,10}` pattern and the
+  resolved path is asserted to be under the attachment directory.
+  `max_attachment_size` (default 10 MB) caps the download and also sizes
+  the StreamReader limit for the signal-cli socket.
+
 - `harness/install-signal-cli.sh` defaults `SERVICE_USER` to a real
   account name. Not a secret, but it is a real identifier in a public
   repository.

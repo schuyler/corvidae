@@ -36,8 +36,69 @@ ATT_DOCUMENT = 5
 ATT_GIF = 6
 ATT_STICKER = 7
 
-# Types we download to disk (the rest are surfaced as metadata only).
-_DOWNLOADABLE_TYPES = {ATT_IMAGE, ATT_GIF}
+# MIME types we download to disk. Category prefixes match any subtype;
+# exact types are matched literally (not as prefixes, so
+# application/pdf does not match application/pdfx).
+_DOWNLOADABLE_MIME_PREFIXES = (
+    "image/",  # images, gifs
+    "text/",   # plain text, markdown, csv, yaml, etc.
+    "audio/",  # voice notes
+)
+_DOWNLOADABLE_MIME_EXACT = frozenset({
+    "application/pdf",   # pdfs
+    "application/json",  # structured data
+    "application/xml",   # structured data
+})
+
+# MIME type → file extension mapping for downloaded attachments.
+_MIME_TO_EXT = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "application/pdf": ".pdf",
+    "text/plain": ".txt",
+    "text/markdown": ".md",
+    "text/csv": ".csv",
+    "audio/ogg": ".ogg",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/mp4": ".m4a",
+    "image/svg+xml": ".svg",
+    "text/html": ".html",
+    "audio/webm": ".webm",
+    "application/json": ".json",
+    "application/xml": ".xml",
+    "text/yaml": ".yaml",
+    "text/x-yaml": ".yaml",
+}
+
+# Safe file suffix: a dot followed by 1-10 alphanumerics.
+_SAFE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,10}")
+
+
+def _mime_base(mime: str) -> str:
+    """Normalize a MIME type: lowercase, strip parameters (; charset=...)."""
+    return mime.split(";", 1)[0].strip().lower()
+
+
+def _is_downloadable(attachment: dict) -> bool:
+    """Whether an attachment should be downloaded to disk.
+
+    Primary signal: contentType (MIME type). signal-cli does not reliably
+    send the protobuf type enum, so gating on it alone would download
+    nothing in practice. Fallback: legacy type enum for older signal-cli
+    versions that omit contentType.
+    """
+    mime = _mime_base(attachment.get("contentType") or "")
+    if mime:
+        return (
+            any(mime.startswith(p) for p in _DOWNLOADABLE_MIME_PREFIXES)
+            or mime in _DOWNLOADABLE_MIME_EXACT
+        )
+    # Fallback: protobuf type enum (if contentType is absent).
+    return attachment.get("type", 0) in (ATT_IMAGE, ATT_GIF)
 
 ATTACHMENT_TYPE_NAMES = {
     ATT_IMAGE: "image",
@@ -198,7 +259,13 @@ class SignalPlugin(TransportPlugin):
         self._message_chunk_size = signal_config.get("message_chunk_size", 2000)
         attachment_dir = signal_config.get("attachment_dir", "state/signal-attachments")
         self._attachment_dir = Path(attachment_dir)
-        self._max_attachment_size = signal_config.get("max_attachment_size", 10 * 1024 * 1024)
+        max_size = signal_config.get("max_attachment_size", 10 * 1024 * 1024)
+        if not isinstance(max_size, int) or max_size <= 0:
+            raise ValueError(
+                f"signal: max_attachment_size must be a positive integer, "
+                f"got {max_size!r}"
+            )
+        self._max_attachment_size = max_size
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -284,7 +351,15 @@ class SignalPlugin(TransportPlugin):
         delay = _INITIAL_BACKOFF
         while self._connect_task is not None:
             try:
-                reader, writer = await asyncio.open_unix_connection(path=self._socket_path)
+                # The StreamReader limit must accommodate the largest
+                # base64-encoded attachment line: max_attachment_size bytes
+                # → ~4/3 that in base64, plus JSON-RPC envelope overhead.
+                # The default 64 KiB limit raises LimitOverrunError on
+                # readline() for attachments >~48 KB, killing the read loop.
+                stream_limit = int(self._max_attachment_size * 4 / 3) + 64 * 1024
+                reader, writer = await asyncio.open_unix_connection(
+                    path=self._socket_path, limit=stream_limit,
+                )
             except OSError as exc:
                 logger.warning("signal: connection error, retrying: %s", exc, exc_info=True)
                 if self._connect_task is None:
@@ -478,15 +553,27 @@ class SignalPlugin(TransportPlugin):
         attachment_notes: list[str] = []
         for att in attachments:
             att_type = att.get("type", 0)
-            type_name = ATTACHMENT_TYPE_NAMES.get(att_type, f"type{att_type}")
-            if att_type in _DOWNLOADABLE_TYPES and allowed:
+            # Derive a type name for the note: prefer the MIME subtype
+            # (e.g. "json" from "application/json"), fall back to the
+            # protobuf type enum name.
+            mime = _mime_base(att.get("contentType") or "")
+            if mime and "/" in mime:
+                major, minor = mime.split("/", 1)
+                type_name = minor if major == "application" else major
+            else:
+                type_name = ATTACHMENT_TYPE_NAMES.get(att_type, f"type{att_type}")
+            if _is_downloadable(att) and allowed:
                 path = await self._download_attachment(envelope, att)
                 if path is not None:
                     attachment_notes.append(f"[{type_name}: {path}]")
                 else:
                     attachment_notes.append(f"[{type_name}: download failed]")
             else:
-                attachment_notes.append(f"[{type_name} attached]")
+                # Sanitize the subtype: restrict to [a-z0-9.+-] and cap
+                # length so sender-controlled text cannot inject newlines
+                # or other control characters into the agent's context.
+                safe_name = re.sub(r"[^a-z0-9.+-]", "", type_name)[:32]
+                attachment_notes.append(f"[{safe_name} attached]")
 
         if attachment_notes:
             prefix = "\n".join(attachment_notes)
@@ -542,12 +629,9 @@ class SignalPlugin(TransportPlugin):
             )
             return None
 
-        recipient = envelope.get("sourceNumber") or envelope.get("sourceUuid")
-        if not recipient:
-            logger.warning("signal: no recipient for getAttachment RPC")
-            return None
-
-        params = {"id": str(att_id), "recipient": str(recipient)}
+        # signal-cli looks up attachments by id alone; recipient is
+        # ignored by the daemon.
+        params = {"id": str(att_id)}
         try:
             result = await asyncio.wait_for(
                 self._send_rpc("getAttachment", params),
@@ -577,16 +661,30 @@ class SignalPlugin(TransportPlugin):
             )
             return None
 
-        # Extension: from the incoming attachment's filename field (not the
-        # RPC response, which carries only base64 data). Sanitised to a
-        # safe suffix to prevent path traversal via a crafted filename.
-        _SAFE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,10}")
-        incoming_name = attachment.get("filename") or ""
+        # Extension: try filename, then id, then MIME-type mapping.
+        # signal-cli sends filename=None for most attachments; the id
+        # field often carries an extension (e.g. "A5mQhazUQ7j6rodCKRNv.jpg").
+        # The MIME mapping is the authoritative source when it exists;
+        # filename/id extensions are a fallback.
+        mime = _mime_base(attachment.get("contentType") or "")
+        mime_suffix = _MIME_TO_EXT.get(mime, "")
         suffix = ""
-        if "." in incoming_name:
-            candidate = incoming_name[incoming_name.rindex("."):].lower()
-            if _SAFE_SUFFIX.fullmatch(candidate):
-                suffix = candidate
+        for src in (attachment.get("filename"), attachment.get("id")):
+            source = str(src) if src is not None else ""
+            if source and "." in source:
+                candidate = source[source.rindex("."):].lower()
+                if _SAFE_SUFFIX.fullmatch(candidate):
+                    suffix = candidate
+                    break
+        if not suffix:
+            suffix = mime_suffix
+        elif mime_suffix and suffix != mime_suffix:
+            # Filename/id extension disagrees with MIME type: trust the
+            # MIME mapping. The whitelist is the security boundary; the
+            # extension is a convenience for the reader.
+            suffix = mime_suffix
+        if suffix and str(att_id).lower().endswith(suffix):
+            suffix = ""
 
         # Ensure the directory exists (blocking I/O off the event loop).
         await asyncio.to_thread(self._attachment_dir.mkdir, parents=True, exist_ok=True)
