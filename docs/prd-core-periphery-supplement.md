@@ -187,17 +187,13 @@ its tests pass; until then they are proposals.
     (§3.7). Appraisal evaluates patterns across channels and over time,
     not just individual responses.
 
-11. The core receives **periodic notifications of channel observables**
-    from the notification bus: queue depth per peripheral, message
-    rates, error counts, KV cache residency (which contexts are in
-    VRAM/RAM/disk), and fork activity. The period is configurable; the
-    observables are a fixed set declared by the framework. These
-    notifications are distinct from escalations (event-driven) and idle
-    notifications (core's own quiet): they are the core's view of the
-    system's vitals. The core uses them to make resource-allocation
-    decisions (page-in/page-out, §3.3), tune escalation behavior
-    (§3.4.4), and detect anomalies (a queue that keeps growing, a
-    peripheral that keeps erroring).
+11. The core can see the system's **channel observables** whenever it
+    needs them, without being woken to be shown them: queue depth per
+    peripheral, message rates, error counts, KV cache residency, and
+    fork activity, among others. It is notified only of anomalies (an
+    overflowing queue, §3.3.7; a peripheral that keeps erroring), at a
+    rate-limited pace. The core uses the observables to direct attention
+    (§3.3.6), tune escalation behaviour (§3.4.4), and spot trouble.
 
 12. The core can **import a peripheral's context tail**: the most recent
     N messages from a peripheral's context window, pulled into the core's
@@ -611,10 +607,7 @@ thought, or to respond to an escalation.
    level. A fork that is discarded without completion is logged at
    WARNING with the reason.
 
-5. The channel observables (§3.1.11) are logged at DEBUG level in the
-   core's JSONL log: queue depth, message rates, KV residency, fork
-   activity. The periodic notification to the core is at INFO level;
-   the underlying data is at DEBUG for post-hoc analysis.
+5. The channel observables (§3.1.11) are logged for post-hoc analysis.
 
 ### 3.11 Evaluation
 
