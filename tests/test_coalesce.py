@@ -495,3 +495,66 @@ async def test_failed_burst_turn_retries_once_for_the_whole_burst(make_env):
     assert sorted(user_rows) == ["m0", "m1", "m2", "m3"]  # none persisted twice
     assert [m["content"] for m in rows if m.get("role") == "assistant"].count("burst reply") == 1
     assert sent_texts(plugin.pm, OutboundMessage)[-1] == "burst reply"
+
+
+# ---------------------------------------------------------------------------
+# #513: attribution once per sender, not once per message in the burst
+# ---------------------------------------------------------------------------
+
+
+async def test_a_burst_from_one_sender_carries_one_attribution_row(make_env):
+    """A coalesced burst is one turn (#398), so the sender and channel are named
+    once before it rather than repeated before every message (#513)."""
+    plugin, channel, db, llm = await make_env()
+    channel.name = "#home"
+    channel.sender_names["user"] = "schuyler"
+
+    await run_burst(plugin, channel, llm, ["m1", "m2", "m3"])
+
+    burst_prompt = llm.calls[1]
+    kinds = [
+        "attribution"
+        if m.get("content", "").startswith("[sender:")
+        else "other"
+        for m in burst_prompt
+    ]
+    attributions = [m for m, kind in zip(burst_prompt, kinds) if kind == "attribution"]
+
+    # One row per turn: the in-flight turn's, and the burst's. What must not
+    # happen is a row per message, or two rows stacked with nothing between.
+    assert len(attributions) == 2, attributions
+    assert all("schuyler" in row["content"] for row in attributions)
+    assert not any(a == b == "attribution" for a, b in zip(kinds, kinds[1:]))
+
+    # And the messages themselves are still the person's own words.
+    assert users(burst_prompt) == ["m0", "m1", "m2", "m3"]
+
+
+async def test_a_burst_from_two_senders_attributes_each_message_to_its_own(make_env):
+    """A burst can mix senders — `take_while` merges on role, not sender — so a
+    second speaker gets their own row before their own words, never the first
+    speaker's name over their message (#513)."""
+    plugin, channel, db, llm = await make_env()
+    channel.name = "#home"
+    channel.sender_names.update({"alice": "Alice", "bob": "Bob"})
+
+    await start_inflight(plugin, channel, llm)
+    for sender, text in (("alice", "a1"), ("bob", "b2")):
+        await plugin.on_message(
+            channel=channel, sender=sender, text=text, trace_id=mint_trace_id()
+        )
+    llm.gate.set()
+    await settle(plugin, channel)
+
+    burst_prompt = llm.calls[1]
+    rows = [
+        m["content"]
+        for m in burst_prompt
+        if m.get("content", "").startswith("[sender:") or m.get("role") == "user"
+    ]
+    # After the in-flight turn's own rows: alice, her message, bob, his message,
+    # in that order.
+    burst = rows[rows.index("m0") + 1 :]
+    assert len(burst) == 4, burst
+    assert "Alice" in burst[0] and "Bob" in burst[2]
+    assert burst[1] == "a1" and burst[3] == "b2"

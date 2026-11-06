@@ -555,37 +555,170 @@ class TestInboundFiltering:
         finally:
             await _stop_plugin(h)
 
-    async def test_attachment_only_message_is_dropped_without_error(self, tmp_path):
+    async def test_attachment_only_message_is_surfaced(self, tmp_path):
+        """An image-only message (no caption) is now surfaced with an
+        attachment note, not dropped. The fake server returns a payload
+        for getAttachment, so the note carries the file path."""
+        import base64
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
         h = await _start_plugin(tmp_path)
         try:
+            # Arm the fake server to answer getAttachment with a real payload.
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png_bytes).decode()},
+            )
             await h.server.push_notification(
                 "receive",
                 make_data_envelope(
                     source_uuid=AUTH_ACI, source_number=None, text=None,
-                    attachments=[{"id": "att-1", "contentType": "image/jpeg"}],
+                    attachments=[{"id": "1730-abc", "type": 1, "contentType": "image/png",
+                                   "filename": "photo.png"}],
                 ),
-            )
-            await h.server.push_notification(
-                "receive", make_data_envelope(source_uuid=AUTH_ACI, source_number=None, text="after the photo")
             )
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             assert h.pm.ahook.on_message.await_count == 1
-            assert h.pm.ahook.on_message.await_args.kwargs["text"] == "after the photo"
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[image:" in text
+            assert "download failed" not in text
+            # The path should point to a file that exists on disk.
+            path_str = text.split("[image: ")[1].split("]")[0]
+            path = Path(path_str)
+            assert path.exists(), f"attachment file not found: {path}"
+            assert path.read_bytes() == png_bytes
+            assert path.suffix == ".png"
         finally:
             await _stop_plugin(h)
 
-    async def test_attachment_plus_text_processes_the_text(self, tmp_path):
+    async def test_attachment_plus_text_includes_attachment_note(self, tmp_path):
+        """An image + caption message includes the attachment note prefix."""
+        import base64
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png_bytes).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text="check this out",
+                    attachments=[{"id": "1730-def", "type": 1, "contentType": "image/png",
+                                   "filename": "pic.png"}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[image:" in text
+            assert "check this out" in text
+            assert "download failed" not in text
+        finally:
+            await _stop_plugin(h)
+
+    async def test_download_only_for_allowed_senders(self, tmp_path):
+        """A sender not on the allowlist gets metadata only, no disk write."""
+        import base64
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        h = await _start_plugin(tmp_path)
+        try:
+            # OTHER_ACI is not in the allow list (only AUTH_ACI is).
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png_bytes).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=OTHER_ACI, source_number=None, text=None,
+                    attachments=[{"id": "1730-xyz", "type": 1, "contentType": "image/png",
+                                   "filename": "sneaky.png"}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            # Metadata is surfaced, but no download happens.
+            assert "[image attached]" in text
+            assert "download failed" not in text
+            # No getAttachment RPC should have been sent.
+            assert not h.server.requests_matching("getAttachment"), (
+                "getAttachment was called for a non-allowed sender"
+            )
+        finally:
+            await _stop_plugin(h)
+
+    async def test_attachment_size_cap(self, tmp_path):
+        """An attachment exceeding max_attachment_size is rejected."""
+        import base64
+        # 11 MB of data, exceeding the default 10 MB cap.
+        big_bytes = b"\x00" * (11 * 1024 * 1024)
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(big_bytes).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "1730-big", "type": 1, "contentType": "image/png",
+                                   "filename": "big.png"}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "download failed" in text
+        finally:
+            await _stop_plugin(h)
+
+    async def test_attachment_missing_id_is_refused(self, tmp_path):
+        """An attachment with no id field is refused, not defaulted to 0."""
         h = await _start_plugin(tmp_path)
         try:
             await h.server.push_notification(
                 "receive",
                 make_data_envelope(
-                    source_uuid=AUTH_ACI, source_number=None, text="check this out",
-                    attachments=[{"id": "att-2", "contentType": "image/png"}],
+                    source_uuid=AUTH_ACI, source_number=None, text="no id",
+                    attachments=[{"type": 1, "contentType": "image/png"}],
                 ),
             )
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
-            assert h.pm.ahook.on_message.await_args.kwargs["text"] == "check this out"
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "download failed" in text
+            # No getAttachment RPC should have been sent.
+            assert not h.server.requests_matching("getAttachment")
+        finally:
+            await _stop_plugin(h)
+
+    async def test_attachment_malicious_filename_is_sanitised(self, tmp_path):
+        """A crafted filename with path traversal is reduced to a safe suffix."""
+        import base64
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png_bytes).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text="traversal",
+                    attachments=[{"id": "1730-evil", "type": 1, "contentType": "image/png",
+                                   "filename": "../../etc/cron.d/evil.png"}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[image:" in text
+            path_str = text.split("[image: ")[1].split("]")[0]
+            path = Path(path_str)
+            # The file must be under the attachment dir, not in /etc.
+            assert str(path).startswith(str(h.plugin._attachment_dir)), (
+                f"path escaped attachment dir: {path}"
+            )
+            assert path.exists()
         finally:
             await _stop_plugin(h)
 

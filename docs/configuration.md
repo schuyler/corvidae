@@ -593,6 +593,8 @@ corvidae talks JSON-RPC to a `signal-cli daemon` that is already running; it doe
 | `signal.account` | string | *required* | The bot's own number, E.164, e.g. `"+15550001111"`. Quote it — bare `+…` is not valid YAML. Used to recognize and ignore the account's own traffic. |
 | `signal.allow` | list of strings | `[]` | Senders permitted to drive the agent. Each entry is either an E.164 number or an ACI (the account UUID). Default-deny: an empty or absent list refuses everyone, silently — no reply, no typing indicator, no read receipt. |
 | `signal.message_chunk_size` | integer | `2000` | Maximum UTF-8 bytes per outbound Signal message. Longer replies are split paragraphs → sentences → words and sent as several messages; nothing is truncated. Must be at least 6; a smaller value raises `ValueError` the first time a reply is split. |
+| `signal.attachment_dir` | string | `state/signal-attachments` | Directory where downloaded image attachments are written. Created on first download. Files are not pruned automatically — retention is the operator's responsibility. |
+| `signal.max_attachment_size` | integer | `10485760` (10 MB) | Maximum bytes for a single downloaded attachment. Larger payloads are rejected with `[image: download failed]`. |
 
 ```yaml
 signal:

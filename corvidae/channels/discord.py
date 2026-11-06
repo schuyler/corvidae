@@ -222,6 +222,43 @@ def _client_class() -> type:
     return _DiscordClient
 
 
+#: How many sender display names one channel remembers (#513).
+SENDER_NAME_CACHE_MAX = 256
+
+
+def remember_sender_name(names: dict[str, str], sender: str, name: str) -> None:
+    """Record a sender's display name on the channel, keeping the map bounded.
+
+    A channel people talk in all day would otherwise keep a name for every
+    sender it has ever seen. The cache is a convenience for the next turn's
+    attribution, so the least recently seen entry goes when it is full (#513).
+    """
+    # Re-stating a name moves it to the newest end, so the person who talks
+    # most is not the first evicted for having been seen first.
+    if sender in names:
+        del names[sender]
+    elif len(names) >= SENDER_NAME_CACHE_MAX:
+        names.pop(next(iter(names)))
+    names[sender] = name
+
+
+def _channel_name(channel: Any) -> str | None:
+    """The name to show the model for a Discord channel or thread (#513).
+
+    A guild channel is its own name. A thread is its title and its parent, so
+    the model can tell "a thread in #home" from "#home". Anything without a
+    name of its own gets None rather than its id dressed up as one.
+    """
+    name = getattr(channel, "name", None)
+    parent = getattr(channel, "parent", None)
+    parent_name = getattr(parent, "name", None) if parent is not None else None
+    if name is None:
+        return None
+    if parent_name is not None:
+        return f"thread {name} in #{parent_name}"
+    return f"#{name}"
+
+
 class DiscordPlugin(TransportPlugin):
     """Transport plugin for Discord DMs, server channels, and threads."""
 
@@ -499,6 +536,15 @@ class DiscordPlugin(TransportPlugin):
         # and threads on their own channel id.
         sender = str(author.id)
         scope = f"dm:{sender}" if is_dm else str(message.channel.id)
+        # The name to put beside the id (#513): the guild nickname a person is
+        # reading in this server, then their global display name, then the
+        # username they log in with. Any of them is a string somebody else
+        # chose, so core frames it as data and never as the message itself.
+        sender_name = (
+            getattr(author, "nick", None)
+            or getattr(author, "global_name", None)
+            or getattr(author, "name", None)
+        )
         # The allowlist is checked before the channel is resolved, so a
         # refused sender never adds a registry entry (PRD §3.2 default-deny;
         # #274, as #103 did for Signal and #77 for IRC).
@@ -507,6 +553,16 @@ class DiscordPlugin(TransportPlugin):
             channel = self._registry.get_or_create("discord", scope)
         else:
             channel = self._transient_channel(scope)
+        # A name for the model to read, never the key (#513). A thread carries
+        # its own title and the channel it hangs off, or "this is a thread in
+        # #home" would be unanswerable from inside the thread.
+        if not is_dm:
+            channel.name = _channel_name(message.channel)
+        # The name for this sender, learned here and read back by core when the
+        # turn is built (#513). A cache of what the transport has seen, so a
+        # rename is picked up on the message that carries it.
+        if sender_name:
+            remember_sender_name(channel.sender_names, sender, sender_name)
 
         # Typing only ever applies to an allowlisted sender -- others get no
         # sign the bot is live. on_message still fires so the real

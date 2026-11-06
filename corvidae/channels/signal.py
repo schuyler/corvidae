@@ -8,10 +8,13 @@ signal-cli itself.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
@@ -22,6 +25,29 @@ from corvidae.channels._registers import shipped_register
 from corvidae.outbound import OutboundMessage, OutboundProgress
 
 logger = logging.getLogger("corvidae.signal_plugin")
+
+
+# Signal attachment types (protobuf enum AttachmentType).
+ATT_IMAGE = 1
+ATT_AUDIO = 2
+ATT_CONTACT = 3
+ATT_VIDEO = 4
+ATT_DOCUMENT = 5
+ATT_GIF = 6
+ATT_STICKER = 7
+
+# Types we download to disk (the rest are surfaced as metadata only).
+_DOWNLOADABLE_TYPES = {ATT_IMAGE, ATT_GIF}
+
+ATTACHMENT_TYPE_NAMES = {
+    ATT_IMAGE: "image",
+    ATT_AUDIO: "audio",
+    ATT_CONTACT: "contact",
+    ATT_VIDEO: "video",
+    ATT_DOCUMENT: "document",
+    ATT_GIF: "gif",
+    ATT_STICKER: "sticker",
+}
 
 # How often the per-channel typing-indicator refresh loop re-sends "typing"
 # while a turn is outstanding. Signal clients expire an indicator after
@@ -49,6 +75,13 @@ ALIAS_RESOLUTION_WAIT_SECONDS = 5.0
 # to `send`: a send that times out may have been delivered, and giving up on
 # it would change delivery semantics rather than only liveness (#413).
 LIVENESS_RPC_TIMEOUT = 10.0
+# Sizing note: LIVENESS_RPC_TIMEOUT is 10s because it covers typing
+# indicators and read receipts, which must be snappy. An attachment
+# download is a different beast: a 10 MB image over a slow mobile link
+# can legitimately exceed 10s, and the user gets [image: download failed]
+# for a message that would have arrived. 60s is generous without
+# imposing a meaningful head-of-line delay on messages queued behind it.
+ATTACHMENT_DOWNLOAD_TIMEOUT = 60.0
 
 # Connection retry backoff ladder -- the same one IRCClient uses.
 _INITIAL_BACKOFF = 10
@@ -81,6 +114,8 @@ class SignalPlugin(TransportPlugin):
         self._account: Optional[str] = None
         self._allow: set[str] = set()
         self._message_chunk_size: int = 2000
+        self._attachment_dir: Path = Path("state/signal-attachments")
+        self._max_attachment_size: int = 10 * 1024 * 1024
 
         # Connection state.
         self._connect_task: Optional[asyncio.Task] = None
@@ -161,6 +196,9 @@ class SignalPlugin(TransportPlugin):
         self._account = account
         self._allow = set(allow)
         self._message_chunk_size = signal_config.get("message_chunk_size", 2000)
+        attachment_dir = signal_config.get("attachment_dir", "state/signal-attachments")
+        self._attachment_dir = Path(attachment_dir)
+        self._max_attachment_size = signal_config.get("max_attachment_size", 10 * 1024 * 1024)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -407,15 +445,14 @@ class SignalPlugin(TransportPlugin):
             logger.debug("signal: ignoring group message")
             return
 
-        # Rule 4: text must be non-empty after attachments are dropped.
-        # Reactions, quotes, edits, and remote deletes all fall out here
-        # since none of them carry a "message" field.
-        attachments = data_message.get("attachments")
-        if attachments:
-            logger.debug("signal: dropping %d attachment(s)", len(attachments))
-        text = data_message.get("message")
-        if not text:
-            logger.debug("signal: ignoring envelope with no text content")
+        # Rule 4: text must be non-empty, or there must be a downloadable
+        # attachment. Reactions, quotes, edits, and remote deletes all fall
+        # out here since none of them carry a "message" field.
+        attachments = data_message.get("attachments") or []
+        text = data_message.get("message") or ""
+
+        if not text and not attachments:
+            logger.debug("signal: ignoring envelope with no content")
             return
 
         source_uuid = envelope.get("sourceUuid")
@@ -424,15 +461,37 @@ class SignalPlugin(TransportPlugin):
             return
 
         timestamp = envelope.get("timestamp", data_message.get("timestamp"))
-        # The allowlist is checked before the channel is resolved, so a
-        # refused sender never adds an entry to the registry (PRD §3.2.6,
-        # issue #103): anyone who knows the number could otherwise grow it
-        # by one channel per distinct ACI.
+        # The allowlist is checked before the channel is resolved AND before
+        # any attachment download, so a refused sender never adds an entry
+        # to the registry (PRD §3.2.6, issue #103) and never triggers a
+        # disk write: anyone who knows the number could otherwise grow the
+        # registry by one channel per distinct ACI and fill the disk with
+        # unsolicited files.
         allowed = await self._is_allowed(source_uuid)
         if allowed:
             channel = await self._resolve_channel(source_uuid, source_number)
         else:
             channel = self._transient_channel(source_uuid)
+
+        # Surface attachments: download images to disk for allowed senders,
+        # note metadata only for everyone else.
+        attachment_notes: list[str] = []
+        for att in attachments:
+            att_type = att.get("type", 0)
+            type_name = ATTACHMENT_TYPE_NAMES.get(att_type, f"type{att_type}")
+            if att_type in _DOWNLOADABLE_TYPES and allowed:
+                path = await self._download_attachment(envelope, att)
+                if path is not None:
+                    attachment_notes.append(f"[{type_name}: {path}]")
+                else:
+                    attachment_notes.append(f"[{type_name}: download failed]")
+            else:
+                attachment_notes.append(f"[{type_name} attached]")
+
+        if attachment_notes:
+            prefix = "\n".join(attachment_notes)
+            text = f"{prefix}\n{text}" if text else prefix
+
         text = self._maybe_prefix_stale(text, timestamp)
 
         # Typing and the read receipt only ever apply to an authorized
@@ -462,6 +521,95 @@ class SignalPlugin(TransportPlugin):
                 if self._pop_pending(channel, trace_id) is not None:
                     await self._decrement_outstanding(channel)
             self._admitted.discard(trace_id)
+
+
+    async def _download_attachment(
+        self,
+        envelope: dict,
+        attachment: dict,
+    ) -> Path | None:
+        """Download a signal-cli attachment to disk via getAttachment RPC.
+
+        Returns the path on success, None on any failure. The caller
+        (which has already passed the allowlist check) surfaces the
+        result as a note in the message text.
+        """
+        att_id = attachment.get("id")
+        if not att_id:
+            logger.warning(
+                "signal: attachment has no id, refusing download; "
+                "attachment keys: %s", sorted(attachment.keys()),
+            )
+            return None
+
+        recipient = envelope.get("sourceNumber") or envelope.get("sourceUuid")
+        if not recipient:
+            logger.warning("signal: no recipient for getAttachment RPC")
+            return None
+
+        params = {"id": str(att_id), "recipient": str(recipient)}
+        try:
+            result = await asyncio.wait_for(
+                self._send_rpc("getAttachment", params),
+                ATTACHMENT_DOWNLOAD_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("signal: getAttachment RPC timed out after %ss", ATTACHMENT_DOWNLOAD_TIMEOUT)
+            return None
+        except Exception:
+            logger.exception("signal: getAttachment RPC failed")
+            return None
+
+        if not result or "data" not in result:
+            logger.warning("signal: getAttachment response has no data")
+            return None
+
+        try:
+            raw = base64.b64decode(result["data"], validate=True)
+        except Exception:
+            logger.exception("signal: attachment data is not valid base64")
+            return None
+
+        if len(raw) > self._max_attachment_size:
+            logger.warning(
+                "signal: attachment %s is %d bytes, exceeds %d byte cap",
+                att_id, len(raw), self._max_attachment_size,
+            )
+            return None
+
+        # Extension: from the incoming attachment's filename field (not the
+        # RPC response, which carries only base64 data). Sanitised to a
+        # safe suffix to prevent path traversal via a crafted filename.
+        _SAFE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,10}")
+        incoming_name = attachment.get("filename") or ""
+        suffix = ""
+        if "." in incoming_name:
+            candidate = incoming_name[incoming_name.rindex("."):].lower()
+            if _SAFE_SUFFIX.fullmatch(candidate):
+                suffix = candidate
+
+        # Ensure the directory exists (blocking I/O off the event loop).
+        await asyncio.to_thread(self._attachment_dir.mkdir, parents=True, exist_ok=True)
+
+        # Filename: timestamp-type-id to avoid collisions.
+        ts = envelope.get("timestamp", 0)
+        att_type = attachment.get("type", 0)
+        filename = f"{ts}-{att_type}-{att_id}{suffix}"
+        path = self._attachment_dir / filename
+
+        # Belt and braces: assert the resolved path is under the attachment dir.
+        if not path.resolve().is_relative_to(self._attachment_dir.resolve()):
+            logger.warning("signal: resolved path %s escapes attachment dir, refusing", path)
+            return None
+
+        try:
+            await asyncio.to_thread(path.write_bytes, raw)
+        except OSError:
+            logger.exception("signal: cannot write attachment to %s", path)
+            return None
+
+        logger.info("signal: downloaded attachment to %s (%d bytes)", path, len(raw))
+        return path
 
     def _pop_pending(self, channel: Channel, trace_id: str) -> int | None:
         """Remove and return a message's pending receipt timestamp, or None
