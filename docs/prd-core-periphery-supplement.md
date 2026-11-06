@@ -306,9 +306,10 @@ its tests pass; until then they are proposals.
    while the core is focused elsewhere waits until the core turns to it.
    Two backstops keep that from becoming a stall. Holding a context out
    is a deferral, so it lapses at that queue's latency bound (base PRD
-   §3.13.5, §3.13.7). And the core's own residency never depends on a
-   core turn: a notification for a paged-out core pages it in through
-   the lease order, which calls no model.
+   §3.13.5, §3.13.7). And the core itself is the exception to waiting:
+   work on the core's own queue pages it in through the lease order,
+   which calls no model, so the core needs no turn to decide to come
+   back; the turn that follows handles the work.
 
 ### 3.4 Escalation
 
