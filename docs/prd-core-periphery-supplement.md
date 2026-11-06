@@ -733,6 +733,14 @@ answer:
     daemon's core as a peripheral? That needs communication between
     processes, which the base PRD does not provide.
 
+14. **Overlap between core and peripheral memories.** Each context
+    consolidates its own window (§3.7.1), so a peripheral exchange and
+    the core's decision about it are consolidated separately. Do the two
+    yield near-duplicate memories that base PRD §3.7 Memory's merge
+    would fold together? The working expectation is that they do not:
+    core consolidation is slower and covers more conceptual and temporal
+    ground than peripheral consolidation. Measure before deciding.
+
 ## Appendix A: Design ideas and research notes
 
 This appendix collects research findings and design ideas that informed
