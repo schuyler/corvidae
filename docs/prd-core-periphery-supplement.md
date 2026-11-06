@@ -665,8 +665,9 @@ answer:
 1. **KV swap policy.** What triggers a page-in/page-out? How much to keep
    in RAM vs disk? Swap costs need measuring before the policy is set.
 
-2. **Escalation trigger tuning.** The message-type rules + confidence
-   signal combination needs to be calibrated. What's the right threshold?
+2. **Escalation detection.** How is the escalation boundary detected and
+   calibrated? A.3's rules-plus-confidence design is one candidate; the
+   outcome log's miss and false-alarm rates (§3.4.5) are the measure.
 
 3. **System One prompt design.** The initial prompt needs to be written.
    The telegraphic thinking research (Sketch-of-Thought, token budgets)
@@ -682,8 +683,8 @@ answer:
    tiny. If it needs the full conversation history, the KV cache grows.
 
 6. **Model server levers.** How the tiers and operations in A.2 map onto
-   llama-server's features (A.4), and which of them the kernel drives
-   versus the core.
+   llama-server's features (A.4), as the slot-management plugin's
+   operations (§3.3.6).
 
 7. **Channel-to-peripheral mapping.** One peripheral per channel, or can
    a peripheral serve multiple channels?
@@ -698,9 +699,11 @@ answer:
    The full files are large; a compressed version would be cheaper but
    might lose nuance.
 
-10. **Fork semantics.** What exactly is a fork in corvidae terms? Is it a
-    new context, a subagent, a checkpointed branch? The fork pattern
-    (§3.5) needs to be mapped onto corvidae's existing primitives.
+10. **Long-lived fork mechanics.** §3.5 defines the two kinds of fork
+    and their outcomes. Open: how a long-lived fork maps onto the
+    kernel's existing primitives (its own queue, its rows in
+    `message_log` hidden from the parent, the join report as a one-shot
+    fork of its window).
 
 11. **Failure modes.** What happens when the periphery fails to
     escalate, escalates unnecessarily, the core is busy, a peripheral's
