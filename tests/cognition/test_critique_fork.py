@@ -55,6 +55,24 @@ async def test_each_lens_forks(tmp_path):
     assert outcome["objections"] == 2
 
 
+async def test_stylistic_outcome_carries_objection_detail(tmp_path):
+    """The envelope stores the objection objects, not just their count."""
+    agent = FakeForkAgent({"critique"}, text=FORK_VERDICT)
+    env, outcome = await _run(tmp_path, agent, ["predictive"])
+    assert outcome["objections"] == 1
+    assert outcome["detail"] == [
+        {"claim": "it was Tuesday", "objection": "you said Monday",
+         "lens": "predictive"}]
+
+
+async def test_empty_stylistic_outcome_has_no_detail(tmp_path):
+    """The detail key exists only when there is something to store."""
+    agent = FakeForkAgent({"critique"}, text='{"objections": []}')
+    env, outcome = await _run(tmp_path, agent, ["predictive"])
+    assert outcome["objections"] == 0
+    assert "detail" not in outcome
+
+
 def _warnings(caplog) -> list[str]:
     """Messages of the WARNING records the critique plugin logged."""
     return [r.getMessage() for r in caplog.records
@@ -397,7 +415,10 @@ async def test_one_unsupported_claim_of_three_is_one_objection(tmp_path):
             f"[provenance] {_claims(3)[1]['claim']} \u2014 nothing says so"]
         outcomes = await _read_outcomes(env.db, "kp")
         assert outcomes["provenance"] == {
-            "claims": 3, "candidates": 0, "supported": 2, "objections": 1}
+            "claims": 3, "candidates": 0, "supported": 2, "objections": 1,
+            "detail": [{"claim": _claims(3)[1]["claim"],
+                        "objection": "nothing says so",
+                        "lens": "provenance"}]}
     finally:
         await _teardown(env)
 
@@ -419,6 +440,21 @@ async def test_all_supported_records_the_outcome_and_registers_nothing(tmp_path)
         outcomes = await _read_outcomes(env.db, "kp")
         assert outcomes["provenance"] == {
             "claims": 3, "candidates": 0, "supported": 3, "objections": 0}
+    finally:
+        await _teardown(env)
+
+
+async def test_unsupported_provenance_outcome_carries_detail(tmp_path):
+    """The stored objection quotes the recorded claim, not the model's echo."""
+    env, agent = await _verdict_run(
+        tmp_path, _verdicts(_v(1), _v(2, reason="nothing says so",
+                              supported=False)), n=2)
+    try:
+        outcomes = await _read_outcomes(env.db, "kp")
+        assert outcomes["provenance"]["objections"] == 1
+        assert outcomes["provenance"]["detail"] == [
+            {"claim": _claims(2)[1]["claim"], "objection": "nothing says so",
+             "lens": "provenance"}]
     finally:
         await _teardown(env)
 

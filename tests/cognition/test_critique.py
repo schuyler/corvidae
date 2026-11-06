@@ -929,7 +929,10 @@ class TestProvenanceCritic:
             assert call["attribution"]["stage"] == "critique"
             assert env.stub.chat_calls == []
             outcomes = await _read_outcomes(env.db, "kp")
-            assert outcomes["provenance"] == {"claims": 1, "candidates": 1, "supported": 0, "objections": 1}
+            assert outcomes["provenance"] == {
+                "claims": 1, "candidates": 1, "supported": 0, "objections": 1,
+                "detail": [{"claim": "the quarterly audit deadline is Thursday",
+                            "objection": "reason 1", "lens": "provenance"}]}
         finally:
             await _teardown(env)
 

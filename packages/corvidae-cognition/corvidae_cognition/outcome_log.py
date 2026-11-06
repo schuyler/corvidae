@@ -379,6 +379,53 @@ def _scrub_past_claims(appraisal_json: str | None, tombstone: str) -> str | None
     return json.dumps(appraisal)
 
 
+def _scrub_outcomes_detail(outcomes_json: str | None, tombstone: str) -> str | None:
+    """Return outcomes JSON with detail[*].claim and detail[*].objection
+    tombstoned, or None when there is nothing to change.
+
+    The critique stores objection objects (claim text + reason) in the
+    outcomes envelope's provenance.detail and critique.detail lists.
+    Redacting a message must reach that text (PRD \u00a73.7 Memory 8:
+    redact cascades to every derived surface). Counts and lens names
+    survive; the words do not.
+
+    No outcomes, no detail, or detail already tombstoned \u2192 None.
+    """
+    if outcomes_json is None:
+        return None
+    try:
+        outcomes = json.loads(outcomes_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(outcomes, dict):
+        return None
+
+    changed = False
+    for section in ("provenance", "critique"):
+        detail = (outcomes.get(section) or {}).get("detail")
+        if not detail or not isinstance(detail, list):
+            continue
+        scrubbed = []
+        for entry in detail:
+            if not isinstance(entry, dict):
+                scrubbed.append(entry)
+                continue
+            e = dict(entry)
+            if e.get("claim") and e["claim"] != tombstone:
+                e["claim"] = tombstone
+                changed = True
+            if e.get("objection") and e["objection"] != tombstone:
+                e["objection"] = tombstone
+                changed = True
+            scrubbed.append(e)
+        if changed:
+            outcomes[section]["detail"] = scrubbed
+
+    if not changed:
+        return None
+    return json.dumps(outcomes)
+
+
 async def redact_exchange_log(
     db: aiosqlite.Connection,
     channel_id: str,
@@ -422,14 +469,15 @@ async def redact_exchange_log(
         if row is not None:
             owners.add(row[0])
 
-    # Tombstone the owners' past_claims text. Sorted so the order is stable:
-    # a corrupt row must not hide the ones after it.
+    # Tombstone the owners' past_claims and outcomes detail text.
+    # Sorted so the order is stable: a corrupt row must not hide the ones
+    # after it.
     for trace_id in sorted(owners):
         async with db.execute(
             # CAST AS BLOB so invalid UTF-8 stored as TEXT fails at this
             # row's decode, not inside fetchone() (#232, #311).
-            "SELECT CAST(appraisal AS BLOB) FROM exchange_log "
-            "WHERE trace_id = ?",
+            "SELECT CAST(appraisal AS BLOB), CAST(outcomes AS BLOB) "
+            "FROM exchange_log WHERE trace_id = ?",
             (trace_id,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -439,7 +487,7 @@ async def redact_exchange_log(
         # exchanges (#311). The row is left as-is — only out-of-band writes
         # can produce one, and the operator is told where it is.
         try:
-            scrubbed = _scrub_past_claims(row[0], tombstone)
+            scrubbed_appraisal = _scrub_past_claims(row[0], tombstone)
         except (ValueError, TypeError, RecursionError, AttributeError,
                 KeyError):
             logger.warning(
@@ -450,15 +498,34 @@ async def redact_exchange_log(
                 exc_info=True,
                 extra={"channel": channel_id, "trace_id": trace_id},
             )
-            continue
-        if scrubbed is None:
+            scrubbed_appraisal = None
+        try:
+            scrubbed_outcomes = _scrub_outcomes_detail(row[1], tombstone)
+        except (ValueError, TypeError, RecursionError, AttributeError,
+                KeyError):
+            logger.warning(
+                "skipping corrupt outcomes for exchange %s on channel %s; "
+                "its detail is left unscrubbed — inspect or correct "
+                "the row",
+                trace_id, channel_id,
+                exc_info=True,
+                extra={"channel": channel_id, "trace_id": trace_id},
+            )
+            scrubbed_outcomes = None
+        if scrubbed_appraisal is None and scrubbed_outcomes is None:
             continue
         changed.add(trace_id)
         if not dry_run:
-            await db.execute(
-                "UPDATE exchange_log SET appraisal = ? WHERE trace_id = ?",
-                (scrubbed, trace_id),
-            )
+            if scrubbed_appraisal is not None:
+                await db.execute(
+                    "UPDATE exchange_log SET appraisal = ? WHERE trace_id = ?",
+                    (scrubbed_appraisal, trace_id),
+                )
+            if scrubbed_outcomes is not None:
+                await db.execute(
+                    "UPDATE exchange_log SET outcomes = ? WHERE trace_id = ?",
+                    (scrubbed_outcomes, trace_id),
+                )
 
     # Drop every snapshot in the channel from the first redacted id on.
     snapshot_where = (
