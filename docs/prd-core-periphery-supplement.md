@@ -508,7 +508,9 @@ thought, or to respond to an escalation.
 
 1. All contexts (core and peripherals) perform:
    - **Consolidation:** Converting raw conversation logs into narrative
-     memory (base PRD §3.7 Memory).
+     memory (base PRD §3.7 Memory). Each context consolidates its own
+     window, so the agent forms separate memories of a peripheral
+     exchange and of the core's decision about it.
    - **Compaction:** Summarizing old conversation to free up window space.
      Append-only constraint (base PRD principle 4): old content is
      summarized, not deleted.
@@ -525,6 +527,13 @@ thought, or to respond to an escalation.
    response with fresh eyes, not to adopt an outside reviewer's
    persona. The specific wording is a prompt-engineering decision, not
    an architectural requirement.
+
+4. Judgment of a reply (base PRD §3.8.2) runs in the window of the
+   context that wrote it. A reply the periphery composed from the core's
+   instruction is judged in the periphery's window, where the
+   instruction arrived, so critique can check both the reply and its
+   fidelity to the instruction. The instruction itself, and any reply
+   the core dictated, are judged in the core's window.
 
 ### 3.8 Model requirements
 
