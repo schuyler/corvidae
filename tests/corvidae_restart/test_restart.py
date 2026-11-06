@@ -517,3 +517,209 @@ async def test_read_boot_status_no_result_record(tmp_path):
     mode, abnormal = read_boot_status(f)
     assert mode == "normal"
     assert abnormal is True  # no result record found
+
+
+# --- real plugin manager: end-to-end restart path ---------------------------
+
+
+async def test_restart_end_to_end_plugin_manager(tmp_path):
+    """Full restart path through a real plugin manager.
+
+    Asserts: tool is registered, marker and history are written,
+    courtesy message is sent, killer is called with SIGTERM.
+    """
+    import signal as signal_mod
+    from unittest.mock import AsyncMock
+    from corvidae.hooks import create_plugin_manager
+    from corvidae.channel import ChannelRegistry, ChannelConfig
+    from corvidae_restart import RestartPlugin
+
+    pm = create_plugin_manager()
+    registry = ChannelRegistry()
+    registry.agent_defaults = {
+        "system_prompt": "test",
+        "max_context_tokens": 8000,
+        "reasoning_history": "drop",
+    }
+    pm.register(registry, name="registry")
+    pm.ahook.send = AsyncMock()
+
+    channel = registry.get_or_create("test", "scope1", config=ChannelConfig())
+
+    plugin = RestartPlugin()
+    pm.register(plugin, name="restart")
+
+    config = {
+        "_base_dir": str(tmp_path),
+        "restart": {
+            "home_channel": "test:scope1",
+            "min_uptime_seconds": 0,
+            "max_restarts": 10,
+            "window_seconds": 21600,
+            "preflight_timeout_seconds": 5,
+            "notify_delay_seconds": 0,
+        },
+        "plugins": {"disabled": []},
+    }
+
+    # Fake the agent plugin (dependency)
+    from unittest.mock import MagicMock
+    agent = MagicMock()
+    agent.tools = {}
+    pm.register(agent, name="agent")
+
+    await plugin.on_init(pm=pm, config=config)
+
+    # Fake preflight and killer
+    plugin._preflight = AsyncMock(return_value=(0, ""))
+    killed = []
+    plugin._killer = lambda pid, sig: killed.append((pid, sig))
+
+    # Set the human-message latch
+    plugin._user_message_seen = True
+    plugin._booted_mono = 0
+    plugin._monotonic = lambda: 200
+    plugin._wall = lambda: 1000000.0
+
+    # Register tools
+    tools = []
+    plugin.register_tools(tools)
+    assert len(tools) == 1
+    assert tools[0].name == "restart"
+
+    # Call the tool
+    from corvidae.tool import ToolContext
+    ctx = ToolContext(channel=channel, tool_call_id="tc-e2e-1", task_queue=None)
+
+    # The tool will call _restart, which will:
+    # 1. Pass the loop guard
+    # 2. Run preflight (faked: success)
+    # 3. Write marker
+    # 4. Append history
+    # 5. Send courtesy message
+    # 6. Call killer (faked: records the call)
+    # 7. Block on asyncio.Event().wait()
+    #
+    # We run it as a task and cancel it after the killer is called.
+    task = asyncio.create_task(plugin._restart("test restart", ctx))
+    
+    # Wait for the killer to be called
+    for _ in range(100):
+        if killed:
+            break
+        await asyncio.sleep(0.01)
+    
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    # Assert: killer was called with our PID and SIGTERM
+    assert len(killed) == 1
+    assert killed[0][1] == signal_mod.SIGTERM
+
+    # Assert: marker was written
+    marker_path = tmp_path / "state" / "restart.json"
+    assert marker_path.exists()
+    import json
+    marker = json.loads(marker_path.read_text())
+    assert marker["reason"] == "test restart"
+    assert marker["channel_id"] == channel.id
+    assert marker["tool_call_id"] == "tc-e2e-1"
+
+    # Assert: history has a "requested" entry
+    history_path = tmp_path / "state" / "restart-history.jsonl"
+    assert history_path.exists()
+    records = [json.loads(line) for line in history_path.read_text().splitlines() if line.strip()]
+    requested = [r for r in records if r.get("event") == "requested"]
+    assert len(requested) == 1
+    assert requested[0]["reason"] == "test restart"
+
+    # Assert: courtesy message was sent
+    assert pm.ahook.send.await_count >= 1
+    send_calls = pm.ahook.send.await_args_list
+    # Find the courtesy message (text starts with "Restarting:")
+    courtesy = [
+        c for c in send_calls
+        if hasattr(c.kwargs.get("event", None), "text")
+        and c.kwargs["event"].text.startswith("Restarting:")
+    ]
+    assert len(courtesy) == 1
+    assert "test restart" in courtesy[0].kwargs["event"].text
+
+
+async def test_deliver_notices_end_to_end(tmp_path):
+    """_deliver_notices reads the marker and notifies the channel."""
+    from unittest.mock import AsyncMock, MagicMock
+    from corvidae.hooks import create_plugin_manager
+    from corvidae.channel import ChannelRegistry, ChannelConfig
+    from corvidae_restart import RestartPlugin
+
+    pm = create_plugin_manager()
+    registry = ChannelRegistry()
+    registry.agent_defaults = {
+        "system_prompt": "test",
+        "max_context_tokens": 8000,
+        "reasoning_history": "drop",
+    }
+    pm.register(registry, name="registry")
+
+    channel = registry.get_or_create("test", "scope1", config=ChannelConfig())
+
+    plugin = RestartPlugin()
+    pm.register(plugin, name="restart")
+
+    config = {
+        "_base_dir": str(tmp_path),
+        "restart": {
+            "home_channel": "test:scope1",
+            "notify_delay_seconds": 0,
+        },
+        "plugins": {"disabled": []},
+    }
+
+    agent = MagicMock()
+    agent.tools = {"some_tool": True}  # non-empty so _wait_until_ready passes
+    pm.register(agent, name="agent")
+
+    pm.ahook.on_notify = AsyncMock()
+
+    await plugin.on_init(pm=pm, config=config)
+    plugin._booted_wall = 1005.0
+    plugin._wall = lambda: 1005.0
+
+    # Write a marker as if a restart had been requested before "crash"
+    import json
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    marker = {
+        "requested_at": 1000.0,
+        "reason": "config change",
+        "channel_id": channel.id,
+        "tool_call_id": "tc-deliver-1",
+        "pid": 12345,
+    }
+    (state_dir / "restart.json").write_text(json.dumps(marker))
+
+    # Run _deliver_notices
+    await plugin._deliver_notices()
+
+    # Assert: on_notify was called with the right args
+    assert pm.ahook.on_notify.await_count == 1
+    call = pm.ahook.on_notify.await_args
+    assert call.kwargs["source"] == "restart"
+    assert call.kwargs["tool_call_id"] == "tc-deliver-1"
+    assert "Restart complete" in call.kwargs["text"]
+    assert "config change" in call.kwargs["text"]
+    assert "5s" in call.kwargs["text"]  # downtime
+
+    # Assert: marker was consumed
+    assert not (state_dir / "restart.json").exists()
+
+    # Assert: history has a "delivered" entry
+    history_path = state_dir / "restart-history.jsonl"
+    records = [json.loads(line) for line in history_path.read_text().splitlines() if line.strip()]
+    delivered = [r for r in records if r.get("event") == "delivered"]
+    assert len(delivered) == 1
+    assert delivered[0]["reason"] == "config change"
