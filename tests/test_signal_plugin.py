@@ -555,42 +555,37 @@ class TestInboundFiltering:
         finally:
             await _stop_plugin(h)
 
-    async def test_attachment_only_message_is_surfaced(self, tmp_path):
-        """An image-only message (no caption) is now surfaced with an
-        attachment note, not dropped. The fake server returns None for the
-        attachment RPC, so the note reads 'download failed'."""
+    async def test_attachment_only_message_is_dropped_without_error(self, tmp_path):
         h = await _start_plugin(tmp_path)
         try:
             await h.server.push_notification(
                 "receive",
                 make_data_envelope(
                     source_uuid=AUTH_ACI, source_number=None, text=None,
-                    attachments=[{"id": 0, "type": 1, "contentType": "image/jpeg"}],
+                    attachments=[{"id": "att-1", "contentType": "image/jpeg"}],
                 ),
+            )
+            await h.server.push_notification(
+                "receive", make_data_envelope(source_uuid=AUTH_ACI, source_number=None, text="after the photo")
             )
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             assert h.pm.ahook.on_message.await_count == 1
-            text = h.pm.ahook.on_message.await_args.kwargs["text"]
-            assert "[image:" in text
-            assert "download failed" in text
+            assert h.pm.ahook.on_message.await_args.kwargs["text"] == "after the photo"
         finally:
             await _stop_plugin(h)
 
-    async def test_attachment_plus_text_includes_attachment_note(self, tmp_path):
-        """An image + caption message includes the attachment note prefix."""
+    async def test_attachment_plus_text_processes_the_text(self, tmp_path):
         h = await _start_plugin(tmp_path)
         try:
             await h.server.push_notification(
                 "receive",
                 make_data_envelope(
                     source_uuid=AUTH_ACI, source_number=None, text="check this out",
-                    attachments=[{"id": 0, "type": 1, "contentType": "image/png"}],
+                    attachments=[{"id": "att-2", "contentType": "image/png"}],
                 ),
             )
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
-            text = h.pm.ahook.on_message.await_args.kwargs["text"]
-            assert "[image:" in text
-            assert "check this out" in text
+            assert h.pm.ahook.on_message.await_args.kwargs["text"] == "check this out"
         finally:
             await _stop_plugin(h)
 
