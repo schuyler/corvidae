@@ -435,6 +435,13 @@ class TestConfig:
         with pytest.raises(ValueError, match="allow"):
             await _start_plugin(discord_overrides={"allow": bad}, wait_connect=False)
 
+    @pytest.mark.parametrize("bad", ["false", 0, None])
+    async def test_require_mention_not_a_bool_raises(self, bad):
+        """`require_mention` must be a bool; the error names the key and the remedy."""
+        with pytest.raises(ValueError, match="require_mention") as excinfo:
+            await _start_plugin(discord_overrides={"require_mention": bad}, wait_connect=False)
+        assert "true or false" in str(excinfo.value)
+
     @pytest.mark.parametrize("bad", [0, 99, 2001, "2000", 100.5, None])
     async def test_chunk_size_out_of_range_raises(self, bad):
         """message_chunk_size must be an int in [100, 2000]."""
@@ -651,6 +658,20 @@ class TestInboundFiltering:
         finally:
             await h.plugin.on_stop()
 
+    async def test_require_mention_false_admits_unmentioned_guild_message(self):
+        """require_mention: false: an unmentioned guild message from an allowed
+        user is processed with its text intact; a mention is still stripped."""
+        h = await _start_plugin(discord_overrides={"require_mention": False})
+        try:
+            await _deliver(
+                h,
+                make_message("just chatting"),
+                make_message(f"<@{BOT_ID}> hi", mentions=[BOT_MENTION]),
+            )
+            assert _delivered(h) == ["just chatting", "hi"]
+        finally:
+            await h.plugin.on_stop()
+
     async def test_mention_of_someone_else_dropped(self):
         """R7: mentioning another user is not addressing the bot."""
         h = await _start_plugin()
@@ -841,6 +862,23 @@ class TestRefusedSenderChannel:
             ch = h.on_message.await_args_list[0].kwargs["channel"]
             assert ch is live
             assert h.registry.get(f"discord:{CHAN_ID}") is live
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_require_mention_false_still_refuses_unlisted_sender(self):
+        """require_mention: false widens what reaches the allowlist gate, not
+        who passes it: an unmentioned guild message from a sender outside
+        discord.allow is vetoed and leaves no registry entry."""
+        h = await _start_plugin(discord_overrides={"require_mention": False})
+        try:
+            # An unlisted user chats in a server channel without mentioning the bot.
+            await _deliver(h, make_message("psst", author_id=OTHER_ID))
+            ch = h.on_message.await_args_list[0].kwargs["channel"]
+            # The gate refuses it and nothing is registered for the channel.
+            assert await h.plugin.should_process_message(
+                channel=ch, sender=str(OTHER_ID), text="psst", trace_id="tid",
+            ) is False
+            assert h.registry.get(f"discord:{CHAN_ID}") is None
         finally:
             await h.plugin.on_stop()
 
@@ -1455,6 +1493,16 @@ class TestRealClient:
         client = DiscordPlugin(create_plugin_manager())._make_client()
         assert isinstance(client, discord.Client)
         assert client.intents.message_content is False
+
+    async def test_require_mention_false_requests_message_content_intent(self):
+        """require_mention: false requests the privileged intent."""
+        h = await _start_plugin(discord_overrides={"require_mention": False})
+        try:
+            # The class's real factory, bypassing the instance-level fake.
+            client = DiscordPlugin._make_client(h.plugin)
+            assert client.intents.message_content is True
+        finally:
+            await h.plugin.on_stop()
 
     async def test_client_on_message_reaches_on_message_hook(self):
         """The real client's on_message feeds the plugin's inbound queue."""

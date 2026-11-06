@@ -3110,7 +3110,10 @@ content for DMs and for messages that mention the bot, and those are the
 only messages this transport processes. If a guild message mentions the
 bot and arrives with empty content anyway, the transport logs a WARNING and
 drops it. That should not happen, and the warning is how a change on
-Discord's side would show up.
+Discord's side would show up. With `discord.require_mention: false` the
+client also requests Message Content, the guild mention check is skipped,
+and the allowlist is the only gate; the bot's mention token is still
+stripped when present.
 
 **Inbound filtering.** A message is dropped if its author is a bot (this
 covers the bot's own messages and other bots', so two bots cannot talk each

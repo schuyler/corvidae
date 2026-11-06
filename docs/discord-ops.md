@@ -24,10 +24,13 @@ the first rough edge yourself, and file it.
    Application**. The name is what people see as the bot's name.
 2. Open the **Bot** page. A bot user already exists; there is nothing to
    add.
-3. Under **Privileged Gateway Intents**, leave everything off. corvidae does
-   not request the Message Content intent: Discord delivers message content
-   for DMs and for messages that @-mention the bot without it, and those are
-   the only messages corvidae processes. Turning it on does nothing useful.
+3. Under **Privileged Gateway Intents**, leave everything off unless you
+   mean to answer without a mention. By default corvidae does not request
+   the Message Content intent: Discord delivers message content for DMs and
+   for messages that @-mention the bot without it, and those are the only
+   messages corvidae processes. Turning it on
+   does nothing unless you also set `require_mention: false` (see
+   [Answering without a mention](#answering-without-a-mention-experimental)).
 4. Decide whether the bot should be installable by anyone. **Public Bot**
    is on by default; if you do not want strangers inviting it elsewhere,
    switch it off. The invite link below keeps working for you.
@@ -125,10 +128,11 @@ bot, and it will not tell them so.
 ## How the bot behaves
 
 - **DMs:** every message from an allowlisted user is answered.
-- **Servers and threads:** the bot answers only messages that @-mention it
-  directly. `@everyone`, `@here`, and role pings do not count. The mention
-  is stripped before the model sees the text. Messages that do not mention
-  it are not even delivered with content, and are ignored.
+- **Servers and threads:** by default the bot answers only messages that
+  @-mention it directly. `@everyone`, `@here`, and role pings do not count.
+  The mention is stripped before the model sees the text. Messages that do
+  not mention it are not even delivered with content, and are ignored.
+  `require_mention: false` changes this; see below.
 - **Other bots, and itself:** ignored.
 - **Typing indicator:** shown while a reply is owed, and only for allowed
   users. Any reply clears it, even if another message is still waiting for
@@ -140,6 +144,38 @@ bot, and it will not tell them so.
   Outbound is text only.
 - **Reasoning and tool-status** messages are not sent to Discord.
 
+## Answering without a mention (experimental)
+
+To have the bot answer every message from an allowed user in a server
+channel, with no @-mention:
+
+1. In the Developer Portal, open the **Bot** page and turn on **Message
+   Content Intent** under **Privileged Gateway Intents**.
+2. Add `require_mention: false` to the `discord:` block and restart.
+
+```yaml
+discord:
+  allow:
+    - 123456789012345678
+  require_mention: false
+```
+
+What to expect:
+
+- Every message from an allowlisted user in any channel the bot can see
+  reaches the agent, whether or not it was meant for the bot. Narrow the
+  channels with the bot's role permissions (View Channels) in Discord.
+- Everyone else is refused as before, before anything is stored. Each
+  refused message logs `discord: rejected message from unauthorized sender
+  <id>` at INFO, so a busy channel makes a busy log.
+- The agent can decline to reply: with the `silence` plugin loaded, a turn
+  that ends in `silence` (the `NO_REPLY` convention) sends nothing, which is
+  how it stays quiet in a conversation that is not addressed to it.
+- A mention token is still stripped from the text.
+- If the intent is switched off in the portal, Discord refuses the
+  connection with `PrivilegedIntentsRequired`; the message names the fix and
+  appears in the usual `discord: connection error, retrying` log line.
+
 ## Troubleshooting
 
 The bot is online but never answers. There are three likely causes, and corvidae
@@ -149,8 +185,9 @@ cannot tell you which from Discord's side. Check the log (INFO or lower):
   is not in `discord.allow`. Add the id from the log line, as a number, and
   restart.
 - Nothing logged at all in a server channel means the message did not
-  mention the bot. Mention it with the autocomplete (typing `@name` as
-  plain text does not make a mention), or DM it.
+  mention the bot (and `require_mention` is not `false`). Mention it with
+  the autocomplete (typing `@name` as plain text does not make a mention),
+  or DM it.
 - `mention in channel <id> arrived with empty content; dropping` at WARNING
   means Discord sent a mention without text. Discord delivers the content
   of messages that mention the bot even without the Message Content
