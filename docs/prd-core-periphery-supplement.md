@@ -604,9 +604,9 @@ respond to an escalation.
    *Rationale:* Some exchanges (a complex multi-turn conversation the
    periphery can't handle) need the core itself.
 
-7. Base PRD §3.8 governs one-shot forks only (§4). The framework MUST
-   let the core choose, when it forks, one of two ways to run a
-   long-lived fork:
+7. Base PRD §3.8 and §3.13.4 govern one-shot forks only (§4). The
+   framework MUST let the core choose, when it forks, one of two ways to
+   run a long-lived fork:
    - **Yield.** The core's main context pauses and yields to the fork.
      The framework MUST run the fork under the core's lease, extending
      the core's warm prefix, and MUST deliver the core's notifications
@@ -784,7 +784,8 @@ supplement amends them once accepted:
   lose the heartbeat's critique exemption, amending base §3.7
   Heartbeat and §3.7 Critique 3 (§3.1.2);
 - goals sit in a pinned block with tail updates (base §3.7 Goals; §3.6);
-- base §3.8 governs one-shot forks only; long-lived forks follow §3.5;
+- base §3.8 and §3.13.4 govern one-shot forks only; long-lived forks
+  follow §3.5;
 - pauses do not lapse, channel queues have a fixed capacity for inbound
   messages, and the write-ahead log has a total cap on them, amending
   base §3.13.5, §3.13.6, §3.13.7, §3.13.9 and §3.4.8 (§3.3.7);

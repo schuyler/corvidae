@@ -54,15 +54,16 @@ base PRD say "base".
 
 4. **The agent pausing itself.** *Resolved:* the framework must not let
    the agent's own actions leave the core unable to receive work
-   (supplement §3.3.7). Original finding: base §3.13.7 guarantees the agent can't
-   pause itself into a state no turn can leave. Supplement §3.3.7 makes
-   pauses last until the core lifts them, and nothing stops the core's
-   own queue being paused.
+   (supplement §3.3.7). Original finding: base §3.13.7 guarantees the
+   agent can't pause itself into a state no turn can leave. Supplement
+   §3.3.7 makes pauses last until the core lifts them, and nothing stops
+   the core's own queue being paused.
 
-5. **Detached forks and leases.** Supplement §3.5.7 makes a detached
-   fork wait for its own lease; base §3.13.4 runs a fork under the
-   lease holding its prefix. §4 narrows base §3.8 to one-shot forks but
-   doesn't list §3.13.4.
+5. **Detached forks and leases.** *Resolved:* §4 now limits base
+   §3.13.4, like §3.8, to one-shot forks. Original finding: supplement
+   §3.5.7 makes a detached fork wait for its own lease; base §3.13.4
+   runs a fork under the lease holding its prefix. §4 narrows base §3.8
+   to one-shot forks but doesn't list §3.13.4.
 
 6. **The slot-management plugin calls no model** (supplement §3.3.6);
    base §3.13.7 allows a replacement scheduler to call one. Unlisted
