@@ -440,7 +440,11 @@ thought, or to respond to an escalation.
 2. The goal block is **pinned**: compaction is not allowed to touch it.
 
 3. The goal block is **rebuilt at each conversation boundary**
-   (compaction point) and **byte-stable between boundaries**.
+   (compaction point) and **byte-stable between boundaries**. A goal
+   created, changed or retired between boundaries is appended at the
+   tail as a CONTEXT entry that supersedes that goal's line in the block
+   (base PRD §3.7 Goals), so the core never acts on a stale goal list;
+   the next rebuild folds those entries into the block.
 
 4. The goal block **dictates the remaining history space**: its size
    determines how much conversation history can fit in the core's window.
@@ -448,9 +452,8 @@ thought, or to respond to an escalation.
 5. The goal block is the core's answer to "what should I be doing?"
    during idle. It is the real thing, not a proxy.
 
-6. Current measurement: 20 open goals → ~1,343 tokens (~1.6% of a typical
-   prompt). The requirement is that the goal block fits in a small,
-   bounded portion of the window with wide margin.
+6. The goal block fits in a small, bounded portion of the window with
+   wide margin (Appendix A.5).
 
 ### 3.7 Cognition: all contexts
 
@@ -730,6 +733,11 @@ README (`tools/server/README.md` in ggml-org/llama.cpp) as of
 - **Measurement:** each response's `timings` reports `cache_n` (prompt
   tokens reused from cache) and `prompt_n` (prompt tokens processed),
   which base PRD §3.13.10 already records.
+
+### A.5 Goal block size
+
+Current measurement: 20 open goals → ~1,343 tokens (~1.6% of a typical
+prompt).
 
 ---
 
