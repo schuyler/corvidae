@@ -7,7 +7,6 @@ dropped. Everything else here is the note wording and the size caps.
 
 from __future__ import annotations
 
-import base64
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -17,7 +16,11 @@ import pytest
 from corvidae.attachments import safe_suffix, save_attachment
 from corvidae.channels import discord as dmod
 from tests.test_discord_plugin import (
-    AUTH_ID, BOT_ID, OTHER_ID, FakeMessageable, _start_plugin, make_dm, make_message,
+    BOT_ID,
+    OTHER_ID,
+    FakeMessageable,
+    _start_plugin,
+    make_dm,
 )
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
@@ -39,10 +42,6 @@ class _Content:
         size = max(1, len(self._body) // self._chunks)
         for start in range(0, len(self._body), size):
             yield self._body[start:start + size]
-
-    async def read(self, n: int = -1) -> bytes:
-        # aiohttp's read(n) returns at most one buffered piece, not n bytes.
-        return self._body if n < 0 else self._body[: max(1, len(self._body) // self._chunks)]
 
 
 class _Resp:
@@ -300,11 +299,6 @@ class TestSharedHelper:
         assert not any(tmp_path.parent.glob("escape*"))
 
 
-def test_bytes_are_base64_safe_png():
-    """Guard: the fixture above is the PNG signature, not random bytes."""
-    assert base64.b64encode(PNG)[:6] == b"iVBORw"
-
-
 class TestOutboundArguments:
     """The tool is called by a model, so its arguments are untrusted too."""
 
@@ -389,5 +383,51 @@ class TestTruncation:
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
             assert text == "[image: download failed]"
             assert list(tmp_path.iterdir()) == []
+        finally:
+            await h.plugin.on_stop()
+
+
+class TestSuffixAndJail:
+    """The extension is ours to choose, and the root is a real jail."""
+
+    async def test_suffix_comes_from_the_content_type_not_the_name(self, tmp_path, fetches):
+        h = await _start_plugin(discord_overrides={"attachment_dir": str(tmp_path)})
+        try:
+            await h.plugin._handle_message(
+                make_dm("", attachments=[_att(filename="x.html", content_type="image/png")]), BOT_ID,
+            )
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert text.rstrip("]").endswith(".png")
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_relative_path_is_relative_to_the_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            dmod, "_sdk", lambda: SimpleNamespace(
+                File=lambda p: p, AllowedMentions=SimpleNamespace(none=lambda: "none"),
+            ),
+        )
+        h = await _start_plugin(discord_overrides={"send_attachment_root": str(tmp_path)})
+        channel = h.registry.get_or_create("discord", str(5151))
+        target = FakeMessageable()
+        h.plugin._messageable = AsyncMock(return_value=target)
+        try:
+            (tmp_path / "shot.png").write_bytes(PNG)
+            out = await h.plugin.send_attachment(channel.id, "shot.png")
+            assert "Sent shot.png" in out
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_a_symlink_out_of_the_root_is_refused(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dmod, "_sdk", lambda: SimpleNamespace())
+        h = await _start_plugin(discord_overrides={"send_attachment_root": str(tmp_path)})
+        channel = h.registry.get_or_create("discord", str(5252))
+        target = FakeMessageable()
+        h.plugin._messageable = AsyncMock(return_value=target)
+        try:
+            (tmp_path / "escape.png").symlink_to("/etc/passwd")
+            out = await h.plugin.send_attachment(channel.id, "escape.png")
+            assert "outside the allowed root" in out
+            assert target.sends == []
         finally:
             await h.plugin.on_stop()

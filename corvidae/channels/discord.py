@@ -31,17 +31,17 @@ import os
 import re
 from pathlib import Path
 from types import ModuleType
+from typing import Any, Optional
 
 import aiohttp
-from typing import Any, Optional
 
 from corvidae.attachments import save_attachment
 from corvidae.channel import Channel, ChannelRegistry
-from corvidae.channels.split import split_message
-from corvidae.trace import mint_trace_id
-from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.channels._registers import shipped_register
+from corvidae.channels.split import split_message
+from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress
+from corvidae.trace import mint_trace_id
 
 logger = logging.getLogger("corvidae.discord_plugin")
 
@@ -60,6 +60,16 @@ _DOWNLOAD_CHUNK_BYTES = 64 * 1024
 # How long one attachment download may take before it is given up on. Images
 # are small; this is a stuck-CDN guard, not a throughput target.
 ATTACHMENT_DOWNLOAD_TIMEOUT = 30.0
+
+# The extension we choose for a downloaded image, keyed by the content type
+# Discord asserts. A remote filename is only a fallback: the suffix decides how
+# the file is read later, so it should be ours.
+_IMAGE_SUFFIX = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
 
 # Attachment kinds we fetch and store. Everything else is named in the note and
 # left on Discord's CDN (video, audio, stickers): #521.
@@ -316,7 +326,7 @@ class DiscordPlugin(TransportPlugin):
         self._message_chunk_size: int = DISCORD_MESSAGE_LIMIT
         self._attachment_dir: Path = Path(DEFAULT_ATTACHMENT_DIR)
         self._max_attachment_size: int = DEFAULT_MAX_ATTACHMENT_SIZE
-        self._send_attachment_root: Path = Path.cwd()
+        self._send_attachment_root: Path = Path("state")
         self._require_mention: bool = True
         #: Per-channel overrides of the transport default (#512), keyed by the
         #: Discord channel id as a string. A thread looks up its parent's entry.
@@ -492,13 +502,13 @@ class DiscordPlugin(TransportPlugin):
         if send_root is not None and (not isinstance(send_root, str) or not send_root):
             raise ValueError(
                 "discord: config field 'send_attachment_root' must be a non-empty "
-                "path, or absent to use the working directory"
+                "path, or absent to use state/"
             )
 
         self._token = str(token)
         self._attachment_dir = Path(attachment_dir)
         self._max_attachment_size = max_size
-        self._send_attachment_root = Path(send_root) if send_root else Path.cwd()
+        self._send_attachment_root = Path(send_root) if send_root else Path("state")
         # Ids are compared as strings against str(author.id); YAML parses
         # them as ints.
         self._allow = {str(entry) for entry in allow}
@@ -786,7 +796,9 @@ class DiscordPlugin(TransportPlugin):
                             self._attachment_dir,
                             f"{message.id}-{index}",
                             filename=getattr(att, "filename", None),
+                            suffix=_IMAGE_SUFFIX.get(content_type, ""),
                             max_bytes=self._max_attachment_size,
+                            transport="discord",
                         )
                 except Exception:
                     # One odd file must not cost the message its text.
@@ -1107,7 +1119,10 @@ class DiscordPlugin(TransportPlugin):
             )
 
         root = self._send_attachment_root.resolve()
-        target_path = Path(path).resolve()
+        raw = Path(path)
+        # A relative path is relative to the root, which is what the docstring
+        # promises and what a reader of an error message expects.
+        target_path = (raw if raw.is_absolute() else root / raw).resolve()
         if not target_path.is_relative_to(root):
             return (
                 f"Could not send: {path!r} is outside the allowed root "
@@ -1133,6 +1148,8 @@ class DiscordPlugin(TransportPlugin):
         # other text: first chunk rides with the file, the rest follow it.
         chunks = [c for c in split_discord_message(caption, self._message_chunk_size) if c.strip()]
         try:
+            # discord.File opens the file synchronously; at the 10 MB cap that
+            # is a few milliseconds, so it stays on the loop.
             await messageable.send(
                 content=chunks[0] if chunks else None,
                 file=_sdk().File(str(target_path)),

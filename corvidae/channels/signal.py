@@ -11,7 +11,6 @@ import asyncio
 import base64
 import json
 import logging
-import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,11 +18,11 @@ from typing import Any, Optional
 
 from corvidae.attachments import save_attachment
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
-from corvidae.channels.split import split_message
-from corvidae.trace import mint_trace_id
-from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.channels._registers import shipped_register
+from corvidae.channels.split import split_message
+from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress
+from corvidae.trace import mint_trace_id
 
 logger = logging.getLogger("corvidae.signal_plugin")
 
@@ -577,6 +576,7 @@ class SignalPlugin(TransportPlugin):
             f"{envelope.get('timestamp', 0)}-{attachment.get('type', 0)}-{att_id}",
             filename=attachment.get("filename"),
             max_bytes=self._max_attachment_size,
+            transport="signal",
         )
         return path
 

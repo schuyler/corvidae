@@ -41,9 +41,16 @@ async def save_attachment(
     stem: str,
     *,
     filename: str | None = None,
+    suffix: str = "",
     max_bytes: int = DEFAULT_MAX_ATTACHMENT_SIZE,
+    transport: str = "attachment",
 ) -> Path | None:
     """Write ``data`` as ``directory/<stem><suffix>``, or return ``None``.
+
+    ``suffix`` wins over ``filename`` when given: a transport that knows the
+    content type should choose the extension itself rather than trust a remote
+    name. ``transport`` only labels the log lines, so ``journalctl | grep
+    signal`` keeps working.
 
     ``None`` means the payload was over ``max_bytes``, the path would have
     resolved outside ``directory``, or the write failed. All three are the
@@ -51,25 +58,26 @@ async def save_attachment(
     """
     if len(data) > max_bytes:
         logger.warning(
-            "attachment %s is %d bytes, over the %d byte cap", stem, len(data), max_bytes
+            "%s: attachment %s is %d bytes, over the %d byte cap",
+            transport, stem, len(data), max_bytes,
         )
         return None
 
-    path = directory / f"{stem}{safe_suffix(filename)}"
+    path = directory / f"{stem}{suffix or safe_suffix(filename)}"
     try:
         await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
         # The stem is built from ids the transport chose, so a separator in it
         # is a bug or an attack; refuse rather than trust it.
         if not path.resolve().is_relative_to(directory.resolve()):
-            logger.warning("resolved path %s escapes %s, refusing", path, directory)
+            logger.warning("%s: resolved path %s escapes %s, refusing", transport, path, directory)
             return None
         await asyncio.to_thread(path.write_bytes, data)
     except OSError:
-        logger.exception("cannot write attachment to %s", path)
+        logger.exception("%s: cannot write attachment to %s", transport, path)
         return None
 
     resolved = path.resolve()
-    logger.info("wrote attachment to %s (%d bytes)", resolved, len(data))
+    logger.info("%s: wrote attachment to %s (%d bytes)", transport, resolved, len(data))
     # Absolute: the path goes into a message text the agent may read from any
     # working directory, so a relative one would be a trap.
     return resolved

@@ -639,6 +639,7 @@ corvidae logs in as a Discord bot account. Creating the application, getting the
 | `discord.attachment_dir` | string | `state/discord-attachments` | Directory where images attached to inbound messages are written. Created on first download; files are not pruned automatically, so retention is the operator's responsibility. |
 | `discord.max_attachment_size` | integer | `10485760` (10 MB) | Largest single file, in bytes, in either direction. A larger inbound attachment is noted as `[image: download failed]`; a larger file passed to `send_attachment` is refused with an error. |
 | `discord.send_attachment_root` | string | `state` | The only directory tree the `send_attachment` tool may read from. A relative path is taken relative to this root, and anything resolving outside it is refused with an error naming the root. It is defence in depth, not a security boundary: `shell` and `read_file` are unjailed already, so widen it only as far as the agent needs. |
+
 ```yaml
 discord:
   token: "MTIz...your.bot.token"   # or leave out and set DISCORD_TOKEN

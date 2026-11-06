@@ -487,7 +487,8 @@ Per transport:
   `channels:`; those resolve forward to ACIs in one batched call after each
   connect, never at startup, and a failed resolution retries after the next
   connect. Non-`dataMessage` envelopes (including the account's own sync
-  traffic) are dropped; text that arrives with an attachment is processed;
+  traffic) are dropped; an attachment is downloaded for an allowlisted sender
+  and named in the text;
   backlog older than five minutes is prefixed with its send time. Typing
   starts on the first outstanding message and refreshes every 10 s; the
   read receipt is sent at processing start, not arrival. Notifications are
@@ -789,7 +790,12 @@ Per transport:
    what the agent said there. Nothing gates which channel a turn may speak
    on. What the agent says is not filtered by audience; the sensitivity
    capability, where the operator applies it, filters what enters a window
-   instead (§3.7 Trust). A limit on how many messages the agent starts on
+   instead (§3.7 Trust). A send may carry one file instead of text (or with
+   it), chosen by the model from a configured root directory and refused
+   outside it or above a configured size, both of which are transport
+   settings rather than gates on crossing channels. A file is not filtered by
+   audience either; the root is the only boundary, and it is defence in depth
+   because the unjailed file tools already outrank it. A limit on how many messages the agent starts on
    any one destination over a period is a restriction the operator can
    apply (principle 15); none applies unless set. It counts every message
    the agent starts, as opposed to the reply a turn owes the channel it
