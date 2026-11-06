@@ -321,13 +321,19 @@ its tests pass; until then they are proposals.
    the slot-management plugin bring the core back, so the core needs no
    turn to decide to return; the turn that follows handles the work.
 
-7. **Pausing and overflow.** This item amends base PRD §3.13.7 and
-   §3.13.9 once the supplement is accepted.
+7. **Pausing and overflow.** This item amends base PRD §3.13.5,
+   §3.13.7 and §3.13.9 once the supplement is accepted.
    - A paused channel stays paused until the core unpauses it; a pause
      does not lapse at a latency bound. The operator can unpause any
      channel at any time without going through a channel's queue (base
      PRD §3.13.7).
    - An active channel's queue behaves as base PRD §3.1 describes.
+     Among active queues, the slot-management plugin decides the order,
+     because it alone knows the cache resources and the cost of swapping
+     them: a queue keeps its head until it drains, and the next waiting
+     queue takes it then (drain-or-yield, base PRD §3.13.3). Base PRD
+     §3.13.5's yield at a latency bound does not apply; queues the core
+     leaves active share by draining in turn.
    - Every channel queue has a fixed capacity for inbound transport
      messages, set in operator config. Tool results, task completions,
      notes and escalations never count against it and are never
