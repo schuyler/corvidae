@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from corvidae.context import MessageType
 from corvidae.trace import mint_trace_id
 from tests.helpers import build_plugin_and_channel, drain
 
@@ -80,6 +81,10 @@ class TestAttributionRow:
         assert "schuyler" in text
         assert channel.scope in text
         assert "#home" in text
+
+        # Persisted as CONTEXT: that is what keeps it out of compaction's
+        # summary and out of memory consolidation.
+        assert attribution["_message_type"] == MessageType.CONTEXT
 
         # And the user turn itself is what the person typed, unchanged.
         assert rows[user_at]["content"] == "hello"

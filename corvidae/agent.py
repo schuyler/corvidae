@@ -1165,10 +1165,14 @@ class Agent(CorvidaePlugin):
 
         # The sender: id first when there is no name, because an id is at least
         # true, and the name is what a person would recognise.
+        # The id is transport-assigned and numeric on every transport today, but
+        # IRC nicks are the sender and may contain brackets, so it gets the same
+        # strip as a name rather than being trusted to stay well behaved.
+        sender_id = self._attribution_name(str(item.sender)) or str(item.sender)
         sender = (
-            f"sender: {sender_name} (id {item.sender})"
+            f"sender: {sender_name} (id {sender_id})"
             if sender_name is not None
-            else f"sender: id {item.sender}"
+            else f"sender: id {sender_id}"
         )
 
         # The channel: a DM scope is a key, not a name, so it says what it is

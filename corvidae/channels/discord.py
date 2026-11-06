@@ -231,9 +231,13 @@ def remember_sender_name(names: dict[str, str], sender: str, name: str) -> None:
 
     A channel people talk in all day would otherwise keep a name for every
     sender it has ever seen. The cache is a convenience for the next turn's
-    attribution, so the oldest entry goes when it is full (#513).
+    attribution, so the least recently seen entry goes when it is full (#513).
     """
-    if sender not in names and len(names) >= SENDER_NAME_CACHE_MAX:
+    # Re-stating a name moves it to the newest end, so the person who talks
+    # most is not the first evicted for having been seen first.
+    if sender in names:
+        del names[sender]
+    elif len(names) >= SENDER_NAME_CACHE_MAX:
         names.pop(next(iter(names)))
     names[sender] = name
 

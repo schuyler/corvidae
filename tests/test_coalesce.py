@@ -528,3 +528,33 @@ async def test_a_burst_from_one_sender_carries_one_attribution_row(make_env):
 
     # And the messages themselves are still the person's own words.
     assert users(burst_prompt) == ["m0", "m1", "m2", "m3"]
+
+
+async def test_a_burst_from_two_senders_attributes_each_message_to_its_own(make_env):
+    """A burst can mix senders — `take_while` merges on role, not sender — so a
+    second speaker gets their own row before their own words, never the first
+    speaker's name over their message (#513)."""
+    plugin, channel, db, llm = await make_env()
+    channel.name = "#home"
+    channel.sender_names.update({"alice": "Alice", "bob": "Bob"})
+
+    await start_inflight(plugin, channel, llm)
+    for sender, text in (("alice", "a1"), ("bob", "b2")):
+        await plugin.on_message(
+            channel=channel, sender=sender, text=text, trace_id=mint_trace_id()
+        )
+    llm.gate.set()
+    await settle(plugin, channel)
+
+    burst_prompt = llm.calls[1]
+    rows = [
+        m["content"]
+        for m in burst_prompt
+        if m.get("content", "").startswith("[sender:") or m.get("role") == "user"
+    ]
+    # After the in-flight turn's own rows: alice, her message, bob, his message,
+    # in that order.
+    burst = rows[rows.index("m0") + 1 :]
+    assert len(burst) == 4, burst
+    assert "Alice" in burst[0] and "Bob" in burst[2]
+    assert burst[1] == "a1" and burst[3] == "b2"
