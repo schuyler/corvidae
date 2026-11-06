@@ -252,10 +252,10 @@ base PRD say "base".
     Critique's exemption by origin is meant to be "unbypassable by tool
     use" (base §3.7 Critique 3).
 
-11. **Requirements on model-written content.** Some requirements bind what a
-    model writes ("same values", an escalation "with its context", a
-    join report that "covers" what the fork did), which no code can
-    guarantee.
+11. **Requirements on model-written content.** Some requirements bind
+    what a model writes ("same values", an escalation "with its
+    context", a join report that "covers" what the fork did), which no
+    code can guarantee.
 
 ## 4. Ideas discussed
 
