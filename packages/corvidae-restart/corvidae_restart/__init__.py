@@ -58,7 +58,12 @@ STDERR_HEAD = 400
 
 
 def truncate_stderr(text: str) -> str:
-    """Fit ``text`` in STDERR_LIMIT characters: head and tail with elision."""
+    """Fit ``text`` to approximately STDERR_LIMIT characters.
+
+    Returns the head (STDERR_HEAD chars) and tail with an elision
+    marker between them. The total length is slightly over
+    STDERR_LIMIT due to the marker.
+    """
     if len(text) <= STDERR_LIMIT:
         return text
     tail = STDERR_LIMIT - STDERR_HEAD
@@ -140,12 +145,32 @@ def read_boot_status(path: Path) -> tuple[str | None, bool]:
         mode = None
     if current == 0:
         return mode, False
-    previous = records[current - 1]
-    return mode, previous.get("service_result") != "success"
+    # Scan backward for the latest record with a service_result key.
+    for i in range(current - 1, -1, -1):
+        if "service_result" in records[i]:
+            return mode, records[i]["service_result"] != "success"
+    # No result record found: treat as abnormal (we can't confirm success).
+    return mode, True
 
 
 def _is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _coerce_int(value, name: str) -> int:
+    """Coerce a config value to int, logging a warning on failure."""
+    if _is_number(value):
+        return int(value)
+    logger.warning("restart config %s is not a number: %r; using 0", name, value)
+    return 0
+
+
+def _coerce_float(value, name: str) -> float:
+    """Coerce a config value to float, logging a warning on failure."""
+    if _is_number(value):
+        return float(value)
+    logger.warning("restart config %s is not a number: %r; using 0.0", name, value)
+    return 0.0
 
 
 class RestartPlugin(CorvidaePlugin):
@@ -161,6 +186,7 @@ class RestartPlugin(CorvidaePlugin):
         self._ready_poll_seconds = 0.25
         self._delivery_task: asyncio.Task | None = None
         self._user_message_seen = False
+        self._restart_lock = asyncio.Lock()
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -171,11 +197,21 @@ class RestartPlugin(CorvidaePlugin):
         self._state_dir = self._base_dir / "state"
         self._home_channel_id = section.get("home_channel")
         self._normal_config = self._base_dir / section.get("config_path", "agent.yaml")
-        self._min_uptime = section.get("min_uptime_seconds", 120)
-        self._max_restarts = section.get("max_restarts", 3)
-        self._window = section.get("window_seconds", 21600)
-        self._preflight_timeout = section.get("preflight_timeout_seconds", 120)
-        self._notify_delay = section.get("notify_delay_seconds", 5)
+        self._min_uptime = _coerce_int(
+            section.get("min_uptime_seconds", 120), "min_uptime_seconds"
+        )
+        self._max_restarts = _coerce_int(
+            section.get("max_restarts", 3), "max_restarts"
+        )
+        self._window = _coerce_int(
+            section.get("window_seconds", 21600), "window_seconds"
+        )
+        self._preflight_timeout = _coerce_float(
+            section.get("preflight_timeout_seconds", 120), "preflight_timeout_seconds"
+        )
+        self._notify_delay = _coerce_float(
+            section.get("notify_delay_seconds", 5), "notify_delay_seconds"
+        )
 
         self._blocked = list((config.get("plugins") or {}).get("disabled") or [])
         self._loaded = sorted(
@@ -211,11 +247,24 @@ class RestartPlugin(CorvidaePlugin):
         section = config.get("restart") or {}
         self._home_channel_id = section.get("home_channel")
         self._normal_config = self._base_dir / section.get("config_path", "agent.yaml")
-        self._min_uptime = section.get("min_uptime_seconds", 120)
-        self._max_restarts = section.get("max_restarts", 3)
-        self._window = section.get("window_seconds", 21600)
-        self._preflight_timeout = section.get("preflight_timeout_seconds", 120)
-        self._notify_delay = section.get("notify_delay_seconds", 5)
+        self._min_uptime = _coerce_int(
+            section.get("min_uptime_seconds", 120), "min_uptime_seconds"
+        )
+        self._max_restarts = _coerce_int(
+            section.get("max_restarts", 3), "max_restarts"
+        )
+        self._window = _coerce_int(
+            section.get("window_seconds", 21600), "window_seconds"
+        )
+        self._preflight_timeout = _coerce_float(
+            section.get("preflight_timeout_seconds", 120), "preflight_timeout_seconds"
+        )
+        self._notify_delay = _coerce_float(
+            section.get("notify_delay_seconds", 5), "notify_delay_seconds"
+        )
+        self._blocked = list(
+            (config.get("plugins") or {}).get("disabled") or []
+        )
 
     @hookimpl
     async def on_message_admitted(self, channel, trace_id, sender, text) -> None:
@@ -288,7 +337,7 @@ class RestartPlugin(CorvidaePlugin):
             return None
         try:
             self._append_history(
-                {"event": "delivered", **marker, "delivered_at": self._wall()}
+                {**marker, "event": "delivered", "delivered_at": self._wall()}
             )
         except OSError:
             logger.warning("cannot record the delivered restart marker", exc_info=True)
@@ -362,35 +411,39 @@ class RestartPlugin(CorvidaePlugin):
         if refusal:
             return refusal + self._safe_mode_suffix()
 
-        returncode, stderr = await self._preflight(
-            self._normal_config, self._preflight_timeout
-        )
-        if returncode != 0:
-            stderr = truncate_stderr(stderr)
-            return f"Refused: pre-flight failed.\n{stderr}" + self._safe_mode_suffix()
+        async with self._restart_lock:
+            returncode, stderr = await self._preflight(
+                self._normal_config, self._preflight_timeout
+            )
+            if returncode != 0:
+                stderr = truncate_stderr(stderr)
+                return (
+                    f"Refused: pre-flight failed.\n{stderr}"
+                    + self._safe_mode_suffix()
+                )
 
-        marker = {
-            "requested_at": self._wall(),
-            "reason": reason,
-            "channel_id": ctx.channel.id,
-            "tool_call_id": ctx.tool_call_id,
-            "pid": os.getpid(),
-        }
-        self._write_marker(marker)
-        try:
-            self._append_history({"event": "requested", **marker})
-        except BaseException:
+            marker = {
+                "requested_at": self._wall(),
+                "reason": reason,
+                "channel_id": ctx.channel.id,
+                "tool_call_id": ctx.tool_call_id,
+                "pid": os.getpid(),
+            }
+            self._write_marker(marker)
             try:
-                self._marker_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
-        await self._send_courtesy_message(ctx.channel, reason)
+                self._append_history({"event": "requested", **marker})
+            except BaseException:
+                try:
+                    self._marker_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+            await self._send_courtesy_message(ctx.channel, reason)
 
-        asyncio.get_running_loop().call_soon(
-            self._killer, os.getpid(), signal.SIGTERM
-        )
-        await asyncio.Event().wait()
+            asyncio.get_running_loop().call_soon(
+                self._killer, os.getpid(), signal.SIGTERM
+            )
+            await asyncio.Event().wait()
 
     async def _send_courtesy_message(self, channel, reason: str) -> None:
         """Tell the user now; the real reply comes after the restart."""
