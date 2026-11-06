@@ -451,22 +451,10 @@ thought, or to respond to an escalation.
    external actions and the notifications it handled. Long-running
    thinking can be preserved on disk and resumed later.
 
-5. **Escalation is a special case of forking.** When a peripheral
-   escalates, the core performs an attentional shift:
-   - **Evaluate.** The core evaluates whether to respond. If not, the
-     escalation is logged and the core continues.
-   - **Checkpoint.** The core checkpoints its current window to RAM (or
-     disk for long-running work).
-   - **Fork.** The core creates a working context that pages in the
-     needed peripheral context from RAM/disk.
-   - **Work.** The fork operates: it exchanges messages with the
-     periphery (or operates the channel directly). Whether the core
-     pauses or keeps receiving notifications meanwhile depends on the
-     mode (item 7).
-   - **Join.** When the fork's work is done, its report is appended at
-     the core's tail and the fork is discarded. In yield mode the core
-     resumes from its paused main context; in detach mode it has kept
-     working.
+5. **Escalations.** When a peripheral escalates, the core decides
+   whether and how to respond: in its main context, with an instruction
+   to the periphery (§3.1.8), or in a fork when the work needs depth of
+   its own (item 7). An escalation the core declines is logged.
 
 6. **The core can operate a channel directly** when the situation calls
    for it (a complex multi-turn exchange that the periphery can't
@@ -619,9 +607,9 @@ thought, or to respond to an escalation.
    direction it followed, if any. On frontier APIs they are
    context-switch boundaries.
 
-4. The fork pattern's lifecycle (evaluate, checkpoint, fork, work,
-   complete, rollback) is logged at INFO level. A fork that is discarded
-   without completion is logged at WARNING with the reason.
+4. A fork's lifecycle (start, join, abandonment) is logged at INFO
+   level. A fork that is discarded without completion is logged at
+   WARNING with the reason.
 
 5. The channel observables (§3.1.11) are logged at DEBUG level in the
    core's JSONL log: queue depth, message rates, KV residency, fork
