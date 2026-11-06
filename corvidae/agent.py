@@ -1184,24 +1184,40 @@ class Agent(CorvidaePlugin):
         return {"role": "system", "content": text}
 
     async def _append_turn_attribution(
-        self, channel: Channel, conv, item: QueueItem
+        self,
+        channel: Channel,
+        conv,
+        item: QueueItem,
+        said: list[str | None],
     ) -> None:
         """Append and persist the attribution row that opens this turn (#513).
 
         Persisted as CONTEXT, like the not-sent marker, so a reload renders the
         same prompt and the row is never summarised as conversation.
+
+        ``said`` carries the last attribution written during this turn, so a
+        coalesced burst from one sender gets one row rather than one per message
+        (#398): five lines typed in a row are one turn, and repeating the
+        attribution five times spends the budget saying nothing new. A different
+        sender mid-burst still gets their own row, before their message.
         """
         row = self._turn_attribution(channel, item)
         if row is None:
             return
+        if said[0] == row["content"]:
+            return
         conv.append(row, MessageType.CONTEXT)
+        # The index, not `messages[-1]`: `persist_message` is awaited below, and
+        # a concurrent append in that gap would otherwise take the rowid.
+        index = len(conv.messages) - 1
+        said[0] = row["content"]
         try:
             results = await self.pm.ahook.persist_message(
                 channel=channel, message=row, message_type=MessageType.CONTEXT,
             )
             rowid = resolve_single_result(results, "persist_message")
             if rowid is not None:
-                conv.messages[-1]["_db_id"] = rowid
+                conv.messages[index]["_db_id"] = rowid
         except Exception:
             logger.warning(
                 "persist_message hook failed for the attribution row on %s "
@@ -1213,6 +1229,7 @@ class Agent(CorvidaePlugin):
     async def _append_and_persist_message(
         self,
         channel: Channel,
+        said: list[str | None],
         conv: ContextWindow,
         item: QueueItem,
         conversation_message: dict[str, Any],
@@ -1229,7 +1246,7 @@ class Agent(CorvidaePlugin):
         # Who is speaking, and where, before the words themselves (#513). Only
         # for an inbound message: a notification's source is already framed.
         if item.role is QueueItemRole.USER:
-            await self._append_turn_attribution(channel, conv, item)
+            await self._append_turn_attribution(channel, conv, item, said)
         conv.append(conversation_message)
         rowid = None
         try:
@@ -1339,15 +1356,18 @@ class Agent(CorvidaePlugin):
             # on_message_persisted); then the owner's message.
             # Persist time covers every row the turn writes, burst included.
             persist_seconds = 0.0
+            # One attribution per distinct sender and channel in this turn: a
+            # coalesced burst from one person is one turn (#398, #513).
+            said: list[str | None] = [None]
             for absorbed_item in absorbed:
                 absorbed_result = self._build_conversation_message(absorbed_item)
                 if absorbed_result is None:
                     continue
                 persist_seconds += await self._append_and_persist_message(
-                    channel, conv, absorbed_item, *absorbed_result,
+                    channel, said, conv, absorbed_item, *absorbed_result,
                 )
             persist_seconds += await self._append_and_persist_message(
-                channel, conv, item, conversation_message, request_text,
+                channel, said, conv, item, conversation_message, request_text,
             )
             _phases["persist"] = persist_seconds
 

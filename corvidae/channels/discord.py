@@ -222,6 +222,22 @@ def _client_class() -> type:
     return _DiscordClient
 
 
+#: How many sender display names one channel remembers (#513).
+SENDER_NAME_CACHE_MAX = 256
+
+
+def remember_sender_name(names: dict[str, str], sender: str, name: str) -> None:
+    """Record a sender's display name on the channel, keeping the map bounded.
+
+    A channel people talk in all day would otherwise keep a name for every
+    sender it has ever seen. The cache is a convenience for the next turn's
+    attribution, so the oldest entry goes when it is full (#513).
+    """
+    if sender not in names and len(names) >= SENDER_NAME_CACHE_MAX:
+        names.pop(next(iter(names)))
+    names[sender] = name
+
+
 def _channel_name(channel: Any) -> str | None:
     """The name to show the model for a Discord channel or thread (#513).
 
@@ -542,7 +558,7 @@ class DiscordPlugin(TransportPlugin):
         # turn is built (#513). A cache of what the transport has seen, so a
         # rename is picked up on the message that carries it.
         if sender_name:
-            channel.sender_names[sender] = sender_name
+            remember_sender_name(channel.sender_names, sender, sender_name)
 
         # Typing only ever applies to an allowlisted sender -- others get no
         # sign the bot is live. on_message still fires so the real

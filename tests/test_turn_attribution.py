@@ -157,3 +157,28 @@ class TestChannelName:
         from corvidae.channels.discord import _channel_name
 
         assert _channel_name(SimpleNamespace(name=None, parent=None)) is None
+
+
+class TestSenderNameCache:
+    def test_the_cache_is_bounded_and_drops_the_oldest(self):
+        """A channel remembers a bounded set of names, oldest first out (#513)."""
+        from corvidae.channels.discord import (
+            SENDER_NAME_CACHE_MAX,
+            remember_sender_name,
+        )
+
+        names: dict[str, str] = {}
+        for i in range(SENDER_NAME_CACHE_MAX):
+            remember_sender_name(names, str(i), f"person {i}")
+        assert len(names) == SENDER_NAME_CACHE_MAX
+
+        # One more evicts the oldest, and the newcomer is remembered.
+        remember_sender_name(names, "newcomer", "someone new")
+        assert len(names) == SENDER_NAME_CACHE_MAX
+        assert "0" not in names
+        assert names["newcomer"] == "someone new"
+
+        # A name already held is updated in place, never evicted for itself.
+        remember_sender_name(names, "newcomer", "renamed")
+        assert names["newcomer"] == "renamed"
+        assert len(names) == SENDER_NAME_CACHE_MAX

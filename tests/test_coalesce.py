@@ -495,3 +495,36 @@ async def test_failed_burst_turn_retries_once_for_the_whole_burst(make_env):
     assert sorted(user_rows) == ["m0", "m1", "m2", "m3"]  # none persisted twice
     assert [m["content"] for m in rows if m.get("role") == "assistant"].count("burst reply") == 1
     assert sent_texts(plugin.pm, OutboundMessage)[-1] == "burst reply"
+
+
+# ---------------------------------------------------------------------------
+# #513: attribution once per sender, not once per message in the burst
+# ---------------------------------------------------------------------------
+
+
+async def test_a_burst_from_one_sender_carries_one_attribution_row(make_env):
+    """A coalesced burst is one turn (#398), so the sender and channel are named
+    once before it rather than repeated before every message (#513)."""
+    plugin, channel, db, llm = await make_env()
+    channel.name = "#home"
+    channel.sender_names["user"] = "schuyler"
+
+    await run_burst(plugin, channel, llm, ["m1", "m2", "m3"])
+
+    burst_prompt = llm.calls[1]
+    kinds = [
+        "attribution"
+        if m.get("content", "").startswith("[sender:")
+        else "other"
+        for m in burst_prompt
+    ]
+    attributions = [m for m, kind in zip(burst_prompt, kinds) if kind == "attribution"]
+
+    # One row per turn: the in-flight turn's, and the burst's. What must not
+    # happen is a row per message, or two rows stacked with nothing between.
+    assert len(attributions) == 2, attributions
+    assert all("schuyler" in row["content"] for row in attributions)
+    assert not any(a == b == "attribution" for a, b in zip(kinds, kinds[1:]))
+
+    # And the messages themselves are still the person's own words.
+    assert users(burst_prompt) == ["m0", "m1", "m2", "m3"]
