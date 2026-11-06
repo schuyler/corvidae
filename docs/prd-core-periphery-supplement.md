@@ -369,9 +369,9 @@ its tests pass; until then they are proposals.
    it (§3.1.5). The core's edits are self-modification (base PRD
    principle 15): the framework MUST let the operator freeze the
    judgment prompts or bound what the core may change, and operator
-   config MUST be able to lift any such lock. A rewrite MUST take effect at the periphery's next
-   compaction boundary or conversation start, not mid-window (base PRD
-   §3.3.8).
+   config MUST be able to lift any such lock. A rewrite MUST take
+   effect at the periphery's next compaction boundary or conversation
+   start, not mid-window (base PRD §3.3.8).
 
    *Rationale:* The periphery's prompt is a living artifact. The core
    observes a mis-escalation, diagnoses which part of the judgment
