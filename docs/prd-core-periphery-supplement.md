@@ -371,9 +371,10 @@ its tests pass; until then they are proposals.
    that the periphery can make this determination without deliberative
    reasoning.
 
-3. Escalation carries a **summary** of the message and its context to the
-   core. The core receives the summary, not the raw message (unless it
-   pages the peripheral in to work the channel directly).
+3. An escalation carries what the core needs to decide: the message or
+   a summary of it, with enough context to act on (§3.2.10). The core
+   can import the raw message and the peripheral's tail when it needs
+   more (§3.1.12).
 
 4. The periphery's judgment prompt is tunable in-flight (§3.2.4). The
    core can adapt the periphery's escalation behavior without human
