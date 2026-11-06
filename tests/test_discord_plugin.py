@@ -865,6 +865,23 @@ class TestRefusedSenderChannel:
         finally:
             await h.plugin.on_stop()
 
+    async def test_require_mention_false_still_refuses_unlisted_sender(self):
+        """require_mention: false widens what reaches the allowlist gate, not
+        who passes it: an unmentioned guild message from a sender outside
+        discord.allow is vetoed and leaves no registry entry."""
+        h = await _start_plugin(discord_overrides={"require_mention": False})
+        try:
+            # An unlisted user chats in a server channel without mentioning the bot.
+            await _deliver(h, make_message("psst", author_id=OTHER_ID))
+            ch = h.on_message.await_args_list[0].kwargs["channel"]
+            # The gate refuses it and nothing is registered for the channel.
+            assert await h.plugin.should_process_message(
+                channel=ch, sender=str(OTHER_ID), text="psst", trace_id="tid",
+            ) is False
+            assert h.registry.get(f"discord:{CHAN_ID}") is None
+        finally:
+            await h.plugin.on_stop()
+
     # Allowed sender still registers: already covered by
     # TestScope.test_guild_channel_scope (registry.get is the channel).
 
