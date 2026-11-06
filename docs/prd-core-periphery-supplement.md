@@ -80,7 +80,7 @@ its tests pass; until then they are proposals.
     network protocol. Channel-bound peripherals are not degraded agents;
     they are the same identity operating in a different cognitive mode.
     The difference between the core and a channel-bound periphery is
-    cognitive mode, not capability or identity. Task-bound peripherals
+    cognitive mode and capability, not identity. Task-bound peripherals
     (§3.2.9) carry no persona.
 
 18. **The KV cache is a shared resource.** When there are levers to
