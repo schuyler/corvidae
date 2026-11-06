@@ -1,12 +1,15 @@
 """Discord transport plugin, built on discord.py's gateway client.
 
 Connects to Discord as a bot account and talks in DMs, server channels, and
-threads. In servers the bot only reacts when it is mentioned; DMs always
-reach it. Only allowlisted Discord user ids may drive the agent.
+threads. In servers the bot by default only reacts when it is mentioned; DMs
+always reach it. Only allowlisted Discord user ids may drive the agent.
 
-The client deliberately does not request the privileged Message Content
+By default the client does not request the privileged Message Content
 intent: Discord still delivers message content for DMs and for messages that
-mention the bot, which are the only messages this transport processes.
+mention the bot, which are the only messages this transport processes. With
+``require_mention: false`` the bot answers every server message from an
+allowlisted user, and the client requests that intent (it must also be
+enabled in the Discord Developer Portal).
 
 The SDK (discord-py) is optional: add ``--extra discord`` to the ``uv sync``
 line. This module
@@ -236,6 +239,7 @@ class DiscordPlugin(TransportPlugin):
         self._token: Optional[str] = None
         self._allow: set[str] = set()
         self._message_chunk_size: int = DISCORD_MESSAGE_LIMIT
+        self._require_mention: bool = True
 
         # Connection state. _client is the live (or latest) gateway client.
         self._client: Any = None
@@ -310,11 +314,21 @@ class DiscordPlugin(TransportPlugin):
                 f"integer between 100 and {DISCORD_MESSAGE_LIMIT}"
             )
 
+        # require_mention is a plain bool; a string like "false" is truthy,
+        # so anything else is rejected rather than coerced.
+        require_mention = block.get("require_mention", True)
+        if not isinstance(require_mention, bool):
+            raise ValueError(
+                "discord: config field 'require_mention' must be true or false, "
+                f"got {require_mention!r}; fix it in the discord: block of agent.yaml"
+            )
+
         self._token = str(token)
         # Ids are compared as strings against str(author.id); YAML parses
         # them as ints.
         self._allow = {str(entry) for entry in allow}
         self._message_chunk_size = chunk_size
+        self._require_mention = require_mention
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -368,9 +382,15 @@ class DiscordPlugin(TransportPlugin):
     # -----------------------------------------------------------------
 
     def _make_client(self) -> Any:
-        """Build a gateway client. Default intents only: no privileged
-        Message Content intent (see the module docstring)."""
-        return _client_class()(self, intents=_sdk().Intents.default())
+        """Build a gateway client. Default intents, plus the privileged
+        Message Content intent only when require_mention is false (see the
+        module docstring)."""
+        # Start from the default intents.
+        intents = _sdk().Intents.default()
+        # Unmentioned server messages carry no text without the intent.
+        if not self._require_mention:
+            intents.message_content = True
+        return _client_class()(self, intents=intents)
 
     def _on_ready(self) -> None:
         """A connection fully came up: the next failure retries quickly."""
@@ -449,20 +469,24 @@ class DiscordPlugin(TransportPlugin):
         text = message.content or ""
 
         if not is_dm:
-            # In servers the bot only reacts when it is itself mentioned
-            # (not merely @everyone/@here, which mentioned_in would accept).
-            if not any(u.id == bot_user_id for u in message.mentions):
-                logger.debug("discord: ignoring guild message that does not mention the bot")
-                return
-            if not text:
-                # Discord should deliver content for mentions even without
-                # the privileged intent; flag it if that ever changes.
-                logger.warning(
-                    "discord: mention in channel %s arrived with empty content; dropping",
-                    message.channel.id,
-                )
-                return
-            # Remove the bot's own mention token (both forms).
+            # With require_mention (the default) the bot only reacts when it
+            # is itself mentioned (not merely @everyone/@here, which
+            # mentioned_in would accept). Without it, every guild message
+            # continues; the allowlist gate still refuses other senders.
+            if self._require_mention:
+                if not any(u.id == bot_user_id for u in message.mentions):
+                    logger.debug("discord: ignoring guild message that does not mention the bot")
+                    return
+                if not text:
+                    # Discord should deliver content for mentions even without
+                    # the privileged intent; flag it if that ever changes.
+                    logger.warning(
+                        "discord: mention in channel %s arrived with empty content; dropping",
+                        message.channel.id,
+                    )
+                    return
+            # Remove the bot's own mention token (both forms); a no-op when
+            # the message does not mention the bot.
             text = re.sub(rf"<@!?{bot_user_id}>", "", text)
 
         # Nothing left to say (empty, whitespace, attachment-only, or a bare mention).
