@@ -732,6 +732,50 @@ answer:
     (A.4), and when it applies: after a model or template change, a crash
     loop, or a cache suspected of being stale.
 
+16. **Consolidation trigger criteria.** §3.7.1 names consolidation as a
+    cognition all contexts perform, but the operational rule for "when
+    does a raw log entry become narrative memory" is unspecified. Is it
+    time-based (end of session), count-based (N messages), or
+    signal-based (a compaction boundary, an idle period)? The dream
+    plugin currently runs on a timer; the TRD needs to decide whether
+    that's the right trigger or whether consolidation should be
+    event-driven.
+
+17. **Peripheral state lifecycle.** Channel-bound peripherals have
+    persistent conversation history; task-bound peripherals are
+    ephemeral (§3.2.9). But what about the peripheral's *plugin state*
+    (memory writes, goal updates, KV cache entries) when the peripheral
+    is paged out or discarded? Is the peripheral's state owned by the
+    peripheral or by the core? If the core owns it, the periphery is
+    purely a cognitive mode with no persistent identity of its own. If
+    the periphery owns it, discarding a task-bound peripheral must
+    clean up its state explicitly.
+
+18. **Instruction fidelity.** §3.1.8 says the core sends telegraphic
+    instructions and the periphery expands them. How is fidelity
+    verified? If the periphery misexpands an instruction (wrong tone,
+    missing a constraint, adding content the core didn't intend), who
+    catches it? Options: (a) the core reads the periphery's output
+    before it's sent (adds a round-trip), (b) the critique plugin
+    checks periphery outputs post-hoc, (c) trust the periphery and
+    rely on user feedback. The TRD needs to pick a default and specify
+    when the override (core reads before send) is warranted.
+
+19. **Escalation summary format.** §3.4.3 says escalation carries a
+    summary to the core. What is the shape of that summary? Free text,
+    structured fields (message type, confidence, key entities), or both?
+    The format determines how much context the core gets without paging
+    the peripheral in. A too-thin summary forces page-ins; a too-thick
+    summary defeats the purpose of the periphery filtering.
+
+20. **Empty goal block behavior.** §3.6.5 says the goal block is the
+    core's answer to "what should I be doing?" during idle. What
+    happens when the goal block is empty (no open goals)? Does the core
+    do nothing, generate its own goals, or signal to the operator that
+    it's idle? The current system has the heartbeat prompt "what should
+    I do?" which is explicitly rejected here; the TRD needs a
+    replacement behavior for the no-goals case.
+
 ## Appendix A: Design ideas and research notes
 
 This appendix collects research findings and design ideas that informed
