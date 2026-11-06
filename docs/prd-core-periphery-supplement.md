@@ -583,15 +583,14 @@ thought, or to respond to an escalation.
    log: false alarm rate, miss rate, per-peripheral and in aggregate.
 
 3. KV cache allocation events (page-in, page-out, checkpoint) are
-   logged at INFO level with the context ID, the tier transition, and
-   the trigger. On local LLM deployments these events are the
+   logged with the context ID, the tier transition, and the trigger. On local LLM deployments these events are the
    slot-management plugin's placement decisions, each naming the core's
    direction it followed, if any. On frontier APIs they are
    context-switch boundaries.
 
-4. A fork's lifecycle (start, join, abandonment) is logged at INFO
-   level. A fork that is discarded without completion is logged at
-   WARNING with the reason.
+4. A fork's lifecycle (start, join, abandonment) is logged. A fork that
+   is discarded without completion is logged at WARNING with the reason
+   (base PRD principle 5).
 
 5. The channel observables (§3.1.11) are logged for post-hoc analysis.
 
