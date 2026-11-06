@@ -377,8 +377,9 @@ class DiscordPlugin(TransportPlugin):
         if not isinstance(channels, dict):
             raise ValueError(
                 "discord: config field 'channels' must be a mapping of channel "
-                f"id to settings, got {channels!r}; fix it in the discord: block "
-                "of agent.yaml"
+                f"id to settings, got {channels!r}; write `channels: {{\"<channel "
+                "id>\": {require_mention: false}}}` in the discord: block of "
+                "agent.yaml"
             )
         channel_overrides: dict[str, bool] = {}
         for channel_id, entry in channels.items():
@@ -387,13 +388,16 @@ class DiscordPlugin(TransportPlugin):
             # shapes a reader of the *other* channels: block will try by habit,
             # and either one would match no channel and leave the override doing
             # nothing (#512).
-            if not re.fullmatch(r"[0-9]+", str(channel_id)):
+            # A leading zero is never part of a real snowflake, and a quoted
+            # "0012345" would match no channel — the silent no-op this check
+            # exists to prevent.
+            if not re.fullmatch(r"[1-9][0-9]*", str(channel_id)):
                 raise ValueError(
                     "discord: config entry 'channels."
                     f"{channel_id}' is not a Discord channel id; use the number "
-                    "alone, as the agent sees it in its logs (discord:123456789…, "
-                    "digits only, quoted or not) — fix it in the discord: block "
-                    "of agent.yaml"
+                    "alone, as it appears after `discord:` in the agent's logs "
+                    "— 123456789012345678, digits only, quoted or not, no leading "
+                    "zeros and no prefix — in the discord: block of agent.yaml"
                 )
             if not isinstance(entry, dict):
                 raise ValueError(
@@ -402,9 +406,12 @@ class DiscordPlugin(TransportPlugin):
                     "write `channels: {\"<channel id>\": {require_mention: false}}` "
                     "in the discord: block of agent.yaml"
                 )
-            unknown = sorted(set(entry) - {"require_mention"})
-            if unknown:
-                written = ", ".join(f"{key}={entry[key]!r}" for key in unknown)
+            # YAML gives keys as whatever it parsed: an int typo key sorts
+            # against a str one with TypeError, so the message would be lost on
+            # the way out. Compare as text.
+            unknown_keys = sorted(set(entry) - {"require_mention"}, key=str)
+            if unknown_keys:
+                written = ", ".join(f"{key}={entry[key]!r}" for key in unknown_keys)
                 raise ValueError(
                     "discord: config entry 'channels."
                     f"{channel_id}' has unknown key(s) {written}; accepted: "
@@ -420,7 +427,15 @@ class DiscordPlugin(TransportPlugin):
                     f"{channel_id}.require_mention' must be true or false, got "
                     f"{value!r}; fix it in the discord: block of agent.yaml"
                 )
-            channel_overrides[str(channel_id)] = value
+            key = str(channel_id)
+            if key in channel_overrides:
+                raise ValueError(
+                    "discord: config entry 'channels."
+                    f"{key}' is listed twice — as a quoted string and as a "
+                    "number — and only one would take effect; keep one entry in "
+                    "the discord: block of agent.yaml"
+                )
+            channel_overrides[key] = value
 
         self._token = str(token)
         # Ids are compared as strings against str(author.id); YAML parses

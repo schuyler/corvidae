@@ -100,8 +100,6 @@ class TestPerChannelRequireMention:
                 },
                 wait_connect=False,
             )
-        # And with an unquoted integer key it is accepted, so the check is about
-        # the shape and not about quoting.
 
     async def test_unlisted_channel_keeps_the_transport_default(self):
         h = await _start_plugin(
@@ -180,6 +178,22 @@ class TestPerChannelRequireMention:
         finally:
             await h.plugin.on_stop()
 
+    async def test_the_intent_is_not_requested_when_everything_is_mention_only(
+        self,
+    ):
+        """The default path must stay off the privileged intent: requesting it
+        without the Developer Portal switch stops the bot connecting at all."""
+        h = await _start_plugin(discord_overrides={"require_mention": True})
+        try:
+            from corvidae.channels.discord import DiscordPlugin
+
+            assert (
+                DiscordPlugin._make_client(h.plugin).intents.message_content
+                is False
+            )
+        finally:
+            await h.plugin.on_stop()
+
     async def test_message_content_intent_is_requested_for_any_conversational_channel(
         self,
     ):
@@ -204,6 +218,45 @@ class TestPerChannelRequireMention:
 
 
 class TestConfigValidation:
+    async def test_a_leading_zero_key_is_refused(self):
+        """A quoted "0012…" is not a snowflake and would match no channel."""
+        with pytest.raises(ValueError, match="not a Discord channel id"):
+            await _start_plugin(
+                discord_overrides={
+                    "channels": {f"00{CHAN_ID}": {"require_mention": False}}
+                },
+                wait_connect=False,
+            )
+
+    async def test_the_same_id_listed_twice_is_refused(self):
+        """A quoted key and a numeric key collapse to one id; one would win
+        silently, so say so instead."""
+        with pytest.raises(ValueError, match="listed twice") as excinfo:
+            await _start_plugin(
+                discord_overrides={
+                    "channels": {
+                        str(CHAN_ID): {"require_mention": False},
+                        int(CHAN_ID): {"require_mention": True},
+                    }
+                },
+                wait_connect=False,
+            )
+        assert str(CHAN_ID) in str(excinfo.value)
+
+    async def test_a_mixed_type_unknown_key_still_names_itself(self):
+        """YAML can give an int typo key; sorting it against a str one used to
+        raise TypeError instead of the message."""
+        with pytest.raises(ValueError, match="unknown key") as excinfo:
+            await _start_plugin(
+                discord_overrides={
+                    "channels": {
+                        str(CHAN_ID): {"require_mention": False, 9: True}
+                    }
+                },
+                wait_connect=False,
+            )
+        assert "9=True" in str(excinfo.value)
+
     async def test_channels_must_be_a_mapping(self):
         with pytest.raises(ValueError, match="channels") as excinfo:
             await _start_plugin(
