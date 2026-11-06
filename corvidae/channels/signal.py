@@ -75,6 +75,13 @@ ALIAS_RESOLUTION_WAIT_SECONDS = 5.0
 # to `send`: a send that times out may have been delivered, and giving up on
 # it would change delivery semantics rather than only liveness (#413).
 LIVENESS_RPC_TIMEOUT = 10.0
+# Sizing note: LIVENESS_RPC_TIMEOUT is 10s because it covers typing
+# indicators and read receipts, which must be snappy. An attachment
+# download is a different beast: a 10 MB image over a slow mobile link
+# can legitimately exceed 10s, and the user gets [image: download failed]
+# for a message that would have arrived. 60s is generous without
+# imposing a meaningful head-of-line delay on messages queued behind it.
+ATTACHMENT_DOWNLOAD_TIMEOUT = 60.0
 
 # Connection retry backoff ladder -- the same one IRCClient uses.
 _INITIAL_BACKOFF = 10
@@ -544,10 +551,10 @@ class SignalPlugin(TransportPlugin):
         try:
             result = await asyncio.wait_for(
                 self._send_rpc("getAttachment", params),
-                LIVENESS_RPC_TIMEOUT,
+                ATTACHMENT_DOWNLOAD_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            logger.warning("signal: getAttachment RPC timed out")
+            logger.warning("signal: getAttachment RPC timed out after %ss", ATTACHMENT_DOWNLOAD_TIMEOUT)
             return None
         except Exception:
             logger.exception("signal: getAttachment RPC failed")
