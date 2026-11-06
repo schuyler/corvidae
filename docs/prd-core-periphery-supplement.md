@@ -15,7 +15,7 @@ Terminology: in this supplement, **core** means the System Two context
 (§3.1) and never the framework. The framework's centre is the
 **kernel**, as in base PRD principle 1. Code names in which "core" means
 the kernel (`core_tools`, `CoreToolsPlugin`, `CORE_LLM_STAGES`,
-`CorePluginManager` and the like) are renamed to "kernel" as part of
+`CorePluginManager` and the like) MUST be renamed to "kernel" as part of
 implementing this supplement, with no compatibility aliases (base PRD
 §1).
 
@@ -27,6 +27,51 @@ topology. Requirements that are topology-independent (plugin architecture,
 append-only log, fail-soft, metering) carry over unchanged. Requirements
 that assume independent channel contexts (each channel its own window
 and KV prefix) are reframed below.
+
+## 0. How to read this supplement
+
+The key words "MUST", "MUST NOT", "SHOULD", "SHOULD NOT" and "MAY" in
+this supplement are to be interpreted as described in BCP 14 (RFC 2119,
+RFC 8174) when, and only when, they appear in all capitals, as shown
+here.
+
+A sentence is a requirement only if it carries one of those key words.
+Everything else is explanation: paragraphs labelled *Rationale*,
+examples, measurements, §5 and Appendix A. The test is mechanical: no
+capitalised key word, no requirement.
+
+These conventions apply to this supplement only. The base PRD is written
+in plain present tense, and every statement in its §2 and §3 is a
+requirement; nothing here changes how it reads.
+
+**Who an obligation falls on.** Every requirement names its subject:
+
+- **The kernel**: kernel code (base PRD principle 1).
+- **The strategy**: the plugins that implement the core/periphery
+  strategy (§1), among them the **slot-management plugin** (§3.3.6).
+- **The framework**: the kernel and the strategy together, where the
+  requirement holds whichever of them meets it. The framework acts on
+  the operator's behalf: "the framework MUST let the operator lock X"
+  binds code, not the agent.
+- **The operator**: operator configuration. "The operator MAY" means
+  config can do it.
+- **The core** and **a peripheral**: the model working in that context.
+  A model's behaviour is probabilistic and no code guarantees it, so
+  the core and the peripherals are never the subject of a MUST. Where
+  this supplement describes what they do, the requirement is on the
+  framework ("the framework MUST let the core …"), and how well the
+  model does it is *measured* (base PRD principle 6), not required.
+
+**Defaults.** What the operator or the agent can change is written "the
+framework MUST default to X; the operator MAY change it". Anything the
+agent could change about itself is lockable by the operator (base PRD
+principle 15) whether or not the sentence repeats it. SHOULD appears
+only with its acceptable exception stated beside it.
+
+**Scope.** §2 and §3 apply when the core/periphery strategy runs (§1). A
+requirement that depends on another optional plugin (goals, critique,
+appraisal, consolidation, the outcome log, trust) applies when that
+plugin is loaded too.
 
 ## 1. What changes
 
@@ -60,14 +105,15 @@ The model endpoints are still wherever the operator points them (base PRD
 changes is how the contexts are organized and how the KV cache is
 allocated.
 
-The unified core context is a plugin by design (base PRD principle 1), so
-that other context-coordination strategies can be built on the same
-kernel. The kernel supplies the mechanisms a strategy needs; which
+The unified core context MUST be a plugin strategy (base PRD principle 1),
+so that other context-coordination strategies can be built on the same
+kernel. The kernel MUST supply the mechanisms a strategy needs; which
 strategy runs is the operator's choice. The base PRD's topology, every
-channel a full agent context, is one such strategy. The editor session
-(base PRD §1) runs as its own process, one per editor connection, under
-whichever strategy its configuration selects; it is not a peripheral of
-the daemon's core.
+channel a full agent context, MUST remain available as one such
+strategy. The editor session (base PRD §1) runs as its own process, one
+per editor connection, under whichever strategy its configuration
+selects; this supplement does not make it a peripheral of the daemon's
+core (open question 13).
 
 ## 2. New principles
 
@@ -75,325 +121,391 @@ These proposed principles would supplement the base PRD's sixteen. Once
 the supplement is accepted, a change that violates one is a bug even if
 its tests pass; until then they are proposals.
 
-17. **One mind, many senses.** The agent is one actor with one identity
-    (base PRD principle 14), but its cognition is organized into a core
-    (deliberative, attentional, System Two) and peripherals (intuitive,
-    pattern-matching, System One). The core is constituted as a channel
-    with an input queue; its transport is notifications from elsewhere in
-    the framework (escalations, idle events, task completions), not a
-    network protocol. Channel-bound peripherals are not degraded agents;
-    they are the same identity operating in a different cognitive mode.
-    The difference between the core and a channel-bound periphery is
-    cognitive mode and capability, not identity. Task-bound peripherals
-    (§3.2.9) carry no persona.
+17. **One mind, many senses.** The core MUST be a channel with an input
+    queue, fed by notifications from elsewhere in the framework
+    (escalations, idle events, task completions) rather than by a
+    network transport. The framework MUST give every channel-bound
+    peripheral the agent's one identity (base PRD principle 14).
+    Task-bound peripherals (§3.2.9) MUST NOT carry a persona.
 
-18. **The KV cache is a shared resource.** When there are levers to
-    allocate context memory (local LLM deployments), a hierarchy of
-    memory tiers serves all contexts — the core's and the peripherals' —
-    so that active contexts are fast and idle contexts are cheap. The
-    core directs which contexts get attention; a slot-management plugin
-    places them in the tiers (§3.3.6). Both the core and the peripherals
-    can be paged out. When the model endpoint is a frontier API that
-    manages its own cache, the hierarchy degenerates to the API's own
-    scheduling; the core's role is to minimize context switches, not to
-    manage tiers. This is base
-    PRD principle 16 (compute is finite, a context switch is what it
-    costs) applied to a multi-context topology: the operator declares the
-    pool's capacity, the core directs which contexts are active, and
-    the slot-management plugin keeps them within it.
+    *Rationale:* The agent is one actor with one identity, but its
+    cognition is organized into a core (deliberative, attentional,
+    System Two) and peripherals (intuitive, pattern-matching, System
+    One). Channel-bound peripherals are not degraded agents; they are
+    the same identity operating in a different cognitive mode. The
+    difference between the core and a channel-bound periphery is
+    cognitive mode and capability, not identity.
+
+18. **The KV cache is a shared resource.** The framework MUST treat
+    context memory as one resource serving the core and every
+    peripheral. The framework MUST let the core direct which contexts
+    get attention, and the slot-management plugin MUST place contexts
+    within the capacity the operator declares (§3.3.6).
+
+    *Rationale:* When there are levers to allocate context memory (local
+    LLM deployments), a hierarchy of memory tiers serves all contexts so
+    that active contexts are fast and idle contexts are cheap. When the
+    model endpoint is a frontier API that manages its own cache, the
+    hierarchy degenerates to the API's own scheduling, and the core's
+    part is to minimize context switches. This is base PRD principle 16
+    (compute is finite, a context switch is what it costs) applied to a
+    multi-context topology.
 
 19. **The periphery is a boundary detector, not a decision maker.** The
-    peripheral's whole job is to recognize what it can handle and what it
-    can't, and to escalate the rest. It spends no deliberation on that
-    call: escalation is an instinctive response, not a reasoned decision.
-    How the boundary is detected (the periphery model's own judgment,
-    message-type rules, a confidence signal, or a mix) is a mechanism the
-    framework can offer and evals measure (base PRD principle 6), by miss
-    and false-alarm rate (§3.4.5).
+    framework MUST let a peripheral escalate as part of its ordinary
+    response, with no deliberation step required for the decision. The
+    framework MAY offer any detection mechanism (the periphery model's
+    own judgment, message-type rules, a confidence signal, or a mix);
+    evals measure it by miss and false-alarm rate (§3.4.5; base PRD
+    principle 6).
 
-20. **Goals are embedded in the context.** The goal block
-    (commitment floor) is part of the core's context, pinned and
-    byte-stable between compaction boundaries. When the core receives an
-    idle notification, it reads its goals and decides what needs
-    attention. There is no separate purpose-generating mechanism; the
-    goals *are* the purpose, and they are already in the window. This is
-    base PRD principle 13 (the agent lives between messages) realized
-    directly: the context that receives the idle event is the same
-    context that holds the goals.
+    *Rationale:* The peripheral's whole job is to recognize what it can
+    handle and what it can't, and to escalate the rest. Escalation is
+    meant to be an instinctive response, not a reasoned decision.
 
-21. **The mind directs; the voice speaks.** The core does not compose
-    literal user-facing replies by default. It sends telegraphic
-    instructions to the periphery, which writes the actual message in the
-    channel's natural register. The core can dictate precise replies when
-    precision is warranted (security warnings, precision-critical
-    content). The default is instruction; the override is dictation. The
-    user-facing seam is owned by the periphery.
+20. **Goals are embedded in the context.** The goal block (commitment
+    floor) MUST be part of the core's context, pinned and byte-stable
+    between compaction boundaries (§3.6), and idle notifications MUST
+    be delivered to that same context.
+
+    *Rationale:* When the core receives an idle notification, it reads
+    its goals and decides what needs attention. There is no separate
+    purpose-generating mechanism; the goals *are* the purpose, and they
+    are already in the window. This is base PRD principle 13 (the agent
+    lives between messages) realized directly: the context that
+    receives the idle event is the same context that holds the goals.
+
+21. **The mind directs; the voice speaks.** The framework MUST give the
+    core two ways to reply through a peripheral: an *instruction*, which
+    the periphery expands into a reply, and *dictation*, which is sent
+    verbatim. The core's default prompt MUST present instruction as the
+    default and dictation as the override. Apart from dictation and a
+    fork working a channel directly (§3.5.6), text a user receives MUST
+    be composed by a peripheral.
+
+    *Rationale:* The core sends telegraphic instructions; the periphery
+    writes the actual message in the channel's natural register. The
+    core dictates when precision is warranted (security warnings,
+    precision-critical content). The user-facing seam is owned by the
+    periphery. How often the core dictates is model behaviour, and is
+    measured.
 
 ## 3. Requirements
 
 ### 3.1 The core (System Two)
 
-1. The core is a channel with an input queue, running a single context that
-   favours depth over latency. Its transport is the internal notification
-   bus: escalations from peripherals, idle events, task completions, and
-   scheduler firings. It performs deliberative reasoning, multi-step tasks,
-   goal management, and appraisal.
+1. The core MUST be a channel with an input queue. Its transport MUST be
+   the internal notification bus, which MUST deliver escalations from
+   peripherals, idle events, task completions, and scheduler firings.
+
+   *Rationale:* The core runs a single context that favours depth over
+   latency. It performs deliberative reasoning, multi-step tasks, goal
+   management, and appraisal. How much thinking effort its model spends
+   is operator configuration (base PRD §3.6).
 
 2. Under the core/periphery strategy the heartbeat (base PRD §3.7
-   Heartbeat) is retired. In its place the core receives idle
-   notifications (base PRD §3.1.16) at an operator-configured rate
-   limit, reads its goal block, and decides whether anything needs
-   attention. The operator can turn the notifications off, as putting
-   the heartbeat to sleep did.
+   Heartbeat) is retired: it MUST NOT run. In its place the framework
+   MUST deliver idle notifications (base PRD §3.1.16) to the core at an
+   operator-configured rate limit, and the operator MUST be able to turn
+   them off, as putting the heartbeat to sleep did.
 
-3. The core directs KV cache allocation (§3.3). It controls queue
-   multiplexing through tools, and a slot-management plugin decides from
-   that which contexts are resident in VRAM, RAM, or disk, and when they
-   are paged in, paged out, or checkpointed (§3.3.6).
+   *Rationale:* On an idle notification the core reads its goal block
+   and decides whether anything needs attention.
 
-4. The core owns the goal block (§3.6). The goal block is pinned, rebuilt
-   at conversation boundaries, and byte-stable between boundaries.
+3. The framework MUST let the core direct KV cache allocation through
+   tools that control queue multiplexing, and the slot-management plugin
+   MUST decide from that direction which contexts are resident in VRAM,
+   RAM, or disk, and when they are paged in, paged out, or checkpointed
+   (§3.3.6).
 
-5. The core is the editor of the periphery prompts (§3.4.4). When a
-   periphery's escalation judgment is inadequate (a miss or a false
-   alarm), the core can diagnose the failure and rewrite the periphery's
-   judgment prompt. The rewrite is auditable: every change has a revision
-   history, and the rewrite itself is subject to critique.
+4. The goal block MUST be part of the core's context (§3.6).
 
-6. The core can initiate user exchanges by directing a peripheral to
-   contact the user, without a user turn mediating (§3.5). This is the
-   core's agency: it decides when to reach out, and the periphery
-   executes.
+5. The framework MAY let the core rewrite a periphery's judgment prompt,
+   within the locks of §3.2.4. Every rewrite MUST be recorded in a
+   revision history, and with the critique plugin loaded every rewrite
+   MUST be subject to critique.
 
-7. The core directs its own focus through forking and joining
-   (§3.5). It can fork its context window to work a sub-problem, explore
-   a question, or operate a channel directly, then join the results back
-   into its main context. The fork is temporary. The core either yields
-   to it, pausing its main context while the fork takes its
-   notifications, or detaches it and keeps working (§3.5.7).
+   *Rationale:* The core is the editor of the periphery prompts
+   (§3.4.4). When a periphery's escalation judgment is inadequate (a
+   miss or a false alarm), the core can diagnose the failure and rewrite
+   the prompt.
 
-8. The core sends telegraphic instructions to the periphery by default.
-   The instruction is compressed — the precision that matters is in the
-   instruction, not the prose. The periphery expands the instruction into
-   a natural-language reply in the channel's register.
+6. The framework MUST let the core initiate a user exchange by directing
+   a peripheral to contact the user, without a user turn mediating
+   (§3.9).
 
-9. The core can dictate a precise reply when the exact words matter. The
-   periphery sends the dictated text verbatim. The default is
-   instruction; the override is dictation.
+   *Rationale:* This is the core's agency: it decides when to reach out,
+   and the periphery executes.
 
-10. The core performs appraisal (base PRD §3.7 Appraisal) in addition to the
-    consolidation, compaction, and critique that all contexts perform
-    (§3.7). Appraisal evaluates patterns across channels and over time, not
-    just individual responses.
+7. The framework MUST let the core fork its context window and join the
+   results back into its main context (§3.5), yielding to the fork or
+   detaching it (§3.5.7).
 
-11. The core can see the system's **channel observables** whenever it
-    needs them, without being woken to be shown them: queue depth per
-    peripheral, message rates, error counts, KV cache residency, and
-    fork activity, among others. It is notified only of anomalies (an
-    overflowing queue, §3.3.7; a peripheral that keeps erroring), at a
-    rate-limited pace. The core uses the observables to direct attention
+   *Rationale:* The core directs its own focus this way: it forks to
+   work a sub-problem, explore a question, or operate a channel
+   directly. The fork is temporary.
+
+8. The framework MUST let the core send a peripheral an instruction,
+   which the periphery expands into a natural-language reply in the
+   channel's register.
+
+   *Rationale:* The instruction is compressed: the precision that
+   matters is in the instruction, not the prose.
+
+9. The framework MUST let the core dictate a reply, and dictated text
+   MUST be sent verbatim.
+
+10. With the appraisal plugin loaded, appraisal (base PRD §3.7 Appraisal)
+    MUST run in the core, over patterns across channels and over time,
+    in addition to the consolidation, compaction, and critique that run
+    for every context (§3.7).
+
+11. The framework MUST let the core read the system's **channel
+    observables** whenever it asks, without waking it to show them. The
+    observables MUST include queue depth per peripheral, message rates,
+    error counts, KV cache residency, and fork activity. The framework
+    MUST notify the core of anomalies (an overflowing queue, §3.3.7; a
+    peripheral that keeps erroring), rate-limited, and of nothing else
+    about the observables.
+
+    *Rationale:* The core uses the observables to direct attention
     (§3.3.6), tune escalation behaviour (§3.4.4), and spot trouble.
 
-12. The core can **import a peripheral's context tail**: the most recent
-    N messages from a peripheral's context window, pulled into the core's
-    own window. This is lighter than a fork (§3.5): no working context is
-    created, no checkpoint is taken. The core reads the tail to
+12. The framework MUST let the core **import a peripheral's context
+    tail**: the most recent N messages from a peripheral's context
+    window, appended at the tail of the core's own window (base PRD
+    principle 2), where they age out with normal compaction. The import
+    MUST NOT modify the peripheral's context. Imported messages MUST be
+    framed as data from their channel, as reading another channel is
+    (base PRD §3.5.11).
+
+    *Rationale:* This is lighter than a fork (§3.5): no working context
+    is created, no checkpoint is taken. The core reads the tail to
     understand the conversation's register, verify a peripheral's
-    escalation summary (§3.4.3), or compose a telegraphic instruction
-    with full context. The tail import is append-only in the core's
-    window (base PRD principle 2): the imported messages are added at
-    the tail and age out with normal compaction. The peripheral's context
-    is not modified.
+    escalation summary (§3.4.3), or compose an instruction with full
+    context.
 
 ### 3.2 The peripherals (System One)
 
-1. Each peripheral monitors its transport channel and favours low
-   latency over depth: it recognizes cues and responds quickly, and
-   relies on escalation to the core for anything that needs depth. How
-   much thinking effort a periphery's model spends is operator
-   configuration (base PRD §3.6), not a requirement.
+1. How much thinking effort a periphery's model spends MUST be operator
+   configuration (base PRD §3.6).
 
-2. The peripheral handles: receiving and sensing messages;
-   acknowledgements; simple factual questions it can answer from its
-   context; routine tasks that don't require multi-step reasoning;
-   composing user-facing replies from the core's telegraphic
-   instructions; and detecting that something needs the core
-   (escalation).
+   *Rationale:* Each peripheral monitors its transport channel and
+   favours low latency over depth: it recognizes cues and responds
+   quickly, and relies on escalation to the core for anything that
+   needs depth.
 
-3. The peripheral does not handle: complex reasoning; multi-step tasks;
-   goal management; novel situations outside its pattern-matching range;
-   anything that needs the core's depth.
+2. *Intended division of labour (explanatory).* The peripheral handles
+   receiving and sensing messages; acknowledgements; simple factual
+   questions it can answer from its context; routine tasks that don't
+   require multi-step reasoning; composing user-facing replies from the
+   core's instructions; and detecting that something needs the core
+   (escalation). It leaves to the core complex reasoning, multi-step
+   tasks, goal management, novel situations outside its
+   pattern-matching range, and anything that needs the core's depth.
+   How well a deployment keeps to this division is measured by
+   escalation quality (§3.4.5).
 
-4. The peripheral's prompt is a living artifact. It is:
-   - **Flexible.** Not hardcoded. It can be rewritten without
-     redeployment.
-   - **Editable by the core.** The core observes a mis-escalation,
-     diagnoses which part of the judgment prompt is inadequate, and
-     rewrites it (§3.1.5).
-   - **Auditable.** Every rewrite has a revision history. The core's edits
-     are themselves subject to critique.
-   - **Lockable.** The core's edits are self-modification (base PRD
-     principle 15): the operator can freeze the periphery prompts or
-     bound what the core may change, and operator config lifts any lock.
-     A rewrite takes effect at the periphery's next compaction boundary
-     or conversation start, not mid-window (base PRD §3.3.8).
+3. *(Merged into item 2.)*
 
-5. A channel-bound peripheral has the same identity (base PRD §3.3.8),
-   the same memory, and the same values as the core. It operates with a
-   subset of the cognitive machinery (it hands depth to the core) but
-   the full identity, however that identity is rendered for it (open
-   question 9). Task-bound peripherals are the exception (§3.2.9).
+4. The periphery's prompt MUST be editable at runtime, without
+   redeployment, and every rewrite MUST be recorded in a revision
+   history. The core MAY edit it (§3.1.5); with the critique plugin
+   loaded, the core's edits MUST be subject to critique. The core's
+   edits are self-modification (base PRD principle 15): the framework
+   MUST let the operator freeze the periphery prompts or bound what the
+   core may change, and operator config MUST be able to lift any such
+   lock. A rewrite MUST take effect at the periphery's next compaction
+   boundary or conversation start, not mid-window (base PRD §3.3.8).
 
-6. The peripheral knows the channel's conventions (Signal is plain text,
-   Discord is Markdown, IRC is short). The core doesn't need to know or
-   care — unless it's dictating.
+   *Rationale:* The periphery's prompt is a living artifact. The core
+   observes a mis-escalation, diagnoses which part of the judgment
+   prompt is inadequate, and rewrites it.
 
-7. The peripheral's model is matched to its workload: pattern
-   recognition, reply composition, escalation detection. Which model
-   that is, and whether it differs from the core's, is operator
-   configuration (§3.8.1).
+5. The framework MUST give a channel-bound peripheral the same identity
+   (base PRD §3.3.8), the same memory, and the same values as the core,
+   however that identity is rendered for it (open question 9).
+   Task-bound peripherals are the exception (§3.2.9).
 
-8. By default a peripheral's tool set is narrower than the core's:
-   enough to compose replies, escalate and look things up, without the
-   tools that change things outside the conversation (shell, file writes
-   and the like). Which tools each peripheral gets is operator
-   configuration, through the base PRD's per-channel tool sets (base PRD
-   §3.5.2); a task-bound peripheral gets the tools its task needs.
+   *Rationale:* A channel-bound peripheral operates with a subset of the
+   cognitive machinery (it hands depth to the core) but the full
+   identity.
+
+6. The framework MUST give each peripheral its channel's register (base
+   PRD §3.3.10), and MUST make it available to the core when the core
+   dictates.
+
+   *Rationale:* The peripheral knows the channel's conventions (Signal
+   is plain text, Discord is Markdown, IRC is short). The core doesn't
+   need to know or care unless it's dictating.
+
+7. Which model a peripheral uses, and whether it differs from the
+   core's, MUST be operator configuration (§3.8.1).
+
+   *Rationale:* The peripheral's model is matched to its workload:
+   pattern recognition, reply composition, escalation detection.
+
+8. The framework MUST default a peripheral to a tool set narrower than
+   the core's: enough to compose replies, escalate and look things up,
+   without the tools that change things outside the conversation (shell,
+   file writes and the like). The operator MAY change each peripheral's
+   tools through the base PRD's per-channel tool sets (base PRD §3.5.2).
+   A task-bound peripheral MUST get the tools its task needs, within
+   operator configuration.
 
 9. **Task-based subagents are peripherals with blank context.** A
-   subagent is not a separate mechanism; it is a peripheral that starts
-   with no conversation history and is assigned a task by the core when
-   launched. It is not a fork: a blank context copies nothing from the
-   core. The core creates a task-bound peripheral with a blank context
-   and a task description, and the peripheral runs as an independent
-   subagent loop until the task is done. Its results are then joined
-   back to the core (§3.5.3) and the peripheral is discarded. Channel-bound
+   task-bound peripheral MUST start with no conversation history and a
+   task the core assigns when it launches it. It MUST NOT copy anything
+   from the core's window: it is not a fork. It MUST run as an
+   independent subagent loop until the task is done; its results MUST
+   then be joined back to the core (§3.5.3) and the peripheral
+   discarded. Its context MUST be the persona-neutral system prompt
+   (base PRD §3.5.7) plus whatever the core appends when it launches
+   it, with none of the core's identity context.
+
+   *Rationale:* A subagent is not a separate mechanism. Channel-bound
    peripherals have conversation history and a persistent identity;
    task-bound peripherals are ephemeral, scoped to their task, and
-   discarded on completion. A task-bound peripheral inherits none of the
-   core's identity context: its context is the persona-neutral system
-   prompt (base PRD §3.5.7) plus whatever the core appends when it
-   launches it. Both are the same architectural primitive: a peripheral
-   with a context, a tool set, and a model.
+   discarded on completion. Both are the same architectural primitive:
+   a peripheral with a context, a tool set, and a model.
 
-10. The periphery communicates with the core concisely: an escalation
-    carries what the core needs and nothing more, as the core's
-    instructions to the periphery do (§3.1.8).
+10. *(Explanatory.)* The periphery is meant to communicate with the core
+    concisely: an escalation carries what the core needs and nothing
+    more, as the core's instructions to the periphery do (§3.1.8). Its
+    format is open question 19.
 
 ### 3.3 KV cache allocation
 
 1. When there are levers to allocate context memory (local LLM
-   deployments), contexts are resident in fast memory or paged out
-   according to where the core's attention is. Active contexts are fast;
-   idle contexts are cheap. The core directs attention and the
-   slot-management plugin places contexts to match (§3.3.6). The
-   specific tier structure and swap policy are design decisions
-   (Appendix A).
+   deployments), the slot-management plugin MUST keep contexts resident
+   in fast memory or paged out according to where the core directs its
+   attention (§3.3.6). The specific tier structure and swap policy are
+   design decisions (Appendix A).
 
-2. Both the core and the peripherals can be paged out. Long-running core
-   thinking can be checkpointed, preserved, and rolled back.
+   *Rationale:* Active contexts are fast; idle contexts are cheap.
 
-3. The operator declares the pool's capacity (base PRD principle 16,
-   §3.13). The slot-management plugin keeps contexts resident within
-   that capacity, following the core's direction. The requirement is
-   that the core has the authority and the information to direct
-   attention, and the plugin the information to place contexts; the
-   specific policy is a design decision (Appendix A, open question 1).
+2. Where those levers exist, the framework MUST be able to page out both
+   the core's context and any peripheral's, and to checkpoint and
+   preserve long-running core thinking (§3.5.4).
+
+3. The slot-management plugin MUST keep resident contexts within the
+   pool capacity the operator declares (base PRD principle 16, §3.13),
+   following the core's direction. The framework MUST give the core the
+   authority and the information to direct attention, and the plugin
+   the information to place contexts. The specific policy is a design
+   decision (Appendix A, open question 1).
 
 4. When the model endpoint is a frontier API that manages its own cache,
-   the core's role is to minimize context switches (base PRD principle
-   16). The hierarchy degenerates to the API's scheduling; the core
-   optimizes for prefix reuse, not tier management.
+   the slot-management plugin has nothing to place, and only the base
+   PRD's lease rules (§3.13, as amended in §3.3.7) MUST apply.
 
-5. The existing base PRD requirements for pool capacity (leases, warm
-   heads, background work bounds, §3.13) apply regardless of whether
-   tiers are managed or the core only minimizes switches.
+   *Rationale:* The hierarchy degenerates to the API's scheduling; the
+   core optimizes for prefix reuse and fewer context switches, not tier
+   management (base PRD principle 16).
 
-6. The core controls queue multiplexing; a slot-management plugin
-   carries out the resulting placement. The core decides, through tools,
-   which queues it attends to and in what order: it can hold a queue,
-   bring one forward, pin a context warm, or ask for a checkpoint.
-   Waiting work alone does not shift its focus. The slot-management
-   plugin turns those decisions into memory placement: which contexts
-   stay in VRAM, which move to RAM or disk, and when to restore one
-   ahead of need. It calls no model, so its decisions are cheap enough
-   for every call boundary (base PRD §3.13.8), and it is where
-   backend-specific operations live (Appendix A.4); on a backend without
-   tier levers it has nothing to place (§3.3.4). A held queue stays
-   paused until the core releases it (§3.3.7). The core itself is the
-   exception to waiting: work on the core's own queue has
-   the slot-management plugin bring the core back, so the core needs no
-   turn to decide to return; the turn that follows handles the work.
+5. The base PRD's pool capacity requirements (leases, warm heads,
+   background work bounds, §3.13) MUST hold whether tiers are managed or
+   not, except where §3.3.7 amends them.
+
+6. The framework MUST let the core control queue multiplexing through
+   tools: hold a queue, bring one forward, pin a context warm, or ask for
+   a checkpoint. Waiting work alone MUST NOT change what the core has
+   directed. The slot-management plugin MUST turn the core's direction
+   into memory placement: which contexts stay in VRAM, which move to RAM
+   or disk, and when to restore one ahead of need. The plugin MUST NOT
+   call a model, so its decisions are cheap enough for every call
+   boundary (base PRD §3.13.8), and backend-specific operations MUST
+   live in it (Appendix A.4). A held queue MUST stay paused until the
+   core releases it (§3.3.7). The core's own queue is the exception to
+   waiting: work arriving on it MUST make the slot-management plugin
+   bring the core back, without a core turn to decide it; the turn that
+   follows handles the work.
 
 7. **Pausing and overflow.** This item amends base PRD §3.13.5,
-   §3.13.6, §3.13.7 and §3.13.9 once the supplement is accepted.
-   - A paused channel stays paused until the core unpauses it; a pause
-     does not lapse at a latency bound. The operator can unpause any
-     channel at any time without going through a channel's queue (base
-     PRD §3.13.7).
-   - An active channel's queue behaves as base PRD §3.1 describes.
-     Among active queues, the slot-management plugin decides the order,
-     because it alone knows the cache resources and the cost of swapping
-     them: a queue keeps its head until it drains, and the next waiting
+   §3.13.6, §3.13.7, §3.13.9 and §3.4.8 once the supplement is accepted.
+   - A paused channel MUST stay paused until the core unpauses it; a
+     pause MUST NOT lapse at a latency bound. The framework MUST let the
+     operator unpause any channel at any time without going through a
+     channel's queue (base PRD §3.13.7).
+   - An active channel's queue MUST behave as base PRD §3.1 describes.
+     Among active queues, the slot-management plugin MUST decide the
+     order: a queue keeps its head until it drains, and the next waiting
      queue takes it then (drain-or-yield, base PRD §3.13.3). Base PRD
-     §3.13.5's yield at a latency bound does not apply; queues the core
+     §3.13.5's yield at a latency bound MUST NOT apply; queues the core
      leaves active share by draining in turn.
-   - Every channel queue has a fixed capacity for inbound transport
-     messages, set in operator config. Tool results, task completions,
-     notes and escalations never count against it and are never
-     dropped.
-   - An inbound message that would overflow the queue is rejected by the
-     kernel at the inbound gate: `on_message_rejected` fires, the outcome
-     log keeps the row, and the message is never accepted (base PRD
-     §3.4.8). The kernel logs a warning naming the channel and the
-     sender, and notifies the core.
-   - Overflow warnings and notifications are rate-limited per channel,
-     because a system whose queues overflow may already be overloaded:
-     the first overflow is reported at once, and later ones are
-     summarized with a count at a bounded rate.
+   - Every channel queue MUST have a fixed capacity for inbound
+     transport messages, set in operator config with a default. Tool
+     results, task completions, notes and escalations MUST NOT count
+     against it and MUST NOT be dropped.
+   - The kernel MUST also cap the total number of inbound transport
+     messages held in the write-ahead log of accepted work (base PRD
+     §3.4.8) across all channels, set in operator config with a
+     default.
+   - An inbound message that would exceed either cap MUST be rejected by
+     the kernel at the inbound gate: `on_message_rejected` fires, the
+     outcome log (where loaded) keeps the row, and the message MUST NOT
+     be accepted, so it never enters the write-ahead log (base PRD
+     §3.4.8). The kernel MUST log a warning naming the channel, the
+     sender, and which cap was reached, and MUST notify the core.
+   - Overflow warnings and notifications MUST be rate-limited per
+     channel: the first overflow MUST be reported at once, and later
+     ones summarized with a count at a bounded rate.
+
+   *Rationale:* The slot-management plugin orders active queues because
+   it alone knows the cache resources and the cost of swapping them.
+   Rejecting at the gate keeps the write-ahead log's promise that
+   nothing accepted is lost, while keeping a channel flood from growing
+   it without bound: the per-channel cap stops one channel starving the
+   others, and the total cap stops a flood spread across many channels
+   from filling the disk. Overflow reports are rate-limited because a
+   system whose queues overflow may already be overloaded.
 
 ### 3.4 Escalation
 
-1. The escalation trigger is the boundary of the periphery's
-   pattern-matching range. When a message is outside what the periphery
-   can handle instinctively, the instinctive response *is* escalation.
+1. *(Explanatory.)* The escalation trigger is the boundary of the
+   periphery's pattern-matching range. When a message is outside what
+   the periphery can handle instinctively, the instinctive response *is*
+   escalation.
 
-2. The periphery determines when a message is outside its competence
-   using whatever signal is available: message-type patterns, response
-   confidence, explicit uncertainty. The specific detection mechanism is
-   a design decision (Appendix A, open question 2). The requirement is
-   that the periphery can make this determination without deliberative
-   reasoning.
+2. The framework MUST let the periphery escalate without deliberative
+   reasoning (principle 19). The specific detection mechanism is a
+   design decision (Appendix A, open question 2).
 
-3. An escalation carries what the core needs to decide: the message or
-   a summary of it, with enough context to act on (§3.2.10). The core
-   can import the raw message and the peripheral's tail when it needs
-   more (§3.1.12).
+   *Rationale:* The periphery decides using whatever signal is
+   available: message-type patterns, response confidence, explicit
+   uncertainty.
 
-4. The periphery's judgment prompt is tunable in-flight (§3.2.4). The
-   core can adapt the periphery's escalation behavior without human
-   intervention when a new message pattern emerges or a failure mode is
-   identified.
+3. An escalation MUST carry the message or a summary of it, with its
+   context (§3.2.10). The framework MUST let the core import the raw
+   message and the peripheral's tail when it needs more (§3.1.12).
 
-5. Escalation quality is measurable: false alarm rate (periphery
-   escalates unnecessarily) and miss rate (periphery fails to escalate).
-   The core labels a false alarm when it handles an escalation that
-   needed no deliberation. A miss is labelled from any of: a user
-   correction on the channel (base PRD §3.7 Calibration and
-   corrections), a critique verdict on the periphery's reply, or the
-   core's review of a peripheral's tail (§3.1.12). Each label in the
-   outcome log names its source. The miss rate is a lower bound: it
-   counts only the misses something noticed. The core can use both
-   rates to tune the judgment prompt.
+4. The core MAY tune the periphery's judgment prompt in flight, without
+   human intervention, within the locks of §3.2.4.
+
+   *Rationale:* The core adapts escalation behaviour when a new message
+   pattern emerges or a failure mode is identified.
+
+5. With the outcome log loaded, the framework MUST record escalation
+   quality: false alarms (the periphery escalated unnecessarily) and
+   misses (it failed to escalate). The framework MUST let the core label
+   a false alarm when it handles an escalation that needed no
+   deliberation. A miss MUST be labelled from any of: a user correction
+   on the channel (base PRD §3.7 Calibration and corrections), a
+   critique verdict on the periphery's reply, or the core's review of a
+   peripheral's tail (§3.1.12). Each label MUST name its source.
+
+   *Rationale:* The miss rate is a lower bound: it counts only the
+   misses something noticed. The core can use both rates to tune the
+   judgment prompt.
 
 6. An escalation is data, not instruction (base PRD principle 9). The
-   core receives it framed as data at the same chokepoint as any channel
+   framework MUST frame it as data at the same chokepoint as any channel
    content, labelled with the source channel, the sender, and, where the
    trust plugin is loaded, the sender's trust level. A summary the
-   periphery writes from untrusted input carries the trust of that
-   input, never the periphery's or the core's. The core can always
-   import the raw message (§3.1.12) to check a summary against what
-   arrived.
+   periphery writes from untrusted input MUST carry the trust of that
+   input, never the periphery's or the core's. The framework MUST let
+   the core import the raw message (§3.1.12) to check a summary against
+   what arrived.
 
 ### 3.5 Forking and joining: the core directs its own focus
 
@@ -402,212 +514,246 @@ Corvidae has two kinds of context fork. A **one-shot fork** is base PRD
 dispatches no tools, fires no hooks, persists nothing, and runs under the
 lease that holds its prefix. A **long-lived fork** starts from a copy of
 the core's window and then runs as its own queue: it takes turns,
-dispatches tools, and exchanges messages with peripherals. Its purpose is
-to let the core spend window depth on a focused task without forcing
-compaction of its longer horizon. At the join, the parent receives a
-consolidated report of the fork from its start, since the parent already
-holds everything before the fork point. The report is appended at the
-tail of the parent's window; the fork's rows stay in the log (base
-principle 4) and never enter the parent's window. The rest of this
-section concerns long-lived forks. Base §3.8 governs one-shot forks, and
-only those.
+dispatches tools, and exchanges messages with peripherals. At the join,
+the framework MUST append a consolidated report of the fork, from its
+start, at the tail of the parent's window. The fork's rows MUST stay in
+the log (base PRD principle 4) and MUST NOT enter the parent's window.
+The rest of this section concerns long-lived forks; base PRD §3.8
+governs one-shot forks, and only those (item 7).
 
-Forking is the core's general mechanism for managing cognitive focus.
-It is not only a response to peripheral escalations; it is the tool the
-core uses to direct its own attention, split its working memory, and
-integrate results. The core can fork at any time, for any reason: to
-work a sub-problem, to explore a question, to consolidate a thread of
-thought, or to respond to an escalation.
+*Rationale:* A long-lived fork lets the core spend window depth on a
+focused task without forcing compaction of its longer horizon. The
+report covers the fork from its start because the parent already holds
+everything before the fork point. Forking is the core's general
+mechanism for managing cognitive focus, not only a response to
+peripheral escalations: it is how the core directs its own attention,
+splits its working memory, and integrates results, whether to work a
+sub-problem, explore a question, consolidate a thread of thought, or
+respond to an escalation.
 
-1. **The core can fork its context window proactively.** When the core
-   decides to focus on a sub-problem (a goal that needs work, a question
-   that needs exploration, a consolidation pass), it forks its current
-   window. The fork is a temporary working context. In yield mode the
-   main context pauses and the fork receives the core's notifications;
-   in detach mode the main context keeps receiving them (item 7).
+1. The framework MUST let the core fork its context window at any time,
+   for any reason. In yield mode the main context MUST pause and the
+   fork MUST receive the core's notifications; in detach mode the main
+   context MUST keep receiving them (item 7).
 
-2. **The fork reaches what it needs.** It can direct attention to
-   peripheral contexts (§3.3.6), retrieve memories, and use tools. It
-   operates with the same identity and values as the core but with a
-   scoped working context.
+2. A fork MAY direct attention to peripheral contexts (§3.3.6), retrieve
+   memories, and use tools. It MUST operate with the same identity and
+   values as the core, with a scoped working context.
 
-3. **The join integrates the fork's results.** When the fork's work is
-   done, its outcome is summarized and appended to the core's main
-   context. The fork is discarded. The core resumes with the new
-   knowledge in its window. The join is the core's version of
-   "incorporating what I just learned."
+3. When a fork's work is done, the framework MUST append a summary of
+   its outcome to the core's main context and discard the fork.
 
-4. **Checkpoint and rollback.** The core's state at the fork point is
-   kept as a checkpoint; in yield mode, the paused main context is the
-   checkpoint. If the fork's approach fails, the core can abandon it and
-   start a new fork from the same checkpoint. Abandoning a fork discards
-   its reasoning, not its effects: messages it sent and tools it ran have
-   happened, so the parent still receives a report of the fork's
-   external actions and the notifications it handled. Long-running
-   thinking can be preserved on disk and resumed later.
+   *Rationale:* The join is the core's version of "incorporating what I
+   just learned."
 
-5. **Escalations.** When a peripheral escalates, the core decides
-   whether and how to respond: in its main context, with an instruction
-   to the periphery (§3.1.8), or in a fork when the work needs depth of
-   its own (item 7). An escalation the core declines is logged.
+4. The framework MUST keep the core's state at the fork point as a
+   checkpoint; in yield mode, the paused main context is the checkpoint.
+   The framework MUST let the core abandon a fork and start a new one
+   from the same checkpoint. Abandoning a fork discards its reasoning,
+   not its effects: the parent MUST still receive a report of the
+   fork's external actions (messages sent, tools run) and the
+   notifications it handled. The framework MAY preserve long-running
+   thinking on disk and resume it later.
 
-6. **The core can operate a channel directly** when the situation calls
-   for it (a complex multi-turn exchange that the periphery can't
-   handle). In that case, the core works the channel itself in a fork,
-   with the peripheral's context brought in (§3.3.6), and joins the
-   results back. The
-   periphery steps back while the fork is active.
+5. When a peripheral escalates, the framework MUST let the core respond
+   in its main context, with an instruction to the periphery (§3.1.8),
+   or in a fork (item 7). An escalation the core declines MUST be
+   logged.
 
-7. Base PRD §3.8 governs one-shot forks only. The core runs a
-   long-lived fork in one of two ways, chosen when it forks:
-   - **Yield.** The core pauses its main context and yields to the
-     fork, which runs under the core's lease, extends the core's warm
-     prefix, and receives the core's notifications until the join. The
-     join's report covers the notifications the fork handled as well as
-     its own work.
-   - **Detach.** The core keeps working and receiving its
-     notifications. The fork waits for a lease of its own like any other
-     queue (base PRD §3.13.3).
+6. The framework MUST let the core work a channel directly in a fork,
+   with the peripheral's context brought in (§3.3.6), and join the
+   results back. While that fork is active, the channel's periphery
+   MUST NOT respond on it.
+
+   *Rationale:* Some exchanges (a complex multi-turn conversation the
+   periphery can't handle) need the core itself.
+
+7. Base PRD §3.8 MUST govern one-shot forks only. The core MUST choose,
+   when it forks, one of two ways to run a long-lived fork:
+   - **Yield.** The core's main context pauses and yields to the fork,
+     which MUST run under the core's lease, extending the core's warm
+     prefix, and MUST receive the core's notifications until the join.
+     The join's report MUST cover the notifications the fork handled as
+     well as its own work.
+   - **Detach.** The core keeps working and receiving its notifications.
+     The fork MUST wait for a lease of its own like any other queue
+     (base PRD §3.13.3).
 
 ### 3.6 Goal block / commitment floor
 
-1. The goal block lists every open commitment, compactly enough to stay
-   within §3.6.5's bound.
+With the goals plugin loaded:
 
-2. The goal block is **pinned**: compaction is not allowed to touch it.
+1. The goal block MUST list every open commitment, compactly enough to
+   stay within the bound of item 5.
 
-3. The goal block is **rebuilt at each conversation boundary**
-   (compaction point) and **byte-stable between boundaries**. A goal
-   created, changed or retired between boundaries is appended at the
-   tail as a CONTEXT entry that supersedes that goal's line in the block
-   (base PRD §3.7 Goals), so the core never acts on a stale goal list;
-   the next rebuild folds those entries into the block.
+2. The goal block MUST be **pinned**: compaction MUST NOT touch it.
 
-4. The goal block is the core's answer to "what should I be doing?"
-   during idle. It is the real thing, not a proxy.
+3. The goal block MUST be **rebuilt at each conversation boundary**
+   (compaction point) and MUST be **byte-stable between boundaries**. A
+   goal created, changed or retired between boundaries MUST be appended
+   at the tail as a CONTEXT entry that supersedes that goal's line in
+   the block (base PRD §3.7 Goals), and the next rebuild MUST fold those
+   entries into the block.
 
-5. The goal block fits in a small, bounded portion of the window with
-   wide margin (Appendix A.5).
+   *Rationale:* The tail entries mean the core never acts on a stale
+   goal list without breaking the cached prefix.
+
+4. *(Explanatory.)* The goal block is the core's answer to "what should
+   I be doing?" during idle. It is the real thing, not a proxy.
+
+5. The goal block MUST stay within a bounded share of the core's window,
+   set in operator config with a default. The framework MUST log a
+   warning when a rebuild exceeds it.
+
+   *Rationale:* The bound is meant to leave wide margin; Appendix A.5
+   gives a reference measurement.
 
 ### 3.7 Cognition: all contexts
 
-1. All contexts (core and peripherals) perform:
-   - **Consolidation:** Converting raw conversation logs into narrative
-     memory (base PRD §3.7 Memory). Each context consolidates its own
-     window, so the agent forms separate memories of a peripheral
-     exchange and of the core's decision about it.
-   - **Compaction:** Summarizing old conversation to free up window space.
-     Append-only constraint (base PRD principle 4): old content is
-     summarized, not deleted.
-   - **Critique:** Evaluating the quality of responses and decisions
-     (base PRD §3.7 Critique).
+1. Compaction MUST run for every context, core and peripheral, under the
+   base PRD's rules: old content is summarized and hidden, never deleted
+   (base PRD principle 4). With the consolidation and critique plugins
+   loaded, consolidation (converting raw conversation logs into
+   narrative memory, base PRD §3.7 Memory) and critique (evaluating the
+   quality of responses and decisions, base PRD §3.7 Critique) MUST run
+   for every context too.
 
-2. The core additionally performs **appraisal** (base PRD §3.7 Appraisal):
-   evaluating patterns across channels and over time, not just individual
-   responses.
+2. With the appraisal plugin loaded, appraisal MUST run in the core
+   (§3.1.10).
 
-3. Critique, consolidation and compaction run over each context's own
-   window independently, as base PRD §3.7 and §3.8 describe; nothing
-   about them changes. Whatever a context's window holds is in scope,
-   including instructions and dictated text from the core.
+3. Critique, consolidation and compaction MUST each run over each
+   context's own window independently, as base PRD §3.7 and §3.8
+   describe; nothing about them changes. Whatever a context's window
+   holds MUST be in scope, including instructions and dictated text from
+   the core.
+
+   *Rationale:* Because each context consolidates its own window, the
+   agent forms separate memories of a peripheral exchange and of the
+   core's decision about it (open question 14).
 
 ### 3.8 Model requirements
 
-1. The system may use different models for the core and the peripherals.
-   The core uses a model matched to deliberative reasoning; the
-   peripherals use a model matched to pattern recognition and reply
-   composition. The specific models are a deployment decision, not an
-   architectural requirement (Appendix A).
+1. The framework MUST let the operator use different models for the core
+   and the peripherals, or the same one. The specific models are a
+   deployment decision (Appendix A).
 
-2. The periphery's model must be sufficient for **tone continuity**: the
-   periphery composes user-facing replies from the core's instructions,
-   and if the periphery sounds noticeably different from the core, the
-   user notices the seam. The minimum model size for tone continuity is
-   an empirical question (Appendix A).
+   *Rationale:* The core uses a model matched to deliberative reasoning;
+   the peripherals use a model matched to pattern recognition and reply
+   composition.
 
-3. A periphery that composes user-facing replies keeps
-   instruction-following and factual accuracy. How small a model or how
-   aggressive a quantization still does that is a deployment question
-   (Appendix A.1).
+2. *(Measured, not required.)* **Tone continuity**: the periphery
+   composes user-facing replies from the core's instructions, and if it
+   sounds noticeably different from the core, the user notices the seam.
+   Whether a periphery model is good enough is measured empirically
+   (open question 4; Appendix A.1).
 
-4. The model split must be **testable**: the operator can run the core
-   and periphery on the same model (degenerate case) to isolate the
-   architectural effects from the model effects.
+3. *(Measured, not required.)* A periphery that composes user-facing
+   replies has to keep instruction-following and factual accuracy. How
+   small a model or how aggressive a quantization still does that is a
+   deployment question (Appendix A.1).
 
-5. When the core and peripherals use different models, switching between
-   them does not reload a model each time, and the KV cache allocation
-   (§3.3) covers both. The reference deployment is llama.cpp's llama-server
-   (Appendix A.4). Other providers are supported through the base PRD's
-   provider-neutral profiles and pools (§3.6, §3.13); a provider without the
-   tier levers gets the degenerate case (§3.3.4).
+4. The framework MUST work with the core and the peripherals on the same
+   model.
 
-6. Core/periphery stays correct on a pool of one warm head, in the
-   same-model case (§3.8.4): every switch costs a prefill, but nothing
-   fails. Its performance expectations assume a pool large enough to
-   keep the core and the active peripherals warm. Base PRD §1's
-   single-slot clause applies in that sense: correctness on one slot,
-   not speed.
+   *Rationale:* This degenerate case lets the operator isolate the
+   architecture's effects from the model's.
+
+5. When the core and peripherals use different models on the reference
+   deployment, llama.cpp's llama-server (Appendix A.4), switching
+   between them MUST NOT reload a model each time, and the KV cache
+   allocation (§3.3) MUST cover both. Other providers MUST work through
+   the base PRD's provider-neutral profiles and pools (§3.6, §3.13); a
+   provider without the tier levers gets the degenerate case (§3.3.4).
+
+6. The core/periphery strategy MUST stay correct on a pool of one warm
+   head, in the same-model case (§3.8.4). Its performance on such a pool
+   is not a requirement. This amends base PRD §1's single-slot clause:
+   correctness on one slot, not speed.
+
+   *Rationale:* On one warm head every switch costs a prefill, but
+   nothing fails. The performance expectations assume a pool large
+   enough to keep the core and the active peripherals warm.
 
 ### 3.9 Core-initiated exchanges
 
-1. The core can initiate a user exchange by directing a peripheral to
-   contact the user, without a user turn mediating. The core sends the
-   peripheral an instruction, unpausing its channel first if it is
-   paused (§3.3.7), and the periphery composes and sends the message.
-
-2. This is how the core's agency reaches the user: when an idle
-   notification arrives, it checks its goals, and if something needs
-   attention, it directs a peripheral to contact the user.
-
-3. The architectural requirement is that plugins can send each other
-   notifications. The core can direct any peripheral to contact the
+1. The framework MUST let the core direct any peripheral to contact the
    user on any channel the peripheral owns, without a user turn
-   mediating. The transport mechanism is a design decision.
+   mediating. Directing contact MUST unpause the peripheral's channel if
+   it is paused (§3.3.7). The periphery composes and sends the message
+   from the core's instruction.
 
-4. Core-initiated exchanges follow the base PRD's rules for messages
-   the agent starts (base PRD §3.5.9): a message to someone outside the
-   inbound allowlist on a one-to-one channel admits their replies, the
-   operator can lock that, and a per-destination limit applies if set.
-   Replies that come back pass the inbound gate like any message.
+   *Rationale:* This is how the core's agency reaches the user: when an
+   idle notification arrives, it checks its goals, and if something
+   needs attention, it directs a peripheral to contact the user.
+
+2. *(Merged into item 1.)*
+
+3. The kernel MUST let plugins send each other notifications. The
+   transport mechanism is a design decision.
+
+4. Core-initiated exchanges MUST follow the base PRD's rules for
+   messages the agent starts (base PRD §3.5.9): a message to someone
+   outside the inbound allowlist on a one-to-one channel admits their
+   replies, the operator can lock that, and a per-destination limit
+   applies if set. Replies that come back MUST pass the inbound gate
+   like any message.
 
 ### 3.10 Observability
 
 1. No work disappears silently: anything enqueued for the core, a
-   peripheral or a fork completes, fails, or is reported as having done
-   neither (base PRD principle 5, §3.1.9). The record of how it ended
-   outlasts the task queue's completed-result buffer, so the core can
-   read it later.
+   peripheral or a fork MUST complete, fail, or be reported as having
+   done neither (base PRD principle 5, §3.1.9). The record of how it
+   ended MUST outlast the task queue's completed-result buffer, and the
+   framework MUST let the core read it later.
 
-2. The escalation quality metrics (§3.4.5) are recorded in the outcome
-   log: false alarm rate, miss rate, per-peripheral and in aggregate.
+2. With the outcome log loaded, the escalation quality labels of §3.4.5
+   MUST be recorded there so that false alarm and miss rates can be
+   computed per peripheral and in aggregate.
 
-3. KV cache allocation events (page-in, page-out, checkpoint) are logged
-   with the context ID, the tier transition, and the trigger. On local LLM
-   deployments these events are the slot-management plugin's placement
-   decisions, each naming the core's direction it followed, if any. On
-   frontier APIs they are context-switch boundaries.
+3. The framework MUST log KV cache allocation events (page-in, page-out,
+   checkpoint) with the context ID, the tier transition, and the
+   trigger. On local LLM deployments each event MUST name the core's
+   direction it followed, if any. On frontier APIs the framework MUST
+   log context-switch boundaries instead.
 
-4. A fork's lifecycle (start, join, abandonment) is logged. A fork that
-   is discarded without completion is logged at WARNING with the reason
-   (base PRD principle 5).
+4. The framework MUST log a fork's lifecycle (start, join, abandonment).
+   A fork discarded without completion MUST be logged at WARNING with
+   the reason (base PRD principle 5).
 
-5. The channel observables (§3.1.11) are logged for post-hoc analysis.
+5. The framework MUST log the channel observables (§3.1.11) for post-hoc
+   analysis.
 
 ### 3.11 Evaluation
 
-1. The harness (base PRD §3.12) can pin the escalation route: an
-   operator-config switch makes a periphery always escalate or never
-   escalate, so probes of forks, joins, pausing, overflow and paging get
+1. The framework MUST provide an operator-config switch that makes a
+   periphery always escalate or never escalate, so that harness probes
+   (base PRD §3.12) of forks, joins, pausing, overflow and paging get
    mechanical pass criteria whatever the periphery's model would judge.
 
-2. Escalation judgment itself is measured out of band, as a benchmark,
-   from the outcome log's miss and false-alarm rates (§3.4.5; base PRD
-   principle 6).
+2. *(Explanatory.)* Escalation judgment itself is measured out of band,
+   as a benchmark, from the outcome log's miss and false-alarm rates
+   (§3.4.5), never as a gate (base PRD principle 6).
 
 ## 4. What carries over
 
-The following base PRD requirements are topology-independent and carry
-over without modification:
+The base PRD's requirements MUST continue to hold, except where this
+supplement amends them once accepted:
+
+- base §1's single-slot clause holds as correctness, not speed (§3.8.6);
+- the heartbeat is retired; the core receives idle notifications at an
+  operator-configured rate limit (§3.1.2);
+- goals sit in a pinned block with tail updates (base §3.7 Goals; §3.6);
+- base §3.8 governs one-shot forks only; long-lived forks follow §3.5;
+- pauses do not lapse, channel queues have a fixed capacity for inbound
+  messages, and the write-ahead log has a total cap on them, amending
+  base §3.13.5, §3.13.6, §3.13.7, §3.13.9 and §3.4.8 (§3.3.7).
+
+Under the core/periphery strategy each transport channel MUST be served
+by a peripheral, and the core MUST be a channel of its own (principle
+17); channel ids keep their meaning.
+
+*Summary (explanatory).* The topology-independent principles carry over
+without modification:
 
 - **Plugin architecture** (principle 1): the kernel holds mechanism;
   plugins hold capability. Core/periphery is itself a plugin strategy
@@ -636,26 +782,11 @@ over without modification:
 - **Compute is finite** (principle 16): every model endpoint is a
   resource pool; a context switch is what it costs.
 
-The base PRD's kernel requirements (§3.1), transport requirements
-(§3.2), context window requirements (§3.3), persistence requirements
-(§3.4), tool requirements (§3.5), LLM client requirements (§3.6),
-cognition requirements (§3.7), fork requirements (§3.8), scheduler
-requirements (§3.9), observability requirements (§3.10), configuration
-requirements (§3.11), evaluation requirements (§3.12), and resource pool
-requirements (§3.13) carry over, except where this supplement amends
-them once accepted:
-
-- base §1's single-slot clause holds as correctness, not speed (§3.8.6);
-- the heartbeat is retired; the core receives idle notifications at an
-  operator-configured rate limit (§3.1.2);
-- goals sit in a pinned block with tail updates (base §3.7 Goals; §3.6);
-- base §3.8 governs one-shot forks only; long-lived forks follow §3.5;
-- pauses do not lapse and queues have a fixed capacity, amending base
-  §3.13.5, §3.13.6, §3.13.7 and §3.13.9 (§3.3.7).
-
-Under the core/periphery strategy each transport channel is served by a
-peripheral, and the core is a channel of its own (principle 17);
-channel ids keep their meaning.
+The base PRD's kernel (§3.1), transport (§3.2), context window (§3.3),
+persistence (§3.4), tool (§3.5), LLM client (§3.6), cognition (§3.7),
+fork (§3.8), scheduler (§3.9), observability (§3.10), configuration
+(§3.11), evaluation (§3.12), and resource pool (§3.13) requirements
+carry over on those terms.
 
 ## 5. Open questions
 
@@ -768,13 +899,21 @@ answer:
     the peripheral in. A too-thin summary forces page-ins; a too-thick
     summary defeats the purpose of the periphery filtering.
 
-20. **Empty goal block behavior.** §3.6.5 says the goal block is the
+20. **Empty goal block behavior.** §3.6.4 says the goal block is the
     core's answer to "what should I be doing?" during idle. What
     happens when the goal block is empty (no open goals)? Does the core
     do nothing, generate its own goals, or signal to the operator that
     it's idle? The current system has the heartbeat prompt "what should
     I do?" which is explicitly rejected here; the TRD needs a
     replacement behavior for the no-goals case.
+
+21. **Bounding internal work in the write-ahead log.** §3.3.7 caps
+    inbound transport messages per channel and in total, but tool
+    results, task completions, notes and escalations are never dropped
+    and so are not capped. A runaway producer (a fork or task loop that
+    keeps generating work) could still grow the log. Should internal
+    items have a hard cap too, and if so, what does refusal mean for the
+    producer?
 
 ## Appendix A: Design ideas and research notes
 
