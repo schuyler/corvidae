@@ -361,8 +361,8 @@ class TestTaskQueue:
 
 
 class TestTaskQueueLogging:
-    async def test_enqueue_logs_debug(self, caplog):
-        """enqueue() must emit a DEBUG record 'task enqueued' with task_id,
+    async def test_enqueue_logs_info(self, caplog):
+        """enqueue() must emit an INFO record 'task enqueued' with task_id,
         channel, and description attributes."""
         queue = TaskQueue()
         channel = _make_channel()
@@ -378,9 +378,9 @@ class TestTaskQueueLogging:
         records = [r for r in caplog.records if r.name == "corvidae.task"]
         matching = [
             r for r in records
-            if r.levelno == logging.DEBUG and r.getMessage() == "task enqueued"
+            if r.levelno == logging.INFO and r.getMessage() == "task enqueued"
         ]
-        assert matching, "Expected DEBUG record with message 'task enqueued'"
+        assert matching, "Expected INFO record with message 'task enqueued'"
         rec = matching[0]
         assert hasattr(rec, "task_id"), "'task enqueued' log must have task_id attribute"
         assert rec.task_id == task.task_id
@@ -390,7 +390,7 @@ class TestTaskQueueLogging:
         assert rec.description == task.description
 
     async def test_run_worker_logs_task_started(self, caplog):
-        """Worker must emit a DEBUG record 'task started' after dequeuing,
+        """Worker must emit an INFO record 'task started' after dequeuing,
         with task_id and description attributes."""
         queue = TaskQueue()
         channel = _make_channel()
@@ -418,9 +418,9 @@ class TestTaskQueueLogging:
         records = [r for r in caplog.records if r.name == "corvidae.task"]
         matching = [
             r for r in records
-            if r.levelno == logging.DEBUG and r.getMessage() == "task started"
+            if r.levelno == logging.INFO and r.getMessage() == "task started"
         ]
-        assert matching, "Expected DEBUG record with message 'task started'"
+        assert matching, "Expected INFO record with message 'task started'"
         rec = matching[0]
         assert hasattr(rec, "task_id"), "'task started' log must have task_id attribute"
         assert rec.task_id == task.task_id
@@ -428,7 +428,7 @@ class TestTaskQueueLogging:
         assert rec.description == task.description
 
     async def test_run_worker_logs_task_completed(self, caplog):
-        """Worker must emit a DEBUG record 'task completed' after successful
+        """Worker must emit an INFO record 'task completed' after successful
         work(), with task_id and result_length attributes."""
         queue = TaskQueue()
         channel = _make_channel()
@@ -455,14 +455,54 @@ class TestTaskQueueLogging:
         records = [r for r in caplog.records if r.name == "corvidae.task"]
         matching = [
             r for r in records
-            if r.levelno == logging.DEBUG and r.getMessage() == "task completed"
+            if r.levelno == logging.INFO and r.getMessage() == "task completed"
         ]
-        assert matching, "Expected DEBUG record with message 'task completed'"
+        assert matching, "Expected INFO record with message 'task completed'"
         rec = matching[0]
         assert hasattr(rec, "task_id"), "'task completed' log must have task_id attribute"
         assert rec.task_id == task.task_id
         assert hasattr(rec, "result_length"), "'task completed' log must have result_length attribute"
         assert isinstance(rec.result_length, int), "result_length must be an int"
+
+    async def test_run_worker_logs_task_cancelled_info(self, caplog):
+        """Worker must emit an INFO record 'task cancelled' when a task is
+        cancelled mid-flight (the #504 silent-loss point), with task_id and
+        description attributes."""
+        queue = TaskQueue()
+        channel = _make_channel()
+        executing = asyncio.Event()
+
+        async def work():
+            executing.set()
+            await asyncio.sleep(30)  # in-flight when the worker is cancelled
+            return "never"
+
+        task = Task(work=work, channel=channel, description="cancel log task")
+
+        async def on_complete(t, result):
+            pass
+
+        with caplog.at_level(logging.INFO, logger="corvidae.task"):
+            worker = asyncio.create_task(queue.run_worker(on_complete))
+            await queue.enqueue(task)
+            await asyncio.wait_for(executing.wait(), timeout=2.0)
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+
+        records = [r for r in caplog.records if r.name == "corvidae.task"]
+        matching = [
+            r for r in records
+            if r.levelno == logging.INFO and r.getMessage() == "task cancelled"
+        ]
+        assert matching, "Expected INFO record with message 'task cancelled'"
+        rec = matching[0]
+        assert hasattr(rec, "task_id"), "'task cancelled' log must have task_id attribute"
+        assert rec.task_id == task.task_id
+        assert hasattr(rec, "description"), "'task cancelled' log must have description attribute"
+        assert rec.description == task.description
 
     async def test_run_worker_logs_task_failed_warning(self, caplog):
         """Worker must emit a WARNING record 'task failed' when work() raises,

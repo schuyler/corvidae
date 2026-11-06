@@ -114,7 +114,7 @@ class TaskQueue:
 
     async def enqueue(self, task: Task) -> None:
         """Add a task to the queue."""
-        logger.debug(
+        logger.info(
             "task enqueued",
             extra={
                 "task_id": task.task_id,
@@ -156,7 +156,7 @@ class TaskQueue:
         while True:
             task = await self.queue.get()
             self._active_tasks.append(task)
-            logger.debug(
+            logger.info(
                 "task started",
                 extra={"task_id": task.task_id, "description": task.description},
             )
@@ -168,7 +168,7 @@ class TaskQueue:
             work_task = asyncio.create_task(task.work(), context=task.ctx)
             try:
                 result = await work_task
-                logger.debug(
+                logger.info(
                     "task completed",
                     extra={"task_id": task.task_id, "result_length": len(result)},
                 )
@@ -179,6 +179,10 @@ class TaskQueue:
                     self._active_tasks.remove(task)
                 except ValueError:
                     pass
+                logger.info(
+                    "task cancelled",
+                    extra={"task_id": task.task_id, "description": task.description},
+                )
                 raise
             except Exception as exc:
                 logger.warning(
