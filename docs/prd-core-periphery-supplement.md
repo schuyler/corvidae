@@ -328,7 +328,7 @@ its tests pass; until then they are proposals.
    turn to decide to return; the turn that follows handles the work.
 
 7. **Pausing and overflow.** This item amends base PRD §3.13.5,
-   §3.13.7 and §3.13.9 once the supplement is accepted.
+   §3.13.6, §3.13.7 and §3.13.9 once the supplement is accepted.
    - A paused channel stays paused until the core unpauses it; a pause
      does not lapse at a latency bound. The operator can unpause any
      channel at any time without going through a channel's queue (base
@@ -635,13 +635,14 @@ thought, or to respond to an escalation.
    from the outcome log's miss and false-alarm rates (§3.4.5; base PRD
    principle 6).
 
-## 4. What carries over unchanged
+## 4. What carries over
 
 The following base PRD requirements are topology-independent and carry
 over without modification:
 
-- **Plugin architecture** (principle 1): every capability is an optional
-  plugin, the kernel is minimal, plugins load at startup.
+- **Plugin architecture** (principle 1): the kernel holds mechanism;
+  plugins hold capability. Core/periphery is itself a plugin strategy
+  (§1).
 - **Append-only log** (principle 4): message_log rows are never deleted.
 - **Fail soft** (principle 5): background paths catch, log, continue.
 - **Behavioural tests** (principle 6): deterministic metrics in CI,
@@ -672,10 +673,20 @@ The base PRD's kernel requirements (§3.1), transport requirements
 cognition requirements (§3.7), fork requirements (§3.8), scheduler
 requirements (§3.9), observability requirements (§3.10), configuration
 requirements (§3.11), evaluation requirements (§3.12), and resource pool
-requirements (§3.13) all carry over, with the understanding
-that "channel" in those sections now means "peripheral" and the
-per-channel KV cache assumption is replaced by the shared hierarchy
-(§3.3).
+requirements (§3.13) carry over, except where this supplement amends
+them once accepted:
+
+- base §1's single-slot clause holds as correctness, not speed (§3.8.6);
+- the heartbeat (base §3.7 Heartbeat) is the core acting on idle
+  notifications (§3.1.2);
+- goals sit in a pinned block with tail updates (base §3.7 Goals; §3.6);
+- base §3.8 governs one-shot forks only; long-lived forks follow §3.5;
+- pauses do not lapse and queues have a fixed capacity, amending base
+  §3.13.5, §3.13.6, §3.13.7 and §3.13.9 (§3.3.7).
+
+Under the core/periphery strategy each transport channel is served by a
+peripheral, and the core is a channel of its own (principle 17);
+channel ids keep their meaning.
 
 ## 5. Open questions
 
@@ -739,9 +750,11 @@ answer:
     consolidates its own window (§3.7.1), so a peripheral exchange and
     the core's decision about it are consolidated separately. Do the two
     yield near-duplicate memories that base PRD §3.7 Memory's merge
-    would fold together? The working expectation is that they do not:
-    core consolidation is slower and covers more conceptual and temporal
-    ground than peripheral consolidation. Measure before deciding.
+    would fold together? Two separate memories are the default; the
+    expectation is that they will not overlap much, since core
+    consolidation is slower and covers more conceptual and temporal
+    ground than peripheral consolidation. Measure before changing that
+    default.
 
 ## Appendix A: Design ideas and research notes
 
