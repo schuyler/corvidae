@@ -41,6 +41,8 @@ The daemon connects to configured transports, listens for messages, and runs unt
 
 For a chat page in your browser, add a `web:` block (an empty one will do) and open the login URL the daemon logs. It listens on `127.0.0.1:8765`, and its token is shell access to the machine, so read the [`web` section](docs/configuration.md#web--browser-chat-ui) before you point it anywhere else.
 
+For a Discord bot backed by a hosted OpenAI-compatible API, see [docs/discord-remote-api.md](docs/discord-remote-api.md).
+
 ## Installation
 
 Clone the repo — corvidae isn't published on PyPI.

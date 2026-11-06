@@ -4,6 +4,10 @@ How to give corvidae a Discord bot: create an application in the Developer
 Portal, get its token, invite it to a server, and point corvidae's
 `discord:` config block at it.
 
+If the bot will talk to a hosted OpenAI-compatible API,
+[discord-remote-api.md](discord-remote-api.md) walks the whole path from
+install to first reply.
+
 The SDK is an optional extra: add `--extra discord` to your `uv sync` line,
 for example `uv sync --extra discord --extra cognition` for the full daemon.
 `uv sync` removes any extra you don't name, so list all of them. Without the
