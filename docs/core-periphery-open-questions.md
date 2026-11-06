@@ -532,8 +532,8 @@ off here.
     critique misses, and the miss is logged. The miss rate of
     non-blocking stages on one head is a measurement for #368.
 
-    *Provisional (unreviewed):* Written into the prerequisites brief;
-    the implementer of #364 posts the amendment on the ticket.
+    *Decided (owner, 2026-11-06):* the amendment is posted on #364
+    (comment 6699065473); the implementer builds to it.
 
 ## 4. Ideas discussed
 
