@@ -299,6 +299,18 @@ class Channel:
     # ChannelRegistry assigns them at creation and on every config load, so
     # a reload reaches live channels the way an agent: edit does.
     wide_entries: tuple["WideEntry", ...] = ()
+    #: A name a reader can use, set by the transport when it knows one ("#home",
+    #: a thread's title). Never a key: `id` is the key, and names change (#513).
+    #: Last in the field list on purpose — a positional `Channel(...)` in the
+    #: tests predates it, and nothing should shift under those.
+    name: "str | None" = None
+    #: Display names the transport has seen for senders on this channel, keyed
+    #: by the sender id that `sender` carries (#513). Filled by the transport
+    #: before it calls `on_message`, read once into the turn's attribution and
+    #: never persisted: a name is what a person is called today, and the JSONL
+    #: log keeps the id that is stable. Absent or empty means the transport has
+    #: no name to give, which is every transport but Discord today.
+    sender_names: "dict[str, str]" = field(default_factory=dict)
 
     @property
     def id(self) -> str:
