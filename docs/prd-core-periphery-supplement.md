@@ -315,12 +315,32 @@ its tests pass; until then they are proposals.
    ahead of need. It calls no model, so its decisions are cheap enough
    for every call boundary (base PRD §3.13.8), and it is where
    backend-specific operations live (Appendix A.4); on a backend without
-   tier levers it has nothing to place (§3.3.4). Two backstops keep this
-   from becoming a stall. Holding a queue is a deferral, so it lapses at
-   that queue's latency bound (base PRD §3.13.5, §3.13.7). And the core
-   itself is the exception to waiting: work on the core's own queue has
+   tier levers it has nothing to place (§3.3.4). A held queue stays
+   paused until the core releases it (§3.3.7). The core itself is the
+   exception to waiting: work on the core's own queue has
    the slot-management plugin bring the core back, so the core needs no
    turn to decide to return; the turn that follows handles the work.
+
+7. **Pausing and overflow.** This item amends base PRD §3.13.7 and
+   §3.13.9 once the supplement is accepted.
+   - A paused channel stays paused until the core unpauses it; a pause
+     does not lapse at a latency bound. The operator can unpause any
+     channel at any time without going through a channel's queue (base
+     PRD §3.13.7).
+   - An active channel's queue behaves as base PRD §3.1 describes.
+   - Every channel queue has a fixed capacity for inbound transport
+     messages, set in operator config. Tool results, task completions,
+     notes and escalations never count against it and are never
+     dropped.
+   - An inbound message that would overflow the queue is rejected by the
+     kernel at the inbound gate: `on_message_rejected` fires, the outcome
+     log keeps the row, and the message is never accepted (base PRD
+     §3.4.8). The kernel logs a warning naming the channel and the
+     sender, and notifies the core.
+   - Overflow warnings and notifications are rate-limited per channel,
+     because a system whose queues overflow may already be overloaded:
+     the first overflow is reported at once, and later ones are
+     summarized with a count at a bounded rate.
 
 ### 3.4 Escalation
 
