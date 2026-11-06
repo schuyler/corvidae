@@ -56,6 +56,12 @@ The model endpoints are still wherever the operator points them (base PRD
 changes is how the contexts are organized and how the KV cache is
 allocated.
 
+The unified core context is a plugin by design (base PRD principle 1), so
+that other context-coordination strategies can be built on the same
+kernel. The kernel supplies the mechanisms a strategy needs; which
+strategy runs is the operator's choice. The base PRD's topology, every
+channel a full agent context, is one such strategy.
+
 ## 2. New principles
 
 These proposed principles would supplement the base PRD's sixteen. Once
