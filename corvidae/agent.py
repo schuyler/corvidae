@@ -1211,8 +1211,10 @@ class Agent(CorvidaePlugin):
         if said[0] == row["content"]:
             return
         conv.append(row, MessageType.CONTEXT)
-        # The index, not `messages[-1]`: `persist_message` is awaited below, and
-        # a concurrent append in that gap would otherwise take the rowid.
+        # Hold the index rather than reading `messages[-1]` back after the
+        # await: nothing appends on this path today, but the id should not
+        # depend on that staying true (#517 covers the same read in the
+        # message path).
         index = len(conv.messages) - 1
         said[0] = row["content"]
         try:
