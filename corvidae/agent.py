@@ -207,6 +207,10 @@ class QueueItem:
     content: str
     channel: Channel
     sender: str | None = None
+    #: The sender's display name when the transport has one (#513), read from
+    #: the channel's `sender_names` at admission. Rendered beside the id as
+    #: data; never merged into what the person typed.
+    sender_name: str | None = None
     source: str | None = None
     tool_call_id: str | None = None
     meta: dict = field(default_factory=dict)
@@ -466,6 +470,7 @@ class Agent(CorvidaePlugin):
             content=text,
             channel=channel,
             sender=sender,
+            sender_name=channel.sender_names.get(sender),
             trace_id=trace_id,
             originating=True,
         )
@@ -1119,6 +1124,92 @@ class Agent(CorvidaePlugin):
         finally:
             self._note_settled(channel)
 
+    #: Longest sender or channel name rendered into a turn, in characters (#513).
+    ATTRIBUTION_NAME_MAX = 64
+
+    @classmethod
+    def _attribution_name(cls, value: str | None) -> str | None:
+        """A display name squeezed to one short line, or None when it is empty.
+
+        A name is a string somebody else chose, and it lands in a prompt, so the
+        separators and brackets the framing uses are removed: a name cannot open
+        a second attribution, close this one early, or run past one line.
+        """
+        if not value:
+            return None
+        # Collapse every run of whitespace, so a newline (or a tab, or a
+        # zero-width-ish gap) cannot split the row into two.
+        cleaned = " ".join(value.split())
+        for char in "[];":
+            cleaned = cleaned.replace(char, " " if char == ";" else "")
+        cleaned = " ".join(cleaned.split())[: cls.ATTRIBUTION_NAME_MAX].strip()
+        return cleaned or None
+
+    def _turn_attribution(self, channel: Channel, item: QueueItem) -> dict | None:
+        """The CONTEXT row naming the sender and the channel for this turn (#513).
+
+        Ordinary prompt context, not a tool call, because the decision about who
+        is talking and where happens before the first token. It is a CONTEXT row
+        and not part of the user's message for two reasons: a display name is
+        attacker-controlled text and must not look like something the person
+        typed, and MESSAGE rows are what compaction summarises and what memory
+        consolidates, so the framing stays out of both.
+
+        Returns None when the transport supplied neither a sender name nor a
+        channel name, which is every transport that knows only ids today.
+        """
+        sender_name = self._attribution_name(item.sender_name)
+        channel_name = self._attribution_name(channel.name)
+        if sender_name is None and channel_name is None:
+            return None
+
+        # The sender: id first when there is no name, because an id is at least
+        # true, and the name is what a person would recognise.
+        sender = (
+            f"sender: {sender_name} (id {item.sender})"
+            if sender_name is not None
+            else f"sender: id {item.sender}"
+        )
+
+        # The channel: a DM scope is a key, not a name, so it says what it is
+        # rather than pretending to be a channel called 'dm:4087...'.
+        if channel.scope.startswith("dm:"):
+            where = f"channel: direct message (id {channel.scope})"
+        elif channel_name is not None:
+            where = f"channel: {channel_name} (id {channel.id})"
+        else:
+            where = f"channel: id {channel.id}"
+
+        text = f"[{sender}; {where}]"
+        return {"role": "system", "content": text}
+
+    async def _append_turn_attribution(
+        self, channel: Channel, conv, item: QueueItem
+    ) -> None:
+        """Append and persist the attribution row that opens this turn (#513).
+
+        Persisted as CONTEXT, like the not-sent marker, so a reload renders the
+        same prompt and the row is never summarised as conversation.
+        """
+        row = self._turn_attribution(channel, item)
+        if row is None:
+            return
+        conv.append(row, MessageType.CONTEXT)
+        try:
+            results = await self.pm.ahook.persist_message(
+                channel=channel, message=row, message_type=MessageType.CONTEXT,
+            )
+            rowid = resolve_single_result(results, "persist_message")
+            if rowid is not None:
+                conv.messages[-1]["_db_id"] = rowid
+        except Exception:
+            logger.warning(
+                "persist_message hook failed for the attribution row on %s "
+                "(trace_id %s); the turn keeps it in the window but not in the log",
+                channel.id, item.trace_id,
+                exc_info=True, extra={"channel": channel.id},
+            )
+
     async def _append_and_persist_message(
         self,
         channel: Channel,
@@ -1135,6 +1226,10 @@ class Agent(CorvidaePlugin):
         # The resolved rowid attaches to the WINDOW copy (conv.append
         # shallow-copies, so the local dict would not update the window).
         _t_persist_start = time.monotonic()
+        # Who is speaking, and where, before the words themselves (#513). Only
+        # for an inbound message: a notification's source is already framed.
+        if item.role is QueueItemRole.USER:
+            await self._append_turn_attribution(channel, conv, item)
         conv.append(conversation_message)
         rowid = None
         try:

@@ -652,6 +652,16 @@ Per transport:
     achieved (prompt material, history, context, sampling) is otherwise a
     design choice, not a requirement; the bar is behavioural (principle 6),
     and an essay-length reply to a one-line text is a bug.
+11. The model is told who is speaking and where, per inbound message, as data:
+    a `CONTEXT` row before the user's own message naming the sender by id and
+    current display name, and the channel by id and name — a thread names the
+    channel it hangs off, and a DM says it is a direct message rather than
+    wearing `dm:<id>` as a channel name. The names come from the transport
+    (`Channel.name`, `Channel.sender_names`) and are never merged into the
+    user's text, because a display name is a string somebody else chose; ids
+    stay the keys (principle 10) and stay what the log, memory and config
+    identify. A transport that supplies no name adds no row, so its prompt is
+    unchanged. Framing is core's, at one place, per principle 9.
 
 ### 3.4 Persistence
 

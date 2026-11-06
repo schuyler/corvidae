@@ -867,6 +867,21 @@ channel.conversation    # ContextWindow | None
 channel.matches_transport("irc")  # True
 ```
 
+`id` is the key and never derives from a name. A transport that knows a name a
+reader could use sets it, for the model to read and for nothing else:
+
+```python
+channel.name            # "#general", or "thread merge-order in #general", or None
+channel.sender_names    # {"408709225498542081": "schuyler"} — ids to display names
+```
+
+Both are optional and both are data: `name` is rendered once per inbound turn
+as a `CONTEXT` row (`[sender: schuyler (id 408...); channel: #general (id irc:#general)]`)
+before the user's own message, which is left exactly as the person typed it.
+`sender_names` is filled by the transport before it calls `on_message`; core
+reads it once, at admission, and never persists it — the log keeps the id. A
+transport that sets neither renders today's prompt unchanged.
+
 Channels are created on-demand when messages arrive, or pre-registered in `agent.yaml`:
 
 ```yaml
