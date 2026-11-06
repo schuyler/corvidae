@@ -98,8 +98,8 @@ The core/periphery architecture changes the topology:
   contexts get attention, and a slot-management plugin places them
   across memory tiers when the backend has the levers (local LLM
   deployments) (§3.3.6).
-- **The heartbeat is retired.** The core receives idle notifications and
-  acts on them (§3.1.2).
+- **The core takes over the heartbeat's role.** It receives idle
+  notifications and acts on them (§3.1.2).
 
 The operator still runs one process on one machine (base PRD principle 8).
 The model endpoints are still wherever the operator points them (base PRD
@@ -209,14 +209,21 @@ its tests pass; until then they are proposals.
    management, and appraisal. How much thinking effort its model spends
    is operator configuration (base PRD §3.6).
 
-2. Under the core/periphery strategy the heartbeat (base PRD §3.7
-   Heartbeat) is retired: it MUST NOT run. In its place the framework
-   MUST deliver idle notifications (base PRD §3.1.16) to the core at an
-   operator-configured rate limit, and the operator MUST be able to turn
-   them off, as putting the heartbeat to sleep did.
+2. Under the core/periphery strategy the core takes over the
+   heartbeat's role (base PRD §3.7 Heartbeat): the framework MUST NOT
+   run a separate heartbeat, and every base PRD requirement on the
+   heartbeat applies instead to the core's handling of idle
+   notifications, except its exemption from critique. The framework
+   MUST critique the core's idle-started turns like every other core
+   turn (§3.7).
 
-   *Rationale:* On an idle notification the core reads its goal block
-   and decides whether anything needs attention.
+   *Rationale:* The heartbeat's purpose is that the agent lives between
+   messages (base PRD principle 13): when the system is idle, it looks
+   at its goals and decides whether to act. The core already holds the
+   goals (principle 20), so it takes over that role, and as the
+   cognitive center it gets every cognitive function, critique
+   included. Base critique's exemptions for `critique` and `task` turns
+   still apply; they keep critique from judging its own objections.
 
 3. The framework MUST let the core direct KV cache allocation through
    tools that control queue multiplexing, and the slot-management plugin
@@ -770,8 +777,9 @@ The base PRD's requirements MUST continue to hold, except where this
 supplement amends them once accepted:
 
 - base §1's single-slot clause holds as correctness, not speed (§3.8.6);
-- the heartbeat is retired; the core receives idle notifications at an
-  operator-configured rate limit (§3.1.2);
+- the core takes over the heartbeat's role, and its idle-started turns
+  lose the heartbeat's critique exemption, amending base §3.7
+  Heartbeat and §3.7 Critique 3 (§3.1.2);
 - goals sit in a pinned block with tail updates (base §3.7 Goals; §3.6);
 - base §3.8 governs one-shot forks only; long-lived forks follow §3.5;
 - pauses do not lapse, channel queues have a fixed capacity for inbound

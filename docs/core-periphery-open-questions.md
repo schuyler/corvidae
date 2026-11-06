@@ -39,7 +39,10 @@ base PRD say "base".
    status text (base principle 5) is neither the core's nor a
    peripheral's.
 
-3. **Retiring the heartbeat.** Supplement §3.1.2 retires the heartbeat,
+3. **Retiring the heartbeat.** *Resolved:* the core takes over the
+   heartbeat's role and every base requirement on it, except that its
+   idle-started turns are critiqued (supplement §3.1.2). Original
+   finding: supplement §3.1.2 retired the heartbeat,
    but base §3.7 Goals has the heartbeat review and retire goals
    (reading retired-goal records so the agent can't re-adopt a purpose
    it concluded), base §3.7 Commitments routes endogenous goal
