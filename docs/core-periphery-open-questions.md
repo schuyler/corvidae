@@ -21,8 +21,8 @@ base PRD say "base".
 ## 1. Contradictions with the base PRD
 
 1. **Latency-bound yield.** *Resolved:* a queue past its latency bound
-   is reported to the core as overdue (supplement §3.3.7), and §4 lists
-   the amendment to base principles 3 and 13. Original finding:
+   is reported to the core as overdue, queues MAY have a bound, and §4
+   restates base principles 3 and 13 for this strategy. Original finding:
    supplement §3.3.7 drops base §3.13.5's
    yield at a latency bound between active queues. Base principles 3
    and 13 (and §3.1.16) rely on that yield so upkeep and idle work

@@ -440,20 +440,11 @@ its tests pass; until then they are proposals.
      queue takes it then (drain-or-yield, base PRD §3.13.3). Base PRD
      §3.13.5's yield at a latency bound MUST NOT apply; queues the core
      leaves active share by draining in turn.
-   - The framework MUST keep tracking every queue's latency bound (base
-     PRD §3.13.5), upkeep and agency queues included, and MUST notify
-     the core when a queue's waiting work passes its bound: the queue is
-     overdue for attention, though not full. The notification MUST name
-     the queue and how long its oldest work has waited, and MUST be
-     rate-limited per queue. What to do about it is the core's call
-     (§3.3.6).
+   - The operator MAY give any queue a latency bound; a queue without
+     one is never overdue. The framework MUST log a warning and notify
+     the core, rate-limited, when a queue's waiting work passes its
+     bound.
 
-   *Rationale:* The latency bound becomes a signal rather than a
-   preemption. The core hears about a queue when it needs attention,
-   instead of on a schedule, and decides whether to bring it forward.
-   This moves base principles 3 and 13's guarantee that traffic can't
-   starve upkeep and idle work from the lease rules to the core's
-   attention (§4).
    - Every channel queue MUST have a fixed capacity for inbound
      transport messages, set in operator config with a default. Tool
      results, task completions, notes and escalations MUST NOT count
@@ -784,10 +775,14 @@ supplement amends them once accepted:
 - pauses do not lapse, channel queues have a fixed capacity for inbound
   messages, and the write-ahead log has a total cap on them, amending
   base §3.13.5, §3.13.6, §3.13.7, §3.13.9 and §3.4.8 (§3.3.7);
-- a queue past its latency bound is reported to the core as overdue
-  instead of taking the head, so whether upkeep and idle work run under
-  traffic rests on the core's attention, amending base principles 3
-  and 13 and §3.1.16 for this strategy (§3.3.7).
+- base principles 3 and 13, §3.1.16 and §3.13.5 are replaced, for this
+  strategy, by: some work is latency-sensitive, and queues MAY have a
+  defined latency bound. Work past its bound does not preempt other
+  work, but it MUST NOT wait unnoticed: the framework MUST log a
+  warning and surface the overdue queue to whatever directs attention,
+  which under this strategy is the core (§3.3.7). Whether upkeep and
+  idle work run under traffic therefore rests on that attention, not
+  on the lease rules.
 
 Under the core/periphery strategy the framework MUST serve each
 transport channel by a peripheral and run the core as a channel of its
