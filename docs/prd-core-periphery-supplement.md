@@ -504,14 +504,7 @@ thought, or to respond to an escalation.
    evaluating patterns across channels and over time, not just individual
    responses.
 
-3. The critique plugin's fork prompts use **self-reflective framing**:
-   the critique is the agent's own work being checked, not an external
-   reviewer's verdict. The prompt instructs the model to assess its own
-   response with fresh eyes, not to adopt an outside reviewer's
-   persona. The specific wording is a prompt-engineering decision, not
-   an architectural requirement.
-
-4. Critique, consolidation and compaction run over each context's own
+3. Critique, consolidation and compaction run over each context's own
    window independently, as base PRD §3.7 and §3.8 describe; nothing
    about them changes. Whatever a context's window holds is in scope,
    including instructions and dictated text from the core.
@@ -837,6 +830,15 @@ README (`tools/server/README.md` in ggml-org/llama.cpp) as of
 
 Current measurement: 20 open goals → ~1,343 tokens (~1.6% of a typical
 prompt).
+
+### A.6 Critique framing
+
+A recent lesson: critique fork prompts work better with self-reflective
+framing. The critique is the agent's own work being checked, not an
+external reviewer's verdict, so the prompt asks the model to assess its
+own response with fresh eyes rather than adopt an outside reviewer's
+persona. The wording is a prompt-engineering decision, and the critic's
+prompts remain the agent's to change (base PRD principle 15).
 
 ---
 
