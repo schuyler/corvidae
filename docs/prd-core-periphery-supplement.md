@@ -253,10 +253,10 @@ its tests pass; until then they are proposals.
    Discord is Markdown, IRC is short). The core doesn't need to know or
    care — unless it's dictating.
 
-7. The peripheral's model is a smaller, faster model than the core's
-   (§3.8). The periphery is matched to its workload: pattern recognition,
-   reply composition, escalation detection. It does not need deep
-   reasoning.
+7. The peripheral's model is matched to its workload: pattern
+   recognition, reply composition, escalation detection. Which model
+   that is, and whether it differs from the core's, is operator
+   configuration (§3.8.1).
 
 8. The peripheral has a **diminished tool set** relative to the core.
    The periphery needs enough tools to compose replies, detect
@@ -539,19 +539,18 @@ thought, or to respond to an escalation.
    user notices the seam. The minimum model size for tone continuity is
    an empirical question (Appendix A).
 
-3. The periphery's model quantization must not introduce
-   **hallucination risk**. A periphery that composes user-facing replies
-   cannot operate at a quality level where instruction-following
-   degrades and hallucinations rise. The minimum acceptable quantization
-   is a deployment decision (Appendix A).
+3. A periphery that composes user-facing replies keeps
+   instruction-following and factual accuracy. How small a model or how
+   aggressive a quantization still does that is a deployment question
+   (Appendix A.1).
 
 4. The model split must be **testable**: the operator can run the core
    and periphery on the same model (degenerate case) to isolate the
    architectural effects from the model effects.
 
-5. The model server must support running multiple models concurrently,
-   with the KV cache allocation (§3.3) managing which model's contexts
-   are resident. The reference deployment is llama.cpp's llama-server
+5. When the core and peripherals use different models, switching
+   between them does not reload a model each time, and the KV cache
+   allocation (§3.3) covers both. The reference deployment is llama.cpp's llama-server
    (Appendix A.4). Other providers are supported through the base PRD's
    provider-neutral profiles and pools (§3.6, §3.13); a provider without
    the tier levers gets the degenerate case (§3.3.4).
