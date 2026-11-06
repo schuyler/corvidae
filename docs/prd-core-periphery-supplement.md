@@ -573,12 +573,11 @@ thought, or to respond to an escalation.
 
 ### 3.10 Observability
 
-1. The core/periphery architecture makes observability natural: the core
-   can see all channels, all escalations, all fork outcomes. The
-   requirement is that this visibility is actually implemented: task
-   lifecycle events at INFO level, completion records that survive buffer
-   eviction, and a sentinel that alerts when enqueued work neither
-   completes nor fails.
+1. No work disappears silently: anything enqueued for the core, a
+   peripheral or a fork completes, fails, or is reported as having done
+   neither (base PRD principle 5, §3.1.9). The record of how it ended
+   outlasts the task queue's completed-result buffer, so the core can
+   read it later.
 
 2. The escalation quality metrics (§3.4.5) are recorded in the outcome
    log: false alarm rate, miss rate, per-peripheral and in aggregate.
