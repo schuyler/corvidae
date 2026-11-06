@@ -239,11 +239,11 @@ its tests pass; until then they are proposals.
      A rewrite takes effect at the periphery's next compaction boundary
      or conversation start, not mid-window (base PRD §3.3.8).
 
-5. A channel-bound peripheral has access to the same identity files
-   (SOUL.md, USER.md, autobiography), the same memory system, and the
-   same values as the core. It operates with a subset of the cognitive
-   machinery (it hands depth to the core) but the full identity. Task-bound
-   peripherals are the exception (§3.2.9).
+5. A channel-bound peripheral has the same identity (base PRD §3.3.8),
+   the same memory, and the same values as the core. It operates with a
+   subset of the cognitive machinery (it hands depth to the core) but
+   the full identity, however that identity is rendered for it (open
+   question 9). Task-bound peripherals are the exception (§3.2.9).
 
 6. The peripheral knows the channel's conventions (Signal is plain text,
    Discord is Markdown, IRC is short). The core doesn't need to know or
