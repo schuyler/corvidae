@@ -152,8 +152,7 @@ its tests pass; until then they are proposals.
    are paged in, paged out, or checkpointed (§3.3.6).
 
 4. The core owns the goal block (§3.6). The goal block is pinned, rebuilt
-   at conversation boundaries, and byte-stable between boundaries. It
-   dictates the remaining history space in the core's window.
+   at conversation boundaries, and byte-stable between boundaries.
 
 5. The core is the editor of the periphery prompts (§3.4.4). When a
    periphery's escalation judgment is inadequate (a miss or a false
@@ -470,8 +469,8 @@ thought, or to respond to an escalation.
 
 ### 3.6 Goal block / commitment floor
 
-1. The goal block lists every open commitment as a short line (goal ID,
-   one-line description, status).
+1. The goal block lists every open commitment, compactly enough to stay
+   within §3.6.5's bound.
 
 2. The goal block is **pinned**: compaction is not allowed to touch it.
 
@@ -482,13 +481,10 @@ thought, or to respond to an escalation.
    (base PRD §3.7 Goals), so the core never acts on a stale goal list;
    the next rebuild folds those entries into the block.
 
-4. The goal block **dictates the remaining history space**: its size
-   determines how much conversation history can fit in the core's window.
-
-5. The goal block is the core's answer to "what should I be doing?"
+4. The goal block is the core's answer to "what should I be doing?"
    during idle. It is the real thing, not a proxy.
 
-6. The goal block fits in a small, bounded portion of the window with
+5. The goal block fits in a small, bounded portion of the window with
    wide margin (Appendix A.5).
 
 ### 3.7 Cognition: all contexts
