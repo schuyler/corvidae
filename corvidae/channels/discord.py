@@ -369,7 +369,11 @@ class DiscordPlugin(TransportPlugin):
         # Per-channel overrides (#512). Each entry may set its own
         # require_mention; an unknown key is named rather than ignored, because
         # a typo there would silently leave the channel on the default.
-        channels = block.get("channels", {})
+        channels = block.get("channels")
+        # An empty YAML section parses as null, and an operator who comments out
+        # the only entry should get the default, not a startup failure.
+        if channels is None:
+            channels = {}
         if not isinstance(channels, dict):
             raise ValueError(
                 "discord: config field 'channels' must be a mapping of channel "
@@ -378,6 +382,19 @@ class DiscordPlugin(TransportPlugin):
             )
         channel_overrides: dict[str, bool] = {}
         for channel_id, entry in channels.items():
+            # The key is matched against the id Discord delivers, so it has to be
+            # that id and nothing else. `discord:<id>` and `#general` are the two
+            # shapes a reader of the *other* channels: block will try by habit,
+            # and either one would match no channel and leave the override doing
+            # nothing (#512).
+            if not re.fullmatch(r"[0-9]+", str(channel_id)):
+                raise ValueError(
+                    "discord: config entry 'channels."
+                    f"{channel_id}' is not a Discord channel id; use the number "
+                    "alone, as the agent sees it in its logs (discord:123456789…, "
+                    "digits only, quoted or not) — fix it in the discord: block "
+                    "of agent.yaml"
+                )
             if not isinstance(entry, dict):
                 raise ValueError(
                     "discord: config entry 'channels."
@@ -385,13 +402,14 @@ class DiscordPlugin(TransportPlugin):
                     "write `channels: {\"<channel id>\": {require_mention: false}}` "
                     "in the discord: block of agent.yaml"
                 )
-            unknown = set(entry) - {"require_mention"}
+            unknown = sorted(set(entry) - {"require_mention"})
             if unknown:
+                written = ", ".join(f"{key}={entry[key]!r}" for key in unknown)
                 raise ValueError(
                     "discord: config entry 'channels."
-                    f"{channel_id}' has unknown key(s) {sorted(unknown)}; the only "
-                    "setting there is 'require_mention' — fix the key in the "
-                    "discord: block of agent.yaml"
+                    f"{channel_id}' has unknown key(s) {written}; accepted: "
+                    "require_mention — fix the key in the discord: block of "
+                    "agent.yaml"
                 )
             if "require_mention" not in entry:
                 continue

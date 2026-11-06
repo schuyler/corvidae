@@ -493,8 +493,9 @@ Per transport:
   read receipt is sent at processing start, not arrival. Notifications are
   never handled inline in the read loop.
 - **Discord**: discord.py's gateway behind the `discord` extra, default
-  intents, no privileged Message Content intent unless the operator sets
-  `discord.require_mention: false`. Replies in DMs and when mentioned (not
+  intents, and the privileged Message Content intent only when a server
+  channel answers unaddressed — the transport default or any per-channel
+  override. Replies in DMs and when mentioned (not
   `@everyone`, `@here`, or roles); with `require_mention: false` it replies
   to every allowlisted sender's server message, mentioned or not; drops bot
   authors and empty text; strips the mention token. Scopes: `discord:<channel_id>`,
@@ -1564,7 +1565,7 @@ record that holds the reasoning.
 | No sandbox; the subagent/MCP seam is where one would attach | principle 9; §3.5.3, §3.5.5; diverges from the Persyn spec's sandboxed execution |
 | No distributed infrastructure | principle 8; diverges from the Persyn spec |
 | Signal keys on ACI; E.164 resolved forward once per connect; no reverse resolution | principle 10; §3.2 Signal |
-| Discord: no privileged intent (requested only when the operator sets `require_mention: false`); outbound mentions disabled; threads own their history | #80 |
+| Discord: no privileged intent unless a channel answers unaddressed (the transport default or any per-channel override); outbound mentions disabled; threads own their history | #80; #512 |
 | Web: loopback default, auth cannot be turned off, HMAC cookie, strict CSP, no CDNs; duplicates over losses in replay | #87; §3.2 Web |
 | ACP: client-spawned subprocess, official SDK, v1 only, no auth, swappable tool backend | §3.2 ACP |
 | ACP rejects a concurrent prompt; a failed final delivery still ends the turn | #92 initial values |

@@ -157,6 +157,17 @@ channel, with no @-mention:
    Content Intent** under **Privileged Gateway Intents**.
 2. Add `require_mention: false` to the `discord:` block and restart.
 
+   To do it for one channel only and leave the rest mention-only, keep
+   `require_mention: true` and add an entry instead — the portal switch is
+   still needed, because the intent is requested once for the client:
+
+   ```yaml
+   discord:
+     channels:
+       "1568093636044787772":
+         require_mention: false
+   ```
+
 ```yaml
 discord:
   allow:

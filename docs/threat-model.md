@@ -37,7 +37,8 @@ them:
 - **Untrusted content.** Every IRC channel message and private message,
   every Discord message that mentions the bot from an allowlisted user in
   a channel other people can read (with `discord.require_mention: false`,
-  every message that user posts there),
+  or a `discord.channels` entry setting it false for that channel, every
+  message that user posts there),
   every web page `web_fetch` returns, every DuckDuckGo snippet, every MCP
   tool description and result, and every memory distilled from any of the
   above.
@@ -397,8 +398,9 @@ Three more things to know:
   from someone else, is untrusted content with the same weight as any
   other. The bot answers only when mentioned, but it records only those
   messages, so the model never sees unmentioned chatter. (With
-  `discord.require_mention: false` it sees every message from allowlisted
-  users in the channel, and still none from anyone else.) Prefer DMs, or
+  `discord.require_mention: false`, or a `discord.channels` entry for that
+  channel, it sees every message from allowlisted users there, and still none
+  from anyone else.) Prefer DMs, or
   channels where everyone present is someone you would add to `allow`.
 - **Outbound mentions are disabled.** Model output can contain anything an
   attacker got into context. Every send passes `AllowedMentions.none()`,

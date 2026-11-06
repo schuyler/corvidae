@@ -176,6 +176,15 @@ agent:
 #     - "+15551234567"
 #   message_chunk_size: 2000           # max UTF-8 bytes per outbound message
 
+# Discord per-channel override: one channel may answer unaddressed while the
+# rest stay mention-only. The key is the channel id alone (digits, quoted or
+# not); a thread uses its parent's entry. The Message Content intent is
+# requested for the whole client, so one conversational channel needs it.
+# discord:
+#   channels:
+#     "1568093636044787772":
+#       require_mention: false
+
 # Discord transport (optional — omit to disable Discord; see
 # docs/discord-ops.md for creating the bot and finding ids). In servers the
 # bot only answers messages that @-mention it; DMs always reach it.

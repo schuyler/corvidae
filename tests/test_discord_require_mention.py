@@ -49,6 +49,60 @@ class TestPerChannelRequireMention:
         finally:
             await h.plugin.on_stop()
 
+    async def test_an_unquoted_numeric_key_matches(self):
+        """YAML reads an unquoted id as an int; the override must still match."""
+        h = await _start_plugin(
+            discord_overrides={
+                "require_mention": True,
+                "channels": {CHAN_ID: {"require_mention": False}},
+            }
+        )
+        try:
+            await _deliver(h, make_message("just chatting"))
+            assert _delivered(h) == ["just chatting"]
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_an_empty_channels_section_means_no_overrides(self):
+        """A commented-out section parses as null; that is the default, not an
+        error that stops the daemon."""
+        h = await _start_plugin(
+            discord_overrides={"require_mention": True, "channels": None}
+        )
+        try:
+            await _deliver(h, make_message("just chatting"))
+            assert _delivered(h) == []
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_a_prefixed_channel_key_is_refused_rather_than_ignored(self):
+        """`discord:<id>` is the shape the top-level channels: block uses, so a
+        reader will try it; matching nothing would silently leave the channel
+        conversational."""
+        with pytest.raises(ValueError, match="not a Discord channel id") as excinfo:
+            await _start_plugin(
+                discord_overrides={
+                    "channels": {
+                        f"discord:{CHAN_ID}": {"require_mention": False}
+                    }
+                },
+                wait_connect=False,
+            )
+        message = str(excinfo.value)
+        assert f"discord:{CHAN_ID}" in message
+        assert "digits only" in message
+
+    async def test_a_channel_name_is_refused_rather_than_ignored(self):
+        with pytest.raises(ValueError, match="not a Discord channel id"):
+            await _start_plugin(
+                discord_overrides={
+                    "channels": {"#general": {"require_mention": False}}
+                },
+                wait_connect=False,
+            )
+        # And with an unquoted integer key it is accepted, so the check is about
+        # the shape and not about quoting.
+
     async def test_unlisted_channel_keeps_the_transport_default(self):
         h = await _start_plugin(
             discord_overrides={
@@ -156,7 +210,9 @@ class TestConfigValidation:
                 discord_overrides={"channels": ["1568093636044787772"]},
                 wait_connect=False,
             )
-        assert "discord" in str(excinfo.value)
+        message = str(excinfo.value)
+        assert "'channels'" in message
+        assert "discord: block of agent.yaml" in message
 
     async def test_each_channel_entry_must_be_a_mapping(self):
         with pytest.raises(ValueError, match="channels") as excinfo:
@@ -164,7 +220,9 @@ class TestConfigValidation:
                 discord_overrides={"channels": {str(CHAN_ID): False}},
                 wait_connect=False,
             )
-        assert str(CHAN_ID) in str(excinfo.value)
+        message = str(excinfo.value)
+        assert f"channels.{CHAN_ID}" in message
+        assert "discord: block of agent.yaml" in message
 
     async def test_the_override_must_be_a_bool(self):
         with pytest.raises(ValueError, match="require_mention") as excinfo:
@@ -174,7 +232,10 @@ class TestConfigValidation:
                 },
                 wait_connect=False,
             )
-        assert str(CHAN_ID) in str(excinfo.value)
+        message = str(excinfo.value)
+        assert f"channels.{CHAN_ID}.require_mention" in message
+        assert "true or false" in message
+        assert "discord: block of agent.yaml" in message
 
     async def test_an_unknown_key_is_named_rather_than_ignored(self):
         with pytest.raises(ValueError, match="requre_mention") as excinfo:
@@ -184,4 +245,8 @@ class TestConfigValidation:
                 },
                 wait_connect=False,
             )
-        assert str(CHAN_ID) in str(excinfo.value)
+        message = str(excinfo.value)
+        # The key, the value written under it, and what is accepted instead.
+        assert "requre_mention=False" in message
+        assert "accepted: require_mention" in message
+        assert f"channels.{CHAN_ID}" in message
