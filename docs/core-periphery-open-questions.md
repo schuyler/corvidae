@@ -77,9 +77,12 @@ base PRD say "base".
    peripheral "the tools its task needs"; base §3.5.7 gives a subagent
    the calling channel's tool set minus itself.
 
-8. **Compressed identity.** Open question 9 contemplates a compressed
-   identity for peripheries; base §3.3.8 says no setting replaces the
-   identity.
+8. **Compressed identity.** *Resolved:* identity unity is intent,
+   measured by tone continuity; §3.2.5 keeps only the shared-memory
+   requirement, notes that base principle 14 should be softened, and §4
+   lists the conditional amendment to base §3.3.8. Original finding:
+   open question 9 contemplates a compressed identity for peripheries;
+   base §3.3.8 says no setting replaces the identity.
 
 9. **Scope of the inbound caps.** Supplement §0 scopes §3 to the
    core/periphery strategy, but the inbound caps in §3.3.7 are kernel

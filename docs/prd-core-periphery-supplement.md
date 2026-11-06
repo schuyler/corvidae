@@ -338,14 +338,21 @@ its tests pass; until then they are proposals.
    observes a mis-escalation, diagnoses which part of the judgment
    prompt is inadequate, and rewrites it.
 
-5. The framework MUST give a channel-bound peripheral the same identity
-   (base PRD §3.3.8), the same memory, and the same values as the core,
-   however that identity is rendered for it (open question 9).
-   Task-bound peripherals are the exception (§3.2.9).
+5. The framework MUST give a channel-bound peripheral the same memory
+   as the core. Task-bound peripherals are the exception (§3.2.9).
 
-   *Rationale:* A channel-bound peripheral operates with a subset of the
-   cognitive machinery (it hands depth to the core) but the full
-   identity.
+   *Intent (measured):* a channel-bound peripheral presents as the same
+   agent as the core. How the identity is rendered for a peripheral, in
+   full or compressed, is open question 9, and how well it works is
+   measured by tone continuity (§3.8.2).
+
+   *Note for the base PRD:* base principle 14 says the agent presents
+   the same identity on every channel, as a requirement. How an agent
+   presents is model behaviour, and the core and peripherals may run
+   different models, so no code can guarantee it. That part of
+   principle 14 should be softened from a requirement to a "should",
+   with different models named as the accepted exception. Until then
+   this supplement treats it as intent.
 
 6. The framework MUST give each peripheral its channel's register (base
    PRD §3.3.10), and MUST make it available to the core when the core
@@ -789,6 +796,8 @@ supplement amends them once accepted:
   lose the heartbeat's critique exemption, amending base §3.7
   Heartbeat and §3.7 Critique 3 (§3.1.2);
 - goals sit in a pinned block with tail updates (base §3.7 Goals; §3.6);
+- if open question 9 settles on a compressed identity for peripheries,
+  that amends base §3.3.8's identity heading every prompt (§3.2.5);
 - the core MAY give a task-bound peripheral fewer tools than it holds,
   amending base §3.5.7's full inherited set (§3.2.8);
 - base §3.8 and §3.13.4 govern one-shot forks only; long-lived forks
