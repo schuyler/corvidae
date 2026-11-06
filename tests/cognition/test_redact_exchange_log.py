@@ -347,6 +347,125 @@ class TestFormsAndReporting:
         assert "2 exchange_log rows" in result.output, result.output
 
 
+class TestOutcomesDetail:
+    """#503: redact must reach outcomes.detail text (PRD \u00a73.7 Memory 8)."""
+
+    OUTCOMES = {
+        "provenance": {
+            "claims": 2,
+            "candidates": 3,
+            "supported": 1,
+            "objections": 2,
+            "detail": [
+                {"claim": "The kestrel nests at Brannan Street",
+                 "objection": "No source cited for this claim",
+                 "lens": "sourcing"},
+                {"claim": "Zebulon owes 40 dollars",
+                 "objection": "This is a rumor, not a fact",
+                 "lens": "verifiability"},
+            ],
+        },
+    }
+
+    async def _set_outcomes(
+        self, db, trace_id: str, outcomes: dict | None,
+    ) -> None:
+        """Set the outcomes column on an existing exchange."""
+        await db.execute(
+            "UPDATE exchange_log SET outcomes = ? WHERE trace_id = ?",
+            (None if outcomes is None else json.dumps(outcomes), trace_id),
+        )
+        await db.commit()
+
+    async def _outcomes_row(self, db, trace_id: str) -> dict | None:
+        """Return the outcomes dict for an exchange."""
+        async with db.execute(
+            "SELECT outcomes FROM exchange_log WHERE trace_id = ?",
+            (trace_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return json.loads(row[0])
+
+    async def test_redact_scrubs_outcomes_detail(self):
+        db, ids = await _db_with_dialog()
+        try:
+            await self._set_outcomes(db, "t1", self.OUTCOMES)
+            await redact_messages(db, [ids["u1"]])
+            outcomes = await self._outcomes_row(db, "t1")
+            detail = outcomes["provenance"]["detail"]
+            # Text is tombstoned
+            assert all("redacted" in e["claim"] for e in detail), detail
+            assert all("redacted" in e["objection"] for e in detail), detail
+            # Original words are gone
+            text = json.dumps(detail)
+            for word in ("kestrel", "Brannan", "Zebulon", "40"):
+                assert word not in text, text
+            # Structure is preserved: counts, lens names
+            assert outcomes["provenance"]["claims"] == 2
+            assert outcomes["provenance"]["objections"] == 2
+            assert [e["lens"] for e in detail] == ["sourcing", "verifiability"]
+        finally:
+            await db.close()
+
+    async def test_redact_does_not_touch_outcomes_without_detail(self):
+        db, ids = await _db_with_dialog()
+        try:
+            # Outcomes without a detail field (count-only run)
+            outcomes = {"provenance": {"claims": 0, "objections": 0}}
+            await self._set_outcomes(db, "t1", outcomes)
+            await redact_messages(db, [ids["u1"]])
+            result = await self._outcomes_row(db, "t1")
+            assert result == outcomes, result
+        finally:
+            await db.close()
+
+    async def test_redact_already_scrubbed_stays_tombstoned(self):
+        db, ids = await _db_with_dialog()
+        try:
+            # Pre-scrubbed outcomes with the operator tombstone format
+            scrubbed = {
+                "provenance": {
+                    "claims": 2,
+                    "objections": 2,
+                    "detail": [
+                        {"claim": "[redacted by operator 2026-01-01]",
+                         "objection": "[redacted by operator 2026-01-01]",
+                         "lens": "sourcing"},
+                        {"claim": "[redacted by operator 2026-01-01]",
+                         "objection": "[redacted by operator 2026-01-01]",
+                         "lens": "verifiability"},
+                    ],
+                },
+            }
+            await self._set_outcomes(db, "t1", scrubbed)
+            await redact_messages(db, [ids["u1"]])
+            result = await self._outcomes_row(db, "t1")
+            # Still tombstoned (the scrubber re-tombstones with today's
+            # date, but the original words are gone)
+            for e in result["provenance"]["detail"]:
+                assert "redacted" in e["claim"], e
+                assert "redacted" in e["objection"], e
+                assert "kestrel" not in e["claim"]
+                assert "Brannan" not in e["claim"]
+        finally:
+            await db.close()
+
+    async def test_dry_run_counts_outcomes_change(self):
+        db, ids = await _db_with_dialog()
+        try:
+            await self._set_outcomes(db, "t1", self.OUTCOMES)
+            result = await redact_messages(db, [ids["u1"]], dry_run=True)
+            # t1 has both appraisal and outcomes to scrub
+            assert result["scrubbed"]["exchange_log"] >= 1
+            # Dry run: outcomes unchanged
+            outcomes = await self._outcomes_row(db, "t1")
+            assert "kestrel" in json.dumps(outcomes["provenance"]["detail"])
+        finally:
+            await db.close()
+
+
 class TestRegistration:
     def test_exchange_log_scrubber_is_registered(self):
         # The kernel finds the scrubber only through the entry point.
