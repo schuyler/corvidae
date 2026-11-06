@@ -869,6 +869,16 @@ With the goals plugin loaded:
 
 3. The kernel MUST let plugins send each other notifications. The
    transport mechanism is a design decision.
+   **(All strategies.)** The kernel MUST stamp every notification with
+   the plugin that created it, and MUST NOT construct a notification
+   from model-generated text: a model's output may travel inside a
+   notification as content (an instruction's text, an escalation's
+   summary), but never sets its kind, its source or its destination.
+
+   *Rationale:* This is what makes in-process provenance hold without
+   cryptography (open question 12). A compromised context is a model
+   emitting text; if text can never become a notification's envelope,
+   it can never pass as one.
 
 4. The framework MUST apply the base PRD's rules for messages the agent
    starts (base PRD §3.5.9) to core-initiated exchanges: a message to
@@ -1105,14 +1115,14 @@ answer:
     notification came from a specific plugin, not from a compromised
     context? Complementary to the source-channel trust boundary.
     Deferred to post-architecture-redesign. Working view: inside one
-    process, provenance is structural. The kernel stamps the source
-    plugin when it creates a notification and never builds one from
-    model-generated text, so a compromised context (a model emitting
-    text that looks like a notification) cannot forge one. An HMAC with
-    an internal shared secret adds nothing there, since any code in the
-    process can read the secret. It earns its place where a notification
-    crosses a process boundary (open question 13) or is replayed from
-    storage that is treated as tamperable.
+    process, provenance is structural (§3.9.3). The kernel stamps the
+    source plugin when it creates a notification and never builds one
+    from model-generated text, so a compromised context (a model
+    emitting text that looks like a notification) cannot forge one. An
+    HMAC with an internal shared secret adds nothing there, since any
+    code in the process can read the secret. It earns its place where a
+    notification crosses a process boundary (open question 13) or is
+    replayed from storage that is treated as tamperable.
 
 13. **Editor sessions and the core.** Should an editor session reach the
     daemon's core as a peripheral? That needs communication between
