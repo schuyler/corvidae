@@ -353,8 +353,10 @@ its tests pass; until then they are proposals.
    presents is model behaviour, and the core and peripherals may run
    different models, so no code can guarantee it. That part of
    principle 14 should be softened from a requirement to a "should",
-   with different models named as the accepted exception. Until then
-   this supplement treats it as intent.
+   with different models named as the accepted exception. Principle 17
+   of this supplement, which requires the framework to give every
+   channel-bound peripheral "the agent's one identity", needs the same
+   adaptation. Until then this supplement treats both as intent.
 
 6. The framework MUST give each peripheral its channel's register (base
    PRD §3.3.10), and MUST make it available to the core when the core
