@@ -65,9 +65,11 @@ base PRD say "base".
    runs a fork under the lease holding its prefix. §4 narrows base §3.8
    to one-shot forks but doesn't list §3.13.4.
 
-6. **The slot-management plugin calls no model** (supplement §3.3.6);
-   base §3.13.7 allows a replacement scheduler to call one. Unlisted
-   narrowing.
+6. *Resolved:* the plugin's decisions must be cheap enough for every
+   call boundary, how is left open (supplement §3.3.6). Original
+   finding: **the slot-management plugin calls no model** (supplement
+   §3.3.6); base §3.13.7 allows a replacement scheduler to call one.
+   Unlisted narrowing.
 
 7. **Task-bound peripheral tools.** Supplement §3.2.8 gives a task-bound
    peripheral "the tools its task needs"; base §3.5.7 gives a subagent

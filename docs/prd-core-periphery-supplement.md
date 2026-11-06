@@ -424,12 +424,12 @@ its tests pass; until then they are proposals.
    not, except where §3.3.7 amends them.
 
 6. The framework MUST let the core control queue multiplexing through
-   tools: hold a queue, bring one forward, pin a context warm, or ask for
-   a checkpoint. Waiting work alone MUST NOT change what the core has
-   directed. The slot-management plugin MUST turn the core's direction
-   into memory placement: which contexts stay in VRAM, which move to RAM
-   or disk, and when to restore one ahead of need. The plugin MUST NOT
-   call a model, so its decisions are cheap enough for every call
+   tools: hold a queue, bring one forward, pin a context warm, or ask
+   for a checkpoint. Waiting work alone MUST NOT change what the core
+   has directed. The slot-management plugin MUST turn the core's
+   direction into memory placement: which contexts stay in VRAM, which
+   move to RAM or disk, and when to restore one ahead of need. The
+   plugin's decisions MUST be cheap enough to make at every call
    boundary (base PRD §3.13.8), and backend-specific operations MUST
    live in it (Appendix A.4). A held queue MUST stay paused until the
    core releases it (§3.3.7). The core's own queue is the exception to
