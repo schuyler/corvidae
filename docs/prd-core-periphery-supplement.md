@@ -376,8 +376,14 @@ its tests pass; until then they are proposals.
 
 5. Escalation quality is measurable: false alarm rate (periphery
    escalates unnecessarily) and miss rate (periphery fails to escalate).
-   The outcome log records both, and the core can use them to tune the
-   judgment prompt.
+   The core labels a false alarm when it handles an escalation that
+   needed no deliberation. A miss is labelled from any of: a user
+   correction on the channel (base PRD §3.7 Calibration and
+   corrections), a critique verdict on the periphery's reply, or the
+   core's review of a peripheral's tail (§3.1.12). Each label in the
+   outcome log names its source. The miss rate is a lower bound: it
+   counts only the misses something noticed. The core can use both
+   rates to tune the judgment prompt.
 
 6. An escalation is data, not instruction (base PRD principle 9). The
    core receives it framed as data at the same chokepoint as any channel
