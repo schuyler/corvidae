@@ -28,6 +28,9 @@ logger = logging.getLogger("corvidae.signal_plugin")
 
 
 # Signal attachment types (protobuf enum AttachmentType).
+# signal-cli does NOT include this field in the JSON-RPC attachment object;
+# the reliable indicator is the "contentType" MIME type. These constants are
+# kept for reference and as a secondary signal if contentType is absent.
 ATT_IMAGE = 1
 ATT_AUDIO = 2
 ATT_CONTACT = 3
@@ -35,9 +38,6 @@ ATT_VIDEO = 4
 ATT_DOCUMENT = 5
 ATT_GIF = 6
 ATT_STICKER = 7
-
-# Types we download to disk (the rest are surfaced as metadata only).
-_DOWNLOADABLE_TYPES = {ATT_IMAGE, ATT_GIF}
 
 ATTACHMENT_TYPE_NAMES = {
     ATT_IMAGE: "image",
@@ -47,6 +47,48 @@ ATTACHMENT_TYPE_NAMES = {
     ATT_DOCUMENT: "document",
     ATT_GIF: "gif",
     ATT_STICKER: "sticker",
+}
+
+# MIME prefixes we download to disk. Everything else is surfaced as
+# metadata only. signal-cli's attachment JSON carries "contentType"
+# (e.g. "image/jpeg", "application/pdf") but no "type" field, so the
+# MIME type is the primary downloadability signal.
+_DOWNLOADABLE_MIME_PREFIXES = (
+    "image/",          # images, gifs
+    "application/pdf", # pdfs
+    "text/",           # plain text, markdown, csv, etc.
+    "audio/",          # voice notes
+)
+
+
+def _is_downloadable(attachment: dict) -> bool:
+    """Check whether an attachment should be downloaded to disk.
+
+    Primary signal: contentType MIME prefix.
+    Fallback: protobuf type enum (if contentType is absent).
+    """
+    mime = (attachment.get("contentType") or "").lower()
+    if mime:
+        return any(mime.startswith(p) for p in _DOWNLOADABLE_MIME_PREFIXES)
+    # Fallback for older signal-cli versions that send type but not contentType.
+    return attachment.get("type", 0) in (ATT_IMAGE, ATT_GIF)
+
+
+# Map common MIME types to file extensions for when filename is None.
+_MIME_TO_EXT = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "application/pdf": ".pdf",
+    "text/plain": ".txt",
+    "text/markdown": ".md",
+    "text/csv": ".csv",
+    "audio/ogg": ".ogg",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/mp4": ".m4a",
 }
 
 # How often the per-channel typing-indicator refresh loop re-sends "typing"
@@ -478,8 +520,17 @@ class SignalPlugin(TransportPlugin):
         attachment_notes: list[str] = []
         for att in attachments:
             att_type = att.get("type", 0)
-            type_name = ATTACHMENT_TYPE_NAMES.get(att_type, f"type{att_type}")
-            if att_type in _DOWNLOADABLE_TYPES and allowed:
+            mime = (att.get("contentType") or "").lower()
+            # Derive a human-readable name: MIME subtype if available,
+            # else the protobuf type name, else "type<N>".
+            if mime and "/" in mime:
+                major, minor = mime.split("/", 1)
+                # "image", "audio", "text" are useful as-is;
+                # "application/pdf" → "pdf" (major is too generic).
+                type_name = minor if major == "application" else major
+            else:
+                type_name = ATTACHMENT_TYPE_NAMES.get(att_type, f"type{att_type}")
+            if _is_downloadable(att) and allowed:
                 path = await self._download_attachment(envelope, att)
                 if path is not None:
                     attachment_notes.append(f"[{type_name}: {path}]")
@@ -577,16 +628,20 @@ class SignalPlugin(TransportPlugin):
             )
             return None
 
-        # Extension: from the incoming attachment's filename field (not the
-        # RPC response, which carries only base64 data). Sanitised to a
-        # safe suffix to prevent path traversal via a crafted filename.
+        # Extension: try filename, then id, then MIME-type mapping.
+        # signal-cli sends filename=None for most attachments; the id
+        # field often carries an extension (e.g. "A5mQhazUQ7j6rodCKRNv.jpg").
         _SAFE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,10}")
-        incoming_name = attachment.get("filename") or ""
         suffix = ""
-        if "." in incoming_name:
-            candidate = incoming_name[incoming_name.rindex("."):].lower()
-            if _SAFE_SUFFIX.fullmatch(candidate):
-                suffix = candidate
+        for source in (attachment.get("filename"), attachment.get("id")):
+            if source and "." in source:
+                candidate = source[source.rindex("."):].lower()
+                if _SAFE_SUFFIX.fullmatch(candidate):
+                    suffix = candidate
+                    break
+        if not suffix:
+            mime = (attachment.get("contentType") or "").lower()
+            suffix = _MIME_TO_EXT.get(mime, "")
 
         # Ensure the directory exists (blocking I/O off the event loop).
         await asyncio.to_thread(self._attachment_dir.mkdir, parents=True, exist_ok=True)
