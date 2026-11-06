@@ -4,10 +4,11 @@ This guide takes you from a fresh checkout to a corvidae bot that answers your
 DMs on Discord, with its chat model and embeddings served by a remote
 OpenAI-compatible API instead of a local llama-server.
 
-The Discord transport has never been tested end to end. There is no local
-Discord server to test against, so the unit tests use fake clients, and
-everything below comes from bringing up one real bot. If something here is
-wrong for you, please file an issue.
+The Discord transport has no automated end-to-end test: there is no local
+Discord server to test against, so the unit tests use fake clients. What is
+below comes from bringing up one real bot by hand, and the log lines are
+checked against the code. If something here is wrong for you, please file an
+issue.
 
 Creating the application, the bot token, intents, the invite URL and user ids
 are in [discord-ops.md](discord-ops.md); every config key is in
@@ -77,13 +78,15 @@ is unset or empty, corvidae refuses to start and names it.
 
 Use the **bot token** from the Bot page (Reset Token). The OAuth2 page has a
 client secret that also looks like a credential, and it does not work. The bot
-token is about 70 characters with two dots in it; the client secret is 32
-characters.
+token is long (roughly 70 characters) with two dots in it; the client secret
+is shorter and has no dots. Discord can change these formats.
 
-`discord.allow` takes numeric user ids, 17 to 19 digits, not usernames. It is
+`discord.allow` takes numeric user ids (about 17 to 19 digits), not usernames. It is
 default-deny and says nothing when it denies you. In a server the bot answers
-only messages that @-mention it; in a DM it answers everything from an
-allowed user.
+only messages that @-mention it, unless you set the experimental
+`discord.require_mention: false` (see
+[discord-ops.md](discord-ops.md#answering-without-a-mention-experimental));
+in a DM it answers everything from an allowed user.
 
 ## Measure the embedding dimensions
 
