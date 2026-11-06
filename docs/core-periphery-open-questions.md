@@ -84,10 +84,13 @@ base PRD say "base".
    open question 9 contemplates a compressed identity for peripheries;
    base §3.3.8 says no setting replaces the identity.
 
-9. **Scope of the inbound caps.** Supplement §0 scopes §3 to the
-   core/periphery strategy, but the inbound caps in §3.3.7 are kernel
-   behaviour and §4 amends base §3.4.8 without scoping. It's unclear
-   whether they hold under the base topology too.
+9. **Scope of the inbound caps.** *Resolved:* the caps became one
+   candidate under a general, all-strategies requirement to guard
+   against unbounded CPU, memory and disk use (supplement §3.12).
+   Original finding: supplement §0 scopes §3 to the core/periphery
+   strategy, but the inbound caps in §3.3.7 are kernel behaviour and §4
+   amends base §3.4.8 without scoping. It's unclear whether they hold
+   under the base topology too.
 
 ## 2. Open questions for the TRD
 
@@ -283,9 +286,12 @@ base PRD say "base".
    at the maximum. At zero, cross-context sends are suppressed and the
    user gets a status reply.
 
-2. **Fuller resource limits.** A ceiling on the write-ahead log that
-   stops new chains starting while running ones drain; a per-response
-   tool-call cap; larger turn budgets for forks and task peripherals.
+2. **Resource limits** (candidates under supplement §3.12). A per-
+   channel inbound capacity with rejection at the gate (the owner's
+   earlier decision, now an implementation note); a total inbound cap
+   across channels; a ceiling on the write-ahead log that stops new
+   chains starting while running ones drain; a per-response tool-call
+   cap; larger turn budgets for forks and task peripherals.
 
 3. **Provider rate limits.** Declared per profile (requests, input and
    output tokens per window), with optional shared limit groups for

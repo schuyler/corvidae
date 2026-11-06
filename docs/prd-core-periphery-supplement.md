@@ -37,7 +37,7 @@ here.
 
 A sentence is a requirement only if it carries one of those key words.
 Everything else is explanation: paragraphs labelled *Rationale*,
-examples, measurements, §5, Appendix A, and the open questions in
+examples, measurements, §5, Appendices A and B, and the open questions in
 `docs/core-periphery-open-questions.md`. The test is mechanical: no
 capitalised key word, no requirement.
 
@@ -70,10 +70,11 @@ agent could change about itself is lockable by the operator (base PRD
 principle 15) whether or not the sentence repeats it. SHOULD appears
 only with its acceptable exception stated beside it.
 
-**Scope.** §2 and §3 apply when the core/periphery strategy runs (§1). A
-requirement that depends on another optional plugin (goals, critique,
-appraisal, consolidation, the outcome log, trust) applies when that
-plugin is loaded too.
+**Scope.** §2 and §3 apply when the core/periphery strategy runs (§1),
+except items marked **(all strategies)**, which hold under every
+strategy, the base PRD's topology included. A requirement that depends
+on another optional plugin (goals, critique, appraisal, memory, the
+outcome log, trust) applies when that plugin is loaded too.
 
 ## 1. What changes
 
@@ -278,7 +279,8 @@ its tests pass; until then they are proposals.
     observables** whenever it asks, without waking it to show them. The
     observables MUST include queue depth per peripheral, message rates,
     error counts, KV cache residency, and fork activity. The framework
-    MUST notify the core of anomalies (an overflowing queue, §3.3.7; a
+    MUST notify the core of anomalies (a queue growing without being
+    served; a
     queue overdue past its latency bound, §3.3.7; a peripheral that
     keeps erroring), rate-limited, and of nothing else about the
     observables.
@@ -449,8 +451,8 @@ its tests pass; until then they are proposals.
    bring the core back, without a core turn to decide it; the turn that
    follows handles the work.
 
-7. **Pausing and overflow.** This item amends base PRD §3.13.5,
-   §3.13.6, §3.13.7, §3.13.9 and §3.4.8 once the supplement is accepted.
+7. **Pausing and queue order.** This item amends base PRD §3.13.5,
+   §3.13.6 and §3.13.7 once the supplement is accepted.
    - A paused channel MUST stay paused until the core unpauses it; a
      pause MUST NOT lapse at a latency bound. The framework MUST let the
      operator unpause any channel at any time without going through a
@@ -469,32 +471,8 @@ its tests pass; until then they are proposals.
      the core, rate-limited, when a queue's waiting work passes its
      bound.
 
-   - Every channel queue MUST have a fixed capacity for inbound
-     transport messages, set in operator config with a default. Tool
-     results, task completions, notes and escalations MUST NOT count
-     against it and MUST NOT be dropped.
-   - The kernel MUST also cap the total number of inbound transport
-     messages held in the write-ahead log of accepted work (base PRD
-     §3.4.8) across all channels, set in operator config with a
-     default.
-   - An inbound message that would exceed either cap MUST be rejected by
-     the kernel at the inbound gate: `on_message_rejected` fires, the
-     outcome log (where loaded) keeps the row, and the message MUST NOT
-     be accepted, so it never enters the write-ahead log (base PRD
-     §3.4.8). The kernel MUST log a warning naming the channel, the
-     sender, and which cap was reached, and MUST notify the core.
-   - Overflow warnings and notifications MUST be rate-limited per
-     channel: the first overflow MUST be reported at once, and later
-     ones summarized with a count at a bounded rate.
-
    *Rationale:* The slot-management plugin orders active queues because
    it alone knows the cache resources and the cost of swapping them.
-   Rejecting at the gate keeps the write-ahead log's promise that
-   nothing accepted is lost, while keeping a channel flood from growing
-   it without bound: the per-channel cap stops one channel starving the
-   others, and the total cap stops a flood spread across many channels
-   from filling the disk. Overflow reports are rate-limited because a
-   system whose queues overflow may already be overloaded.
 
 8. The framework MUST meet every requirement in this supplement when
    any context, core or peripheral, runs on a provider that offers no
@@ -779,12 +757,34 @@ With the goals plugin loaded:
 
 1. The framework MUST provide an operator-config switch that makes a
    periphery always escalate or never escalate, so that harness probes
-   (base PRD §3.12) of forks, joins, pausing, overflow and paging get
+   (base PRD §3.12) of forks, joins, pausing, floods and paging get
    mechanical pass criteria whatever the periphery's model would judge.
 
 2. *(Explanatory.)* Escalation judgment itself is measured out of band,
    as a benchmark, from the outcome log's miss and false-alarm rates
    (§3.4.5), never as a gate (base PRD principle 6).
+
+### 3.12 Resource consumption
+
+1. **(All strategies.)** The framework MUST take reasonable precautions
+   against unbounded CPU, memory or disk consumption, whether it comes
+   from outside (a flood of messages on a channel) or from inside (a
+   loop between contexts, a runaway task). Which precautions to take,
+   and their limits, are design decisions.
+
+   *Implementation note (explanatory):* one candidate for floods is a
+   fixed per-channel capacity for inbound transport messages, set in
+   operator config, with a message that would exceed it rejected at the
+   inbound gate before it is accepted, so the write-ahead log of
+   accepted work (base PRD §3.4.8) keeps its promise that nothing
+   accepted is lost. Other candidates (a total cap across channels, a
+   bound on loops between the core and peripherals, a per-response
+   tool-call cap) are in `docs/core-periphery-open-questions.md`.
+
+   *Rationale:* Resource exhaustion doesn't depend on topology, so this
+   holds under every strategy. Stating the outcome rather than a set of
+   caps leaves the TRD to choose limits that fit together, instead of
+   accumulating mechanisms one finding at a time.
 
 ## 4. What carries over
 
@@ -802,9 +802,8 @@ supplement amends them once accepted:
   amending base §3.5.7's full inherited set (§3.2.8);
 - base §3.8 and §3.13.4 govern one-shot forks only; long-lived forks
   follow §3.5;
-- pauses do not lapse, channel queues have a fixed capacity for inbound
-  messages, and the write-ahead log has a total cap on them, amending
-  base §3.13.5, §3.13.6, §3.13.7, §3.13.9 and §3.4.8 (§3.3.7);
+- pauses do not lapse, amending base §3.13.5, §3.13.6 and §3.13.7
+  (§3.3.7);
 - base principles 3 and 13, §3.1.16 and §3.13.5 are replaced, for this
   strategy, by: some work is latency-sensitive, and queues MAY have a
   defined latency bound. Work past its bound does not preempt other
@@ -967,6 +966,31 @@ external reviewer's verdict, so the prompt asks the model to assess its
 own response with fresh eyes rather than adopt an outside reviewer's
 persona. The wording is a prompt-engineering decision, and the critic's
 prompts remain the agent's to change (base PRD principle 15).
+
+
+## Appendix B: Safety and limit mechanisms
+
+*This appendix is explanatory.* It lists every mechanism in this
+supplement whose job is safety, trust, or bounding what the agent can
+do or consume, so they can be weighed together rather than one at a
+time. "Owner" marks text from the owner's review pass; "recast" marks
+text settled while recasting the supplement in BCP 14 terms. The base
+PRD's own mechanisms (the inbound gate, allowlists, the trust and
+sensitivity plugins, locks under principle 15, the floors of principle
+9) all still apply and are not repeated here.
+
+| Mechanism | Where | Origin | Protects against |
+|---|---|---|---|
+| Escalations are framed as data, labelled with source, sender and trust; a summary carries its input's trust; the raw message can always be checked | §3.4.6 | Owner | Prompt injection travelling from a channel to the core |
+| An imported peripheral tail is framed as data | §3.1.12 | Recast | The same, by way of a tail import |
+| Periphery prompt rewrites are lockable, kept in a revision history and reviewed by critique | §3.1.5, §3.2.4 | Owner | Runaway or injected self-modification of escalation judgment |
+| Peripherals default to a narrower tool set than the core | §3.2.8 | Owner | A peripheral changing things outside the conversation |
+| Task-bound peripherals carry no persona and never get a tool their launcher lacks | Principle 17, §3.2.8–9 | Owner, recast | Privilege escalation through subagents |
+| Core-initiated messages follow the base rules for messages the agent starts; replies pass the inbound gate | §3.9.4 | Owner | The core reaching or admitting people the operator didn't approve |
+| No work disappears silently | §3.10.1 | Owner | Lost work going unnoticed |
+| The agent's own actions can't leave the core unable to receive work | §3.3.7 | Recast | The agent wedging itself |
+| A queue past its latency bound is reported to the core | §3.3.7 | Recast | Silent starvation of a channel or of upkeep |
+| Reasonable precautions against unbounded CPU, memory or disk use | §3.12 | Recast | Floods and runaway loops |
 
 ---
 
