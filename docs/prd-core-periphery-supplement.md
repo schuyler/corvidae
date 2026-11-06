@@ -99,11 +99,12 @@ its tests pass; until then they are proposals.
 
 19. **The periphery is a boundary detector, not a decision maker.** The
     peripheral's whole job is to recognize what it can handle and what it
-    can't. The escalation trigger is not a separate mechanism; it is the
-    boundary of the periphery's pattern-matching range. When a message is
-    outside that range, the instinctive response *is* escalation. No
-    thinking tokens are devoted to the decision; the periphery's competence
-    boundary *is* the decision.
+    can't, and to escalate the rest. It spends no deliberation on that
+    call: escalation is an instinctive response, not a reasoned decision.
+    How the boundary is detected (the periphery model's own judgment,
+    message-type rules, a confidence signal, or a mix) is a mechanism the
+    framework can offer and evals measure (base PRD principle 6), by miss
+    and false-alarm rate (§3.4.5).
 
 20. **Goals are embedded in the context.** The goal block
     (commitment floor) is part of the core's context, pinned and
@@ -356,14 +357,13 @@ its tests pass; until then they are proposals.
 1. The escalation trigger is the boundary of the periphery's
    pattern-matching range. When a message is outside what the periphery
    can handle instinctively, the instinctive response *is* escalation.
-   There is no separate escalation mechanism.
 
 2. The periphery determines when a message is outside its competence
    using whatever signal is available: message-type patterns, response
    confidence, explicit uncertainty. The specific detection mechanism is
    a design decision (Appendix A, open question 2). The requirement is
    that the periphery can make this determination without deliberative
-   reasoning and without a separate escalation mechanism.
+   reasoning.
 
 3. Escalation carries a **summary** of the message and its context to the
    core. The core receives the summary, not the raw message (unless it
