@@ -233,8 +233,12 @@ one is a bug even if its tests pass.
     from one channel to the next is register (§3.3.10), never who it is
     (§3.3.8). Any turn can speak on any channel a transport owns, leave a
     note for another channel's context, and read another channel's recent
-    conversation (§3.5.9–11), and retrieval spans the whole memory. There
-    are no channel walls to configure: the per-channel queue and window
+    conversation (§3.5.9–11), and retrieval spans the whole memory.
+    Memory is shared but eventually consistent: what one context learns
+    reaches the others when it is consolidated (§3.7 Memory), within
+    consolidation's latency bound (principle 3), not at once. A turn that
+    needs another context to know something now leaves it a note
+    (§3.5.10). There are no channel walls to configure: the per-channel queue and window
     exist for concurrency and the KV cache, and per-channel settings for
     register and for bounding what a channel's participants can make the
     agent do (its tool set and locks, §3.5.2, §3.5.6), never for what
@@ -1592,6 +1596,7 @@ record that holds the reasoning.
 | The kernel owns the clock; idle keeps firing through quiet, and no plugin needs another's queues to learn of it; idle reaches plugins by push | #167; #165 |
 | Upkeep runs on time regardless of agency plugins; the scheduler is agency and optional | #167 |
 | Transports deliver every emission on their own channels regardless of origin | #167 |
+| Memory is shared but eventually consistent: what one context learns reaches the others at consolidation, within its latency bound; a note is the immediate path | principle 14; §3.5.10; owner, 2026-11-06 |
 | The agent is one actor with one identity on every channel; trust and sensitivity, not channel walls. No cross-channel allowlist and no memory compartments, as an option or otherwise; two identities means two instances | #167; operator directive, 2026-11-01; #234, #235 |
 | Any turn can speak on any channel, leave a note for another channel's context, and read another channel's conversation; a per-destination limit on messages the agent starts is a restriction the operator can apply, off unless set, never a gate on crossing channels | operator directive, 2026-11-01; #234, #235 |
 | Audience filtering is a capability, not a requirement: the sensitivity plugin, where the operator loads it, filters what enters a window (retrieval, notes, reads, goals) by who is present; it never gates a reply | principle 15; operator directive, 2026-11-01 |
