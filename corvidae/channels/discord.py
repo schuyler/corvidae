@@ -9,7 +9,10 @@ intent: Discord still delivers message content for DMs and for messages that
 mention the bot, which are the only messages this transport processes. With
 ``require_mention: false`` the bot answers every server message from an
 allowlisted user, and the client requests that intent (it must also be
-enabled in the Discord Developer Portal).
+enabled in the Discord Developer Portal). A ``discord.channels.<channel id>``
+entry may override ``require_mention`` for one channel, and its threads inherit
+it (#512); the intent is requested once for the client, so a single
+conversational channel is enough to need it.
 
 The SDK (discord-py) is optional: add ``--extra discord`` to the ``uv sync``
 line. This module
@@ -277,6 +280,9 @@ class DiscordPlugin(TransportPlugin):
         self._allow: set[str] = set()
         self._message_chunk_size: int = DISCORD_MESSAGE_LIMIT
         self._require_mention: bool = True
+        #: Per-channel overrides of the transport default (#512), keyed by the
+        #: Discord channel id as a string. A thread looks up its parent's entry.
+        self._channel_require_mention: dict[str, bool] = {}
 
         # Connection state. _client is the live (or latest) gateway client.
         self._client: Any = None
@@ -360,12 +366,84 @@ class DiscordPlugin(TransportPlugin):
                 f"got {require_mention!r}; fix it in the discord: block of agent.yaml"
             )
 
+        # Per-channel overrides (#512). Each entry may set its own
+        # require_mention; an unknown key is named rather than ignored, because
+        # a typo there would silently leave the channel on the default.
+        channels = block.get("channels")
+        # An empty YAML section parses as null, and an operator who comments out
+        # the only entry should get the default, not a startup failure.
+        if channels is None:
+            channels = {}
+        if not isinstance(channels, dict):
+            raise ValueError(
+                "discord: config field 'channels' must be a mapping of channel "
+                f"id to settings, got {channels!r}; write `channels: {{\"<channel "
+                "id>\": {require_mention: false}}}` in the discord: block of "
+                "agent.yaml"
+            )
+        channel_overrides: dict[str, bool] = {}
+        for channel_id, entry in channels.items():
+            # The key is matched against the id Discord delivers, so it has to be
+            # that id and nothing else. `discord:<id>` and `#general` are the two
+            # shapes a reader of the *other* channels: block will try by habit,
+            # and either one would match no channel and leave the override doing
+            # nothing (#512).
+            # A leading zero is never part of a real snowflake, and a quoted
+            # "0012345" would match no channel — the silent no-op this check
+            # exists to prevent.
+            if not re.fullmatch(r"[1-9][0-9]*", str(channel_id)):
+                raise ValueError(
+                    "discord: config entry 'channels."
+                    f"{channel_id}' is not a Discord channel id; use the number "
+                    "alone, as it appears after `discord:` in the agent's logs "
+                    "— 123456789012345678, digits only, quoted or not, no leading "
+                    "zeros and no prefix — in the discord: block of agent.yaml"
+                )
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    "discord: config entry 'channels."
+                    f"{channel_id}' must be a mapping of settings, got {entry!r}; "
+                    "write `channels: {\"<channel id>\": {require_mention: false}}` "
+                    "in the discord: block of agent.yaml"
+                )
+            # YAML gives keys as whatever it parsed: an int typo key sorts
+            # against a str one with TypeError, so the message would be lost on
+            # the way out. Compare as text.
+            unknown_keys = sorted(set(entry) - {"require_mention"}, key=str)
+            if unknown_keys:
+                written = ", ".join(f"{key}={entry[key]!r}" for key in unknown_keys)
+                raise ValueError(
+                    "discord: config entry 'channels."
+                    f"{channel_id}' has unknown key(s) {written}; accepted: "
+                    "require_mention — fix the key in the discord: block of "
+                    "agent.yaml"
+                )
+            if "require_mention" not in entry:
+                continue
+            value = entry["require_mention"]
+            if not isinstance(value, bool):
+                raise ValueError(
+                    "discord: config field 'channels."
+                    f"{channel_id}.require_mention' must be true or false, got "
+                    f"{value!r}; fix it in the discord: block of agent.yaml"
+                )
+            key = str(channel_id)
+            if key in channel_overrides:
+                raise ValueError(
+                    "discord: config entry 'channels."
+                    f"{key}' is listed twice — as a quoted string and as a "
+                    "number — and only one would take effect; keep one entry in "
+                    "the discord: block of agent.yaml"
+                )
+            channel_overrides[key] = value
+
         self._token = str(token)
         # Ids are compared as strings against str(author.id); YAML parses
         # them as ints.
         self._allow = {str(entry) for entry in allow}
         self._message_chunk_size = chunk_size
         self._require_mention = require_mention
+        self._channel_require_mention = channel_overrides
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -424,8 +502,10 @@ class DiscordPlugin(TransportPlugin):
         module docstring)."""
         # Start from the default intents.
         intents = _sdk().Intents.default()
-        # Unmentioned server messages carry no text without the intent.
-        if not self._require_mention:
+        # Unmentioned server messages carry no text without the intent. The
+        # intent is per client, not per channel, so one conversational channel
+        # is enough to need it (#512).
+        if not self._require_mention or False in self._channel_require_mention.values():
             intents.message_content = True
         return _client_class()(self, intents=intents)
 
@@ -510,7 +590,7 @@ class DiscordPlugin(TransportPlugin):
             # is itself mentioned (not merely @everyone/@here, which
             # mentioned_in would accept). Without it, every guild message
             # continues; the allowlist gate still refuses other senders.
-            if self._require_mention:
+            if self._require_mention_for(message.channel):
                 if not any(u.id == bot_user_id for u in message.mentions):
                     logger.debug("discord: ignoring guild message that does not mention the bot")
                     return
@@ -586,6 +666,24 @@ class DiscordPlugin(TransportPlugin):
             if took_slot and trace_id not in self._admitted:
                 self._decrement_outstanding(channel)
             self._admitted.discard(trace_id)
+
+    def _require_mention_for(self, channel: Any) -> bool:
+        """Whether this Discord channel answers only on an @-mention (#512).
+
+        The transport value is the default. A `discord.channels.<id>` entry
+        overrides it, and a thread looks up its parent's entry before falling
+        back to the default, so a thread whose parent is not listed stays
+        mention-only rather than silently becoming conversational.
+        """
+        own = str(getattr(channel, "id", ""))
+        if own in self._channel_require_mention:
+            return self._channel_require_mention[own]
+        parent = getattr(channel, "parent_id", None)
+        if parent is not None:
+            listed = self._channel_require_mention.get(str(parent))
+            if listed is not None:
+                return listed
+        return self._require_mention
 
     def _transient_channel(self, scope: str) -> Channel:
         """The channel a refused sender's message is gated on.

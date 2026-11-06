@@ -625,7 +625,7 @@ Pass the ids explicitly rather than using the `range` form: `message_log` ids ar
 
 The transport needs the Discord SDK: add `--extra discord` to your `uv sync` line. A `discord:` block without it fails at startup with a message saying so; with no block, the SDK is never loaded.
 
-The `discord` section is optional. If absent, `DiscordPlugin` loads but stays inert: no client, no tasks, nothing logged above `DEBUG`. If present, it must be well-formed — no token (in the block or the environment), an `allow` that is not a list, a `message_chunk_size` that is not an integer from 100 to 2000, or a `require_mention` that is not a boolean raises at startup naming the offending field.
+The `discord` section is optional. If absent, `DiscordPlugin` loads but stays inert: no client, no tasks, nothing logged above `DEBUG`. If present, it must be well-formed — no token (in the block or the environment), an `allow` that is not a list, a `message_chunk_size` that is not an integer from 100 to 2000, a `require_mention` that is not a boolean, a `channels` entry keyed on anything but a numeric channel id, or an unknown key inside one, raises at startup naming the offending field and the remedy.
 
 corvidae logs in as a Discord bot account. Creating the application, getting the token, and inviting the bot are covered in [discord-ops.md](discord-ops.md). In DMs the bot answers every message from an allowed user; in servers and threads it answers only messages that @-mention it, unless `discord.require_mention` is `false`.
 
@@ -634,7 +634,8 @@ corvidae logs in as a Discord bot account. Creating the application, getting the
 | `discord.token` | string | `$DISCORD_TOKEN` | The bot token. If the key is absent, null, or empty, the `DISCORD_TOKEN` environment variable is used; if neither is set, startup fails. |
 | `discord.allow` | list of user ids | `[]` | Discord user ids permitted to drive the agent. Numeric ids, written as YAML ints or quoted strings; they are compared as strings. Default-deny: an empty or absent list refuses everyone, silently — no reply and no typing indicator. An explicit `allow: null` is an error, not an empty list. |
 | `discord.message_chunk_size` | integer | `2000` | Maximum UTF-8 bytes per outbound Discord message, 100 to 2000 inclusive. Longer replies are split, keeping code fences intact, and sent as several messages; nothing is truncated. An explicit `null` is rejected (unlike a null `token`, which falls back to the environment). The limit is bytes, while Discord's 2000 is characters, so text with multi-byte characters splits earlier than strictly needed. |
-| `discord.require_mention` | boolean | `true` | Experimental. With `true`, servers and threads get an answer only when a message @-mentions the bot. With `false`, every message from an allowlisted user in any channel the bot can see reaches the agent, which may still decline to reply, and a mention token, if there is one, is still stripped. Messages from anyone else are refused by the allowlist before they are stored, as always. `false` makes the client request the privileged Message Content intent, which you must also switch on in the Developer Portal (see [discord-ops.md](discord-ops.md#answering-without-a-mention-experimental)); `true` requests only the default intents. Anything but `true` or `false` (a quoted `"false"`, a number, `null`) fails startup naming the key. Global: there is no per-channel form. Read at startup only. |
+| `discord.channels` | mapping | `{}` | Per-channel overrides, keyed by the Discord channel id — the number alone, quoted or not, as it appears after `discord:` in the agent's logs — digits, no prefix, no leading zeros. Each entry is a mapping whose only key is `require_mention`; listing one id twice (quoted and as a number) fails startup. A thread uses its parent channel's entry; a thread whose parent has no entry stays on `discord.require_mention`. A key that is not a bare number (`discord:123…`, `#general`) fails startup rather than matching nothing, because a silently ignored override is a channel left conversational. An empty section means no overrides. Read at startup only. |
+| `discord.require_mention` | boolean | `true` | The default for every channel. With `true`, servers and threads get an answer only when a message @-mentions the bot. With `false`, every message from an allowlisted user in any channel the bot can see reaches the agent, which may still decline to reply; a mention token, if present, is still stripped. Messages from anyone else are refused by the allowlist before they are stored, as always. Answering unaddressed anywhere makes the client request the privileged Message Content intent, which must also be switched on for the application in the Developer Portal — the intent is per client, so one conversational channel is enough to need it. Per-channel overrides live in `discord.channels` below. Read at startup only. |
 
 ```yaml
 discord:
@@ -643,6 +644,9 @@ discord:
     - 123456789012345678
   message_chunk_size: 2000
   # require_mention: false         # answer allowed users without an @-mention
+  channels:                       # per-channel overrides (#512)
+    "1568093636044787772":        # the channel id the agent sees
+      require_mention: false      # this one channel may answer unaddressed
 ```
 
 User ids are the long numeric snowflakes you get from Discord's Developer Mode, not usernames; see [discord-ops.md](discord-ops.md#find-ids). Prefer the environment variable if `agent.yaml` is world-readable or checked in anywhere: the token is the bot, and anyone holding it can act as it.
