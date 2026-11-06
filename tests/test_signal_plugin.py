@@ -1011,6 +1011,143 @@ class TestInboundFiltering:
 
 
 
+
+    async def test_application_prefix_not_matched_as_category(self, tmp_path):
+        """application/pdfx, application/json-seq must NOT be downloaded."""
+        for mime in ("application/pdfx", "application/json-seq", "application/xml-dtd"):
+            h = await _start_plugin(tmp_path)
+            try:
+                await h.server.push_notification(
+                    "receive",
+                    make_data_envelope(
+                        source_uuid=AUTH_ACI, source_number=None, text="t",
+                        attachments=[{"id": "neg-1", "type": 0,
+                                       "contentType": mime,
+                                       "filename": None}],
+                    ),
+                )
+                await _wait_until(
+                    lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10
+                )
+                text = h.pm.ahook.on_message.await_args.kwargs["text"]
+                assert "download" not in text.lower(), (
+                    f"{mime} should not be downloadable: {text!r}"
+                )
+            finally:
+                await _stop_plugin(h)
+
+    async def test_content_type_overrides_legacy_type_enum(self, tmp_path):
+        """type=1 (image) + contentType=video/mp4 → not downloaded."""
+        h = await _start_plugin(tmp_path)
+        try:
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text="vid",
+                    attachments=[{"id": "1737-ct-override", "type": 1,
+                                   "contentType": "video/mp4",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(
+                lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10
+            )
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "download" not in text.lower(), (
+                f"contentType should override type enum: {text!r}"
+            )
+        finally:
+            await _stop_plugin(h)
+
+    async def test_filename_extension_conflicts_with_mime(self, tmp_path):
+        """filename=photo.jpg + contentType=image/png → .png wins."""
+        import base64
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "abc", "type": 0,
+                                   "contentType": "image/png",
+                                   "filename": "photo.jpg"}],
+                ),
+            )
+            await _wait_until(
+                lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10
+            )
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            path_str = text.split("[image: ")[1].split("]")[0]
+            assert path_str.endswith(".png"), (
+                f"MIME should override filename extension: {path_str}"
+            )
+        finally:
+            await _stop_plugin(h)
+
+    async def test_audio_attachment_downloads(self, tmp_path):
+        """audio/ogg downloads and is tagged [audio: ...]."""
+        import base64
+        ogg = b"OggS" + b"\x00" * 64
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(ogg).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text="voicemail",
+                    attachments=[{"id": "1738-audio", "type": 0,
+                                   "contentType": "audio/ogg",
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(
+                lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10
+            )
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[audio:" in text, f"expected [audio: in {text!r}"
+            path_str = text.split("[audio: ")[1].split("]")[0]
+            assert path_str.endswith(".ogg"), f"expected .ogg: {path_str}"
+        finally:
+            await _stop_plugin(h)
+
+    async def test_legacy_type_enum_with_id_extension(self, tmp_path):
+        """type=1, id=abc.jpg, no contentType → downloaded, keeps .jpg."""
+        import base64
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "abc.jpg", "type": 1,
+                                   "filename": None}],
+                ),
+            )
+            await _wait_until(
+                lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10
+            )
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert "[image:" in text, f"expected [image: in {text!r}"
+            path_str = text.split("[image: ")[1].split("]")[0]
+            assert path_str.endswith(".jpg"), f"expected .jpg: {path_str}"
+            assert not path_str.endswith(".jpg.jpg"), f"double ext: {path_str}"
+        finally:
+            await _stop_plugin(h)
+
+
     async def test_malformed_frame_is_logged_and_loop_survives(self, tmp_path, caplog):
         h = await _start_plugin(tmp_path)
         try:

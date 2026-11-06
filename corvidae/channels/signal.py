@@ -54,13 +54,15 @@ ATTACHMENT_TYPE_NAMES = {
 # (e.g. "image/jpeg", "application/pdf") but no "type" field, so the
 # MIME type is the primary downloadability signal.
 _DOWNLOADABLE_MIME_PREFIXES = (
-    "image/",           # images, gifs
-    "application/pdf",  # pdfs
-    "application/json", # structured data I can parse
-    "application/xml",  # structured data I can parse
-    "text/",            # plain text, markdown, csv, yaml, etc.
-    "audio/",           # voice notes
+    "image/",  # images, gifs
+    "text/",   # plain text, markdown, csv, yaml, etc.
+    "audio/",  # voice notes
 )
+_DOWNLOADABLE_MIME_EXACT = frozenset({
+    "application/pdf",   # pdfs
+    "application/json",  # structured data I can parse
+    "application/xml",   # structured data I can parse
+})
 
 
 def _is_downloadable(attachment: dict) -> bool:
@@ -71,7 +73,10 @@ def _is_downloadable(attachment: dict) -> bool:
     """
     mime = _mime_base(attachment.get("contentType") or "")
     if mime:
-        return any(mime.startswith(p) for p in _DOWNLOADABLE_MIME_PREFIXES)
+        return (
+            any(mime.startswith(p) for p in _DOWNLOADABLE_MIME_PREFIXES)
+            or mime in _DOWNLOADABLE_MIME_EXACT
+        )
     # Fallback for older signal-cli versions that send type but not contentType.
     return attachment.get("type", 0) in (ATT_IMAGE, ATT_GIF)
 
