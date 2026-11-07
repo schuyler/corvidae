@@ -732,7 +732,11 @@ class DiscordPlugin(TransportPlugin):
         # Mint the trace id here; the Agent uses it verbatim (#95), and it
         # keys whether this message was admitted.
         trace_id = mint_trace_id()
-        took_slot = allowed
+        # Typing says "a reply is owed". An unaddressed message in a channel
+        # that requires a mention is not owed one -- the gate will refuse it --
+        # so it must not flash the indicator on every line people send each
+        # other (#526).
+        took_slot = allowed and addressed is not False
         try:
             if took_slot:
                 await self._begin_typing(channel)

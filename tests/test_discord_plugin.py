@@ -1072,6 +1072,23 @@ class TestAuthorizationGate:
 
 
 class TestTyping:
+    async def test_unaddressed_message_shows_no_typing(self, fast_typing):
+        """#526: an unaddressed message in a mention-only channel is not owed a
+        reply, so it must not flash the typing indicator on every line people
+        send each other."""
+        h = await _start_plugin()
+        try:
+            h.plugin._enqueue(make_message("talking amongst ourselves"), BOT_ID)
+            await _wait_until(lambda: h.on_message.await_count >= 1)
+            await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 4)
+            assert h.messageable.typing_count == 0
+            # The message still reached the gate; the gate is what refused it.
+            fired = [c for c in h.on_message.await_args_list
+                     if c.kwargs["text"] == "talking amongst ourselves"]
+            assert fired and fired[0].kwargs["addressed"] is False
+        finally:
+            await h.plugin.on_stop()
+
     async def test_typing_refreshes_while_outstanding(self, fast_typing):
         """Typing is re-sent every refresh interval while a reply is owed."""
         h = await _start_plugin()
