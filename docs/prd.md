@@ -672,10 +672,11 @@ Per transport:
     achieved (prompt material, history, context, sampling) is otherwise a
     design choice, not a requirement; the bar is behavioural (principle 6),
     and an essay-length reply to a one-line text is a bug.
-11. A person's message, and every item that did not come from the
-    channel's human, reach the model with a header the code builds, never
-    with framing taken from text the item's author controls. Those other
-    items are notifications (from the scheduler, the heartbeat,
+11. Every item that did not come from the channel's human, and a
+    person's message whenever the transport supplies a name or knows whether
+    it addressed the agent, reaches the model with a header the code builds,
+    never with framing taken from text the item's author controls. The
+    non-human items are notifications (from the scheduler, the heartbeat,
     cross-channel sends, plugins and webhooks) and the results of the
     agent's own actions on another channel. From the header the model can
     tell an item's kind, where it came from as distinct from the channel it
@@ -1326,8 +1327,8 @@ design, not requirement. The requirements are outcomes:
    (§3.5.9), like any turn.
 4. The scheduler supplies a firing's origin and the kernel renders its
    frame (§3.3.11): reminder text as data with its quote marks
-   neutralized, an operator job as the operator's. A late firing is
-   prefixed with how overdue it was.
+   neutralized, an operator job as the operator's. A late firing's frame
+   says how overdue it was.
 5. Recurrence is a fixed interval with an optional anchor, stepped in
    local wall-clock time in `scheduler.timezone`, computed from the
    scheduled time so there is no drift. Startup applies a catch-up policy
@@ -1598,7 +1599,7 @@ record that holds the reasoning.
 | Engagement decision inverted: cheap gate first, generate only past threshold | principle 7; §3.7 Appraisal; diverges from the Persyn spec |
 | Two-stage appraisal; stage 1 never calls a model; core mints the exchange key; pull-based compute | §3.7 Appraisal 1–3 |
 | Origin is stamped and propagated, never inferred; critique eligibility by origin | §3.1.4; §3.7 Critique 3 |
-| Two grades on a queue item: kernel-certified `metadata`, never a hook argument, and plugin-owned `annotations`; every item in context gets a code-built header and outside payloads a fence derived from the stored row; foreign-origin items are framed, never withheld (no silence default) | §3.1.4; §3.3.11; #555 |
+| Two grades on a queue item: kernel-certified `metadata`, never a hook argument, and plugin-owned `annotations`; non-human items (and a person's message whose transport supplies a name or addressing) get a code-built header, and outside payloads a fence derived from the stored row; foreign-origin items are framed, never withheld (no silence default) | §3.1.4; §3.3.11; #555 |
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
