@@ -102,10 +102,11 @@ Adversaries:
   unauthenticated on networks without services accounts.
 - **Anyone in a Discord server the bot has been invited to**, who can
   @-mention it, and anyone Discord lets DM it.
-  The allowlist refuses them, silently; see finding 5. Since #526 the text of
-  an unaddressed message in a mention-only channel also reaches the agent for
-  the gate's decision, where before the transport dropped it unseen. What
-  reaches is the text in memory and one DEBUG line naming the channel; it is
+  The allowlist refuses them, recorded for diagnosis rather than announced;
+  see finding 5. Since #526 the text of an unaddressed message in a
+  mention-only channel also reaches the agent for the gate's decision, where
+  before the transport dropped it unseen. What reaches is the text in memory
+  and a diagnostic line naming the channel; it is
   refused before any store, tool, or model turn (§3.2 items 2 and 6), so the
   surface is the same one the allowlist already exposes and the persistence
   rule is unchanged.
