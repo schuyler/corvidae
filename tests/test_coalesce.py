@@ -197,7 +197,7 @@ async def test_burst_rows_in_order_and_persisted_events_before_call(make_env):
         """Records every persistence event against the model calls."""
 
         @hookimpl
-        async def on_message_persisted(self, channel, trace_id, rowid, text, meta):
+        async def on_message_persisted(self, channel, trace_id, rowid, text, annotations):
             persisted.append((trace_id, rowid))
             events.append(("persisted", text))
 
@@ -249,14 +249,14 @@ async def test_only_adjacent_messages_merge_around_a_notification(make_env, kind
     if kind == "notification":
         await plugin.on_notify(
             channel=channel, source="scheduler", text="NOTE-TEXT",
-            tool_call_id=None, meta=None,
+            tool_call_id=None, annotations=None,
         )
     else:
         # An outstanding call whose result arrives behind the burst.
         channel.pending_tool_call_ids.add("call-x")
         await plugin.on_notify(
             channel=channel, source="task", text="NOTE-TEXT",
-            tool_call_id="call-x", meta=None,
+            tool_call_id="call-x", annotations=None,
         )
     await send(plugin, channel, "m3")
     llm.gate.set()
@@ -397,11 +397,11 @@ async def test_burst_turn_carries_the_last_trace_everywhere(make_env):
         """Records the trace id each before_agent_turn and send-gate call sees."""
 
         @hookimpl
-        async def before_agent_turn(self, channel, trace_id, meta):
+        async def before_agent_turn(self, channel, trace_id, annotations):
             before.append(trace_id)
 
         @hookimpl
-        async def should_send_response(self, channel, text, emission, trace_id, meta):
+        async def should_send_response(self, channel, text, emission, trace_id, annotations):
             gates.append(trace_id)
 
     plugin.pm.register(Spy(), name="spy")

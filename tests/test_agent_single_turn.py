@@ -304,7 +304,7 @@ class TestMaxTurnsResetsOnOriginatingNotification:
         channel.turn_counter = 10
         await plugin.on_notify(
             channel=channel, source="reminder", text="due",
-            tool_call_id=None, meta={"origin": "reminder"},
+            tool_call_id=None, annotations={"origin": "reminder"},
         )
         await drain(plugin, channel)
         assert channel.turn_counter == 1, (
@@ -324,13 +324,13 @@ class TestMaxTurnsResetsOnOriginatingNotification:
         channel.turn_counter = 3
         await plugin.on_notify(
             channel=channel, source="reminder", text="due",
-            tool_call_id=None, meta=None,
+            tool_call_id=None, annotations=None,
         )
         await drain(plugin, channel)
         assert channel.turn_counter == 4
 
     async def test_inherited_trace_notification_does_not_reset(self, plugin_and_channel):
-        """A notification carrying meta['trace_id'] belongs to an
+        """A notification carrying annotations['trace_id'] belongs to an
         existing exchange (originating=False) and must not reset."""
         plugin, channel, db = plugin_and_channel
         mock_client = MagicMock()
@@ -341,7 +341,7 @@ class TestMaxTurnsResetsOnOriginatingNotification:
         channel.turn_counter = 3
         await plugin.on_notify(
             channel=channel, source="task", text="background done",
-            tool_call_id=None, meta={"trace_id": "abc-123"},
+            tool_call_id=None, annotations={"trace_id": "abc-123"},
         )
         await drain(plugin, channel)
         assert channel.turn_counter == 4
@@ -765,7 +765,7 @@ class _RaisingNotifier:
     """Peer plugin whose on_notify hookimpl always raises."""
 
     @hookimpl
-    async def on_notify(self, channel, source, text, tool_call_id, meta):
+    async def on_notify(self, channel, source, text, tool_call_id, annotations):
         """Fail like a broken peer implementation."""
         raise RuntimeError("peer on_notify broke")
 

@@ -545,7 +545,7 @@ class RestartPlugin(CorvidaePlugin):
             source="restart",
             text=text,
             tool_call_id=tool_call_id,
-            meta=None,
+            annotations=None,
         )
 
     def _summary_lines(self, marker: dict | None = None) -> list[str]:

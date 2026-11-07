@@ -52,7 +52,7 @@ class _Recorder:
         self.events.append(("rejected", trace_id))
 
     @hookimpl
-    async def on_message_persisted(self, channel, trace_id, rowid, text, meta):
+    async def on_message_persisted(self, channel, trace_id, rowid, text, annotations):
         self.events.append(("persisted", trace_id))
 
 

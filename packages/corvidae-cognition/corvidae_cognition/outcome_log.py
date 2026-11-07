@@ -185,16 +185,16 @@ class OutcomeLogPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_message_persisted(
-        self, channel, trace_id: str, rowid: int | None, text: str, meta: dict,
+        self, channel, trace_id: str, rowid: int | None, text: str, annotations: dict,
     ) -> None:
         try:
             # INSERT OR IGNORE covers notification-born exchanges (no prior
             # on_message_admitted for those) — origin lands on first insert.
-            # meta["origin"] normalizes to "task" for the background-origin
+            # annotations["origin"] normalizes to "task" for the background-origin
             # default (reproduces core's old dequeue-mint default); the
             # admitted-time INSERT OR IGNORE row (origin="user") already
             # exists for user messages by the time this hook fires.
-            origin = meta.get("origin") or "task"
+            origin = annotations.get("origin") or "task"
             await self.record_exchange(trace_id, channel.id, origin=origin)
             if rowid is not None:
                 await self.update_exchange(trace_id, message_rowid=rowid)

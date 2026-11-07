@@ -71,7 +71,7 @@ class Rig:
         await self.plugin.on_notify(
             channel=channel, source="heartbeat",
             text=text or f"beat {i}", tool_call_id=None,
-            meta={"origin": "heartbeat"},
+            annotations={"origin": "heartbeat"},
         )
         await drain(self.plugin, channel)
 

@@ -2,13 +2,13 @@
 its four firing sites (plans/implementation/phase-2.md WP2.8; docs/prd.md
 §3.7 "Output gate and the right to silence").
 
-Kernel deviations agreed on #131: the hook carries ``meta`` instead of an
+Kernel deviations agreed on #131: the hook carries ``annotations`` instead of an
 ``origin`` param (origin is a plugin-side convention), the stored type is
 ``MessageType.UNSENT`` (the kernel vocabulary rule), and core appends the
 not-sent marker itself (the funnel is cognition).
 
 Interface pinned here:
-  hookspec  should_send_response(channel, text, emission, trace_id, meta)
+  hookspec  should_send_response(channel, text, emission, trace_id, annotations)
             -> bool | None, reject-wins; emission in
             {"final", "progress", "thinking", "error"}
   corvidae.context.MessageType.UNSENT == "unsent"
@@ -51,10 +51,10 @@ class SpyGate:
         self.calls: list[dict] = []
 
     @hookimpl
-    async def should_send_response(self, channel, text, emission, trace_id, meta):
+    async def should_send_response(self, channel, text, emission, trace_id, annotations):
         self.calls.append({
             "channel": channel, "text": text, "emission": emission,
-            "trace_id": trace_id, "meta": dict(meta),
+            "trace_id": trace_id, "annotations": dict(annotations),
         })
         if self.raises:
             raise RuntimeError("gate exploded")
@@ -132,20 +132,20 @@ class TestHookspec:
         from corvidae.hooks import AgentSpec
 
         params = [p for p in inspect.signature(AgentSpec.should_send_response).parameters if p != "self"]
-        assert params == ["channel", "text", "emission", "trace_id", "meta"]
+        assert params == ["channel", "text", "emission", "trace_id", "annotations"]
 
     def test_impl_defaulting_meta_is_flagged(self):
         pm = create_plugin_manager()
 
         class Defaulting:
             @hookimpl
-            async def should_send_response(self, channel, text, emission, trace_id, meta=None):
+            async def should_send_response(self, channel, text, emission, trace_id, annotations=None):
                 return None
 
         pm.register(Defaulting(), name="defaulting_gate")
         with pytest.raises(pluggy.PluginValidationError) as excinfo:
             _check_hook_arg_binding(pm)
-        assert "meta" in str(excinfo.value)
+        assert "annotations" in str(excinfo.value)
         assert "defaulting_gate" in str(excinfo.value)
 
 
@@ -206,7 +206,7 @@ class TestFinalVeto:
 
         class Accepting:
             @hookimpl
-            async def should_send_response(self, channel, text, emission, trace_id, meta):
+            async def should_send_response(self, channel, text, emission, trace_id, annotations):
                 return True
 
         plugin.pm.register(Accepting(), name="accepting_gate")
@@ -218,7 +218,7 @@ class TestFinalVeto:
         assert sent_texts(plugin.pm, OutboundMessage) == []
 
     async def test_gate_receives_trace_id_and_meta(self, env):
-        """Origin is not a kernel param; the gate reads it from meta."""
+        """Origin is not a kernel param; the gate reads it from annotations."""
         plugin, channel, db = env
         gate = SpyGate()
         plugin.pm.register(gate, name="spy_gate")
@@ -227,14 +227,14 @@ class TestFinalVeto:
 
         await plugin.on_notify(
             channel=channel, source="scheduler", text="time to stretch",
-            tool_call_id=None, meta={"origin": "reminder"},
+            tool_call_id=None, annotations={"origin": "reminder"},
         )
         await drain(plugin, channel)
 
         call = gate.calls[-1]
         assert call["emission"] == "final"
         assert call["trace_id"]
-        assert call["meta"]["origin"] == "reminder"
+        assert call["annotations"]["origin"] == "reminder"
         assert call["channel"] is channel
 
     async def test_dispatching_turn_never_faces_the_final_gate(self, env):

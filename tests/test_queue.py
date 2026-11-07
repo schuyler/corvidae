@@ -43,20 +43,20 @@ class TestQueueItem:
         assert item.channel is ch
 
     def test_queue_item_meta_default_is_empty_dict(self):
-        """meta field must default to an empty dict, not a bare mutable default."""
+        """annotations field must default to an empty dict, not a bare mutable default."""
         ch = _make_channel()
         item1 = QueueItem(role="user", content="a", channel=ch)
         item2 = QueueItem(role="user", content="b", channel=ch)
         # Each instance must get its own dict (no shared mutable default)
-        assert item1.meta == {}
-        assert item2.meta == {}
-        assert item1.meta is not item2.meta
+        assert item1.annotations == {}
+        assert item2.annotations == {}
+        assert item1.annotations is not item2.annotations
 
     def test_queue_item_meta_explicit(self):
-        """meta can be set at construction time."""
+        """annotations can be set at construction time."""
         ch = _make_channel()
-        item = QueueItem(role="user", content="x", channel=ch, meta={"task_id": "abc"})
-        assert item.meta["task_id"] == "abc"
+        item = QueueItem(role="user", content="x", channel=ch, annotations={"task_id": "abc"})
+        assert item.annotations["task_id"] == "abc"
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +322,7 @@ class TestQueueItemRole:
         q.start(fake_process)
         plugin.queues[ch.id] = q
 
-        await plugin.on_notify(channel=ch, source="task", text="done", tool_call_id=None, meta=None)
+        await plugin.on_notify(channel=ch, source="task", text="done", tool_call_id=None, annotations=None)
         await q.drain()
 
         assert len(captured_items) == 1

@@ -187,8 +187,8 @@ class QueueItem:
         sender: For user messages, the sender identity; None for notifications.
         source: For notifications, the origin (e.g. "task"); None for user messages.
         tool_call_id: For deferred tool results (background task completions).
-        meta: Extensible metadata, opaque to core. Plugins stamp their own
-            keys (e.g. ``meta["origin"]``) and read them back downstream.
+        annotations: Extensible annotations, opaque to core. Plugins stamp their own
+            keys (e.g. ``annotations["origin"]``) and read them back downstream.
         trace_id: The trace this item belongs to. None for
             notifications until dequeue-time resolution runs.
         originating: True when this item mints/owns the trace id
@@ -213,7 +213,7 @@ class QueueItem:
     sender_name: str | None = None
     source: str | None = None
     tool_call_id: str | None = None
-    meta: dict = field(default_factory=dict)
+    annotations: dict = field(default_factory=dict)
     trace_id: str | None = None
     originating: bool = False
     retry: bool = False
@@ -486,7 +486,7 @@ class Agent(CorvidaePlugin):
         source: str,
         text: str,
         tool_call_id: str | None,
-        meta: dict | None,
+        annotations: dict | None,
     ) -> None:
         """Enqueue a notification item on the channel's queue."""
         item = QueueItem(
@@ -495,7 +495,7 @@ class Agent(CorvidaePlugin):
             channel=channel,
             source=source,
             tool_call_id=tool_call_id,
-            meta=meta or {},
+            annotations=annotations or {},
         )
         logger.debug(
             "on_notify received",
@@ -517,7 +517,7 @@ class Agent(CorvidaePlugin):
             self._queued_tool_results.add((channel.id, tool_call_id))
 
     async def deliver_tool_error(
-        self, channel, tool_call_id: str, text: str, meta: dict | None
+        self, channel, tool_call_id: str, text: str, annotations: dict | None
     ) -> bool:
         """Queue an error tool result when on_notify failed to deliver one (#173).
 
@@ -537,7 +537,7 @@ class Agent(CorvidaePlugin):
             channel=channel,
             source="task",
             tool_call_id=tool_call_id,
-            meta=meta or {},
+            annotations=annotations or {},
         )
         queue = self._get_or_create_queue(channel)
         await queue.enqueue(item)
@@ -666,7 +666,7 @@ class Agent(CorvidaePlugin):
         Returns the AgentTurnResult on success, or None on error (error message
         already sent to the channel via the send hook, unless a
         should_send_response gate vetoed the "error" emission). ``item``
-        supplies the trace id and meta for that gate.
+        supplies the trace id and annotations for that gate.
         """
         try:
             result = await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
@@ -846,11 +846,11 @@ class Agent(CorvidaePlugin):
         failure is logged and the emission goes out.
         """
         trace_id = item.trace_id if item is not None else None
-        meta = item.meta if item is not None else {}
+        annotations = item.annotations if item is not None else {}
         try:
             results = await self.pm.ahook.should_send_response(
                 channel=channel, text=text, emission=emission,
-                trace_id=trace_id, meta=meta,
+                trace_id=trace_id, annotations=annotations,
             )
             verdict = resolve_reject_wins(results)
         except Exception:
@@ -943,7 +943,7 @@ class Agent(CorvidaePlugin):
         - No tool calls: increment counter, resolve display text, fire
           on_agent_response, send message.
 
-        ``item`` provides the current turn's trace id/meta (for the
+        ``item`` provides the current turn's trace id/annotations (for the
         enriched on_agent_response call and the send gate) and, via
         _dispatch_tool_calls, stamps the tool cycle's Tasks with the same
         trace. ``display_text`` is the text the step-7 final gate already
@@ -1000,14 +1000,14 @@ class Agent(CorvidaePlugin):
         )
 
         trace_id = item.trace_id if item is not None else None
-        meta = item.meta if item is not None else {}
+        annotations = item.annotations if item is not None else {}
         try:
             await self.pm.ahook.on_agent_response(
                 channel=channel,
                 request_text=request_text,
                 response_text=display_response,
                 trace_id=trace_id,
-                meta=meta,
+                annotations=annotations,
                 logprobs=result.logprobs,
             )
         except Exception:
@@ -1092,7 +1092,7 @@ class Agent(CorvidaePlugin):
             # (after attribution is set), usage_log.trace_id would be null
             # for the whole turn.
             if item.trace_id is None:
-                inherited = item.meta.get("trace_id") if item.meta else None
+                inherited = item.annotations.get("trace_id") if item.annotations else None
                 if inherited is not None:
                     item.trace_id = inherited
                     item.originating = False
@@ -1115,7 +1115,7 @@ class Agent(CorvidaePlugin):
             # around its own LLM call and restores this attribution after.
             attribution_token = set_attribution(
                 stage="turn", channel_id=channel.id,
-                trace_id=item.trace_id, meta=item.meta,
+                trace_id=item.trace_id, annotations=item.annotations,
             )
             try:
                 await self._process_queue_item_attributed(item, channel, absorbed)
@@ -1283,7 +1283,7 @@ class Agent(CorvidaePlugin):
             try:
                 await self.pm.ahook.on_message_persisted(
                     channel=channel, trace_id=item.trace_id,
-                    rowid=rowid, text=request_text, meta=item.meta,
+                    rowid=rowid, text=request_text, annotations=item.annotations,
                 )
             except Exception:
                 logger.warning("on_message_persisted hook failed", exc_info=True, extra={"channel": channel.id})
@@ -1428,7 +1428,7 @@ class Agent(CorvidaePlugin):
             msg_count_before = len(conv.messages)
             try:
                 await self.pm.ahook.before_agent_turn(
-                    channel=channel, trace_id=item.trace_id, meta=item.meta,
+                    channel=channel, trace_id=item.trace_id, annotations=item.annotations,
                 )
             except Exception:
                 logger.warning(
@@ -1900,7 +1900,7 @@ class Agent(CorvidaePlugin):
         registered), so the model can finish the turn instead of waiting
         forever for a result that will never arrive.
 
-        Stamps each Task with the current turn's trace id/meta, read
+        Stamps each Task with the current turn's trace id/annotations, read
         from the attribution contextvar set by _process_queue_item at
         dequeue (this coroutine runs under that attribution). Every turn of
         a tool cycle inherits its trace this way, however many hops.
@@ -1909,7 +1909,7 @@ class Agent(CorvidaePlugin):
 
         current_attribution = get_attribution()
         trace_id = current_attribution.get("trace_id")
-        meta = current_attribution.get("meta") or {}
+        annotations = current_attribution.get("annotations") or {}
 
         # Union in this batch's call IDs — a second dispatch while an earlier
         # batch is still outstanding must not clobber its ids (R3). The LLM
@@ -1936,7 +1936,7 @@ class Agent(CorvidaePlugin):
                     f"[Task unavailable] Error: tool '{fn_name}' was not "
                     "executed because the task queue is unavailable"
                 )
-                notify_meta = {"trace_id": trace_id, **meta}
+                notify_annotations = {"trace_id": trace_id, **annotations}
                 # One call's failed delivery must not stop the rest.
                 try:
                     await self.pm.ahook.on_notify(
@@ -1944,7 +1944,7 @@ class Agent(CorvidaePlugin):
                         source="task",
                         text=text,
                         tool_call_id=call_id,
-                        meta=notify_meta,
+                        annotations=notify_annotations,
                     )
                 except Exception:
                     logger.warning(
@@ -1957,7 +1957,7 @@ class Agent(CorvidaePlugin):
                     # Safe after a partial broadcast: deliver_tool_error
                     # skips ids already queued or no longer pending, so the
                     # model never sees two results for one call.
-                    await self.deliver_tool_error(channel, call_id, text, notify_meta)
+                    await self.deliver_tool_error(channel, call_id, text, notify_annotations)
             return
 
         for call in tool_calls:
@@ -2009,7 +2009,7 @@ class Agent(CorvidaePlugin):
                 tool_call_id=call_id,
                 description=f"tool:{fn_name}",
                 trace_id=trace_id,
-                meta=meta,
+                annotations=annotations,
             )
             await task_queue.enqueue(task)
 

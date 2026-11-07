@@ -956,7 +956,7 @@ class TestOutbound:
         await env.plugin.on_message_rejected(channel=irc, trace_id="c",
                                              sender="x", text="x")
         await env.plugin.on_message_persisted(channel=irc, trace_id="c",
-                                              rowid=1, text="x", meta={})
+                                              rowid=1, text="x", annotations={})
         assert calls == []
         assert env.plugin._unsent == {}
         assert env.plugin._working == set()
@@ -1002,7 +1002,7 @@ def _tid_of(env, text: str) -> str:
 
 async def _persist(env, tid: str, name: str = "main") -> None:
     await env.pm.ahook.on_message_persisted(
-        channel=env.channel(name), trace_id=tid, rowid=1, text="", meta={})
+        channel=env.channel(name), trace_id=tid, rowid=1, text="", annotations={})
 
 
 class TestWorking:

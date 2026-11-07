@@ -150,10 +150,10 @@ async def test_registers_tool_through_the_real_pm():
    driver) from a tool: wrap it in `asyncio.to_thread`. Do not swallow
    `CancelledError`; clean up and re-raise.
 7. **Inject channel work with `on_notify`**, passing `tool_call_id=None`. Origin
-   is a convention in `meta["origin"]`, and cognition plugins key on it (critique,
+   is a convention in `annotations["origin"]`, and cognition plugins key on it (critique,
    gates, funnel, appraisal, outcome log): when you introduce a new origin,
    read those consumers and say in your plugin docstring what each does with it.
-   **Do not put `trace_id` in `meta` unless you mean to inherit the sender's
+   **Do not put `trace_id` in `annotations` unless you mean to inherit the sender's
    trace**: the kernel then keeps `originating=False`, skips the per-exchange
    `turn_counter` reset and does not mint a new trace. Use another key (for
    example `source_trace_id`) to record where it came from.

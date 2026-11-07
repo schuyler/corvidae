@@ -57,9 +57,9 @@ class Task:
         trace_id: The trace this task belongs to. Stamped by
             Agent._dispatch_tool_calls from the current turn's attribution
             so the tool cycle carries its trace forward.
-        meta: Extensible metadata, opaque to core. Stamped alongside
+        annotations: Extensible annotations, opaque to core. Stamped alongside
             trace_id and merged into the completion notification's
-            meta by TaskPlugin.
+            annotations by TaskPlugin.
         deliver: When False, the task is silent: completion fires no
             tool-status event, no on_notify, and therefore no main-model
             turn. Failures are still logged by the worker.
@@ -73,7 +73,7 @@ class Task:
     description: str = ""
     ctx: contextvars.Context = field(default_factory=contextvars.copy_context)
     trace_id: str | None = None
-    meta: dict = field(default_factory=dict)
+    annotations: dict = field(default_factory=dict)
     deliver: bool = True
 
     def __post_init__(self) -> None:
@@ -318,10 +318,10 @@ class TaskPlugin(CorvidaePlugin):
                 source="task",
                 text=f"[Task {task.task_id}] {result}",
                 tool_call_id=task.tool_call_id,
-                meta={
+                annotations={
                     "task_id": task.task_id,
                     "trace_id": task.trace_id,
-                    **task.meta,
+                    **task.annotations,
                 },
             )
         except Exception as exc:
@@ -353,7 +353,7 @@ class TaskPlugin(CorvidaePlugin):
             agent = self.pm.get_plugin("agent")
             await agent.deliver_tool_error(
                 task.channel, task.tool_call_id, text,
-                {"task_id": task.task_id, "trace_id": task.trace_id, **task.meta},
+                {"task_id": task.task_id, "trace_id": task.trace_id, **task.annotations},
             )
         except Exception:
             logger.error(

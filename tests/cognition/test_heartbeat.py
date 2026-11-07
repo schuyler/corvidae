@@ -44,10 +44,10 @@ class AgentStub:
         self.calls: list[dict] = []
 
     @hookimpl
-    async def on_notify(self, channel, source, text, tool_call_id, meta):
+    async def on_notify(self, channel, source, text, tool_call_id, annotations):
         self.calls.append({
             "channel": channel, "source": source, "text": text,
-            "tool_call_id": tool_call_id, "meta": meta,
+            "tool_call_id": tool_call_id, "annotations": annotations,
         })
         self.tracker.note_activity(channel.id)
         self.tracker.note_settled(channel.id)
@@ -182,7 +182,7 @@ async def test_beats_after_configured_quiet_on_internal_channel(make_env):
     beat = env.beats[0]
     assert beat["channel"].id == HEARTBEAT_CHANNEL == "internal:heartbeat"
     assert beat["source"] == "heartbeat"
-    assert beat["meta"] == {"origin": "heartbeat"}
+    assert beat["annotations"] == {"origin": "heartbeat"}
     assert beat["tool_call_id"] is None
 
 

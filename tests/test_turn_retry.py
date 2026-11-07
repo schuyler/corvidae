@@ -194,11 +194,11 @@ async def test_retry_keeps_trace_and_does_not_refire_persisted():
         """Records how often the once-per-exchange hooks fire."""
 
         @hookimpl
-        async def on_message_persisted(self, channel, trace_id, rowid, text, meta):
+        async def on_message_persisted(self, channel, trace_id, rowid, text, annotations):
             persisted.append(trace_id)
 
         @hookimpl
-        async def before_agent_turn(self, channel, trace_id, meta):
+        async def before_agent_turn(self, channel, trace_id, annotations):
             before.append(trace_id)
 
     plugin.pm.register(Spy(), name="spy")
@@ -365,7 +365,7 @@ async def test_vetoed_error_fallback_still_retries():
         """Vetoes only the error fallback."""
 
         @hookimpl
-        async def should_send_response(self, channel, text, emission, trace_id, meta):
+        async def should_send_response(self, channel, text, emission, trace_id, annotations):
             return False if emission == "error" else None
 
     plugin.pm.register(Veto(), name="veto")

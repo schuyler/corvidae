@@ -35,7 +35,7 @@ async def _run(tmp_path, agent, lenses, window_rowids=(7, 8), rowid=7, config=No
     env.channel.runtime_overrides.update(overrides or {})
     await env.outcome.record_exchange("k", env.channel.id, origin="user")
     await env.plugin.on_message_persisted(
-        channel=env.channel, trace_id="k", rowid=rowid, text=QUESTION, meta={})
+        channel=env.channel, trace_id="k", rowid=rowid, text=QUESTION, annotations={})
     await env.plugin._run_critique(env.channel, "k", QUESTION, RESPONSE, lenses, False)
     # None when no lens ran (nothing is recorded for an all-miss run).
     outcome = ((await _read_outcomes(env.db, "k")) or {}).get("critique")

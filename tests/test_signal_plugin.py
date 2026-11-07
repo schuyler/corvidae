@@ -1481,7 +1481,7 @@ class TestLiveness:
             # agent's queue consumer would when processing starts.
             _, trace_id, channel = h.agent.calls[0]
             await h.plugin.on_message_persisted(
-                channel=channel, trace_id=trace_id, rowid=1, text="hi", meta={}
+                channel=channel, trace_id=trace_id, rowid=1, text="hi", annotations={}
             )
 
             receipt_request = await h.server.next_request(timeout=5)
@@ -1821,7 +1821,7 @@ class TestLiveness:
                     # Bounded: this returns only because the call gave up.
                     await asyncio.wait_for(
                         h.plugin.on_message_persisted(
-                            channel=channel, trace_id=trace_id, rowid=1, text="hi", meta={}
+                            channel=channel, trace_id=trace_id, rowid=1, text="hi", annotations={}
                         ),
                         timeout=5,
                     )
@@ -2022,7 +2022,7 @@ class TestTransportMintedIds:
             channel = agent.calls[1][2]
             await h.plugin.on_message_persisted(
                 channel=channel, trace_id=agent.tid_for("kept"),
-                rowid=1, text="kept", meta={},
+                rowid=1, text="kept", annotations={},
             )
 
             await _wait_until(lambda: h.server.requests_matching("receipt"), timeout=3)
@@ -2136,7 +2136,7 @@ class TestTransportMintedIds:
 
             # A notification-born turn on the same channel persists first.
             await h.plugin.on_message_persisted(
-                channel=channel, trace_id="notif-id", rowid=9, text="n", meta={},
+                channel=channel, trace_id="notif-id", rowid=9, text="n", annotations={},
             )
             await asyncio.sleep(0.2)
             assert h.server.requests_matching("receipt") == []
@@ -2144,7 +2144,7 @@ class TestTransportMintedIds:
             # The owed message's own persist sends its receipt.
             await h.plugin.on_message_persisted(
                 channel=channel, trace_id=agent.tid_for("owed"),
-                rowid=10, text="owed", meta={},
+                rowid=10, text="owed", annotations={},
             )
             await _wait_until(lambda: h.server.requests_matching("receipt"), timeout=3)
             assert frame_contains(h.server.requests_matching("receipt")[0], ts)
@@ -2242,7 +2242,7 @@ class TestOrphanedPendingReceipts:
             with caplog.at_level(logging.WARNING, logger="corvidae.signal_plugin"):
                 await h.plugin.on_message_persisted(
                     channel=channel, trace_id=h.agent.tid_for("b"),
-                    rowid=2, text="b", meta={},
+                    rowid=2, text="b", annotations={},
                 )
 
             await _wait_until(lambda: h.server.requests_matching("receipt"), timeout=3)
@@ -2275,7 +2275,7 @@ class TestOrphanedPendingReceipts:
 
             await h.plugin.on_message_persisted(
                 channel=channel, trace_id=h.agent.tid_for("a"),
-                rowid=1, text="a", meta={},
+                rowid=1, text="a", annotations={},
             )
             await _wait_until(lambda: h.server.requests_matching("receipt"), timeout=3)
             assert h.plugin._pending_receipts[channel.id] == {h.agent.tid_for("b"): ts_b}

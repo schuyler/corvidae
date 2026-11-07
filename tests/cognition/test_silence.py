@@ -47,7 +47,7 @@ class TestVeto:
         pm.register(SilencePlugin(), name="silence")
         results = await pm.ahook.should_send_response(
             channel=Channel(transport="test", scope="veto"),
-            text=text, emission=emission, trace_id="sveto", meta={"origin": origin},
+            text=text, emission=emission, trace_id="sveto", annotations={"origin": origin},
         )
         return resolve_reject_wins(results)
 
@@ -258,7 +258,7 @@ async def _respond(response_text: str, final_type: MessageType) -> list[dict]:
     # Dispatch through the manager so a method missing @hookimpl never runs.
     await pm.ahook.on_agent_response(
         channel=_channel_ending_in(final_type), request_text="thanks, night!",
-        response_text=response_text, trace_id="t-s5", meta={}, logprobs=None,
+        response_text=response_text, trace_id="t-s5", annotations={}, logprobs=None,
     )
     # The write is a tracked fire-and-forget task; on_stop drains it.
     await silence.on_stop()

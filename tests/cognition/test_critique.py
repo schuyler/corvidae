@@ -218,10 +218,10 @@ async def _read_outcomes(db, key):
 async def _fire(env, trace_id="k", origin="user", response_text="resp",
                 originating_text="orig user text"):
     """Simulates the propagated-origin mechanics (§1.4/§1.5): "user" makes
-    the trace_id admitted via on_message_admitted (meta carries no
+    the trace_id admitted via on_message_admitted (annotations carries no
     origin string -- eligibility is inferred from admitted-LRU membership);
-    "reminder" stamps meta["origin"]; "critique"/"heartbeat" stamp their own
-    exempt origin into meta; "task" is neither admitted nor stamped
+    "reminder" stamps annotations["origin"]; "critique"/"heartbeat" stamp their own
+    exempt origin into annotations; "task" is neither admitted nor stamped
     (background/task-origin default, per §1.4)."""
     await env.outcome.record_exchange(trace_id, env.channel.id, origin=origin)
     if env.appraisal is not None:
@@ -230,20 +230,20 @@ async def _fire(env, trace_id="k", origin="user", response_text="resp",
     # the window (#320); persist row 1 unless the test already recorded one.
     if env.fork_agent is not None and trace_id not in env.plugin._originating_rowid:
         await env.plugin.on_message_persisted(
-            channel=env.channel, trace_id=trace_id, rowid=1, text=originating_text, meta={})
+            channel=env.channel, trace_id=trace_id, rowid=1, text=originating_text, annotations={})
     if origin == "user":
         await env.plugin.on_message_admitted(
             channel=env.channel, trace_id=trace_id,
             sender="user", text=originating_text,
         )
-        meta = {}
+        annotations = {}
     elif origin == "task":
-        meta = {}
+        annotations = {}
     else:
-        meta = {"origin": origin}
+        annotations = {"origin": origin}
     await env.plugin.on_agent_response(
         channel=env.channel, request_text="req", response_text=response_text,
-        trace_id=trace_id, meta=meta, logprobs=None,
+        trace_id=trace_id, annotations=annotations, logprobs=None,
     )
 
 
@@ -510,7 +510,7 @@ class TestExecution:
         env.funnel.register_and_wake.assert_not_awaited()
         notify.assert_not_awaited()
         # A turn with no origin (a user turn) admits the verdict as framed CONTEXT.
-        await env.funnel.before_agent_turn(env.channel, trace_id="kfull", meta={})
+        await env.funnel.before_agent_turn(env.channel, trace_id="kfull", annotations={})
         context_text = "\n".join(
             m.get("content") or ""
             for m in env.channel.conversation.messages
@@ -581,16 +581,16 @@ async def _begin_exchange(env, trace_id, origin_rowid, origin="user"):
         )
     await env.plugin.on_message_persisted(
         channel=env.channel, trace_id=trace_id, rowid=origin_rowid,
-        text="when is it due?", meta={},
+        text="when is it due?", annotations={},
     )
 
 
-async def _stage2(env, trace_id, claims, meta=None, response_text=CUE_FREE_REPLY):
+async def _stage2(env, trace_id, claims, annotations=None, response_text=CUE_FREE_REPLY):
     """Deliver a stage-2 result the way AppraisalPlugin's listener call does."""
     [listener] = env.appraisal.stage2_listeners
     await listener(
         channel=env.channel, trace_id=trace_id, response_text=response_text,
-        meta=meta or {}, stage2={"valence": 0.5, "past_claims": claims},
+        annotations=annotations or {}, stage2={"valence": 0.5, "past_claims": claims},
     )
 
 
@@ -656,7 +656,7 @@ async def _provenance_exchange(env, agent, trace_id="kp", reply_text=CUE_FREE_RE
     await _begin_exchange(env, trace_id, origin_rowid=origin)
     await env.plugin.on_agent_response(
         channel=env.channel, request_text="when is it due?", response_text=reply_text,
-        trace_id=trace_id, meta={}, logprobs=None,
+        trace_id=trace_id, annotations={}, logprobs=None,
     )
     return SimpleNamespace(origin=origin, tool_row=tool_row, reply_row=reply_row,
                            conv=conv, trace_id=trace_id)
@@ -705,7 +705,7 @@ class TestProvenanceTrigger:
             # With an originating rowid and an empty message_fts, the old
             # wording-triggered gate would have added "provenance" here.
             await env.plugin.on_message_persisted(
-                channel=env.channel, trace_id="kst", rowid=50, text="q?", meta={},
+                channel=env.channel, trace_id="kst", rowid=50, text="q?", annotations={},
             )
             await _fire(env, "kst", response_text=CLAIM_REPLY)
             await _run_next_task(env.task)
@@ -739,8 +739,8 @@ class TestProvenanceTrigger:
         env = await _provenance_env(tmp_path)
         try:
             await _begin_exchange(env, "kx", origin_rowid=50, origin=origin)
-            meta = {} if origin == "task" else {"origin": origin}
-            await _stage2(env, "kx", [CLAIM], meta=meta)
+            annotations = {} if origin == "task" else {"origin": origin}
+            await _stage2(env, "kx", [CLAIM], annotations=annotations)
             assert env.task.task_queue.queue.qsize() == 0
         finally:
             await _teardown(env)
@@ -749,7 +749,7 @@ class TestProvenanceTrigger:
         env = await _provenance_env(tmp_path)
         try:
             await _begin_exchange(env, "kr", origin_rowid=50, origin="reminder")
-            await _stage2(env, "kr", [CLAIM], meta={"origin": "reminder"})
+            await _stage2(env, "kr", [CLAIM], annotations={"origin": "reminder"})
             assert env.task.task_queue.queue.qsize() == 1
         finally:
             await _teardown(env)
@@ -1307,7 +1307,7 @@ class TestNoReplyVeto:
         pm.register(CritiquePlugin(), name="critique")
         results = await pm.ahook.should_send_response(
             channel=Channel(transport="test", scope="veto"),
-            text=text, emission=emission, trace_id="kveto", meta={"origin": origin},
+            text=text, emission=emission, trace_id="kveto", annotations={"origin": origin},
         )
         return resolve_reject_wins(results)
 

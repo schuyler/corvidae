@@ -84,7 +84,7 @@ class SilencePlugin(CorvidaePlugin):
             await asyncio.gather(*set(self._record_tasks), return_exceptions=True)
 
     @hookimpl
-    async def should_send_response(self, channel, text, emission, trace_id, meta) -> bool | None:
+    async def should_send_response(self, channel, text, emission, trace_id, annotations) -> bool | None:
         """Veto a final that is exactly NO_REPLY, for every origin.
 
         Anything else is no opinion. An error fails open: a broken plugin
@@ -109,7 +109,7 @@ class SilencePlugin(CorvidaePlugin):
         request_text: str,
         response_text: str,
         trace_id: str | None,
-        meta: dict,
+        annotations: dict,
         logprobs: dict | None,
     ) -> None:
         """Record a decline: an unsent NO_REPLY or an unsent empty final."""

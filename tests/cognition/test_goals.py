@@ -137,7 +137,7 @@ def ctx_for(channel):
 async def turn(env, channel=None):
     """Run before_agent_turn through the plugin manager."""
     channel = channel or env.channel
-    await env.pm.ahook.before_agent_turn(channel=channel, trace_id=None, meta={})
+    await env.pm.ahook.before_agent_turn(channel=channel, trace_id=None, annotations={})
 
 
 def goals_messages(channel) -> list[str]:
