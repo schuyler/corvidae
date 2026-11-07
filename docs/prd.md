@@ -431,16 +431,17 @@ The contract every transport meets:
 2. Default-deny sender allowlist in `should_process_message`. A refusal is
    one INFO line naming the sender; nothing is sent back and no liveness
    indicator is shown. The transport fires `on_message` for every decoded
-   message regardless; the gate is the one place that vetoes. One exception,
-   acknowledged rather than hidden: a transport may drop a message it can
-   already tell was not for the agent — an un-mentioned line in a channel
-   that requires a mention — because passing it on would put other people's
-   chatter through the gates, the appraisal and the stores for nothing. Such
-   a drop is expected traffic and is recorded for diagnosis only, naming the
-   channel and the sender so an operator can tell a channel that answers
-   unaddressed from one that does not, and a misconfigured allowlist from a
-   room talking to itself. Web
-   substitutes a bearer token for the allowlist; the token is the
+   message regardless; the gate is the one place that vetoes.
+   - One exception: a transport configured to answer only when addressed may
+     drop a message it can already tell was not addressed to the agent,
+     before the kernel sees it. This is not a refusal — the allowlist has not
+     been consulted — and it is not a second veto, because the transport is
+     applying the operator's own addressing rule, not judging the sender.
+     The reason is cost and reach: passing other people's chatter on would put
+     it through the gates, the appraisal and the stores for no answer.
+     The drop is expected traffic, recorded for diagnosis only, naming the
+     channel (the parent too, where one decides it) and the sender.
+   Web substitutes a bearer token for the allowlist; the token is the
    authorization. A sender the agent has messaged first, one to one, is
    admitted on that channel (§3.5.9).
 3. Transports subclass `TransportPlugin`, set `transport`, and override the
@@ -507,7 +508,9 @@ Per transport:
   override. Replies in DMs and when mentioned (not
   `@everyone`, `@here`, or roles); with `require_mention: false` it replies
   to every allowlisted sender's server message, mentioned or not; drops bot
-  authors and empty text; strips the mention token. Scopes: `discord:<channel_id>`,
+  authors, empty text, and — in a channel that requires a mention — unmentioned
+  messages, before the kernel sees them (§3.2 item 2); strips the mention
+  token. Scopes: `discord:<channel_id>`,
   `discord:<thread_id>` (a thread has its own history),
   `discord:dm:<user_id>`. Every send passes `AllowedMentions.none()`. A bad
   token is logged once at ERROR and not retried. Gateway events are queued

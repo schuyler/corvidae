@@ -673,24 +673,38 @@ class TestInboundFiltering:
         self, caplog
     ):
         """#526: the drop is expected traffic, so it is recorded for diagnosis
-        and not announced — one DEBUG line naming the channel, nothing at INFO
-        for every line people send each other."""
+        and not announced — one DEBUG line naming the channel and the sender,
+        nothing at INFO for every line people send each other."""
         h = await _start_plugin()
         try:
             with caplog.at_level(logging.DEBUG):
                 await _deliver(h, make_message("talking amongst ourselves"))
-            drops = [r for r in caplog.records if "unaddressed" in r.getMessage()]
-            assert drops, "the drop left no trace at all"
-            assert all(r.levelno == logging.DEBUG for r in drops)
+            drops = [r for r in caplog.records if "not admitted" in r.getMessage()]
+            assert len(drops) == 1
+            (drop,) = drops
+            assert drop.levelno == logging.DEBUG
+            assert str(CHAN_ID) in drop.getMessage()
+            assert str(AUTH_ID) in drop.getMessage()
+            assert drop.__dict__["channel"] == f"discord:{CHAN_ID}"
+            assert drop.__dict__["sender"] == str(AUTH_ID)
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_an_unaddressed_thread_message_names_the_parent(self, caplog):
+        """A thread is decided by its parent's entry (#512), so the line names
+        the parent as well; otherwise an operator looks up the thread id in
+        `discord.channels` and finds nothing (#526)."""
+        h = await _start_plugin()
+        try:
+            message = make_message("in a thread", channel_id=THREAD_ID)
+            message.channel = SimpleNamespace(id=THREAD_ID, parent_id=CHAN_ID)
+            with caplog.at_level(logging.DEBUG):
+                await _deliver(h, message)
+            drops = [r for r in caplog.records if "not admitted" in r.getMessage()]
+            assert len(drops) == 1
+            assert f"thread {THREAD_ID}" in drops[0].getMessage()
             assert str(CHAN_ID) in drops[0].getMessage()
-            # Who was turned away, not only where: the PRD asks for enough to
-            # tell a misconfigured allowlist from a quiet channel.
-            assert str(AUTH_ID) in drops[0].getMessage()
-            assert drops[0].__dict__.get("sender") == str(AUTH_ID)
-            assert not [
-                r for r in caplog.records
-                if r.levelno >= logging.INFO and "unaddressed" in r.getMessage()
-            ]
+            assert drops[0].__dict__["parent_channel"] == f"discord:{CHAN_ID}"
         finally:
             await h.plugin.on_stop()
 

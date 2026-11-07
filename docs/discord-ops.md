@@ -135,8 +135,12 @@ bot, and it will not tell them so.
 - **Servers and threads:** by default the bot answers only messages that
   @-mention it directly. `@everyone`, `@here`, and role pings do not count.
   The mention is stripped before the model sees the text. Messages that do
-  not mention it are not even delivered with content, and are ignored.
-  `require_mention: false` changes this; see below.
+  not mention it are not even delivered with content, and are ignored:
+  the kernel never sees them, so nothing is appraised or stored. Each drop
+  leaves one DEBUG line naming the channel (and the parent, for a thread)
+  and the sender, so `--log-level DEBUG` answers "why didn't it answer in
+  this channel" — and tells a channel that answers unaddressed from one that
+  does not. `require_mention: false` changes this; see below.
 - **Other bots, and itself:** ignored.
 - **Typing indicator:** shown while a reply is owed, and only for allowed
   users. Any reply clears it, even if another message is still waiting for

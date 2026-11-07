@@ -3108,7 +3108,12 @@ a login failure, but is deaf and mute until the daemon restarts.
 does not request the privileged Message Content intent, so operators need
 not enable it in the Developer Portal. Discord still delivers message
 content for DMs and for messages that mention the bot, and those are the
-only messages this transport processes. If a guild message mentions the
+only messages this transport processes. An un-mentioned guild message in a
+channel that requires a mention is dropped before the kernel sees it, leaving
+one DEBUG line naming the channel, its parent thread if any, and the sender
+(#526): the drop is the operator's own addressing rule, not a refusal, and
+passing the text on would put other people's chatter through the gates and
+the appraisal for no answer. If a guild message mentions the
 bot and arrives with empty content anyway, the transport logs a WARNING and
 drops it. That should not happen, and the warning is how a change on
 Discord's side would show up. The client requests Message Content when any

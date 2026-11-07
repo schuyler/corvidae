@@ -660,17 +660,23 @@ class DiscordPlugin(TransportPlugin):
             # continues; the allowlist gate still refuses other senders.
             if self._require_mention_for(message.channel):
                 if not any(u.id == bot_user_id for u in message.mentions):
-                    # Expected traffic, recorded for diagnosis and not
-                    # announced: in a busy channel this is every line people
-                    # send each other (#526). The channel id is enough to see
-                    # which channel answers unaddressed and which does not.
+                    # DEBUG, not INFO: this fires on every line people send
+                    # each other in a channel that requires a mention. A thread
+                    # is decided by its parent's entry, so name the parent too,
+                    # or an operator looks up the thread id and finds nothing.
+                    parent_id = getattr(message.channel, "parent_id", None)
+                    where = f"channel {message.channel.id}"
+                    if parent_id:
+                        where = f"thread {message.channel.id} (parent {parent_id})"
                     logger.debug(
-                        "discord: unaddressed message in channel %s from %s, "
-                        "not admitted",
-                        message.channel.id,
+                        "discord: unaddressed message in %s from %s, not admitted",
+                        where,
                         str(author.id),
                         extra={
                             "channel": f"discord:{message.channel.id}",
+                            "parent_channel": (
+                                f"discord:{parent_id}" if parent_id else None
+                            ),
                             "sender": str(author.id),
                         },
                     )
