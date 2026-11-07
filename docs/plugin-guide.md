@@ -365,6 +365,15 @@ async def on_message_admitted(self, channel, trace_id, sender, text):
 
 The framework itself never stamps meaning into `annotations` — it is a pass-through. Cognition plugins (see below) use the convention `annotations["origin"]` to record where a queue item came from ("user" recognized by subscribing to `on_message_admitted`, or an explicit string like `"reminder"` stamped by a producer); that convention is plugin-side, not a core concept.
 
+`annotations` never reach the model on their own. A plugin that wants a key shown declares it on the class:
+
+```python
+class HeartbeatPlugin(CorvidaePlugin):
+    model_visible_annotations = frozenset({"origin"})
+```
+
+The Agent collects these once at startup (a plugin loaded later is not read) and, for a notification carrying a declared key, stores that key's value with the row and renders it in a kernel-built `[annotations: origin=heartbeat]` line. Only `origin` is declared today (scheduler producers, heartbeat, funnel, cross-channel send, restart). Declare a key only for short, plugin-chosen text, never payload: the value is sanitized but otherwise shown as given. The header's wording and the payload fence are the kernel's, and a plugin cannot change them ([design.md](design.md#provenance-header-and-fence)).
+
 `SchedulerPlugin` is the producer that stamps it for clock-driven items. A due reminder fires as
 
 ```python

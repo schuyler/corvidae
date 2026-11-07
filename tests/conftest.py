@@ -120,3 +120,18 @@ async def mcp_url(mcp_request_log):
     finally:
         server.should_exit = True
         await task
+
+
+@pytest.fixture(autouse=True)
+def _fence_key_in_tmp(monkeypatch, tmp_path):
+    """Keep provenance.key out of the working directory: an Agent started
+    without ``_base_dir`` would write it next to wherever pytest runs."""
+    from pathlib import Path
+
+    import corvidae.agent as agent_module
+
+    real = agent_module.load_fence_key
+    monkeypatch.setattr(
+        agent_module, "load_fence_key",
+        lambda base_dir: real(tmp_path if Path(base_dir) == Path(".") else base_dir),
+    )

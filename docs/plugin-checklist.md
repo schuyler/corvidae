@@ -124,6 +124,11 @@ async def test_registers_tool_through_the_real_pm():
 
 ## 4. Traps that fail silently
 
+0. **`annotations` are invisible to the model.** A key reaches the prompt only
+   if the plugin class lists it in `model_visible_annotations` (read once at
+   startup; only `origin` is declared today), and then only for short
+   plugin-chosen text, never payload.
+
 1. **Not registered** in the package's entry points: never loaded. Check by
    starting the daemon and reading the `"plugins loaded"` log line (`loaded` and
    `blocked` lists).

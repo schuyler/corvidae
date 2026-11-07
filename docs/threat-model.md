@@ -279,6 +279,34 @@ The only `user`-role summary is the one for a retained tail with no user
 message (#56). A `user`-role summary with data framing, the obvious
 hardening, is still an experiment worth running.
 
+### Provenance header and fence (#548)
+
+The kernel renders a code-built `[metadata: ...]` header before a person's
+message and a header plus a nonce-fenced payload (`[payload <nonce> begins]`
+... `[payload <nonce> ends]`) for notifications and cross-channel tool
+results ([design.md](design.md#provenance-header-and-fence)).
+
+What it guarantees: the header's wording and the fence come from kernel
+code. Names, ids, annotation values and payload are sanitized at render
+time, so text a person, plugin or tool supplied cannot close the fence or
+open a header of its own without knowing the nonce, and a plugin cannot
+change what the header says. The nonce differs per stored row and is not
+derivable from the text.
+
+What it does not guarantee:
+
+- It is a cue the model is trained to weigh, not an enforced boundary; a
+  model can still follow instructions inside a fence.
+- `provenance.key` sits in the base directory beside `sessions.db`.
+  `read_file` has no root and `shell` reads any path, so a model induced to
+  read the key and send it out through a tool lets an attacker forge fences
+  for later rows. Mode 0600 keeps other users out, not the agent. Keep the
+  file out of any directory the agent is meant to read, and delete it to
+  rotate (nonces change on the next start).
+- A person's own message is unfenced: it is the instruction channel, so only
+  its header is kernel-built. A person's text can say anything; the header
+  only fixes who the kernel saw send it.
+
 ### 4. Tools are unsandboxed and the exfil path is open
 
 `shell` runs as the daemon user with no allowlist, no fixed cwd, and no

@@ -67,8 +67,8 @@ DEFAULT_TIMEZONE = "UTC"
 DEFAULT_CATCH_UP_WINDOW = 3600.0
 DEFAULT_MAX_REMINDERS_PER_CHANNEL = 50
 
-#: Origins a row may carry; each becomes the "[origin]" notification prefix
-#: and annotations["origin"], which origin-aware plugins key on.
+#: Origins a row may carry; each becomes annotations["origin"], which
+#: origin-aware plugins key on and the model sees in the notification header.
 VALID_ORIGINS = ("reminder", "heartbeat")
 
 #: Longest the timer sleeps in one go even with nothing due sooner; the

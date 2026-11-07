@@ -1,10 +1,8 @@
-"""Per-turn attribution: who is speaking, and where (#513).
+"""Provenance headers for inbound messages: who is speaking, and where (#513, #548).
 
-An inbound message reaches the model with its sender and channel dropped, so a
-rule keyed on either is unfalsifiable from inside the turn. These tests hold the
-shape the card asks for: an attribution row before the user turn, carrying ids
-and names, never inside the user turn's own text, and absent when the transport
-has nothing to say.
+A person's message reaches the model with a kernel-built header before it,
+carrying ids and names, never inside the message's own text, and absent when
+the transport has nothing to say.
 """
 
 from __future__ import annotations

@@ -594,10 +594,10 @@ def reminder_verdict(set_row: bool, fired: bool, replied: bool) -> tuple[bool, s
     if not set_row:
         return False, "no tool-created schedule row — the model did not call remind_me"
     if not fired:
-        return False, "the reminder never fired: no [reminder] row in message_log"
+        return False, "the reminder never fired: no reminder notification row in message_log"
     if not replied:
         return False, "the reminder fired but no unprompted reply carried the token"
-    return True, "reminder set by tool, fired as [reminder], token delivered unprompted"
+    return True, "reminder set by tool, fired as a reminder notification, token delivered unprompted"
 
 
 def heartbeat_exchange_count(db_path: Path, channel_id: str) -> int:

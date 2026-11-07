@@ -107,10 +107,12 @@ def load_fence_key(base_dir: Path) -> bytes:
 def clean_value(s: str, max_len: int | None = None) -> str:
     """``s`` as one short header-safe line: no control, format or bracket characters."""
     s = unicodedata.normalize("NFKC", s).replace(";", " ")
+    # Format characters go first so they cannot leave doubled spaces behind.
+    s = "".join(c for c in s if unicodedata.category(c) != "Cf")
     s = " ".join(s.split())
     s = "".join(
         c for c in s
-        if c not in "<>[]" and unicodedata.category(c) not in ("Cc", "Cf")
+        if c not in "<>[]" and unicodedata.category(c) != "Cc"
     )
     s = s[:max_len].strip() if max_len is not None else s.strip()
     return s or "?"
@@ -201,7 +203,7 @@ def frame(
         return ({"role": "system", "content": "\n".join(lines)} if lines else None), rendered
     # Notifications and cross-channel results carry a code-built header and a
     # fenced payload in one message, so a call and its result stay adjacent.
-    content = clean_payload(str(rendered.get("content", "")))
+    content = clean_payload(str(rendered.get("content") or ""))
     nonce = _nonce(msg, content, fence_key)
     lines += [f"[payload {nonce} begins]", content, f"[payload {nonce} ends]"]
     return None, {**rendered, "content": "\n".join(lines)}
