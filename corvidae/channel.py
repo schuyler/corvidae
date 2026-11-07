@@ -553,9 +553,16 @@ def parse_channel_config(config: dict) -> ParsedChannels:
                 f"channels.{channel_id}.{k} = {_short_repr(overrides[k])}"
                 for k in unknown
             )
+            hint = ""
+            if "require_mention" in unknown and channel_id.startswith("discord:"):
+                hint = (
+                    "; require_mention is a Discord setting: put it in "
+                    "discord.channels in agent.yaml, keyed by the bare channel "
+                    "id (see docs/configuration.md)"
+                )
             raise ValueError(
                 f"channels.{channel_id}: unknown key(s) {rejected}; "
-                f"accepted: {', '.join(CHANNEL_ENTRY_KEYS)}"
+                f"accepted: {', '.join(CHANNEL_ENTRY_KEYS)}{hint}"
             )
         # Fail now, not at turn time, on a scalar of the wrong type.
         for int_key in ("max_turns", "max_context_tokens"):

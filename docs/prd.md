@@ -431,7 +431,12 @@ The contract every transport meets:
 2. Default-deny sender allowlist in `should_process_message`. A refusal is
    one INFO line naming the sender; nothing is sent back and no liveness
    indicator is shown. The transport fires `on_message` for every decoded
-   message regardless; the gate is the one place that vetoes. Web
+   message regardless; the gate is the one place that vetoes. One exception,
+   acknowledged rather than hidden: a transport may drop a message it can
+   already tell was not for the agent — an un-mentioned line in a channel
+   that requires a mention — because passing it on would put other people's
+   chatter through the gates, the appraisal and the stores for nothing. Such
+   a drop is expected traffic and is recorded for diagnosis only. Web
    substitutes a bearer token for the allowlist; the token is the
    authorization. A sender the agent has messaged first, one to one, is
    admitted on that channel (§3.5.9).

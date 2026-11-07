@@ -669,6 +669,27 @@ class TestInboundFiltering:
         finally:
             await h.plugin.on_stop()
 
+    async def test_an_unaddressed_message_is_logged_at_debug_naming_the_channel(
+        self, caplog
+    ):
+        """#526: the drop is expected traffic, so it is recorded for diagnosis
+        and not announced — one DEBUG line naming the channel, nothing at INFO
+        for every line people send each other."""
+        h = await _start_plugin()
+        try:
+            with caplog.at_level(logging.DEBUG):
+                await _deliver(h, make_message("talking amongst ourselves"))
+            drops = [r for r in caplog.records if "unaddressed" in r.getMessage()]
+            assert drops, "the drop left no trace at all"
+            assert all(r.levelno == logging.DEBUG for r in drops)
+            assert str(CHAN_ID) in drops[0].getMessage()
+            assert not [
+                r for r in caplog.records
+                if r.levelno >= logging.INFO and "unaddressed" in r.getMessage()
+            ]
+        finally:
+            await h.plugin.on_stop()
+
     async def test_require_mention_false_admits_unmentioned_guild_message(self):
         """require_mention: false: an unmentioned guild message from an allowed
         user is processed with its text intact; a mention is still stripped."""

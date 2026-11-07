@@ -660,7 +660,15 @@ class DiscordPlugin(TransportPlugin):
             # continues; the allowlist gate still refuses other senders.
             if self._require_mention_for(message.channel):
                 if not any(u.id == bot_user_id for u in message.mentions):
-                    logger.debug("discord: ignoring guild message that does not mention the bot")
+                    # Expected traffic, recorded for diagnosis and not
+                    # announced: in a busy channel this is every line people
+                    # send each other (#526). The channel id is enough to see
+                    # which channel answers unaddressed and which does not.
+                    logger.debug(
+                        "discord: unaddressed message in channel %s, not admitted",
+                        message.channel.id,
+                        extra={"channel": f"discord:{message.channel.id}"},
+                    )
                     return
                 if not text and not attachments:
                     # Discord should deliver content for mentions even without
