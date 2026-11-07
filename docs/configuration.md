@@ -979,7 +979,7 @@ Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv 
 
 Requires the restart extra (`--extra restart` on your `uv sync` line). Without it the `restart` tool does not exist.
 
-`RestartPlugin` provides a `restart` tool that the agent can call to restart the daemon after plugin, prompt, or config changes. A loop guard prevents restart loops: no restart until a human has messaged since boot, a minimum uptime, and a maximum number of restarts per time window. A pre-flight check validates the config before the daemon is killed. After the restart, a notification is delivered to the originating channel (or the home channel as fallback) with the reason, downtime, and plugin list.
+`RestartPlugin` provides a `restart` tool that the agent can call to restart the daemon after plugin, prompt, or config changes. A loop guard prevents restart loops: no restart until a human has messaged since boot, a minimum uptime, and a maximum number of restarts per time window. A pre-flight check boots the daemon's startup as far as plugin `on_init` (logging, config sections, channels, plugin loading, hook and dependency checks) before the daemon is killed, and refuses the restart if that fails, with the kernel's `Config error:` line or a `pre-flight failed:` line naming the exception. It skips `on_start` and CLI overrides; see the threat model's "Pre-flight" section. After the restart, a notification is delivered to the originating channel (or the home channel as fallback) with the reason, downtime, and plugin list.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

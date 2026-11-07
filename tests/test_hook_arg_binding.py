@@ -152,10 +152,11 @@ class TestRuntimeStartupCoverage:
         # The function is imported into runtime's namespace.
         assert runtime._check_hook_arg_binding is _check_hook_arg_binding
 
-        # It is actually invoked inside Runtime.start(), after
+        # It is actually invoked inside Runtime.load_plugins() (the part of
+        # startup shared with the restart pre-flight), after
         # load_setuptools_entrypoints (so the real plugins are registered
         # by the time it runs).
-        src = inspect.getsource(runtime.Runtime.start)
+        src = inspect.getsource(runtime.Runtime.load_plugins)
         assert "_check_hook_arg_binding(self.pm)" in src
         load_idx = src.index("load_setuptools_entrypoints")
         guard_idx = src.index("_check_hook_arg_binding(self.pm)")

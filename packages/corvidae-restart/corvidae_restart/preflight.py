@@ -1,8 +1,14 @@
 """Pre-flight check for the restart plugin.
 
-Validates the config file using the daemon's own validation functions,
-so a config that passes the pre-flight can actually boot. Run as a
+Runs the daemon's own startup through plugin on_init (logging setup,
+section validation, channel config, plugin load, hook and dependency
+checks, on_init), so a config that passes the pre-flight is one the
+daemon can boot. on_start is not run and no agent is started. Run as a
 subprocess by the restart tool before the daemon is killed.
+
+Output: `pre-flight OK` on success. On failure, one stderr line: the
+kernel's own `Config error:` line, or `pre-flight failed: ...` for any
+other exception. Exit code 0 or 1.
 
 Usage:
     python -P -m corvidae_restart.preflight --config <path>
@@ -11,8 +17,40 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
+import logging
 import sys
-from pathlib import Path
+import warnings
+
+from corvidae.runtime import Runtime
+
+
+async def _run(config_path: str) -> int:
+    """Run the daemon's startup through on_init; return the exit code."""
+    runtime = Runtime(config_path=config_path)
+    try:
+        config = runtime.load_config()
+        runtime.setup_logging(config)
+        try:
+            await runtime.load_plugins(config)
+        finally:
+            # Close whatever load_plugins built; returns at once if it
+            # never created a plugin manager.
+            await runtime._cleanup_failed_start()
+    except SystemExit as exc:
+        # The kernel already wrote its one-line Config error to stderr.
+        return exc.code if isinstance(exc.code, int) else 1
+    except Exception as exc:
+        # Any other failure: one line naming the exception and the remedy.
+        print(
+            f"pre-flight failed: {exc} ({type(exc).__name__}); fix the config "
+            f"or the plugin set it names, then retry the restart — "
+            f"check {config_path}",
+            file=sys.stderr,
+        )
+        return 1
+    print("pre-flight OK", file=sys.stderr)
+    return 0
 
 
 def main() -> int:
@@ -22,39 +60,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    config_path = Path(args.config)
-    if not config_path.exists():
-        print(f"config file not found: {config_path}", file=sys.stderr)
-        return 1
+    # Keep kernel logs and plugin import warnings out of stderr; kernel
+    # problems are reported by direct stderr writes, which these do not touch.
+    warnings.simplefilter("ignore")
+    logging.disable(logging.CRITICAL)
 
-    try:
-        import yaml
-
-        with open(config_path, encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-    except Exception as exc:
-        print(f"config file could not be parsed: {exc}", file=sys.stderr)
-        return 1
-
-    if not isinstance(config, dict):
-        print("config file is not a YAML mapping", file=sys.stderr)
-        return 1
-
-    # Run the daemon's own validation, same as `corvidae serve`.
-    try:
-        from corvidae.channel import validate_agent_config
-        from corvidae.idle import validate_daemon_config
-
-        if "agent" in config:
-            validate_agent_config(config["agent"])
-        if "daemon" in config:
-            validate_daemon_config(config["daemon"])
-    except Exception as exc:
-        print(f"config validation failed: {exc}", file=sys.stderr)
-        return 1
-
-    print("pre-flight OK", file=sys.stderr)
-    return 0
+    return asyncio.run(_run(args.config))
 
 
 if __name__ == "__main__":
