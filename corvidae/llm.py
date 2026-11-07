@@ -38,11 +38,12 @@ MODEL_NOT_LOADED_MARKER = "model is not loaded"
 logger = logging.getLogger(__name__)
 
 # Text shaped like a chat-template control token (<|endoftext|>, <|im_start|>)
-# or a bare reasoning/tool-call tag (<think>, </think>, <tool_call>,
-# </tool_call>). llama-server tokenizes request content with parse_special, so
+# or a bare reasoning/tool tag (<think>, <tool_call>, <tool_response> and their
+# closing forms). llama-server tokenizes request content with parse_special, so
 # a literal one in any message becomes the real token: the model copies it and
-# generation stops, or it injects template structure (#356, #355).
-CONTROL_TOKEN_RE = re.compile(r"<(\|[^|<>\s]{1,40}\|>|/?(?:think|tool_call)>)")
+# generation stops, or it injects template structure (#356, #355). The tags are
+# added tokens, so parse_special=false would not stop them either (#553).
+CONTROL_TOKEN_RE = re.compile(r"<(\|[^|<>\s]{1,40}\|>|/?(?:think|tool_call|tool_response)>)")
 # A zero-width space after the "<" keeps the text readable but untokenizable
 # as the control token.
 CONTROL_TOKEN_DEFANGED = "<\u200b\\1"

@@ -390,7 +390,7 @@ model copies it while quoting the text, and generation stops with empty
 content. A fetched `<|im_start|>system` would inject template structure.
 `defang_control_tokens` walks the messages and rewrites every string match
 of `<\|[^|<>\s]{1,40}\|>`, or of a bare `<think>`, `</think>`,
-`<tool_call>` or `</tool_call>` tag (#355), to `<` + U+200B + the rest. It returns new
+`<tool_call>`, `</tool_call>`, `<tool_response>` or `</tool_response>` tag (#355, #553), to `<` + U+200B + the rest. It returns new
 containers, so the window and the stored history keep the original text. It
 is a pure function of the messages, so the prompt prefix stays cache-stable.
 Every chat profile and caller (main loop, forks, compaction, memory) goes
