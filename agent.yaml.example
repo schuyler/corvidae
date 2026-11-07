@@ -205,6 +205,20 @@ agent:
 #   allowed_origins:                   # extra origins: Tailscale name, reverse proxy
 #     - https://box.tailnet.ts.net
 
+# Webhook ingress: POST /hook/<endpoint> events for subscribing plugins
+# (optional; omit to disable). Plain HTTP; see docs/configuration.md
+# ("webhook") and docs/threat-model.md finding 16.
+# webhook:
+#   host: 127.0.0.1                    # null tokens only on a specific IP address
+#   port: 8400
+#   max_body_bytes: 1048576
+#   endpoints:
+#     github:
+#       auth: hmac-sha256              # or bearer (default)
+#       token: ${GITHUB_WEBHOOK_SECRET}
+#     siri:
+#       token: ${SIRI_WEBHOOK_TOKEN}
+
 # Scheduler: reminders (remind_me tool) and operator jobs (optional;
 # without this block the tools still work, in UTC, with these defaults).
 # A job can target any channel; see docs/threat-model.md finding 7.

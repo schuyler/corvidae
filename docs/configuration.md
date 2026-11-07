@@ -707,6 +707,41 @@ Whichever you pick, the origin you browse to has to be in the allowed set. Don't
 
 **Web content is stored in plaintext on this host**, like every other transport's: `sessions.db`, the JSONL log (`web_<name>.jsonl`, when enabled) and memory. To remove a conversation, use `corvidae redact` as described for Signal above, with `channel_id = 'web:<name>'`.
 
+## `webhook` — webhook ingress
+
+The `webhook` section is optional. If it is absent, null, empty or has no `endpoints`, `WebhookPlugin` loads but stays inert: no listener, nothing logged above `DEBUG`. If present, it must be well-formed: a bad field raises at startup naming it. A port that is already taken does not: the plugin logs an `ERROR` naming `host:port` and stays inert.
+
+It listens for `POST /hook/<endpoint>` and hands each accepted JSON object to the plugins that subscribed to that endpoint (see [plugin-guide.md](plugin-guide.md#subscribing-to-webhooks)). The ingress writes nothing to a conversation itself; with no subscribing plugin loaded, every endpoint answers 404.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `webhook.host` | string | `127.0.0.1` | Address to bind. A null token is allowed only when this is a specific IP address; a wildcard (`0.0.0.0`, `::`) or a hostname needs a token on every endpoint. |
+| `webhook.port` | integer | `8400` | Port to bind, 0 to 65535. `0` needs `host` to be an IP literal. |
+| `webhook.max_body_bytes` | integer | `1048576` | Largest accepted body; a larger one gets 413 without being read in full. |
+| `webhook.endpoints.<name>` | mapping or null | none | One entry per endpoint. The name matches `[a-z0-9][a-z0-9_-]{0,63}`. Null means every default. |
+| `webhook.endpoints.<name>.auth` | string | `bearer` | `bearer` (`Authorization: Bearer <token>`) or `hmac-sha256` (`X-Hub-Signature-256: sha256=<hex>`, the HMAC-SHA256 of the raw body keyed by the token). |
+| `webhook.endpoints.<name>.token` | string | `null` | The bearer token or HMAC secret; `${VAR}` expands from the environment. Non-empty ASCII. Required for `hmac-sha256` and on a non-specific host. `null` on a bearer endpoint means no auth. |
+
+```yaml
+webhook:
+  host: 127.0.0.1
+  port: 8400
+  endpoints:
+    github:
+      auth: hmac-sha256
+      token: ${GITHUB_WEBHOOK_SECRET}
+    siri:
+      token: ${SIRI_WEBHOOK_TOKEN}
+```
+
+**Responses.** `202 {"status": "accepted", "deliveries": n}` once the delivery is queued for every subscriber; it never waits for one. `200 {"status": "duplicate"}` for a repeated delivery id. `400` for a body that is not a JSON object, `401` for failed auth, `404` for an endpoint that is unconfigured or has no subscriber, `405` for any method but POST, `413` for a body over `max_body_bytes`. The 400, 401 and 404 bodies are JSON naming the endpoint and the fix.
+
+**Duplicates.** The delivery id is the `X-GitHub-Delivery` header, else `Idempotency-Key`. The last 32 ids per endpoint are kept in memory; a request carrying neither header is never a duplicate. A restart forgets them.
+
+**Slow subscribers.** Each subscriber has a queue of 100 deliveries. When it is full the oldest delivery is dropped and a `WARNING` names the endpoint, the subscriber and the running drop count. Delivery order per subscriber is preserved. Queued deliveries are lost on shutdown.
+
+**GitHub setup.** Add a webhook with Payload URL `http://<host>:8400/hook/github`, Content type `application/json`, and a secret equal to `webhook.endpoints.github.token`, and use `auth: hmac-sha256`. GitHub signs the body but sends no timestamp. The listener is plain HTTP; see [threat-model.md](threat-model.md) finding 16 before exposing it.
+
 ---
 
 ## `acp` — ACP stdio transport
@@ -921,6 +956,7 @@ No restart is required for the changes listed below. Changes that require restar
 |---------|--------|
 | `irc.host`, `irc.port`, `irc.nick` | IRC transport is connected at startup; changing connection parameters requires reconnection. |
 | `irc.allow` | The allowlist is parsed once in `on_init`; a reload keeps the old one. |
+| `webhook.*` | `WebhookPlugin` reads its block in `on_init` and binds in `on_start`; it has no reload hook, so a change takes a restart. |
 | `web.host`, `web.port`, `web.allowed_origins`, adding or removing the `web` block | The listener is bound at startup. A reload logs `restart to apply` and keeps serving with the old values. |
 | Existing exact entries in `channels:` | Channels already registered retain their original `ChannelConfig` until restart, except `tools.disabled` (above). Transport-wide entries are live (above). |
 | `llm.*` (every profile, including `llm.main`, plus `llm.defaults` and `llm.stages`) | Read at startup. A reload that changes any of it logs a restart-only warning per changed key and `llm config changed; LLM profiles, llm.stages and llm.defaults apply on restart` and keeps the running clients. A malformed `llm:` section still refuses the whole reload. A reload is not checked against the registered stages, so a `llm.stages` entry of the wrong kind passes the reload and fails the next startup. |

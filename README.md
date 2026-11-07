@@ -120,6 +120,7 @@ other tenants.
 | SignalPlugin | Signal transport via a running `signal-cli` daemon |
 | DiscordPlugin | Discord transport (needs `--extra discord`) |
 | WebPlugin | Browser chat UI on localhost |
+| WebhookPlugin | Webhook ingress: routes `POST /hook/<endpoint>` events to subscribing plugins |
 | AcpPlugin | Agent Client Protocol over stdio for editors (`corvidae acp`, needs `--extra acp`) |
 
 ### Cognition plugins (`--extra cognition`)

@@ -139,6 +139,10 @@ declaration of the same name still fails. Its only effect is that such an
 orphan can be logged at DEBUG when the real owner is a different absent
 plugin.
 
+The `webhook` plugin owns `on_webhook_subscribe(subscriptions)`, through which
+plugins register handlers for webhook endpoints; see "Webhook ingress" under
+Transports.
+
 ### Broadcast dispatch and result resolution
 
 All hooks are called via `pm.ahook.<hook_name>(...)`. A broadcast hook
@@ -3521,6 +3525,39 @@ inspector pane, and views of other transports' channels.
 
 Behavior is pinned by `tests/test_web_plugin.py`, which drives a real
 listener with aiohttp's client and raw sockets.
+
+### Webhook ingress (`channels/webhook.py`)
+
+`WebhookPlugin` is a `CorvidaePlugin`, not a transport: it owns no channels and
+never writes to a conversation. It accepts `POST /hook/<endpoint>` over
+`aiohttp.web` and routes each accepted JSON object to the plugins subscribed to
+that endpoint. Configuration is in [configuration.md](configuration.md#webhook--webhook-ingress).
+
+**Subscribing.** The plugin owns `on_webhook_subscribe(subscriptions)`. At
+`on_start` it calls the hook with an empty `dict[str, list[handler]]`; each
+implementer appends async handlers under endpoint names. Each (endpoint,
+handler) pair becomes a subscriber with its own bounded queue (100) and worker
+task, so a slow or raising handler affects only itself. A raising handler is
+logged at `ERROR` with its traceback, naming endpoint and handler.
+
+**Request path.** Unknown or subscriber-less endpoint: 404 (before auth, so a
+typo is visible). Bearer is checked before the body is read; `hmac-sha256` is
+checked after, over the raw bytes. aiohttp's `client_max_size` rejects an
+oversized stream with 413. The body must parse as a JSON object (400). Then the
+delivery id (`X-GitHub-Delivery`, else `Idempotency-Key`) is looked up in the
+endpoint's 32-entry window (200 duplicate) and recorded; the delivery is queued
+for every subscriber, dropping a full queue's oldest item with a `WARNING`, and
+the reply is 202. The delivery is a frozen `WebhookDelivery(endpoint, payload,
+delivery_id)` whose `origin` is `webhook:<endpoint>`, minted by the ingress.
+Only the delivery id, taken from `X-GitHub-Delivery` or `Idempotency-Key`, reaches a subscriber from the headers.
+
+**Failure handling.** A bind failure is not a fatal startup path (PRD
+3.1.17): it logs `ERROR` naming `host:port` and the plugin stays inert. Config
+errors raise `ValueError` from `on_init`. `on_stop` closes the listener first,
+then cancels the workers, discarding queued deliveries. At start a `WARNING`
+lists configured endpoints with no subscriber and subscribed endpoints with no
+config.
+
 ### ACP (`channels/acp.py`)
 
 `AcpPlugin` + `corvidae acp` — Agent Client Protocol **v1** over stdio for
@@ -3709,7 +3746,7 @@ fixed hand-written order:
 
 The kernel's entry points (`[project.entry-points.corvidae]` in the root
 `pyproject.toml`): `persistence`, `jsonl_log`, `core_tools`, `cli`, `irc`,
-`signal`, `discord`, `web`, `acp`, `task`, `subagent`, `mcp`, `llm`,
+`signal`, `discord`, `web`, `webhook`, `acp`, `task`, `subagent`, `mcp`, `llm`,
 `compaction`, `thinking`, `runtime_settings`, `tools`, `metrics`,
 `usage_log`, `metrics_jsonl`, `scheduler`, `agent`,
 `config_watcher`. The cognition extra adds `memory`, `memory_tools`,
@@ -3838,6 +3875,7 @@ corvidae/
 │   ├── signal.py         # SignalPlugin (signal-cli JSON-RPC transport)
 │   ├── discord.py        # DiscordPlugin (discord.py gateway transport)
 │   ├── web.py            # WebPlugin (browser chat UI over aiohttp)
+│   ├── webhook.py        # WebhookPlugin (POST /hook/<endpoint> ingress)
 │   ├── web_static/       # its page, script, styles, vendored marked + DOMPurify
 │   ├── acp.py            # AcpPlugin + corvidae acp command
 │   └── split.py          # split_message() — shared outbound chunking

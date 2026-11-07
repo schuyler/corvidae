@@ -39,6 +39,7 @@ them:
   a channel other people can read (with `discord.require_mention: false`,
   or a `discord.channels` entry setting it false for that channel, every
   message that user posts there),
+  every webhook payload,
   every web page `web_fetch` returns, every DuckDuckGo snippet, every MCP
   tool description and result, and every memory distilled from any of the
   above.
@@ -113,6 +114,8 @@ Adversaries:
   loopback, and anyone who gets the token or cookie; also any web page
   open in the operator's browser, which can try cross-site requests. See
   finding 9.
+- **Anyone who can reach the webhook listener**, to the degree each endpoint's
+  auth allows (none, for `token: null`). See finding 16.
 - **Anyone who controls a page the bot fetches**, or a search result it
   reads.
 - **An MCP server**, via its tool descriptions and results.
@@ -1062,6 +1065,31 @@ already cross channels (finding 10). There is no send, note or read tool
 yet (#234, #235), so the other costs above arrive with those. The identity
 and register layers are built (#316), but not their runtime overrides and
 separate locks.
+
+### 16. The webhook ingress accepts events from the network
+
+`channels/webhook.py` listens for `POST /hook/<endpoint>` and gives each JSON
+body to subscribing plugins. It reaches the model only through a subscriber's
+`on_notify`, as a fenced notification (PRD §3.3.11); the ingress itself writes
+to no conversation. What each auth mode gives:
+
+- **`bearer` with a token.** Whoever holds the token can inject events. The
+  token crosses the network in clear on this plain-HTTP listener, so exposing
+  an endpoint beyond a trusted network needs a TLS-terminating proxy.
+- **`hmac-sha256`.** Proves the body came from a holder of the secret and was
+  not altered; it does not hide the body. GitHub signs no timestamp, so a
+  captured delivery replays successfully once its id leaves the 32-id window
+  or after a restart.
+- **`token: null`.** No authentication at all, allowed only on a specific IP
+  address. The network is the only control: anyone who can reach that address
+  can inject events. A wildcard host or a hostname requires a token.
+- Endpoint names are enumerable without a credential (404 versus 401).
+- An authenticated sender that floods an endpoint pushes real events out of a
+  subscriber's queue (drop-oldest), and each event a subscriber turns into a
+  notification spends a turn (finding 14).
+- No query string reaches a subscriber, and of the headers only the delivery
+  id (`X-GitHub-Delivery` or `Idempotency-Key`) does. Tokens are never
+  logged (the access log is off, rejections log the endpoint and address only).
 
 ### Smaller things
 
