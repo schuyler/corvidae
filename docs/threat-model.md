@@ -1244,7 +1244,10 @@ files that reach it, not the specific content within a category.
 The `getAttachment` RPC sends only the attachment id; signal-cli resolves the
 attachment server-side. No recipient parameter is sent.
 
-The StreamReader buffer limit is sized to `max_attachment_size * 4 / 3 + 64 KiB`
-to accommodate base64-encoded attachment data. A line that exceeds the limit
-raises `ValueError` in `_read_loop`, which logs a warning and discards the
-line; the connection survives.
+The StreamReader buffer limit is sized to `max_attachment_size * 2 * 4 / 3 + 64 KiB`
+to accommodate base64-encoded attachment data with 2x headroom. The 2x factor
+lets an oversized-but-bounded response be read and rejected by the size cap
+rather than tripping the stream limit (which would discard the frame and hang
+the RPC). A line that exceeds even the 2x limit raises `ValueError` in
+`_read_loop`, which logs a warning and discards the line; the connection
+survives.

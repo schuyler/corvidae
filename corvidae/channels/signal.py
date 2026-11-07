@@ -597,7 +597,7 @@ class SignalPlugin(TransportPlugin):
                 if major == "application":
                     type_name = _sanitize_subtype(subtype)
                 else:
-                    type_name = major
+                    type_name = _sanitize_subtype(major)
             else:
                 att_type = att.get("type", 0)
                 type_name = ATTACHMENT_TYPE_NAMES.get(att_type, f"type{att_type}")
