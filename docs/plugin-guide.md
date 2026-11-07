@@ -259,6 +259,32 @@ declares`), since it will never be called. Usually that's a typo. The
 exception is an impl for a hook owned by one of your `optional_depends_on`
 plugins that isn't loaded: that's expected, and is logged at DEBUG.
 
+## Subscribing to webhooks
+
+The `webhook` plugin (`corvidae/channels/webhook.py`) owns `on_webhook_subscribe(subscriptions)`. Implement it to receive the JSON objects POSTed to `/hook/<endpoint>`; the listener, auth and endpoint names are the operator's `webhook:` config ([configuration.md](configuration.md#webhook)).
+
+```python
+from corvidae.channels.webhook import WebhookDelivery
+from corvidae.hooks import CorvidaePlugin, hookimpl
+
+class GithubEvents(CorvidaePlugin):
+    optional_depends_on = frozenset({"webhook"})
+
+    @hookimpl
+    async def on_webhook_subscribe(self, subscriptions) -> None:
+        subscriptions.setdefault("github", []).append(self.handle)
+
+    async def handle(self, delivery: WebhookDelivery) -> None:
+        ...  # delivery.payload, delivery.delivery_id, delivery.origin
+```
+
+Declare `optional_depends_on = frozenset({"webhook"})` so the impl is not reported as specless when the ingress is disabled. The handler contract:
+
+- It runs in a worker task owned by the ingress, one delivery at a time per handler, in arrival order. It may run before your own `on_start` finishes, so resolve dependencies in `on_init` or lazily.
+- `delivery.payload` is the parsed JSON object, shared with every other subscriber: do not mutate it. It is untrusted text. `delivery.origin` is `webhook:<endpoint>`, minted by the ingress.
+- To let the model see an event, call `on_notify` yourself; the ingress never does.
+- An exception is logged at `ERROR` and the next delivery proceeds. A handler that falls 100 deliveries behind loses its oldest ones, with a `WARNING`.
+
 ## Available hooks
 
 ### Lifecycle

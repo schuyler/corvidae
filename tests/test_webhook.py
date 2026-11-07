@@ -138,13 +138,13 @@ async def test_inert_config(cfg, caplog, monkeypatch):
 @pytest.mark.parametrize(
     ("block", "fragments"),
     [
-        ([], ["webhook", "must be a mapping"]),
+        ([1], ["webhook", "must be a mapping"]),
         ({"host": "", "endpoints": TOK}, ["webhook.host"]),
         ({"port": 70000, "endpoints": TOK}, ["webhook.port", "70000", "65535"]),
         ({"port": True, "endpoints": TOK}, ["webhook.port", "True"]),
         ({"host": "example.org", "port": 0, "endpoints": TOK}, ["webhook.port", "requires host to be an IP literal"]),
         ({"max_body_bytes": 0, "endpoints": TOK}, ["webhook.max_body_bytes", "0"]),
-        ({"endpoints": []}, ["webhook.endpoints"]),
+        ({"endpoints": [1]}, ["webhook.endpoints"]),
         ({"endpoints": {"Bad!": None}}, ["Bad!", "[a-z0-9][a-z0-9_-]{0,63}"]),
         ({"endpoints": {"gh": 5}}, ["webhook.endpoints.gh"]),
         ({"endpoints": {"gh": {"auth": "basic"}}}, ["webhook.endpoints.gh.auth", "basic", "bearer, hmac-sha256"]),
@@ -238,8 +238,10 @@ async def test_oversized_body_413(start):
     http, base = await start({"open": [rec]}, block={"max_body_bytes": 1024})
 
     async def stream():
+        yield b'{"x": "'
         for _ in range(64):
             yield b"x" * 16384
+        yield b'"}'
     async with http.post(f"{base}/open", data=stream()) as resp:
         assert resp.status == 413
     async with http.post(f"{base}/open", json={}) as resp:

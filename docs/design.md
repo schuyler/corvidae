@@ -3518,6 +3518,38 @@ inspector pane, and views of other transports' channels.
 
 Behavior is pinned by `tests/test_web_plugin.py`, which drives a real
 listener with aiohttp's client and raw sockets.
+### Webhook ingress (`channels/webhook.py`)
+
+`WebhookPlugin` is a `CorvidaePlugin`, not a transport: it owns no channels and
+never writes to a conversation. It accepts `POST /hook/<endpoint>` over
+`aiohttp.web` and routes each accepted JSON object to the plugins subscribed to
+that endpoint. Configuration is in [configuration.md](configuration.md#webhook).
+
+**Subscribing.** The plugin owns `on_webhook_subscribe(subscriptions)`. At
+`on_start` it calls the hook with an empty `dict[str, list[handler]]`; each
+implementer appends async handlers under endpoint names. Each (endpoint,
+handler) pair becomes a subscriber with its own bounded queue (100) and worker
+task, so a slow or raising handler affects only itself. A raising handler is
+logged at `ERROR` with its traceback, naming endpoint and handler.
+
+**Request path.** Unknown or subscriber-less endpoint: 404 (before auth, so a
+typo is visible). Bearer is checked before the body is read; `hmac-sha256` is
+checked after, over the raw bytes. aiohttp's `client_max_size` rejects an
+oversized stream with 413. The body must parse as a JSON object (400). Then the
+delivery id (`X-GitHub-Delivery`, else `Idempotency-Key`) is looked up in the
+endpoint's 32-entry window (200 duplicate) and recorded; the delivery is queued
+for every subscriber, dropping a full queue's oldest item with a `WARNING`, and
+the reply is 202. The delivery is a frozen `WebhookDelivery(endpoint, payload,
+delivery_id)` whose `origin` is `webhook:<endpoint>`, minted by the ingress.
+No request header reaches a subscriber.
+
+**Failure handling.** A bind failure is not a fatal startup path (PRD
+3.1.17): it logs `ERROR` naming `host:port` and the plugin stays inert. Config
+errors raise `ValueError` from `on_init`. `on_stop` closes the listener first,
+then cancels the workers, discarding queued deliveries. At start a `WARNING`
+lists configured endpoints with no subscriber and subscribed endpoints with no
+config.
+
 ### ACP (`channels/acp.py`)
 
 `AcpPlugin` + `corvidae acp` — Agent Client Protocol **v1** over stdio for
