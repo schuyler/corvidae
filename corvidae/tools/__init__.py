@@ -2,8 +2,9 @@
 
 import aiohttp
 
-from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.tool import Tool
+from corvidae.tool_collection import ToolCollectionPlugin
 
 from corvidae.tools.shell import shell
 from corvidae.tools.files import read_file, write_file
@@ -11,7 +12,7 @@ from corvidae.tools.web import web_fetch, web_fetch_with_session, web_search
 
 
 class CoreToolsPlugin(CorvidaePlugin):
-    depends_on = frozenset()
+    depends_on = frozenset({"tools"})
 
     def __init__(self, pm=None) -> None:
         self.pm = pm  # May be None; on_init will set it via CorvidaePlugin.on_init
@@ -55,10 +56,15 @@ class CoreToolsPlugin(CorvidaePlugin):
         # Declare the timeout shell really uses, read live at dispatch (R4).
         shell.own_timeout = lambda: plugin._shell_timeout  # type: ignore[attr-defined]
 
-        async def read_file(path: str) -> str:
-            """Read the contents of a file."""
+        async def read_file(path: str, offset: int | None = None, length: int | None = None) -> str:
+            """Read a file; offset and length are in characters, and a ranged result's header names the next offset."""
             from corvidae.tools.files import read_file as _read_file_impl
-            return await _read_file_impl(path, max_size=plugin._max_file_read_bytes)
+            # An unranged read is untouched; a ranged one is clamped to the
+            # live result cap so it is never truncated after the fact.
+            if offset is None and length is None:
+                return await _read_file_impl(path, max_size=plugin._max_file_read_bytes)
+            max_chars = get_dependency(plugin.pm, "tools", ToolCollectionPlugin).max_result_chars
+            return await _read_file_impl(path, offset=offset, length=length, max_chars=max_chars)
 
         async def web_fetch(url: str) -> str:
             """Fetch a URL and return its text content."""

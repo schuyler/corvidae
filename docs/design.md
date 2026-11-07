@@ -2810,7 +2810,7 @@ Registered via `CoreToolsPlugin` in `tools/__init__.py`:
 | Tool | File | Purpose |
 |------|------|---------|
 | `shell(command)` | `tools/shell.py` | Execute shell command, 30s timeout (configurable). On cancellation (the call bound, shutdown) it kills and reaps its `/bin/sh` process, then re-raises; `task_pipeline` inherits this. Grandchildren of the shell are not killed. Its companion `run_shell` returns the exit code beside the output, for callers that must know whether the command succeeded (#105). |
-| `read_file(path)` | `tools/files.py` | Read file (1MB limit, configurable) |
+| `read_file(path, offset, length)` | `tools/files.py` | Read file (1MB limit, configurable), or a character range of any size behind a header naming the range, total and next offset; a range is clamped to `tools.max_result_chars` |
 | `write_file(path, content)` | `tools/files.py` | Write file, creates parent dirs |
 | `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation (configurable) |
 | `web_search(query, max_results)` | `tools/web.py` | Search via DuckDuckGo, default 8 results (configurable) |
@@ -3674,7 +3674,7 @@ tools:
   shell_timeout: 30             # shell tool timeout in seconds (default 30)
   web_fetch_timeout: 15         # web_fetch timeout in seconds (default 15)
   web_max_response_bytes: 50000 # web_fetch response truncation (default 50_000)
-  max_file_read_bytes: 1048576  # read_file size limit in bytes (default 1MB)
+  max_file_read_bytes: 1048576  # unranged read_file size limit in bytes (default 1MB)
   web_search_max_results: 8     # web_search result count (default 8)
 
 memory:

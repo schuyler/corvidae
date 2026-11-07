@@ -1235,7 +1235,7 @@ Registered by `CoreToolsPlugin` (entry point name: `core_tools`).
 | Tool | Parameters | What it does |
 |------|------------|--------------|
 | `shell` | `command: str` | Runs a shell command and returns combined stdout/stderr. Times out after `tools.shell_timeout` seconds (default 30). Returns `"(no output)"` if the command produces none. Non-zero exit codes are appended to the output. |
-| `read_file` | `path: str` | Reads a file and returns its text content. Returns an error string for missing files, directories, unreadable files, or files larger than `tools.max_file_read_bytes` bytes (default 1 MB). |
+| `read_file` | `path: str`, `offset: int \| None`, `length: int \| None` | Reads a file and returns its text content. With `offset` or `length` (counted in characters) it returns that range behind a header naming the range, the file's total length and the next offset, e.g. `[characters 0-99932 of 300000 in /path/f.json; next offset 99932]`; the range is clamped so the result fits `tools.max_result_chars`. Returns an error string for missing files, directories, unreadable files, an offset at or past the end, a negative offset or non-positive length, or an unranged read of a file larger than `tools.max_file_read_bytes` bytes (default 1 MB). |
 | `write_file` | `path: str`, `content: str` | Writes `content` to `path`, creating parent directories as needed. Returns a confirmation with the byte count, or an error string on failure. |
 | `web_fetch` | `url: str` | Fetches a URL via HTTP GET and returns the response body as text. Times out after `tools.web_fetch_timeout` seconds (default 15). Truncates responses at `tools.web_max_response_bytes` characters (default 50,000, independent of `MAX_TOOL_RESULT_CHARS`). A network failure names the URL and the failure class. |
 | `web_search` | `query: str`, `max_results: int` (optional) | Searches the web via DuckDuckGo and returns formatted results with titles, URLs, and snippets. Defaults to 8 results per page. |
@@ -1251,7 +1251,7 @@ tools:
   web_fetch_timeout: 15              # seconds before web request is aborted
   web_max_response_bytes: 50000      # response body truncation limit
   web_search_max_results: 8          # max results returned per search query
-  max_file_read_bytes: 1048576   # file size limit (1 MB)
+  max_file_read_bytes: 1048576   # file size limit for unranged reads (1 MB)
 ```
 
 ### SubagentPlugin tools

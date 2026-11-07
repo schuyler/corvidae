@@ -140,7 +140,7 @@ agent:
 #   shell_timeout: 30               # seconds before shell command is killed
 #   web_fetch_timeout: 15           # seconds before HTTP request is aborted
 #   web_max_response_bytes: 50000   # max bytes of HTTP response body
-#   max_file_read_bytes: 1048576    # max file size for read_file (1 MB)
+#   max_file_read_bytes: 1048576    # max file size for unranged read_file (1 MB)
 #   disabled: []                    # tool names to drop entirely, e.g. [shell, write_file]
 #                                   # or [set_settings]; shell and task_pipeline go
 #                                   # together; see docs/threat-model.md

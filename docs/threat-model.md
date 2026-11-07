@@ -1121,6 +1121,9 @@ channel, and provider-side event filtering is the only volume control.
 
 - `read_file` has a stat-then-read race and follows symlinks. Irrelevant
   while finding 4 stands.
+- `tools.max_file_read_bytes` bounds only an unranged `read_file`; a read
+  with `offset` or `length` reaches any part of a file of any size, a page
+  at a time. It is a context-size guard, not an access control.
 - Tool arguments are not validated against the generated schema. Wrong
   types produce a generic "tool failed". Robustness, not security.
 - `task_pipeline` marks a task failed on a non-zero exit code, so
