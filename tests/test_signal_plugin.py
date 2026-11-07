@@ -591,6 +591,36 @@ class TestInboundFiltering:
         finally:
             await _stop_plugin(h)
 
+    async def test_id_ending_in_extension_is_not_doubled(self, tmp_path):
+        """A signal-cli attachment id that already ends in .png (the id
+        carries the original name) must not produce foo.png.png on disk
+        when the MIME map adds the same suffix."""
+        import base64
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+        h = await _start_plugin(tmp_path)
+        try:
+            h.server.respond_when_contains(
+                "getAttachment",
+                {"data": base64.b64encode(png_bytes).decode()},
+            )
+            await h.server.push_notification(
+                "receive",
+                make_data_envelope(
+                    source_uuid=AUTH_ACI, source_number=None, text=None,
+                    attachments=[{"id": "1794040311112-0-0iFvDX7LY4JvRV0LmOXg.png",
+                                   "type": 1, "contentType": "image/png"}],
+                ),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
+            text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            path_str = text.split("[image: ")[1].split("]")[0]
+            path = Path(path_str)
+            assert path.exists(), f"attachment file not found: {path}"
+            assert path.name.endswith(".png")
+            assert not path.name.endswith(".png.png"), path.name
+        finally:
+            await _stop_plugin(h)
+
     async def test_attachment_plus_text_includes_attachment_note(self, tmp_path):
         """An image + caption message includes the attachment note prefix."""
         import base64
