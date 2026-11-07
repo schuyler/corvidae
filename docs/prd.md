@@ -672,19 +672,21 @@ Per transport:
     achieved (prompt material, history, context, sampling) is otherwise a
     design choice, not a requirement; the bar is behavioural (principle 6),
     and an essay-length reply to a one-line text is a bug.
-11. The model can tell, for every item in its context, what it is: its kind
-    (a person's message, the result of the agent's own tool call, a
-    scheduler or heartbeat firing, another channel's activity, an external
-    event), where it came from as distinct from the channel it arrived on,
-    whether it is a principal's instruction or untrusted data, and what it
-    answers. It learns this from a header the code builds, never from text
-    the item's author controls. An item produced outside the channel's own
-    human is never presented as that human speaking. A foreign-origin item,
-    such as the result of the agent's own action on another channel, is
-    framed as what it is, not withheld. Telling instruction from data is
-    the framing's job; weighting who is trusted stays the trust plugin's
+11. A person's message, and every item that did not come from the
+    channel's human, reach the model with a header the code builds, never
+    with framing taken from text the item's author controls. Those other
+    items are notifications (from the scheduler, the heartbeat,
+    cross-channel sends, plugins and webhooks) and the results of the
+    agent's own actions on another channel. From the header the model can
+    tell an item's kind, where it came from as distinct from the channel it
+    arrived on, whether it is a principal's instruction or untrusted data,
+    and what it answers. An item produced outside the channel's own human
+    is never presented as that human speaking. A foreign-origin item, such
+    as the result of the agent's own action on another channel, is framed
+    as what it is, not withheld. Telling instruction from data is the
+    framing's job; weighting who is trusted stays the trust plugin's
     capability (principle 14).
-    For a person's message, the model is told who is speaking and where, as
+    For a person's message, the header says who is speaking and where, as
     data rather than as part of what the person said: the sender by stable
     id and current display name, the channel by stable id and name, a thread
     naming the channel it hangs off, a direct message saying what it is
@@ -693,18 +695,19 @@ Per transport:
     transport's to supply and are never merged into the user's message,
     because a display name is a string somebody else chose; identifiers stay
     the keys (principle 10) and stay what the log, memory and configuration
-    identify. A payload from outside the conversation (a notification, an
-    external event, the result of an action elsewhere) is fenced so that
-    nothing in it can imitate a header, a role or a control token, and the
-    fence is derived from the stored row, so a reload renders the same
-    prompt. Sanitizing happens only when the prompt is built; the stored row
-    and the log keep what arrived. The framing is the kernel's, in one
-    place, so no transport can frame it differently: plugins extend the
-    header only by static declaration (which annotation keys the model may
-    see, which tools return untrusted output), and the kernel owns the
-    format, the fence and the sanitizing floor, so no plugin can weaken
-    them. A transport that supplies no name and no addressing adds nothing
-    to a person's message, so its prompt is unchanged.
+    identify. A person's message is not fenced, and a transport that
+    supplies no name and no addressing adds nothing to it, so its prompt is
+    unchanged.
+    For the other items, an external payload (a webhook event, a relayed
+    message, the result of an action elsewhere) is fenced so that nothing
+    in it can imitate a header, a role or a control token, and the fence is
+    derived from the stored row, so a reload renders the same prompt.
+    Sanitizing happens only when the prompt is built; the stored row and
+    the log keep what arrived. The framing is the kernel's, in one place,
+    so no transport can frame it differently: plugins extend the header
+    only by static declaration (which annotation keys the model may see,
+    which tools return untrusted output), and the kernel owns the format,
+    the fence and the sanitizing floor, so no plugin can weaken them.
 
 ### 3.4 Persistence
 
@@ -776,9 +779,8 @@ Per transport:
    disabling one disables both, and a non-zero exit marks the task failed
    so dependents do not run.
 4. Tool results are truncated to `tools.max_result_chars`. Results from
-   tools that return untrusted output, MCP servers' among them, are fenced
-   as data by the kernel (§3.3.11); a tool plugin declares which of its
-   tools those are.
+   tools that return untrusted output are fenced as data by the kernel
+   (§3.3.11); a tool plugin declares which of its tools those are.
 5. Tools run in the daemon's process. Process separation (tool workers in
    another process with a narrowed filesystem and network, credentials and
    the database on the trusted side) is out of scope until corvidae runs
@@ -1322,9 +1324,10 @@ design, not requirement. The requirements are outcomes:
    then runs. A firing on a channel no transport owns is delivered by no
    transport; it reaches a person by speaking on another channel
    (§3.5.9), like any turn.
-4. Reminder text is framed as data with its quote marks neutralized;
-   operator jobs are framed as the operator's; a late firing is prefixed
-   with how overdue it was.
+4. The scheduler supplies a firing's origin and the kernel renders its
+   frame (§3.3.11): reminder text as data with its quote marks
+   neutralized, an operator job as the operator's. A late firing is
+   prefixed with how overdue it was.
 5. Recurrence is a fixed interval with an optional anchor, stepped in
    local wall-clock time in `scheduler.timezone`, computed from the
    scheduled time so there is no drift. Startup applies a catch-up policy
@@ -1595,7 +1598,7 @@ record that holds the reasoning.
 | Engagement decision inverted: cheap gate first, generate only past threshold | principle 7; §3.7 Appraisal; diverges from the Persyn spec |
 | Two-stage appraisal; stage 1 never calls a model; core mints the exchange key; pull-based compute | §3.7 Appraisal 1–3 |
 | Origin is stamped and propagated, never inferred; critique eligibility by origin | §3.1.4; §3.7 Critique 3 |
-| Two grades on a queue item: kernel-certified `metadata`, never a hook argument, and plugin-owned `annotations`; every item in context gets a code-built header and outside payloads a fence derived from the stored row; foreign-origin items are framed, never withheld; trust stays a capability | §3.1.4; §3.3.11; #555 |
+| Two grades on a queue item: kernel-certified `metadata`, never a hook argument, and plugin-owned `annotations`; every item in context gets a code-built header and outside payloads a fence derived from the stored row; foreign-origin items are framed, never withheld (no silence default) | §3.1.4; §3.3.11; #555 |
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
