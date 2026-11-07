@@ -3,6 +3,7 @@
 import aiohttp
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.spill import NotificationSpill
 from corvidae.tool import Tool
 from corvidae.tool_collection import ToolCollectionPlugin
 
@@ -12,7 +13,7 @@ from corvidae.tools.web import web_fetch, web_fetch_with_session, web_search
 
 
 class CoreToolsPlugin(CorvidaePlugin):
-    depends_on = frozenset({"tools"})
+    depends_on = frozenset({"tools", "spill"})
 
     def __init__(self, pm=None) -> None:
         self.pm = pm  # May be None; on_init will set it via CorvidaePlugin.on_init
@@ -55,16 +56,25 @@ class CoreToolsPlugin(CorvidaePlugin):
 
         # Declare the timeout shell really uses, read live at dispatch (R4).
         shell.own_timeout = lambda: plugin._shell_timeout  # type: ignore[attr-defined]
+        # A shell command can read a notification spill file.
+        shell.reads_spill_files = True  # type: ignore[attr-defined]
 
         async def read_file(path: str, offset: int | None = None, length: int | None = None) -> str:
             """Read a file; offset and length are in characters, and a ranged result's header names the next offset."""
             from corvidae.tools.files import read_file as _read_file_impl
+            # A spill file past its age is gone; say so rather than "not found".
+            stale = get_dependency(plugin.pm, "spill", NotificationSpill).stale_pointer_error(path)
+            if stale is not None:
+                return stale
             # An unranged read is untouched; a ranged one is clamped to the
             # live result cap so it is never truncated after the fact.
             if offset is None and length is None:
                 return await _read_file_impl(path, max_size=plugin._max_file_read_bytes)
             max_chars = get_dependency(plugin.pm, "tools", ToolCollectionPlugin).max_result_chars
             return await _read_file_impl(path, offset=offset, length=length, max_chars=max_chars)
+
+        # read_file reads notification spill files.
+        read_file.reads_spill_files = True  # type: ignore[attr-defined]
 
         async def web_fetch(url: str) -> str:
             """Fetch a URL and return its text content."""

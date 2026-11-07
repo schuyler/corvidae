@@ -710,6 +710,16 @@ Per transport:
     only by static declaration (which annotation keys the model may see,
     which tools return untrusted output), and the kernel owns the format,
     the fence and the sanitizing floor, so no plugin can weaken them.
+    A notification too long to show inline is cut by the plugin that
+    sends it, and the full text is spilled to a file through one kernel
+    service, so every plugin cuts the same way. The header, not the
+    payload, says the item was cut: how much is shown, the full length in
+    characters, and, where the channel's tool set can read the file, the
+    spill file's path, which the agent reads on demand. Which tools can
+    read spill files is a tool plugin's static declaration; the kernel
+    names none. The marker is the kernel's and is derived from the stored
+    row like the rest of the header. Content read back from a spill file
+    is not yet fenced (#571).
 
 ### 3.4 Persistence
 
@@ -750,6 +760,17 @@ Per transport:
    (principle 5). The log is compacted: finished entries retire and are
    removed, so it stays small. It is not the conversation log, and
    principle 4 does not bind it.
+9. Spilled notification content (§3.3.11) is written once per item,
+   however many channels it reaches, and only when at least one of them
+   can read it, to a configured directory, under a name that carries
+   nothing a sender controls. A spill is capped in size before anything
+   is written; content over the cap is spilled up to it and the header
+   says so. Spill files older than a configured age are deleted at
+   startup and periodically; the stored row's pointer outlives its file,
+   and reading a removed spill file returns an error naming the path and
+   the age policy. A spill that cannot be written leaves the notification
+   delivered with its inline excerpt and a header saying the full text
+   was not saved, and logs a warning (principle 5).
 
 ### 3.5 Tools
 

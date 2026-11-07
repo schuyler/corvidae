@@ -1358,7 +1358,10 @@ role:
   `channel_name` and `addressed` (from `channel.addressed` at admission), set
   in `on_message`;
 - notification: `origin_channel` and `origin_trace`, read from the
-  attribution of the code that called `on_notify`;
+  attribution of the code that called `on_notify`; and, for a notification
+  the spill service cut, `cut_shown`, `cut_total`, `spill_path`,
+  `spill_chars` and `spill_failed` (see [Notification
+  spill](#notification-spill-spillpy));
 - tool result: `tool` and `target`, the dispatched call's name and the first
   argument naming another registered channel, read from the call's
   row in the window (`on_notify` with a `tool_call_id`, and
@@ -1371,7 +1374,9 @@ it on the row under `corvidae_provenance` (`encode`: set fields only, plus
 an `annotations` entry holding only the keys a plugin declared in
 `model_visible_annotations`; the Agent reads the declarations once in
 `_start_plugin`). Other annotations are never persisted into the row or
-shown to the model. A stored record that does not decode renders as a row
+shown to the model. `decode` checks each field's type (strings, booleans for
+`addressed` and `spill_failed`, integers for the three counts; a boolean is
+not an integer) and rejects the whole record on a mismatch. A stored record that does not decode renders as a row
 without provenance and logs a warning naming the row.
 
 `build_prompt` renders it through `provenance.frame` on every build; the
@@ -1387,6 +1392,15 @@ in code:
   the one computed for the row before it. The message text is unfenced.
 - A notification gets `[metadata: notification from your own activity on
   <channel> (trace <id>); not from this channel's human]`.
+- A cut notification gets a second line, the cut line, in one of four
+  wordings: `[metadata: cut to the first N of M characters; the full text is
+  in <path>]`; `[metadata: cut to the first N of M characters; the first S
+  characters are in <path>]` when the file holds less than the whole text
+  (the spill cap); `[metadata: cut to the first N of M characters; the full
+  text was not saved]` when the write failed; and `[metadata: cut to the
+  first N of M characters]` when the channel has no tool that can read the
+  file. The kernel builds it from the stored fields, so no plugin writes or
+  forges it; the path goes through `clean_value`.
 - A cross-channel tool result gets `[metadata: result of your own <tool>
   action on <target>; ...]`, in the tool message itself so call and result
   stay adjacent.
@@ -1412,6 +1426,83 @@ Items the kernel builds carry no attribution of their own: the queue
 consumer runs in an empty `contextvars.Context`, so a notification
 enqueued first from another channel's turn does not inherit that turn's
 attribution.
+
+## Notification spill (`spill.py`)
+
+A notification too long to show inline is cut, and its full text is written
+once to a file the agent reads on demand. `NotificationSpill` is a kernel
+service, not an entry-point plugin: `Runtime.start()` registers it as
+`"spill"` beside `"registry"`, `"clock"` and `"idle"`, and listing it in
+`plugins.disabled` fails dependency validation. It depends on `"clock"` and
+`"tools"`.
+
+The plugin that produces the text chooses the limit; the service applies it.
+A plugin that cuts calls `spill.notify(channels, source=..., text=...,
+annotations=..., limit=...)` instead of firing `on_notify` itself
+(`webhook_notify` passes `max_payload_chars`). `notify` returns the file path,
+or `None` when nothing was written.
+
+- **Text that fits** (`len(text) <= limit`) goes to each channel through
+  `on_notify` unchanged, with no cut recorded.
+- **Longer text** is cut to `limit` characters. The service decides per
+  channel whether the pointer is offered: only where an enabled tool declares
+  `reads_spill_files = True` (`read_file` and `shell` do) on that channel,
+  after `tool_policy`'s per-channel disabled set. If any channel qualifies,
+  one file holds the text, cut to `notification_spill_max_chars`, and every
+  channel's row records its own cut: a pointer where it can read the file,
+  "not saved" where it could have but the write failed, neither where it
+  cannot read it. With no tool registry yet (a delivery before the tool
+  collection is built), no channel counts as a reader.
+- **The file** is `<uuid4 hex>.txt` in the spill directory, created
+  exclusively with mode 0600 and written as UTF-8 with replacement, so a lone
+  surrogate costs a character's worth of `?` instead of the delivery and the
+  header's counts hold. The name carries nothing the sender controls. The
+  directory is created on demand, so removing it while the daemon runs costs
+  nothing.
+- **A failed write** (`OSError`) is logged at WARNING naming the directory
+  and the remedy; the notification is delivered cut, with the "not saved"
+  wording. Delivery is never lost to the spill.
+
+The service tells `Agent.on_notify` what it did through a context variable,
+`current_cut()`, set around each channel's `on_notify` and reset after it.
+`Agent._notification_metadata` copies it into `ItemMetadata`, so the header
+comes from the stored row and a plugin cannot assert it. An `on_notify`
+hookimpl must not spawn a task or fire `on_notify` again, or it carries the
+cut into that context; `Agent.on_notify` is the only one, and does neither.
+
+**Cleanup.** `on_start` sweeps the directory, then arms an hourly
+`Clock.call_later` timer (`notification-spill-cleanup`) that re-arms itself
+before it sweeps, so a failed sweep never stops it. The sweep deletes only
+regular files named `<32 hex>.txt` whose mtime is older than
+`notification_spill_max_age_days`; a missing directory is not an error, and an
+undeletable file logs a WARNING and the sweep goes on; an unlistable directory
+logs a WARNING and that sweep stops, but the timer goes on.
+The age is the only policy: nothing bounds the directory's total size, so its
+worst case is the cap times the notification rate times the age.
+
+**Reading it back.** `read_file` takes any path, so the agent pages through a
+spill file with `offset` and `length`. `read_file` asks the service first: a
+missing path inside the spill directory (a file the sweep deleted, or a name
+that never existed) returns an error saying it was a spill file, that spill
+files are deleted after the configured days, and which key sets that. The
+check is lexical (`os.path.abspath`), so a path with a NUL byte cannot raise.
+
+**Configuration** (`daemon`, applied at restart):
+
+- `notification_spill_dir`, default `state/notification-spill`, resolved
+  against the config directory. It is refused at startup when `clean_value`
+  would alter the resolved path, because the header renders the path through
+  `clean_value` and a pointer `read_file` cannot open is worse than none.
+- `notification_spill_max_chars`, default 1000000: a positive integer.
+- `notification_spill_max_age_days`, default 7: a positive number (booleans
+  and NaN are rejected).
+
+A bad value raises `ValueError` naming the key, the value and what is
+accepted. See [configuration.md](configuration.md#daemon--daemon-level-settings).
+
+Logging: INFO when a cut notification is spilled (characters, path, channel
+counts) and when a sweep deletes files; WARNING for a failed write, listing or
+delete.
 
 ## PersistencePlugin
 
@@ -1653,7 +1744,9 @@ running callbacks that way.
 
 The Agent uses the clock for turn retries: it schedules a
 `turn-retry:<channel id>` timer after a backend-unreachable failure (see
-Message processing).
+Message processing). The notification spill service uses it for its hourly
+cleanup of aged spill files, and for the wall time those files age against
+([Notification spill](#notification-spill-spillpy)).
 
 **IdleTracker.** It answers "has this channel been quiet for N seconds?" and
 "has the whole system?". A channel is busy from `note_activity` until
@@ -2809,8 +2902,8 @@ Registered via `CoreToolsPlugin` in `tools/__init__.py`:
 
 | Tool | File | Purpose |
 |------|------|---------|
-| `shell(command)` | `tools/shell.py` | Execute shell command, 30s timeout (configurable). On cancellation (the call bound, shutdown) it kills and reaps its `/bin/sh` process, then re-raises; `task_pipeline` inherits this. Grandchildren of the shell are not killed. Its companion `run_shell` returns the exit code beside the output, for callers that must know whether the command succeeded (#105). |
-| `read_file(path, offset, length)` | `tools/files.py` | Read file (1MB limit, configurable), or a character range of any size behind a header naming the range, total and next offset; a range is clamped to `tools.max_result_chars` |
+| `shell(command)` | `tools/shell.py` | Execute shell command (declares `reads_spill_files`), 30s timeout (configurable). On cancellation (the call bound, shutdown) it kills and reaps its `/bin/sh` process, then re-raises; `task_pipeline` inherits this. Grandchildren of the shell are not killed. Its companion `run_shell` returns the exit code beside the output, for callers that must know whether the command succeeded (#105). |
+| `read_file(path, offset, length)` | `tools/files.py` | Read file (declares `reads_spill_files`; a missing path in the spill directory gets the stale-spill error; 1MB limit, configurable), or a character range of any size behind a header naming the range, total and next offset; a range is clamped to `tools.max_result_chars` |
 | `write_file(path, content)` | `tools/files.py` | Write file, creates parent dirs |
 | `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation (configurable) |
 | `web_search(query, max_results)` | `tools/web.py` | Search via DuckDuckGo, default 8 results (configurable) |
@@ -3562,13 +3655,17 @@ config.
 
 `WebhookNotifyPlugin` subscribes one handler to each endpoint in
 `webhook_notify.endpoints`. For a delivery it serialises the payload as compact
-JSON (`ensure_ascii=False`), cuts it to `max_payload_chars` and calls
-`on_notify` once per target channel, resolved at delivery with
-`resolve_persisted_channel`; a `ChannelNotReady` target is skipped with a
-`WARNING`. The notification carries `source` and `annotations["origin"]` set
-to `webhook:<endpoint>` (minted by the ingress), and a cut payload adds
-`annotations["truncated"]`. Both keys are declared model-visible, so the kernel
-renders them in the header outside the payload fence. Configuration is in
+JSON (`ensure_ascii=False`), resolves each target channel at delivery with
+`resolve_persisted_channel` (a `ChannelNotReady` target is skipped with a
+`WARNING`) and makes one `spill.notify` call with the resolved channels and
+`limit=max_payload_chars`. The service cuts a longer payload, writes the full
+text to a spill file where a channel can read it, and notifies each channel
+([Notification spill](#notification-spill-spillpy)); the plugin writes no cut
+marker. The notification carries `source` and `annotations["origin"]` set to
+`webhook:<endpoint>` (minted by the ingress); `origin` is declared
+model-visible, so the kernel renders it in the header outside the payload
+fence, and a cut payload gets its cut line there too. The plugin depends on
+`"spill"`. Configuration is in
 [configuration.md](configuration.md#webhook_notify--webhook-deliveries-as-notifications).
 
 ### ACP (`channels/acp.py`)
@@ -3747,8 +3844,9 @@ Relative paths resolve against the directory containing `agent.yaml`.
 `Runtime.start()` (`runtime.py`) registers plugins in two stages, not a
 fixed hand-written order:
 
-1. Three kernel objects are registered by hand: `ChannelRegistry` as
-   `"registry"`, the `Clock` as `"clock"` and the `IdleTracker` as `"idle"`
+1. Four kernel objects are registered by hand: `ChannelRegistry` as
+   `"registry"`, the `Clock` as `"clock"`, the `IdleTracker` as `"idle"` and
+   the `NotificationSpill` as `"spill"`
    (`self.pm.register(..., name=...)` in `Runtime.start()`).
 2. Every other plugin loads from the `corvidae` setuptools entry-point
    group: `self.pm.load_setuptools_entrypoints("corvidae")`
@@ -3822,6 +3920,9 @@ WARNING for an impl of a hook owned by an absent optional dependency.
 
 ```
 Agent               → "registry", "task", "llm", "tools"
+NotificationSpill   → "clock", "tools"  (kernel object, registered as "spill")
+CoreToolsPlugin     → "tools", "spill"
+WebhookNotifyPlugin → "registry", "spill"; soft-uses "webhook"
 CLIPlugin           → "registry"    (ChannelRegistry)
 IRCPlugin           → "registry"    (ChannelRegistry)
 WebPlugin           → "registry"    (ChannelRegistry); looks up "agent" and "persistence" lazily
@@ -3843,7 +3944,7 @@ SchedulerPlugin     → "registry", "persistence", "clock"
 
 Plugins with `depends_on = set()` (declared but empty):
 `LLMPlugin`, `ToolCollectionPlugin`, `PersistencePlugin`,
-`CoreToolsPlugin`, `McpClientPlugin`, `RuntimeSettingsPlugin`, `JsonlLogPlugin`,
+`McpClientPlugin`, `RuntimeSettingsPlugin`, `JsonlLogPlugin`,
 `TaskPlugin`, `MetricsPlugin`, `MetricsJsonlPlugin`, `ConfigWatcherPlugin`,
 `FunnelPlugin` (cognition extra).
 
@@ -3876,6 +3977,7 @@ corvidae/
 ├── persistence.py        # PersistencePlugin (DB lifecycle, conversation init)
 ├── clock.py              # Clock, Timer (kernel clock: now, sleep, call_later, call_at, call_soon)
 ├── idle.py               # IdleTracker, IdleWatch (per-channel and system quiet)
+├── spill.py              # NotificationSpill (cut notifications spilled to files), Cut, current_cut
 ├── thinking.py           # ThinkingPlugin, strip_thinking(), strip_reasoning_content()
 ├── compaction.py         # CompactionPlugin
 ├── fork.py               # fork prompt builder, cut snap, agent.forks parser (#51)

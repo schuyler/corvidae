@@ -87,22 +87,33 @@ _RANGE_HEADER = re.compile(
 )
 
 
-async def _ranged_read_file(tools_config: dict | None = None):
+async def _ranged_read_file(tools_config: dict | None = None, daemon: dict | None = None):
     """Return the registered read_file callable and the ToolCollectionPlugin.
 
-    Ranged calls look up the "tools" plugin for max_result_chars, so this
-    builds a real plugin manager with both plugins registered.
+    Ranged calls look up the "tools" plugin for max_result_chars, and every
+    call looks up the "spill" service for the stale-pointer check, so this
+    builds a real plugin manager with the tools, the spill service on a
+    FakeClock, and CoreToolsPlugin registered, and the tool registry built.
+    ``daemon`` is the config's daemon section (the spill keys).
     """
     from corvidae.hooks import create_plugin_manager
+    from corvidae.spill import NotificationSpill
     from corvidae.tool_collection import ToolCollectionPlugin
+    from fake_clock import install_kernel_clock
 
-    config = {"tools": tools_config or {}}
+    config = {"tools": tools_config or {}, "daemon": daemon or {}}
     pm = create_plugin_manager()
+    install_kernel_clock(pm, started=False)
     collection = ToolCollectionPlugin(pm)
     pm.register(collection, name="tools")
+    spill = NotificationSpill()
+    pm.register(spill, name="spill")
     await collection.on_init(pm=pm, config=config)
+    await spill.on_init(pm=pm, config=config)
     core = CoreToolsPlugin(pm)
+    pm.register(core, name="core_tools")
     await core.on_init(pm=pm, config=config)
+    await collection.rebuild_registry()
     return _tool_fns(core)["read_file"], collection
 
 
@@ -213,6 +224,58 @@ class TestReadFileRange:
         assert refused.startswith("Error: file too large")
         assert str(f) in refused
         assert "pass offset and length to read it in ranges" in refused
+
+
+# ---------------------------------------------------------------------------
+# Notification spill files (#558): read_file and shell can read them, and a
+# removed one fails naming the path and the age policy.
+# ---------------------------------------------------------------------------
+
+
+def test_read_file_and_shell_declare_spill_reading():
+    """The read_file and shell tools declare, statically, that they read spill files."""
+    from corvidae.tool import declares_spill_reader
+
+    fns = _tool_fns(CoreToolsPlugin(None))
+    assert declares_spill_reader(fns["read_file"])
+    assert declares_spill_reader(fns["shell"])
+
+
+async def test_read_file_pages_a_spill_file(tmp_path):
+    """read_file(pointer, offset, length) returns that range of the
+    spilled text."""
+    from corvidae.channel import ChannelRegistry
+
+    fn, collection = await _ranged_read_file(daemon={"notification_spill_dir": str(tmp_path)})
+    spill = collection.pm.get_plugin("spill")
+    text = "".join(chr(ord("a") + i % 26) for i in range(5000))
+    channel = ChannelRegistry().get_or_create("irc", "#a")
+    pointer = await spill.notify([channel], source="test", text=text, annotations=None, limit=100)
+
+    result = await fn(pointer, offset=1000, length=500)
+    assert result == f"[characters 1000-1500 of 5000 in {pointer}; next offset 1500]\n" + text[1000:1500]
+
+
+async def test_read_file_on_a_removed_spill_file_names_path_and_age(tmp_path):
+    """The read_file tool on a missing path inside the spill directory names
+    the path and the age policy, and its config key."""
+    fn, _ = await _ranged_read_file(daemon={"notification_spill_dir": str(tmp_path),
+                                            "notification_spill_max_age_days": 3})
+    missing = tmp_path.resolve() / ("0" * 32 + ".txt")
+
+    result = await fn(str(missing))
+    assert result.startswith(f"Error: file not found: {missing}")
+    assert "3 days" in result
+    assert "daemon.notification_spill_max_age_days" in result
+
+
+async def test_read_file_elsewhere_keeps_file_not_found(tmp_path):
+    """A missing path outside the spill directory keeps read_file's
+    own file-not-found message."""
+    fn, _ = await _ranged_read_file(daemon={"notification_spill_dir": str(tmp_path / "spill")})
+    missing = tmp_path / "other.txt"
+
+    assert await fn(str(missing)) == f"Error: file not found: {missing}"
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,9 @@ daemon:
   # completed_task_buffer: 100      # completed tasks retained in memory
   # idle_cooldown_seconds, idle_poll_interval: removed; either one is a config
   # error. Idle work runs on the kernel clock, per plugin.
+  # notification_spill_dir: state/notification-spill   # full text of cut notifications, mode 0600
+  # notification_spill_max_chars: 1000000   # most characters written to one file
+  # notification_spill_max_age_days: 7      # files older than this are deleted; no size limit
 
 # Agent-level defaults — apply to all channels unless overridden (optional)
 agent:
@@ -222,7 +225,7 @@ agent:
 # Webhook notifications: send each webhook delivery to channels (needs the
 # webhook-notify extra and the webhook block above); docs/configuration.md.
 # webhook_notify:
-#   max_payload_chars: 8000            # longer payloads are cut and marked
+#   max_payload_chars: 8000            # longer payloads are cut, the rest spilled to a file
 #   endpoints:
 #     github: [irc:#corvidae]          # endpoint name -> channel ids
 #     siri: [signal:+15551234567]

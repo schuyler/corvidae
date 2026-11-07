@@ -154,7 +154,11 @@ async def test_registers_tool_through_the_real_pm():
    tool call id). Never call blocking code (`requests`, `time.sleep`, a sync DB
    driver) from a tool: wrap it in `asyncio.to_thread`. Do not swallow
    `CancelledError`; clean up and re-raise.
-7. **Inject channel work with `on_notify`**, passing `tool_call_id=None`. Origin
+7. **Inject channel work with `on_notify`**, passing `tool_call_id=None`. If you
+   cut the text first, call `spill.notify` (`depends_on = frozenset({"spill"})`)
+   instead: it cuts, writes the full text to a file, and the kernel marks the
+   header, so a cut payload never reaches the model without saying so
+   (plugin-guide, "Spilling a long notification"). Origin
    is a convention in `annotations["origin"]`, and cognition plugins key on it (critique,
    gates, funnel, appraisal, outcome log): when you introduce a new origin,
    read those consumers and say in your plugin docstring what each does with it.

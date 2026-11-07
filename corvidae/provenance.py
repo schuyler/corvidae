@@ -50,9 +50,28 @@ class ItemMetadata:
     # than this one that its arguments named
     tool: str | None = None
     target: str | None = None
+    # role system (notification): how the kernel cut the text, and where the
+    # full text went (spill_failed is True or absent)
+    cut_shown: int | None = None
+    cut_total: int | None = None
+    spill_path: str | None = None
+    spill_chars: int | None = None
+    spill_failed: bool | None = None
 
 
 _FIELDS = frozenset(f.name for f in dataclasses.fields(ItemMetadata))
+_BOOL_FIELDS = frozenset({"addressed", "spill_failed"})
+_INT_FIELDS = frozenset({"cut_shown", "cut_total", "spill_chars"})
+
+
+def _well_typed(name: str, value: object) -> bool:
+    """Whether ``value`` has the type ItemMetadata field ``name`` stores."""
+    if name in _BOOL_FIELDS:
+        return isinstance(value, bool)
+    if name in _INT_FIELDS:
+        # type() is int, not isinstance: True is not a length.
+        return type(value) is int
+    return isinstance(value, str)
 
 
 def encode(metadata: ItemMetadata, annotations: Mapping[str, str]) -> dict:
@@ -73,7 +92,7 @@ def decode(value: object) -> tuple[ItemMetadata, dict[str, str]] | None:
         not isinstance(annotations, dict)
         or not all(isinstance(k, str) and isinstance(v, str) for k, v in annotations.items())
         or not fields.keys() <= _FIELDS
-        or not all(isinstance(v, bool if k == "addressed" else str) for k, v in fields.items())
+        or not all(_well_typed(k, v) for k, v in fields.items())
     ):
         return None
     return ItemMetadata(**fields), annotations
@@ -130,7 +149,8 @@ def _nonce(msg: dict, content: str, fence_key: bytes | None) -> str:
     """The fence nonce: HMAC of the stored row id, or of the text for an unsaved row."""
     row_id = msg.get("_db_id")
     subject = f"message_log:{row_id}" if isinstance(row_id, int) else f"text:{content}"
-    return hmac.new(fence_key, subject.encode(), hashlib.sha256).hexdigest()[:16]
+    # surrogatepass: an unsaved row's text may hold a lone surrogate (JSON "\ud83d").
+    return hmac.new(fence_key, subject.encode(errors="surrogatepass"), hashlib.sha256).hexdigest()[:16]
 
 
 def _person_header(meta: ItemMetadata, channel_id: str) -> str | None:
@@ -153,6 +173,20 @@ def _person_header(meta: ItemMetadata, channel_id: str) -> str | None:
     # Fixed words: no transport text reaches the clause.
     addressed = "" if meta.addressed is None else f"; addressed: {'yes' if meta.addressed else 'no'}"
     return f"[metadata: {sender}; {where}{addressed}]"
+
+
+def _cut_line(meta: ItemMetadata) -> str:
+    """The ``metadata:`` line saying a notification was cut and where the rest is."""
+    line = f"[metadata: cut to the first {meta.cut_shown} of {meta.cut_total} characters"
+    if meta.spill_path:
+        path = clean_value(meta.spill_path)
+        if meta.spill_chars == meta.cut_total:
+            line += f"; the full text is in {path}"
+        else:
+            line += f"; the first {meta.spill_chars} characters are in {path}"
+    elif meta.spill_failed:
+        line += "; the full text was not saved"
+    return line + "]"
 
 
 def frame(
@@ -190,6 +224,8 @@ def frame(
         else:
             what = "notification"
         lines = [f"[metadata: {what}; {_NOT_HUMAN}]"]
+        if meta.cut_total is not None:
+            lines.append(_cut_line(meta))
     elif role == "tool" and meta.target:
         lines = [
             f"[metadata: result of your own {clean_value(meta.tool or '')} action on "

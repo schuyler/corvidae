@@ -1097,6 +1097,25 @@ as a fenced notification, so whoever can post to the endpoint chooses text the
 model reads there. Each delivery spends one main-model turn per target
 channel, and provider-side event filtering is the only volume control.
 
+A payload longer than `max_payload_chars` is cut, and the kernel's
+notification spill service writes the full text to a file
+(`daemon.notification_spill_dir`) where a channel can read it. That puts
+untrusted bytes on disk at sizes the sender influences, up to
+`daemon.notification_spill_max_chars` per notification, and the only bounds
+are that cap and the age policy (`notification_spill_max_age_days`, checked at
+startup and hourly): nothing limits the directory's total size, so a sender
+that floods an endpoint fills it at the cap times the rate until the age
+catches up. Files are mode 0600 and named by a random UUID, so a name carries
+nothing the sender controls and the service only ever deletes names of that
+shape. The header offers the path only on a channel where an enabled tool
+declares it reads spill files (`read_file`, `shell`). What the agent reads
+back is not fenced: the header's pointer is kernel text, but the file's
+contents arrive as an ordinary `read_file` result, without the notification's
+payload fence (#571). The spill directory is not inside any tool root
+(`read_file` has none until #444), so the file is reachable the same way any
+other path is, and the agent can read it whether or not a header pointed at
+it.
+
 ### Smaller things
 
 - Untrusted text in a chat channel can talk the agent into silence. Where
