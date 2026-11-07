@@ -42,6 +42,7 @@ class ItemMetadata:
     sender: str | None = None
     sender_name: str | None = None
     channel_name: str | None = None
+    addressed: bool | None = None
     # role system (notification): the attribution context of the code that called on_notify
     origin_channel: str | None = None
     origin_trace: str | None = None
@@ -72,7 +73,7 @@ def decode(value: object) -> tuple[ItemMetadata, dict[str, str]] | None:
         not isinstance(annotations, dict)
         or not all(isinstance(k, str) and isinstance(v, str) for k, v in annotations.items())
         or not fields.keys() <= _FIELDS
-        or not all(isinstance(v, str) for v in fields.values())
+        or not all(isinstance(v, bool if k == "addressed" else str) for k, v in fields.items())
     ):
         return None
     return ItemMetadata(**fields), annotations
@@ -133,8 +134,9 @@ def _nonce(msg: dict, content: str, fence_key: bytes | None) -> str:
 
 
 def _person_header(meta: ItemMetadata, channel_id: str) -> str | None:
-    """The #513 wording behind a ``metadata:`` label, or None with no names."""
-    if not meta.sender_name and not meta.channel_name:
+    """The #513 wording behind a ``metadata:`` label, or None with no names
+    and no addressing."""
+    if not meta.sender_name and not meta.channel_name and meta.addressed is None:
         return None
     sender_id = clean_value(meta.sender or "")
     sender = (
@@ -148,7 +150,9 @@ def _person_header(meta: ItemMetadata, channel_id: str) -> str | None:
         where = f"channel: {clean_value(meta.channel_name, NAME_MAX)} (id {clean_value(channel_id)})"
     else:
         where = f"channel: id {clean_value(channel_id)}"
-    return f"[metadata: {sender}; {where}]"
+    # Fixed words: no transport text reaches the clause.
+    addressed = "" if meta.addressed is None else f"; addressed: {'yes' if meta.addressed else 'no'}"
+    return f"[metadata: {sender}; {where}{addressed}]"
 
 
 def frame(

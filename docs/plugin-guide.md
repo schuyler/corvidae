@@ -883,14 +883,19 @@ reader could use sets it, for the model to read and for nothing else:
 ```python
 channel.name            # "#general", or "thread merge-order in #general", or None
 channel.sender_names    # {"408709225498542081": "schuyler"} — ids to display names
+channel.addressed       # True / False: did this message address the agent? None: not known
 ```
 
-Both are optional and both are data: when either is set, the prompt carries a
-system message `[metadata: sender: schuyler (id 408...); channel: #general (id irc:#general)]`
+All are optional. The names are data; `addressed` renders as the fixed words
+`addressed: yes` or `addressed: no`, and None renders nothing. A transport
+that sets `addressed` assigns it before every `on_message` call on that
+channel and dispatches that channel's messages one at a time; core reads it
+once, at admission. When any is set, the prompt carries a
+system message `[metadata: sender: schuyler (id 408...); channel: #general (id irc:#general); addressed: yes]`
 before the person's message, which is left exactly as the person typed it.
 `build_prompt` renders it per person row and drops it when it repeats the
 header of the row before, so a burst from one sender carries one. A transport
-that sets neither gets no header. `sender_names` is filled by the transport
+that sets none gets no header. `sender_names` is filled by the transport
 before it calls `on_message`; core reads it once, at admission, and stores it
 in the row's provenance record ([design.md](design.md#provenance-header-and-fence)).
 

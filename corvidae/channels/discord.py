@@ -653,13 +653,18 @@ class DiscordPlugin(TransportPlugin):
         text = message.content or ""
         attachments = list(message.attachments or ())
 
+        # Whether the bot's own user is mentioned (not merely @everyone/@here,
+        # which mentioned_in would accept); None where there is no such
+        # concept: a DM, or a bot user id not yet known.
+        addressed = None
+        if not is_dm and bot_user_id is not None:
+            addressed = any(u.id == bot_user_id for u in message.mentions)
         if not is_dm:
             # With require_mention (the default) the bot only reacts when it
-            # is itself mentioned (not merely @everyone/@here, which
-            # mentioned_in would accept). Without it, every guild message
+            # is itself mentioned. Without it, every guild message
             # continues; the allowlist gate still refuses other senders.
             if self._require_mention_for(message.channel):
-                if not any(u.id == bot_user_id for u in message.mentions):
+                if not addressed:
                     # DEBUG: this fires on every line people send each other
                     # here. A thread's parent entry is what decides, so name it
                     # too, or an operator looks up the thread id and finds
@@ -743,6 +748,7 @@ class DiscordPlugin(TransportPlugin):
             if took_slot:
                 await self._begin_typing(channel)
 
+            channel.addressed = addressed
             await self.pm.ahook.on_message(
                 channel=channel, sender=sender, text=text, trace_id=trace_id,
             )

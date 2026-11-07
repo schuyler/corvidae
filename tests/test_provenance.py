@@ -308,7 +308,7 @@ async def test_every_kernel_path_sets_metadata_that_annotations_cannot_forge(sta
         ItemMetadata(sender="1", sender_name="Ann", channel_name="home"),
         ItemMetadata(sender="1", sender_name="Ann", channel_name="home", addressed=True),
         ItemMetadata(origin_channel="signal:b", origin_trace="t-9"), ItemMetadata(), ItemMetadata()]
-    assert items[1].annotations == {"origin": "agent_send", "origin_channel": "x", "target": "y"}
+    assert items[2].annotations == {"origin": "agent_send", "origin_channel": "x", "target": "y"}
     with pytest.raises(dataclasses.FrozenInstanceError):
         items[0].metadata.sender = "2"
 

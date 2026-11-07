@@ -483,6 +483,7 @@ class Agent(CorvidaePlugin):
                 sender=sender,
                 sender_name=channel.sender_names.get(sender),
                 channel_name=channel.name,
+                addressed=channel.addressed,
             ),
         )
         # The gate admitted the item: the channel is busy from here.
