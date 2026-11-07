@@ -683,6 +683,10 @@ class TestInboundFiltering:
             assert drops, "the drop left no trace at all"
             assert all(r.levelno == logging.DEBUG for r in drops)
             assert str(CHAN_ID) in drops[0].getMessage()
+            # Who was turned away, not only where: the PRD asks for enough to
+            # tell a misconfigured allowlist from a quiet channel.
+            assert str(AUTH_ID) in drops[0].getMessage()
+            assert drops[0].__dict__.get("sender") == str(AUTH_ID)
             assert not [
                 r for r in caplog.records
                 if r.levelno >= logging.INFO and "unaddressed" in r.getMessage()

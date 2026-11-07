@@ -436,7 +436,10 @@ The contract every transport meets:
    already tell was not for the agent — an un-mentioned line in a channel
    that requires a mention — because passing it on would put other people's
    chatter through the gates, the appraisal and the stores for nothing. Such
-   a drop is expected traffic and is recorded for diagnosis only. Web
+   a drop is expected traffic and is recorded for diagnosis only, naming the
+   channel and the sender so an operator can tell a channel that answers
+   unaddressed from one that does not, and a misconfigured allowlist from a
+   room talking to itself. Web
    substitutes a bearer token for the allowlist; the token is the
    authorization. A sender the agent has messaged first, one to one, is
    admitted on that channel (§3.5.9).

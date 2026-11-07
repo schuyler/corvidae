@@ -665,9 +665,14 @@ class DiscordPlugin(TransportPlugin):
                     # send each other (#526). The channel id is enough to see
                     # which channel answers unaddressed and which does not.
                     logger.debug(
-                        "discord: unaddressed message in channel %s, not admitted",
+                        "discord: unaddressed message in channel %s from %s, "
+                        "not admitted",
                         message.channel.id,
-                        extra={"channel": f"discord:{message.channel.id}"},
+                        str(author.id),
+                        extra={
+                            "channel": f"discord:{message.channel.id}",
+                            "sender": str(author.id),
+                        },
                     )
                     return
                 if not text and not attachments:
