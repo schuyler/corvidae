@@ -454,6 +454,7 @@ class SchedulerPlugin(CorvidaePlugin):
     """
 
     depends_on = frozenset({"registry", "persistence", "clock"})
+    model_visible_annotations = frozenset({"origin"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:

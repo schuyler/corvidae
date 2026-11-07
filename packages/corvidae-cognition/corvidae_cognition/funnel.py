@@ -68,6 +68,7 @@ class FunnelPlugin(CorvidaePlugin):
     """The single admission point for tail CONTEXT entries."""
 
     depends_on = frozenset()
+    model_visible_annotations = frozenset({"origin"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:

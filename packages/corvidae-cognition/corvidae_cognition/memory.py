@@ -549,6 +549,7 @@ async def build_catchup_segments(
         seg_ids = {r[0] for r in seg_rows if r[2] != "summary"}
         window = ContextWindow(channel_id)
         window.system_prompt = inputs.system_prompt
+        window.fence_key = inputs.fence_key
         # Shallow copies: the policy's in-place stripping must not alter rows
         # a later segment reuses as context.
         window.messages = [dict(m) for m in run_view[:own[-1] + 1]]

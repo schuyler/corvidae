@@ -27,7 +27,7 @@ def _view_inputs(max_tokens: int = 100_000):
     well above the test ranges, the system mid role and a no-op policy."""
     from corvidae.fork import ViewInputs
 
-    return ViewInputs("IDENTITY\n\nREGISTER", max_tokens, "system", lambda messages: None)
+    return ViewInputs("IDENTITY\n\nREGISTER", max_tokens, "system", lambda messages: None, b"k" * 32)
 
 
 def _prompt_file(tmp_path) -> str:

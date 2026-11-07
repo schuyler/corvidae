@@ -4,7 +4,7 @@ HeartbeatPlugin no longer edits the window, so each beat extends the previous
 one's prompt and the kernel's compaction (with its consolidation fork) is the
 only thing that shortens it. A beat is simulated the way HeartbeatPlugin._beat
 produces it: an untargeted ``on_notify(source="heartbeat")`` on
-``internal:heartbeat``, which the real Agent turns into a ``[heartbeat]``
+``internal:heartbeat``, which the real Agent turns into a
 system row. The Agent, persistence and task plugins are real; only the LLM
 client is a stub, so there is no network. The prompt each call sends is
 recorded at call time.
@@ -13,6 +13,7 @@ recorded at call time.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -33,12 +34,20 @@ SYSTEM_PROMPT = "You are a test assistant."
 
 def beat_rows(i: int, text: str | None = None) -> list[str]:
     """The two contents one simple beat leaves in the window."""
-    return [f"[heartbeat]\n\n{text or f'beat {i}'}", f"reply {i}"]
+    return [text or f"beat {i}", f"reply {i}"]
+
+
+def unframe(content: str) -> str:
+    """A rendered notification's payload, without its header and fence."""
+    return re.sub(
+        r"\A\[metadata:[^\n]*\n\[payload \w+ begins\]\n(.*)\n\[payload \w+ ends\]\Z",
+        r"\1", content, flags=re.S,
+    )
 
 
 def notification(i: int) -> str:
     """The content of beat i's notification row."""
-    return f"[heartbeat]\n\nbeat {i}"
+    return f"beat {i}"
 
 
 class Rig:
@@ -55,14 +64,14 @@ class Rig:
 
     def contents(self, k: int) -> list:
         """Contents of prompt k without its system prompt."""
-        return [m["content"] for m in self.prompts[k][1:]]
+        return [unframe(m["content"]) for m in self.prompts[k][1:]]
 
     async def chat(self, messages, *args, **kwargs) -> dict:
         """Record the prompt, then answer from the script or with 'reply N'."""
         self.prompts.append([dict(m) for m in messages])
         if self.script is not None:
             return self.script.pop(0)
-        last = messages[-1]["content"]
+        last = unframe(messages[-1]["content"])
         return _make_text_response(f"reply {last.rsplit(' ', 1)[-1]}")
 
     async def beat(self, i: int, text: str | None = None, channel=None) -> None:

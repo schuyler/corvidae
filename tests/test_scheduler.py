@@ -674,7 +674,8 @@ class TestWithAgent:
             messages = client.chat.await_args.args[0]
             last = messages[-1]
             assert last["role"] == role
-            assert last["content"].startswith("[reminder]\n\nA reminder you set")
+            assert last["content"].startswith("[metadata: notification;")
+            assert "A reminder you set" in last["content"]
             assert "«TOKEN-9»" in last["content"]
             # Stored role is unchanged: system, whatever the rendering.
             async with db.execute("SELECT message FROM message_log") as cur:

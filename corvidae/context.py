@@ -19,6 +19,8 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
+from corvidae.provenance import frame
+
 if TYPE_CHECKING:
     from corvidae.tool_policy import ToolView
 
@@ -236,6 +238,9 @@ class ContextWindow:
         # The conversation's tool set (corvidae/tool_policy.py), resolved
         # with the system prompt and fixed until the next compaction.
         self.tool_view: "ToolView | None" = None
+        # The key fenced payloads' nonces derive from (corvidae/provenance.py);
+        # None until the Agent sets it, so a window that missed it fails loudly.
+        self.fence_key: bytes | None = None
         self.chars_per_token: float = chars_per_token
 
     def append(self, message: dict, message_type: MessageType = MessageType.MESSAGE) -> None:
@@ -334,7 +339,7 @@ class ContextWindow:
             out = [self._renderable(msg)]
             for call in well_formed_calls(msg):
                 result = self.messages[result_at[call["id"]]] if call["id"] in result_at else None
-                out.append(_visible(result) if result is not None else {
+                out.append(frame(result, _visible(result), self.channel_id, self.fence_key)[1] if result is not None else {
                     "role": "tool",
                     "tool_call_id": call["id"],
                     "content": (
@@ -346,7 +351,11 @@ class ContextWindow:
             return out
 
         out = [{"role": "system", "content": self.system_prompt}]
+        # The header computed for the previous row when it was a person's
+        # message: a burst from one sender carries one header.
+        prev_header = None
         for i, msg in enumerate(self.messages):
+            before, prev_header = prev_header, None
             # A row that is not a message object can't be rendered at all.
             if not isinstance(msg, dict):
                 self._warn_unrenderable(
@@ -382,16 +391,23 @@ class ContextWindow:
                 continue
             # Orphaned result: its call is gone, so frame it as a notification.
             if msg.get("role") == "tool":
+                _, framed = frame(msg, _visible(msg), self.channel_id, self.fence_key)
                 out.append({
                     "role": "system",
-                    "content": f"[{ORPHAN_RESULT_LABEL}]\n\n{msg.get('content', '')}",
+                    "content": f"[{ORPHAN_RESULT_LABEL}]\n\n{framed.get('content', '')}",
                 })
                 continue
-            out.append(self._renderable(msg))
+            header, rendered = frame(msg, self._renderable(msg), self.channel_id, self.fence_key)
+            if msg.get("role") == "user":
+                prev_header = header
+            if header is not None and header != before:
+                out.append(header)
+            out.append(rendered)
 
         # Re-role non-leading system messages (CONTEXT, untargeted
-        # notifications) for strict chat templates. A pure function of the
-        # message, so the rendered prefix stays stable across turns.
+        # notifications) for strict chat templates. A pure function of each
+        # message and the rows before it, so the rendered prefix stays stable
+        # across turns.
         if mid_conversation_system_role != "system":
             out[1:] = [
                 {**m, "role": mid_conversation_system_role} if m.get("role") == "system" else m

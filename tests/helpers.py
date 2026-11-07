@@ -103,6 +103,7 @@ async def build_plugin_and_channel(
     pm.register(plugin, name="agent")
     plugin.pm = pm
     plugin._registry = registry
+    plugin._fence_key = b"k" * 32
 
     channel = registry.get_or_create(
         "test",
@@ -179,6 +180,7 @@ class FakeForkAgent:
             self.max_tokens,
             "system",
             lambda messages: apply_reasoning_history(messages, policy),
+            b"k" * 32,
         )
 
     async def fork(self, channel, instruction, *, stage, cut=None, extra_body=None):

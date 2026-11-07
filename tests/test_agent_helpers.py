@@ -124,8 +124,7 @@ class TestBuildConversationMessage:
         assert result is not None
         msg, request_text = result
         assert msg["role"] == "system"
-        assert "[scheduler]" in msg["content"]
-        assert "something happened" in msg["content"]
+        assert msg["content"] == "something happened"
         assert request_text == "something happened"
 
     async def test_unknown_role_returns_none(self, plugin_and_channel):

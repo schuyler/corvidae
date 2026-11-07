@@ -574,7 +574,7 @@ def reminder_set_since(db_path: Path, channel_id: str, since_ts: float) -> tuple
 def reminder_firing_row(
     db_path: Path, channel_id: str, token: str, since_ts: float
 ) -> tuple[float, str] | None:
-    """(timestamp, message JSON) of the persisted "[reminder]" notification
+    """(timestamp, message JSON) of the persisted reminder notification
     row on `channel_id` carrying `token`, or None. It is persisted when the
     channel queue dequeues the firing, so every bot reply after its
     timestamp answers the reminder, not the request that set it."""
@@ -582,14 +582,14 @@ def reminder_firing_row(
         db_path,
         "SELECT timestamp, message FROM message_log WHERE channel_id = ? AND timestamp >= ? "
         "AND message LIKE ? AND message LIKE ? ORDER BY id LIMIT 1",
-        (channel_id, since_ts, "%[reminder]%", f"%{token}%"),
+        (channel_id, since_ts, '%"origin": "reminder"%', f"%{token}%"),
     )
     return (rows[0][0], rows[0][1]) if rows else None
 
 
 def reminder_verdict(set_row: bool, fired: bool, replied: bool) -> tuple[bool, str]:
     """Pass/fail and details for the reminder probes: the model set the
-    reminder through the tool, the scheduler fired it as a "[reminder]"
+    reminder through the tool, the scheduler fired it as a reminder notification
     row, and the bot then said the token unprompted."""
     if not set_row:
         return False, "no tool-created schedule row — the model did not call remind_me"
@@ -1233,7 +1233,7 @@ async def _reminder_probe(ctx: RunContext, name: str, channel: str, token: str,
     """Shared body of the reminder probes.
 
     Asks for a reminder carrying `token`, sends nothing further, then
-    waits for the scheduler's "[reminder]" row and a bot reply carrying
+    waits for the scheduler's reminder notification row and a bot reply carrying
     the token timestamped after it. With `restart`, bounces the daemon
     while the reminder is still pending, so the row has to survive it.
     """

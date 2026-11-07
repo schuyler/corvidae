@@ -10,6 +10,7 @@ build/
 sessions.db*
 corvidae.log
 agent.yaml
+provenance.key
 *.swp
 
 # local dev

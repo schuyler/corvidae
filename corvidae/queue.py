@@ -15,6 +15,7 @@ for backward compatibility.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
@@ -94,7 +95,12 @@ class SerialQueue:
         Args:
             process_fn: Async callable invoked for each dequeued item.
         """
-        self._consumer_task = asyncio.create_task(self._run(process_fn))
+        # An empty context: a queue is first fed by whichever code enqueues
+        # first, which can be a tool Task inside another channel's turn, and
+        # its items must not inherit that turn's attribution.
+        self._consumer_task = asyncio.create_task(
+            self._run(process_fn), context=contextvars.Context()
+        )
 
     async def _run(self, process_fn: Callable) -> None:
         """Consumer loop — runs until cancelled.

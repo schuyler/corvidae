@@ -202,7 +202,8 @@ class TestAgentWiring:
         await drain(plugin, channel)
         sent = client.chat.call_args.args[0]
         assert [m["role"] for m in sent] == ["system", "user"]
-        assert sent[1]["content"] == "[task]\n\nbackground event"
+        assert sent[1]["content"].startswith("[metadata: notification;")
+        assert "background event" in sent[1]["content"]
         assert await _db_roles(db) == ["system", "assistant"]
 
     async def test_default_is_system(self, make_agent):

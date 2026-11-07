@@ -216,6 +216,7 @@ class HeartbeatPlugin(CorvidaePlugin):
     # Memory is needed only when awake, so it is checked in on_init rather
     # than declared: a config that disables memory still starts.
     depends_on = frozenset({"idle", "registry"})
+    model_visible_annotations = frozenset({"origin"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:

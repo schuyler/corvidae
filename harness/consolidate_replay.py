@@ -156,6 +156,8 @@ def view_inputs_from_config(config: dict, system_prompt: str) -> ViewInputs:
         max_tokens=resolved["max_context_tokens"],
         mid_role=_resolve_mid_conversation_system_role(agent_cfg),
         apply_reasoning_history=lambda messages: apply_reasoning_history(messages, policy),
+        # An offline replay has no daemon key file; its prompts are not compared across runs.
+        fence_key=os.urandom(32),
     )
 
 

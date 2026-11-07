@@ -91,12 +91,14 @@ class ViewInputs:
         mid_role: ``build_prompt``'s ``mid_conversation_system_role``.
         apply_reasoning_history: The channel's ``reasoning_history`` policy,
             bound; mutates a message list in place.
+        fence_key: The key fenced payloads' nonces derive from.
     """
 
     system_prompt: str
     max_tokens: int
     mid_role: str
     apply_reasoning_history: Callable[[list[dict]], None]
+    fence_key: bytes
 
 
 @dataclass(frozen=True)
@@ -190,6 +192,7 @@ def build_fork_prompt(
     # the agent loop; only the message list is truncated.
     prefix = ContextWindow(conv.channel_id, chars_per_token=conv.chars_per_token)
     prefix.system_prompt = conv.system_prompt
+    prefix.fence_key = conv.fence_key
     prefix.messages = conv.messages[:cut]
     # Calls before the cut whose first result lands at or after it were
     # pending as of the cut; render them that way, as the main turn did.

@@ -72,7 +72,7 @@ one is a bug even if its tests pass.
    memories, critique verdicts, reminders, and grounding are appended as
    CONTEXT or notification rows at the tail and retire by aging past the
    compaction boundary. Prompt-build rewrites are pure functions of each
-   message so the cached prefix stays stable. Prefill is the expensive
+   message and the rows before it so the cached prefix stays stable. Prefill is the expensive
    part of a call on any transformer, so context is reused, not rebuilt:
    background calls that need the conversation fork it (§3.8) rather than
    rebuilding it. This is principle 16 applied to prefill: a reused prefix
@@ -576,8 +576,9 @@ Per transport:
 
 1. Each channel has a token budget (`max_context_tokens`), estimated with
    tiktoken over the JSON-serialized visible fields of every message
-   (tool-call arguments and reasoning included), with a character-based
-   fallback.
+   (tool-call arguments, reasoning and the stored provenance record
+   included; the record stands in for the header and fence it renders
+   into), with a character-based fallback.
 2. Compaction runs when the estimate passes `compaction_threshold`
    (default 80%), retains the most recent messages that fit
    `compaction_retention` (default 50%), and skips windows of

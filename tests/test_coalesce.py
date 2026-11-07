@@ -514,7 +514,7 @@ async def test_a_burst_from_one_sender_carries_one_attribution_row(make_env):
     burst_prompt = llm.calls[1]
     kinds = [
         "attribution"
-        if m.get("content", "").startswith("[sender:")
+        if m.get("content", "").startswith("[metadata: sender:")
         else "other"
         for m in burst_prompt
     ]
@@ -550,7 +550,7 @@ async def test_a_burst_from_two_senders_attributes_each_message_to_its_own(make_
     rows = [
         m["content"]
         for m in burst_prompt
-        if m.get("content", "").startswith("[sender:") or m.get("role") == "user"
+        if m.get("content", "").startswith("[metadata: sender:") or m.get("role") == "user"
     ]
     # After the in-flight turn's own rows: alice, her message, bob, his message,
     # in that order.
