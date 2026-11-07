@@ -172,6 +172,18 @@ class TestLLMClientChat:
         for tag in tags:
             assert tag not in sent
 
+    def test_defang_tool_response_tags(self):
+        """<tool_response> tags are single tokens on the deployed model (#553)."""
+        from corvidae.llm import defang_control_tokens
+
+        text = "<tool_response>x</tool_response> a <b> c"
+        out = defang_control_tokens(text)
+
+        # Both tags are broken up; ordinary angle-bracket text is untouched.
+        assert "<tool_response>" not in out and "</tool_response>" not in out
+        assert out.endswith(" a <b> c")
+        assert defang_control_tokens(text) == out
+
     async def test_chat_raw_reasoning_parse(self):
         """With raw_reasoning, the reply's <think> block is split out and a
         missing </think> is flagged as a cut-off (#355)."""
