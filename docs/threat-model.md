@@ -1221,3 +1221,51 @@ A marker file (`state/restart.json`) survives the restart. On the next boot, the
 ### Boot notice
 
 On safe-mode boot (plugins disabled after a crash loop) or after an abnormal previous run (detected from `state/boot-history.jsonl`, written by an external boot supervisor), the plugin sends a notice to the home channel. This is the only notification that does not require a prior restart request.
+
+### Signal attachment downloads
+
+Signal attachments are downloaded to disk for allowlisted senders when the
+MIME type passes the download gate. The gate is a prefix allowlist
+(`image/*`, `text/*`, `audio/*`) plus an exact allowlist for
+`application/pdf`, `application/json`, `application/xml`. Two types are
+explicitly excluded: `image/svg+xml` and `text/html`, because they can carry
+embedded scripts and the agent has no safe renderer for them.
+
+The attachment id is restricted to `[A-Za-z0-9._-]` before use in a filename;
+ids with any other character refuse the download. The file extension comes
+from a MIME-to-extension map first, then from `safe_suffix()` (fullmatch,
+lowercased, 1–10 chars) on the sender-supplied filename or id. The extension
+is passed to `save_attachment` as a separate parameter, not embedded in the
+stem.
+
+The MIME type is sender-controlled and treated as a labelling convenience,
+not a security boundary. No content sniffing is performed. A sender can label
+a PDF as `text/plain`; the file is still written with a `.txt` extension and
+surfaced to the agent as `[text: /path]`. The agent (an LLM) is the ultimate
+consumer of the file content; the download gate limits the *categories* of
+files that reach it, not the specific content within a category.
+
+The `getAttachment` RPC sends only the attachment id. signal-cli's handler
+reads only the id: `GetAttachmentCommand.handleCommand` (AsamK/signal-cli,
+master and the deployed v0.14.7) takes `id` and never reads `recipient` or
+`group-id` -- those are CLI subparser arguments. Verified against the live
+daemon: an id-only call returns a clean lookup failure for a since-purged
+id, not a parameter rejection (a bogus id gives the identical response).
+The earlier "no recipient, refuse" branch was removed as a consequence.
+
+The StreamReader buffer limit is sized to `max_attachment_size * 4 / 3 + 64 KiB`
+(base64 inflates by ~4/3; the 64 KiB covers JSON framing). A response over
+the cap that still fits under the limit is read in full and rejected by the
+size cap. A line that exceeds the limit raises `ValueError` in `_read_loop`:
+`readline()` has already cleared the buffer, so the tail of the line arrives
+as the next read and is skipped there as a malformed frame (a very large
+line can trip the limit several times, once per over-limit chunk). The
+connection survives, and the in-flight RPCs are failed immediately with an
+explicit error rather than left to time out after
+`ATTACHMENT_DOWNLOAD_TIMEOUT` (60 s).
+
+Old signal-cli versions that send no `contentType` fall back to the coarse
+protobuf type enum: only `ATT_IMAGE` and `ATT_GIF` pass the gate, so a legacy
+`image/svg+xml` typed as `IMAGE` would be downloaded. The exposure is limited
+to allowlisted senders on an old daemon; content sniffing would close it, and
+is out of scope here.

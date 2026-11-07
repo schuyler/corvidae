@@ -63,7 +63,12 @@ async def save_attachment(
         )
         return None
 
-    path = directory / f"{stem}{suffix or safe_suffix(filename)}"
+    effective = suffix or safe_suffix(filename)
+    # A stem that already carries the extension (e.g. an id that ends in
+    # .png) must not get it appended a second time.
+    if effective and stem.endswith(effective):
+        effective = ""
+    path = directory / f"{stem}{effective}"
     try:
         await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
         # The stem is built from ids the transport chose, so a separator in it
