@@ -644,6 +644,7 @@ line in this guide.
 | `corvidae.llm_plugin` | `LLMPlugin` |
 | `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |
 | `corvidae.idle` | `IdleTracker`, `IdleWatch` |
+| `corvidae.spill` | `NotificationSpill` (see [Spilling a long notification](#spilling-a-long-notification)) |
 | `corvidae.runtime` | `Runtime`: `load_config`, `setup_logging` and `load_plugins`, the startup steps the daemon and the restart pre-flight share. For tools that check a config the way the daemon boots, not for ordinary plugins |
 | `corvidae.outbound` | `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus`, `OutboundProgress` (for senders and transports) |
 
@@ -704,6 +705,53 @@ scheduler's job: its firings go through `on_notify` and run a full turn. In
 tests, `tests/fake_clock.py`'s `install_kernel_clock(pm)` registers
 a fake clock and a real tracker, so time moves only when the test says so.
 Full semantics: [design.md](design.md#clock-and-idle-tracker-clockpy-idlepy).
+
+## Spilling a long notification
+
+A plugin that cuts text before notifying a channel calls the spill service
+instead of `on_notify`. The service cuts the text to your limit, writes the
+full text to a file where a channel's tools can read it, and has the kernel
+say so in the header; you write no marker and keep no annotation for it.
+
+```python
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.spill import NotificationSpill
+
+class MyPlugin(CorvidaePlugin):
+    depends_on = frozenset({"registry", "spill"})
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
+        self._spill = get_dependency(pm, "spill", NotificationSpill)
+
+    async def _deliver(self, channels, text: str) -> None:
+        # One call for all channels: one file, however many are notified.
+        await self._spill.notify(
+            channels, source="my_plugin:thing", text=text,
+            annotations={"origin": "my_plugin:thing"}, limit=8000,
+        )
+```
+
+`notify` takes the resolved channels, so resolve them first. Text at or under
+`limit` goes out unchanged. Each channel gets its own `on_notify` with
+`tool_call_id=None` and a fresh copy of `annotations`. A channel gets the
+file's path in its header only if an enabled tool there declares it reads
+spill files; a tool does so by setting an attribute on the function:
+
+```python
+async def read_log(path: str) -> str:
+    "Read a log file."
+    ...
+
+read_log.reads_spill_files = True
+```
+
+Set it only on a tool that can open an arbitrary path (`read_file` and
+`shell` do). Declare a tool that cannot, and the agent is told about a file it
+cannot reach. Tuning (directory, size cap, age) is in
+[configuration.md](configuration.md#daemon--daemon-level-settings), and the
+mechanism in [design.md](design.md#notification-spill-spillpy).
 
 ## Plugin dependencies
 

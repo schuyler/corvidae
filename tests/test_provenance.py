@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, NonCallableMagicMock
 
 import pytest
 
-from corvidae.agent import QueueItem
+from corvidae.agent import QueueItem, QueueItemRole
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.channel import ChannelConfig
 from corvidae.context import ContextWindow, MessageType
@@ -83,6 +83,42 @@ def header_blocks(out: list[dict]) -> list[list[str]]:
 def test_encode_writes_only_set_fields_and_round_trips(meta, annotations, stored):
     assert encode(meta, annotations) == stored
     assert decode(json.loads(json.dumps(stored))) == (meta, annotations)
+
+
+# The four cut cases a notification header can carry, and the line each renders.
+SPILL = "/srv/agent/state/notification-spill/3f2a9c0e1b7d4a6f8e5c2b1a0d9f8e7c.txt"
+CUT_CASES = [
+    (dict(cut_shown=8000, cut_total=120000, spill_path=SPILL, spill_chars=120000),
+     f"[metadata: cut to the first 8000 of 120000 characters; the full text is in {SPILL}]"),
+    (dict(cut_shown=8000, cut_total=3000000, spill_path=SPILL, spill_chars=1000000),
+     "[metadata: cut to the first 8000 of 3000000 characters; "
+     f"the first 1000000 characters are in {SPILL}]"),
+    (dict(cut_shown=8000, cut_total=120000),
+     "[metadata: cut to the first 8000 of 120000 characters]"),
+    (dict(cut_shown=8000, cut_total=120000, spill_failed=True),
+     "[metadata: cut to the first 8000 of 120000 characters; the full text was not saved]"),
+]
+CUT_IDS = ["pointer", "capped", "no-reader", "failed"]
+
+
+@pytest.mark.parametrize("fields", [f for f, _ in CUT_CASES], ids=CUT_IDS)
+def test_cut_fields_round_trip(fields):
+    """The cut fields are stored with the row (set fields only) and read
+    back unchanged, so the header can be rendered from the stored row."""
+    meta = ItemMetadata(**fields)
+    assert encode(meta, {}) == fields
+    assert decode(json.loads(json.dumps(encode(meta, {})))) == (meta, {})
+
+
+@pytest.mark.parametrize("fields, line", CUT_CASES, ids=CUT_IDS)
+def test_cut_header_texts(fields, line):
+    """The cut line names the shown and total lengths (and the spill
+    file when there is one), after the notification line, before the
+    annotations line and outside the fence."""
+    conv = window(row("system", "p", 2, ItemMetadata(**fields), {"origin": "webhook:github"}))
+    assert conv.build_prompt()[1] == {"role": "system", "content":
+        f"[metadata: notification; {OWN}]\n{line}\n"
+        "[annotations: origin=webhook:github]\n" + fenced("p", 2)}
 
 
 @pytest.mark.parametrize("bad", ["not a record", {"nope": "1"}, {"sender": "1", "addressed": "yes"}])
@@ -387,3 +423,29 @@ async def test_a_cross_channel_result_reads_as_your_own_action(started, deliver)
     assert prompt[at]["content"].startswith(
         f"[metadata: result of your own send_attachment action on discord:1; {OWN}]\n[payload ")
     assert conv.messages[-1]["content"] == "ok"
+
+
+async def test_a_reloaded_cut_row_renders_the_same_header(started):
+    """A cut notification's row, reloaded from message_log,
+    renders a byte-identical header from the stored record alone."""
+    plugin, channel, _db, _persisted = await started(Declarer())
+    item = QueueItem(
+        role=QueueItemRole.NOTIFICATION, content="x" * 10, channel=channel,
+        source="webhook:github", annotations={"origin": "webhook:github"},
+        metadata=ItemMetadata(cut_shown=10, cut_total=50, spill_path=SPILL, spill_chars=50),
+    )
+    await plugin._get_or_create_queue(channel).enqueue(item)
+    await drain(plugin, channel)
+
+    def notification(prompt: list[dict]) -> dict:
+        """The rendered notification message in ``prompt``."""
+        return next(m for m in prompt if str(m.get("content")).startswith("[metadata: notification"))
+
+    first = notification(last_prompt(plugin))
+    assert first["content"].split("\n")[1] == (
+        f"[metadata: cut to the first 10 of 50 characters; the full text is in {SPILL}]")
+
+    # A restart: the rows come back from message_log through the persistence plugin.
+    rows = await plugin.pm.get_plugin("persistence").resolve_conversation(channel)
+    key = channel.conversation.fence_key
+    assert notification(window(*rows, channel_id=channel.id, key=key).build_prompt()) == first

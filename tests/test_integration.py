@@ -207,6 +207,11 @@ async def _build_harness(config: dict) -> IntegrationHarness:
     core_tools = CoreToolsPlugin(pm)
     pm.register(core_tools, name="core_tools")
 
+    # The kernel's notification spill service, which read_file depends on.
+    from corvidae.spill import NotificationSpill
+    spill = NotificationSpill()
+    pm.register(spill, name="spill")
+
     fake_transport = FakeTransportPlugin(pm)
     pm.register(fake_transport, name="fake_transport")
 
@@ -240,6 +245,9 @@ async def _build_harness(config: dict) -> IntegrationHarness:
     pm.register(agent_loop, name="agent")
 
     validate_dependencies(pm)
+
+    # The harness broadcasts no on_init; the spill service reads its config there.
+    await spill.on_init(pm=pm, config=config)
 
     # Patch LLMClient so LLMPlugin.on_start() uses the mock instead of creating a real session.
     with patch("corvidae.llm_plugin.LLMClient", return_value=mock_client):
@@ -285,6 +293,10 @@ class TestGroupALifecycle:
 
         core_tools = CoreToolsPlugin(pm)
         pm.register(core_tools, name="core_tools")
+
+        # The kernel's notification spill service, which read_file depends on.
+        from corvidae.spill import NotificationSpill
+        pm.register(NotificationSpill(), name="spill")
 
         fake_transport = FakeTransportPlugin(pm)
         pm.register(fake_transport, name="fake_transport")

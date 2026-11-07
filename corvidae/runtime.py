@@ -33,6 +33,7 @@ from corvidae.hooks import (
 from corvidae.idle import IdleTracker, validate_daemon_config
 from corvidae.llm_plugin import parse_llm_config
 from corvidae.logging import configure_logging
+from corvidae.spill import NotificationSpill
 from corvidae.tool_collection import parse_tool_timeouts
 from corvidae.tools.subagent import parse_subagent_max_turns
 
@@ -213,7 +214,7 @@ class Runtime:
         # 5. Create plugin manager
         self.pm = create_plugin_manager()
 
-        # 6. Create ChannelRegistry, Clock and IdleTracker and register them.
+        # 6. Create ChannelRegistry, Clock, IdleTracker and NotificationSpill and register them.
         # Kernel objects: not loaded from entry points, not disableable.
         self.registry = ChannelRegistry()
         self.pm.register(self.registry, name="registry")
@@ -221,6 +222,8 @@ class Runtime:
         self.idle = IdleTracker(self.clock)
         self.pm.register(self.clock, name="clock")
         self.pm.register(self.idle, name="idle")
+        self.spill = NotificationSpill()
+        self.pm.register(self.spill, name="spill")
 
         # 7. Validate the agent section and load channel config. A rejected
         # value is an operator error: one line naming the key, the value
@@ -316,8 +319,9 @@ class Runtime:
         3.  Set config["_base_dir"] from config_path (after merge; cannot be overridden).
         4.  Configure logging (MUST be first operational step after config load).
         5.  Create plugin manager.
-        6.  Create ChannelRegistry, Clock and IdleTracker and register them
-            with the plugin manager as "registry", "clock" and "idle".
+        6.  Create ChannelRegistry, Clock, IdleTracker and NotificationSpill and
+            register them with the plugin manager as "registry", "clock",
+            "idle" and "spill".
         7.  Validate the agent, daemon and llm sections and tools.call_timeout /
             tools.timeouts; load channel config from merged config.
         7b. Block disabled plugins via pm.set_blocked for each name in

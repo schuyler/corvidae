@@ -180,6 +180,11 @@ Keeping a fork's cached prefix is the operator's job. A stage mapped to another 
 | `daemon.jsonl_log_dir` | string | — | Directory for per-channel JSONL conversation logs. When set, `JsonlLogPlugin` appends one JSON line per conversation event to `<dir>/<channel_id>.jsonl`. Relative paths are resolved against `_base_dir`. Omit to disable JSONL logging. |
 | `daemon.metrics_jsonl` | string | — | Path of the metrics event log. When set, `MetricsJsonlPlugin` appends one JSON line (`{"ts", "name", "value", "tags"}`) per `on_metrics` event. Relative paths are resolved against `_base_dir`. Omit to disable the metrics JSONL sink. |
 | `daemon.config_poll_interval` | float | `2.0` | Seconds between `agent.yaml` mtime checks by `ConfigWatcherPlugin`. |
+| `daemon.notification_spill_dir` | string | `state/notification-spill` | Directory where the full text of a cut notification is written, one file per notification, mode 0600. Relative paths are resolved against `_base_dir`. Startup fails, naming the key, if the resolved path contains characters a notification header would not render verbatim (brackets, `<`, `>`, `;`, control characters, doubled or edge whitespace, or anything NFKC normalisation changes). Restart to apply. |
+| `daemon.notification_spill_max_chars` | integer | `1000000` | Most characters written to one spill file; a longer text is cut to this and the header says how many characters the file holds. Must be an integer ≥ 1 (booleans and floats are rejected; a bad value fails startup naming the key and the value). Restart to apply. |
+| `daemon.notification_spill_max_age_days` | number | `7` | Spill files older than this many days (by modification time) are deleted: once at startup, then hourly. Only the age is checked; nothing limits the directory's total size. Only files the service named (`<32 hex digits>.txt`) are deleted. Must be a number > 0 (booleans and NaN are rejected; a bad value fails startup naming the key and the value). Restart to apply. |
+
+A notification cut by the plugin that sent it (see `webhook_notify.max_payload_chars`) shows the model its first characters inline. When the channel has a tool that reads spill files (`read_file` or `shell`, not disabled there), the header also names the file holding the rest, and the agent pages through it with `read_file`'s `offset` and `length`. A file deleted by age gives `read_file` an error that says so and names `notification_spill_max_age_days`. If the write fails, the notification is delivered cut and the header says the full text was not saved; the daemon logs a warning naming the directory.
 
 `daemon.idle_cooldown_seconds` and `daemon.idle_poll_interval` are removed with the `on_idle` hook. Either one in the config is an error at startup, and a reload carrying one is rejected. Idle work now runs on the kernel clock and each plugin sets its own period (for example `memory.idle_consolidate_after`); delete the key.
 
@@ -1013,7 +1018,7 @@ Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv 
 
 ## `webhook_notify` — webhook deliveries as notifications
 
-Requires the webhook-notify extra (`--extra webhook-notify` on your `uv sync` line) and the `webhook` ingress. Each delivery on a listed endpoint is sent to every channel listed for it as a notification: the payload as compact JSON, fenced, with `origin=webhook:<endpoint>` in the header. Each delivery costs one turn per target channel. Restart to apply a change.
+Requires the webhook-notify extra (`--extra webhook-notify` on your `uv sync` line) and the `webhook` ingress. Each delivery on a listed endpoint is sent to every channel listed for it as a notification: the payload as compact JSON, fenced, with `origin=webhook:<endpoint>` in the header; an over-long payload is cut and spilled to a file (see `daemon.notification_spill_*`). Each delivery costs one turn per target channel. Restart to apply a change.
 
 ```yaml
 webhook_notify:
@@ -1025,10 +1030,10 @@ webhook_notify:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `webhook_notify.max_payload_chars` | integer | `8000` | Longest compact-JSON payload passed inline, in characters. A longer one is cut and the header says `truncated=first N of M characters`. Must be an integer ≥ 1. |
+| `webhook_notify.max_payload_chars` | integer | `8000` | Longest compact-JSON payload passed inline, in characters. A longer one is cut, and the header says it was cut to the first N of M characters. Where a channel's tools can read spill files, the full text goes to a file the header names (see `daemon.notification_spill_*`). Must be an integer ≥ 1. |
 | `webhook_notify.endpoints.<endpoint>` | list of strings | none | Non-empty list of channel ids (`transport:scope`) notified of each delivery on that `webhook` endpoint. Repeated ids are notified once. |
 
-A malformed block fails startup naming the key and the value; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet (Discord or Signal before they start) is skipped with a `WARNING` for that delivery. For GitHub, filter events in the webhook's own settings: payloads such as `pull_request` and `check_run` are large and are cut at the cap.
+A malformed block fails startup naming the key and the value; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet (Discord or Signal before they start) is skipped with a `WARNING` for that delivery. For GitHub, filter events in the webhook's own settings: payloads such as `pull_request` and `check_run` are large and are cut at the cap, with the rest in a spill file.
 
 ---
 

@@ -575,3 +575,8 @@ class ToolContext:
     channel: Channel | None
     tool_call_id: str
     task_queue: TaskQueue | None
+
+
+def declares_spill_reader(tool_fn: Callable) -> bool:
+    """True when the tool declares ``reads_spill_files = True``."""
+    return getattr(tool_fn, "reads_spill_files", False) is True

@@ -93,6 +93,7 @@ from corvidae.outbound import (
     OutboundToolStatus,
 )
 from corvidae.queue import SerialQueue
+from corvidae.spill import current_cut
 from corvidae.task import Task
 from corvidae.tool import DEFAULT_TOOL_TIMEOUTS, ToolTimeouts, dispatch_tool_call
 from corvidae.tool_policy import (
@@ -566,9 +567,16 @@ class Agent(CorvidaePlugin):
         if tool_call_id:
             return self._tool_result_metadata(channel, tool_call_id)
         attribution = get_attribution()
+        # A notification the spill service cut carries what it did with it.
+        cut = current_cut()
         return ItemMetadata(
             origin_channel=attribution.get("channel_id"),
             origin_trace=attribution.get("trace_id"),
+            cut_shown=cut.shown if cut else None,
+            cut_total=cut.total if cut else None,
+            spill_path=cut.path if cut else None,
+            spill_chars=cut.spilled if cut else None,
+            spill_failed=True if cut and cut.failed else None,
         )
 
     def _tool_result_metadata(self, channel, tool_call_id: str) -> ItemMetadata:

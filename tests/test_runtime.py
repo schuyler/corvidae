@@ -1715,6 +1715,42 @@ class TestKernelClockRuntime:
         finally:
             os.unlink(config_path)
 
+    async def test_registers_notification_spill(self):
+        """start() registers the kernel's NotificationSpill as "spill",
+        next to the clock, so no plugin can be left without it."""
+        from corvidae.runtime import Runtime
+        from corvidae.spill import NotificationSpill
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            _write_config(f.name)
+            config_path = f.name
+
+        registered: dict[str, object] = {}
+
+        try:
+            mock_pm, _agent = _make_mock_pm_and_agent()
+
+            def capture_register(plugin, name=None):
+                # Keep every registration by name.
+                registered[name] = plugin
+
+            mock_pm.register = capture_register
+
+            with patch(
+                "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+            ), patch("corvidae.runtime.validate_dependencies"), patch(
+                "corvidae.runtime.configure_logging"
+            ):
+                rt = Runtime(config_path=config_path)
+                await rt.start()
+                await rt.stop()
+
+            assert isinstance(registered.get("spill"), NotificationSpill)
+        finally:
+            os.unlink(config_path)
+
     async def test_starts_idle_tracker_after_agent(self):
         """R3: IdleTracker.start() runs after agent.on_start, so nothing
         fires before the Agent can take work."""

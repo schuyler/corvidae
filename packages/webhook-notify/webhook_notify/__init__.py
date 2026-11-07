@@ -1,9 +1,10 @@
 """Corvidae plugin: deliver webhook events to channels as notifications.
 
 Subscribes to endpoints of the webhook ingress (``corvidae.channels.webhook``)
-and ``on_notify``s each delivery's payload, as compact JSON, to the channels
-configured for its endpoint. The kernel fences the text and renders the
-``origin`` and ``truncated`` annotations in the header.
+and notifies each delivery's payload, as compact JSON, to the channels configured
+for its endpoint through the kernel's spill service. The kernel fences the
+text, renders the ``origin`` annotation in the header, and, for a payload cut
+at ``max_payload_chars``, renders the cut marker and spill file pointer.
 
 Origin ``webhook:<endpoint>`` in the cognition plugins:
 
@@ -31,6 +32,7 @@ from corvidae.channel import (
 )
 from corvidae.channels.webhook import WebhookDelivery, WebhookHandler
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.spill import NotificationSpill
 from corvidae.tuning import config_value
 
 logger = logging.getLogger(__name__)
@@ -46,14 +48,15 @@ def _bad(key: str, value: object, want: str) -> ValueError:
 class WebhookNotifyPlugin(CorvidaePlugin):
     """Notifies configured channels of webhook deliveries."""
 
-    depends_on = frozenset({"registry"})
+    depends_on = frozenset({"registry", "spill"})
     optional_depends_on = frozenset({"webhook"})
-    model_visible_annotations = frozenset({"origin", "truncated"})
+    model_visible_annotations = frozenset({"origin"})
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         self._registry = get_dependency(pm, "registry", ChannelRegistry)
+        self._spill = get_dependency(pm, "spill", NotificationSpill)
         self._max_chars = config_value(
             config, "webhook_notify.max_payload_chars", None
         )
@@ -91,15 +94,7 @@ class WebhookNotifyPlugin(CorvidaePlugin):
     async def _deliver(self, delivery: WebhookDelivery) -> None:
         """Notify each target channel of the delivery's endpoint."""
         text = json.dumps(delivery.payload, separators=(",", ":"), ensure_ascii=False)
-        annotations = {"origin": delivery.origin}
-        # Cut an over-long payload; the marker is written here, not by the payload.
-        if len(text) > self._max_chars:
-            annotations["truncated"] = f"first {self._max_chars} of {len(text)} characters"
-            logger.info(
-                "webhook_notify: delivery %s on endpoint %s cut from %d to %d characters",
-                delivery.delivery_id, delivery.endpoint, len(text), self._max_chars,
-            )
-            text = text[: self._max_chars]
+        channels = []
         for cid in self._targets[delivery.endpoint]:
             try:
                 channel = await resolve_persisted_channel(self.pm, self._registry, cid)
@@ -111,7 +106,9 @@ class WebhookNotifyPlugin(CorvidaePlugin):
                     delivery.delivery_id, delivery.endpoint, cid,
                 )
                 continue
-            await self.pm.ahook.on_notify(
-                channel=channel, source=delivery.origin, text=text,
-                tool_call_id=None, annotations=dict(annotations),
-            )
+            channels.append(channel)
+        # The kernel cuts an over-long payload, spills the rest and marks the header.
+        await self._spill.notify(
+            channels, source=delivery.origin, text=text,
+            annotations={"origin": delivery.origin}, limit=self._max_chars,
+        )
