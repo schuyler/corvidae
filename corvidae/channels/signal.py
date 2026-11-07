@@ -376,10 +376,13 @@ class SignalPlugin(TransportPlugin):
         delay = _INITIAL_BACKOFF
         while self._connect_task is not None:
             try:
-                # StreamReader limit sized to the max attachment: base64
+                # StreamReader limit sized to 2x the max attachment: base64
                 # inflates by ~4/3, plus 64 KiB headroom for JSON framing.
+                # The 2x headroom lets an oversized response be read and
+                # rejected by the size cap, rather than silently discarded
+                # by the stream limit (which would hang the RPC).
                 # Integer arithmetic (no float precision loss).
-                stream_limit = (self._max_attachment_size * 4 + 2) // 3 + 64 * 1024
+                stream_limit = (self._max_attachment_size * 2 * 4 + 2) // 3 + 64 * 1024
                 reader, writer = await asyncio.open_unix_connection(
                     path=self._socket_path, limit=stream_limit,
                 )

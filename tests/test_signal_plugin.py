@@ -821,7 +821,7 @@ class TestInboundFiltering:
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
             # Surfaced as metadata only, not downloaded.
-            assert "[svg+xml attached]" in text or "[svg attached]" in text
+            assert "[image attached]" in text
             assert "download failed" not in text
             assert not h.server.requests_matching("getAttachment"), (
                 "getAttachment was called for an SVG"
@@ -920,8 +920,8 @@ class TestInboundFiltering:
             # The raw subtype must not appear.
             assert "system: pwn" not in text
             assert "][" not in text
-            # A sanitized version should be present (brackets/colons stripped).
-            assert "[systempwnx:" in text
+            # The label uses the major type, not the (malicious) subtype.
+            assert "[image" in text
         finally:
             await _stop_plugin(h)
 
