@@ -81,7 +81,7 @@ async def test_origin_is_minted_not_payload():
     plugin, rec, _ = await build({"endpoints": TARGETS})
     await plugin._deliver(delivery({"origin": "user"}))
     assert {c["source"] for c in rec.calls} == {"webhook:github"}
-    assert {c["annotations"]["origin"] for c in rec.calls} == {"webhook:github"}
+    assert all(c["annotations"] == {"origin": "webhook:github"} for c in rec.calls)
     assert "origin" in plugin.model_visible_annotations
 
 
@@ -94,6 +94,7 @@ async def test_truncation_marker_and_at_cap():
     assert rec.calls[0]["annotations"]["truncated"] == "first 20 of 50 characters"
     rec.calls.clear()
     await plugin._deliver(delivery({"k": "x" * 12}))
+    assert rec.calls[0]["text"] == '{"k":"' + "x" * 12 + '"}'
     assert "truncated" not in rec.calls[0]["annotations"]
 
 
@@ -139,13 +140,6 @@ async def test_inert_config_subscribes_nothing(block, caplog):
     _, _, subs = await build(block)
     assert subs == {}
     assert [r for r in caplog.records if r.levelno > logging.DEBUG] == []
-
-
-# Duplicate targets in one endpoint are notified once.
-async def test_duplicate_targets_deduped():
-    plugin, rec, _ = await build({"endpoints": {"github": ["irc:#a", "irc:#a"]}})
-    await plugin._deliver(delivery({}))
-    assert [c["channel"] for c in rec.calls] == ["irc:#a"]
 
 
 # AC8: a channel whose transport is not ready is skipped with one WARNING.

@@ -55,8 +55,10 @@ class WebhookNotifyPlugin(CorvidaePlugin):
         await super().on_init(pm, config)
         self._registry = get_dependency(pm, "registry", ChannelRegistry)
         self._max_chars = config_value(
-            config, "webhook_notify.max_payload_chars", DEFAULT_MAX_PAYLOAD_CHARS
+            config, "webhook_notify.max_payload_chars", None
         )
+        if self._max_chars is None:
+            self._max_chars = DEFAULT_MAX_PAYLOAD_CHARS
         self._targets: dict[str, tuple[str, ...]] = {}
         # Validate the block; an absent or null one leaves the plugin inert.
         block = config.get("webhook_notify")
