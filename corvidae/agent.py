@@ -1936,7 +1936,7 @@ class Agent(CorvidaePlugin):
                     f"[Task unavailable] Error: tool '{fn_name}' was not "
                     "executed because the task queue is unavailable"
                 )
-                notify_meta = {"trace_id": trace_id, **annotations}
+                notify_annotations = {"trace_id": trace_id, **annotations}
                 # One call's failed delivery must not stop the rest.
                 try:
                     await self.pm.ahook.on_notify(
@@ -1944,7 +1944,7 @@ class Agent(CorvidaePlugin):
                         source="task",
                         text=text,
                         tool_call_id=call_id,
-                        annotations=notify_meta,
+                        annotations=notify_annotations,
                     )
                 except Exception:
                     logger.warning(
@@ -1957,7 +1957,7 @@ class Agent(CorvidaePlugin):
                     # Safe after a partial broadcast: deliver_tool_error
                     # skips ids already queued or no longer pending, so the
                     # model never sees two results for one call.
-                    await self.deliver_tool_error(channel, call_id, text, notify_meta)
+                    await self.deliver_tool_error(channel, call_id, text, notify_annotations)
             return
 
         for call in tool_calls:

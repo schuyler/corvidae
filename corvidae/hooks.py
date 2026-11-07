@@ -781,7 +781,7 @@ class AgentSpec:
             trace_id: The trace id this response belongs to,
                 or None.
             annotations: The annotations dict; producers of notifications
-                may stamp keys into it via ``on_notify`` annotations, and the dict
+                may stamp keys into it through ``on_notify``, and the dict
                 travels with the trace id through task cycles.
             logprobs: The response's logprobs envelope, or None.
 
@@ -1375,7 +1375,7 @@ class AgentSpec:
                 to access the ContextWindow for appending context entries.
             trace_id: The current turn's trace id, or None.
             annotations: The annotations dict; producers of notifications
-                may stamp keys into it via ``on_notify`` annotations, and the dict
+                may stamp keys into it through ``on_notify``, and the dict
                 travels with the trace id through task cycles.
         """
 
