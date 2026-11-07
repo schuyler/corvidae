@@ -683,10 +683,10 @@ class TestInboundFiltering:
             assert len(drops) == 1
             (drop,) = drops
             assert drop.levelno == logging.DEBUG
-            assert str(CHAN_ID) in drop.getMessage()
-            assert str(AUTH_ID) in drop.getMessage()
             assert drop.__dict__["channel"] == f"discord:{CHAN_ID}"
             assert drop.__dict__["sender"] == str(AUTH_ID)
+            assert "parent_channel" not in drop.__dict__
+            assert not [r for r in caplog.records if r.levelno >= logging.INFO]
         finally:
             await h.plugin.on_stop()
 
@@ -702,8 +702,7 @@ class TestInboundFiltering:
                 await _deliver(h, message)
             drops = [r for r in caplog.records if "not admitted" in r.getMessage()]
             assert len(drops) == 1
-            assert f"thread {THREAD_ID}" in drops[0].getMessage()
-            assert str(CHAN_ID) in drops[0].getMessage()
+            assert drops[0].__dict__["channel"] == f"discord:{THREAD_ID}"
             assert drops[0].__dict__["parent_channel"] == f"discord:{CHAN_ID}"
         finally:
             await h.plugin.on_stop()

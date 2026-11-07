@@ -431,7 +431,8 @@ The contract every transport meets:
 2. Default-deny sender allowlist in `should_process_message`. A refusal is
    one INFO line naming the sender; nothing is sent back and no liveness
    indicator is shown. The transport fires `on_message` for every decoded
-   message regardless; the gate is the one place that vetoes.
+   message that reaches the gate; among those, the gate is the one place that
+   vetoes.
    - One exception: a transport configured to answer only when addressed may
      drop a message it can already tell was not addressed to the agent,
      before the kernel sees it. This is not a refusal — the allowlist has not

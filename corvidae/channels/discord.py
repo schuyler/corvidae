@@ -664,21 +664,19 @@ class DiscordPlugin(TransportPlugin):
                     # each other in a channel that requires a mention. A thread
                     # is decided by its parent's entry, so name the parent too,
                     # or an operator looks up the thread id and finds nothing.
+                    # StructuredFormatter appends every extra as key=value, so
+                    # the ids live there and the message stays short; a
+                    # parent_channel of None would print on every drop.
                     parent_id = getattr(message.channel, "parent_id", None)
-                    where = f"channel {message.channel.id}"
-                    if parent_id:
-                        where = f"thread {message.channel.id} (parent {parent_id})"
+                    extra = {
+                        "channel": f"discord:{message.channel.id}",
+                        "sender": str(author.id),
+                    }
+                    if parent_id is not None:
+                        extra["parent_channel"] = f"discord:{parent_id}"
                     logger.debug(
-                        "discord: unaddressed message in %s from %s, not admitted",
-                        where,
-                        str(author.id),
-                        extra={
-                            "channel": f"discord:{message.channel.id}",
-                            "parent_channel": (
-                                f"discord:{parent_id}" if parent_id else None
-                            ),
-                            "sender": str(author.id),
-                        },
+                        "discord: unaddressed message, not admitted",
+                        extra=extra,
                     )
                     return
                 if not text and not attachments:
