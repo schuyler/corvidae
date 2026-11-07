@@ -219,6 +219,14 @@ agent:
 #     siri:
 #       token: ${SIRI_WEBHOOK_TOKEN}
 
+# Webhook notifications: send each webhook delivery to channels (needs the
+# webhook-notify extra and the webhook block above); docs/configuration.md.
+# webhook_notify:
+#   max_payload_chars: 8000            # longer payloads are cut and marked
+#   endpoints:
+#     github: [irc:#corvidae]          # endpoint name -> channel ids
+#     siri: [signal:+15551234567]
+
 # Scheduler: reminders (remind_me tool) and operator jobs (optional;
 # without this block the tools still work, in UTC, with these defaults).
 # A job can target any channel; see docs/threat-model.md finding 7.

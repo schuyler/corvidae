@@ -46,7 +46,8 @@ jobs:
           uv run --no-sync python - <<'PY'
           import importlib.util
           present = [m for m in ("sqlite_vec", "discord", "corvidae_cognition",
-                                 "cross_channel_send", "corvidae_restart")
+                                 "cross_channel_send", "corvidae_restart",
+                                 "webhook_notify")
                      if importlib.util.find_spec(m) is not None]
           assert not present, f"kernel install has optional packages: {present}"
           import corvidae.channels.discord  # must import without its SDK
@@ -54,7 +55,7 @@ jobs:
           PY
 
       - name: Run kernel tests
-        run: uv run --no-sync pytest -q --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/corvidae_restart
+        run: uv run --no-sync pytest -q --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/corvidae_restart
 
       # Advisory until the tree is clean (#111, #455): the output is in the
       # log, but a finding does not fail the run. Drop continue-on-error in
@@ -84,7 +85,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies (all extras)
-        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra restart
+        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra restart
 
       # About 26 test sites skip when sqlite-vec can't load, and the Discord
       # tests skip without the SDK, which would turn them into silent skips

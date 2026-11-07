@@ -88,25 +88,25 @@ async def test_origin_is_minted_not_payload():
 # AC4a/b: cut at the cap with a code-written marker; exactly at the cap is whole.
 async def test_truncation_marker_and_at_cap():
     plugin, rec, _ = await build({"max_payload_chars": 20, "endpoints": TARGETS})
-    await plugin._deliver(delivery({"k": "x" * 44}))
-    text = '{"k":"' + "x" * 44 + '"}'
+    await plugin._deliver(delivery({"k": "x" * 42}))
+    text = '{"k":"' + "x" * 42 + '"}'
     assert rec.calls[0]["text"] == text[:20]
     assert rec.calls[0]["annotations"]["truncated"] == "first 20 of 50 characters"
     rec.calls.clear()
-    await plugin._deliver(delivery({"k": "x" * 14}))
+    await plugin._deliver(delivery({"k": "x" * 12}))
     assert "truncated" not in rec.calls[0]["annotations"]
 
 
 # AC4c: the stored row renders the kernel header, marker line and fence.
 async def test_marker_survives_the_kernel_rendering():
     plugin, rec, _ = await build({"max_payload_chars": 20, "endpoints": TARGETS})
-    await plugin._deliver(delivery({"k": "x" * 44}))
+    await plugin._deliver(delivery({"k": "x" * 42}))
     call = rec.calls[0]
     kept = {k: v for k, v in call["annotations"].items()
             if k in plugin.model_visible_annotations}
     row = {"role": "system", "content": call["text"],
            PROVENANCE_KEY: encode(ItemMetadata(), kept)}
-    _, out = frame(row, {"role": "system", "content": call["text"]}, "irc:#a", None)
+    _, out = frame(row, {"role": "system", "content": call["text"]}, "irc:#a", b"k")
     lines = out["content"].split("\n")
     assert lines[0] == "[metadata: notification; not from this channel's human]"
     assert lines[1] == ("[annotations: origin=webhook:github, "

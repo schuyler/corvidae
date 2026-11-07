@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "webhook-notify"
+version = "0.0.1"
+description = "Webhook notification plugin for corvidae: delivers webhook events to channels"
+requires-python = ">=3.13"
+dependencies = ["corvidae"]
+
+[project.entry-points.corvidae]
+webhook_notify = "webhook_notify:WebhookNotifyPlugin"
+
+[tool.uv.sources]
+corvidae = { workspace = true }
+
+# Explicit, so a later docs/ directory here can't break the build.
+[tool.setuptools.packages.find]
+include = ["webhook_notify*"]

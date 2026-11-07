@@ -1011,6 +1011,27 @@ Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv 
 
 ---
 
+## `webhook_notify` — webhook deliveries as notifications
+
+Requires the webhook-notify extra (`--extra webhook-notify` on your `uv sync` line) and the `webhook` ingress. Each delivery on a listed endpoint is sent to every channel listed for it as a notification: the payload as compact JSON, fenced, with `origin=webhook:<endpoint>` in the header. Each delivery costs one turn per target channel. Restart to apply a change.
+
+```yaml
+webhook_notify:
+  max_payload_chars: 8000
+  endpoints:
+    github: [irc:#corvidae, discord:123456789]
+    siri: [signal:+15551234567]
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `webhook_notify.max_payload_chars` | integer | `8000` | Longest compact-JSON payload passed inline, in characters. A longer one is cut and the header says `truncated=first N of M characters`. Must be an integer ≥ 1. |
+| `webhook_notify.endpoints.<endpoint>` | list of strings | none | Non-empty list of channel ids (`transport:scope`) notified of each delivery on that `webhook` endpoint. Repeated ids are notified once. |
+
+A malformed block fails startup naming the key and the value; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet (Discord or Signal before they start) is skipped with a `WARNING` for that delivery. For GitHub, filter events in the webhook's own settings: payloads such as `pull_request` and `check_run` are large and are cut at the cap.
+
+---
+
 ## `restart` — Daemon restart plugin
 
 Requires the restart extra (`--extra restart` on your `uv sync` line). Without it the `restart` tool does not exist.
