@@ -1360,7 +1360,7 @@ role:
   `deliver_tool_error`).
 
 `metadata` is never passed as a hook argument; the kernel fills it from what
-it observes (the transport's sender and channel, the tool call it dispatched (from the window), the
+it observes (the transport's sender and channel, the tool-call row in the window, the
 attribution context). `_build_conversation_message` stores
 it on the row under `corvidae_provenance` (`encode`: set fields only, plus
 an `annotations` entry holding only the keys a plugin declared in
