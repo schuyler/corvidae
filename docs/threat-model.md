@@ -40,7 +40,7 @@ them:
   or a `discord.channels` entry setting it false for that channel, every
   message that user posts there),
   every webhook payload,
-  every web page `web_fetch` returns,  every web page `web_fetch` returns, every DuckDuckGo snippet, every MCP
+  every web page `web_fetch` returns, every DuckDuckGo snippet, every MCP
   tool description and result, and every memory distilled from any of the
   above.
 - **Exfiltration.** `web_fetch` will GET any URL with no scheme or host
@@ -1085,7 +1085,8 @@ to no conversation. What each auth mode gives:
 - An authenticated sender that floods an endpoint pushes real events out of a
   subscriber's queue (drop-oldest), and each event a subscriber turns into a
   notification spends a turn (finding 14).
-- No request header or query string reaches a subscriber, and tokens are never
+- No query string reaches a subscriber, and of the headers only the delivery
+  id (`X-GitHub-Delivery` or `Idempotency-Key`) does. Tokens are never
   logged (the access log is off, rejections log the endpoint and address only).
 
 ### Smaller things

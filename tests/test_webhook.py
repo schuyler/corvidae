@@ -154,6 +154,9 @@ async def test_inert_config(cfg, caplog, monkeypatch):
         ({"host": "0.0.0.0", "endpoints": {"gh": None}}, ["webhook.endpoints.gh.token", "0.0.0.0", "bind a specific IP address"]),
         ({"host": "::", "endpoints": {"gh": None}}, ["webhook.endpoints.gh.token", "::", "bind a specific IP address"]),
         ({"host": "localhost", "endpoints": {"gh": None}}, ["webhook.endpoints.gh.token", "localhost", "bind a specific IP address"]),
+        ({"endpoints": {"siri": "TOPSECRET"}}, ["webhook.endpoints.siri", "got str", "mapping"]),
+        ({"endpoints": ["TOPSECRET"]}, ["webhook.endpoints", "got list", "mapping"]),
+        ({"endpoints": {"gh": ["TOPSECRET"]}}, ["webhook.endpoints.gh", "got list", "mapping"]),
         ({"host": "0", "endpoints": {"gh": None}}, ["webhook.endpoints.gh.token", "bind a specific IP address"]),
     ],
 )
@@ -166,7 +169,7 @@ async def test_config_rejected(block, fragments, monkeypatch):
     assert msg.startswith("webhook:") and "check agent.yaml" in msg
     for fragment in fragments:
         assert fragment in msg
-    assert "tök" not in msg
+    assert "tök" not in msg and "TOPSECRET" not in msg
 
 
 BODY = b'{"action": "opened"}'

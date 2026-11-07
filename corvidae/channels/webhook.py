@@ -135,6 +135,9 @@ def _parse_token(name: str, raw: Any) -> str | None:
 
 def _parse_block(block: dict[str, Any]) -> _Settings | None:
     """Validate the webhook block; None when it configures no endpoints."""
+    raw_endpoints = block.get("endpoints")
+    if not raw_endpoints:
+        return None
     host = block.get("host", "127.0.0.1")
     if not isinstance(host, str) or not host:
         raise _fail(f"webhook.host is {host!r}; use an IP address such as 127.0.0.1")
@@ -147,11 +150,8 @@ def _parse_block(block: dict[str, Any]) -> _Settings | None:
     if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
         raise _fail(f"webhook.max_body_bytes is {cap!r}; use a positive integer")
 
-    raw_endpoints = block.get("endpoints")
-    if not raw_endpoints:
-        return None
     if not isinstance(raw_endpoints, dict):
-        raise _fail(f"webhook.endpoints is {raw_endpoints!r}; use a mapping of endpoint name to settings")
+        raise _fail(f"webhook.endpoints got {type(raw_endpoints).__name__}; use a mapping of endpoint name to settings")
 
     # A null token is safe only where the network is the control: a specific
     # IP address. Wildcards, hostnames and unparseable hosts need a token.
@@ -164,7 +164,7 @@ def _parse_block(block: dict[str, Any]) -> _Settings | None:
         if raw is None:
             raw = {}
         if not isinstance(raw, dict):
-            raise _fail(f"webhook.endpoints.{name} is {raw!r}; use a mapping with auth and token")
+            raise _fail(f"webhook.endpoints.{name} got {type(raw).__name__}; use a mapping with auth and token")
         auth = raw.get("auth", "bearer")
         if auth not in _AUTH_MODES:
             raise _fail(f"webhook.endpoints.{name}.auth is {auth!r}; use one of: {', '.join(_AUTH_MODES)}")
@@ -175,10 +175,6 @@ def _parse_block(block: dict[str, Any]) -> _Settings | None:
             raise _fail(f"webhook.endpoints.{name}.token is null but host is {host!r}; set a token or bind a specific IP address")
         endpoints[name] = _Endpoint(auth, token)
     return _Settings(host, port, cap, endpoints)
-
-
-def _reply(status: int, body: dict[str, Any]) -> web.Response:
-    return web.json_response(body, status=status)
 
 
 class WebhookPlugin(CorvidaePlugin):
@@ -200,7 +196,7 @@ class WebhookPlugin(CorvidaePlugin):
             logger.debug("webhook: no webhook block; ingress disabled")
             return
         if not isinstance(block, dict):
-            raise _fail(f"webhook is {block!r}; it must be a mapping")
+            raise _fail(f"webhook got {type(block).__name__}; it must be a mapping")
         self._settings = _parse_block(block)
         if self._settings is None:
             logger.debug("webhook: no endpoints configured; ingress disabled")
@@ -295,7 +291,7 @@ class WebhookPlugin(CorvidaePlugin):
     def _reject(self, request: web.Request, endpoint: str, status: int, text: str) -> web.Response:
         """Log and answer a rejected request; never logs the token or body."""
         logger.info('webhook: rejected request to "%s" from %s: %d', endpoint, request.remote, status)
-        return _reply(status, {"status": "error", "error": text})
+        return web.json_response({"status": "error", "error": text}, status=status)
 
     async def _handle(self, request: web.Request) -> web.Response:
         endpoint = request.match_info["endpoint"]
@@ -322,7 +318,7 @@ class WebhookPlugin(CorvidaePlugin):
         if config.auth == "hmac-sha256":
             assert config.token is not None
             expected = "sha256=" + hmac.new(config.token.encode(), body, hashlib.sha256).hexdigest()
-            if not _ascii_equal(request.headers.get("X-Hub-Signature-256", ""), expected):
+            if not _ascii_equal(request.headers.get("X-Hub-Signature-256", "").lower(), expected):
                 return self._reject(
                     request, endpoint, 401,
                     f'webhook "{endpoint}": X-Hub-Signature-256 is missing or does not match the body; '
@@ -331,7 +327,7 @@ class WebhookPlugin(CorvidaePlugin):
 
         try:
             payload = json.loads(body)
-        except ValueError:
+        except (ValueError, RecursionError):
             payload = None
         if not isinstance(payload, dict):
             return self._reject(
@@ -345,11 +341,11 @@ class WebhookPlugin(CorvidaePlugin):
         seen = self._seen[endpoint]
         if delivery_id is not None:
             if delivery_id in seen:
-                return _reply(200, {"status": "duplicate"})
+                return web.json_response({"status": "duplicate"}, status=200)
             seen.append(delivery_id)
 
         delivery = WebhookDelivery(endpoint, payload, delivery_id)
         for sub in subs:
             self._enqueue(sub, delivery)
         logger.info('webhook: accepted delivery %s on "%s" for %d subscribers', delivery_id, endpoint, len(subs))
-        return _reply(202, {"status": "accepted", "deliveries": len(subs)})
+        return web.json_response({"status": "accepted", "deliveries": len(subs)}, status=202)

@@ -261,7 +261,7 @@ plugins that isn't loaded: that's expected, and is logged at DEBUG.
 
 ## Subscribing to webhooks
 
-The `webhook` plugin (`corvidae/channels/webhook.py`) owns `on_webhook_subscribe(subscriptions)`. Implement it to receive the JSON objects POSTed to `/hook/<endpoint>`; the listener, auth and endpoint names are the operator's `webhook:` config ([configuration.md](configuration.md#webhook)).
+The `webhook` plugin (`corvidae/channels/webhook.py`) owns `on_webhook_subscribe(subscriptions)`. Implement it to receive the JSON objects POSTed to `/hook/<endpoint>`; the listener, auth and endpoint names are the operator's `webhook:` config ([configuration.md](configuration.md#webhook--webhook-ingress)).
 
 ```python
 from corvidae.channels.webhook import WebhookDelivery
