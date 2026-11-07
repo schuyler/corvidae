@@ -683,6 +683,7 @@ class TestInboundFiltering:
             assert len(drops) == 1
             (drop,) = drops
             assert drop.levelno == logging.DEBUG
+            assert "does not mention the bot" in drop.getMessage()
             assert getattr(drop, "channel") == f"discord:{CHAN_ID}"
             assert getattr(drop, "sender") == str(AUTH_ID)
             assert not hasattr(drop, "parent_channel")
