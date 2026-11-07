@@ -12,6 +12,7 @@ members = [
     "corvidae-cognition",
     "corvidae-restart",
     "cross-channel-send",
+    "webhook-notify",
 ]
 
 [[package]]
@@ -539,6 +540,9 @@ discord = [
 restart = [
     { name = "corvidae-restart" },
 ]
+webhook-notify = [
+    { name = "webhook-notify" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -568,8 +572,9 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "tiktoken", specifier = ">=0.7" },
+    { name = "webhook-notify", marker = "extra == 'webhook-notify'", editable = "packages/webhook-notify" },
 ]
-provides-extras = ["dev", "acp", "discord", "cross-channel-send", "cognition", "restart"]
+provides-extras = ["dev", "acp", "discord", "cross-channel-send", "webhook-notify", "cognition", "restart"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2013,6 +2018,17 @@ sdist = { url = "https://files.pythonhosted.org/packages/da/34/30e9280707135d2cf
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl", hash = "sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf", size = 87427, upload-time = "2026-09-25T06:52:35.829Z" },
 ]
+
+[[package]]
+name = "webhook-notify"
+version = "0.0.1"
+source = { editable = "packages/webhook-notify" }
+dependencies = [
+    { name = "corvidae" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "corvidae", editable = "." }]
 
 [[package]]
 name = "yarl"

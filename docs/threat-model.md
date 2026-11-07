@@ -1091,6 +1091,12 @@ to no conversation. What each auth mode gives:
   id (`X-GitHub-Delivery` or `Idempotency-Key`) does. Tokens are never
   logged (the access log is off, rejections log the endpoint and address only).
 
+The `webhook-notify` package is the concrete path from a payload to a prompt:
+each delivery on a configured endpoint is injected into every target channel
+as a fenced notification, so whoever can post to the endpoint chooses text the
+model reads there. Each delivery spends one main-model turn per target
+channel, and provider-side event filtering is the only volume control.
+
 ### Smaller things
 
 - Untrusted text in a chat channel can talk the agent into silence. Where

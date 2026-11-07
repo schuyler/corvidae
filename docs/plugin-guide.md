@@ -635,7 +635,8 @@ line in this guide.
 | `corvidae.fork` | `fork_agent`, `quote`, `window_db_ids`, `ViewInputs`, `view_agent`, `view_call`, `ForkRefused`, `build_fork_prompt`, `snap_cut_forward`, `snap_cut_to_tool_boundary` (see [Forking the window](#forking-the-window) and [The view call](#the-view-call)) |
 | `corvidae.attribution` | `get_attribution`, `set_attribution`, `reset_attribution` |
 | `corvidae.tuning` | `config_value`, `resolve_tunable` |
-| `corvidae.channel` | `ChannelRegistry` |
+| `corvidae.channel` | `ChannelRegistry`, `resolve_persisted_channel`, `ChannelNotReady` |
+| `corvidae.channels.webhook` | `WebhookDelivery`, `WebhookHandler` (for subscribers to the webhook ingress) |
 | `corvidae.context` | `MessageType`, `ContextWindow`, `count_tokens`, `message_tokens` |
 | `corvidae.task` | `Task` |
 | `corvidae.tool` | `Tool`, `tool_to_schema` |

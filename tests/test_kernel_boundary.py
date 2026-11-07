@@ -37,6 +37,7 @@ ALLOWED_KERNEL_MODULES = {
     "corvidae.clock",
     "corvidae.idle",
     "corvidae.channel",
+    "corvidae.channels.webhook",
     "corvidae.runtime",
 }
 

@@ -31,6 +31,10 @@ discord = [
 cross-channel-send = [
     "cross-channel-send",
 ]
+# Webhook deliveries to channels as notifications (packages/webhook-notify).
+webhook-notify = [
+    "webhook-notify",
+]
 # Memory, appraisal, critique, funnel and outcome log
 # (packages/corvidae-cognition, docs/cognition.md). Includes the `vec`
 # sub-extra, so the documented install keeps vector memory (#130). For the
@@ -141,4 +145,5 @@ members = ["packages/*"]
 [tool.uv.sources]
 corvidae-cognition = { workspace = true }
 cross-channel-send = { workspace = true }
+webhook-notify = { workspace = true }
 corvidae-restart = { workspace = true }

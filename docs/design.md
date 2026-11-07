@@ -578,7 +578,7 @@ CREATE TABLE usage_log (
 CREATE TABLE exchange_log (
     trace_id TEXT PRIMARY KEY,      -- one exchange = what one trace covers (see plugin-guide.md's Traces section)
     channel_id TEXT NOT NULL,
-    origin TEXT,                    -- convention: 'user'|'reminder'|'critique'|'heartbeat'|'task'
+    origin TEXT,                    -- convention: 'user'|'reminder'|'critique'|'heartbeat'|'task'|'webhook:<endpoint>'
     message_rowid INTEGER,          -- message_log.id of the originating message (a coalesced burst's absorbed traces keep theirs; no response completes those rows)
     created_at REAL NOT NULL,
     retrieval_top_score REAL,       -- written by MemoryPlugin retrieval (decayed score)
@@ -3557,6 +3557,19 @@ errors raise `ValueError` from `on_init`. `on_stop` closes the listener first,
 then cancels the workers, discarding queued deliveries. At start a `WARNING`
 lists configured endpoints with no subscriber and subscribed endpoints with no
 config.
+
+### Webhook notifications (`webhook-notify` package)
+
+`WebhookNotifyPlugin` subscribes one handler to each endpoint in
+`webhook_notify.endpoints`. For a delivery it serialises the payload as compact
+JSON (`ensure_ascii=False`), cuts it to `max_payload_chars` and calls
+`on_notify` once per target channel, resolved at delivery with
+`resolve_persisted_channel`; a `ChannelNotReady` target is skipped with a
+`WARNING`. The notification carries `source` and `annotations["origin"]` set
+to `webhook:<endpoint>` (minted by the ingress), and a cut payload adds
+`annotations["truncated"]`. Both keys are declared model-visible, so the kernel
+renders them in the header outside the payload fence. Configuration is in
+[configuration.md](configuration.md#webhook_notify--webhook-deliveries-as-notifications).
 
 ### ACP (`channels/acp.py`)
 
