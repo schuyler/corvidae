@@ -11,6 +11,12 @@ from it, and it cites none of them. It cites only external references (the
 Persyn BOOTSTRAP specification, the GitHub issues and operator directives
 that record decisions) and the threat model it requires (principle 9).
 
+`docs/prd-core-periphery-supplement.md` is part of this document.
+Accepted 2026-11-07, it adds principles 17–21 and amends the requirements
+its §4 lists, for deployments that run the core/periphery strategy; its
+§0 says how its requirements read. Implementation of the supplement is
+gated on acceptance of its technical reference document.
+
 ## 1. What it is
 
 Corvidae is a personal agent daemon: one Python asyncio process on one
@@ -229,9 +235,11 @@ one is a bug even if its tests pass.
 
 14. **One actor, one identity, many channels.** Identity, memory, working
     knowledge and the ability to act are the agent's, not the channel's.
-    The agent presents the same identity on every channel; what changes
-    from one channel to the next is register (§3.3.10), never who it is
-    (§3.3.8). Any turn can speak on any channel a transport owns, leave a
+    The framework gives every context the one identity, and the agent
+    presents it on every channel as far as the models it runs allow:
+    where contexts run different models, how well it presents is
+    measured (§3.12), not required. What changes from one channel to
+    the next is register (§3.3.10), never who it is (§3.3.8). Any turn can speak on any channel a transport owns, leave a
     note for another channel's context, and read another channel's recent
     conversation (§3.5.9–11), and retrieval spans the whole memory.
     Memory is shared but eventually consistent: what one context learns
@@ -1535,6 +1543,7 @@ record that holds the reasoning.
 
 | Decision | Where |
 |---|---|
+| Core/periphery: one deliberative core context and a peripheral per channel, as a plugin strategy beside the base topology; forks block or not, chosen per fork; pauses don't lapse and overdue queues are reported to the core; trust passes through the core; implementation gated on the TRD | supplement, accepted 2026-11-07; #16, #296 |
 | apluggy entry points, not a hand-written registration order; `depends_on` validated at startup | principle 1; §3.1.13 |
 | Single-turn dispatch; multi-turn reasoning emerges from notifications | principle 3; §3.1.2 |
 | Only startup is fatal, on named paths; after start, no channel content can fail its turns repeatedly. Enforced by a prompt build that cannot fail plus a wedge breaker, not by cataloguing per-turn call sites: catching exceptions doesn't stop a deterministic failure from recurring every turn | principle 5; §3.1.17–18; #352, #353 |

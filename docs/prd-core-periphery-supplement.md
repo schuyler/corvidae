@@ -1,8 +1,13 @@
 # Corvidae: product requirements supplement — core/periphery architecture
 
-**Status: draft.** This supplement binds nothing until the owner accepts
-it. Until then `docs/prd.md` alone is the reference, and work is not
-measured against this document.
+**Status: accepted 2026-11-07.** This supplement is part of the product
+requirements: its principles and requirements bind, and `docs/prd.md`
+§4 records the decision. Implementation is gated on acceptance of the
+technical reference document (TRD) that will say how these outcomes are
+met and in what order; until the TRD is accepted, no work is measured
+against this supplement, and the prerequisites it names (the kernel
+rename, #16; pools and leases, #362–#364) are measured against the base
+PRD alone.
 
 This supplement reframes the requirements in `docs/prd.md` around a
 core/periphery architecture. It specifies desired outcomes, not
@@ -120,9 +125,8 @@ core (open question 13).
 
 ## 2. New principles
 
-These proposed principles would supplement the base PRD's sixteen. Once
-the supplement is accepted, a change that violates one is a bug even if
-its tests pass; until then they are proposals.
+These principles supplement the base PRD's sixteen. A change that
+violates one is a bug even if its tests pass.
 
 17. **One mind, many senses.** The framework MUST run the core as a
     channel with an input queue, fed by notifications from elsewhere in
@@ -167,8 +171,8 @@ its tests pass; until then they are proposals.
     handle and what it can't, and to escalate the rest. Escalation is
     meant to be an instinctive response, not a reasoned decision.
 
-20. **Goals are embedded in the context.** The goal block (commitment
-    floor) MUST be part of the core's context, pinned and byte-stable
+20. **Goals are embedded in the context.** The goal block MUST be part
+    of the core's context, pinned and byte-stable
     between compaction boundaries (§3.6), and idle notifications MUST
     be delivered to that same context.
 
@@ -348,15 +352,12 @@ its tests pass; until then they are proposals.
    full or compressed, is open question 9, and how well it works is
    measured by tone continuity (§3.8.2).
 
-   *Note for the base PRD:* base principle 14 says the agent presents
-   the same identity on every channel, as a requirement. How an agent
-   presents is model behaviour, and the core and peripherals may run
-   different models, so no code can guarantee it. That part of
-   principle 14 should be softened from a requirement to a "should",
-   with different models named as the accepted exception. Principle 17
-   of this supplement, which requires the framework to give every
-   channel-bound peripheral "the agent's one identity", needs the same
-   adaptation. Until then this supplement treats both as intent.
+   *Note:* base principle 14 was amended at acceptance (§4): the
+   framework gives every context the one identity, and where contexts
+   run different models, how the agent presents is measured, not
+   required. Principle 17 of this supplement reads the same way: giving
+   the identity is required of the framework; presenting it is model
+   behaviour.
 
 6. The framework MUST give each peripheral its channel's register (base
    PRD §3.3.10), and MUST make it available to the core when the core
@@ -457,7 +458,7 @@ its tests pass; until then they are proposals.
    order in which active queues are granted heads.
 
 7. **Pausing and queue order.** This item amends base PRD §3.13.5,
-   §3.13.6 and §3.13.7 once the supplement is accepted.
+   §3.13.6 and §3.13.7 (§4).
    - A paused channel MUST stay paused until the core unpauses it; a
      pause MUST NOT lapse at a latency bound. The framework MUST let the
      operator unpause any channel at any time without going through a
@@ -549,6 +550,24 @@ its tests pass; until then they are proposals.
    input, never the periphery's or the core's. The framework MUST let
    the core import the raw message (§3.1.12) to check a summary against
    what arrived.
+
+7. **Trust passes through the core.** With the trust plugin loaded, an
+   instruction to a periphery (§3.1.8), a fork's join report (§3.5.3), a
+   task-bound peripheral's result (§3.2.9) and a memory consolidated from
+   the core's own window MUST each carry a trust level no higher than
+   the lowest-trust content it was written from, and the framework MUST
+   stamp that level itself, never from anything the model wrote. Where
+   the framework cannot tell which content an instruction was written
+   from, it MUST use the lowest trust in the core's window since its
+   last compaction. How the framework learns what an instruction answers
+   is a design decision (`docs/core-periphery-open-questions.md`, gap 2).
+
+   *Rationale:* Item 6 frames an escalation as data, but an attacker
+   who waits one turn would otherwise reach a periphery through an
+   instruction the core wrote after reading them, at the core's trust.
+   Base PRD §3.7 Trust already gives a consolidated record the minimum
+   trust of its range; this item extends the same rule to everything
+   else that leaves the core.
 
 ### 3.5 Forking and joining: the core directs its own focus
 
@@ -658,7 +677,7 @@ respond to an escalation.
    today), critique's background objections (non-blocking today, and
    re-entering as CONTEXT) and the core's long-lived forks.
 
-### 3.6 Goal block / commitment floor
+### 3.6 Goal block
 
 With the goals plugin loaded:
 
@@ -841,9 +860,13 @@ With the goals plugin loaded:
 ## 4. What carries over
 
 The base PRD's requirements MUST continue to hold, except where this
-supplement amends them once accepted:
+supplement amends them:
 
 - base §1's single-slot clause holds as correctness, not speed (§3.8.6);
+- base principle 14's "presents the same identity on every channel" is
+  softened: the framework gives every context the one identity, and
+  where contexts run different models, presentation is measured, not
+  required (§3.2.5);
 - the core takes over the heartbeat's role, and its idle-started turns
   lose the heartbeat's critique exemption, amending base §3.7
   Heartbeat and §3.7 Critique 3 (§3.1.2);
@@ -1049,11 +1072,13 @@ sensitivity plugins, locks under principle 15, the floors of principle
 | The agent's own actions can't leave the core unable to receive work | §3.3.7 | Recast | The agent wedging itself |
 | A queue past its latency bound is reported to the core | §3.3.7 | Recast | Silent starvation of a channel or of upkeep |
 | Reasonable precautions against unbounded CPU, memory or disk use | §3.12 | Recast | Floods and runaway loops |
+| Instructions, join reports, task results and core memories carry the trust of what they were written from, stamped by the framework | §3.4.7 | Owner, 2026-11-07 | Injection reaching a periphery through the core one turn later |
 
 ---
 
-*This supplement is a draft and a goal for exploration, not a build plan. It
-specifies desired outcomes for the core/periphery architecture. The TRD will
-specify how those outcomes are achieved and in what order. Appendix A
-collects the research and design ideas that informed the requirements; the
-TRD may adopt, modify, or discard any of them.*
+*This supplement is accepted requirements, not a build plan. It specifies
+desired outcomes for the core/periphery architecture. The TRD will specify
+how those outcomes are achieved and in what order, and implementation is
+gated on its acceptance. Appendix A collects the research and design ideas
+that informed the requirements; the TRD may adopt, modify, or discard any
+of them.*

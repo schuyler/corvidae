@@ -145,14 +145,10 @@ off here.
    "less Lex," the options are: improve the prompt, use a larger
    periphery model (9B), or have the core dictate more replies.
 
-   *Provisional (unreviewed):* Run it before the kernel work, since it
-   needs none: a script sends the same telegraphic instructions and
-   channel context to a 4B and to the 27B, and an LLM-judged suite (base
-   §3.12) scores the pairs for register and identity. If the 4B is
-   judged clearly worse, the default flips to exact wording for
-   everything beyond acknowledgements and the periphery narrows to
-   sensing and escalating; a 9B is the second thing to try. Either way
-   the number goes in the measurement plan, not in a requirement.
+   *Decided (owner, 2026-11-07):* an operator concern, not a framework
+   one. The supplement measures rather than requires it (§3.8.2), the
+   operator picks the periphery model and judges the seam, and base
+   principle 14 was softened at acceptance to say so.
 
 5. **Periphery context size.** How much context does the periphery need?
    If it's small (last few messages + identity files), the KV cache is
@@ -419,14 +415,17 @@ off here.
    summary takes the trust of the message that triggered it, which an
    attacker can sidestep by waiting one turn.
 
-   *Provisional (unreviewed):* An instruction carries the trust of the
-   escalation it answers: the instruct tool takes the escalation's id as
-   a required argument and the framework stamps the trust from that row.
-   An instruction that cites nothing carries the lowest trust in the
-   core's window since its last compaction (idea 5). A fork's report
-   carries the lowest trust in the fork's window; a task-bound result
-   the lowest trust of its inputs; a core memory the lowest trust in its
-   range, as any consolidated range does.
+   *Decided (owner, 2026-11-07):* supplement §3.4.7 states the outcome:
+   each of these carries a trust level no higher than the lowest-trust
+   content it was written from, stamped by the framework, with
+   lowest-in-window since the last compaction as the fallback.
+
+   *Provisional (unreviewed), for the TRD:* how the framework knows
+   what an instruction answers. The instruct tool takes the
+   escalation's id as a required argument and the framework stamps the
+   trust from that row; an instruction that cites nothing takes the
+   fallback. A fork's report takes the lowest trust in the fork's
+   window; a task-bound result the lowest trust of its inputs.
 
 3. **Fork lifecycle.** When a long-lived fork counts as done; what
    happens to items queued for it but unhandled at join or abandonment;
@@ -471,8 +470,8 @@ off here.
 
    *Provisional (unreviewed):* Every goal, one line each, within the
    bound; past the bound, the N highest-priority lines plus a line "and
-   K more", with the warning §3.6.5 already requires. Drop the term
-   "commitment floor"; the block is the goal block.
+   K more", with the warning §3.6.5 already requires. The term
+   "commitment floor" was dropped at acceptance.
 
 7. **Judgment-prompt rewrites.** Whether critique gates a rewrite or
    reviews it afterwards (base critique only reviews afterwards);
