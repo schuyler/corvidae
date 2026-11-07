@@ -55,7 +55,6 @@ _MIME_EXCLUDED = frozenset({
     "text/html",
 })
 
-
 # MIME → file extension mapping (for the extension override).
 _MIME_TO_EXT = {
     "image/jpeg": ".jpg",
@@ -101,18 +100,20 @@ def _is_downloadable(mime_base: str, att_type: int = 0) -> bool:
     Fallback: legacy protobuf type enum (image/GIF only) for older
     signal-cli versions that do not send contentType.
     """
-    if mime_base:
-        if mime_base in _MIME_EXCLUDED:
-            return False
-        if mime_base in _DOWNLOADABLE_MIME_EXACT:
-            return True
-        return any(mime_base.startswith(p) for p in _DOWNLOADABLE_MIME_PREFIXES)
-    # No contentType: fall back to the protobuf type enum.
-    return att_type in (ATT_IMAGE, ATT_GIF)
+    if not mime_base:
+        # No contentType: fall back to the protobuf type enum (older
+        # signal-cli versions that do not send contentType).
+        return att_type in (ATT_IMAGE, ATT_GIF)
+    if mime_base in _MIME_EXCLUDED:
+        return False
+    if mime_base in _DOWNLOADABLE_MIME_EXACT:
+        return True
+    return any(mime_base.startswith(p) for p in _DOWNLOADABLE_MIME_PREFIXES)
 
 
-def _sanitize_subtype(type_name: str) -> str:
-    """Sanitize a sender-controlled MIME subtype for agent-visible notes."""
+def _sanitize_mime_part(type_name: str) -> str:
+    """Sanitize a sender-controlled MIME name part (major or subtype)
+    for agent-visible notes."""
     return _SAFE_SUBTYPE.sub("", type_name)[:32] or "attachment"
 
 
@@ -430,11 +431,20 @@ class SignalPlugin(TransportPlugin):
                 line = await reader.readline()
             except ValueError as exc:
                 # StreamReader buffer limit exceeded — an oversized frame
-                # (typically a base64-encoded attachment). The partial data
-                # in the buffer will fail JSON parsing on the next iteration
-                # and be skipped; the connection stays alive.
+                # (typically a base64-encoded attachment). readline() has
+                # already cleared the buffer, so the tail of the line
+                # arrives as the next read and is skipped there as a
+                # malformed frame (a very large line can trip the limit
+                # several times, once per over-limit chunk). The
+                # connection stays alive; an in-flight getAttachment RPC
+                # whose response was discarded is left to time out after
+                # ATTACHMENT_DOWNLOAD_TIMEOUT.
                 logger.warning(
-                    'signal: line exceeded stream limit (%s); discarding', exc,
+                    "signal: frame exceeded the StreamReader limit (%s); "
+                    "discarded. If this was a legitimate attachment, raise "
+                    "signal.max_attachment_size. Any in-flight getAttachment "
+                    "RPC will time out after %ss.",
+                    exc, ATTACHMENT_DOWNLOAD_TIMEOUT,
                 )
                 continue
             if not line:
@@ -595,9 +605,9 @@ class SignalPlugin(TransportPlugin):
             if mime_base and "/" in mime_base:
                 major, subtype = mime_base.split("/", 1)
                 if major == "application":
-                    type_name = _sanitize_subtype(subtype)
+                    type_name = _sanitize_mime_part(subtype)
                 else:
-                    type_name = _sanitize_subtype(major)
+                    type_name = _sanitize_mime_part(major)
             else:
                 att_type = att.get("type", 0)
                 type_name = ATTACHMENT_TYPE_NAMES.get(att_type, f"type{att_type}")

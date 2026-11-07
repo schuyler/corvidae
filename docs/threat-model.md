@@ -1246,8 +1246,17 @@ attachment server-side. No recipient parameter is sent.
 
 The StreamReader buffer limit is sized to `max_attachment_size * 2 * 4 / 3 + 64 KiB`
 to accommodate base64-encoded attachment data with 2x headroom. The 2x factor
-lets an oversized-but-bounded response be read and rejected by the size cap
-rather than tripping the stream limit (which would discard the frame and hang
-the RPC). A line that exceeds even the 2x limit raises `ValueError` in
-`_read_loop`, which logs a warning and discards the line; the connection
-survives.
+lets a response between 1x and 2x of the cap be read in full and rejected by
+the size cap, instead of tripping the stream limit. A line that exceeds the
+2x limit raises `ValueError` in `_read_loop`: `readline()` has already cleared
+the buffer, so the tail of the line arrives as the next read and is skipped
+there as a malformed frame (a very large line can trip the limit several
+times, once per over-limit chunk). The connection survives; an in-flight
+`getAttachment` RPC whose response was discarded is left to time out after
+`ATTACHMENT_DOWNLOAD_TIMEOUT` (60 s).
+
+Old signal-cli versions that send no `contentType` fall back to the coarse
+protobuf type enum: only `ATT_IMAGE` and `ATT_GIF` pass the gate, so a legacy
+`image/svg+xml` typed as `IMAGE` would be downloaded. The exposure is limited
+to allowlisted senders on an old daemon; content sniffing would close it, and
+is out of scope here.

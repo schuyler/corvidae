@@ -490,8 +490,10 @@ Per transport:
   traffic) are dropped; an attachment is downloaded for an allowlisted sender
   when its MIME type passes the download gate (image/*, text/*, audio/*
   prefixes plus application/pdf, application/json, application/xml; SVG and
-  HTML excluded) and is named in the text with the major type label (image, text, audio), except application/* attachments use the MIME subtype (pdf, json, xml);
-  backlog older than five minutes is prefixed with its send time. Typing
+  HTML excluded) and is named in the text with the major type label (image,
+  text, audio), except application/* attachments use the MIME subtype (pdf,
+  json, xml); backlog older than five minutes is prefixed with its send
+  time. Typing
   starts on the first outstanding message and refreshes every 10 s; the
   read receipt is sent at processing start, not arrival. Notifications are
   never handled inline in the read loop.
