@@ -429,12 +429,18 @@ The contract every transport meets:
 1. No config block: inert, nothing logged above DEBUG. Present but
    malformed: raise in `on_init` naming the field.
 2. Default-deny sender allowlist in `should_process_message`. A refusal is
-   one INFO line naming the sender; nothing is sent back and no liveness
-   indicator is shown. The transport fires `on_message` for every decoded
-   message regardless; the gate is the one place that vetoes. Web
-   substitutes a bearer token for the allowlist; the token is the
-   authorization. A sender the agent has messaged first, one to one, is
-   admitted on that channel (§3.5.9).
+   one INFO line naming the sender, except a message that was not addressed
+   to the agent in a channel that requires a mention, which is one DEBUG
+   line naming the channel: it is not a stranger at the door, it is the
+   room moving past the agent, and a busy channel would otherwise log a
+   line per message. Nothing is sent back and no liveness indicator is
+   shown. The transport fires `on_message` for every decoded message
+   regardless; the gate is the one place that vetoes. A transport that can
+   tell whether a message addressed the agent reports it there (`addressed`
+   on the hook: true, false, or absent where the transport has no such
+   concept) and does not act on it itself. Web substitutes a bearer token
+   for the allowlist; the token is the authorization. A sender the agent
+   has messaged first, one to one, is admitted on that channel (§3.5.9).
 3. Transports subclass `TransportPlugin`, set `transport`, and override the
    `send_*` methods they can display. The one `send(channel, event)` hook
    does the ownership check once; a transport's `owns(channel)` predicate

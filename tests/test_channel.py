@@ -388,6 +388,19 @@ class TestLoadChannelConfig:
         assert "channels.irc:#a.bogus" in str(excinfo.value)
         assert len(str(excinfo.value)) < 600
 
+    def test_require_mention_in_a_channel_entry_is_refused_with_the_right_block(self):
+        """#526: `channels.<id>.require_mention` is read by no layer. A live
+        deployment wrote it here and it was silently inert; refuse the config
+        and name the block that reads it."""
+        for key in ("discord:1234567890", "discord:home"):
+            config = {"channels": {key: {"require_mention": False}}}
+            with pytest.raises(ValueError) as excinfo:
+                load_channel_config(config, ChannelRegistry({}))
+            msg = str(excinfo.value)
+            assert f"channels.{key}.require_mention" in msg
+            assert "discord.channels" in msg
+            assert "would do nothing" in msg
+
     def test_removed_keep_thinking_key_keeps_migration_message(self):
         """#205 R4: the specific migration text wins over the generic one."""
         config = {"channels": {"irc:#a": {"keep_thinking_in_history": True}}}

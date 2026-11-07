@@ -178,6 +178,7 @@ class TestIRCClientEvents:
                 sender="user",
                 text="hello bot",
                 trace_id=ANY,
+                addressed=None,
             )
             # The transport mints a real (non-empty string) trace id.
             tid = pm.ahook.on_message.await_args.kwargs["trace_id"]
@@ -238,6 +239,7 @@ class TestIRCClientEvents:
                 sender="user",
                 text="private message",
                 trace_id=ANY,
+                addressed=None,
             )
             tid = pm.ahook.on_message.await_args.kwargs["trace_id"]
             assert isinstance(tid, str) and tid

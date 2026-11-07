@@ -849,7 +849,7 @@ class WebPlugin(TransportPlugin):
             self._broadcast(channel.id, {"type": "user", "conversation": name,
                                          "text": text, "id": entry.id})
             await self.pm.ahook.on_message(channel=channel, sender="web", text=text,
-                                           trace_id=entry.trace_id)
+                                           trace_id=entry.trace_id, addressed=None)
         finally:
             # Admission fires before on_message returns, so an entry still
             # un-admitted here was dropped, rejected, raised or cancelled.

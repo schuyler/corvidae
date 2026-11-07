@@ -189,7 +189,10 @@ agent:
 #   require_mention: true              # false: answer allowed users without an @-mention
 #   channels:                          # per-channel override; the key is the
 #     "1568093636044787772":           # channel id alone (digits, quoted or not),
-#       require_mention: false         # and a thread uses its parent's entry
+#       require_mention: false         # and a thread uses its parent's entry.
+#                                      # This key lives here, not under the
+#                                      # top-level channels: block, which refuses
+#                                      # it at startup (#526)
 #   attachment_dir: state/discord-attachments   # where inbound images are saved
 #   max_attachment_size: 10485760      # bytes, per file, in either direction
 #   send_attachment_root: state        # send_attachment may only read under here

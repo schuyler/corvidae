@@ -137,13 +137,14 @@ async def test_two_lines_one_read_impersonator_refused_through_gathered_hook():
     verdicts: dict[str, bool | None] = {}
     gate_channels: dict[str, object] = {}
 
-    async def on_message(channel, sender, text, trace_id):
+    async def on_message(channel, sender, text, trace_id, addressed=None):
         # The pipeline's shape: a nested gather, so a suspension precedes
         # the hookimpl running.
         async def hook():
             return await asyncio.gather(
                 plugin.should_process_message(
-                    channel=channel, sender=sender, text=text, trace_id=trace_id
+                    channel=channel, sender=sender, text=text, trace_id=trace_id,
+                    addressed=addressed,
                 )
             )
 
@@ -210,14 +211,15 @@ async def test_whois_gap_impersonator_refused_with_account_tag():
     client.rawmsg = rawmsg
     verdicts: dict[str, bool | None] = {}
 
-    async def on_message(channel, sender, text, trace_id):
+    async def on_message(channel, sender, text, trace_id, addressed=None):
         # The Agent's shape: nested gathers, then the gate.
         async def hook():
             for _ in range(5):
                 await asyncio.sleep(0)
             return await asyncio.gather(
                 plugin.should_process_message(
-                    channel=channel, sender=sender, text=text, trace_id=trace_id
+                    channel=channel, sender=sender, text=text, trace_id=trace_id,
+                    addressed=addressed,
                 )
             )
 

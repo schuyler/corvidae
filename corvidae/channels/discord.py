@@ -653,16 +653,24 @@ class DiscordPlugin(TransportPlugin):
         text = message.content or ""
         attachments = list(message.attachments or ())
 
+        # Whether this message was addressed to the bot, or None where the
+        # question does not apply (#526). A channel that requires a mention can
+        # answer it; everywhere else (a DM, a conversational channel) the
+        # answer is not "no", it is "not a thing", and the gate must read it
+        # as no objection. The transport observes; the gate vetoes.
+        addressed: bool | None = None
         if not is_dm:
-            # With require_mention (the default) the bot only reacts when it
-            # is itself mentioned (not merely @everyone/@here, which
-            # mentioned_in would accept). Without it, every guild message
-            # continues; the allowlist gate still refuses other senders.
             if self._require_mention_for(message.channel):
-                if not any(u.id == bot_user_id for u in message.mentions):
-                    logger.debug("discord: ignoring guild message that does not mention the bot")
+                # Not @everyone/@here, which mentioned_in would accept: the
+                # bot itself, by id.
+                addressed = any(u.id == bot_user_id for u in message.mentions)
+                if not addressed and not text and not attachments:
+                    logger.debug(
+                        "discord: unaddressed message with no content in %s",
+                        message.channel.id,
+                    )
                     return
-                if not text and not attachments:
+                if addressed and not text and not attachments:
                     # Discord should deliver content for mentions even without
                     # the privileged intent; flag it if that ever changes.
                     logger.warning(
@@ -731,6 +739,7 @@ class DiscordPlugin(TransportPlugin):
 
             await self.pm.ahook.on_message(
                 channel=channel, sender=sender, text=text, trace_id=trace_id,
+                addressed=addressed,
             )
         finally:
             # Admission fires before on_message returns. Anything not
@@ -921,13 +930,27 @@ class DiscordPlugin(TransportPlugin):
 
     @hookimpl
     async def should_process_message(
-        self, channel: Channel, sender: str, text: str, trace_id: str
+        self,
+        channel: Channel,
+        sender: str,
+        text: str,
+        trace_id: str,
+        addressed: bool | None = None,
     ) -> bool | None:
-        """Default-deny gate: only allowlisted user ids may drive the agent.
-        trace_id is bound without a default -- see
+        """Default-deny gate: only allowlisted user ids may drive the agent,
+        and in a channel that requires a mention, only a message that
+        addressed the bot (#526). trace_id is bound without a default -- see
         tests/test_hook_arg_binding.py."""
         if not channel.matches_transport("discord"):
             return None
+        if addressed is False:
+            # Spoken past, not spoken to. DEBUG, not INFO: in a channel where
+            # people talk to each other, this is the room moving, not an
+            # attempt on the agent, and §3.2's INFO line is for the stranger.
+            logger.debug(
+                "discord: unaddressed message in %s, not admitted", channel.id
+            )
+            return False
         if sender in self._allow:
             return True
         logger.info("discord: rejected message from unauthorized sender %s", sender)

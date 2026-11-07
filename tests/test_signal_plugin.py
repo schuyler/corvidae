@@ -253,7 +253,7 @@ class _FakeAgent:
         """The trace id the transport passed for the message `text`."""
         return next(tid for t, tid, _ in self.calls if t == text)
 
-    async def __call__(self, channel, sender, text, trace_id):
+    async def __call__(self, channel, sender, text, trace_id, addressed=None):
         # Record first so tests can find the id even on early return.
         self.calls.append((text, trace_id, channel))
         if not self.ready:
@@ -261,6 +261,7 @@ class _FakeAgent:
         # Gate, then reject-wins, then the matching lifecycle hook.
         results = await self.pm.ahook.should_process_message(
             channel=channel, sender=sender, text=text, trace_id=trace_id,
+            addressed=addressed,
         )
         if resolve_reject_wins(results) is False:
             await self.pm.ahook.on_message_rejected(

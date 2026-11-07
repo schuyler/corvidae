@@ -144,6 +144,7 @@ class TestReadLoop:
             sender="user",
             text="hello world",
             trace_id=ANY,
+            addressed=None,
         )
         # The transport mints a real (non-empty string) trace id.
         tid = pm.ahook.on_message.await_args.kwargs["trace_id"]
@@ -263,6 +264,7 @@ class TestNonInteractiveStdin:
             sender="user",
             text="hi",
             trace_id=ANY,
+            addressed=None,
         )
         mock_kill.assert_not_called()
 

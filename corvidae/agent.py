@@ -407,7 +407,14 @@ class Agent(CorvidaePlugin):
         await self._start_plugin(config)
 
     @hookimpl
-    async def on_message(self, channel, sender: str, text: str, trace_id: str) -> None:
+    async def on_message(
+        self,
+        channel,
+        sender: str,
+        text: str,
+        trace_id: str,
+        addressed: bool | None = None,
+    ) -> None:
         # The transport mints the id. A missing one would silently break the
         # transport's link between this message and its lifecycle hooks, so
         # fail loudly -- before the readiness check, so a mis-wired transport
@@ -443,6 +450,7 @@ class Agent(CorvidaePlugin):
         # Hook: should_process_message (broadcast, reject-wins)
         results = await self.pm.ahook.should_process_message(
             channel=channel, sender=sender, text=text, trace_id=trace_id,
+            addressed=addressed,
         )
         gate_result = resolve_reject_wins(results)
         if gate_result is False:

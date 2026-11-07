@@ -682,7 +682,12 @@ class AgentSpec:
 
     @hookspec
     async def on_message(
-        self, channel: Channel, sender: str, text: str, trace_id: str
+        self,
+        channel: Channel,
+        sender: str,
+        text: str,
+        trace_id: str,
+        addressed: bool | None = None,
     ) -> None:
         """Called when an inbound message arrives on a channel.
 
@@ -700,6 +705,11 @@ class AgentSpec:
                 ValueError if it is empty. admitted/rejected fire before
                 this hook returns, so a transport can treat "returned
                 without admission" as the message being dropped.
+            addressed: Whether the message was addressed to the agent, for
+                transports where that is a thing a message can fail to be
+                (#526). ``None`` means the transport has no such concept —
+                a DM, a CLI line, a web message — and the gate must read it
+                as "no objection", never as "not addressed".
         """
 
     @hookspec
@@ -829,7 +839,12 @@ class AgentSpec:
 
     @hookspec
     async def should_process_message(
-        self, channel: Channel, sender: str, text: str, trace_id: str | None
+        self,
+        channel: Channel,
+        sender: str,
+        text: str,
+        trace_id: str | None,
+        addressed: bool | None = None,
     ) -> bool | None:
         """Gate hook: decide whether to process an incoming message.
 
@@ -844,6 +859,12 @@ class AgentSpec:
             text: The message content.
             trace_id: The id minted by the transport for this message
                 (passed to ``on_message``). Present for every USER message.
+            addressed: Whether the message was addressed to the agent, or
+                ``None`` where the transport has no such concept (#526). A
+                transport that can answer passes False for a message that
+                spoke past the agent; the veto belongs here, not in the
+                transport's own handler, so a refusal is one gate decision
+                that the rejected hooks and the logs can see.
 
         Note:
             Extension point for message filtering (rate limiting, blocklists,

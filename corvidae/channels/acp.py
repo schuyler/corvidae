@@ -194,6 +194,7 @@ class CorvidaeAcpAgent:
                 channel=channel,
                 sender="user",
                 text=text,
+                addressed=None,
                 trace_id=prompt_trace,
             )
             started = True

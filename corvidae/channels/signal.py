@@ -510,6 +510,9 @@ class SignalPlugin(TransportPlugin):
 
             await self.pm.ahook.on_message(
                 channel=channel, sender=source_uuid, text=text, trace_id=trace_id,
+                # A Signal message has no mention concept: it is a DM or a
+                # group line, and the allowlist is the whole gate (#526).
+                addressed=None,
             )
         finally:
             # Admission or rejection fires before on_message returns.
@@ -839,7 +842,12 @@ class SignalPlugin(TransportPlugin):
 
     @hookimpl
     async def should_process_message(
-        self, channel: Channel, sender: str, text: str, trace_id: str
+        self,
+        channel: Channel,
+        sender: str,
+        text: str,
+        trace_id: str,
+        addressed: bool | None = None,
     ) -> bool | None:
         """Default-deny gate: only an allowlisted ACI (or its known E.164
         alias) may drive the agent. trace_id is bound without a

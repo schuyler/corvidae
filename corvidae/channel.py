@@ -130,6 +130,11 @@ CHANNEL_ENTRY_KEYS: tuple[str, ...] = (
 #: agent-wide, so no channel setting may replace it.
 _REMOVED_CHANNEL_PROMPT_KEY = "system_prompt"
 
+#: Transport settings that look like channel settings (#526). Written in this
+#: block they are read by nothing, which is the silent no-op that cost a live
+#: deployment an afternoon: refuse the config and name the block that reads it.
+_TRANSPORT_CHANNEL_KEYS = {"require_mention": "discord.channels"}
+
 
 def _check_register_prompt(value: object, where: str) -> None:
     """Raise ValueError unless value is None, a string, or a list of strings."""
@@ -546,6 +551,18 @@ def parse_channel_config(config: dict) -> ParsedChannels:
         _check_register_prompt(
             overrides.get("register_prompt"), f"channels.{channel_id}.register_prompt"
         )
+        # A transport setting where a channel setting goes is a startup error,
+        # not a warning: nothing reads it here, so the config would look right
+        # and do nothing (#526).
+        misplaced = sorted(k for k in overrides if k in _TRANSPORT_CHANNEL_KEYS)
+        if misplaced:
+            key = misplaced[0]
+            raise ValueError(
+                f"channels.{channel_id}.{key} is read by no layer and would do "
+                f"nothing; it is a transport setting. Move it to "
+                f"{_TRANSPORT_CHANNEL_KEYS[key]} in agent.yaml, keyed by the "
+                f"bare {key.split('_')[0]} id (see docs/configuration.md)"
+            )
         # Reject keys no layer reads, so a typo or a wished-for key is loud.
         unknown = sorted(k for k in overrides if k not in CHANNEL_ENTRY_KEYS)
         if unknown:

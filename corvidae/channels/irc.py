@@ -422,7 +422,12 @@ class IRCPlugin(TransportPlugin):
 
     @hookimpl
     async def should_process_message(
-        self, channel: Channel, sender: str, text: str, trace_id: str
+        self,
+        channel: Channel,
+        sender: str,
+        text: str,
+        trace_id: str,
+        addressed: bool | None = None,
     ) -> bool | None:
         """Default-deny gate: only an irc.allow sender may drive the agent.
 
@@ -472,7 +477,10 @@ class IRCPlugin(TransportPlugin):
         self._verdicts[trace_id] = (allowed, account, reason)
         try:
             await self.pm.ahook.on_message(
-                channel=channel, sender=by, text=message, trace_id=trace_id
+                channel=channel, sender=by, text=message, trace_id=trace_id,
+                # IRC has no mention gate; a line in the channel is addressed
+                # to whoever cares (#526).
+                addressed=None,
             )
         finally:
             # Admitted, refused or failed: the verdict dies with the message.

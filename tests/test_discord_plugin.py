@@ -280,6 +280,9 @@ class Harness:
     plugin: DiscordPlugin
     config: dict
     clients: list[FakeClient] = field(default_factory=list)
+    # Trace ids the gate admitted. `texts()` reports only these, so "delivered"
+    # keeps meaning "the agent saw it", not "the transport fired" (#526).
+    admitted: set[str] = field(default_factory=set)
     messageable: FakeMessageable = field(default_factory=FakeMessageable)
     messageable_requests: list[str] = field(default_factory=list)
 
@@ -288,7 +291,7 @@ class Harness:
         return self.pm.ahook.on_message
 
     def texts(self) -> list[str]:
-        """Texts of every on_message call so far, in order."""
+        """Texts of every on_message call so far, in order (fired, not admitted)."""
         return [c.kwargs["text"] for c in self.on_message.await_args_list]
 
 
@@ -310,9 +313,21 @@ async def _start_plugin(
     pm = create_plugin_manager()
     registry = ChannelRegistry(AGENT_DEFAULTS)
     pm.register(registry, name="registry")
-    # Like Agent.on_message, the default mock admits the message (firing
-    # on_message_admitted before returning) so it keeps its typing slot.
-    async def _admit(channel, sender, text, trace_id):
+    # Like Agent.on_message, the default mock runs the gate and then admits
+    # the message (firing on_message_admitted before returning) so it keeps
+    # its typing slot. The gate is the only veto (#526), so a test that
+    # asserts "dropped" is asserting the gate refused, not that the
+    # transport never fired.
+    admitted: set[str] = set()
+
+    async def _admit(channel, sender, text, trace_id, addressed=None):
+        gate = await pm.ahook.should_process_message(
+            channel=channel, sender=sender, text=text, trace_id=trace_id,
+            addressed=addressed,
+        )
+        if resolve_reject_wins(gate) is False:
+            return
+        admitted.add(trace_id)
         await pm.ahook.on_message_admitted(
             channel=channel, trace_id=trace_id, sender=sender, text=text,
         )
@@ -332,6 +347,7 @@ async def _start_plugin(
     plugin = DiscordPlugin(pm)
     pm.register(plugin, name="discord")
     h = Harness(pm=pm, registry=registry, plugin=plugin, config=config)
+    h.admitted = admitted
 
     queue = list(behaviors or [])
 
@@ -367,8 +383,17 @@ async def _deliver(h: Harness, *messages, bot_id: int = BOT_ID) -> None:
 
 
 def _delivered(h: Harness) -> list[str]:
-    """on_message texts excluding the sentinel."""
-    return [t for t in h.texts() if t != "__sentinel__"]
+    """Texts the *gate admitted*, excluding the sentinel.
+
+    Since #526 the transport fires for messages it would once have dropped and
+    the gate is the only veto, so "delivered to the agent" is the gate's
+    answer, not the call's existence.
+    """
+    return [
+        c.kwargs["text"]
+        for c in h.on_message.await_args_list
+        if c.kwargs["trace_id"] in h.admitted and c.kwargs["text"] != "__sentinel__"
+    ]
 
 
 @pytest.fixture
@@ -660,12 +685,62 @@ class TestInboundFiltering:
         finally:
             await h.plugin.on_stop()
 
-    async def test_guild_message_without_mention_dropped(self):
-        """R7: in a server channel the bot only reacts when addressed."""
+    async def test_guild_message_without_mention_is_fired_and_addressed_false(self):
+        """R7, #526: in a server channel the transport still fires the hook --
+        the gate is what refuses -- and it says the message was not addressed."""
         h = await _start_plugin()
         try:
             await _deliver(h, make_message("just chatting"))
-            assert _delivered(h) == []
+            fired = [c for c in h.on_message.await_args_list if c.kwargs["text"] == "just chatting"]
+            assert len(fired) == 1
+            assert fired[0].kwargs["addressed"] is False
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_gate_vetoes_unaddressed_and_logs_it_at_debug(self, caplog):
+        """#526: the veto is the gate's, at DEBUG -- an unaddressed message is
+        the room talking past the bot, not a stranger at the door, so it must
+        not put a line at INFO for every message in a busy channel."""
+        h = await _start_plugin()
+        try:
+            channel = h.registry.get_or_create("discord", str(CHAN_ID))
+            with caplog.at_level(logging.DEBUG):
+                verdict = await h.plugin.should_process_message(
+                    channel, str(AUTH_ID), "just chatting", "trace-x", addressed=False,
+                )
+            assert verdict is False
+            unaddressed = [r for r in caplog.records if "unaddressed" in r.getMessage()]
+            assert unaddressed and all(r.levelno == logging.DEBUG for r in unaddressed)
+            assert not any(
+                r.levelno >= logging.INFO and "unaddressed" in r.getMessage()
+                for r in caplog.records
+            )
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_gate_admits_an_allowlisted_sender_when_addressed_is_none(self):
+        """#526: None means the channel has no mention concept (a DM, a
+        conversational channel) and must read as no objection, not as False."""
+        h = await _start_plugin()
+        try:
+            channel = h.registry.get_or_create("discord", str(CHAN_ID))
+            assert await h.plugin.should_process_message(
+                channel, str(AUTH_ID), "hello", "trace-y", addressed=None,
+            ) is True
+            assert await h.plugin.should_process_message(
+                channel, str(AUTH_ID), "hello", "trace-z", addressed=True,
+            ) is True
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_a_mention_is_addressed_true_and_still_stripped(self):
+        """#526: the observation is the transport's; the text it hands on is
+        the same text #521 left."""
+        h = await _start_plugin()
+        try:
+            await _deliver(h, make_message(f"<@{BOT_ID}> hi", mentions=[BOT_MENTION]))
+            fired = [c for c in h.on_message.await_args_list if c.kwargs["text"] == "hi"]
+            assert fired and fired[0].kwargs["addressed"] is True
         finally:
             await h.plugin.on_stop()
 
@@ -683,21 +758,24 @@ class TestInboundFiltering:
         finally:
             await h.plugin.on_stop()
 
-    async def test_mention_of_someone_else_dropped(self):
+    async def test_mention_of_someone_else_is_addressed_false(self):
         """R7: mentioning another user is not addressing the bot."""
         h = await _start_plugin()
         try:
             await _deliver(h, make_message(f"<@{OTHER_ID}> hi", mentions=[OTHER_MENTION]))
-            assert _delivered(h) == []
+            fired = [c for c in h.on_message.await_args_list if "hi" in c.kwargs["text"]]
+            assert fired and fired[0].kwargs["addressed"] is False
         finally:
             await h.plugin.on_stop()
 
     async def test_everyone_only_not_treated_as_mention(self):
-        """R7: @everyone/@here (mention_everyone, bot not in mentions) is dropped."""
+        """R7: @everyone/@here (mention_everyone, bot not in mentions) is not
+        being addressed, and the gate says so."""
         h = await _start_plugin()
         try:
             await _deliver(h, make_message("@everyone look", mention_everyone=True))
-            assert _delivered(h) == []
+            fired = [c for c in h.on_message.await_args_list if "look" in c.kwargs["text"]]
+            assert fired and fired[0].kwargs["addressed"] is False
         finally:
             await h.plugin.on_stop()
 

@@ -120,7 +120,7 @@ class TestAcpSessionsAndPrompt:
         created = await agent.new_session(cwd=str(tmp_path))
         session_id = created.session_id
 
-        async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
+        async def _fake_on_message(channel, sender: str, text: str, trace_id: str, addressed=None) -> None:
             # The transport mints a real (non-empty string) trace id (#95).
             assert isinstance(trace_id, str) and trace_id
             # Simulate the agent loop finishing a text-only turn.
@@ -159,7 +159,7 @@ class TestAcpSessionsAndPrompt:
 
         gate = asyncio.Event()
 
-        async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
+        async def _fake_on_message(channel, sender: str, text: str, trace_id: str, addressed=None) -> None:
             channel.pending_tool_call_ids.add("call_1")
             await gate.wait()
             channel.pending_tool_call_ids.discard("call_1")
@@ -187,7 +187,7 @@ class TestAcpCancel:
         created = await agent.new_session(cwd=str(tmp_path))
         session_id = created.session_id
 
-        async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
+        async def _fake_on_message(channel, sender: str, text: str, trace_id: str, addressed=None) -> None:
             # Enqueue-style: leave the prompt future pending (tools in flight).
             channel.pending_tool_call_ids.add("call_1")
 
@@ -228,7 +228,7 @@ class TestAcpCancel:
         # leaves the turn open, as a turn with tools in flight does.
         traces: list[str] = []
 
-        async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
+        async def _fake_on_message(channel, sender: str, text: str, trace_id: str, addressed=None) -> None:
             traces.append(trace_id)
             channel.pending_tool_call_ids.add("call_1")
 
@@ -287,7 +287,7 @@ class TestAcpCancel:
         session_id = created.session_id
         channel = registry.get(f"acp:{session_id}")
 
-        async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
+        async def _fake_on_message(channel, sender: str, text: str, trace_id: str, addressed=None) -> None:
             channel.pending_tool_call_ids.add("call_1")
 
         plugin.pm.ahook.on_message = _fake_on_message
@@ -399,7 +399,7 @@ class TestAcpIgnoredClientInput:
         plugin, _registry, agent = await _init_acp_plugin()
         created = await agent.new_session(cwd=str(tmp_path))
 
-        async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
+        async def _fake_on_message(channel, sender: str, text: str, trace_id: str, addressed=None) -> None:
             await plugin.send(channel=channel, event=OutboundMessage(text=f"reply:{text}"))
 
         plugin.pm.ahook.on_message = _fake_on_message
@@ -453,7 +453,7 @@ class TestPromptAlwaysCompletes:
         created = await agent.new_session(cwd=str(tmp_path))
         plugin._conn.session_update = AsyncMock(side_effect=RuntimeError("client gone"))
 
-        async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
+        async def _fake_on_message(channel, sender: str, text: str, trace_id: str, addressed=None) -> None:
             # Mimic the agent loop: delivery happens on its own task, and the
             # Agent logs (does not re-raise) a failed send hook.
             async def _deliver() -> None:
@@ -480,7 +480,7 @@ class TestPromptAlwaysCompletes:
         plugin, _registry, agent = await _init_acp_plugin()
         created = await agent.new_session(cwd=str(tmp_path))
 
-        async def _boom(channel, sender: str, text: str, trace_id: str) -> None:
+        async def _boom(channel, sender: str, text: str, trace_id: str, addressed=None) -> None:
             raise RuntimeError("queue full")
 
         plugin.pm.ahook.on_message = _boom
@@ -503,7 +503,7 @@ class TestConcurrentPrompt:
         created = await agent.new_session(cwd=str(tmp_path))
         enqueued = asyncio.Event()
 
-        async def _enqueue(channel, sender: str, text: str, trace_id: str) -> None:
+        async def _enqueue(channel, sender: str, text: str, trace_id: str, addressed=None) -> None:
             # A tool is in flight, so the turn's future stays pending.
             channel.pending_tool_call_ids.add("call_1")
             enqueued.set()

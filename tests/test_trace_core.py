@@ -113,7 +113,7 @@ class TestHookspecSignatures:
     def test_should_process_message(self):
         from corvidae.hooks import AgentSpec
         assert _params(AgentSpec.should_process_message) == [
-            "channel", "sender", "text", "trace_id",
+            "channel", "sender", "text", "trace_id", "addressed",
         ]
 
     def test_on_message_admitted(self):

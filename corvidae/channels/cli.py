@@ -113,6 +113,7 @@ class CLIPlugin(TransportPlugin):
                 channel=channel,
                 sender="user",
                 text=text,
+                addressed=None,
                 # Transport-minted id; the Agent uses it verbatim (#95).
                 trace_id=mint_trace_id(),
             )

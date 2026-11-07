@@ -3108,16 +3108,22 @@ a login failure, but is deaf and mute until the daemon restarts.
 does not request the privileged Message Content intent, so operators need
 not enable it in the Developer Portal. Discord still delivers message
 content for DMs and for messages that mention the bot, and those are the
-only messages this transport processes. If a guild message mentions the
+only messages this transport can decode. If a guild message mentions the
 bot and arrives with empty content anyway, the transport logs a WARNING and
 drops it. That should not happen, and the warning is how a change on
 Discord's side would show up. The client requests Message Content when any
 channel answers unaddressed — the transport default (`discord.require_mention:
 false`) or a `discord.channels` entry with `require_mention: false` — because
-the intent is per client, not per channel. The mention check itself is per
-channel: a channel that answers unaddressed skips it and the allowlist is the
-only gate there, while every other channel stays mention-only. The bot's
-mention token is stripped when present either way.
+the intent is per client, not per channel.
+
+The mention check is per channel, and since #526 it is the *gate's* decision,
+not the transport's. The transport observes whether the message addressed the
+bot and hands that on `on_message` as `addressed` (`True`, `False`, or `None`
+in a channel that answers unaddressed, where the question does not arise); it
+then fires the hook and lets `should_process_message` veto, so an unaddressed
+message is a refusal the rejected hooks and the logs can see, logged at DEBUG
+naming the channel rather than at INFO. The bot's mention token is stripped
+when present either way.
 
 **Inbound filtering.** A message is dropped if its author is a bot (this
 covers the bot's own messages and other bots', so two bots cannot talk each
