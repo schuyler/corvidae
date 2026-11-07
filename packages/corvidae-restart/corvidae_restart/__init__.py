@@ -179,6 +179,7 @@ class RestartPlugin(CorvidaePlugin):
     """Restart tool, startup notification and loop guard."""
 
     depends_on = frozenset({"registry", "agent"})
+    model_visible_annotations = frozenset({"origin"})
 
     def __init__(self) -> None:
         self._preflight = run_preflight
@@ -537,15 +538,17 @@ class RestartPlugin(CorvidaePlugin):
                 headline,
             )
             return
-        await self._notify(channel, text, None)
+        await self._notify(channel, text, None, {"origin": "restart"})
 
-    async def _notify(self, channel, text: str, tool_call_id: str | None) -> None:
+    async def _notify(
+        self, channel, text: str, tool_call_id: str | None, annotations: dict | None = None
+    ) -> None:
         await self.pm.ahook.on_notify(
             channel=channel,
             source="restart",
             text=text,
             tool_call_id=tool_call_id,
-            annotations=None,
+            annotations=annotations,
         )
 
     def _summary_lines(self, marker: dict | None = None) -> list[str]:

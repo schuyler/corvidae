@@ -100,13 +100,14 @@ class TestDbHelpers:
             got = reminder_set_since(db_path, channel_id, t0)
             assert got is not None and got[0] == row_id
 
-            # The firing row as Agent persists it: a system message with the
-            # [source] prefix _build_conversation_message adds.
+            # The firing row as Agent persists it: a system message whose
+            # provenance record carries the scheduler's origin.
             (row,) = await sched._fetch(conn, "id = ?", (row_id,))
-            content = f"[reminder]\n\n{frame_firing(row, sched._tz, None)}"
+            content = frame_firing(row, sched._tz, None)
             channel = Channel(transport="irc", scope=REMIND_CHANNEL)
             await persistence.persist_message(
-                channel=channel, message={"role": "system", "content": content},
+                channel=channel,
+                message={"role": "system", "content": content, "corvidae_provenance": {"annotations": {"origin": "reminder"}}},
                 message_type=MessageType.MESSAGE,
             )
             fired = reminder_firing_row(db_path, channel_id, REMIND_TOKEN, t0)
@@ -147,10 +148,10 @@ class TestReminderProbeWiring:
             # The model sets the reminder and acks, echoing the token.
             await sched.add_reminder(channel_id, REMIND_TOKEN, time.time())
             messages[channel].append(driver.IRCMessage(time.time(), "buster", f"SCHEDULED {REMIND_TOKEN}"))
-            # The scheduler fires: the [reminder] row lands, then the reply.
+            # The scheduler fires: the reminder row lands, then the reply.
             await persistence.persist_message(
                 channel=Channel(transport="irc", scope=REMIND_CHANNEL),
-                message={"role": "system", "content": f"[reminder]\n\n... «{REMIND_TOKEN}» ..."},
+                message={"role": "system", "content": f"... «{REMIND_TOKEN}» ...", "corvidae_provenance": {"annotations": {"origin": "reminder"}}},
                 message_type=MessageType.MESSAGE,
             )
             if reply:

@@ -17,7 +17,9 @@ Propagation rule: contextvars snapshot at ``asyncio.create_task`` time.
 A task created before ``set_attribution`` was called never sees the
 attribution. TaskQueue workers are created once at startup, so Task
 captures ``contextvars.copy_context()`` at creation and the worker runs
-the work inside that captured context (see corvidae.task).
+the work inside that captured context (see corvidae.task). A channel's
+SerialQueue consumer is the opposite: it starts in an empty context, because
+whichever code first enqueues to it may be running inside another turn.
 """
 
 import contextvars

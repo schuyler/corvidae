@@ -25,6 +25,7 @@ Logging:
 """
 
 import asyncio
+import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -59,7 +60,9 @@ from corvidae.context import (
     message_tokens,
     MessageType,
     unsent_marker_text,
+    well_formed_calls,
 )
+from corvidae.provenance import PROVENANCE_KEY, ItemMetadata, encode, load_fence_key
 # Re-exported: mint_trace_id lives in a leaf module so transports can
 # import it without this module; existing imports from here keep working.
 from corvidae.trace import mint_trace_id  # noqa: F401
@@ -186,6 +189,7 @@ class QueueItem:
         channel: The Channel this item belongs to.
         sender: For user messages, the sender identity; None for notifications.
         source: For notifications, the origin (e.g. "task"); None for user messages.
+            A log label only; the model sees ``metadata``.
         tool_call_id: For deferred tool results (background task completions).
         annotations: Extensible annotations, opaque to core. Plugins stamp their own
             keys (e.g. ``annotations["origin"]``) and read them back downstream.
@@ -207,16 +211,16 @@ class QueueItem:
     content: str
     channel: Channel
     sender: str | None = None
-    #: The sender's display name when the transport has one (#513), read from
-    #: the channel's `sender_names` at admission. Rendered beside the id as
-    #: data; never merged into what the person typed.
-    sender_name: str | None = None
     source: str | None = None
     tool_call_id: str | None = None
     annotations: dict = field(default_factory=dict)
     trace_id: str | None = None
     originating: bool = False
     retry: bool = False
+    #: What the kernel observed about this item (corvidae/provenance.py); set
+    #: only by kernel code, never from a hook argument. None only for items
+    #: tests build by hand.
+    metadata: ItemMetadata | None = None
 
 
 #: Backoff for re-running a turn the backend could not answer (#281): the
@@ -299,6 +303,9 @@ class Agent(CorvidaePlugin):
         self._tool_call_timeouts: ToolTimeouts = DEFAULT_TOOL_TIMEOUTS
         self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
         self._base_dir = None
+        # Annotation keys the model may see and the fence key, read in _start_plugin.
+        self._annotation_keys: frozenset[str] = frozenset()
+        self._fence_key: bytes | None = None
         self._request_logprobs: bool = False
         self._mid_conversation_system_role: str = "system"
         self._forks: ForksConfig = ForksConfig()
@@ -470,9 +477,13 @@ class Agent(CorvidaePlugin):
             content=text,
             channel=channel,
             sender=sender,
-            sender_name=channel.sender_names.get(sender),
             trace_id=trace_id,
             originating=True,
+            metadata=ItemMetadata(
+                sender=sender,
+                sender_name=channel.sender_names.get(sender),
+                channel_name=channel.name,
+            ),
         )
         # The gate admitted the item: the channel is busy from here.
         self._note_activity(channel.id)
@@ -496,6 +507,7 @@ class Agent(CorvidaePlugin):
             source=source,
             tool_call_id=tool_call_id,
             annotations=annotations or {},
+            metadata=self._notification_metadata(channel, tool_call_id),
         )
         logger.debug(
             "on_notify received",
@@ -538,6 +550,7 @@ class Agent(CorvidaePlugin):
             source="task",
             tool_call_id=tool_call_id,
             annotations=annotations or {},
+            metadata=self._tool_result_metadata(channel, tool_call_id),
         )
         queue = self._get_or_create_queue(channel)
         await queue.enqueue(item)
@@ -545,6 +558,50 @@ class Agent(CorvidaePlugin):
         # The error result is inbound work like any notification.
         self._note_activity(channel.id)
         return True
+
+    def _notification_metadata(self, channel, tool_call_id: str | None) -> ItemMetadata:
+        """What the kernel can certify about a notification: the attribution of
+        the code that called on_notify, or the call a tool result answers."""
+        if tool_call_id:
+            return self._tool_result_metadata(channel, tool_call_id)
+        attribution = get_attribution()
+        return ItemMetadata(
+            origin_channel=attribution.get("channel_id"),
+            origin_trace=attribution.get("trace_id"),
+        )
+
+    def _tool_result_metadata(self, channel, tool_call_id: str) -> ItemMetadata:
+        """The tool and the other registered channel that the call answered by
+        ``tool_call_id`` named, read from the call's row in the window.
+
+        A call not in the window (or no window yet) gives empty metadata.
+        """
+        conv = channel.conversation
+        for msg in reversed(conv.messages if conv is not None else []):
+            for call in well_formed_calls(msg):
+                if call["id"] != tool_call_id:
+                    continue
+                function = call.get("function")
+                function = function if isinstance(function, dict) else {}
+                try:
+                    args = json.loads(function.get("arguments") or "{}")
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "arguments of tool call %s on channel %s are not JSON; "
+                        "its result renders without a target",
+                        tool_call_id, channel.id, extra={"channel": channel.id},
+                    )
+                    args = {}
+                name = function.get("name")
+                target = next(
+                    (
+                        v for v in (args.values() if isinstance(args, dict) else ())
+                        if isinstance(v, str) and v != channel.id and self._registry.get(v)
+                    ),
+                    None,
+                )
+                return ItemMetadata(tool=name if isinstance(name, str) else None, target=target)
+        return ItemMetadata()
 
     def _get_or_create_queue(self, channel) -> SerialQueue:
         """Return existing SerialQueue for channel or create and start a new one."""
@@ -574,14 +631,16 @@ class Agent(CorvidaePlugin):
                     "content": item.content,
                 }
             else:
-                conversation_message = {
-                    "role": "system",
-                    "content": f"[{item.source}]\n\n{item.content}",
-                }
+                conversation_message = {"role": "system", "content": item.content}
             request_text = item.content
         else:
             logger.error("_build_conversation_message: unknown item role %r", item.role)
             return None
+        # Only the annotation keys a plugin declared model-visible are stored.
+        if item.metadata is not None:
+            conversation_message[PROVENANCE_KEY] = encode(item.metadata, {
+                k: str(v) for k, v in item.annotations.items() if k in self._annotation_keys
+            })
         return conversation_message, request_text
 
     def _warn_compaction_failed(self, channel: Channel, exc: BaseException) -> None:
@@ -1124,118 +1183,9 @@ class Agent(CorvidaePlugin):
         finally:
             self._note_settled(channel)
 
-    #: Longest sender or channel name rendered into a turn, in characters (#513).
-    ATTRIBUTION_NAME_MAX = 64
-
-    @classmethod
-    def _attribution_name(cls, value: str | None) -> str | None:
-        """A display name squeezed to one short line, or None when it is empty.
-
-        A name is a string somebody else chose, and it lands in a prompt, so the
-        separators and brackets the framing uses are removed: a name cannot open
-        a second attribution, close this one early, or run past one line.
-        """
-        if not value:
-            return None
-        # Collapse every run of whitespace, so a newline (or a tab, or a
-        # zero-width-ish gap) cannot split the row into two.
-        cleaned = " ".join(value.split())
-        for char in "[];":
-            cleaned = cleaned.replace(char, " " if char == ";" else "")
-        cleaned = " ".join(cleaned.split())[: cls.ATTRIBUTION_NAME_MAX].strip()
-        return cleaned or None
-
-    def _turn_attribution(self, channel: Channel, item: QueueItem) -> dict | None:
-        """The CONTEXT row naming the sender and the channel for this turn (#513).
-
-        Ordinary prompt context, not a tool call, because the decision about who
-        is talking and where happens before the first token. It is a CONTEXT row
-        and not part of the user's message for two reasons: a display name is
-        attacker-controlled text and must not look like something the person
-        typed, and MESSAGE rows are what compaction summarises and what memory
-        consolidates, so the framing stays out of both.
-
-        Returns None when the transport supplied neither a sender name nor a
-        channel name, which is every transport that knows only ids today.
-        """
-        sender_name = self._attribution_name(item.sender_name)
-        channel_name = self._attribution_name(channel.name)
-        if sender_name is None and channel_name is None:
-            return None
-
-        # The sender: id first when there is no name, because an id is at least
-        # true, and the name is what a person would recognise.
-        # The id is transport-assigned and numeric on every transport today, but
-        # IRC nicks are the sender and may contain brackets, so it gets the same
-        # strip as a name rather than being trusted to stay well behaved.
-        sender_id = self._attribution_name(str(item.sender)) or str(item.sender)
-        sender = (
-            f"sender: {sender_name} (id {sender_id})"
-            if sender_name is not None
-            else f"sender: id {sender_id}"
-        )
-
-        # The channel: a DM scope is a key, not a name, so it says what it is
-        # rather than pretending to be a channel called 'dm:4087...'.
-        if channel.scope.startswith("dm:"):
-            where = f"channel: direct message (id {channel.scope})"
-        elif channel_name is not None:
-            where = f"channel: {channel_name} (id {channel.id})"
-        else:
-            where = f"channel: id {channel.id}"
-
-        text = f"[{sender}; {where}]"
-        return {"role": "system", "content": text}
-
-    async def _append_turn_attribution(
-        self,
-        channel: Channel,
-        conv,
-        item: QueueItem,
-        said: list[str | None],
-    ) -> None:
-        """Append and persist the attribution row that opens this turn (#513).
-
-        Persisted as CONTEXT, like the not-sent marker, so a reload renders the
-        same prompt and the row is never summarised as conversation.
-
-        ``said`` carries the last attribution written during this turn, so a
-        coalesced burst from one sender gets one row rather than one per message
-        (#398): five lines typed in a row are one turn, and repeating the
-        attribution five times spends the budget saying nothing new. A different
-        sender mid-burst still gets their own row, before their message.
-        """
-        row = self._turn_attribution(channel, item)
-        if row is None:
-            return
-        if said[0] == row["content"]:
-            return
-        conv.append(row, MessageType.CONTEXT)
-        # Hold the index rather than reading `messages[-1]` back after the
-        # await: nothing appends on this path today, but the id should not
-        # depend on that staying true (#517 covers the same read in the
-        # message path).
-        index = len(conv.messages) - 1
-        said[0] = row["content"]
-        try:
-            results = await self.pm.ahook.persist_message(
-                channel=channel, message=row, message_type=MessageType.CONTEXT,
-            )
-            rowid = resolve_single_result(results, "persist_message")
-            if rowid is not None:
-                conv.messages[index]["_db_id"] = rowid
-        except Exception:
-            logger.warning(
-                "persist_message hook failed for the attribution row on %s "
-                "(trace_id %s); the turn keeps it in the window but not in the log",
-                channel.id, item.trace_id,
-                exc_info=True, extra={"channel": channel.id},
-            )
-
     async def _append_and_persist_message(
         self,
         channel: Channel,
-        said: list[str | None],
         conv: ContextWindow,
         item: QueueItem,
         conversation_message: dict[str, Any],
@@ -1249,10 +1199,6 @@ class Agent(CorvidaePlugin):
         # The resolved rowid attaches to the WINDOW copy (conv.append
         # shallow-copies, so the local dict would not update the window).
         _t_persist_start = time.monotonic()
-        # Who is speaking, and where, before the words themselves (#513). Only
-        # for an inbound message: a notification's source is already framed.
-        if item.role is QueueItemRole.USER:
-            await self._append_turn_attribution(channel, conv, item, said)
         conv.append(conversation_message)
         rowid = None
         try:
@@ -1332,6 +1278,7 @@ class Agent(CorvidaePlugin):
             # The tool set is fixed for the conversation, like the system
             # prompt it sits beside at the head of the prompt (principle 2).
             conv.tool_view = self._build_tool_view(channel)
+            conv.fence_key = self._fence_key
             history = await self.pm.ahook.resolve_conversation(channel=channel)
             if history:
                 conv.messages = history
@@ -1362,18 +1309,15 @@ class Agent(CorvidaePlugin):
             # on_message_persisted); then the owner's message.
             # Persist time covers every row the turn writes, burst included.
             persist_seconds = 0.0
-            # One attribution per distinct sender and channel in this turn: a
-            # coalesced burst from one person is one turn (#398, #513).
-            said: list[str | None] = [None]
             for absorbed_item in absorbed:
                 absorbed_result = self._build_conversation_message(absorbed_item)
                 if absorbed_result is None:
                     continue
                 persist_seconds += await self._append_and_persist_message(
-                    channel, said, conv, absorbed_item, *absorbed_result,
+                    channel, conv, absorbed_item, *absorbed_result,
                 )
             persist_seconds += await self._append_and_persist_message(
-                channel, said, conv, item, conversation_message, request_text,
+                channel, conv, item, conversation_message, request_text,
             )
             _phases["persist"] = persist_seconds
 
@@ -1674,6 +1618,7 @@ class Agent(CorvidaePlugin):
             max_tokens=resolved["max_context_tokens"],
             mid_role=self._mid_conversation_system_role,
             apply_reasoning_history=partial(apply_reasoning_history, policy=policy),
+            fence_key=self._fence_key,
         )
 
     def fork_enabled(self, stage: str) -> bool:
@@ -2054,6 +1999,11 @@ class Agent(CorvidaePlugin):
         self._tools = {}
         self._tool_schemas = []
         self._base_dir = config.get("_base_dir", Path("."))
+        self._fence_key = load_fence_key(self._base_dir)
+        self._annotation_keys = frozenset(
+            key for plugin in self.pm.get_plugins()
+            for key in getattr(plugin, "model_visible_annotations", ())
+        )
 
         # Get the LLM client from LLMPlugin (which owns the lifecycle).
         llm = get_dependency(self.pm, "llm", LLMPlugin)

@@ -62,8 +62,8 @@ before making `user` the default for `mid_conversation_system_role`.
 `reminder` asks the bot to call `remind_me` for 20 seconds out with a
 planted token, then sends nothing further. It needs three things: a
 tool-created row in the `schedule` table (the model used the tool rather
-than promising to), the scheduler's `[reminder]` notification row in
-`message_log`, and a bot reply carrying the token timestamped after that
+than promising to), the scheduler's notification row in
+`message_log` (its provenance record carries `"origin": "reminder"`), and a bot reply carrying the token timestamped after that
 row. The channel queue is serial, so anything the bot says after the
 firing row is persisted answers the reminder, not the request; that keeps
 an acknowledgement that echoes the token from passing the probe.

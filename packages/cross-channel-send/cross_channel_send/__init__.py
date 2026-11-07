@@ -50,6 +50,7 @@ class CrossChannelSendPlugin(CorvidaePlugin):
     """Provides send_message and list_channels tools for cross-channel delivery."""
 
     depends_on = frozenset({"registry"})
+    model_visible_annotations = frozenset({"origin"})
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

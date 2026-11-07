@@ -365,6 +365,15 @@ async def on_message_admitted(self, channel, trace_id, sender, text):
 
 The framework itself never stamps meaning into `annotations` — it is a pass-through. Cognition plugins (see below) use the convention `annotations["origin"]` to record where a queue item came from ("user" recognized by subscribing to `on_message_admitted`, or an explicit string like `"reminder"` stamped by a producer); that convention is plugin-side, not a core concept.
 
+`annotations` never reach the model on their own. A plugin that wants a key shown declares it on the class:
+
+```python
+class HeartbeatPlugin(CorvidaePlugin):
+    model_visible_annotations = frozenset({"origin"})
+```
+
+The Agent collects these once at startup (a plugin loaded later is not read) and, for a notification carrying a declared key, stores that key's value with the row and renders it in a kernel-built `[annotations: origin=heartbeat]` line. Only `origin` is declared today (scheduler producers, heartbeat, funnel, cross-channel send, restart). Declare a key only for short, plugin-chosen text, never payload: the value is sanitized but otherwise shown as given. The header's wording and the payload fence are the kernel's, and a plugin cannot change them ([design.md](design.md#provenance-header-and-fence)).
+
 `SchedulerPlugin` is the producer that stamps it for clock-driven items. A due reminder fires as
 
 ```python
@@ -876,12 +885,14 @@ channel.name            # "#general", or "thread merge-order in #general", or No
 channel.sender_names    # {"408709225498542081": "schuyler"} — ids to display names
 ```
 
-Both are optional and both are data: `name` is rendered once per inbound turn
-as a `CONTEXT` row (`[sender: schuyler (id 408...); channel: #general (id irc:#general)]`)
-before the user's own message, which is left exactly as the person typed it.
-`sender_names` is filled by the transport before it calls `on_message`; core
-reads it once, at admission, and never persists it — the log keeps the id. A
-transport that sets neither renders today's prompt unchanged.
+Both are optional and both are data: when either is set, the prompt carries a
+system message `[metadata: sender: schuyler (id 408...); channel: #general (id irc:#general)]`
+before the person's message, which is left exactly as the person typed it.
+`build_prompt` renders it per person row and drops it when it repeats the
+header of the row before, so a burst from one sender carries one. A transport
+that sets neither gets no header. `sender_names` is filled by the transport
+before it calls `on_message`; core reads it once, at admission, and stores it
+in the row's provenance record ([design.md](design.md#provenance-header-and-fence)).
 
 Channels are created on-demand when messages arrive, or pre-registered in `agent.yaml`:
 

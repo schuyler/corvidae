@@ -557,6 +557,10 @@ class CorvidaePlugin:
     depends_on: frozenset[str] = frozenset()
     optional_depends_on: frozenset[str] = frozenset()
     hookspecs: ClassVar[type | None] = None
+    # Annotation keys the model may see in a notification's header, read once
+    # at startup (the kernel owns the header's format and sanitizing). Declare
+    # a key only when its value is short, plugin-chosen text, never payload.
+    model_visible_annotations: ClassVar[frozenset[str]] = frozenset()
     # Dotted config-key prefixes this plugin re-reads in on_config_reload.
     # Everything a plugin reads but does not list here applies at restart,
     # so a reload that changes one is reported as pending (#408). Empty

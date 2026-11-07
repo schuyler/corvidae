@@ -505,7 +505,7 @@ class TestIntegration:
 
     async def test_send_triggers_llm_on_target_only(self):
         """A send from A produces one LLM call on B, no LLM call on A.
-        B's message is role:system with [agent_send from A] prefix.
+        B's message is role:system with a header naming A as the origin.
         B's trace differs from A's and originating is True."""
         db = await aiosqlite.connect(":memory:")
         await init_db(db)
@@ -541,6 +541,7 @@ class TestIntegration:
         pm.register(agent, name="agent")
         agent.pm = pm
         agent._registry = registry
+        agent._fence_key = b"k" * 32
 
         ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
@@ -582,10 +583,9 @@ class TestIntegration:
         b_conv = ch_b.conversation.messages
         system_msgs = [m for m in b_conv if m.get("role") == "system"]
         assert len(system_msgs) >= 1
-        agent_send_msg = [m for m in system_msgs if "agent_send from" in m.get("content", "")]
+        agent_send_msg = [m for m in system_msgs if "hello bob" in m.get("content", "")]
         assert len(agent_send_msg) == 1
-        assert f"agent_send from {ch_a.id}" in agent_send_msg[0]["content"]
-        assert "hello bob" in agent_send_msg[0]["content"]
+        assert agent_send_msg[0]["corvidae_provenance"]["origin_channel"] == ch_a.id
 
         # on_message_persisted should have fired for B
         assert pm.ahook.on_message_persisted.call_count >= 1
@@ -908,6 +908,7 @@ class TestHopPropagation:
         pm.register(agent, name="agent")
         agent.pm = pm
         agent._registry = registry
+        agent._fence_key = b"k" * 32
 
         ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
         ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
@@ -942,7 +943,11 @@ class TestHopPropagation:
         # B's conversation should have the notification
         b_msgs = ch_b.conversation.messages
         sys_msgs = [m for m in b_msgs if m.get("role") == "system"]
-        assert any("agent_send from" in m.get("content", "") for m in sys_msgs)
+        assert any(
+            m.get("corvidae_provenance", {}).get("origin_channel") == ch_a.id
+            and m["corvidae_provenance"]["origin_trace"] == trace_a
+            for m in sys_msgs
+        )
 
         await db.close()
 

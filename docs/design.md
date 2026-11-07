@@ -996,7 +996,7 @@ queued, unmoved, so those keep their place. When the call returns
 anything, the last item taken owns the turn, and the item that was
 dequeued plus the other taken items are *absorbed*: `absorbed = [item,
 *following[:-1]]`, `item = following[-1]`. One INFO log names the channel,
-the burst size and the owning trace id. Turn attribution, trace
+the burst size and the owning trace id. Trace
 resolution, `before_agent_turn`, the model call, the gates,
 `on_agent_response` and every usage row use the owner's trace; absorbed
 traces see admission and persistence only. The queue is never touched while
@@ -1330,7 +1330,12 @@ class QueueItem:
     trace_id: str | None = None
     originating: bool = False
     retry: bool = False
+    metadata: ItemMetadata | None = None
 ```
+
+`metadata` is what the kernel itself observed about the item
+(`corvidae/provenance.py`); see [Provenance](#provenance-header-and-fence).
+`source` is a log label only.
 
 `retry` marks the re-run of a turn whose LLM call could not reach the backend
 (#281). The item's message is already in the window and the log, so the
@@ -1338,6 +1343,68 @@ retry skips the `turn_counter` reset, the append/persist,
 `on_message_persisted`, tool-result batching, compaction and
 `before_agent_turn` and goes straight to the LLM call; the
 `max_context_tokens` ceiling (`fit_to_budget`, #308) still runs first.
+
+### Provenance header and fence
+
+`ItemMetadata` is a frozen dataclass of what the kernel observed, never
+what a plugin or transport asserted. Which fields apply follows the row's
+role:
+
+- user: `sender`, `sender_name` (from `channel.sender_names` at admission)
+  and `channel_name`, set in `on_message`;
+- notification: `origin_channel` and `origin_trace`, read from the
+  attribution of the code that called `on_notify`;
+- tool result: `tool` and `target`, the dispatched call's name and the first
+  argument naming another registered channel, read from the call's
+  row in the window (`on_notify` with a `tool_call_id`, and
+  `deliver_tool_error`).
+
+`metadata` is never passed as a hook argument; the kernel fills it from what
+it observes (the transport's sender and channel, the tool-call row in the window, the
+attribution context). `_build_conversation_message` stores
+it on the row under `corvidae_provenance` (`encode`: set fields only, plus
+an `annotations` entry holding only the keys a plugin declared in
+`model_visible_annotations`; the Agent reads the declarations once in
+`_start_plugin`). Other annotations are never persisted into the row or
+shown to the model. A stored record that does not decode renders as a row
+without provenance and logs a warning naming the row.
+
+`build_prompt` renders it through `provenance.frame` on every build; the
+stored row is never changed. The header is a `[metadata: ...]` line built
+in code:
+
+- A person's message with a sender or channel name gets a separate system
+  message before it: `[metadata: sender: <name> (id <id>); channel: <name>
+  (id <channel id>)]`, with `direct message` for a DM scope. A burst from
+  one sender carries one header: a row's header is dropped when it equals
+  the one computed for the row before it. The message text is unfenced.
+- A notification gets `[metadata: notification from your own activity on
+  <channel> (trace <id>); not from this channel's human]`.
+- A cross-channel tool result gets `[metadata: result of your own <tool>
+  action on <target>; ...]`, in the tool message itself so call and result
+  stay adjacent.
+- Declared annotations follow as `[annotations: k=v, ...]`.
+
+Notification payloads and cross-channel results (tool results with a
+`target`) are fenced; other tool results are not:
+`[payload <nonce> begins]` ... `[payload <nonce> ends]`. The nonce is the
+first 16 hex digits of an HMAC-SHA256 of `message_log:<row id>` keyed by
+the fence key, so it is stable across renders and restarts and differs per
+row; a row with no id yet uses its text. The key is 32 random bytes in
+`provenance.key` in the base directory, created mode
+0600; an unreadable or short file logs a warning and degrades to a key
+that lasts until restart. `ContextWindow.fence_key` carries it.
+
+Sanitizing happens at render time only (`clean_value` for header values:
+NFKC, no control, format or bracket characters, one line, names cut at 64
+characters and ids never cut; `clean_payload` for fenced text: control and
+format characters removed, newline and tab kept). The log keeps the
+original text. A cross-channel result with no content fences an empty payload.
+
+Items the kernel builds carry no attribution of their own: the queue
+consumer runs in an empty `contextvars.Context`, so a notification
+enqueued first from another channel's turn does not inherit that turn's
+attribution.
 
 ## PersistencePlugin
 

@@ -203,24 +203,13 @@ async def test_retry_keeps_trace_and_does_not_refire_persisted():
 
     plugin.pm.register(Spy(), name="spy")
 
-    # A named channel, so the turn writes an attribution row to count.
-    channel.name = "#home"
     trace_id = await _send(plugin, channel)
     await _advance(plugin, channel, clock, 5)
 
     assert persisted == [trace_id]
     assert before == [trace_id]
-    # The retried turn reuses the rows the failed attempt wrote: one attribution
-    # row, not one per attempt (#513).
-    rows = channel.conversation.messages
-    assert (
-        sum(
-            m.get("content", "").startswith("[sender:")
-            for m in rows
-            if m.get("role") == "system"
-        )
-        == 1
-    )
+    # The retried turn reuses the rows the failed attempt wrote.
+    assert [m["role"] for m in channel.conversation.messages].count("user") == 1
     # The reply carries the inbound trace id.
     kwargs = plugin.pm.ahook.on_agent_response.await_args.kwargs
     assert kwargs["trace_id"] == trace_id

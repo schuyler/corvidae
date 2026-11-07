@@ -723,3 +723,12 @@ async def test_deliver_notices_end_to_end(tmp_path):
     delivered = [r for r in records if r.get("event") == "delivered"]
     assert len(delivered) == 1
     assert delivered[0]["reason"] == "config change"
+
+
+async def test_home_notice_carries_a_model_visible_origin(tmp_path):
+    """The home notice is stamped origin=restart, which the plugin declares model-visible (#548)."""
+    plugin, pm, cfg = make_plugin(tmp_path)
+    await plugin.on_init(pm, cfg)
+    await plugin._notify_home("Restart complete")
+    assert pm.ahook.notifies[0]["annotations"] == {"origin": "restart"}
+    assert RestartPlugin.model_visible_annotations == frozenset({"origin"})
