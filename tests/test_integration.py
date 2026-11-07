@@ -265,6 +265,71 @@ async def harness():
         await h.pm.ahook.on_stop()
 
 
+class _VetoGate:
+    """A gate that refuses whatever the transport says spoke past the agent."""
+
+    def __init__(self, pm):
+        self.pm = pm
+        self.rejected: list[str] = []
+
+    @hookimpl
+    async def should_process_message(self, channel, sender, text, trace_id, addressed):
+        return False if addressed is False or sender == "stranger" else None
+
+    @hookimpl
+    async def on_message_rejected(self, channel, trace_id, sender, text):
+        self.rejected.append(text)
+
+
+class TestUnaddressedVeto:
+    """#526: the daemon side of an unaddressed message.
+
+    The Discord tests stop at the gate; the log line, the rejected hooks and
+    the exchange-log row are all written by Agent.on_message. This is the test
+    that would have caught a DEBUG refusals becoming an INFO line per message,
+    or a rejected hook running for a message that only spoke past the agent.
+    """
+
+    async def test_an_unaddressed_veto_logs_at_debug_and_fires_no_rejected_hook(
+        self, harness, caplog
+    ):
+        gate = _VetoGate(harness.pm)
+        harness.pm.register(gate, name="veto_gate")
+        channel = harness.registry.get_or_create("fake", "unaddressed")
+        trace_id = mint_trace_id()
+
+        with caplog.at_level(logging.DEBUG):
+            await harness.agent.on_message(
+                channel, "someone", "talking amongst ourselves", trace_id,
+                addressed=False,
+            )
+
+        # Nothing was queued for a turn.
+        assert channel.id not in harness.agent.queues or not harness.agent.queues[channel.id].qsize()
+        # No rejected hook: a message that spoke past the agent is not an
+        # attempt at it, so nothing is stored or counted.
+        assert gate.rejected == []
+        # DEBUG, not INFO: a busy channel must not log a line per message.
+        agent_records = [r for r in caplog.records if r.name.startswith("corvidae.agent")]
+        assert not [r for r in agent_records if r.levelno >= logging.INFO]
+        assert [r for r in agent_records if r.levelno == logging.DEBUG and "unaddressed" in r.getMessage()]
+
+    async def test_a_stranger_is_still_an_info_rejection(self, harness, caplog):
+        """The INFO line §3.2 item 2 asks for still fires for a refused sender."""
+        gate = _VetoGate(harness.pm)
+        harness.pm.register(gate, name="veto_gate_2")
+        channel = harness.registry.get_or_create("fake", "stranger")
+        with caplog.at_level(logging.INFO):
+            await harness.agent.on_message(
+                channel, "stranger", "let me in", mint_trace_id(), addressed=None,
+            )
+        assert gate.rejected == ["let me in"]
+        assert any(
+            r.levelno == logging.INFO and "rejected" in r.getMessage()
+            for r in caplog.records if r.name.startswith("corvidae.agent")
+        )
+
+
 # ---------------------------------------------------------------------------
 # Group A: Full Lifecycle
 # ---------------------------------------------------------------------------

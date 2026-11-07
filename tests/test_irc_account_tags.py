@@ -143,8 +143,7 @@ async def test_two_lines_one_read_impersonator_refused_through_gathered_hook():
         async def hook():
             return await asyncio.gather(
                 plugin.should_process_message(
-                    channel=channel, sender=sender, text=text, trace_id=trace_id,
-                    addressed=addressed,
+                    channel=channel, sender=sender, text=text, trace_id=trace_id
                 )
             )
 
@@ -218,8 +217,7 @@ async def test_whois_gap_impersonator_refused_with_account_tag():
                 await asyncio.sleep(0)
             return await asyncio.gather(
                 plugin.should_process_message(
-                    channel=channel, sender=sender, text=text, trace_id=trace_id,
-                    addressed=addressed,
+                    channel=channel, sender=sender, text=text, trace_id=trace_id
                 )
             )
 

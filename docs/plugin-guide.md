@@ -300,7 +300,7 @@ The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwa
 
 | Hook | Type | When |
 |------|------|------|
-| `on_message(channel, sender: str, text: str, trace_id: str)` | async broadcast | Inbound message arrives; the transport mints and passes the id (see [Traces](#traces)) |
+| `on_message(channel, sender: str, text: str, trace_id: str, addressed: bool \| None)` | async broadcast |  Inbound message arrives; the transport mints and passes the id (see [Traces](#traces)), plus `addressed`: `True`, `False` for a message that spoke past the agent in a channel that requires addressing, or `None` where the channel does not enforce it |
 | `should_process_message(channel, sender: str, text: str, trace_id: str \| None, addressed: bool \| None)` | async broadcast, reject-wins | Gate: decide whether to process a message. Return False to reject, True to accept, None for no opinion. `addressed` is the transport's observation of whether the message addressed the agent: `True`, `False`, or `None` where the transport has no such concept (a DM, a CLI line, a web message). `None` means "no objection", never "not addressed" — a gate that reads it as False would refuse every DM (#526). |
 | `on_message_admitted(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message admits a USER message |
 | `on_message_rejected(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |

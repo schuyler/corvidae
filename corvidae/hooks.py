@@ -707,9 +707,12 @@ class AgentSpec:
                 without admission" as the message being dropped.
             addressed: Whether the message was addressed to the agent, for
                 transports where that is a thing a message can fail to be
-                (#526). ``None`` means the transport has no such concept —
-                a DM, a CLI line, a web message — and the gate must read it
-                as "no objection", never as "not addressed".
+                (#526). ``True``: it was. ``False``: the message arrived in a
+                channel that requires addressing and did not address the
+                agent. ``None``: the channel does not enforce addressing (a
+                DM, a CLI line, a web message, a conversational Discord
+                channel), so the transport did not observe it — the gate must
+                read ``None`` as "no objection", never as "not addressed".
         """
 
     @hookspec
@@ -859,12 +862,12 @@ class AgentSpec:
             text: The message content.
             trace_id: The id minted by the transport for this message
                 (passed to ``on_message``). Present for every USER message.
-            addressed: Whether the message was addressed to the agent, or
-                ``None`` where the transport has no such concept (#526). A
-                transport that can answer passes False for a message that
-                spoke past the agent; the veto belongs here, not in the
-                transport's own handler, so a refusal is one gate decision
-                that the rejected hooks and the logs can see.
+            addressed: Whether the message was addressed to the agent (#526):
+                ``True``, ``False`` for a message that spoke past the agent in
+                a channel that requires addressing, or ``None`` where the
+                channel does not enforce it (read as "no objection"). The veto
+                belongs here, not in the transport's own handler, so a refusal
+                is one gate decision the logs can see.
 
         Note:
             Extension point for message filtering (rate limiting, blocklists,

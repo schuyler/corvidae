@@ -717,7 +717,12 @@ class DiscordPlugin(TransportPlugin):
         # Attachments last, once the gate above has decided who this is: a
         # refused sender's file is named, never fetched (#103, #520).
         if attachments:
-            note = await self._attachment_note(message, attachments, allowed)
+            # A file from a message the gate will refuse is never named and
+            # never fetched: nothing consumes it and attachment files are never
+            # pruned (#526).
+            note = await self._attachment_note(
+                message, attachments, allowed and addressed is not False
+            )
             text = f"{note}\n{text}".strip() if text.strip() else note
 
         # Nothing left to say (empty, whitespace, or a bare mention).

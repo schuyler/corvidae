@@ -842,12 +842,7 @@ class SignalPlugin(TransportPlugin):
 
     @hookimpl
     async def should_process_message(
-        self,
-        channel: Channel,
-        sender: str,
-        text: str,
-        trace_id: str,
-        addressed: bool | None = None,
+        self, channel: Channel, sender: str, text: str, trace_id: str
     ) -> bool | None:
         """Default-deny gate: only an allowlisted ACI (or its known E.164
         alias) may drive the agent. trace_id is bound without a

@@ -422,12 +422,7 @@ class IRCPlugin(TransportPlugin):
 
     @hookimpl
     async def should_process_message(
-        self,
-        channel: Channel,
-        sender: str,
-        text: str,
-        trace_id: str,
-        addressed: bool | None = None,
+        self, channel: Channel, sender: str, text: str, trace_id: str
     ) -> bool | None:
         """Default-deny gate: only an irc.allow sender may drive the agent.
 

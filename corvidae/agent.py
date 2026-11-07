@@ -442,7 +442,11 @@ class Agent(CorvidaePlugin):
                 )
                 return
 
-        logger.info(
+        # Arrival is INFO for a message the agent might answer; an unaddressed
+        # one in a channel that requires addressing only ever reaches a refusal,
+        # so it is DEBUG (#526).
+        logger.log(
+            logging.DEBUG if addressed is False else logging.INFO,
             "on_message received",
             extra={"channel": channel.id, "sender": sender},
         )
@@ -454,6 +458,17 @@ class Agent(CorvidaePlugin):
         )
         gate_result = resolve_reject_wins(results)
         if gate_result is False:
+            # An unaddressed message in a channel that requires a mention is the
+            # room talking past the agent, not a stranger at the door: DEBUG
+            # naming the channel, and no rejected hooks, so nothing is stored
+            # and nothing is counted against the sender (#526).
+            if addressed is False:
+                logger.debug(
+                    "unaddressed message on channel %s, not admitted",
+                    channel.id,
+                    extra={"channel": channel.id},
+                )
+                return
             logger.info(
                 "message rejected by should_process_message hook",
                 extra={"channel": channel.id, "sender": sender},
