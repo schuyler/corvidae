@@ -130,3 +130,23 @@ async def test_take_while_keeps_drain_waiting_for_the_current_item():
     release.set()
     await asyncio.wait_for(drain_task, timeout=2)
     await q.stop()
+
+
+async def test_consumer_runs_with_an_empty_attribution_whoever_started_it():
+    """A queue first fed inside another channel's turn doesn't inherit its attribution (#548)."""
+    from corvidae.attribution import get_attribution, reset_attribution, set_attribution
+
+    seen = []
+    async def process(item):
+        seen.append(dict(get_attribution()))
+
+    q = SerialQueue()
+    token = set_attribution(channel_id="signal:a", trace_id="t-9")
+    try:
+        q.start(process)
+    finally:
+        reset_attribution(token)
+    await q.enqueue("item")
+    await q.drain()
+    await q.stop()
+    assert seen == [{}]
