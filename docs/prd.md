@@ -431,20 +431,14 @@ The contract every transport meets:
 2. Default-deny sender allowlist in `should_process_message`. A refusal is
    one INFO line naming the sender; nothing is sent back and no liveness
    indicator is shown. The transport fires `on_message` for every decoded
-   message that reaches the gate; among those, the gate is the one place that
-   vetoes.
-   - One exception: a transport configured to answer only when addressed may
-     drop a message it can already tell was not addressed to the agent,
-     before the kernel sees it. This is not a refusal — the allowlist has not
-     been consulted — and it is not a second veto, because the transport is
-     applying the operator's own addressing rule, not judging the sender.
-     The reason is cost and reach: passing other people's chatter on would put
-     it through the gates, the appraisal and the stores for no answer.
-     The drop is expected traffic, recorded for diagnosis only, naming the
-     channel (the parent too, where one decides it) and the sender.
-   Web substitutes a bearer token for the allowlist; the token is the
-   authorization. A sender the agent has messaged first, one to one, is
-   admitted on that channel (§3.5.9).
+   message regardless; the gate is the one place that vetoes. One
+   acknowledged exception: a transport configured to answer only when
+   addressed may drop a message that does not address the agent, before the
+   kernel sees it. That is the operator's addressing rule rather than a
+   judgement on the sender, so it is not a refusal and nothing is sent back;
+   it is recorded for diagnosis only. Web substitutes a bearer token for the
+   allowlist; the token is the authorization. A sender the agent has
+   messaged first, one to one, is admitted on that channel (§3.5.9).
 3. Transports subclass `TransportPlugin`, set `transport`, and override the
    `send_*` methods they can display. The one `send(channel, event)` hook
    does the ownership check once; a transport's `owns(channel)` predicate

@@ -683,10 +683,15 @@ class TestInboundFiltering:
             assert len(drops) == 1
             (drop,) = drops
             assert drop.levelno == logging.DEBUG
-            assert drop.__dict__["channel"] == f"discord:{CHAN_ID}"
-            assert drop.__dict__["sender"] == str(AUTH_ID)
-            assert "parent_channel" not in drop.__dict__
-            assert not [r for r in caplog.records if r.levelno >= logging.INFO]
+            assert getattr(drop, "channel") == f"discord:{CHAN_ID}"
+            assert getattr(drop, "sender") == str(AUTH_ID)
+            assert not hasattr(drop, "parent_channel")
+            # Nothing about this drop is announced: an INFO line per message
+            # would swamp a busy channel, which is the whole point.
+            assert not [
+                r for r in caplog.records
+                if r.name == "corvidae.channels.discord" and r.levelno >= logging.INFO
+            ]
         finally:
             await h.plugin.on_stop()
 
@@ -696,14 +701,14 @@ class TestInboundFiltering:
         `discord.channels` and finds nothing (#526)."""
         h = await _start_plugin()
         try:
-            message = make_message("in a thread", channel_id=THREAD_ID)
+            message = make_message("in a thread")
             message.channel = SimpleNamespace(id=THREAD_ID, parent_id=CHAN_ID)
             with caplog.at_level(logging.DEBUG):
                 await _deliver(h, message)
             drops = [r for r in caplog.records if "not admitted" in r.getMessage()]
             assert len(drops) == 1
-            assert drops[0].__dict__["channel"] == f"discord:{THREAD_ID}"
-            assert drops[0].__dict__["parent_channel"] == f"discord:{CHAN_ID}"
+            assert getattr(drops[0], "channel") == f"discord:{THREAD_ID}"
+            assert getattr(drops[0], "parent_channel") == f"discord:{CHAN_ID}"
         finally:
             await h.plugin.on_stop()
 

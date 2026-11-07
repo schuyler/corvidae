@@ -660,13 +660,10 @@ class DiscordPlugin(TransportPlugin):
             # continues; the allowlist gate still refuses other senders.
             if self._require_mention_for(message.channel):
                 if not any(u.id == bot_user_id for u in message.mentions):
-                    # DEBUG, not INFO: this fires on every line people send
-                    # each other in a channel that requires a mention. A thread
-                    # is decided by its parent's entry, so name the parent too,
-                    # or an operator looks up the thread id and finds nothing.
-                    # StructuredFormatter appends every extra as key=value, so
-                    # the ids live there and the message stays short; a
-                    # parent_channel of None would print on every drop.
+                    # DEBUG: this fires on every line people send each other
+                    # here. A thread's parent entry is what decides, so name it
+                    # too, or an operator looks up the thread id and finds
+                    # nothing.
                     parent_id = getattr(message.channel, "parent_id", None)
                     extra = {
                         "channel": f"discord:{message.channel.id}",
@@ -675,7 +672,7 @@ class DiscordPlugin(TransportPlugin):
                     if parent_id is not None:
                         extra["parent_channel"] = f"discord:{parent_id}"
                     logger.debug(
-                        "discord: unaddressed message, not admitted",
+                        "discord: message does not mention the bot, not admitted",
                         extra=extra,
                     )
                     return

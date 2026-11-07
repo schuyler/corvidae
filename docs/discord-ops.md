@@ -139,8 +139,7 @@ bot, and it will not tell them so.
   the kernel never sees them, so nothing is appraised or stored. Each drop
   leaves one DEBUG line naming the channel (and the parent, for a thread)
   and the sender — set `logging.level: DEBUG` in `agent.yaml` and restart to
-  see them. That line is what answers "why didn't it answer in this channel",
-  and tells a channel that answers unaddressed from one that does not.
+  see them. That is how you find out why the bot ignored a channel.
   `require_mention: false` changes this; see below.
 - **Other bots, and itself:** ignored.
 - **Typing indicator:** shown while a reply is owed, and only for allowed

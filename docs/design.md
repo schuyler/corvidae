@@ -3109,11 +3109,11 @@ does not request the privileged Message Content intent, so operators need
 not enable it in the Developer Portal. Discord still delivers message
 content for DMs and for messages that mention the bot, and those are the
 only messages this transport processes. An un-mentioned guild message in a
-channel that requires a mention is dropped before the kernel sees it; the
-drop is logged at DEBUG with the channel, its parent thread where one decides
-the rule, and the sender. If a guild message mentions the
-bot and arrives with empty content anyway, the transport logs a WARNING and
-drops it. That should not happen, and the warning is how a change on
+channel that requires a mention is dropped before the kernel sees it, logged
+at DEBUG with the channel, its parent where one decides the rule, and the
+sender (§3.2 item 2 of the PRD allows this drop). If a guild message
+mentions the bot and arrives with empty content anyway, the transport logs a
+WARNING and drops it. That should not happen, and the warning is how a change on
 Discord's side would show up. The client requests Message Content when any
 channel answers unaddressed — the transport default (`discord.require_mention:
 false`) or a `discord.channels` entry with `require_mention: false` — because
