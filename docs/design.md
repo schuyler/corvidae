@@ -1354,12 +1354,14 @@ role:
   and `channel_name`, set in `on_message`;
 - notification: `origin_channel` and `origin_trace`, read from the
   attribution of the code that called `on_notify`;
-- tool result: `tool` and `target`, the dispatched call's name and the one
-  other registered channel its string arguments named, read from the call's
+- tool result: `tool` and `target`, the dispatched call's name and the first
+  argument naming another registered channel, read from the call's
   row in the window (`on_notify` with a `tool_call_id`, and
   `deliver_tool_error`).
 
-No hook argument reaches `metadata`. `_build_conversation_message` stores
+`metadata` is never passed as a hook argument; the kernel fills it from what
+it observes (the transport's sender and channel, its own dispatch table, the
+attribution context). `_build_conversation_message` stores
 it on the row under `corvidae_provenance` (`encode`: set fields only, plus
 an `annotations` entry holding only the keys a plugin declared in
 `model_visible_annotations`; the Agent reads the declarations once in
@@ -1383,12 +1385,13 @@ in code:
   stay adjacent.
 - Declared annotations follow as `[annotations: k=v, ...]`.
 
-Notification and cross-channel result payloads are fenced:
+Notification payloads and cross-channel results (tool results with a
+`target`) are fenced; other tool results are not:
 `[payload <nonce> begins]` ... `[payload <nonce> ends]`. The nonce is the
 first 16 hex digits of an HMAC-SHA256 of `message_log:<row id>` keyed by
 the fence key, so it is stable across renders and restarts and differs per
 row; a row with no id yet uses its text. The key is 32 random bytes in
-`provenance.key` beside `sessions.db` (the base directory), created mode
+`provenance.key` in the base directory, created mode
 0600; an unreadable or short file logs a warning and degrades to a key
 that lasts until restart. `ContextWindow.fence_key` carries it.
 
@@ -1401,9 +1404,7 @@ original text. A tool result with no content fences an empty payload.
 Items the kernel builds carry no attribution of their own: the queue
 consumer runs in an empty `contextvars.Context`, so a notification
 enqueued first from another channel's turn does not inherit that turn's
-attribution. The CONTEXT attribution row that opened a turn is gone; the
-header is the only per-message framing, and the `[source]` prefix on
-notifications is gone with it.
+attribution.
 
 ## PersistencePlugin
 

@@ -885,12 +885,14 @@ channel.name            # "#general", or "thread merge-order in #general", or No
 channel.sender_names    # {"408709225498542081": "schuyler"} — ids to display names
 ```
 
-Both are optional and both are data: `name` is rendered once per inbound turn
-as a `CONTEXT` row (`[sender: schuyler (id 408...); channel: #general (id irc:#general)]`)
-before the user's own message, which is left exactly as the person typed it.
-`sender_names` is filled by the transport before it calls `on_message`; core
-reads it once, at admission, and never persists it — the log keeps the id. A
-transport that sets neither renders today's prompt unchanged.
+Both are optional and both are data: when either is set, the prompt carries a
+system message `[metadata: sender: schuyler (id 408...); channel: #general (id irc:#general)]`
+before the person's message, which is left exactly as the person typed it.
+`build_prompt` renders it per person row and drops it when it repeats the
+header of the row before, so a burst from one sender carries one. A transport
+that sets neither gets no header. `sender_names` is filled by the transport
+before it calls `on_message`; core reads it once, at admission, and stores it
+in the row's provenance record ([design.md](design.md#provenance-header-and-fence)).
 
 Channels are created on-demand when messages arrive, or pre-registered in `agent.yaml`:
 

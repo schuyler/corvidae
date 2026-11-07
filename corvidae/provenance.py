@@ -108,12 +108,11 @@ def clean_value(s: str, max_len: int | None = None) -> str:
     """``s`` as one short header-safe line: no control, format or bracket characters."""
     s = unicodedata.normalize("NFKC", s).replace(";", " ")
     # Format characters go first so they cannot leave doubled spaces behind.
-    s = "".join(c for c in s if unicodedata.category(c) != "Cf")
-    s = " ".join(s.split())
     s = "".join(
         c for c in s
-        if c not in "<>[]" and unicodedata.category(c) != "Cc"
+        if c not in "<>[]" and unicodedata.category(c) not in ("Cc", "Cf")
     )
+    s = " ".join(s.split())
     s = s[:max_len].strip() if max_len is not None else s.strip()
     return s or "?"
 
