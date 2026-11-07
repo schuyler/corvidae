@@ -1360,7 +1360,7 @@ role:
   `deliver_tool_error`).
 
 `metadata` is never passed as a hook argument; the kernel fills it from what
-it observes (the transport's sender and channel, its own dispatch table, the
+it observes (the transport's sender and channel, the tool call it dispatched (from the window), the
 attribution context). `_build_conversation_message` stores
 it on the row under `corvidae_provenance` (`encode`: set fields only, plus
 an `annotations` entry holding only the keys a plugin declared in
@@ -1399,7 +1399,7 @@ Sanitizing happens at render time only (`clean_value` for header values:
 NFKC, no control, format or bracket characters, one line, names cut at 64
 characters and ids never cut; `clean_payload` for fenced text: control and
 format characters removed, newline and tab kept). The log keeps the
-original text. A tool result with no content fences an empty payload.
+original text. A cross-channel result with no content fences an empty payload.
 
 Items the kernel builds carry no attribution of their own: the queue
 consumer runs in an empty `contextvars.Context`, so a notification

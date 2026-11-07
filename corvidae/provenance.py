@@ -107,7 +107,7 @@ def load_fence_key(base_dir: Path) -> bytes:
 def clean_value(s: str, max_len: int | None = None) -> str:
     """``s`` as one short header-safe line: no control, format or bracket characters."""
     s = unicodedata.normalize("NFKC", s).replace(";", " ")
-    # Format characters go first so they cannot leave doubled spaces behind.
+    # Characters are dropped before whitespace collapses, so none leave doubled spaces.
     s = "".join(
         c for c in s
         if c not in "<>[]" and unicodedata.category(c) not in ("Cc", "Cf")
