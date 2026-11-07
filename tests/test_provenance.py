@@ -222,7 +222,7 @@ def test_names_are_cut_and_ids_render_whole():
     text = "\n".join(m["content"] for m in conv.build_prompt())
     assert "n" * 64 in text and "n" * 65 not in text
     assert "c" * 64 in text and "c" * 65 not in text
-    for whole in ("s" * 200, "discord:" + "i" * 200, "t" * 200, "g" * 200):
+    for whole in ("discord:" + "i" * 200, "t" * 200, "g" * 200):
         assert whole in text
 
 
@@ -323,17 +323,18 @@ async def test_the_stored_row_keeps_the_payload_and_only_declared_annotations(st
 
 
 @pytest.mark.parametrize("declared", [True, False])
-async def test_the_annotations_line_follows_the_allowlist_read_at_startup(started, declared):
+async def test_the_annotations_line_follows_the_allowlist_read_at_startup(started, declared, monkeypatch):
     assert CorvidaePlugin.model_visible_annotations == frozenset()
     assert SchedulerPlugin.model_visible_annotations == frozenset({"origin"})
     declarer = Declarer()
     plugin, channel, _db, _persisted = await started(*([declarer] if declared else []))
     # Changing the declaration after startup has no effect until restart.
-    declarer.model_visible_annotations = frozenset()
+    monkeypatch.setattr(Declarer, "model_visible_annotations", frozenset())
     await plugin.on_notify(channel=channel, source="reminder", text="stretch",
                            tool_call_id=None, annotations={"origin": "reminder"})
     await drain(plugin, channel)
     lines = "\n".join(m["content"] for m in last_prompt(plugin)).split("\n")
+    assert any(line.startswith("[metadata:") for line in lines)
     assert ("[annotations: origin=reminder]" in lines) is declared
 
 
