@@ -141,7 +141,7 @@ plugin.
 
 The `webhook` plugin owns `on_webhook_subscribe(subscriptions)`, through which
 plugins register handlers for webhook endpoints; see "Webhook ingress" under
-Channel System.
+Transports.
 
 ### Broadcast dispatch and result resolution
 
