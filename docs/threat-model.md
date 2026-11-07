@@ -1241,18 +1241,23 @@ surfaced to the agent as `[text: /path]`. The agent (an LLM) is the ultimate
 consumer of the file content; the download gate limits the *categories* of
 files that reach it, not the specific content within a category.
 
-The `getAttachment` RPC sends only the attachment id; signal-cli resolves the
-attachment server-side. No recipient parameter is sent.
+The `getAttachment` RPC sends only the attachment id. signal-cli's handler
+reads only the id: `GetAttachmentCommand.handleCommand` (AsamK/signal-cli,
+master and the deployed v0.14.7) takes `id` and never reads `recipient` or
+`group-id` -- those are CLI subparser arguments. Verified against the live
+daemon: an id-only call returns a clean lookup failure for a since-purged
+id, not a parameter rejection (a bogus id gives the identical response).
+The earlier "no recipient, refuse" branch was removed as a consequence.
 
-The StreamReader buffer limit is sized to `max_attachment_size * 2 * 4 / 3 + 64 KiB`
-to accommodate base64-encoded attachment data with 2x headroom. The 2x factor
-lets a response between 1x and 2x of the cap be read in full and rejected by
-the size cap, instead of tripping the stream limit. A line that exceeds the
-2x limit raises `ValueError` in `_read_loop`: `readline()` has already cleared
-the buffer, so the tail of the line arrives as the next read and is skipped
-there as a malformed frame (a very large line can trip the limit several
-times, once per over-limit chunk). The connection survives; an in-flight
-`getAttachment` RPC whose response was discarded is left to time out after
+The StreamReader buffer limit is sized to `max_attachment_size * 4 / 3 + 64 KiB`
+(base64 inflates by ~4/3; the 64 KiB covers JSON framing). A response over
+the cap that still fits under the limit is read in full and rejected by the
+size cap. A line that exceeds the limit raises `ValueError` in `_read_loop`:
+`readline()` has already cleared the buffer, so the tail of the line arrives
+as the next read and is skipped there as a malformed frame (a very large
+line can trip the limit several times, once per over-limit chunk). The
+connection survives, and the in-flight RPCs are failed immediately with an
+explicit error rather than left to time out after
 `ATTACHMENT_DOWNLOAD_TIMEOUT` (60 s).
 
 Old signal-cli versions that send no `contentType` fall back to the coarse

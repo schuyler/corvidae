@@ -594,7 +594,7 @@ corvidae talks JSON-RPC to a `signal-cli daemon` that is already running; it doe
 | `signal.allow` | list of strings | `[]` | Senders permitted to drive the agent. Each entry is either an E.164 number or an ACI (the account UUID). Default-deny: an empty or absent list refuses everyone, silently — no reply, no typing indicator, no read receipt. |
 | `signal.message_chunk_size` | integer | `2000` | Maximum UTF-8 bytes per outbound Signal message. Longer replies are split paragraphs → sentences → words and sent as several messages; nothing is truncated. Must be at least 6; a smaller value raises `ValueError` the first time a reply is split. |
 | `signal.attachment_dir` | string | `state/signal-attachments` | Directory where downloaded attachments are written. Created on first download. Files are not pruned automatically — retention is the operator's responsibility. |
-| `signal.max_attachment_size` | integer | `10485760` (10 MB) | Maximum bytes for a single downloaded attachment. Must be a positive integer; the value also sizes the StreamReader buffer limit for the signal-cli connection (2x the cap in base64 terms, so an oversized-but-bounded response is read and rejected by the size cap rather than discarded by the stream limit). Larger payloads are rejected with `[<type>: download failed]`. |
+| `signal.max_attachment_size` | integer | `10485760` (10 MB) | Maximum bytes for a single downloaded attachment. Must be a positive integer; the value also sizes the StreamReader buffer limit for the signal-cli connection (the cap in base64 terms, 4/3, plus 64 KiB for JSON framing; a response that trips the limit fails its in-flight RPC immediately). Larger payloads are rejected with `[<type>: download failed]`. |
 
 ```yaml
 signal:

@@ -638,8 +638,9 @@ class TestInboundFiltering:
             )
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
-            # Metadata is surfaced, but no download happens.
-            assert "[image attached]" in text
+            # Metadata is surfaced (the subtype, so the agent sees what
+            # it was), but no download happens.
+            assert "[png attached]" in text
             assert "download failed" not in text
             # No getAttachment RPC should have been sent.
             assert not h.server.requests_matching("getAttachment"), (
@@ -755,16 +756,23 @@ class TestInboundFiltering:
     async def test_read_loop_survives_over_limit_line(self, tmp_path, caplog):
         """Feed a line over the StreamReader limit directly to
         _read_loop: the ValueError branch discards it (readline has
-        cleared the buffer), the line tail is skipped as a malformed
+        cleared the buffer), the in-flight RPCs are failed immediately
+        (no 60 s timeout), the line tail is skipped as a malformed
         frame, and subsequent frames are still processed.
+
+        The cap is set small (8 KiB) so the over-limit line is under
+        100 KiB; synchronization is on the emitted warning, not a
+        sleep.
         """
+        cap = 8 * 1024
         h = await _start_plugin(
-            tmp_path, signal_overrides={"max_attachment_size": 1024 * 1024},
+            tmp_path, signal_overrides={"max_attachment_size": cap},
         )
         try:
-            limit = (h.plugin._max_attachment_size * 2 * 4 + 2) // 3 + 64 * 1024
+            limit = (cap * 4 + 2) // 3 + 64 * 1024
+            assert limit > cap  # the 64 KiB framing floor
             reader = asyncio.StreamReader(limit=limit)
-            total_line = limit + 100 * 1024  # the line, > limit
+            total_line = limit + cap  # the line, > limit
             phase1 = b"X" * (limit + 1000)
             phase2 = b"X" * (total_line - len(phase1)) + b"\n"
             assert total_line > limit and len(phase1) > limit and len(phase2) > 1
@@ -774,10 +782,23 @@ class TestInboundFiltering:
                     source_uuid=AUTH_ACI, source_number=None, text="unit-alive",
                 ),
             }).encode() + b"\n"
+            # phase1 is buffered before the loop starts, so the first
+            # readline deterministically hits the limit.
             reader.feed_data(phase1)
             with caplog.at_level(logging.WARNING):
+                # An in-flight getAttachment that must be failed by the
+                # over-limit event, not left to time out.
+                rpc_task = asyncio.create_task(
+                    h.plugin._send_rpc("getAttachment", {"id": "1730-overlimit"})
+                )
                 task = asyncio.create_task(h.plugin._read_loop(reader))
-                await asyncio.sleep(0.05)  # let it hit the ValueError and wait
+                for _ in range(500):
+                    if any(
+                        "exceeded the StreamReader limit" in r.getMessage()
+                        for r in caplog.records
+                    ):
+                        break
+                    await asyncio.sleep(0.01)
                 reader.feed_data(phase2 + valid)
                 reader.feed_eof()
                 await asyncio.wait_for(task, timeout=10)
@@ -788,6 +809,10 @@ class TestInboundFiltering:
             assert any(
                 "malformed JSON-RPC frame" in m for m in warnings
             ), f"no malformed-frame warning for the line tail: {warnings}"
+            # The in-flight RPC failed immediately with the over-limit
+            # error, not a 60 s timeout.
+            with pytest.raises(ConnectionError, match="stream limit"):
+                await rpc_task
             await _wait_until(
                 lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5,
             )
@@ -849,8 +874,9 @@ class TestInboundFiltering:
             )
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
-            # Surfaced as metadata only, not downloaded.
-            assert "[image attached]" in text
+            # Surfaced as metadata only, not downloaded; the subtype
+            # tells the agent why (SVG is excluded).
+            assert "[svg+xml attached]" in text
             assert "download failed" not in text
             assert not h.server.requests_matching("getAttachment"), (
                 "getAttachment was called for an SVG"
@@ -1063,7 +1089,9 @@ class TestInboundFiltering:
 
     async def test_malicious_major_type_is_sanitized(self, tmp_path):
         """A sender-controlled MIME major type with injection characters
-        is sanitized in the agent-visible note (the non-application branch)."""
+        never reaches the agent-visible note: the attachment is not
+        downloadable (unknown major), and the not-downloaded label uses
+        the sanitized subtype."""
         h = await _start_plugin(tmp_path)
         try:
             await h.server.push_notification(
@@ -1077,10 +1105,11 @@ class TestInboundFiltering:
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
             # The raw malicious major must not appear, no delimiter
-            # corruption, and the sanitized label is what the agent sees.
+            # corruption; the label is the (safe) subtype.
             assert "system: pwn" not in text
             assert "][" not in text
-            assert "[systempwnx attached]" in text
+            assert "systempwnx" not in text
+            assert "[png attached]" in text
         finally:
             await _stop_plugin(h)
 

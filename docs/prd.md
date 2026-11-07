@@ -487,16 +487,18 @@ Per transport:
   `channels:`; those resolve forward to ACIs in one batched call after each
   connect, never at startup, and a failed resolution retries after the next
   connect. Non-`dataMessage` envelopes (including the account's own sync
-  traffic) are dropped; an attachment is downloaded for an allowlisted sender
-  when its MIME type passes the download gate (image/*, text/*, audio/*
-  prefixes plus application/pdf, application/json, application/xml; SVG and
-  HTML excluded) and is named in the text with the major type label (image,
-  text, audio), except application/* attachments use the MIME subtype (pdf,
-  json, xml); backlog older than five minutes is prefixed with its send
-  time. Typing
-  starts on the first outstanding message and refreshes every 10 s; the
-  read receipt is sent at processing start, not arrival. Notifications are
-  never handled inline in the read loop.
+  traffic) are dropped. An attachment from an allowlisted sender is
+  downloaded when its MIME type passes the download gate (the allowlist is
+  specified in the threat model) and is named in the text: downloaded
+  attachments use the major type (image, text, audio) or the subtype for
+  application/* (pdf, json, xml); attachments that are not downloaded use
+  the sanitized subtype (svg, html, ...), so the agent can see why nothing
+  was fetched; with no MIME type, the legacy protobuf type name applies.
+  The `getAttachment` RPC sends the attachment id only. Backlog older than
+  five minutes is prefixed with its send time. Typing starts on the first
+  outstanding message and refreshes every 10 s; the read receipt is sent at
+  processing start, not arrival. Notifications are never handled inline in
+  the read loop.
 - **Discord**: discord.py's gateway behind the `discord` extra, default
   intents, and the privileged Message Content intent only when a server
   channel answers unaddressed — the transport default or any per-channel

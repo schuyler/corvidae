@@ -93,7 +93,7 @@ def _mime_base(content_type: str) -> str:
     return content_type.split(";", 1)[0].strip().lower()
 
 
-def _is_downloadable(mime_base: str, att_type: int = 0) -> bool:
+def _is_downloadable(mime_base: str, att_type: int) -> bool:
     """MIME-based download gate.
 
     Primary: contentType (MIME type, parameters stripped).
@@ -101,8 +101,6 @@ def _is_downloadable(mime_base: str, att_type: int = 0) -> bool:
     signal-cli versions that do not send contentType.
     """
     if not mime_base:
-        # No contentType: fall back to the protobuf type enum (older
-        # signal-cli versions that do not send contentType).
         return att_type in (ATT_IMAGE, ATT_GIF)
     if mime_base in _MIME_EXCLUDED:
         return False
@@ -377,13 +375,12 @@ class SignalPlugin(TransportPlugin):
         delay = _INITIAL_BACKOFF
         while self._connect_task is not None:
             try:
-                # StreamReader limit sized to 2x the max attachment: base64
+                # StreamReader limit sized to the max attachment: base64
                 # inflates by ~4/3, plus 64 KiB headroom for JSON framing.
-                # The 2x headroom lets an oversized response be read and
-                # rejected by the size cap, rather than silently discarded
-                # by the stream limit (which would hang the RPC).
+                # A frame that still exceeds it is dropped by readline(),
+                # and _read_loop fails the in-flight RPCs (no 60 s hang).
                 # Integer arithmetic (no float precision loss).
-                stream_limit = (self._max_attachment_size * 2 * 4 + 2) // 3 + 64 * 1024
+                stream_limit = (self._max_attachment_size * 4 + 2) // 3 + 64 * 1024
                 reader, writer = await asyncio.open_unix_connection(
                     path=self._socket_path, limit=stream_limit,
                 )
@@ -430,21 +427,20 @@ class SignalPlugin(TransportPlugin):
             try:
                 line = await reader.readline()
             except ValueError as exc:
-                # StreamReader buffer limit exceeded — an oversized frame
-                # (typically a base64-encoded attachment). readline() has
-                # already cleared the buffer, so the tail of the line
-                # arrives as the next read and is skipped there as a
-                # malformed frame (a very large line can trip the limit
-                # several times, once per over-limit chunk). The
-                # connection stays alive; an in-flight getAttachment RPC
-                # whose response was discarded is left to time out after
-                # ATTACHMENT_DOWNLOAD_TIMEOUT.
+                # StreamReader buffer limit exceeded -- an oversized frame
+                # (typically a base64-encoded attachment). The connection
+                # stays alive; the in-flight RPCs are failed below rather
+                # than left to time out (see the threat model for the
+                # buffer-clearing/tail-frame mechanics).
                 logger.warning(
                     "signal: frame exceeded the StreamReader limit (%s); "
-                    "discarded. If this was a legitimate attachment, raise "
-                    "signal.max_attachment_size. Any in-flight getAttachment "
-                    "RPC will time out after %ss.",
-                    exc, ATTACHMENT_DOWNLOAD_TIMEOUT,
+                    "discarded and in-flight requests failed. If this was "
+                    "a legitimate attachment, raise "
+                    "signal.max_attachment_size.",
+                    exc,
+                )
+                self._reject_pending_requests(
+                    "signal-cli response exceeded the stream limit"
                 )
                 continue
             if not line:
@@ -505,11 +501,13 @@ class SignalPlugin(TransportPlugin):
         else:
             future.set_result(frame.get("result"))
 
-    def _reject_pending_requests(self) -> None:
-        """On disconnect, fail any outstanding request rather than hang it."""
+    def _reject_pending_requests(
+        self, message: str = "signal-cli connection lost"
+    ) -> None:
+        """Fail any outstanding request rather than hang it."""
         for future in self._pending_requests.values():
             if not future.done():
-                future.set_exception(ConnectionError("signal-cli connection lost"))
+                future.set_exception(ConnectionError(message))
         self._pending_requests.clear()
 
     async def _send_rpc(self, method: str, params: dict) -> Any:
@@ -599,19 +597,23 @@ class SignalPlugin(TransportPlugin):
         attachment_notes: list[str] = []
         for att in attachments:
             mime_base = _mime_base(att.get("contentType") or "")
-            # Label for agent-visible notes: major type (image, text, audio)
-            # or subtype for application/* (pdf, json, xml). Falls back to
-            # the protobuf type name if no MIME type.
+            att_type = att.get("type", 0)
+            downloadable = _is_downloadable(mime_base, att_type) and allowed
+            # Label for agent-visible notes: downloaded attachments use
+            # the major type (image, text, audio) or the subtype for
+            # application/* (pdf, json, xml); not-downloaded ones use the
+            # sanitized subtype (svg, html, zip, ...) so the agent can see
+            # why nothing was fetched. Falls back to the protobuf type
+            # name if no MIME type.
             if mime_base and "/" in mime_base:
                 major, subtype = mime_base.split("/", 1)
-                if major == "application":
-                    type_name = _sanitize_mime_part(subtype)
-                else:
+                if downloadable and major != "application":
                     type_name = _sanitize_mime_part(major)
+                else:
+                    type_name = _sanitize_mime_part(subtype)
             else:
-                att_type = att.get("type", 0)
                 type_name = ATTACHMENT_TYPE_NAMES.get(att_type, f"type{att_type}")
-            if _is_downloadable(mime_base, att.get("type", 0)) and allowed:
+            if downloadable:
                 path = await self._download_attachment(envelope, att, mime_base)
                 if path is not None:
                     attachment_notes.append(f"[{type_name}: {path}]")
