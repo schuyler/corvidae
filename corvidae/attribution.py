@@ -11,7 +11,7 @@ and metadata):
         "turn", "compaction", "subagent".
     channel_id: str — the Channel.id the operation is running on behalf of.
     trace_id: str — the trace this call belongs to.
-    meta: dict — the trace metadata dict.
+    annotations: dict — the opaque, plugin-owned annotations of the turn.
 
 Propagation rule: contextvars snapshot at ``asyncio.create_task`` time.
 A task created before ``set_attribution`` was called never sees the

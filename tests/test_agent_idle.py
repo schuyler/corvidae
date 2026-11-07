@@ -120,7 +120,7 @@ async def test_notification_counts_as_activity(env, source, tool_call_id):
 
     await plugin.pm.ahook.on_notify(
         channel=channel, source=source, text="event",
-        tool_call_id=tool_call_id, meta=None,
+        tool_call_id=tool_call_id, annotations=None,
     )
     # Activity is pushed synchronously from on_notify.
     assert rec.events[0] == ("activity", channel.id)
@@ -136,14 +136,14 @@ async def test_pending_tool_calls_keep_channel_busy_until_last_result(env):
     channel.pending_tool_call_ids |= {"a", "b"}
 
     await plugin.pm.ahook.on_notify(
-        channel=channel, source="task", text="ra", tool_call_id="a", meta=None,
+        channel=channel, source="task", text="ra", tool_call_id="a", annotations=None,
     )
     await drain(plugin, channel)
     # "b" is still outstanding: the first result buffered, no settle.
     assert ("settled", channel.id) not in rec.events
 
     await plugin.pm.ahook.on_notify(
-        channel=channel, source="task", text="rb", tool_call_id="b", meta=None,
+        channel=channel, source="task", text="rb", tool_call_id="b", annotations=None,
     )
     await drain(plugin, channel)
     assert rec.events.count(("settled", channel.id)) == 1

@@ -141,7 +141,7 @@ class _ContextInjector:
     """Stand-in for a funnel producer: appends a CONTEXT system message."""
 
     @hookimpl
-    async def before_agent_turn(self, channel, trace_id, meta):
+    async def before_agent_turn(self, channel, trace_id, annotations):
         channel.conversation.append(
             {"role": "system", "content": "[CONTEXT from memory]\nfact\n[end CONTEXT from memory]"},
             MessageType.CONTEXT,
@@ -197,7 +197,7 @@ class TestAgentWiring:
         plugin, channel, db, client = await make_agent("user")
         await plugin.pm.ahook.on_notify(
             channel=channel, source="task", text="background event",
-            tool_call_id=None, meta=None,
+            tool_call_id=None, annotations=None,
         )
         await drain(plugin, channel)
         sent = client.chat.call_args.args[0]

@@ -531,15 +531,15 @@ retrieval) log a warning and admit nothing.
 
 `register_and_wake(channel, origin, source, entries)` is the deferred
 admission path for notification producers without a `tool_call_id`:
-`origin` is stamped into the wake stub's `meta["origin"]` (see
+`origin` is stamped into the wake stub's `annotations["origin"]` (see
 [Traces](plugin-guide.md#traces)) so `before_agent_turn`'s drain, and any
 plugin gating eligibility off that origin, never has to infer it from
 stub text. The `'user'|'reminder'|'critique'|'heartbeat'|'task'`
 taxonomy is a convention cognition plugins (AppraisalPlugin,
 CritiquePlugin, OutcomeLogPlugin) share over this key — not a core
 concept. `'user'` is recognized by subscribing to `on_message_admitted`
-rather than by a value in `meta`; `'task'` is the default OutcomeLogPlugin
-applies when `meta["origin"]` is absent on a notification-born
+rather than by a value in `annotations`; `'task'` is the default OutcomeLogPlugin
+applies when `annotations["origin"]` is absent on a notification-born
 trace. `stub_text=` replaces the default "N pending … item(s)" stub text
 (the provenance check's use). `register(channel, source, entries)` is the
 no-wake variant: no stub, no origin.
@@ -711,7 +711,7 @@ missing or malformed field reads as no claims; malformed entries are
 dropped with a warning; it's capped at 5 claims. The vector is merged into
 the `appraisal` envelope's `stage2` key. Then every listener registered with
 `add_stage2_listener` is awaited with `channel, trace_id, response_text,
-meta, stage2`, outside the appraisal attribution. A failing listener is
+annotations, stage2`, outside the appraisal attribution. A failing listener is
 logged and doesn't stop the others; a failed stage 2 notifies no one. It's
 a push rather than a wait because a consumer that awaited stage 2 from a
 queued task would hold a TaskQueue worker the stage-2 task may need.
@@ -839,13 +839,13 @@ API rather than relying on hook order: apluggy runs a broadcast's
 implementations concurrently, and the pull API's per-key dedup makes the
 compute run once whoever asks first.
 
-**Origin.** Read from propagated state, never inferred: `meta["origin"]`
+**Origin.** Read from propagated state, never inferred: `annotations["origin"]`
 when a producer stamped one (the scheduler stamps `reminder`,
 `HeartbeatPlugin` stamps `heartbeat`, the funnel stamps `critique`), else `user` for a trace the
 plugin saw in `on_message_admitted` (a bounded LRU of 1024), else the origin
 `exchange_log` already holds for the trace (so a user exchange whose trace
 fell out of the LRU during a long tool cycle is still `user`), else `task`.
-Tool cycles carry the item's meta forward, so an exchange keeps its origin
+Tool cycles carry the item's annotations forward, so an exchange keeps its origin
 through its tool calls. The decide gate never passes its derived origin to
 `upsert_exchange`, so it can't relabel a row; only the engagement gate,
 which fires only for user messages, writes `origin="user"`.
@@ -955,7 +955,7 @@ traffic that never stops it never beats; that is accepted until #214.
 **What a beat is.** The plugin reads `MemoryPlugin.recent(heartbeat.memory_limit)` (default 20),
 re-checks that the system is still quiet (a message may have landed
 during the read), and calls `on_notify` on `internal:heartbeat` with
-`source="heartbeat"` and `meta={"origin": "heartbeat"}`. The text is the
+`source="heartbeat"` and `annotations={"origin": "heartbeat"}`. The text is the
 heartbeat prompt (`DEFAULT_HEARTBEAT_PROMPT`, overridable with
 `heartbeat.prompt`; documented copy in `prompts/heartbeat.md`, and the key's
 resolution in [configuration.md](configuration.md#heartbeat--a-turn-on-system-idle))

@@ -17,7 +17,7 @@ Interface pinned here:
   AppraisalPlugin.get_or_compute_out(channel, trace_id, text) and a thin
     should_send_response impl that always returns None.
 
-Origin is a plugin-side convention (#131): meta["origin"] when present,
+Origin is a plugin-side convention (#131): annotations["origin"] when present,
 else "user" for a trace admitted through on_message_admitted, else the
 origin exchange_log holds, else "task".
 
@@ -194,16 +194,16 @@ class TraceRecorder:
         self.trace_ids: list[str] = []
 
     @hookimpl
-    async def on_message_persisted(self, channel, trace_id, rowid, text, meta):
+    async def on_message_persisted(self, channel, trace_id, rowid, text, annotations):
         self.trace_ids.append(trace_id)
 
 
-async def _notify(env, text, meta=None):
+async def _notify(env, text, annotations=None):
     """A notification-born exchange; returns its dequeue-minted trace id."""
     before = len(env.recorder.trace_ids)
     await env.plugin.on_notify(
         channel=env.channel, source="scheduler", text=text,
-        tool_call_id=None, meta=meta,
+        tool_call_id=None, annotations=annotations,
     )
     await drain(env.plugin, env.channel)
     assert len(env.recorder.trace_ids) == before + 1
@@ -362,7 +362,7 @@ class TestComputeFailureFailsOpen:
         # The thin trigger alone returns None and swallows nothing silently.
         results = await env.appraisal.should_send_response(
             channel=env.channel, text="x", emission="final",
-            trace_id=mint_trace_id(), meta={},
+            trace_id=mint_trace_id(), annotations={},
         )
         assert results is None
 
@@ -397,7 +397,7 @@ class TestOrderingIndependence:
         )
         outbound = await env.pm.ahook.should_send_response(
             channel=env.channel, text="nothing to add.", emission="final",
-            trace_id=trace_id, meta={"origin": "heartbeat"},
+            trace_id=trace_id, annotations={"origin": "heartbeat"},
         )
 
         assert resolve_reject_wins(inbound) is None  # shadow mode
@@ -471,7 +471,7 @@ class TestWithheldStillCritiqued:
         await critique.on_init(pm=env.pm, config=env.config)
         critique._run_critique = AsyncMock()
 
-        await _notify(env, "time to stretch", meta={"origin": "reminder"})
+        await _notify(env, "time to stretch", annotations={"origin": "reminder"})
         await drain_task_queue(env.plugin)
 
         rows = await env.rows_by_type()
@@ -542,10 +542,10 @@ async def _gate(config=None, *, appraisal=None, persistence=None):
     return gate, outcome_log, channel
 
 
-async def _final(gate, channel, meta=None, trace_id="t1"):
+async def _final(gate, channel, annotations=None, trace_id="t1"):
     verdict = await gate.should_send_response(
         channel=channel, text="nothing to add.", emission="final",
-        trace_id=trace_id, meta=meta or {},
+        trace_id=trace_id, annotations=annotations or {},
     )
     await asyncio.gather(*set(gate._record_tasks))
     return verdict
@@ -553,7 +553,7 @@ async def _final(gate, channel, meta=None, trace_id="t1"):
 
 class TestDecisionTable:
     @pytest.mark.parametrize(
-        "meta, salience, config, verdict, record",
+        "annotations, salience, config, verdict, record",
         [
             # Non-user, below threshold, enforced: withheld.
             ({"origin": "heartbeat"}, 0.1, {}, False,
@@ -564,16 +564,16 @@ class TestDecisionTable:
             # Shadow mode: would veto, sends.
             ({"origin": "heartbeat"}, 0.1, {"gate": {"send": {"enforce": False}}}, None,
              {"vetoed": False, "would_veto": True, "enforced": False}),
-            # meta["origin"] is used as-is.
+            # annotations["origin"] is used as-is.
             ({"origin": "reminder"}, 0.1, {}, False, {"origin": "reminder", "vetoed": True}),
             # User origin is never withheld, at any threshold.
             ({"origin": "user"}, 0.0, {"gate": {"send": {"min_salience": 1.0}}}, None,
              {"vetoed": False, "reason": "user_origin"}),
         ],
     )
-    async def test_final_decisions(self, meta, salience, config, verdict, record):
+    async def test_final_decisions(self, annotations, salience, config, verdict, record):
         gate, log, channel = await _gate(config, appraisal=_StubAppraisal(salience))
-        assert await _final(gate, channel, meta) is verdict
+        assert await _final(gate, channel, annotations) is verdict
         send = log.writes[-1]["outcomes"]["send"]
         assert {k: send[k] for k in record} == record
 
@@ -605,7 +605,7 @@ class TestDecisionTable:
             {"gate": {"send": {"min_salience": 1.0}}}, appraisal=_StubAppraisal(0.0),
         )
         verdict = await gate.should_send_response(
-            channel=channel, text="x", emission=emission, trace_id="t1", meta={"origin": "heartbeat"},
+            channel=channel, text="x", emission=emission, trace_id="t1", annotations={"origin": "heartbeat"},
         )
         assert verdict is None
         assert log.writes == []
@@ -613,7 +613,7 @@ class TestDecisionTable:
     @pytest.mark.parametrize("emission", ["progress", "thinking"])
     async def test_emission_switches(self, emission):
         gate, log, channel = await _gate()
-        args = dict(channel=channel, text="x", emission=emission, trace_id="t1", meta={})
+        args = dict(channel=channel, text="x", emission=emission, trace_id="t1", annotations={})
         assert await gate.should_send_response(**args) is None
         channel.runtime_overrides[f"gate.send.allow_{emission}"] = False
         assert await gate.should_send_response(**args) is False

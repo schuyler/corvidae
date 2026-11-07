@@ -149,7 +149,7 @@ async def _originate(env, trace_id, rowid=1, text="the user asked"):
     persists the user message. Stage 2 forks only when this row is known
     and in the window; without it the stage skips (#320)."""
     await env.appraisal.on_message_persisted(
-        channel=env.channel, trace_id=trace_id, rowid=rowid, text=text, meta={},
+        channel=env.channel, trace_id=trace_id, rowid=rowid, text=text, annotations={},
     )
 
 
@@ -172,7 +172,7 @@ class TestOriginatingTextLRU:
         env = await build_env(tmp_path)
         await env.appraisal.on_message_persisted(
             channel=env.channel, trace_id="k-lru-1", rowid=5,
-            text="the original user text", meta={},
+            text="the original user text", annotations={},
         )
         assert env.appraisal.get_originating_text("k-lru-1") == "the original user text"
         await _teardown(env)
@@ -184,7 +184,7 @@ class TestOriginatingTextLRU:
         env = await build_env(tmp_path)
         await env.appraisal.on_message_persisted(
             channel=env.channel, trace_id="k-lru-none", rowid=None,
-            text="text with no rowid yet", meta={},
+            text="text with no rowid yet", annotations={},
         )
         assert env.appraisal.get_originating_text("k-lru-none") == "text with no rowid yet"
         await _teardown(env)
@@ -202,7 +202,7 @@ class TestOriginatingTextLRU:
         for i in range(ORIGINATING_TEXT_LRU_MAXSIZE + 1):
             await env.appraisal.on_message_persisted(
                 channel=env.channel, trace_id=f"k-{i}", rowid=i,
-                text=f"text {i}", meta={},
+                text=f"text {i}", annotations={},
             )
         # The oldest entry (k-0) was evicted once the 513th arrived; the
         # newest MAXSIZE entries survive.
@@ -226,12 +226,12 @@ class TestOriginatingTextLRU:
         env = await build_env(tmp_path)
         await env.appraisal.on_message_persisted(
             channel=env.channel, trace_id="k-cycle", rowid=1,
-            text="the original user text", meta={},
+            text="the original user text", annotations={},
         )
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="tool result: done",
             response_text="final response", trace_id="k-cycle",
-            meta={}, logprobs=None,
+            annotations={}, logprobs=None,
         )
         await _run_next_task(env.task)
 
@@ -255,7 +255,7 @@ class TestTrigger:
         env = await build_env(tmp_path)
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            trace_id="k1", meta={},
+            trace_id="k1", annotations={},
             logprobs=None,
         )
         queue = env.task.task_queue
@@ -264,7 +264,7 @@ class TestTrigger:
         assert task.deliver is False
         assert task.tool_call_id is None
         assert task.trace_id == "k1"
-        assert task.meta == {}
+        assert task.annotations == {}
         assert "appraisal" in task.description
         await _teardown(env)
 
@@ -272,7 +272,7 @@ class TestTrigger:
         env = await build_env(tmp_path)
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            trace_id="kc", meta={"origin": "critique"},
+            trace_id="kc", annotations={"origin": "critique"},
             logprobs=None,
         )
         assert env.task.task_queue.queue.qsize() == 0
@@ -290,14 +290,14 @@ class TestTrigger:
             depends_on = frozenset()
 
             @hookimpl
-            async def on_notify(self, channel, source, text, tool_call_id, meta):
+            async def on_notify(self, channel, source, text, tool_call_id, annotations):
                 notified.append(source)
 
         env.pm.register(NotifySpy(), name="notify_spy")
 
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            trace_id="k2", meta={},
+            trace_id="k2", annotations={},
             logprobs=None,
         )
         # Let the worker drain.
@@ -316,7 +316,7 @@ class TestTrigger:
         await _originate(env, "k3")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            trace_id="k3", meta={},
+            trace_id="k3", annotations={},
             logprobs=None,
         )
         await _run_next_task(env.task)
@@ -340,7 +340,7 @@ class TestStage2Persist:
         await _originate(env, "kp")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            trace_id="kp", meta={},
+            trace_id="kp", annotations={},
             logprobs=None,
         )
         await _run_next_task(env.task)
@@ -363,7 +363,7 @@ class TestStage2Persist:
         await _originate(env, "km")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            trace_id="km", meta={},
+            trace_id="km", annotations={},
             logprobs=None,
         )
         await _run_next_task(env.task)
@@ -381,7 +381,7 @@ class TestStage2Persist:
         await _originate(env, "kbad")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            trace_id="kbad", meta={},
+            trace_id="kbad", annotations={},
             logprobs=None,
         )
         # Must not raise.
@@ -405,7 +405,7 @@ class TestStage2Persist:
         ]}
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            trace_id="ke", meta={},
+            trace_id="ke", annotations={},
             logprobs=logprobs,
         )
         await _run_next_task(env.task)
@@ -478,12 +478,12 @@ class TestPastClaims:
 
 
 class TestStage2Listeners:
-    async def _run(self, env, trace_id, meta=None):
+    async def _run(self, env, trace_id, annotations=None):
         await env.outcome.record_exchange(trace_id, env.channel.id, origin="user")
         await _originate(env, trace_id)
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="the reply",
-            trace_id=trace_id, meta=meta if meta is not None else {"origin": "reminder"},
+            trace_id=trace_id, annotations=annotations if annotations is not None else {"origin": "reminder"},
             logprobs=None,
         )
         await _run_next_task(env.task)
@@ -504,7 +504,7 @@ class TestStage2Listeners:
             assert call["channel"] is env.channel
             assert call["trace_id"] == "kl"
             assert call["response_text"] == "the reply"
-            assert call["meta"] == {"origin": "reminder"}
+            assert call["annotations"] == {"origin": "reminder"}
             assert call["stage2"]["past_claims"] == CLAIMS_STAGE2["past_claims"]
             assert call["persisted"]["past_claims"] == CLAIMS_STAGE2["past_claims"]
         finally:

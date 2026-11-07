@@ -76,17 +76,17 @@ class AgentSpec:
     async def send(self, channel: Channel, event: Outbound) -> None  # corvidae/outbound.py
     def register_tools(self, tool_registry: list) -> None  # sync; plugins append Tool instances or bare callables
     def register_llm_stages(self, stages: dict[str, str]) -> None  # sync; plugins add stages[name] = "chat" | "embedding"
-    async def on_agent_response(self, channel: Channel, request_text: str, response_text: str, trace_id: str | None, meta: dict, logprobs: dict | None) -> None
-    async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
+    async def on_agent_response(self, channel: Channel, request_text: str, response_text: str, trace_id: str | None, annotations: dict, logprobs: dict | None) -> None
+    async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, annotations: dict | None) -> None
     async def should_process_message(self, channel: Channel, sender: str, text: str, trace_id: str | None) -> bool | None
-    async def should_send_response(self, channel: Channel, text: str, emission: str, trace_id: str | None, meta: dict) -> bool | None
+    async def should_send_response(self, channel: Channel, text: str, emission: str, trace_id: str | None, annotations: dict) -> bool | None
     async def on_message_admitted(self, channel: Channel, trace_id: str, sender: str, text: str) -> None
     async def on_message_rejected(self, channel: Channel, trace_id: str, sender: str, text: str) -> None
-    async def on_message_persisted(self, channel: Channel, trace_id: str, rowid: int | None, text: str, meta: dict) -> None
+    async def on_message_persisted(self, channel: Channel, trace_id: str, rowid: int | None, text: str, annotations: dict) -> None
     async def resolve_llm_error(self, channel: Channel, error: Exception) -> str | None
     async def resolve_compaction(self, channel: Channel, conversation: ContextWindow, max_tokens: int) -> None
     async def transform_tool_result(self, tool_name: str, result: str, channel: Channel | None) -> str | None
-    async def before_agent_turn(self, channel: Channel, trace_id: str | None, meta: dict) -> None
+    async def before_agent_turn(self, channel: Channel, trace_id: str | None, annotations: dict) -> None
     async def after_persist_assistant(self, channel: Channel, message: dict) -> None
     async def transform_display_text(self, channel: Channel, text: str, result_message: dict) -> str | None
     async def transform_system_prompt(self, channel: Channel, text: str) -> str | None
@@ -188,7 +188,7 @@ owner's plugin name after the prefix.
 | `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
-| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `meta`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes an exact `NO_REPLY` final of any origin (cognition extra); a raising implementation fails open (logged, sent); no kernel implementation, so with none registered everything is sent |
+| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes an exact `NO_REPLY` final of any origin (cognition extra); a raising implementation fails open (logged, sent); no kernel implementation, so with none registered everything is sent |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
 | `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None). Each message of a coalesced burst fires it under its own trace, in arrival order, before the turn's model call |
@@ -489,7 +489,7 @@ hooks with the client's profile (a key under `llm:`, such as `main`) and the
 current attribution snapshot.
 
 **Attribution.** `attribution.py` holds a single ContextVar dict
-(`stage`, `channel_id`, `trace_id`, `meta`, plus stage-specific
+(`stage`, `channel_id`, `trace_id`, `annotations`, plus stage-specific
 extras such as `trigger` on consolidation calls). Callers set it at the
 top of a logical operation and reset in a `finally`: the Agent turn loop
 (`stage="turn"`), CompactionPlugin around its summary call
@@ -973,7 +973,7 @@ uses it verbatim for the gate, the admitted/rejected hooks and the
 for a USER item: a falsy id raises `ValueError`, checked before the
 readiness check so a mis-wired transport fails even while the agent starts.
 Omitting the argument entirely fails at the hook call (`HookCallError`).
-Notification-born items with no inherited `meta["trace_id"]` are the
+Notification-born items with no inherited `annotations["trace_id"]` are the
 exception: the Agent mints their id at dequeue.
 
 `on_message` broadcasts `should_process_message` and passes the result
@@ -1044,7 +1044,7 @@ that trace.
    `channel.conversation`
 3. Resets `turn_counter` to 0 when the item originates a new trace
    (`item.originating`, set during trace resolution: every USER
-   item, and a notification with no inherited `meta["trace_id"]`)
+   item, and a notification with no inherited `annotations["trace_id"]`)
    **and** no tool cycle is in flight (`channel.pending_tool_call_ids` is
    empty). An item arriving mid-cycle is charged to the running cycle
    instead (R4), so a chatty channel cannot extend `max_turns`. Keying on
@@ -1170,7 +1170,7 @@ is returned.
 
 ### The output gate
 
-`should_send_response(channel, text, emission, trace_id, meta)` is the
+`should_send_response(channel, text, emission, trace_id, annotations)` is the
 outbound mirror of `should_process_message`: reject-wins over every
 implementation, any `False` vetoes. It fires at four sites, in two modes.
 
@@ -1236,9 +1236,9 @@ is the shared parser.
 at WARNING with the emission and channel, and sends: a broken gate never
 silences the agent. With no implementation registered (the kernel ships
 none), every emission is sent; the only behavioral change from before the
-hook is the max-turns `tool_calls` strip. `meta` is the item's trace
-metadata dict; origin is not a kernel concept, so a gate that needs it reads
-`meta["origin"]` (stamped by producers such as the scheduler) the way
+hook is the max-turns `tool_calls` strip. `annotations` is the item's
+annotations dict; origin is not a kernel concept, so a gate that needs it reads
+`annotations["origin"]` (stamped by producers such as the scheduler) the way
 cognition's `GatePlugin` does ([cognition.md](cognition.md#gateplugin)).
 
 ### Tool call dispatch
@@ -1326,7 +1326,7 @@ class QueueItem:
     sender: str | None = None
     source: str | None = None
     tool_call_id: str | None = None
-    meta: dict = field(default_factory=dict)
+    annotations: dict = field(default_factory=dict)
     trace_id: str | None = None
     originating: bool = False
     retry: bool = False
@@ -2356,7 +2356,7 @@ CREATE INDEX schedule_due ON schedule (enabled, next_fire_at);
 ```
 
 There is no firing log: a firing is a persisted conversation row, and its
-`meta["schedule_id"]` travels with the trace.
+`annotations["schedule_id"]` travels with the trace.
 
 **Timer.** One asyncio task sleeps until the earliest enabled row is due
 (at most an hour, so a wall-clock jump is noticed) with `Clock.sleep`, and
@@ -2380,7 +2380,7 @@ advanced (recurring) or disabled as `fired` (one-shot), at most once.
 ```python
 await pm.ahook.on_notify(
     channel=channel, source=row.origin, text=framed_text,
-    tool_call_id=None, meta={"origin": row.origin, "schedule_id": row.id},
+    tool_call_id=None, annotations={"origin": row.origin, "schedule_id": row.id},
 )
 ```
 

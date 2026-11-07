@@ -610,7 +610,7 @@ class TestTaskPlugin:
         assert task.task_id in call_kwargs["text"]
         assert "work output" in call_kwargs["text"]
         assert call_kwargs["tool_call_id"] == "call_42"
-        assert call_kwargs["meta"]["task_id"] == task.task_id
+        assert call_kwargs["annotations"]["task_id"] == task.task_id
 
         await plugin.on_stop()
 

@@ -315,10 +315,10 @@ one is a bug even if its tests pass.
 4. Every inbound item carries a trace id. Transports mint it from a
    stdlib-only module and pass it to `on_message`; the Agent mints at
    dequeue for a notification that inherits none. The id and an opaque
-   `meta` dict ride every hook, every `Task`, every completion
+   `annotations` dict ride every hook, every `Task`, every completion
    notification, and every usage-log row. A falsy id is a `ValueError`;
-   omitting it is a hook-call error. Core never stamps meaning into `meta`;
-   `meta["origin"]` is a plugin-side convention. A message coalesced into
+   omitting it is a hook-call error. Core never stamps meaning into `annotations`;
+   `annotations["origin"]` is a plugin-side convention. A message coalesced into
    another's turn (item 19) keeps its own trace through admission and
    persistence only; the owning trace carries the turn's hooks.
 5. The inbound gate (`should_process_message`) resolves reject-wins over
@@ -356,7 +356,7 @@ one is a bug even if its tests pass.
 11. A new hookspec, kernel or plugin-owned, is admitted only when it is a decision point, an
     observation with at least two plausible implementers, or the pair of
     an existing observability hook. A single-consumer observation gets a
-    `meta` entry or a return value on an existing hook instead.
+    `annotations` entry or a return value on an existing hook instead.
 12. Hook parameters with defaults can be dropped silently by pluggy; a
     startup guard rejects implementations that re-declare a spec-required
     parameter with a default.
@@ -1039,7 +1039,7 @@ deciding only what to newly append and in what order.
 
 **Output gate and the right to silence.**
 
-1. `should_send_response(channel, text, emission, trace_id, meta)` resolves
+1. `should_send_response(channel, text, emission, trace_id, annotations)` resolves
    reject-wins, with `emission` in `final | progress | thinking | error`.
 2. The persistence-controlling firing happens between generation and
    persistence, only for results whose tool calls will not dispatch (a
@@ -1281,7 +1281,7 @@ design, not requirement. The requirements are outcomes:
 3. A firing resolves the channel (registry, `resolve_channel`, then
    `get_or_create` for ids no resolving transport owns), counts as an
    inbound item on that channel (§3.1.16), and injects through
-   `on_notify` with `meta={"origin", "schedule_id"}`; the whole pipeline
+   `on_notify` with `annotations={"origin", "schedule_id"}`; the whole pipeline
    then runs. A firing on a channel no transport owns is delivered by no
    transport; it reaches a person by speaking on another channel
    (§3.5.9), like any turn.
@@ -1313,7 +1313,7 @@ design, not requirement. The requirements are outcomes:
    per call, success or terminal failure, never on retried attempts;
    observer failures never break the call. `on_llm_request` is retained
    as the pair of its response hook.
-2. Attribution (stage, channel, trace, meta, trigger, mode) is a
+2. Attribution (stage, channel, trace, annotations, trigger, mode) is a
    ContextVar set at the top of each logical operation and reset in a
    `finally`; `Task` captures the context at creation because queue
    workers do not inherit it.

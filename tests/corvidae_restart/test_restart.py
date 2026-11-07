@@ -48,14 +48,14 @@ class FakeAHook:
     async def send(self, channel, event):
         self.sends.append({"channel": channel, "event": event})
 
-    async def on_notify(self, channel, source, text, tool_call_id, meta):
+    async def on_notify(self, channel, source, text, tool_call_id, annotations):
         self.notifies.append(
             {
                 "channel": channel,
                 "source": source,
                 "text": text,
                 "tool_call_id": tool_call_id,
-                "meta": meta,
+                "annotations": annotations,
             }
         )
 

@@ -139,7 +139,7 @@ class FunnelPlugin(CorvidaePlugin):
         Args:
             channel: The Channel to wake.
             origin: §3.3 origin vocabulary value; stamped into on_notify
-                meta so the drain (and critique eligibility) never infer it.
+                annotations so the drain (and critique eligibility) never infer it.
             source: Frame label at admission ("critique", …).
             entries: Pre-formatted lines to admit on the matching-origin
                 drain.
@@ -165,7 +165,7 @@ class FunnelPlugin(CorvidaePlugin):
                     else f"{pending_count} pending {source} item(s)"
                 ),
                 tool_call_id=None,
-                meta={"origin": origin},
+                annotations={"origin": origin},
             )
         except Exception:
             # The stub failed to enqueue — clear the flag so the next
@@ -177,13 +177,13 @@ class FunnelPlugin(CorvidaePlugin):
             )
 
     @hookimpl
-    async def before_agent_turn(self, channel, trace_id, meta) -> None:
+    async def before_agent_turn(self, channel, trace_id, annotations) -> None:
         """Drain stub-less payloads, then payloads matching the turn's origin.
 
         The next-turn queue (``register``) drains on every turn of the
         channel, whatever its origin. The origin-keyed queue
         (``register_and_wake``) drains only on a turn whose
-        ``meta["origin"]`` matches; the origin comes from ``meta``, never
+        ``annotations["origin"]`` matches; the origin comes from ``annotations``, never
         parsed from stub text (§2.2/§4.7 no-inference rule). The pending
         flag is cleared FIRST, before either drain: a failure inside
         admission leaves payloads registered, and the next producer's stub
@@ -191,7 +191,7 @@ class FunnelPlugin(CorvidaePlugin):
         successful admission; entries the budget dropped stay registered
         for the next drain.
         """
-        origin = (meta or {}).get("origin")
+        origin = (annotations or {}).get("origin")
         pair = (channel.id, origin) if origin is not None else None
         # Clear the pending flag on ANY matching-origin turn, even when
         # nothing is queued — BEFORE either drain and the empty-registry

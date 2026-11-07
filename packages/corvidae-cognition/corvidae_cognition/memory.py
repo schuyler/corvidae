@@ -2013,7 +2013,7 @@ class MemoryPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def before_agent_turn(self, channel, trace_id, meta) -> None:
+    async def before_agent_turn(self, channel, trace_id, annotations) -> None:
         """Retrieve memories for the inbound user text and admit them.
 
         Runs only when the window tail is a plain user MESSAGE — retrieval

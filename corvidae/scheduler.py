@@ -68,7 +68,7 @@ DEFAULT_CATCH_UP_WINDOW = 3600.0
 DEFAULT_MAX_REMINDERS_PER_CHANNEL = 50
 
 #: Origins a row may carry; each becomes the "[origin]" notification prefix
-#: and meta["origin"], which origin-aware plugins key on.
+#: and annotations["origin"], which origin-aware plugins key on.
 VALID_ORIGINS = ("reminder", "heartbeat")
 
 #: Longest the timer sleeps in one go even with nothing due sooner; the
@@ -863,7 +863,7 @@ class SchedulerPlugin(CorvidaePlugin):
             source=row.origin,
             text=frame_firing(row, self._tz, overdue),
             tool_call_id=None,
-            meta={"origin": row.origin, "schedule_id": row.id},
+            annotations={"origin": row.origin, "schedule_id": row.id},
         )
 
     async def _channel_for(self, channel_id: str, schedule_id: int | None = None) -> Channel | None:

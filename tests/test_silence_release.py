@@ -55,7 +55,7 @@ def _on_agent_response_kwargs(channel: Channel) -> dict:
     """The arguments the kernel passes when a final is produced."""
     return {
         "channel": channel, "request_text": "thanks, night!", "response_text": "NO_REPLY",
-        "trace_id": mint_trace_id(), "meta": {}, "logprobs": None,
+        "trace_id": mint_trace_id(), "annotations": {}, "logprobs": None,
     }
 
 
@@ -263,7 +263,7 @@ class _RowAtResponse:
         self.contents: list[str] = []
 
     @hookimpl
-    async def on_agent_response(self, channel, request_text, response_text, trace_id, meta, logprobs):
+    async def on_agent_response(self, channel, request_text, response_text, trace_id, annotations, logprobs):
         newest = next(
             m for m in reversed(channel.conversation.messages) if m.get("role") == "assistant"
         )
@@ -275,7 +275,7 @@ class _VetoFinal:
     """A gate that withholds every final."""
 
     @hookimpl
-    async def should_send_response(self, channel, text, emission, trace_id, meta):
+    async def should_send_response(self, channel, text, emission, trace_id, annotations):
         return False if emission == "final" else None
 
 

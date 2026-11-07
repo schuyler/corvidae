@@ -102,7 +102,7 @@ class TestSendMessageDelivery:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -118,12 +118,12 @@ class TestSendMessageDelivery:
         assert kwargs["source"] == f"agent_send from {ch_a.id}"
         assert kwargs["text"] == "hello bob"
         assert kwargs["tool_call_id"] is None
-        assert kwargs["meta"]["origin"] == "agent_send"
-        assert kwargs["meta"]["source_channel"] == ch_a.id
-        assert kwargs["meta"]["source_trace_id"] == "trace-123"
-        assert kwargs["meta"]["hop_count"] == 1
-        # trace_id must NOT be in meta (target mints its own trace)
-        assert "trace_id" not in kwargs["meta"]
+        assert kwargs["annotations"]["origin"] == "agent_send"
+        assert kwargs["annotations"]["source_channel"] == ch_a.id
+        assert kwargs["annotations"]["source_trace_id"] == "trace-123"
+        assert kwargs["annotations"]["hop_count"] == 1
+        # trace_id must NOT be in annotations (target mints its own trace)
+        assert "trace_id" not in kwargs["annotations"]
 
         await db.close()
 
@@ -144,7 +144,7 @@ class TestSendMessageDelivery:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -155,7 +155,7 @@ class TestSendMessageDelivery:
         # is always from attribution
         await plugin.send_message(ch_b.id, "hello")
         kwargs = notify.call_args.kwargs
-        assert kwargs["meta"]["source_channel"] == ch_a.id
+        assert kwargs["annotations"]["source_channel"] == ch_a.id
         assert kwargs["source"] == f"agent_send from {ch_a.id}"
 
         await db.close()
@@ -178,7 +178,7 @@ class TestSendMessageDelivery:
 
 
 class TestHopCount:
-    """Hop count increments from attribution meta, refused above max_hops."""
+    """Hop count increments from attribution annotations, refused above max_hops."""
 
     async def test_hop_increments_from_attribution(self):
         plugin, registry, db, agent = await _build_harness()
@@ -194,7 +194,7 @@ class TestHopCount:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {"hop_count": 2},
+                "annotations": {"hop_count": 2},
             }
         )
 
@@ -203,7 +203,7 @@ class TestHopCount:
 
         await plugin.send_message(ch_b.id, "hello")
         kwargs = notify.call_args.kwargs
-        assert kwargs["meta"]["hop_count"] == 3
+        assert kwargs["annotations"]["hop_count"] == 3
 
         await db.close()
 
@@ -221,7 +221,7 @@ class TestHopCount:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {"hop_count": 3},  # at the default max
+                "annotations": {"hop_count": 3},  # at the default max
             }
         )
 
@@ -249,7 +249,7 @@ class TestHopCount:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {"hop_count": "three"},  # not an int
+                "annotations": {"hop_count": "three"},  # not an int
             }
         )
 
@@ -258,7 +258,7 @@ class TestHopCount:
 
         await plugin.send_message(ch_b.id, "hello")
         kwargs = notify.call_args.kwargs
-        assert kwargs["meta"]["hop_count"] == 1  # reset to 1
+        assert kwargs["annotations"]["hop_count"] == 1  # reset to 1
 
         await db.close()
 
@@ -276,7 +276,7 @@ class TestHopCount:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {"hop_count": True},  # bool, not int
+                "annotations": {"hop_count": True},  # bool, not int
             }
         )
 
@@ -285,7 +285,7 @@ class TestHopCount:
 
         await plugin.send_message(ch_b.id, "hello")
         kwargs = notify.call_args.kwargs
-        assert kwargs["meta"]["hop_count"] == 1  # reset to 1
+        assert kwargs["annotations"]["hop_count"] == 1  # reset to 1
 
         await db.close()
 
@@ -306,7 +306,7 @@ class TestInputValidation:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -335,7 +335,7 @@ class TestInputValidation:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -359,7 +359,7 @@ class TestInputValidation:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -383,7 +383,7 @@ class TestInputValidation:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -407,7 +407,7 @@ class TestInputValidation:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -563,7 +563,7 @@ class TestIntegration:
             {
                 "channel_id": ch_a.id,
                 "trace_id": trace_a,
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -661,7 +661,7 @@ class TestIntegration:
             {
                 "channel_id": ch_a.id,
                 "trace_id": mint_trace_id(),
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -736,7 +736,7 @@ class TestIntegration:
             {
                 "channel_id": ch_a.id,
                 "trace_id": mint_trace_id(),
-                "meta": {"hop_count": 2},  # already at max
+                "annotations": {"hop_count": 2},  # already at max
             }
         )
 
@@ -765,7 +765,7 @@ class TestNegativeHopCount:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {"hop_count": -100},
+                "annotations": {"hop_count": -100},
             }
         )
 
@@ -775,7 +775,7 @@ class TestNegativeHopCount:
         result = await plugin.send_message(ch_b.id, "hello")
         assert result == f"Queued on {ch_b.id}."
         kwargs = notify.call_args.kwargs
-        assert kwargs["meta"]["hop_count"] == 1  # clamped, not -99
+        assert kwargs["annotations"]["hop_count"] == 1  # clamped, not -99
 
         await db.close()
 
@@ -793,7 +793,7 @@ class TestNegativeHopCount:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {"hop_count": -1},
+                "annotations": {"hop_count": -1},
             }
         )
 
@@ -803,13 +803,13 @@ class TestNegativeHopCount:
         result = await plugin.send_message(ch_b.id, "hello")
         assert result == f"Queued on {ch_b.id}."
         kwargs = notify.call_args.kwargs
-        assert kwargs["meta"]["hop_count"] == 1
+        assert kwargs["annotations"]["hop_count"] == 1
 
         await db.close()
 
 
 class TestNonDictMeta:
-    """Non-dict attribution meta is handled gracefully."""
+    """Non-dict attribution annotations is handled gracefully."""
 
     async def test_non_dict_meta(self):
         plugin, registry, db, agent = await _build_harness()
@@ -825,7 +825,7 @@ class TestNonDictMeta:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": "not a dict",
+                "annotations": "not a dict",
             }
         )
 
@@ -835,7 +835,7 @@ class TestNonDictMeta:
         result = await plugin.send_message(ch_b.id, "hello")
         assert result == f"Queued on {ch_b.id}."
         kwargs = notify.call_args.kwargs
-        assert kwargs["meta"]["hop_count"] == 1
+        assert kwargs["annotations"]["hop_count"] == 1
 
         await db.close()
 
@@ -857,7 +857,7 @@ class TestOnNotifyFailure:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -870,10 +870,10 @@ class TestOnNotifyFailure:
 
 
 class TestHopPropagation:
-    """Hop count propagates into the target's attribution meta."""
+    """Hop count propagates into the target's attribution annotations."""
 
     async def test_hop_count_in_target_attribution(self):
-        """After a send from A to B, B's attribution meta carries
+        """After a send from A to B, B's attribution annotations carries
         hop_count=1 and source_trace_id, but NOT trace_id."""
         db = await aiosqlite.connect(":memory:")
         await init_db(db)
@@ -928,7 +928,7 @@ class TestHopPropagation:
             {
                 "channel_id": ch_a.id,
                 "trace_id": trace_a,
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -1003,7 +1003,7 @@ class TestHopPropagation:
             {
                 "channel_id": ch_a.id,
                 "trace_id": trace_a,
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -1039,7 +1039,7 @@ class TestHopDoesNotPersist:
             {
                 "channel_id": ch_b.id,
                 "trace_id": mint_trace_id(),
-                "meta": {"hop_count": 2},
+                "annotations": {"hop_count": 2},
             }
         )
 
@@ -1048,14 +1048,14 @@ class TestHopDoesNotPersist:
         pm.ahook.on_notify = notify
         await plugin.send_message(ch_c.id, "from b")
         kwargs = notify.call_args.kwargs
-        assert kwargs["meta"]["hop_count"] == 3
+        assert kwargs["annotations"]["hop_count"] == 3
 
         # Now a fresh user turn starts on B (clean attribution)
         _attribution.set(
             {
                 "channel_id": ch_b.id,
                 "trace_id": mint_trace_id(),
-                "meta": {},  # clean, no hop_count
+                "annotations": {},  # clean, no hop_count
             }
         )
 
@@ -1064,7 +1064,7 @@ class TestHopDoesNotPersist:
         pm.ahook.on_notify = notify2
         await plugin.send_message(ch_c.id, "fresh turn")
         kwargs2 = notify2.call_args.kwargs
-        assert kwargs2["meta"]["hop_count"] == 1
+        assert kwargs2["annotations"]["hop_count"] == 1
 
         await db.close()
 
@@ -1104,7 +1104,7 @@ class TestMinorCoverage:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -1132,7 +1132,7 @@ class TestMinorCoverage:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {},
+                "annotations": {},
             }
         )
 
@@ -1158,7 +1158,7 @@ class TestMinorCoverage:
             {
                 "channel_id": ch_a.id,
                 "trace_id": "trace-123",
-                "meta": {},
+                "annotations": {},
             }
         )
 

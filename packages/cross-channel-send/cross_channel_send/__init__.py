@@ -9,11 +9,11 @@ The list_channels tool returns registered channel IDs so the sending
 context knows its available targets.
 
 Loop prevention: each send increments a hop_count tracked in the
-notification's meta. The receiving context's attribution carries the
+notification's annotations. The receiving context's attribution carries the
 hop_count, so the next send from that context increments it again. When
 hop_count exceeds max_hops (config, default 3), the send is refused.
 
-Cognition consumers see origin "agent_send" in meta. Verified against the
+Cognition consumers see origin "agent_send" in annotations. Verified against the
 cognition source (2026-11-05):
 - critique._eligible: exempt. Eligible iff origin == "reminder", or origin
   is absent and the trace was admitted (user). "agent_send" matches
@@ -28,7 +28,7 @@ cognition source (2026-11-05):
 - appraisal: stage 2 runs (it skips only origin "critique") — one silent
   appraisal task per sent instruction.
 - outcome_log: the exchange row's origin column records "agent_send"
-  (record_exchange takes meta["origin"] verbatim, default "task").
+  (record_exchange takes annotations["origin"] verbatim, default "task").
 """
 
 from __future__ import annotations
@@ -114,10 +114,10 @@ class CrossChannelSendPlugin(CorvidaePlugin):
             if not source_channel:
                 return "Could not send: no source channel in the current context."
 
-            meta = attribution.get("meta")
-            if not isinstance(meta, dict):
-                meta = {}
-            prev_hops = meta.get("hop_count")
+            annotations = attribution.get("annotations")
+            if not isinstance(annotations, dict):
+                annotations = {}
+            prev_hops = annotations.get("hop_count")
             if type(prev_hops) is int and prev_hops >= 0:
                 hop = prev_hops + 1
             else:
@@ -140,7 +140,7 @@ class CrossChannelSendPlugin(CorvidaePlugin):
                 source=f"agent_send from {source_channel}",
                 text=text,
                 tool_call_id=None,
-                meta={
+                annotations={
                     "origin": "agent_send",
                     "source_channel": source_channel,
                     "source_trace_id": attribution.get("trace_id"),

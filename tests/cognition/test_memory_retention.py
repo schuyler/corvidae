@@ -546,7 +546,7 @@ class TestDemotionRetrievalIntegration:
         )
 
         channel.conversation.append({"role": "user", "content": "ESP32 wifi issue"})
-        await memory.before_agent_turn(channel=channel, trace_id=None, meta={})
+        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
 
         from corvidae.context import MessageType
         context_msgs = [

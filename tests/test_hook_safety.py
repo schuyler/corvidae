@@ -78,7 +78,7 @@ class RaisingPlugin(TransportPlugin):
             raise RuntimeError(self._error_msg)
 
     @hookimpl(trylast=True)
-    async def on_notify(self, channel, source, text, tool_call_id, meta):
+    async def on_notify(self, channel, source, text, tool_call_id, annotations):
         if self._hook_name == "on_notify":
             self._call_count += 1
             raise RuntimeError(self._error_msg)

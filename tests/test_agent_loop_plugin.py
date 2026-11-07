@@ -1203,7 +1203,7 @@ class TestOnNotify:
 
         await plugin.pm.ahook.on_notify(
             channel=channel, source="test", text="background event happened",
-            tool_call_id=None, meta=None,
+            tool_call_id=None, annotations=None,
         )
         await drain(plugin, channel)
 
@@ -1228,7 +1228,7 @@ class TestOnNotify:
             source="task",
             text="task done: success",
             tool_call_id="call_abc123",
-            meta=None,
+            annotations=None,
         )
         await drain(plugin, channel)
 
@@ -1987,7 +1987,7 @@ class TestBeforeAgentTurn:
             source="task",
             text="tool completed: success",
             tool_call_id="call_xyz",
-            meta=None,
+            annotations=None,
         )
         await drain(plugin, channel)
 

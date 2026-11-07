@@ -289,7 +289,7 @@ class GoalsPlugin(CorvidaePlugin):
             tool_registry.append(Tool(name=fn.__name__, fn=fn, schema=tool_to_schema(fn)))
 
     @hookimpl
-    async def before_agent_turn(self, channel, trace_id, meta) -> None:
+    async def before_agent_turn(self, channel, trace_id, annotations) -> None:
         """Admit the current goals entry; the funnel dedupes an unchanged one."""
         conv = getattr(channel, "conversation", None)
         if conv is None:

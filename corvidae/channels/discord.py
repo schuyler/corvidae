@@ -1045,7 +1045,7 @@ class DiscordPlugin(TransportPlugin):
         request_text: str,
         response_text: str,
         trace_id: str | None,
-        meta: dict,
+        annotations: dict,
         logprobs: dict | None,
     ) -> None:
         """Release per-turn state for an unsent final (it never reaches

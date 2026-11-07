@@ -617,7 +617,7 @@ class AppraisalPlugin(CorvidaePlugin):
         return None
 
     @hookimpl
-    async def should_send_response(self, channel, text, emission, trace_id, meta):
+    async def should_send_response(self, channel, text, emission, trace_id, annotations):
         """Thin trigger: compute the outbound vector for a final, return None.
 
         So the vector exists even when no gate plugin is registered, or a
@@ -639,7 +639,7 @@ class AppraisalPlugin(CorvidaePlugin):
         return None
 
     @hookimpl
-    async def on_message_persisted(self, channel, trace_id, rowid, text, meta) -> None:
+    async def on_message_persisted(self, channel, trace_id, rowid, text, annotations) -> None:
         """Record the exchange's true originating text in the bounded LRU.
 
         Fires once per originating item (user messages and
@@ -735,7 +735,7 @@ class AppraisalPlugin(CorvidaePlugin):
         """Register a coroutine function to hear each completed stage 2.
 
         After a stage-2 vector is persisted, every listener is awaited with
-        keyword arguments ``channel, trace_id, response_text, meta, stage2``,
+        keyword arguments ``channel, trace_id, response_text, annotations, stage2``,
         outside the appraisal attribution. A failed stage 2 notifies no one.
         A listener's exception is logged and never reaches the others. This
         is a push, not a wait: a consumer that awaited stage 2 from a queued
@@ -743,13 +743,13 @@ class AppraisalPlugin(CorvidaePlugin):
         """
         self._stage2_listeners.append(callback)
 
-    async def _notify_stage2(self, channel, trace_id, response_text, meta, stage2) -> None:
+    async def _notify_stage2(self, channel, trace_id, response_text, annotations, stage2) -> None:
         """Await every stage-2 listener; one failure doesn't stop the rest."""
         for listener in list(self._stage2_listeners):
             try:
                 await listener(
                     channel=channel, trace_id=trace_id, response_text=response_text,
-                    meta=meta, stage2=stage2,
+                    annotations=annotations, stage2=stage2,
                 )
             except Exception:
                 logger.warning(
@@ -763,17 +763,17 @@ class AppraisalPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_agent_response(
-        self, channel, request_text, response_text, trace_id, meta, logprobs,
+        self, channel, request_text, response_text, trace_id, annotations, logprobs,
     ) -> None:
         """Enqueue the silent stage-2 appraisal task (never on the response path).
 
-        Fires once per exchange-ending turn. Never for ``meta["origin"] ==
+        Fires once per exchange-ending turn. Never for ``annotations["origin"] ==
         "critique"`` exchanges — nothing downstream consumes them and it
         doubles cost. The task is silent (``deliver=False``): its empty
         result triggers no on_notify and therefore no main-model turn
         (trap #10).
         """
-        origin = (meta or {}).get("origin")
+        origin = (annotations or {}).get("origin")
         if trace_id is None or origin == "critique":
             return
         task_plugin = self.pm.get_plugin("task") if hasattr(self, "pm") else None
@@ -788,7 +788,7 @@ class AppraisalPlugin(CorvidaePlugin):
             # Listeners run after _run_stage2 has reset its attribution, so
             # their own work isn't billed to appraisal.
             if stage2 is not None:
-                await self._notify_stage2(channel, trace_id, response_text, meta, stage2)
+                await self._notify_stage2(channel, trace_id, response_text, annotations, stage2)
             return ""
 
         try:
@@ -797,7 +797,7 @@ class AppraisalPlugin(CorvidaePlugin):
                 channel=channel,
                 description="appraisal:stage2",
                 trace_id=trace_id,
-                meta=meta,
+                annotations=annotations,
                 deliver=False,
                 tool_call_id=None,
             ))

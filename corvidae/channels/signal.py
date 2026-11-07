@@ -1095,7 +1095,7 @@ class SignalPlugin(TransportPlugin):
 
     @hookimpl
     async def on_message_persisted(
-        self, channel: Channel, trace_id: str, rowid: int | None, text: str, meta: dict
+        self, channel: Channel, trace_id: str, rowid: int | None, text: str, annotations: dict
     ) -> None:
         """Fire the read receipt at processing start, not arrival -- a
         message can sit queued behind contended local inference, and a
@@ -1182,7 +1182,7 @@ class SignalPlugin(TransportPlugin):
         request_text: str,
         response_text: str,
         trace_id: str | None,
-        meta: dict,
+        annotations: dict,
         logprobs: dict | None,
     ) -> None:
         """Release per-turn state for an unsent final (it never reaches
