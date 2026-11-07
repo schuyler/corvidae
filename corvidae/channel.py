@@ -311,6 +311,12 @@ class Channel:
     #: log keeps the id that is stable. Absent or empty means the transport has
     #: no name to give, which is every transport but Discord today.
     sender_names: "dict[str, str]" = field(default_factory=dict)
+    #: Whether the message the transport is about to dispatch addressed the
+    #: agent; None when it has no mention concept. A transport that sets it
+    #: assigns it before every ``on_message`` call on this channel (None
+    #: included) and dispatches the channel's messages one at a time. Core reads
+    #: it once, at admission; it is never persisted on the channel.
+    addressed: bool | None = None
 
     @property
     def id(self) -> str:

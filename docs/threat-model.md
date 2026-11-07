@@ -106,7 +106,9 @@ Adversaries:
   mention the bot in a mention-only channel is dropped before the kernel sees
   it, and the DEBUG line recording the drop carries the sender's Discord id —
   for a stranger as well as an allowlisted user, since a name is what tells a
-  misconfigured allowlist from a quiet channel.
+  misconfigured allowlist from a quiet channel. The prompt's `addressed: yes`
+  comes from Discord's structured mention list, not the message text, so typing
+  "@corvidae" cannot set it; the mention token is still stripped from the text.
 - **Anyone who can reach the web listener**, if it's bound beyond
   loopback, and anyone who gets the token or cookie; also any web page
   open in the operator's browser, which can try cross-site requests. See

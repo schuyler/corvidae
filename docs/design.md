@@ -1351,7 +1351,8 @@ what a plugin or transport asserted. Which fields apply follows the row's
 role:
 
 - user: `sender`, `sender_name` (from `channel.sender_names` at admission)
-  and `channel_name`, set in `on_message`;
+  `channel_name` and `addressed` (from `channel.addressed` at admission), set
+  in `on_message`;
 - notification: `origin_channel` and `origin_trace`, read from the
   attribution of the code that called `on_notify`;
 - tool result: `tool` and `target`, the dispatched call's name and the first
@@ -1373,9 +1374,11 @@ without provenance and logs a warning naming the row.
 stored row is never changed. The header is a `[metadata: ...]` line built
 in code:
 
-- A person's message with a sender or channel name gets a separate system
-  message before it: `[metadata: sender: <name> (id <id>); channel: <name>
-  (id <channel id>)]`, with `direct message` for a DM scope. A burst from
+- A person's message with a sender or channel name, or a known `addressed`,
+  gets a separate system message before it: `[metadata: sender: <name> (id
+  <id>); channel: <name> (id <channel id>); addressed: yes|no]`, with
+  `direct message` for a DM scope. The `addressed` clause is absent when the
+  transport did not say. A burst from
   one sender carries one header: a row's header is dropped when it equals
   the one computed for the row before it. The message text is unfenced.
 - A notification gets `[metadata: notification from your own activity on
