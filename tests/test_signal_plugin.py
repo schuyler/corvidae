@@ -579,10 +579,10 @@ class TestInboundFiltering:
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             assert h.pm.ahook.on_message.await_count == 1
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
-            assert "[png:" in text
+            assert "[image:" in text
             assert "download failed" not in text
             # The path should point to a file that exists on disk.
-            path_str = text.split("[png: ")[1].split("]")[0]
+            path_str = text.split("[image: ")[1].split("]")[0]
             path = Path(path_str)
             assert path.exists(), f"attachment file not found: {path}"
             assert path.read_bytes() == png_bytes
@@ -610,7 +610,7 @@ class TestInboundFiltering:
             )
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
-            assert "[png:" in text
+            assert "[image:" in text
             assert "check this out" in text
             assert "download failed" not in text
         finally:
@@ -638,7 +638,7 @@ class TestInboundFiltering:
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
             # Metadata is surfaced, but no download happens.
-            assert "[png attached]" in text
+            assert "[image attached]" in text
             assert "download failed" not in text
             # No getAttachment RPC should have been sent.
             assert not h.server.requests_matching("getAttachment"), (
@@ -711,8 +711,8 @@ class TestInboundFiltering:
             )
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
-            assert "[png:" in text
-            path_str = text.split("[png: ")[1].split("]")[0]
+            assert "[image:" in text
+            path_str = text.split("[image: ")[1].split("]")[0]
             path = Path(path_str)
             # The file must be under the attachment dir, not in /etc. The
             # note carries a resolved path, so compare resolved forms.
@@ -880,7 +880,7 @@ class TestInboundFiltering:
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
             assert "download failed" not in text
-            assert "[png:" in text
+            assert "[image:" in text
         finally:
             await _stop_plugin(h)
 

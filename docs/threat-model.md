@@ -1217,3 +1217,34 @@ A marker file (`state/restart.json`) survives the restart. On the next boot, the
 ### Boot notice
 
 On safe-mode boot (plugins disabled after a crash loop) or after an abnormal previous run (detected from `state/boot-history.jsonl`, written by an external boot supervisor), the plugin sends a notice to the home channel. This is the only notification that does not require a prior restart request.
+
+### Signal attachment downloads
+
+Signal attachments are downloaded to disk for allowlisted senders when the
+MIME type passes the download gate. The gate is a prefix allowlist
+(`image/*`, `text/*`, `audio/*`) plus an exact allowlist for
+`application/pdf`, `application/json`, `application/xml`. Two types are
+explicitly excluded: `image/svg+xml` and `text/html`, because they can carry
+embedded scripts and the agent has no safe renderer for them.
+
+The attachment id is restricted to `[A-Za-z0-9._-]` before use in a filename;
+ids with any other character refuse the download. The file extension comes
+from a MIME-to-extension map first, then from `safe_suffix()` (fullmatch,
+lowercased, 1–10 chars) on the sender-supplied filename or id. The extension
+is passed to `save_attachment` as a separate parameter, not embedded in the
+stem.
+
+The MIME type is sender-controlled and treated as a labelling convenience,
+not a security boundary. No content sniffing is performed. A sender can label
+a PDF as `text/plain`; the file is still written with a `.txt` extension and
+surfaced to the agent as `[text: /path]`. The agent (an LLM) is the ultimate
+consumer of the file content; the download gate limits the *categories* of
+files that reach it, not the specific content within a category.
+
+The `getAttachment` RPC sends only the attachment id; signal-cli resolves the
+attachment server-side. No recipient parameter is sent.
+
+The StreamReader buffer limit is sized to `max_attachment_size * 4 / 3 + 64 KiB`
+to accommodate base64-encoded attachment data. A line that exceeds the limit
+raises `ValueError` in `_read_loop`, which logs a warning and discards the
+line; the connection survives.

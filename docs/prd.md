@@ -488,7 +488,9 @@ Per transport:
   connect, never at startup, and a failed resolution retries after the next
   connect. Non-`dataMessage` envelopes (including the account's own sync
   traffic) are dropped; an attachment is downloaded for an allowlisted sender
-  and named in the text;
+  when its MIME type passes the download gate (image/*, text/*, audio/*
+  prefixes plus application/pdf, application/json, application/xml; SVG and
+  HTML excluded) and is named in the text with the major type label;
   backlog older than five minutes is prefixed with its send time. Typing
   starts on the first outstanding message and refreshes every 10 s; the
   read receipt is sent at processing start, not arrival. Notifications are

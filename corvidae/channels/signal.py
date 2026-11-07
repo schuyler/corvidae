@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from corvidae.attachments import save_attachment
+from corvidae.attachments import save_attachment, safe_suffix
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.channels._registers import shipped_register
 from corvidae.channels.split import split_message
@@ -38,7 +38,6 @@ ATT_DOCUMENT = 5
 ATT_GIF = 6
 ATT_STICKER = 7
 
-# Types we download to disk (the rest are surfaced as metadata only).
 # MIME-based download gating. signal-cli does not reliably send the
 # protobuf `type` enum; `contentType` is the primary signal.
 # Prefixes cover whole families; exact types are the application/*
@@ -56,8 +55,6 @@ _MIME_EXCLUDED = frozenset({
     "text/html",
 })
 
-# Safe suffix: dot + alphanumerics only. Prevents path traversal.
-_SAFE_SUFFIX = re.compile(r"^\.[A-Za-z0-9]+$")
 
 # MIME → file extension mapping (for the extension override).
 _MIME_TO_EXT = {
@@ -97,19 +94,21 @@ def _mime_base(content_type: str) -> str:
     return content_type.split(";", 1)[0].strip().lower()
 
 
-def _is_downloadable(mime_base: str) -> bool:
+def _is_downloadable(mime_base: str, att_type: int = 0) -> bool:
     """MIME-based download gate.
 
     Primary: contentType (MIME type, parameters stripped).
-    Fallback: legacy protobuf type enum (image/GIF only).
+    Fallback: legacy protobuf type enum (image/GIF only) for older
+    signal-cli versions that do not send contentType.
     """
-    if not mime_base:
-        return False
-    if mime_base in _MIME_EXCLUDED:
-        return False
-    if mime_base in _DOWNLOADABLE_MIME_EXACT:
-        return True
-    return any(mime_base.startswith(p) for p in _DOWNLOADABLE_MIME_PREFIXES)
+    if mime_base:
+        if mime_base in _MIME_EXCLUDED:
+            return False
+        if mime_base in _DOWNLOADABLE_MIME_EXACT:
+            return True
+        return any(mime_base.startswith(p) for p in _DOWNLOADABLE_MIME_PREFIXES)
+    # No contentType: fall back to the protobuf type enum.
+    return att_type in (ATT_IMAGE, ATT_GIF)
 
 
 def _sanitize_subtype(type_name: str) -> str:
@@ -424,7 +423,17 @@ class SignalPlugin(TransportPlugin):
         and skipped so one bad frame does not take the whole connection down.
         """
         while True:
-            line = await reader.readline()
+            try:
+                line = await reader.readline()
+            except ValueError as exc:
+                # StreamReader buffer limit exceeded — an oversized frame
+                # (typically a base64-encoded attachment). The partial data
+                # in the buffer will fail JSON parsing on the next iteration
+                # and be skipped; the connection stays alive.
+                logger.warning(
+                    'signal: line exceeded stream limit (%s); discarding', exc,
+                )
+                continue
             if not line:
                 return  # EOF: connection dropped
             stripped = line.strip()
@@ -577,14 +586,19 @@ class SignalPlugin(TransportPlugin):
         attachment_notes: list[str] = []
         for att in attachments:
             mime_base = _mime_base(att.get("contentType") or "")
-            # Sanitized MIME subtype for agent-visible notes.
-            # Falls back to the protobuf type name if no MIME type.
+            # Label for agent-visible notes: major type (image, text, audio)
+            # or subtype for application/* (pdf, json, xml). Falls back to
+            # the protobuf type name if no MIME type.
             if mime_base and "/" in mime_base:
-                type_name = _sanitize_subtype(mime_base.split("/", 1)[1])
+                major, subtype = mime_base.split("/", 1)
+                if major == "application":
+                    type_name = _sanitize_subtype(subtype)
+                else:
+                    type_name = major
             else:
                 att_type = att.get("type", 0)
                 type_name = ATTACHMENT_TYPE_NAMES.get(att_type, f"type{att_type}")
-            if _is_downloadable(mime_base) and allowed:
+            if _is_downloadable(mime_base, att.get("type", 0)) and allowed:
                 path = await self._download_attachment(envelope, att, mime_base)
                 if path is not None:
                     attachment_notes.append(f"[{type_name}: {path}]")
@@ -661,12 +675,7 @@ class SignalPlugin(TransportPlugin):
             )
             return None
 
-        recipient = envelope.get("sourceNumber") or envelope.get("sourceUuid")
-        if not recipient:
-            logger.warning("signal: no recipient for getAttachment RPC")
-            return None
-
-        params = {"id": str(raw_id), "recipient": str(recipient)}
+        params = {"id": str(raw_id)}
         try:
             result = await asyncio.wait_for(
                 self._send_rpc("getAttachment", params),
@@ -705,24 +714,19 @@ class SignalPlugin(TransportPlugin):
         # not a security boundary. No content sniffing is done.
         suffix = _MIME_TO_EXT.get(mime_base, "")
         if not suffix:
-            filename_field = attachment.get("filename") or ""
-            if filename_field and "." in filename_field:
-                candidate = "." + filename_field.rsplit(".", 1)[1]
-                if _SAFE_SUFFIX.match(candidate):
-                    suffix = candidate
-        if not suffix and "." in safe_id:
-            candidate = "." + safe_id.rsplit(".", 1)[1]
-            if _SAFE_SUFFIX.match(candidate):
-                suffix = candidate
+            suffix = safe_suffix(attachment.get("filename") or "")
+        if not suffix:
+            suffix = safe_suffix(safe_id)
 
         ts = envelope.get("timestamp", 0)
         att_type = attachment.get("type", 0)
-        filename = f"{ts}-{att_type}-{safe_id}{suffix}"
+        filename = f"{ts}-{att_type}-{safe_id}"
 
         path = await save_attachment(
             raw,
             self._attachment_dir,
             filename,
+            suffix=suffix,
             max_bytes=self._max_attachment_size,
             transport="signal",
         )
