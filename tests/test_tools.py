@@ -4,6 +4,7 @@ All tests are expected to FAIL until corvidae/tools.py is implemented.
 """
 
 import asyncio
+import re
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -73,6 +74,145 @@ class TestReadFile:
     async def test_read_file_directory(self, tmp_path):
         result = await read_file(str(tmp_path))
         assert "error" in result.lower() or "directory" in result.lower() or "not a file" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# TestReadFileRange — character offset/length on read_file (#570)
+# ---------------------------------------------------------------------------
+
+# Parses a ranged result's header: start, end, total, and next offset (None at
+# end of file).
+_RANGE_HEADER = re.compile(
+    r"^\[characters (\d+)-(\d+) of (\d+) in (.+); (?:next offset (\d+)|end of file)\]\n"
+)
+
+
+async def _ranged_read_file(tools_config: dict | None = None):
+    """Return the registered read_file callable and the ToolCollectionPlugin.
+
+    Ranged calls look up the "tools" plugin for max_result_chars, so this
+    builds a real plugin manager with both plugins registered.
+    """
+    from corvidae.hooks import create_plugin_manager
+    from corvidae.tool_collection import ToolCollectionPlugin
+
+    config = {"tools": tools_config or {}}
+    pm = create_plugin_manager()
+    collection = ToolCollectionPlugin(pm)
+    pm.register(collection, name="tools")
+    await collection.on_init(pm=pm, config=config)
+    core = CoreToolsPlugin(pm)
+    await core.on_init(pm=pm, config=config)
+    return _tool_fns(core)["read_file"], collection
+
+
+class TestReadFileRange:
+    async def test_unranged_output_unchanged(self, tmp_path):
+        """R1: with neither parameter, or both null, the content comes back bare."""
+        f = tmp_path / "plain.txt"
+        f.write_text("file contents here")
+        fn, _ = await _ranged_read_file()
+        assert await fn(str(f)) == "file contents here"
+        assert await fn(str(f), offset=None, length=None) == "file contents here"
+
+    def test_schema_exposes_nullable_offset_and_length(self):
+        """R1: the schema lists offset and length as nullable integers."""
+        from corvidae.tool import Tool
+        registry: list = []
+        CoreToolsPlugin(None).register_tools(tool_registry=registry)
+        tool = next(t for t in registry if isinstance(t, Tool) and t.name == "read_file")
+        props = tool.schema["function"]["parameters"]["properties"]
+        nullable_int = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+        assert props["offset"] == nullable_int
+        assert props["length"] == nullable_int
+
+    async def test_header_states_range_and_total_in_characters(self, tmp_path):
+        """R1, R2: the header names the half-open range and the character total."""
+        f = tmp_path / "accents.txt"
+        f.write_text("ééééé", encoding="utf-8")  # 5 characters, 10 bytes
+        result = await read_file(str(f), offset=1, length=2)
+        assert result == f"[characters 1-3 of 5 in {f}; next offset 3]\néé"
+        result = await read_file(str(f), offset=3)
+        assert result == f"[characters 3-5 of 5 in {f}; end of file]\néé"
+
+    async def test_paging_reconstructs_large_one_line_file(self, tmp_path):
+        """R2, R6: following each next offset rebuilds the file exactly, and no
+        page exceeds max_result_chars, so execute_tool_call never truncates."""
+        content = "".join(chr(ord("a") + i % 26) for i in range(300_000))
+        f = tmp_path / "big.json"
+        f.write_text(content)
+        # A configured cap below the default proves the clamp reads the setting.
+        cap = 30_000
+        fn, _ = await _ranged_read_file({"max_result_chars": cap})
+        length = cap * 2
+
+        # Page through the file, starting each read where the last one ended.
+        pieces: list[str] = []
+        offset = 0
+        while True:
+            result = await fn(str(f), offset=offset, length=length)
+            assert len(result) <= cap
+            match = _RANGE_HEADER.match(result)
+            assert match, result[:200]
+            start, end, total = (int(match.group(i)) for i in (1, 2, 3))
+            assert (start, total) == (offset, 300_000)
+            body = result[match.end():]
+            assert len(body) == end - start
+            pieces.append(body)
+            if match.group(5) is None:
+                break
+            offset = int(match.group(5))
+            assert offset == end
+        assert "".join(pieces) == content
+
+    @pytest.mark.parametrize("offset", [10, 11])
+    async def test_offset_at_or_past_end_names_total(self, tmp_path, offset):
+        """R3: an offset at or past the end names the file and its true total."""
+        f = tmp_path / "ten.txt"
+        f.write_text("0123456789")
+        result = await read_file(str(f), offset=offset)
+        assert result.startswith("Error:")
+        assert str(f) in result
+        assert "10 characters" in result
+        assert "use an offset below 10" in result
+
+    async def test_empty_file_ranged_read(self, tmp_path):
+        """R3: a ranged read of an empty file says it is empty."""
+        f = tmp_path / "empty.txt"
+        f.write_text("")
+        result = await read_file(str(f), offset=0)
+        assert result == f"Error: {f} is empty; there is nothing to read"
+
+    async def test_negative_offset_rejected(self, tmp_path):
+        """R4: names the parameter, the rejected value and the accepted values."""
+        f = tmp_path / "ten.txt"
+        f.write_text("0123456789")
+        result = await read_file(str(f), offset=-5)
+        assert result == f"Error: offset is -5 for {f}; use 0 or greater"
+
+    async def test_non_positive_length_rejected(self, tmp_path):
+        """R4: names the parameter, the rejected value and the accepted values."""
+        f = tmp_path / "ten.txt"
+        f.write_text("0123456789")
+        result = await read_file(str(f), length=0)
+        assert result == (
+            f"Error: length is 0 for {f}; use a positive integer, or omit it to read to the end"
+        )
+
+    async def test_ranged_read_ignores_max_file_read_bytes(self, tmp_path):
+        """R5: a ranged read of an over-limit file succeeds; unranged is refused
+        with the remedy."""
+        f = tmp_path / "over.txt"
+        f.write_text("x" * 1000)
+        fn, _ = await _ranged_read_file({"max_file_read_bytes": 100})
+
+        result = await fn(str(f), offset=900, length=50)
+        assert result == f"[characters 900-950 of 1000 in {f}; next offset 950]\n" + "x" * 50
+
+        refused = await fn(str(f))
+        assert refused.startswith("Error: file too large")
+        assert str(f) in refused
+        assert "pass offset and length to read it in ranges" in refused
 
 
 # ---------------------------------------------------------------------------
