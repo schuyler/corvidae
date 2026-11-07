@@ -303,3 +303,33 @@ class TestConfigValidation:
         assert "requre_mention=False" in message
         assert "accepted: require_mention" in message
         assert f"channels.{CHAN_ID}" in message
+
+
+@pytest.mark.parametrize(
+    "require_mention, message_kw, bot_id, expected",
+    [
+        (True, {"mentions": [BOT_MENTION]}, BOT_ID, True),
+        (False, {"mentions": [BOT_MENTION]}, BOT_ID, True),
+        (False, {}, BOT_ID, False),
+        (False, {"mention_everyone": True}, BOT_ID, False),
+        (False, {"guild": False}, BOT_ID, None),
+        (False, {"mentions": [BOT_MENTION]}, None, None),
+    ],
+)
+async def test_the_channel_says_whether_the_message_mentioned_the_bot(
+    require_mention, message_kw, bot_id, expected
+):
+    h = await _start_plugin(discord_overrides={"require_mention": require_mention})
+    seen = []
+    admit = h.on_message.side_effect
+
+    async def record(**kwargs):
+        seen.append(kwargs["channel"].addressed)
+        await admit(**kwargs)
+
+    h.on_message.side_effect = record
+    try:
+        await _deliver(h, make_message("hi", **message_kw), bot_id=bot_id)
+        assert seen[0] is expected
+    finally:
+        await h.plugin.on_stop()

@@ -78,13 +78,14 @@ def header_blocks(out: list[dict]) -> list[list[str]]:
     (ItemMetadata(tool="send_attachment", target="discord:1"), {},
      {"tool": "send_attachment", "target": "discord:1"}),
     (ItemMetadata(), {}, {}),
+    (ItemMetadata(sender="1", addressed=False), {}, {"sender": "1", "addressed": False}),
 ])
 def test_encode_writes_only_set_fields_and_round_trips(meta, annotations, stored):
     assert encode(meta, annotations) == stored
     assert decode(json.loads(json.dumps(stored))) == (meta, annotations)
 
 
-@pytest.mark.parametrize("bad", ["not a record", {"nope": "1"}])
+@pytest.mark.parametrize("bad", ["not a record", {"nope": "1"}, {"sender": "1", "addressed": "yes"}])
 def test_an_undecodable_key_renders_as_keyless_and_warns_once(bad, caplog):
     conv = window({**row("system", "payload", 7), PROVENANCE_KEY: bad})
     with caplog.at_level(logging.WARNING):
@@ -137,6 +138,16 @@ H_BOB = "[metadata: sender: Bob (id 2); channel: lex_home (id discord:456)]"
     ("discord:456", [{"sender": "123"}], [None]),  # no names: nothing added
     ("discord:dm:123", [{"sender": "123", "channel_name": "DM"}],
      ["[metadata: sender: id 123; channel: direct message (id dm:123)]"]),
+    # addressed: the clause is last; None adds nothing; id-only renders once it is known
+    ("discord:456", [{**ANN, "addressed": True}], [H_ANN[:-1] + "; addressed: yes]"]),
+    ("discord:456", [{**ANN, "addressed": False}], [H_ANN[:-1] + "; addressed: no]"]),
+    ("discord:456", [{**ANN, "addressed": None}], [H_ANN]),
+    ("irc:#lex", [{"sender": "123", "addressed": False}],
+     ["[metadata: sender: id 123; channel: id irc:#lex; addressed: no]"]),
+    ("discord:456", [{**ANN, "addressed": True}, {**ANN, "addressed": True}],
+     [H_ANN[:-1] + "; addressed: yes]", None]),
+    ("discord:456", [{**ANN, "addressed": True}, {**ANN, "addressed": False}],
+     [H_ANN[:-1] + "; addressed: yes]", H_ANN[:-1] + "; addressed: no]"]),
 ])
 def test_person_headers_precede_the_unchanged_message(channel_id, people, headers):
     rows = [row("user", f"m{i}", i, ItemMetadata(**p)) for i, p in enumerate(people)]
@@ -280,6 +291,8 @@ async def test_every_kernel_path_sets_metadata_that_annotations_cannot_forge(sta
     channel.name = "home"
     channel.sender_names["1"] = "Ann"
     await plugin.on_message(channel=channel, sender="1", text="hi", trace_id=mint_trace_id())
+    channel.addressed = True
+    await plugin.on_message(channel=channel, sender="1", text="hi", trace_id=mint_trace_id())
     token = set_attribution(channel_id="signal:b", trace_id="t-9")
     try:
         await plugin.on_notify(channel=channel, source="agent_send", text="n", tool_call_id=None,
@@ -293,6 +306,7 @@ async def test_every_kernel_path_sets_metadata_that_annotations_cannot_forge(sta
 
     assert [i.metadata for i in items] == [
         ItemMetadata(sender="1", sender_name="Ann", channel_name="home"),
+        ItemMetadata(sender="1", sender_name="Ann", channel_name="home", addressed=True),
         ItemMetadata(origin_channel="signal:b", origin_trace="t-9"), ItemMetadata(), ItemMetadata()]
     assert items[1].annotations == {"origin": "agent_send", "origin_channel": "x", "target": "y"}
     with pytest.raises(dataclasses.FrozenInstanceError):
