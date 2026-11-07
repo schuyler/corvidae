@@ -265,9 +265,9 @@ plugins that isn't loaded: that's expected, and is logged at DEBUG.
 
 | Hook | Type | When |
 |------|------|------|
-| `on_init(pm, config: dict)` | async broadcast | After all plugins are registered, before `on_start`. Use to store `pm`, read config values, and resolve references to other plugins. Do not create runtime resources here. |
+| `on_init(pm, config: dict)` | async broadcast | After all plugins are registered, before `on_start`. Use to store `pm`, read config values, and resolve references to other plugins. Do not create runtime resources here: `on_init` also runs in the restart pre-flight, a second process alongside the live daemon, so it must only validate and store. |
 | `on_start(config: dict)` | async broadcast | Once at startup, after `on_init`. Use to open runtime resources: DB connections, network clients, file handles, asyncio tasks. |
-| `on_stop()` | async broadcast | On SIGINT/SIGTERM, before process exits (a SIGINT during startup is held until `on_start` finishes; a SIGTERM then ends the process without `on_stop`). Also after a failed startup, before the error propagates, so it may run when this plugin's `on_start` (or `on_init`) never ran or didn't finish: guard each resource with a None check. |
+| `on_stop()` | async broadcast | On SIGINT/SIGTERM, before process exits (a SIGINT during startup is held until `on_start` finishes; a SIGTERM then ends the process without `on_stop`). Also after a failed startup, before the error propagates, so it may run when this plugin's `on_start` (or `on_init`) never ran or didn't finish: guard each resource with a None check. It also runs in the restart pre-flight process, so keep it free of effects outside the process. |
 | `on_config_reload(config: dict)` | async broadcast | When `agent.yaml` is modified while the daemon is running. The config dict has been re-parsed, merged with CLI overrides, and validated before dispatch. |
 
 `config` is the full parsed `agent.yaml` dict. The key `_base_dir` (a `Path`) is set by `Runtime.start()` pointing to the config file's directory.
@@ -608,6 +608,7 @@ line in this guide.
 | `corvidae.llm_plugin` | `LLMPlugin` |
 | `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |
 | `corvidae.idle` | `IdleTracker`, `IdleWatch` |
+| `corvidae.runtime` | `Runtime`: `load_config`, `setup_logging` and `load_plugins`, the startup steps the daemon and the restart pre-flight share. For tools that check a config the way the daemon boots, not for ordinary plugins |
 | `corvidae.outbound` | `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus`, `OutboundProgress` (for senders and transports) |
 
 The kernel never imports a plugin outside it. A plugin that needs another
@@ -1072,7 +1073,7 @@ config_watcher    (ConfigWatcherPlugin) — entry point
 
 **Shutdown order:** `Runtime.stop()` calls `agent.on_stop()` first (drains queues), then `pm.ahook.on_stop()` to tear down all other plugins, then stops the idle tracker and closes the kernel clock, which cancels any timers left running.
 
-**Failed startup:** if `Runtime.start()` raises an exception (a plugin's `on_init` or `on_start`, say; not a config error, which exits before any plugin loads), `Runtime.run` runs the `on_stop` broadcast, stops the idle tracker and closes the clock, under the same 3 s bound, then re-raises so the process exits non-zero. `agent.on_stop()` is skipped. A plugin's `on_stop` must therefore cope with resources its `on_start` never opened.
+**Failed startup:** if `Runtime.start()` raises an exception (a plugin's `on_init` or `on_start`, say; a config error exits with one `Config error:` line and no traceback, but goes through the same cleanup once plugins have loaded), `Runtime.run` runs the `on_stop` broadcast, stops the idle tracker and closes the clock, under the same 3 s bound, then re-raises so the process exits non-zero. `agent.on_stop()` is skipped. A plugin's `on_stop` must therefore cope with resources its `on_start` never opened.
 
 `ChannelRegistry`, the `Clock` (`"clock"`) and the `IdleTracker` (`"idle"`) are registered by `Runtime.start()` before the entry points load, so any plugin can depend on them. See [Acting on time and quiet](#acting-on-time-and-quiet).
 

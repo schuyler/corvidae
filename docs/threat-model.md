@@ -1212,7 +1212,7 @@ Three checks, in order, prevent restart loops:
 
 ### Pre-flight
 
-Before the daemon is killed, a pre-flight subprocess validates the config file using the daemon's own validation functions (`validate_agent_config`, `validate_daemon_config`). A config that fails validation refuses the restart with the error message. This prevents a bad config change from bricking the daemon on restart.
+Before the daemon is killed, a pre-flight subprocess runs the daemon's own startup, through every plugin's `on_init` and stopping before `on_start`: it loads the config file, configures logging, validates the config sections and channel entries, loads the plugins, checks hooks and dependencies, and runs each plugin's `on_init`. It shares that code with `corvidae serve` (`Runtime.load_config`, `setup_logging` and `load_plugins`), so a config the daemon refuses at boot refuses the restart too. The refusal carries the kernel's `Config error:` line, or a `pre-flight failed:` line naming the exception for any other fault. This prevents a bad config change from bricking the daemon on restart. It does not apply CLI overrides the daemon was started with, and it cannot catch a fault that only shows up in `on_start`, such as an unreachable endpoint or a resource another process holds.
 
 ### Post-restart notification
 

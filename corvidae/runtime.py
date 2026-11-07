@@ -132,40 +132,11 @@ class Runtime:
         self.clock = None
         self.idle = None
 
-    async def start(self) -> None:
-        """Load config, merge overrides, create PM, load plugins, start.
+    def load_config(self) -> dict:
+        """Steps 1-3 of start(): read the YAML, merge overrides, set reserved keys.
 
-        Steps:
-        1.  Load YAML config from config_path. Prints a Config error and exits
-            non-zero if missing or malformed.
-        2.  Deep-merge self.overrides on top of the YAML config.
-        3.  Set config["_base_dir"] from config_path (after merge; cannot be overridden).
-        4.  Configure logging (MUST be first operational step after config load).
-        5.  Create plugin manager.
-        6.  Create ChannelRegistry, Clock and IdleTracker and register them
-            with the plugin manager as "registry", "clock" and "idle".
-        7.  Validate the agent, daemon and llm sections and tools.call_timeout /
-            tools.timeouts; load channel config from merged config.
-        7b. Block disabled plugins via pm.set_blocked for each name in
-            config["plugins"]["disabled"]. Must precede step 8 so blocked
-            plugins are never instantiated by the entry-point loader.
-        8.  Load entry-point plugins (corvidae group).
-        8a. Log the effective plugin set.
-        8b. Install plugin-declared hookspecs (install_plugin_hookspecs), so
-            every spec exists before the guard below and before on_init.
-        8c. Run the hook arg-binding guard over the full plugin set.
-        9.  Validate plugin dependencies, then report hookimpls left with no
-            spec (report_orphan_hookimpls).
-        10. await pm.ahook.on_init(pm=pm, config=config). A ValueError from
-            a plugin's on_init is a config rejection: one-line Config error
-            and exit, like a malformed block in step 7 (#277).
-        11. await pm.ahook.on_start(config=config).
-            NOTE: Agent.on_start has no @hookimpl — the broadcast skips it.
-        12. Retrieve agent plugin; raise RuntimeError if absent.
-            await agent.on_start(config=config) explicitly, after the broadcast
-            so that plugins Agent depends on have already started.
-        13. Start the idle tracker, so nothing fires before the Agent can
-            take work.
+        Prints one Config error line and raises SystemExit(1) if the file is
+        missing, undecodable, malformed or not a mapping. Returns the config.
         """
         # 1. Load YAML config, reporting a missing or malformed file as a
         # one-line operator error instead of an uncaught traceback.
@@ -215,6 +186,10 @@ class Runtime:
         config["_config_path"] = Path(self.config_path)
         config["_cli_overrides"] = self.overrides
 
+        return config
+
+    def setup_logging(self, config: dict) -> None:
+        """Step 4 of start(): configure logging from the config's logging section."""
         # 4. Configure logging — must be first operational step. Relative
         # paths resolve against _base_dir, same mechanism as
         # MetricsJsonlPlugin's daemon.metrics_jsonl.
@@ -229,6 +204,12 @@ class Runtime:
             extra={"level": log_level, "file": log_file or "stderr"},
         )
 
+    async def load_plugins(self, config: dict) -> None:
+        """Steps 5-10 of start(): build the plugin manager, load and init plugins.
+
+        Prints one Config error line and raises SystemExit(1) for a rejected
+        config section, a duplicate entry point or an on_init ValueError.
+        """
         # 5. Create plugin manager
         self.pm = create_plugin_manager()
 
@@ -322,6 +303,53 @@ class Runtime:
             sys.stderr.flush()
             raise SystemExit(1) from exc
 
+    async def start(self) -> None:
+        """Load config, merge overrides, create PM, load plugins, start.
+
+        Delegates steps 1-3 to load_config(), step 4 to setup_logging() and
+        steps 5-10 to load_plugins(), then runs steps 11-13 itself.
+
+        Steps:
+        1.  Load YAML config from config_path. Prints a Config error and exits
+            non-zero if missing or malformed.
+        2.  Deep-merge self.overrides on top of the YAML config.
+        3.  Set config["_base_dir"] from config_path (after merge; cannot be overridden).
+        4.  Configure logging (MUST be first operational step after config load).
+        5.  Create plugin manager.
+        6.  Create ChannelRegistry, Clock and IdleTracker and register them
+            with the plugin manager as "registry", "clock" and "idle".
+        7.  Validate the agent, daemon and llm sections and tools.call_timeout /
+            tools.timeouts; load channel config from merged config.
+        7b. Block disabled plugins via pm.set_blocked for each name in
+            config["plugins"]["disabled"]. Must precede step 8 so blocked
+            plugins are never instantiated by the entry-point loader.
+        8.  Load entry-point plugins (corvidae group).
+        8a. Log the effective plugin set.
+        8b. Install plugin-declared hookspecs (install_plugin_hookspecs), so
+            every spec exists before the guard below and before on_init.
+        8c. Run the hook arg-binding guard over the full plugin set.
+        9.  Validate plugin dependencies, then report hookimpls left with no
+            spec (report_orphan_hookimpls).
+        10. await pm.ahook.on_init(pm=pm, config=config). A ValueError from
+            a plugin's on_init is a config rejection: one-line Config error
+            and exit, like a malformed block in step 7 (#277).
+        11. await pm.ahook.on_start(config=config).
+            NOTE: Agent.on_start has no @hookimpl — the broadcast skips it.
+        12. Retrieve agent plugin; raise RuntimeError if absent.
+            await agent.on_start(config=config) explicitly, after the broadcast
+            so that plugins Agent depends on have already started.
+        13. Start the idle tracker, so nothing fires before the Agent can
+            take work.
+        """
+        # 1-3. Load, merge and mark the config.
+        config = self.load_config()
+
+        # 4. Configure logging.
+        self.setup_logging(config)
+
+        # 5-10. Build the plugin manager, load plugins, run on_init.
+        await self.load_plugins(config)
+
         # 11. on_start broadcast (Agent.on_start has no @hookimpl — skipped here)
         await self.pm.ahook.on_start(config=config)
 
@@ -364,6 +392,9 @@ class Runtime:
 
     async def _cleanup_failed_start(self) -> None:
         """Best-effort shutdown after start() raised (#177).
+
+        Also the teardown for the restart pre-flight, which loads plugins
+        without starting an agent.
 
         Runs the on_stop broadcast, stops the idle tracker and closes the
         clock under the same 3-second bound as stop(). Skips agent.on_stop,
