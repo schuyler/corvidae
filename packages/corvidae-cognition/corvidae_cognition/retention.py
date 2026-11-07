@@ -177,7 +177,7 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
     # Skip entirely when embedding is disabled by the embedding_meta mismatch guard.
     # ------------------------------------------------------------------
     if memory._encoder_mismatch:
-        logger.debug("retention: backfill skipped (embedding disabled by meta mismatch)")
+        logger.debug("retention: backfill skipped (embedding disabled by annotations mismatch)")
         return
 
     if not memory._embedding_enabled() or not memory._vec_available:

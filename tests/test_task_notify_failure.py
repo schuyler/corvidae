@@ -40,7 +40,7 @@ class RaisingNotify(CorvidaePlugin):
     """A third-party plugin whose on_notify always raises."""
 
     @hookimpl
-    async def on_notify(self, channel, source, text, tool_call_id, meta):
+    async def on_notify(self, channel, source, text, tool_call_id, annotations):
         raise RuntimeError("third-party notify explosion")
 
 

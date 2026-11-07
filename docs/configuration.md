@@ -467,7 +467,7 @@ Each job:
 |-----|----------|-------------|
 | `name` | yes | Unique; the sync key. Renaming a job disables the old row and creates a new one. |
 | `channel` | yes | `transport:scope` to fire into. Any channel, including one no transport owns, such as `internal:notes`, whose replies go to the log and `sessions.db` only. |
-| `origin` | no | `reminder` (default); becomes the `[origin]` notification prefix and `meta["origin"]`. `heartbeat` is still accepted so old configs load, but a scheduler heartbeat is superseded by the [`heartbeat`](#heartbeat--a-turn-on-system-idle) plugin; delete the job when you enable the plugin, or both will run turns on `internal:heartbeat`. |
+| `origin` | no | `reminder` (default); becomes the `[origin]` notification prefix and `annotations["origin"]`. `heartbeat` is still accepted so old configs load, but a scheduler heartbeat is superseded by the [`heartbeat`](#heartbeat--a-turn-on-system-idle) plugin; delete the job when you enable the plugin, or both will run turns on `internal:heartbeat`. |
 | `every` | yes | Interval: `30s`, `20m`, `6h`, `1d`, `7d`, `1h30m`, or a number of seconds. |
 | `at` | no | Anchor. `HH:MM`: the first fire is the next such time, then every `every`. An ISO datetime: slots are that instant plus multiples of `every` (`every: 7d` with `at: "2026-10-16T09:00"`, a Friday, is every Friday at 09:00). Without it, the first fire is one interval after the job is first synced. |
 | `prompt` / `prompt_file` | one of them | The job's text. `prompt_file` is relative to the directory holding `agent.yaml`. |
@@ -967,7 +967,7 @@ When `logging.file` is set in YAML, logs go to that rotating file regardless of 
 
 Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv sync` line). Without it the `send_message` and `list_channels` tools do not exist.
 
-`CrossChannelSendPlugin` lets any turn send an instruction to another channel context. The message is delivered as a system-role notification via `on_notify` (the same mechanism the scheduler uses for reminders); the target mints its own trace and gets a fresh turn budget. Loop prevention is a `hop_count` in the notification meta, refused when it exceeds `max_hops`.
+`CrossChannelSendPlugin` lets any turn send an instruction to another channel context. The message is delivered as a system-role notification via `on_notify` (the same mechanism the scheduler uses for reminders); the target mints its own trace and gets a fresh turn budget. Loop prevention is a `hop_count` in the notification annotations, refused when it exceeds `max_hops`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

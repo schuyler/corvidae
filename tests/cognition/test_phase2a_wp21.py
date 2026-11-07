@@ -12,7 +12,7 @@ WP2.1 section, PASSED re-review #1 at HEAD bb03fa5). Covers:
   4. Tool cycle: Task stamped with key+origin; tool-result notification
      turn inherits the same key (no second exchange row); final
      on_agent_response carries originating_text.
-  5. Standalone notification (no tool_call_id, no meta key): key minted
+  5. Standalone notification (no tool_call_id, no annotations key): key minted
      at dequeue, one on_message_persisted firing, origin='task'.
   6. Mid-exchange tool-result rows never fire on_message_persisted (count
      firings) — folded into test 4's assertion and a dedicated multi-tool
@@ -129,28 +129,28 @@ class _AdmissionRecorderPlugin:
         )
 
     @hookimpl
-    async def on_message_persisted(self, channel, trace_id, rowid, text, meta):
+    async def on_message_persisted(self, channel, trace_id, rowid, text, annotations):
         self.persisted.append(
             {
                 "channel": channel,
                 "trace_id": trace_id,
                 "rowid": rowid,
                 "text": text,
-                "meta": meta,
+                "annotations": annotations,
             }
         )
 
 
 class _BeforeTurnRecorderPlugin:
-    """Records the (channel, trace_id, meta) tuple before_agent_turn receives."""
+    """Records the (channel, trace_id, annotations) tuple before_agent_turn receives."""
 
     def __init__(self):
         self.calls: list[dict] = []
 
     @hookimpl
-    async def before_agent_turn(self, channel, trace_id, meta):
+    async def before_agent_turn(self, channel, trace_id, annotations):
         self.calls.append(
-            {"channel": channel, "trace_id": trace_id, "meta": meta}
+            {"channel": channel, "trace_id": trace_id, "annotations": annotations}
         )
 
 
@@ -167,7 +167,7 @@ class _AgentResponseRecorderPlugin:
         request_text,
         response_text,
         trace_id,
-        meta,
+        annotations,
         logprobs,
     ):
         self.calls.append(
@@ -176,7 +176,7 @@ class _AgentResponseRecorderPlugin:
                 "request_text": request_text,
                 "response_text": response_text,
                 "trace_id": trace_id,
-                "meta": meta,
+                "annotations": annotations,
                 "logprobs": logprobs,
             }
         )
@@ -367,7 +367,7 @@ class TestGateRejection:
 
 class TestToolCyclePropagation:
     async def test_task_stamped_with_trace_id_and_meta(self):
-        """_dispatch_tool_calls must stamp Task.trace_id/meta from the
+        """_dispatch_tool_calls must stamp Task.trace_id/annotations from the
         current item so the tool cycle carries the exchange forward."""
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -425,10 +425,10 @@ class TestToolCyclePropagation:
         task = captured_tasks[0]
         assert task.trace_id is not None
         assert task.trace_id == gate.seen_keys[0]
-        # Core stamps only the attribution meta forward; it carries no
+        # Core stamps only the attribution annotations forward; it carries no
         # 'user' origin string itself (R1 — origin is a plugin-side
-        # convention over meta["origin"], never set by core for USER items).
-        assert task.meta == {}
+        # convention over annotations["origin"], never set by core for USER items).
+        assert task.annotations == {}
 
         await task_plugin.on_stop()
         await db.close()
@@ -549,7 +549,7 @@ class TestStandaloneNotificationAndPersistedFiring:
 
         await plugin.on_notify(
             channel=channel, source="task", text="standalone event",
-            tool_call_id=None, meta=None,
+            tool_call_id=None, annotations=None,
         )
         await drain(plugin, channel)
 
@@ -572,7 +572,7 @@ class TestStandaloneNotificationAndPersistedFiring:
 
         await plugin.on_notify(
             channel=channel, source="task", text="standalone event",
-            tool_call_id=None, meta=None,
+            tool_call_id=None, annotations=None,
         )
         await drain(plugin, channel)
 
@@ -594,7 +594,7 @@ class TestStandaloneNotificationAndPersistedFiring:
 
         await plugin.on_notify(
             channel=channel, source="task", text="standalone event",
-            tool_call_id=None, meta=None,
+            tool_call_id=None, annotations=None,
         )
         await drain(plugin, channel)
 
@@ -681,9 +681,9 @@ class TestBeforeAgentTurnEnrichment:
         assert len(recorder.calls) == 1
         assert recorder.calls[0]["trace_id"] == gate.seen_keys[0]
         # Core carries no 'user' origin string for a USER item -- origin is
-        # a plugin-side convention over meta["origin"] (R1); core's meta
+        # a plugin-side convention over annotations["origin"] (R1); core's annotations
         # for a directly-admitted USER message stays empty.
-        assert recorder.calls[0]["meta"] == {}
+        assert recorder.calls[0]["annotations"] == {}
 
         await db.close()
 
@@ -707,7 +707,7 @@ class TestBeforeAgentTurnEnrichment:
 
         class _StandInRetrievalProfiler:
             @hookimpl
-            async def before_agent_turn(self, channel, trace_id, meta):
+            async def before_agent_turn(self, channel, trace_id, annotations):
                 if trace_id is None:
                     return
                 await outcome_log.update_exchange(

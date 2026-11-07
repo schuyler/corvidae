@@ -757,7 +757,7 @@ class AgentSpec:
         request_text: str,
         response_text: str,
         trace_id: str | None,
-        meta: dict,
+        annotations: dict,
         logprobs: dict | None,
     ) -> None:
         """Called after the agent loop produces a response to a message.
@@ -780,8 +780,8 @@ class AgentSpec:
             response_text: The final text produced by the agent loop.
             trace_id: The trace id this response belongs to,
                 or None.
-            meta: The trace metadata dict; producers of notifications
-                may stamp keys into it via ``on_notify`` meta, and the dict
+            annotations: The annotations dict; producers of notifications
+                may stamp keys into it via ``on_notify`` annotations, and the dict
                 travels with the trace id through task cycles.
             logprobs: The response's logprobs envelope, or None.
 
@@ -803,7 +803,7 @@ class AgentSpec:
         source: str,
         text: str,
         tool_call_id: str | None,
-        meta: dict | None,
+        annotations: dict | None,
     ) -> None:
         """Called to inject a notification into a channel's processing queue.
 
@@ -815,7 +815,7 @@ class AgentSpec:
 
         Note: all parameters are required (no defaults) so pluggy forwards
         them correctly to hookimpl implementations. Callers should pass
-        tool_call_id=None and meta=None when not applicable.
+        tool_call_id=None and annotations=None when not applicable.
 
         Args:
             channel: The Channel to notify.
@@ -824,7 +824,7 @@ class AgentSpec:
             tool_call_id: If set, the notification is a deferred tool result
                           and will be formatted as role="tool" in the conversation.
                           Pass None when not a deferred tool result.
-            meta: Optional extensible metadata (task_id, etc.). Pass None if unused.
+            annotations: Optional annotations (task_id, etc.). Pass None if unused.
         """
 
     @hookspec
@@ -859,7 +859,7 @@ class AgentSpec:
         text: str,
         emission: str,
         trace_id: str | None,
-        meta: dict,
+        annotations: dict,
     ) -> bool | None:
         """Gate hook: decide whether an outbound emission reaches the channel.
 
@@ -896,8 +896,8 @@ class AgentSpec:
             emission: One of "final", "progress", "thinking", "error".
                 Treat unknown values as no opinion.
             trace_id: The current turn's trace id, or None.
-            meta: The trace metadata dict the item carries. Producers stamp
-                plugin-side keys into it (e.g. ``meta["origin"]``); core
+            annotations: The annotations dict the item carries. Producers stamp
+                plugin-side keys into it (e.g. ``annotations["origin"]``); core
                 never does.
         """
 
@@ -944,7 +944,7 @@ class AgentSpec:
         trace_id: str,
         rowid: int | None,
         text: str,
-        meta: dict,
+        annotations: dict,
     ) -> None:
         """Broadcast after the trace-originating message row is persisted.
 
@@ -963,7 +963,7 @@ class AgentSpec:
             trace_id: The trace id this row originates.
             rowid: The message_log rowid of the persisted row, or None.
             text: The originating row's content.
-            meta: The trace metadata dict carried by the item.
+            annotations: The annotations dict carried by the item.
         """
 
     @hookspec(firstresult=True)
@@ -1355,7 +1355,7 @@ class AgentSpec:
         self,
         channel: "Channel",
         trace_id: str | None,
-        meta: dict,
+        annotations: dict,
     ) -> None:
         """Called before each LLM invocation, after compaction.
 
@@ -1374,8 +1374,8 @@ class AgentSpec:
             channel: The Channel being processed. Use ``channel.conversation``
                 to access the ContextWindow for appending context entries.
             trace_id: The current turn's trace id, or None.
-            meta: The trace metadata dict; producers of notifications
-                may stamp keys into it via ``on_notify`` meta, and the dict
+            annotations: The annotations dict; producers of notifications
+                may stamp keys into it via ``on_notify`` annotations, and the dict
                 travels with the trace id through task cycles.
         """
 

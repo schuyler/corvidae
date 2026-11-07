@@ -310,5 +310,5 @@ class HeartbeatPlugin(CorvidaePlugin):
             source="heartbeat",
             text=frame_beat(memories, retired, self._prompt, self._goals_instruction),
             tool_call_id=None,
-            meta={"origin": "heartbeat"},
+            annotations={"origin": "heartbeat"},
         )

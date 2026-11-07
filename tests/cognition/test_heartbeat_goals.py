@@ -71,12 +71,12 @@ class AgentStub:
         self.calls: list[dict] = []
 
     @hookimpl
-    async def on_notify(self, channel, source, text, tool_call_id, meta):
+    async def on_notify(self, channel, source, text, tool_call_id, annotations):
         self.calls.append({"channel": channel, "text": text})
         self.tracker.note_activity(channel.id)
         if channel.conversation is None:
             channel.conversation = ContextWindow(channel.id)
-        await self.pm.ahook.before_agent_turn(channel=channel, trace_id=None, meta=meta)
+        await self.pm.ahook.before_agent_turn(channel=channel, trace_id=None, annotations=annotations)
         self.tracker.note_settled(channel.id)
 
 

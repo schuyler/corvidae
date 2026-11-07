@@ -86,7 +86,7 @@ class ThinkingPlugin(CorvidaePlugin):
         return registry.resolve_config(channel)["reasoning_history"]
 
     @hookimpl
-    async def before_agent_turn(self, channel, trace_id, meta) -> None:
+    async def before_agent_turn(self, channel, trace_id, annotations) -> None:
         """Apply the reasoning_history policy to the whole window.
 
         No-op without a registry or a conversation window, and under "keep".

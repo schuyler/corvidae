@@ -24,7 +24,7 @@ compute run once whoever asks first. A missing AppraisalPlugin, or a
 compute that fails, fails open: the gate never rejects or withholds on a
 missing signal.
 
-Origin is a plugin-side convention (R1): ``meta["origin"]`` when a
+Origin is a plugin-side convention (R1): ``annotations["origin"]`` when a
 producer stamped it, else ``user`` for a trace admitted through
 ``on_message_admitted``, else ``task`` (outcome_log's default for
 background exchanges).
@@ -218,7 +218,7 @@ class GatePlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def should_send_response(self, channel, text, emission, trace_id, meta):
+    async def should_send_response(self, channel, text, emission, trace_id, annotations):
         """Decide whether an outbound emission reaches the channel.
 
         "final": origin-conditional salience policy over the outbound
@@ -238,7 +238,7 @@ class GatePlugin(CorvidaePlugin):
                 return False
             if emission != "final":
                 return None
-            origin = await self._origin(trace_id, meta)
+            origin = await self._origin(trace_id, annotations)
             return await self._decide_final(channel, text, trace_id, origin)
         except Exception:
             logger.warning(
@@ -332,16 +332,16 @@ class GatePlugin(CorvidaePlugin):
     # Helpers
     # ------------------------------------------------------------------
 
-    async def _origin(self, trace_id, meta) -> str:
+    async def _origin(self, trace_id, annotations) -> str:
         """The exchange's origin, read from propagated state, never inferred
         from text or source strings (trap #3).
 
-        ``meta["origin"]`` first, then the admitted-trace LRU. A trace the
+        ``annotations["origin"]`` first, then the admitted-trace LRU. A trace the
         LRU has evicted (a long tool cycle under heavy traffic) falls back
         to the exchange_log row's origin, so an old user exchange is never
         mistaken for background traffic and withheld.
         """
-        origin = (meta or {}).get("origin")
+        origin = (annotations or {}).get("origin")
         if origin:
             return origin
         if trace_id is None:

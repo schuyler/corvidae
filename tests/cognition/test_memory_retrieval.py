@@ -148,7 +148,7 @@ async def seed_memory(
 async def ask(memory, channel, conv, text: str) -> None:
     """Simulate the turn-loop entry: append the user message, fire retrieval."""
     conv.append({"role": "user", "content": text})
-    await memory.before_agent_turn(channel=channel, trace_id=None, meta={})
+    await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
 
 
 def context_messages(conv) -> list[dict]:
@@ -194,7 +194,7 @@ class TestRetrievalBasics:
         memory, embedder, channel, conv, db = await build_retrieval_env()
         await seed_memory(db, channel.id, "some memory about wifi networks")
         conv.append({"role": "system", "content": "[task]\n\nwifi wifi wifi"})
-        await memory.before_agent_turn(channel=channel, trace_id=None, meta={})
+        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
         assert context_messages(conv) == []
         assert embedder.calls == []
         await db.close()
@@ -511,7 +511,7 @@ class TestRetrievalLogSimilarity:
                           "kestrel moved the rain gauge to the north fence")
         conv.append({"role": "user", "content": "where is the rain gauge?"})
         await memory.before_agent_turn(
-            channel=channel, trace_id="ex-sim", meta={}
+            channel=channel, trace_id="ex-sim", annotations={}
         )
 
         async with db.execute(
@@ -601,7 +601,7 @@ class TestBurstRetrieval:
         # Three unanswered user messages; only the first matches a memory.
         for text in ("zephyr quasar nebula pulsar", "ok", "thanks"):
             conv.append({"role": "user", "content": text})
-        await memory.before_agent_turn(channel=channel, trace_id=None, meta={})
+        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
 
         # m1's text reaches the embedded query, and its memory is admitted.
         assert "zephyr" in embedder.calls[-1][0]
@@ -629,7 +629,7 @@ class TestBurstRetrieval:
                       + [f"gamma{i}" for i in range(8, 21)])
         for text in (m1, m2, m3):
             conv.append({"role": "user", "content": text})
-        await memory.before_agent_turn(channel=channel, trace_id=None, meta={})
+        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
 
         recalled = " ".join(m["content"] for m in context_messages(conv))
         assert "falconry apprenticeship" in recalled

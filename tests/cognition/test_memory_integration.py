@@ -127,7 +127,7 @@ async def test_recall_across_restart_and_channels(tmp_path):
     conv = ContextWindow(channel.id)
     channel.conversation = conv
     conv.append({"role": "user", "content": "what did we do about the dome motor jamming?"})
-    await memory2.before_agent_turn(channel=channel, trace_id=None, meta={})
+    await memory2.before_agent_turn(channel=channel, trace_id=None, annotations={})
     contexts = [m for m in conv.messages
                 if m.get("_message_type") == MessageType.CONTEXT]
     assert len(contexts) == 1
@@ -139,7 +139,7 @@ async def test_recall_across_restart_and_channels(tmp_path):
     other_conv = ContextWindow(other.id)
     other.conversation = other_conv
     other_conv.append({"role": "user", "content": "what about the dome motor jamming?"})
-    await memory2.before_agent_turn(channel=other, trace_id=None, meta={})
+    await memory2.before_agent_turn(channel=other, trace_id=None, annotations={})
     other_contexts = [m for m in other_conv.messages
                       if m.get("_message_type") == MessageType.CONTEXT]
     assert len(other_contexts) == 1
@@ -156,7 +156,7 @@ async def test_recall_across_restart_and_channels(tmp_path):
     blank_conv = ContextWindow(blank.id)
     blank.conversation = blank_conv
     blank_conv.append({"role": "user", "content": "what about the dome motor jamming?"})
-    await memory3.before_agent_turn(channel=blank, trace_id=None, meta={})
+    await memory3.before_agent_turn(channel=blank, trace_id=None, annotations={})
     async with db3.execute(
         "SELECT hit_count, admitted_count FROM retrieval_log "
         "WHERE channel_id = ? ORDER BY id DESC LIMIT 1",

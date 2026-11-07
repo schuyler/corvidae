@@ -50,9 +50,9 @@ class NotifyRecorder:
         self.calls: list[dict] = []
 
     @hookimpl
-    async def on_notify(self, channel, source, text, tool_call_id, meta):
+    async def on_notify(self, channel, source, text, tool_call_id, annotations):
         self.calls.append(dict(channel=channel, source=source, text=text,
-                               tool_call_id=tool_call_id, meta=meta))
+                               tool_call_id=tool_call_id, annotations=annotations))
 
 
 class Env:
@@ -232,7 +232,7 @@ class TestFiring:
         assert call["channel"] is ch
         assert call["source"] == "reminder"
         assert call["tool_call_id"] is None
-        assert call["meta"] == {"origin": "reminder", "schedule_id": row.id}
+        assert call["annotations"] == {"origin": "reminder", "schedule_id": row.id}
         text = call["text"]
         assert text.startswith("A reminder you set on 2026-10-23 14:00 (PDT) for this conversation is due.")
         assert "Reminder text: «call mom TOKEN-123»" in text
@@ -264,7 +264,7 @@ class TestFiring:
         await e.sched._tick()
         (call,) = e.recorder.calls
         assert call["source"] == "heartbeat"
-        assert call["meta"] == {"origin": "heartbeat", "schedule_id": row.id}
+        assert call["annotations"] == {"origin": "heartbeat", "schedule_id": row.id}
         assert call["channel"].id == "internal:heartbeat"
         assert 'Scheduled job "beat"' in call["text"]
         (after,) = await e.rows()

@@ -1118,7 +1118,7 @@ class WebPlugin(TransportPlugin):
 
     @hookimpl
     async def on_message_persisted(
-        self, channel: Channel, trace_id: str, rowid: int | None, text: str, meta: dict
+        self, channel: Channel, trace_id: str, rowid: int | None, text: str, annotations: dict
     ) -> None:
         if not self.owns(channel):
             return

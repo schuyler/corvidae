@@ -207,7 +207,7 @@ class TestEnrichedOnAgentResponseParams:
     defaults, which exempts them from this guard — an impl mirroring the
     defaulted signature would silently receive None forever. The spec is
     default-free; these tests pin both the guard behavior and the real
-    end-to-end delivery. ``trace_id``/``meta`` replace the deleted
+    end-to-end delivery. ``trace_id``/``annotations`` replace the deleted
     ``trace_id``/``origin``/``originating_text`` params; ``withheld``
     is gone entirely (returns generically in a later phase).
     """
@@ -219,7 +219,7 @@ class TestEnrichedOnAgentResponseParams:
             @hookimpl
             async def on_agent_response(
                 self, channel, request_text, response_text, trace_id,
-                meta, logprobs=None,
+                annotations, logprobs=None,
             ):
                 pass
 
@@ -241,10 +241,10 @@ class TestEnrichedOnAgentResponseParams:
             @hookimpl
             async def on_agent_response(
                 self, channel, request_text, response_text, trace_id,
-                meta, logprobs,
+                annotations, logprobs,
             ):
                 received.update(
-                    logprobs=logprobs, meta=meta, trace_id=trace_id
+                    logprobs=logprobs, annotations=annotations, trace_id=trace_id
                 )
 
         pm.register(Consumer(), name="consumer")
@@ -255,13 +255,13 @@ class TestEnrichedOnAgentResponseParams:
             request_text="req",
             response_text="resp",
             trace_id="tid-1",
-            meta={"origin": "user"},
+            annotations={"origin": "user"},
             logprobs={"content": [{"token": "resp", "logprob": -0.1}]},
         )
 
         assert received["logprobs"] == {"content": [{"token": "resp", "logprob": -0.1}]}
         assert received["trace_id"] == "tid-1"
-        assert received["meta"] == {"origin": "user"}
+        assert received["annotations"] == {"origin": "user"}
 
 
 class TestResolveChannelSpec:

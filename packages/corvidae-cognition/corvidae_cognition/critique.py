@@ -563,7 +563,7 @@ class CritiquePlugin(CorvidaePlugin):
             self._admitted.popitem(last=False)
 
     @hookimpl
-    async def on_message_persisted(self, channel, trace_id, rowid, text, meta) -> None:
+    async def on_message_persisted(self, channel, trace_id, rowid, text, annotations) -> None:
         """Record the exchange's originating rowid for the fork containment
         check. Unpersisted exchanges (rowid None) are never forked."""
         if rowid is None:
@@ -585,7 +585,7 @@ class CritiquePlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def before_agent_turn(self, channel, trace_id, meta) -> None:
+    async def before_agent_turn(self, channel, trace_id, annotations) -> None:
         """Snapshot the CONTEXT messages in the window under the trace id.
 
         The provenance template's evidence: what the agent could actually see
@@ -633,7 +633,7 @@ class CritiquePlugin(CorvidaePlugin):
             )
 
     @hookimpl
-    async def should_send_response(self, channel, text, emission, trace_id, meta):
+    async def should_send_response(self, channel, text, emission, trace_id, annotations):
         """Veto a provenance turn's final reply when it is the no-reply marker.
 
         Anything else is no opinion. Errors fail open: a broken check never
@@ -642,7 +642,7 @@ class CritiquePlugin(CorvidaePlugin):
         try:
             if (
                 emission == "final"
-                and (meta or {}).get("origin") == "critique"
+                and (annotations or {}).get("origin") == "critique"
                 and text.strip() == NO_REPLY_MARKER
             ):
                 return False
@@ -661,7 +661,7 @@ class CritiquePlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_agent_response(
-        self, channel, request_text, response_text, trace_id, meta, logprobs,
+        self, channel, request_text, response_text, trace_id, annotations, logprobs,
     ) -> None:
         """Decide the stylistic lenses, then enqueue the silent critique task.
 
@@ -671,7 +671,7 @@ class CritiquePlugin(CorvidaePlugin):
         The provenance check doesn't start here: it waits for stage 2's
         past_claims (handle_stage2).
         """
-        if not self._eligible(trace_id, meta):
+        if not self._eligible(trace_id, annotations):
             return  # critique/heartbeat/task/unadmitted exempt — the recursion brake
 
         self._record_reply(channel, trace_id)
@@ -712,7 +712,7 @@ class CritiquePlugin(CorvidaePlugin):
             )
             return ""
 
-        await self._enqueue(channel, trace_id, meta, "critique", _work)
+        await self._enqueue(channel, trace_id, annotations, "critique", _work)
 
     def _record_reply(self, channel, trace_id) -> None:
         """Note which window row is the exchange's final reply, for the
@@ -732,18 +732,18 @@ class CritiquePlugin(CorvidaePlugin):
         while len(self._reply) > ADMITTED_LRU_MAXSIZE:
             self._reply.popitem(last=False)
 
-    def _eligible(self, trace_id, meta) -> bool:
+    def _eligible(self, trace_id, annotations) -> bool:
         """Eligibility by propagated origin (trap #3).
 
-        Eligible iff ``meta["origin"] == "reminder"``, or origin is absent
+        Eligible iff ``annotations["origin"] == "reminder"``, or origin is absent
         AND the trace id was admitted via on_message_admitted ("user"
         recognition, R1). Everything else (critique/heartbeat/task/unknown
         background) is exempt; the recursion brake holds because
-        critique-origin meta propagates through tool cycles.
+        critique-origin annotations propagates through tool cycles.
         """
         if trace_id is None:
             return False
-        origin = (meta or {}).get("origin")
+        origin = (annotations or {}).get("origin")
         return origin == "reminder" or (origin is None and trace_id in self._admitted)
 
     def _originating_text(self, trace_id, fallback):
@@ -754,7 +754,7 @@ class CritiquePlugin(CorvidaePlugin):
         text = get_originating(trace_id) if callable(get_originating) else None
         return text if text is not None else fallback
 
-    async def _enqueue(self, channel, trace_id, meta, description, work) -> None:
+    async def _enqueue(self, channel, trace_id, annotations, description, work) -> None:
         """Enqueue one silent critique task (deliver=False), fail-soft."""
         task_plugin = self.pm.get_plugin("task")
         queue = getattr(task_plugin, "task_queue", None)
@@ -767,7 +767,7 @@ class CritiquePlugin(CorvidaePlugin):
                 channel=channel,
                 description=description,
                 trace_id=trace_id,
-                meta=meta,
+                annotations=annotations,
                 deliver=False,
                 tool_call_id=None,
             ))
@@ -821,7 +821,7 @@ class CritiquePlugin(CorvidaePlugin):
     # The provenance check (trap #4, #155)
     # ------------------------------------------------------------------
 
-    async def handle_stage2(self, channel, trace_id, response_text, meta, stage2) -> None:
+    async def handle_stage2(self, channel, trace_id, response_text, annotations, stage2) -> None:
         """AppraisalPlugin's stage-2 listener: start the provenance check.
 
         Stage 2 (a model) has listed the claims the reply makes about the
@@ -829,7 +829,7 @@ class CritiquePlugin(CorvidaePlugin):
         provenance task; the task gathers the evidence and forks the window
         to judge it.
         """
-        if not self._eligible(trace_id, meta):
+        if not self._eligible(trace_id, annotations):
             return
         if not resolve_tunable(
             channel, self.config, "critique.provenance.enabled", PROVENANCE_ENABLED_DEFAULT
@@ -844,7 +844,7 @@ class CritiquePlugin(CorvidaePlugin):
             await self._run_provenance(channel, trace_id, text_in, response_text, claims)
             return ""
 
-        await self._enqueue(channel, trace_id, meta, "critique:provenance", _work)
+        await self._enqueue(channel, trace_id, annotations, "critique:provenance", _work)
 
     def _provenance_fork(self, channel, trace_id):
         """``(agent, cut)`` for the provenance fork, or the reason it can't run.

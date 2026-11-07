@@ -5,7 +5,7 @@ R1's acceptance made executable: a grep test asserting no core module
 references the cognition vocabulary, plus structural assertions (QueueItem/
 Task field names, the new hookspec signatures, absence of the deleted
 surface); then behavioral round-trip tests for the generic trace
-mechanism (dequeue resolution, attribution, Task/TaskPlugin meta
+mechanism (dequeue resolution, attribution, Task/TaskPlugin annotations
 propagation, on_message_persisted firing discipline).
 """
 
@@ -94,7 +94,7 @@ class TestTaskStructure:
 
         names = {f.name for f in dataclasses.fields(Task)}
         assert "trace_id" in names
-        assert "meta" in names
+        assert "annotations" in names
         assert "exchange_key" not in names
         assert "correlation_id" not in names
         assert "origin" not in names
@@ -131,20 +131,20 @@ class TestHookspecSignatures:
     def test_on_message_persisted(self):
         from corvidae.hooks import AgentSpec
         assert _params(AgentSpec.on_message_persisted) == [
-            "channel", "trace_id", "rowid", "text", "meta",
+            "channel", "trace_id", "rowid", "text", "annotations",
         ]
 
     def test_before_agent_turn(self):
         from corvidae.hooks import AgentSpec
         assert _params(AgentSpec.before_agent_turn) == [
-            "channel", "trace_id", "meta",
+            "channel", "trace_id", "annotations",
         ]
 
     def test_on_agent_response(self):
         from corvidae.hooks import AgentSpec
         assert _params(AgentSpec.on_agent_response) == [
             "channel", "request_text", "response_text",
-            "trace_id", "meta", "logprobs",
+            "trace_id", "annotations", "logprobs",
         ]
 
 
@@ -217,13 +217,13 @@ class TestDequeueTraceResolution:
 
         await plugin.on_notify(
             channel=channel, source="task", text="standalone",
-            tool_call_id=None, meta={"trace_id": "inherited-123"},
+            tool_call_id=None, annotations={"trace_id": "inherited-123"},
         )
         await drain(plugin, channel)
 
         call_kwargs = plugin.pm.ahook.on_agent_response.call_args.kwargs
         assert call_kwargs["trace_id"] == "inherited-123"
-        assert call_kwargs["meta"] == {"trace_id": "inherited-123"}
+        assert call_kwargs["annotations"] == {"trace_id": "inherited-123"}
 
     async def test_mints_when_absent(self, plugin_and_channel):
         plugin, channel, db = plugin_and_channel
@@ -234,7 +234,7 @@ class TestDequeueTraceResolution:
 
         await plugin.on_notify(
             channel=channel, source="task", text="standalone",
-            tool_call_id=None, meta=None,
+            tool_call_id=None, annotations=None,
         )
         await drain(plugin, channel)
 
@@ -263,16 +263,16 @@ class TestAttributionCarriesTraceAndMeta:
 
         await plugin.on_notify(
             channel=channel, source="task", text="hello",
-            tool_call_id=None, meta={"task_id": "t-1"},
+            tool_call_id=None, annotations={"task_id": "t-1"},
         )
         await drain(plugin, channel)
 
         assert captured.get("trace_id") is not None
-        assert captured.get("meta") == {"task_id": "t-1"}
+        assert captured.get("annotations") == {"task_id": "t-1"}
 
 
 # ---------------------------------------------------------------------------
-# Behavioral: TaskPlugin meta round-trip
+# Behavioral: TaskPlugin annotations round-trip
 # ---------------------------------------------------------------------------
 
 
@@ -294,12 +294,12 @@ class TestTaskPluginMetaRoundTrip:
 
         task = Task(
             work=work, channel=channel, trace_id="tid-1",
-            meta={"origin": "critique"}, tool_call_id=None,
+            annotations={"origin": "critique"}, tool_call_id=None,
         )
         await plugin._on_task_complete(task, "the result")
 
         call_kwargs = pm.ahook.on_notify.call_args.kwargs
-        assert call_kwargs["meta"] == {
+        assert call_kwargs["annotations"] == {
             "task_id": task.task_id,
             "trace_id": "tid-1",
             "origin": "critique",
