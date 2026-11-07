@@ -669,6 +669,50 @@ class TestInboundFiltering:
         finally:
             await h.plugin.on_stop()
 
+    async def test_an_unaddressed_message_is_logged_at_debug_naming_the_channel(
+        self, caplog
+    ):
+        """#526: the drop is expected traffic, so it is recorded for diagnosis
+        and not announced — one DEBUG line naming the channel and the sender,
+        nothing at INFO for every line people send each other."""
+        h = await _start_plugin()
+        try:
+            with caplog.at_level(logging.DEBUG):
+                await _deliver(h, make_message("talking amongst ourselves"))
+            drops = [r for r in caplog.records if "not admitted" in r.getMessage()]
+            assert len(drops) == 1
+            (drop,) = drops
+            assert drop.levelno == logging.DEBUG
+            assert "does not mention the bot" in drop.getMessage()
+            assert getattr(drop, "channel") == f"discord:{CHAN_ID}"
+            assert getattr(drop, "sender") == str(AUTH_ID)
+            assert not hasattr(drop, "parent_channel")
+            # Nothing about this drop is announced: an INFO line per message
+            # would swamp a busy channel, which is the whole point.
+            assert not [
+                r for r in caplog.records
+                if r.name == "corvidae.channels.discord" and r.levelno >= logging.INFO
+            ]
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_an_unaddressed_thread_message_names_the_parent(self, caplog):
+        """A thread is decided by its parent's entry (#512), so the line names
+        the parent as well; otherwise an operator looks up the thread id in
+        `discord.channels` and finds nothing (#526)."""
+        h = await _start_plugin()
+        try:
+            message = make_message("in a thread")
+            message.channel = SimpleNamespace(id=THREAD_ID, parent_id=CHAN_ID)
+            with caplog.at_level(logging.DEBUG):
+                await _deliver(h, message)
+            drops = [r for r in caplog.records if "not admitted" in r.getMessage()]
+            assert len(drops) == 1
+            assert getattr(drops[0], "channel") == f"discord:{THREAD_ID}"
+            assert getattr(drops[0], "parent_channel") == f"discord:{CHAN_ID}"
+        finally:
+            await h.plugin.on_stop()
+
     async def test_require_mention_false_admits_unmentioned_guild_message(self):
         """require_mention: false: an unmentioned guild message from an allowed
         user is processed with its text intact; a mention is still stripped."""

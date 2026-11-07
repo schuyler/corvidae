@@ -431,10 +431,14 @@ The contract every transport meets:
 2. Default-deny sender allowlist in `should_process_message`. A refusal is
    one INFO line naming the sender; nothing is sent back and no liveness
    indicator is shown. The transport fires `on_message` for every decoded
-   message regardless; the gate is the one place that vetoes. Web
-   substitutes a bearer token for the allowlist; the token is the
-   authorization. A sender the agent has messaged first, one to one, is
-   admitted on that channel (§3.5.9).
+   message regardless; the gate is the one place that vetoes. One
+   acknowledged exception: a channel configured to answer only when addressed
+   may drop a message that does not address the agent, before the kernel sees
+   it. That is the operator's addressing rule rather than a
+   judgement on the sender, so it is not a refusal and nothing is sent back;
+   it is recorded for diagnosis only. Web substitutes a bearer token for the
+   allowlist; the token is the authorization. A sender the agent has
+   messaged first, one to one, is admitted on that channel (§3.5.9).
 3. Transports subclass `TransportPlugin`, set `transport`, and override the
    `send_*` methods they can display. The one `send(channel, event)` hook
    does the ownership check once; a transport's `owns(channel)` predicate
@@ -499,7 +503,8 @@ Per transport:
   override. Replies in DMs and when mentioned (not
   `@everyone`, `@here`, or roles); with `require_mention: false` it replies
   to every allowlisted sender's server message, mentioned or not; drops bot
-  authors and empty text; strips the mention token. Scopes: `discord:<channel_id>`,
+  authors, empty text, and unmentioned messages in a channel that requires a
+  mention (§3.2 item 2); strips the mention token. Scopes: `discord:<channel_id>`,
   `discord:<thread_id>` (a thread has its own history),
   `discord:dm:<user_id>`. Every send passes `AllowedMentions.none()`. A bad
   token is logged once at ERROR and not retried. Gateway events are queued

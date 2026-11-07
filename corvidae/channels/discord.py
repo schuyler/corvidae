@@ -660,7 +660,21 @@ class DiscordPlugin(TransportPlugin):
             # continues; the allowlist gate still refuses other senders.
             if self._require_mention_for(message.channel):
                 if not any(u.id == bot_user_id for u in message.mentions):
-                    logger.debug("discord: ignoring guild message that does not mention the bot")
+                    # DEBUG: this fires on every line people send each other
+                    # here. A thread's parent entry is what decides, so name it
+                    # too, or an operator looks up the thread id and finds
+                    # nothing.
+                    parent_id = getattr(message.channel, "parent_id", None)
+                    extra = {
+                        "channel": f"discord:{message.channel.id}",
+                        "sender": str(author.id),
+                    }
+                    if parent_id is not None:
+                        extra["parent_channel"] = f"discord:{parent_id}"
+                    logger.debug(
+                        "discord: message does not mention the bot, not admitted",
+                        extra=extra,
+                    )
                     return
                 if not text and not attachments:
                     # Discord should deliver content for mentions even without
