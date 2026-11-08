@@ -81,7 +81,8 @@ Assets, roughly in order of how bad it is to lose them:
    grants whatever that server grants. A credential embedded in a server's
    `url` instead — a query-string token or a `user:pass@` userinfo — never
    reaches the log: the connect-failure and retry warnings name only the
-   endpoint's scheme, host, port and path (#386).
+   endpoint's scheme, host, port and path, and a config-error skip describes
+   a rejected value the same way (#386).
 2. The host account corvidae runs as, and anything it can read or run.
 3. `sessions.db`, the JSONL logs, and the memory tables: plaintext copies
    of every conversation, including end-to-end-encrypted Signal ones.

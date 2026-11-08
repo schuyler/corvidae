@@ -87,6 +87,9 @@ def _redact_url(value: object) -> str:
     failure being reported. Both call sites evaluate this *inside* an except
     handler, so a raise here would escalate a failed connect into a startup
     failure (#386 review).
+
+    Returns ``_UNPARSEABLE`` for anything that is not a URL the client could
+    use, which is also how callers tell a URL from other config values.
     """
     try:
         parts = urlsplit(str(value))
@@ -95,11 +98,11 @@ def _redact_url(value: object) -> str:
         host = parts.hostname
         port = parts.port
     except ValueError:
-        return "(unparseable endpoint)"
+        return _UNPARSEABLE
     # A value with no scheme is not a URL the client can use; logging it whole
     # would put whatever it is into the log unredacted.
     if not parts.scheme or not parts.netloc or not host:
-        return "(unparseable endpoint)"
+        return _UNPARSEABLE
     # Drop userinfo by rebuilding netloc from host and port alone. An IPv6
     # literal keeps its brackets, or the colons read as a port separator.
     netloc = f"[{host}]" if ":" in host else host
@@ -107,6 +110,30 @@ def _redact_url(value: object) -> str:
         netloc = f"{netloc}:{port}"
     return f"{parts.scheme}://{netloc}{parts.path}{'?…' if parts.query else ''}"
 
+
+
+def _describe_config_value(value: object) -> str:
+    """A rejected config value, in a form safe to put in a log line.
+
+    Config errors are reported in the daemon log, and a value the validator
+    rejected can still be one that carries a credential: a server entry that
+    is the URL itself, or a ``headers`` list holding ``Bearer <token>``. So:
+
+    - a string that parses as a URL keeps scheme, host, port and path -- what
+      tells the operator which endpoint is misconfigured -- and loses its
+      userinfo and query;
+    - any other scalar is shown, because a typo ("abc" for a number) is the
+      thing the operator must see to fix it;
+    - a container is described by type and length, never by contents, since a
+      container is where a token hides and the key in the message is the
+      actionable part (#386 review).
+    """
+    if isinstance(value, str):
+        redacted = _redact_url(value)
+        return repr(value) if redacted == _UNPARSEABLE else redacted
+    if isinstance(value, (dict, list, tuple, set)):
+        return f"{type(value).__name__} of length {len(value)}"
+    return repr(value)
 
 
 def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
@@ -151,6 +178,9 @@ _CANCEL_GRACE_SECONDS = 0.3
 
 # Transports a server config may name.
 _TRANSPORTS = ("stdio", "sse", "streamable_http")
+# What _redact_url returns for a value it cannot read as a URL. Also how
+# callers tell a URL-shaped config value from any other kind.
+_UNPARSEABLE = "(unparseable endpoint)"
 # Reconnect backoff ladder for servers that failed at startup; the same
 # 10 s doubling to 300 s as the IRC, Signal and Discord transports.
 _INITIAL_BACKOFF = 10
@@ -180,12 +210,14 @@ def _as_seconds(name: str, cfg: dict, key: str) -> float:
         seconds = float(value)
     except (TypeError, ValueError):
         raise ValueError(
-            f"mcp.servers.{name}.{key} must be a number, got {value!r}"
+            f"mcp.servers.{name}.{key} must be a number, got "
+            f"{_describe_config_value(value)}"
         ) from None
     # A non-finite number would never time out or always fail.
     if not math.isfinite(seconds):
         raise ValueError(
-            f"mcp.servers.{name}.{key} must be a finite number, got {value!r}"
+            f"mcp.servers.{name}.{key} must be a finite number, got "
+            f"{_describe_config_value(value)}"
         )
     return seconds
 
@@ -232,7 +264,8 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
     # A non-mapping server entry (e.g. `a: null`) has no keys to read.
     if not isinstance(cfg, dict):
         raise ValueError(
-            f"mcp.servers.{name} must be a mapping, got {cfg!r}; "
+            f"mcp.servers.{name} must be a mapping, got "
+            f"{_describe_config_value(cfg)}; "
             f"give it transport and command/url keys"
         )
     transport = cfg["transport"]
@@ -257,13 +290,14 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
         not isinstance(args, list) or not all(isinstance(a, str) for a in args)
     ):
         raise ValueError(
-            f"mcp.servers.{name}.args must be a list of strings, got {args!r}"
+            f"mcp.servers.{name}.args must be a list of strings, got "
+            f"{_describe_config_value(args)}"
         )
     env = cfg.get("env")
     if env is not None and not isinstance(env, dict):
         raise ValueError(
             f"mcp.servers.{name}.env must be a mapping of variable names "
-            f"to values, got {env!r}"
+            f"to values, got {_describe_config_value(env)}"
         )
     prefix = cfg.get("tool_prefix", name)
     timeout = _as_seconds(name, cfg, "timeout_seconds")
@@ -279,7 +313,7 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
     if raw_headers is not None and not isinstance(raw_headers, dict):
         raise ValueError(
             f"mcp.servers.{name}.headers must be a mapping of header names "
-            f"to values, got {raw_headers!r}"
+            f"to values, got {_describe_config_value(raw_headers)}"
         )
     # Resolve ${VAR} references: a missing variable raises McpHeaderEnvError.
     headers = _resolve_headers(name, cfg.get("headers"))

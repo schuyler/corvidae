@@ -210,3 +210,59 @@ async def test_two_failing_servers_are_distinguishable(caplog):
     messages = [r.getMessage() for r in caplog.records]
     assert any("wiki.example.com" in m for m in messages)
     assert any("search.example.com" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# The config-error skip warning
+#
+# A server whose *config* is invalid is skipped before any transport opens,
+# and that warning quotes the offending value. A credential can sit in a value
+# the validator rejects -- a server entry that should be a mapping but is the
+# URL itself, or a headers list holding a bearer token -- so the skip line must
+# not quote it whole (#386 review).
+# ---------------------------------------------------------------------------
+
+
+async def test_config_error_skip_line_hides_a_url_with_credentials(caplog):
+    """A server entry that is the URL itself is not quoted into the log.
+
+    `mcp.servers.wiki` that is a bare string instead of a mapping is a config
+    error, and the message used to interpolate that string verbatim.
+    """
+    secret_url = (
+        f"https://user:{USERINFO_PASSWORD}@wiki.example.com/mcp"
+        f"?token={QUERY_SECRET}"
+    )
+    plugin = await _plugin_with({"wiki": secret_url})
+    with caplog.at_level(logging.WARNING):
+        await plugin.on_start({"mcp": {"servers": {"wiki": secret_url}}})
+
+    joined = "\n".join(
+        r.getMessage() for r in caplog.records if "wiki" in r.getMessage()
+    )
+    assert joined, "the config-error skip must be logged"
+    # The operator still learns which server and which key to fix.
+    assert "wiki" in joined
+    assert "mapping" in joined
+    assert QUERY_SECRET not in joined
+    assert USERINFO_PASSWORD not in joined
+
+
+async def test_config_error_skip_line_hides_a_headers_bearer_token(caplog):
+    """A rejected `headers` list holding a token is not quoted into the log."""
+    headers_secret = "SECRET3"
+    bad_headers = [f"Bearer {headers_secret}"]
+    server = {"transport": "streamable_http", "url": "https://h.example.com/mcp",
+              "headers": bad_headers}
+    plugin = await _plugin_with({"wiki": server})
+    with caplog.at_level(logging.WARNING):
+        await plugin.on_start({"mcp": {"servers": {"wiki": server}}})
+
+    joined = "\n".join(
+        r.getMessage() for r in caplog.records if "wiki" in r.getMessage()
+    )
+    assert joined, "the config-error skip must be logged"
+    assert "headers" in joined
+    assert "wiki" in joined
+    assert headers_secret not in joined
+
