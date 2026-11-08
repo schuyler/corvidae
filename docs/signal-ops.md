@@ -286,10 +286,14 @@ differ so both transports can run in one agent.)
   under that root, and a path that lands outside it is refused.
 - **How big.** `signal.max_attachment_size` caps a file in both directions;
   a larger one is refused before anything is sent.
-- **To whom.** A contact corvidae knows: an allowlisted sender who has
-  messaged this account since corvidae started. The registry starts empty
-  at every start, so a contact who has not written since a restart is
-  refused until they do.
+- **To whom.** A `signal:<id>` channel corvidae holds in its registry. That
+  is an allowlisted sender who has written since corvidae started, a channel
+  you list under `channels:` in `agent.yaml`, or one a reminder or scheduled
+  job has fired on since the start. The registry is rebuilt at every start,
+  so a contact who has not written since a restart (and has no reminder or
+  job) is refused until they do. The tool does not check `signal.allow`
+  itself: membership in the registry is the whole gate, as it is for the
+  Discord tool.
 - **The caption** goes in the same message as the file. One longer than
   `signal.message_chunk_size` is split: the first part rides with the file
   and the rest follow as text. If a later part fails, the tool says the file
@@ -304,11 +308,14 @@ differ so both transports can run in one agent.)
 absolute path of the file, not its contents, so the file must be visible to
 the signal-cli process. The unit in "Run the daemon" sets `ProtectHome=yes`,
 which makes `/home`, `/root` and `/run/user` inaccessible to the daemon, and
-`PrivateTmp=yes`, which gives it its own empty `/tmp`. A send root under
-any of those fails inside signal-cli, and the tool answers `Could not send:
-... check the signal-cli daemon can read <path>`. The harness unit sets only
-`PrivateTmp` and `ProtectSystem=strict`, so under it just `/tmp` is hidden.
-Three ways to fix it, from least to most exposure:
+`PrivateTmp=yes`, which gives it its own empty `/tmp` and `/var/tmp`. A send
+root under any of those fails inside signal-cli (by reading signal-cli's source, an
+unreadable file comes back as a JSON-RPC error; this has not been run against
+a live daemon), and the tool answers `Could not send: ... check the signal-cli
+daemon can read <path>`. The harness unit has no `ProtectHome`, so under it
+only `/tmp` and `/var/tmp` are hidden. A root under `/tmp` or `/var/tmp` is
+fixed by option 1 below or by setting `PrivateTmp=no`; a root under `/home`
+can use any of the three. Ways to fix it, from least to most exposure:
 
 1. Keep the send root outside those directories, for example
    `/var/lib/corvidae/outbox`. `ProtectSystem=strict` leaves the rest of the

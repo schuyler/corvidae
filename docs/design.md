@@ -3223,7 +3223,16 @@ both schemas. Known limits: the daemon must be able to read the path (it is
 local and runs as the corvidae user; `docs/signal-ops.md`, "Sending files"
 covers the unit's sandbox); a `send` result that reports a per-recipient
 failure without a JSON-RPC error is not inspected, for files or text alike;
-and a file send is not recorded in the contact's history.
+a file send is not recorded in the contact's history; and the file send has
+not been run against a live signal-cli daemon (the wire format and the error
+path come from reading signal-cli's documentation and source, and the fake
+daemon in `tests/signal_fake.py` pins the same shape). The target gate is
+registry membership, as for Discord's tool and PRD §3.5.9 (nothing gates which
+channel a turn may speak on): a channel is in the registry when an
+allowlisted sender has written since the last start, when it is listed under
+`channels:` (including a `signal:+E164` alias, which then receives the
+file at the E.164 address, bypassing `resolve_channel`), or when a reminder or
+scheduler job has resolved it since the start.
 
 **Authorization.** `should_process_message` is a default-deny gate: the
 sender's ACI must appear in `allow:` directly, or be what a configured
@@ -3309,7 +3318,8 @@ monitored.
 text is never truncated, and chunks go out verbatim, without the newline
 stripping IRC needs. `send_progress` uses the same delivery path but skips
 the outstanding-count bookkeeping: it is mid-turn liveness, not the reply.
-Outbound is text only.
+Replies and progress are text; a file goes out through the separate
+`send_signal_attachment` tool (**Outbound files**, above).
 
 Signal delivers a reply to a turn of any origin on a channel it owns. A
 reminder firing on a `signal:` channel injects through `on_notify`, and
