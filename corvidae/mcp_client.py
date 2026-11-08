@@ -79,7 +79,7 @@ def _failure_log_parts(exc: BaseException, cfg: dict) -> tuple[str, bool]:
         return "", True
     return (
         f": {_redact_urls_in_text(_exc_text(exc))} "
-        "(traceback withheld: the configured URL carries credentials)",
+        "(traceback omitted: the configured URL carries credentials)",
         False,
     )
 

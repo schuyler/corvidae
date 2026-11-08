@@ -537,7 +537,7 @@ async def test_the_rendered_record_hides_a_url_carrying_exception(
     )
     assert "wiki.example.com/mcp" in rendered
     assert "401 Unauthorized" in rendered, "the status text was lost"
-    assert "traceback withheld" in rendered
+    assert "traceback omitted" in rendered
     assert "Traceback" not in rendered
     assert QUERY_SECRET not in rendered, "query token reached the record"
     assert USERINFO_PASSWORD not in rendered, "userinfo reached the record"
@@ -582,7 +582,7 @@ async def test_a_credential_free_endpoint_keeps_its_traceback(caplog):
         {"wiki": cfg}, lambda c: _UrlBearingError(c["url"]), caplog, retry=False
     )
     assert "Traceback" in rendered
-    assert "traceback withheld" not in rendered
+    assert "traceback omitted" not in rendered
 
 
 class _UnreadableError(Exception):
