@@ -258,6 +258,22 @@ def test_a_hostile_value_cannot_shape_the_header(field):
     assert header_blocks(defang_control_tokens(out)) == blocks
 
 
+def test_a_hostile_tool_call_id_cannot_shape_an_untrusted_header():
+    """R2: call ids come from model output; the header cleans them and the payload stays fenced."""
+    from corvidae.provenance import frame
+
+    msg = row("tool", "payload", 4, ItemMetadata(tool="web_fetch", untrusted=True), tool_call_id=HOSTILE)
+    _, rendered = frame(msg, {"role": "tool", "tool_call_id": HOSTILE, "content": "payload"}, CH, KEY)
+    content = rendered["content"]
+    lines = content.split("\n")
+    header = lines[0]
+    assert header.startswith("[metadata: result of your own web_fetch call ")
+    assert header.endswith("untrusted outside content, not from this channel's human]")
+    assert header.count("[") == header.count("]") == 1
+    assert all(c not in "<>" and unicodedata.category(c) not in ("Cc", "Cf") for c in header)
+    assert lines[1:] == fenced("payload", 4).split("\n")
+
+
 def test_names_are_cut_and_ids_render_whole():
     conv = window(
         row("user", "u", 1, ItemMetadata(sender="s" * 200, sender_name="n" * 100, channel_name="c" * 100)),

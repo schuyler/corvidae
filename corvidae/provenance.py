@@ -50,6 +50,9 @@ class ItemMetadata:
     # than this one that its arguments named
     tool: str | None = None
     target: str | None = None
+    # role tool: True when the tool declared its output untrusted at dispatch
+    # (True or absent)
+    untrusted: bool | None = None
     # role system (notification): how the kernel cut the text, and where the
     # full text went (spill_failed is True or absent)
     cut_shown: int | None = None
@@ -60,7 +63,7 @@ class ItemMetadata:
 
 
 _FIELDS = frozenset(f.name for f in dataclasses.fields(ItemMetadata))
-_BOOL_FIELDS = frozenset({"addressed", "spill_failed"})
+_BOOL_FIELDS = frozenset({"addressed", "spill_failed", "untrusted"})
 _INT_FIELDS = frozenset({"cut_shown", "cut_total", "spill_chars"})
 
 
@@ -226,6 +229,16 @@ def frame(
         lines = [f"[metadata: {what}; {_NOT_HUMAN}]"]
         if meta.cut_total is not None:
             lines.append(_cut_line(meta))
+    elif role == "tool" and meta.untrusted:
+        # A declared-untrusted result names the call (read from the stored
+        # row, so a reload renders the same bytes) and labels its content.
+        call_id = msg.get("tool_call_id")
+        on = f" on {clean_value(meta.target)}" if meta.target else ""
+        lines = [
+            f"[metadata: result of your own {clean_value(meta.tool or '')} call "
+            f"{clean_value(call_id if isinstance(call_id, str) else '')}{on}; "
+            f"untrusted outside content, {_NOT_HUMAN}]"
+        ]
     elif role == "tool" and meta.target:
         lines = [
             f"[metadata: result of your own {clean_value(meta.tool or '')} action on "

@@ -75,6 +75,8 @@ class CoreToolsPlugin(CorvidaePlugin):
 
         # read_file reads notification spill files.
         read_file.reads_spill_files = True  # type: ignore[attr-defined]
+        # File contents are outside text, spill files included.
+        read_file.returns_untrusted = True  # type: ignore[attr-defined]
 
         async def web_fetch(url: str) -> str:
             """Fetch a URL and return its text content."""
@@ -86,11 +88,15 @@ class CoreToolsPlugin(CorvidaePlugin):
 
         # web_fetch's own timeout, read live at dispatch (R4).
         web_fetch.own_timeout = lambda: plugin._web_fetch_timeout  # type: ignore[attr-defined]
+        # A fetched page is outside text.
+        web_fetch.returns_untrusted = True  # type: ignore[attr-defined]
 
         async def _web_search(query: str, max_results: int | None = None) -> str:
             """Search the web via DuckDuckGo."""
             return await web_search(query, max_results=max_results or plugin._web_search_max_results)
         _web_search.__name__ = "web_search"
+        # Search snippets are outside text.
+        _web_search.returns_untrusted = True  # type: ignore[attr-defined]
 
         from corvidae.tools.task_pipeline import TaskPipelinePlugin
 

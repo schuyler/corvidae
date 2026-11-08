@@ -13,6 +13,7 @@ Public API:
     - dispatch_tool_call(): parse, dispatch, and wrap a tool call from an LLM response
     - ToolTimeouts: the per-call time bound (default plus per-tool overrides)
     - resolve_own_timeout(): read a tool's declared ``own_timeout`` at dispatch
+    - declares_untrusted_output(): read a tool's ``returns_untrusted`` declaration
 """
 
 from __future__ import annotations
@@ -580,3 +581,9 @@ class ToolContext:
 def declares_spill_reader(tool_fn: Callable) -> bool:
     """True when the tool declares ``reads_spill_files = True``."""
     return getattr(tool_fn, "reads_spill_files", False) is True
+
+
+def declares_untrusted_output(tool_fn: Callable) -> bool:
+    """True when the tool declares ``returns_untrusted = True``: its results
+    carry outside content and reach the model fenced."""
+    return getattr(tool_fn, "returns_untrusted", False) is True

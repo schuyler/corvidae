@@ -917,6 +917,8 @@ def _make_tool(server: _McpServerState, mcp_tool, plugin=None) -> Tool:
     tool_fn.__name__ = tool_name
     # Declare the server's own timeout so dispatch skips a longer outer bound.
     tool_fn.own_timeout = lambda: server.timeout_seconds  # type: ignore[attr-defined]
+    # Every MCP tool returns outside content.
+    tool_fn.returns_untrusted = True  # type: ignore[attr-defined]
     return Tool(name=tool_name, fn=tool_fn, schema=schema)
 
 
