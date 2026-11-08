@@ -42,6 +42,24 @@ from corvidae.tool_collection import parse_tool_timeouts
 
 logger = logging.getLogger(__name__)
 
+#: Distinguishes "this key is absent from the config" from a stored None.
+_ABSENT = object()
+
+
+def _leaf_value(config: dict, dotted: str, default: object = None) -> object:
+    """The value at a dotted key, or ``default`` when any step is missing.
+
+    ``_changed_leaf_keys`` reports dotted paths, so reading a reported key's
+    pending value means walking the same path.
+    """
+    current: object = config
+    for part in dotted.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+    return current
+
+
 def _changed_leaf_keys(old: dict, new: dict, prefix: str = "") -> set[str]:
     """Dotted leaf keys whose value differs between two config dicts.
 
@@ -314,27 +332,42 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         Without this a restart-only edit is silent: the reload reports the
         plugins it did update, and the operator learns the change was pending
         only by noticing behaviour never changed (#408).
-        """
-        # Compare against the last config this watcher saw, not against the
-        # startup config: otherwise reload N re-reports every key reload 1
-        # changed, forever. `self.config` is set once in on_init and never
-        # advances, so it is only the seed for this.
-        live = self._reloadable_prefixes()
-        previous = getattr(self, "_last_config", None)
-        if not isinstance(previous, dict):
-            previous = self.config if isinstance(getattr(self, "config", None), dict) else {}
-        self._last_config = new_config
 
-        for key in sorted(_changed_leaf_keys(previous, new_config)):
+        The comparison is against the config the running daemon is using
+        (`self.config`, set once in on_init and never advanced), because the
+        warning claims what a restart would change. Diffing against the
+        previous reload reported a key edited back to its running value as
+        pending, when the file and the process already agreed (#473).
+
+        A key whose pending value is unchanged from the last report is not
+        reported again, so a parked file does not warn on every poll. The
+        record is rebuilt each pass, so a key that reverts is forgotten and a
+        later edit to it is news again.
+        """
+        live = self._reloadable_prefixes()
+        running = self.config if isinstance(getattr(self, "config", None), dict) else {}
+        reported = getattr(self, "_reported_pending", None)
+        if not isinstance(reported, dict):
+            reported = {}
+        still_pending: dict[str, object] = {}
+
+        for key in sorted(_changed_leaf_keys(running, new_config)):
             if key.startswith("_") or any(
                 key == p or key.startswith(p + ".") for p in live
             ):
                 continue
-            logger.warning(
-                "config reload: %s changed; restart-only, takes effect on restart",
-                key,
-                extra={"key": key},
-            )
+            value = _leaf_value(new_config, key, _ABSENT)
+            # Reported once per pending value, not once per reload.
+            if reported.get(key, _ABSENT) != value:
+                logger.warning(
+                    "config reload: %s changed; restart-only, takes effect "
+                    "on restart",
+                    key,
+                    extra={"key": key},
+                )
+            still_pending[key] = value
+
+        self._reported_pending = still_pending
 
     async def _dispatch_config_reload(self, config: dict) -> None:
         """Dispatch on_config_reload to each plugin with per-plugin error isolation.
