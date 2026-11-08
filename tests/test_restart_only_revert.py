@@ -159,14 +159,45 @@ def test_a_key_name_containing_a_dot_is_reported(tmp_path, caplog):
 
 
 def test_an_unchanged_file_does_not_warn(tmp_path, caplog):
-    """A reload that changes nothing draws no warning."""
+    """A reload that changes nothing draws no warning.
+
+    The reloaded config is the running one and nothing else: a fixture that
+    added a key would produce a real warning for it, and filtering on
+    `llm.main.model` would then hide that warning and report green (review).
+    """
     watcher = _watcher(tmp_path, RUNNING)
 
     with caplog.at_level(logging.WARNING):
-        watcher._warn_restart_only_changes({"**": None, **RUNNING})
-        messages = [m for m in _warnings(caplog) if "llm.main.model" in m]
+        watcher._warn_restart_only_changes({"_config_path": "agent.yaml", **RUNNING})
+        messages = _warnings(caplog)
 
     assert not messages, f"an unchanged file must not warn: {messages}"
+
+
+def test_a_non_string_key_reports_every_change(tmp_path, caplog):
+    """A key YAML gives a non-string type (an int) still reports each change.
+
+    The path is walked by the key's real name. Coercing it to a string first
+    made `_leaf_value` miss the key and return `_ABSENT` every time, so only
+    the first change was reported and later ones compared equal to it.
+    """
+    running = {"llm": {1: {"base_url": "http://h:1", "model": "a"}}}
+    watcher = _watcher(tmp_path, running)
+
+    def reload_with(model: str) -> dict:
+        return {"_config_path": "agent.yaml",
+                "llm": {1: {"base_url": "http://h:1", "model": model}}}
+
+    reported = []
+    with caplog.at_level(logging.WARNING):
+        for model in ("b", "c", "d"):
+            caplog.clear()
+            watcher._warn_restart_only_changes(reload_with(model))
+            reported.append(bool(_warnings(caplog)))
+
+    assert reported == [True, True, True], (
+        f"every change to a non-string key must be reported; got {reported}"
+    )
 
 
 def test_live_keys_still_do_not_warn(tmp_path, caplog):

@@ -52,7 +52,7 @@ _ABSENT = object()
 _UNREPORTED = object()
 
 
-def _leaf_value(config: object, path: tuple[str, ...]) -> object:
+def _leaf_value(config: object, path: tuple[object, ...]) -> object:
     """The value at ``path`` (key names, outermost first), or ``_ABSENT``.
 
     The path is walked by key name rather than by re-splitting a dotted
@@ -68,19 +68,32 @@ def _leaf_value(config: object, path: tuple[str, ...]) -> object:
     return current
 
 
+def _dotted(path: tuple[object, ...]) -> str:
+    """A key path as the dotted name the warning names.
+
+    Path tuples keep the keys as they were written, which may include a type
+    YAML chose (`1`, `true`); the message needs a string, and sorting needs a
+    key that compares across types.
+    """
+    return ".".join(str(part) for part in path)
+
+
 def _changed_leaf_keys(
-    old: dict, new: dict, prefix: tuple[str, ...] = ()
-) -> set[tuple[str, ...]]:
+    old: dict, new: dict, prefix: tuple[object, ...] = ()
+) -> set[tuple[object, ...]]:
     """Leaf key paths whose value differs between two config dicts.
 
-    Paths are tuples of key names, so a dotted key name survives intact. A
+    Paths are tuples of the keys themselves, so a dotted key name survives
+    intact and a key YAML typed as a non-string still resolves. Stringifying
+    here turned such a key into a name the lookup could never find, so every
+    later comparison read `_ABSENT` and the change was suppressed (review). A
     whole subtree appearing or disappearing reports each leaf under it rather
     than the subtree name, so the warning names something the operator can act
     on.
     """
-    changed: set[tuple[str, ...]] = set()
+    changed: set[tuple[object, ...]] = set()
     for key in set(old) | set(new):
-        path = (*prefix, str(key))
+        path = (*prefix, key)
         in_old, in_new = key in old, key in new
         if in_old and in_new:
             a, b = old[key], new[key]
@@ -361,10 +374,10 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         reported = getattr(self, "_reported_pending", None)
         if not isinstance(reported, dict):
             reported = {}
-        still_pending: dict[tuple[str, ...], object] = {}
+        still_pending: dict[tuple[object, ...], object] = {}
 
-        for path in sorted(_changed_leaf_keys(running, new_config)):
-            dotted = ".".join(path)
+        for path in sorted(_changed_leaf_keys(running, new_config), key=_dotted):
+            dotted = _dotted(path)
             if dotted.startswith("_") or any(
                 dotted == p or dotted.startswith(p + ".") for p in live
             ):
