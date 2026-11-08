@@ -1363,9 +1363,12 @@ role:
   `spill_chars` and `spill_failed` (see [Notification
   spill](#notification-spill-spillpy));
 - tool result: `tool` and `target`, the dispatched call's name and the first
-  argument naming another registered channel, read from the call's
-  row in the window (`on_notify` with a `tool_call_id`, and
-  `deliver_tool_error`).
+  argument naming another registered channel, set by `on_notify` with a
+  `tool_call_id` and by `deliver_tool_error` (the name from the dispatch
+  record when there is one, else the call's row; the target from the call's
+  row in the window); and `untrusted`, True when the tool declared its
+  output untrusted as of dispatch (see [Untrusted tool
+  results](#untrusted-tool-results)), otherwise absent.
 
 `metadata` is never passed as a hook argument; the kernel fills it from what
 it observes (the transport's sender and channel, the tool-call row in the window, the
@@ -1375,7 +1378,7 @@ an `annotations` entry holding only the keys a plugin declared in
 `model_visible_annotations`; the Agent reads the declarations once in
 `_start_plugin`). Other annotations are never persisted into the row or
 shown to the model. `decode` checks each field's type (strings, booleans for
-`addressed` and `spill_failed`, integers for the three counts; a boolean is
+`addressed`, `spill_failed` and `untrusted`, integers for the three counts; a boolean is
 not an integer) and rejects the whole record on a mismatch. A stored record that does not decode renders as a row
 without provenance and logs a warning naming the row.
 
@@ -1404,10 +1407,20 @@ in code:
 - A cross-channel tool result gets `[metadata: result of your own <tool>
   action on <target>; ...]`, in the tool message itself so call and result
   stay adjacent.
+- A tool result with `untrusted` set gets `[metadata: result of your own
+  <tool> call <call id>; untrusted outside content, not from this channel's
+  human]`, and when it also has a `target`, `[metadata: result of your own
+  <tool> call <call id> on <target>; untrusted outside content, not from
+  this channel's human]`. The call id is read from the stored row, so a
+  reload renders the same bytes; a row with no string id renders `?`. Tool,
+  call id and target go through `clean_value`, which matters because call ids
+  come from model output. A result with a `target` and no `untrusted` keeps
+  the cross-channel wording above.
 - Declared annotations follow as `[annotations: k=v, ...]`.
 
-Notification payloads and cross-channel results (tool results with a
-`target`) are fenced; other tool results are not:
+Notification payloads, cross-channel results (tool results with a
+`target`) and untrusted tool results (`untrusted` set) are fenced; other
+tool results are not:
 `[payload <nonce> begins]` ... `[payload <nonce> ends]`. The nonce is the
 first 16 hex digits of an HMAC-SHA256 of `message_log:<row id>` keyed by
 the fence key, so it is stable across renders and restarts and differs per
@@ -1420,7 +1433,49 @@ Sanitizing happens at render time only (`clean_value` for header values:
 NFKC, no control, format or bracket characters, one line, names cut at 64
 characters and ids never cut; `clean_payload` for fenced text: control and
 format characters removed, newline and tab kept). The log keeps the
-original text. A cross-channel result with no content fences an empty payload.
+original text. A cross-channel result with no content fences an empty payload. The
+fenced text is the stored `content` after `clean_payload` (the stored row
+is unchanged); an orphaned result
+(`ContextWindow.build_prompt` rendering it as a `system` message, #79) gets
+the same header and fence inside the orphan label.
+
+#### Untrusted tool results
+
+A tool plugin declares that a tool returns outside content by setting
+`returns_untrusted = True` on the registered callable, the form
+`reads_spill_files` and `own_timeout` take; `tool.declares_untrusted_output`
+reads it and is strict (`is True`, so a truthy non-bool does not count). It
+is per callable and not a plugin class attribute because MCP tools are
+created per server at connect time and no class-level list could name them.
+Declared today: `read_file` (so a spill file read back is fenced, and so is
+any other file), `web_fetch`, `web_search`, and every tool `mcp_client`
+builds. `shell` and `task_pipeline` are not declared (#580).
+
+The declaration is evaluated when the call is dispatched, not when the
+result arrives. `_dispatch_tool_calls` writes `Agent._dispatched_calls`,
+`(channel id, call id)` -> `(tool name, untrusted)`, for every call before
+the task is enqueued (and before the no-task-queue path's `on_notify`).
+Two things make the record necessary. Compaction can drop the call row
+while the tool runs (a user message can interleave and trigger it), so
+the window no longer names the call when the result arrives; and a registry
+change between dispatch and result (an MCP server dropping, a rebuild) must
+not unfence a call that was declared when dispatched. `_tool_result_metadata`
+takes the name and `untrusted` from the record, then the window's call row
+for `target`; with the call row gone it returns the record's name, `untrusted`
+and no target. The record is removed in `_process_queue_item` where the
+`_queued_tool_results` entry is discarded, after `on_notify` computed the
+metadata. A second delivery for the same id (a subagent's confirmation, then
+its result) processed after the first finds no record: its name comes from the window and it is not
+stamped, so the rule is one: declared at dispatch, or not fenced. Kernel error
+text for a declared tool (refusal, timeout, task unavailable) is stamped and
+fenced too.
+
+The flag is stamped into the row's provenance record when the result is
+built, so a later change to a declaration does not re-render history. The
+header names no spill source: it says the content is untrusted, not that it
+came from a notification's spill file (#576). The estimator counts the stored
+row, not the added framing, so a fenced row costs more tokens than it is
+estimated at (#577).
 
 Items the kernel builds carry no attribution of their own: the queue
 consumer runs in an empty `contextvars.Context`, so a notification

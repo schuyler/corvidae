@@ -95,7 +95,12 @@ from corvidae.outbound import (
 from corvidae.queue import SerialQueue
 from corvidae.spill import current_cut
 from corvidae.task import Task
-from corvidae.tool import DEFAULT_TOOL_TIMEOUTS, ToolTimeouts, dispatch_tool_call
+from corvidae.tool import (
+    DEFAULT_TOOL_TIMEOUTS,
+    ToolTimeouts,
+    declares_untrusted_output,
+    dispatch_tool_call,
+)
 from corvidae.tool_policy import (
     ToolView,
     build_tool_view,
@@ -298,6 +303,9 @@ class Agent(CorvidaePlugin):
         # (channel_id, tool_call_id) of tool results queued but not yet
         # processed, so deliver_tool_error never adds a second result (#173).
         self._queued_tool_results: set[tuple[str, str]] = set()
+        # (channel id, call id) -> (tool name, declared untrusted), recorded at
+        # dispatch so a registry change before the result cannot unfence it.
+        self._dispatched_calls: dict[tuple[str, str], tuple[str, bool]] = {}
         self._registry: ChannelRegistry | None = None
         self._max_tool_result_chars: int = 100_000
         # Per-call tool time bounds, copied from ToolCollectionPlugin at start.
@@ -581,10 +589,15 @@ class Agent(CorvidaePlugin):
 
     def _tool_result_metadata(self, channel, tool_call_id: str) -> ItemMetadata:
         """The tool and the other registered channel that the call answered by
-        ``tool_call_id`` named, read from the call's row in the window.
+        ``tool_call_id`` named, from the dispatch-time record and the window.
 
-        A call not in the window (or no window yet) gives empty metadata.
+        The name and the untrusted flag come from the dispatch-time record when
+        there is one; without it (a repeat delivery) the name comes from the
+        window and the result is not marked untrusted. A call in neither gives
+        empty metadata.
         """
+        recorded = self._dispatched_calls.get((channel.id, tool_call_id))
+        untrusted = True if recorded and recorded[1] else None
         conv = channel.conversation
         for msg in reversed(conv.messages if conv is not None else []):
             for call in well_formed_calls(msg):
@@ -609,7 +622,15 @@ class Agent(CorvidaePlugin):
                     ),
                     None,
                 )
-                return ItemMetadata(tool=name if isinstance(name, str) else None, target=target)
+                if recorded:
+                    name = recorded[0]
+                return ItemMetadata(
+                    tool=name if isinstance(name, str) else None,
+                    target=target, untrusted=untrusted,
+                )
+        # The call row is gone (compaction): the record alone names the call.
+        if recorded:
+            return ItemMetadata(tool=recorded[0], untrusted=untrusted)
         return ItemMetadata()
 
     def _get_or_create_queue(self, channel) -> SerialQueue:
@@ -1343,6 +1364,8 @@ class Agent(CorvidaePlugin):
                 # Same step as the discard: a result is either queued or no
                 # longer pending, never neither (see deliver_tool_error).
                 self._queued_tool_results.discard((channel.id, item.tool_call_id))
+                # The metadata was computed at enqueue; the record is spent.
+                self._dispatched_calls.pop((channel.id, item.tool_call_id), None)
                 if channel.pending_tool_call_ids:
                     logger.debug(
                         "tool result buffered, pending: %d",
@@ -1870,6 +1893,14 @@ class Agent(CorvidaePlugin):
         # call fires once the pending set empties, i.e. after the last
         # result of the last outstanding batch.
         channel.pending_tool_call_ids |= {call["id"] for call in tool_calls}
+
+        # Record each call's tool and untrusted declaration as it stands now,
+        # before any result can be enqueued for it.
+        for call in tool_calls:
+            name = call["function"]["name"]
+            self._dispatched_calls[(channel.id, call["id"])] = (
+                name, declares_untrusted_output(self._tools.get(name)),
+            )
 
         if task_queue is None:
             logger.error(

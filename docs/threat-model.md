@@ -248,7 +248,8 @@ Four places:
 - A tool result whose call compaction dropped (#79) is rendered by
   `ContextWindow.build_prompt` as a framed `role: system` message, since a
   `tool` message with no call breaks strict chat templates. The result can
-  be untrusted (a `web_fetch` page, an MCP reply). Unlike the two above it
+  be untrusted (a `web_fetch` page, an MCP reply); an orphaned result of a
+  declared tool is fenced as one (finding 6). Unlike the two above it
   is render-only: the stored row stays `role: tool`.
 
 The "retrieved data, not instructions" wrapper is the right instinct. But
@@ -288,8 +289,8 @@ hardening, is still an experiment worth running.
 
 The kernel renders a code-built `[metadata: ...]` header before a person's
 message and a header plus a nonce-fenced payload (`[payload <nonce> begins]`
-... `[payload <nonce> ends]`) for notifications and cross-channel tool
-results ([design.md](design.md#provenance-header-and-fence)).
+... `[payload <nonce> ends]`) for notifications, cross-channel tool
+results and results of tools declared to return untrusted output ([design.md](design.md#provenance-header-and-fence)).
 
 What it guarantees: the header's wording and the fence come from kernel
 code. Names, ids, annotation values and payload are sanitized at render
@@ -456,10 +457,30 @@ Three more things to know:
 ### 6. MCP servers are trusted peers
 
 An MCP server's tool descriptions go into the prompt as tool schemas and
-its results come back as tool results, neither of them framed. Schema
-sanitization is shallow by design. An MCP server is therefore a supply-chain
-vector for tool-description injection. `transform_tool_result` exists as a
-hook for exactly this and has only a pass-through default.
+its results come back as tool results. The descriptions are not framed, and
+schema sanitization is shallow by design. An MCP server is therefore a
+supply-chain vector for tool-description injection. Results are framed: the
+kernel declares every MCP tool as returning untrusted output (#557), so each
+result reaches the model in the nonce fence under a header the code builds,
+naming the tool and call id and labelling the content untrusted. That marks
+data as data; it does not make the model ignore it. `transform_tool_result`
+remains a pass-through hook.
+
+**What is fenced and what is not.** Fenced as untrusted outside content: the
+results of `read_file` (spill files read back included), `web_fetch`,
+`web_search` and every MCP tool. A tool declares this for itself
+(`returns_untrusted`, read when the call is dispatched and stored on the
+result), so a result of a tool no plugin declares is unfenced unless it acts on
+another channel. Result rows stored before #557 carry no flag and stay
+unfenced on reload. Unfenced today:
+`shell` and `task_pipeline` output, including a `cat` of a spill file (#580);
+`recall_raw` and `search_memory` replays of earlier content, which can carry
+text that was untrusted when it first arrived; the results inside a
+subagent's own loop, which reach the subagent's model with no frame; and the
+subagent's final report to the main model, which can repeat what the
+subagent read. The header names no spill source for a read-back (#576), and
+fenced rows are costed by the estimator without their framing, so a long run
+of them can undercount tokens against the hard ceiling (#577).
 
 The HTTP transports (`streamable_http`, `sse`) open an outbound connection
 to whatever `url` names and send the configured `headers`, bearer token
@@ -1108,10 +1129,12 @@ that floods an endpoint fills it at the cap times the rate until the age
 catches up. Files are mode 0600 and named by a random UUID, so a name carries
 nothing the sender controls and the service only ever deletes names of that
 shape. The header offers the path only on a channel where an enabled tool
-declares it reads spill files (`read_file`, `shell`). What the agent reads
-back is not fenced: the header's pointer is kernel text, but the file's
-contents arrive as an ordinary `read_file` result, without the notification's
-payload fence (#571). The spill directory is not inside any tool root
+declares it reads spill files (`read_file`, `shell`). What `read_file` reads
+back is fenced: the header's pointer is kernel text, and the file's contents
+arrive as a `read_file` result under the untrusted-output header and nonce
+fence (#571), though not the notification's own fence, and the header names
+no source (#576). A `cat` of the file through `shell` arrives unfenced
+(#580). The spill directory is not inside any tool root
 (`read_file` has none until #444), so the file is reachable the same way any
 other path is, and the agent can read it whether or not a header pointed at
 it.
@@ -1273,7 +1296,8 @@ skills.
    `agent.mid_conversation_system_role: user`; flipping the default is
    what remains.
 7. Give `transform_tool_result` a default that frames MCP results the way
-   the funnel frames CONTEXT.
+   the funnel frames CONTEXT. (MCP results now reach the model fenced as
+   untrusted output; this item concerns a hook-level default.)
 8. Decide whether process separation is worth doing.
 
 Items 1 through 7 are each a contained change, though 4 and 6 touch

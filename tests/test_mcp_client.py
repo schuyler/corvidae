@@ -1773,3 +1773,11 @@ async def test_mcp_tool_declares_live_own_timeout():
     with patch("corvidae.mcp_client._call_mcp_tool", new=AsyncMock(return_value="ok")) as call:
         await tool.fn()
     assert call.await_args.args[3] == 4
+
+
+def test_an_mcp_tool_function_declares_untrusted_output():
+    """R7: every MCP tool's function declares that its output is untrusted."""
+    from corvidae.tool import declares_untrusted_output
+
+    tool = _make_tool(_make_server_state(), _make_mcp_tool("anything"))
+    assert declares_untrusted_output(tool.fn)
