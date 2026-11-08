@@ -109,7 +109,12 @@ class TaskQueue:
         # line to this file, so results survive the in-memory deque's
         # eviction and a daemon restart. Audit side channel: a write
         # failure is logged and swallowed, never breaking completion.
-        self.results_path: Path | None = Path(results_path) if results_path is not None else None
+        # An empty/whitespace string is treated as unset (Path("") would
+        # silently become the current directory).
+        if results_path is None or (isinstance(results_path, str) and not results_path.strip()):
+            self.results_path: Path | None = None
+        else:
+            self.results_path = Path(results_path)
 
     @property
     def active_task(self) -> Task | None:
@@ -276,9 +281,16 @@ class TaskQueue:
                     except json.JSONDecodeError:
                         continue
                     if isinstance(rec, dict) and rec.get("task_id") == task_id:
-                        found = rec.get("result")
+                        # Only string results honor the tool's contract; a
+                        # corrupt/preexisting record with a non-string
+                        # result is skipped.
+                        result = rec.get("result")
+                        if isinstance(result, str):
+                            found = result
             return found
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # A non-UTF-8 byte sequence raises while iterating the file;
+            # retrieval of an audit file must not raise.
             return None
 
     def status(self) -> str:
@@ -329,6 +341,10 @@ class TaskPlugin(CorvidaePlugin):
         daemon_config = config.get("daemon", {})
         self._max_workers = daemon_config.get("max_task_workers", 4)
         self._completed_buffer = daemon_config.get("completed_task_buffer", 100)
+        # Reset first: a later on_init without the key must not keep a
+        # stale path (consistent with _max_workers/_completed_buffer,
+        # which are unconditionally overwritten).
+        self._results_path = None
         results_path = daemon_config.get("task_results_path")
         # An empty string would resolve Path(base_dir) / "" to the base
         # directory itself — a directory, not a file. Treat it as unset.
