@@ -338,3 +338,25 @@ def test_validate_mcp_config_hides_a_url_that_is_the_whole_block():
     assert QUERY_SECRET not in message
     assert USERINFO_PASSWORD not in message
 
+
+
+def test_a_pathologically_nested_value_does_not_raise():
+    """Describing a rejected value must not raise, however deep it nests.
+
+    The recursion was unbounded, so a deeply nested or self-referential value
+    raised RecursionError from inside config-error handling and replaced the
+    error it was describing (review).
+    """
+    from corvidae.mcp_client import _describe_config_value
+
+    deep: list = []
+    cur = deep
+    for _ in range(5000):
+        nxt: list = []
+        cur.append(nxt)
+        cur = nxt
+    assert isinstance(_describe_config_value(deep), str)
+
+    self_ref: dict = {}
+    self_ref["self"] = self_ref
+    assert isinstance(_describe_config_value(self_ref), str)

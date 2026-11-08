@@ -112,7 +112,9 @@ def _redact_url(value: object) -> str:
 
 
 
-def _describe_config_value(value: object, secret_bearing: bool = False) -> str:
+def _describe_config_value(
+    value: object, secret_bearing: bool = False, _depth: int = 0
+) -> str:
     """A rejected config value, in a form safe to put in a log line.
 
     Config errors are reported in the daemon log, and a value the validator
@@ -129,7 +131,13 @@ def _describe_config_value(value: object, secret_bearing: bool = False) -> str:
     - ``secret_bearing`` is for the key whose value is a credential by
       definition -- ``headers`` -- where only the type and size are reported,
       whatever shape the value arrived in (#386 review).
+
+    Nesting is bounded: this runs inside config-error handling, and a
+    deeply nested or self-referential value would otherwise raise
+    RecursionError and replace the error it is describing.
     """
+    if _depth >= _MAX_DESCRIBE_DEPTH:
+        return f"{type(value).__name__} (nested too deeply to show)"
     if secret_bearing and not isinstance(value, (int, float, bool, type(None))):
         if isinstance(value, str):
             return f"str of length {len(value)}"
@@ -140,13 +148,16 @@ def _describe_config_value(value: object, secret_bearing: bool = False) -> str:
         return repr(value) if redacted == _UNPARSEABLE else redacted
     if isinstance(value, dict):
         inner = ", ".join(
-            f"{k!r}: {_describe_config_value(v)}"
+            f"{k!r}: {_describe_config_value(v, _depth=_depth + 1)}"
             for k, v in list(value.items())[:4]
         )
         more = ", …" if len(value) > 4 else ""
         return "{" + inner + more + "}"
     if isinstance(value, (list, tuple)):
-        inner = ", ".join(_describe_config_value(v) for v in list(value)[:4])
+        inner = ", ".join(
+            _describe_config_value(v, _depth=_depth + 1)
+            for v in list(value)[:4]
+        )
         more = ", …" if len(value) > 4 else ""
         return "[" + inner + more + "]"
     return repr(value)
@@ -197,6 +208,10 @@ _TRANSPORTS = ("stdio", "sse", "streamable_http")
 # What _redact_url returns for a value it cannot read as a URL. Also how
 # callers tell a URL-shaped config value from any other kind.
 _UNPARSEABLE = "(unparseable endpoint)"
+# How deep _describe_config_value will descend before summarising. Config
+# nesting is shallow; the bound exists so a pathological value cannot raise
+# RecursionError inside config-error handling.
+_MAX_DESCRIBE_DEPTH = 8
 # Reconnect backoff ladder for servers that failed at startup; the same
 # 10 s doubling to 300 s as the IRC, Signal and Discord transports.
 _INITIAL_BACKOFF = 10
