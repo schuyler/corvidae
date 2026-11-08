@@ -10,7 +10,9 @@ Usage:
     python scripts/eval_compaction.py --segment 2   # evaluate the death-spiral segment specifically
 
 Requirements:
-    - aiohttp (pip install aiohttp)
+    - The project environment: run it as `uv run python scripts/eval_compaction.py`.
+      It resolves the compaction stage's profile through `corvidae.llm_plugin`,
+      the same code the daemon runs, so corvidae must be importable.
     - Access to an OpenAI-compatible LLM API
 """
 
@@ -20,6 +22,14 @@ import json
 import sys
 import time
 from pathlib import Path
+
+try:
+    from corvidae.llm_plugin import parse_llm_config
+except ImportError:  # pragma: no cover - depends on how the script is launched
+    sys.exit(
+        "eval_compaction: corvidae is not importable from this interpreter. "
+        "Run it in the project environment: uv run python scripts/eval_compaction.py"
+    )
 
 # ---------------------------------------------------------------------------
 # 1. Fixture loading
@@ -45,20 +55,12 @@ def resolve_llm_defaults(llm_section: dict | None) -> dict:
         A dict with ``base_url``, ``model`` and optionally ``api_key``.
 
     Raises:
-        ValueError: naming the problem, for a malformed ``llm:`` section or
-            one with no profile the compaction stage can resolve to.
+        ValueError: naming the problem, for a malformed ``llm:`` section.
     """
-    # Imported here so the script still loads (and prints its usage) when it
-    # is run outside the project environment -- see the guard in main().
-    from corvidae.llm_plugin import parse_llm_config
-
     config = parse_llm_config(llm_section)
+    # `parse_llm_config` guarantees a default chat profile (PRD §3.11.1), so
+    # this always resolves; `profile_for` falls back to it for any stage.
     profile = config.profile_for(EVAL_STAGE, "chat")
-    if profile is None:
-        raise ValueError(
-            f"no profile resolves for the {EVAL_STAGE} stage: llm.stages does "
-            "not name one and there is no default chat profile"
-        )
     resolved = config.profiles[profile]
     return {
         "base_url": resolved.get("base_url"),
