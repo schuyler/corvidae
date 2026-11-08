@@ -30,7 +30,7 @@ import logging
 import math
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from corvidae.clock import Clock
 from corvidae.envref import EnvRefError, expand_env_refs
@@ -84,22 +84,28 @@ def _redact_url(value: object) -> str:
 
     Never raises. Redaction runs inside failure logging, so a value it cannot
     parse becomes a constant rather than an exception that would replace the
-    failure being reported.
+    failure being reported. Both call sites evaluate this *inside* an except
+    handler, so a raise here would escalate a failed connect into a startup
+    failure (#386 review).
     """
     try:
         parts = urlsplit(str(value))
+        # `hostname` and `port` raise ValueError on a malformed authority
+        # (`host:abc`, an out-of-range port), so they are read inside the try.
+        host = parts.hostname
+        port = parts.port
     except ValueError:
         return "(unparseable endpoint)"
     # A value with no scheme is not a URL the client can use; logging it whole
     # would put whatever it is into the log unredacted.
-    if not parts.scheme or not parts.netloc:
+    if not parts.scheme or not parts.netloc or not host:
         return "(unparseable endpoint)"
-    # Drop userinfo by rebuilding netloc from host and port alone.
-    netloc = parts.hostname or ""
-    if parts.port is not None:
-        netloc = f"{netloc}:{parts.port}"
-    query = "?…" if parts.query else ""
-    return urlunsplit((parts.scheme, netloc, parts.path, query, ""))
+    # Drop userinfo by rebuilding netloc from host and port alone. An IPv6
+    # literal keeps its brackets, or the colons read as a port separator.
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return f"{parts.scheme}://{netloc}{parts.path}{'?…' if parts.query else ''}"
 
 
 

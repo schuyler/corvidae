@@ -56,7 +56,42 @@ def test_query_presence_is_still_visible():
         {"transport": "streamable_http",
          "url": f"https://wiki.example.com/mcp?token={QUERY_SECRET}"}
     )
-    assert "?" in endpoint
+    # Exactly one marker: the path carries no "?" of its own, and a rebuilt
+    # URL must not join its own delimiter to ours ("mcp??…").
+    assert endpoint == "https://wiki.example.com/mcp?…"
+
+
+def test_bad_port_does_not_raise():
+    """A malformed authority is accepted by config validation and must not raise.
+
+    `url: http://host:abc/mcp?token=S` passes the config check (a non-empty
+    string) and is queued for retry. `parts.port` raises ValueError on it, and
+    both call sites evaluate the endpoint inside an except handler, so a raise
+    here turns a failed MCP connect into a daemon startup failure (#386 review).
+    """
+    endpoint = _server_endpoint(
+        {"transport": "streamable_http", "url": "http://host:abc/mcp?token=S"}
+    )
+    assert endpoint == "(unparseable endpoint)"
+    assert "S" not in endpoint.replace("unparseable", "")
+
+
+def test_out_of_range_port_does_not_raise():
+    """A port above 65535 raises from parts.port too."""
+    endpoint = _server_endpoint(
+        {"transport": "streamable_http", "url": "http://host:99999/mcp"}
+    )
+    assert isinstance(endpoint, str)
+    assert endpoint == "(unparseable endpoint)"
+
+
+def test_ipv6_literal_keeps_its_brackets():
+    """An IPv6 host is re-bracketed, or the colons read as a port separator."""
+    endpoint = _server_endpoint(
+        {"transport": "sse", "url": "http://[::1]:8931/mcp?token=x"}
+    )
+    assert endpoint == "http://[::1]:8931/mcp?…"
+    assert "x" not in endpoint
 
 
 def test_plain_url_is_unchanged():
@@ -116,17 +151,13 @@ def secret_url_server():
     }
 
 
-async def _plugin_with(servers: dict, failures: set[str]):
-    """A started plugin whose named servers fail to connect."""
+async def _plugin_with(servers: dict) -> "mcp_client_mod.McpClientPlugin":
+    """A started plugin whose configured servers all fail to connect."""
     plugin = mcp_client_mod.McpClientPlugin(None)
     config = {"mcp": {"servers": servers}}
     await plugin.on_init(pm=clock_pm(), config=config)
 
     async def connect(name, cfg):
-        if name in failures:
-            raise ConnectionError("refused")
-        # A server that is not failing never registers, so it also stays
-        # pending; the warning under test comes only from the failures.
         raise ConnectionError("refused")
 
     plugin._connect_server = connect
@@ -135,7 +166,7 @@ async def _plugin_with(servers: dict, failures: set[str]):
 
 async def test_on_start_skip_line_hides_credentials(secret_url_server, caplog):
     """The on_start connect-failure warning carries no credential."""
-    plugin = await _plugin_with({"wiki": secret_url_server}, {"wiki"})
+    plugin = await _plugin_with({"wiki": secret_url_server})
     with caplog.at_level(logging.WARNING):
         await plugin.on_start({"mcp": {"servers": {"wiki": secret_url_server}}})
 
@@ -150,7 +181,7 @@ async def test_on_start_skip_line_hides_credentials(secret_url_server, caplog):
 
 async def test_retry_round_line_hides_credentials(secret_url_server, caplog):
     """The retry-round reconnect failure warning carries no credential."""
-    plugin = await _plugin_with({"wiki": secret_url_server}, {"wiki"})
+    plugin = await _plugin_with({"wiki": secret_url_server})
     await plugin.on_start({"mcp": {"servers": {"wiki": secret_url_server}}})
     caplog.clear()
 
@@ -172,7 +203,7 @@ async def test_two_failing_servers_are_distinguishable(caplog):
         "wiki": {"transport": "streamable_http", "url": "https://wiki.example.com/mcp"},
         "search": {"transport": "sse", "url": "https://search.example.com/sse"},
     }
-    plugin = await _plugin_with(servers, {"wiki", "search"})
+    plugin = await _plugin_with(servers)
     with caplog.at_level(logging.WARNING):
         await plugin.on_start({"mcp": {"servers": servers}})
 
