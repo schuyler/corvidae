@@ -82,10 +82,13 @@ Assets, roughly in order of how bad it is to lose them:
    `url` instead — a query-string token or a `user:pass@` userinfo — stays
    out of corvidae's own MCP log lines: the connect-failure and retry
    warnings name only the endpoint's scheme, host, port and path, the
-   exception attached to them has every URL in its text reduced the same
-   way, and a config-error skip describes a rejected value likewise (#386).
-   The MCP SDK's own loggers (`mcp.*`) are not filtered and can still write
-   the URL whole, so prefer a `${VAR}` header to a credential in the URL.
+   exception chain attached to them has every URL in its text reduced the
+   same way (sub-exceptions of an exception group are not yet walked), and
+   a config-error skip describes a rejected value likewise (#386). Library
+   loggers — the MCP SDK's `mcp.*` and the HTTP client's `httpx2` — are not
+   filtered and can write the URL whole (at the default WARNING level only
+   `mcp.*` errors do), so prefer a `${VAR}` header to a credential in the
+   URL.
 2. The host account corvidae runs as, and anything it can read or run.
 3. `sessions.db`, the JSONL logs, and the memory tables: plaintext copies
    of every conversation, including end-to-end-encrypted Signal ones.

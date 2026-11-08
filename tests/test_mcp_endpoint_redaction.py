@@ -654,3 +654,62 @@ def test_a_header_name_that_is_a_credential_url_is_not_echoed(monkeypatch):
     assert "'wiki'" in message and "NOPE_UNSET_VAR" in message
     assert QUERY_SECRET not in message
     assert USERINFO_PASSWORD not in message
+
+
+async def test_config_error_skip_line_hides_headers_inside_a_list_shaped_entry(caplog):
+    """A stray `-` makes the server entry a list; its nested `headers` value
+    is still a credential and must not be quoted (review)."""
+    headers_secret = "SECRET5"
+    entry = [{"transport": "sse", "url": "https://wiki.example.com/sse",
+              "headers": {"Authorization": f"Bearer {headers_secret}"}}]
+    plugin = await _plugin_with({"wiki": entry})
+    with caplog.at_level(logging.WARNING):
+        await plugin.on_start({"mcp": {"servers": {"wiki": entry}}})
+
+    joined = "\n".join(
+        r.getMessage() for r in caplog.records if "wiki" in r.getMessage()
+    )
+    assert "mcp.servers.wiki must be a mapping" in joined
+    assert headers_secret not in joined
+
+
+def test_validate_mcp_config_hides_headers_in_a_list_shaped_servers_block():
+    """`servers:` written as a list must not quote a nested headers value."""
+    from corvidae.mcp_client import validate_mcp_config
+
+    servers = [{"name": "wiki", "transport": "sse",
+                "url": "https://wiki.example.com/sse",
+                "headers": {"Authorization": "Bearer SECRET5"}}]
+    with pytest.raises(ValueError) as info:
+        validate_mcp_config({"mcp": {"servers": servers}})
+    message = str(info.value)
+    assert "mcp.servers must be a mapping" in message
+    assert "SECRET5" not in message
+
+
+def test_a_chain_deeper_than_the_scrub_bound_does_not_leak():
+    """Past the depth bound the remaining chain is replaced, not kept."""
+    import traceback as tb
+
+    from corvidae.mcp_client import _safe_exc_info
+
+    url = f"https://user:{USERINFO_PASSWORD}@wiki.example.com/mcp?token={QUERY_SECRET}"
+    exc: BaseException = RuntimeError(f"for url '{url}'")
+    for i in range(12):
+        nxt = RuntimeError(f"link {i}")
+        nxt.__cause__ = exc
+        exc = nxt
+    info = _safe_exc_info(exc, {"transport": "sse", "url": url})
+    assert isinstance(info, BaseException)
+    rendered = "".join(tb.format_exception(info))
+    assert QUERY_SECRET not in rendered
+    assert USERINFO_PASSWORD not in rendered
+
+
+def test_a_malformed_notes_attribute_does_not_raise():
+    """Scrubbing runs inside an except handler and must never raise."""
+    from corvidae.mcp_client import _safe_exc_info
+
+    exc = RuntimeError("boom")
+    exc.__notes__ = 5  # type: ignore[attr-defined]
+    _safe_exc_info(exc, {"transport": "sse", "url": "https://h.example/?t=SECRET1"})

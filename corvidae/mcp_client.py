@@ -170,7 +170,10 @@ def _scrub_exception(
     context.
     """
     if _depth >= _MAX_DESCRIBE_DEPTH:
-        return None
+        # Past the bound, replace the rest of the chain rather than keep it:
+        # returning None here would mean "unchanged" and attach the original,
+        # unscrubbed links (#386 review).
+        return _RedactedException("(exception chain too deep to show)")
     # The message and any notes are the text a handler renders for this link
     # of the chain; scrub each.
     try:
@@ -182,7 +185,10 @@ def _scrub_exception(
             type(exc).__name__, exc_info=True,
         )
         message = "(message unavailable)"
-    notes = [str(n) for n in getattr(exc, "__notes__", ())]
+    # __notes__ is a list by convention only; anything else is ignored
+    # rather than allowed to raise inside the except handler logging this.
+    raw_notes = getattr(exc, "__notes__", None)
+    notes = [str(n) for n in raw_notes] if isinstance(raw_notes, list) else []
     redacted = _scrub_text(message, secrets)
     redacted_notes = [_scrub_text(n, secrets) for n in notes]
     cause = _scrub_exception(exc.__cause__, secrets, _depth + 1) if exc.__cause__ else None
@@ -314,9 +320,12 @@ def _describe_config_value(
     if isinstance(value, str):
         return _describe_string(value)
     if isinstance(value, dict):
+        # A nested `headers` value is a credential wherever it sits -- a
+        # list-shaped server entry or `servers` block reaches it here rather
+        # than through the caller's own secret_bearing flag (#386 review).
         inner = ", ".join(
             f"{_describe_config_value(k, _depth=_depth + 1)}: "
-            f"{_describe_config_value(v, _depth=_depth + 1)}"
+            f"{_describe_config_value(v, secret_bearing=k == 'headers', _depth=_depth + 1)}"
             for k, v in list(value.items())[:4]
         )
         more = ", …" if len(value) > 4 else ""
