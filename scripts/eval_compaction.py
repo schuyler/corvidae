@@ -10,7 +10,9 @@ Usage:
     python scripts/eval_compaction.py --segment 2   # evaluate the death-spiral segment specifically
 
 Requirements:
-    - aiohttp (pip install aiohttp)
+    - The project environment: run it as `uv run python scripts/eval_compaction.py`.
+      It resolves the compaction stage's profile through `corvidae.llm_plugin`,
+      the same code the daemon runs, so corvidae must be importable.
     - Access to an OpenAI-compatible LLM API
 """
 
@@ -21,12 +23,87 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from corvidae.envref import EnvRefError, expand_env_refs
+    from corvidae.llm_plugin import parse_llm_config
+except ImportError:  # pragma: no cover - depends on how the script is launched
+    sys.exit(
+        "eval_compaction: corvidae is not importable from this interpreter. "
+        "Run it in the project environment: uv run python scripts/eval_compaction.py"
+    )
+
 # ---------------------------------------------------------------------------
 # 1. Fixture loading
 # ---------------------------------------------------------------------------
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 DEFAULT_FIXTURE = FIXTURE_DIR / "death_spiral_compaction.json"
+
+# The stage this eval measures, so it sends to the profile compaction uses.
+EVAL_STAGE = "compaction"
+
+
+def resolve_llm_defaults(llm_section: dict | None) -> dict:
+    """The endpoint settings for the profile the compaction stage resolves to.
+
+    The daemon resolves a stage through ``llm.stages``, then its kind's
+    default (``llm.defaults``, else ``llm.main``), folding ``extends`` chains.
+    This eval measures compaction quality, so it must send to the same model
+    the daemon would; reading ``llm.main`` raw measured a different model
+    whenever a deployment mapped the stage or used ``defaults`` (#470).
+
+    Returns:
+        A dict with ``base_url``, ``model`` and optionally ``api_key``.
+
+    Raises:
+        ValueError: naming the problem, for a malformed ``llm:`` section.
+    """
+    config = parse_llm_config(llm_section)
+    # `parse_llm_config` guarantees a default chat profile (PRD §3.11.1), so
+    # this always resolves; `profile_for` falls back to it for any stage.
+    profile = config.profile_for(EVAL_STAGE, "chat")
+    resolved = config.profiles[profile]
+    api_key = resolved.get("api_key")
+    # A profile holds `"${VAR}"` rather than the secret, and the daemon
+    # expands it in LLMPlugin._create_client. Sending the reference instead
+    # would 401 against exactly the deployment this eval mirrors (#470 review).
+    if isinstance(api_key, str):
+        try:
+            api_key = expand_env_refs(api_key)
+        except EnvRefError as exc:
+            raise ValueError(
+                f"llm.{profile}.api_key references ${{{exc.var}}}, which is "
+                f"{'not set' if exc.reason == 'unset' else 'unusable'} in this "
+                f"environment; set {exc.var} and re-run"
+            ) from None
+    return {
+        "base_url": resolved.get("base_url"),
+        "model": resolved.get("model"),
+        "api_key": api_key,
+    }
+
+
+def resolve_llm_from_file(config_path: str | Path) -> dict:
+    """Read ``config_path`` and resolve its compaction profile settings.
+
+    Split out of ``main`` so the empty and malformed cases are testable: the
+    inline version called ``config.get`` on whatever ``yaml.safe_load``
+    returned, which is ``None`` for an empty file and raised AttributeError
+    rather than the config error R470.4 requires (#470 review).
+
+    Raises:
+        ValueError: naming the problem, for a malformed or empty ``llm:``.
+    """
+    import yaml
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"{config_path} is empty or is not a mapping; "
+            "it needs an llm: section with a profile"
+        )
+    return resolve_llm_defaults(config.get("llm"))
 
 
 def load_fixture(fixture_path: str | Path) -> dict:
@@ -387,23 +464,28 @@ def main():
     parser.add_argument("--api-key", default=None, help="LLM API key")
     args = parser.parse_args()
 
-    # Load defaults from agent.yaml if not specified
+    # Load defaults from agent.yaml if not specified.
     if not args.base_url or not args.model:
         config_path = Path(__file__).parent.parent / "agent.yaml"
         if config_path.exists():
-            import yaml
-            with open(config_path) as f:
-                config = yaml.safe_load(f)
-            llm_config = config.get("llm", {}).get("main", {})
+            try:
+                resolved = resolve_llm_from_file(config_path)
+            except ValueError as exc:
+                print(f"Config error: {exc} — check {config_path}", file=sys.stderr)
+                sys.exit(1)
+            # An explicit flag still wins over the resolved profile.
             if not args.base_url:
-                args.base_url = llm_config.get("base_url")
+                args.base_url = resolved["base_url"]
             if not args.model:
-                args.model = llm_config.get("model")
+                args.model = resolved["model"]
             if not args.api_key:
-                args.api_key = llm_config.get("api_key")
+                args.api_key = resolved["api_key"]
 
     if not args.base_url or not args.model:
-        print("❌ Must specify --base-url and --model (or have agent.yaml)")
+        print(
+            "❌ Must specify --base-url and --model (or have agent.yaml with an "
+            "llm: section the compaction stage resolves to)"
+        )
         sys.exit(1)
 
     print(f"🌐 LLM: {args.model} @ {args.base_url}")
