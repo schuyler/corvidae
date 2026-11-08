@@ -30,6 +30,7 @@ import logging
 import math
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit, urlunsplit
 
 from corvidae.clock import Clock
 from corvidae.envref import EnvRefError, expand_env_refs
@@ -60,9 +61,46 @@ def _server_endpoint(cfg: dict) -> str:
 
     Called from failure logging, so it must not raise: a retry-round config
     that fails validation may lack the key, and then the endpoint is "?".
+
+    An HTTP endpoint is logged without its credentials (#386). A server may
+    carry a token in its query string or a password in its userinfo, and this
+    runs on every failed connect and every retry, so logging the URL whole
+    would write that secret to the daemon log repeatedly. Scheme, host, port
+    and path survive, which is what tells an operator which endpoint failed;
+    a configured query is shown as "?…" so its presence is still visible.
     """
     key = "command" if cfg.get("transport") == "stdio" else "url"
-    return str(cfg.get(key, "?"))
+    if key == "command":
+        return str(cfg.get(key, "?"))
+    # A config that failed validation may lack the key entirely; keep the
+    # historical "?" so the log still says the endpoint was unreadable.
+    if key not in cfg:
+        return "?"
+    return _redact_url(cfg[key])
+
+
+def _redact_url(value: object) -> str:
+    """A URL safe to log: scheme, host, port and path only.
+
+    Never raises. Redaction runs inside failure logging, so a value it cannot
+    parse becomes a constant rather than an exception that would replace the
+    failure being reported.
+    """
+    try:
+        parts = urlsplit(str(value))
+    except ValueError:
+        return "(unparseable endpoint)"
+    # A value with no scheme is not a URL the client can use; logging it whole
+    # would put whatever it is into the log unredacted.
+    if not parts.scheme or not parts.netloc:
+        return "(unparseable endpoint)"
+    # Drop userinfo by rebuilding netloc from host and port alone.
+    netloc = parts.hostname or ""
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    query = "?…" if parts.query else ""
+    return urlunsplit((parts.scheme, netloc, parts.path, query, ""))
+
 
 
 def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
