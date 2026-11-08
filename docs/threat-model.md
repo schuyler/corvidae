@@ -545,20 +545,33 @@ prompt is framed as the operator's. It is hot-reloaded, so it joins the
 just at the next restart. The mitigation is the one finding 4 already
 gives: keep `agent.yaml` unwritable by the daemon user.
 
-`discord.send_attachment` (issue #521) is the first tool that sends to a
-channel the model chooses: `channel_id` is an argument, and the file comes
-from anywhere under `discord.send_attachment_root`, which defaults to the
-working directory — `agent.yaml` and its tokens included. Text from a fetched
-page or an MCP result can therefore turn into a file upload on any channel
-already in the registry, and the file's contents never appear in the
-transcript. Two soft mitigations today: the root is configurable, and the
-upload names the file. Neither is a boundary, because `shell` and `read_file`
-are unjailed already; the meaningful control is the allowlist of who can
-reach a turn at all. Narrowing the default root, or taking the calling
-channel unless a turn explicitly overrides it, is the structural fix and is
-not done.
+`discord.send_attachment` (issue #521) and `send_signal_attachment` (issue
+#544) are the first tools that send a *file* to a channel the model chooses
+(the cross-channel `send_message` of #234 also takes a model-chosen channel,
+but it hands an instruction to the agent's own context, not a message to the
+person): `channel_id` is an argument, and the file comes from under
+`discord.send_attachment_root` or `signal.send_attachment_root`, each `state`
+by default, relative to the working directory. `state/` holds what corvidae
+writes there, among other things downloaded attachments and spilled
+notification content; an operator who widens a root to the working directory
+puts `agent.yaml` and its tokens in reach. Text from a fetched page or an MCP
+result can therefore turn into a file upload on any channel already in the
+registry, and the file's contents never appear in the transcript. Neither tool
+checks the inbound allowlist: registry membership is the whole gate. For
+Signal a channel is in the registry, for example, when an allowlisted sender has written
+since the last start, when it is listed under `channels:`, or when a reminder
+or scheduler job has resolved it since the start, so the reach is the contacts
+the operator or the allowlist has already put there, and (as PRD §3.5.9 says)
+nothing narrows it further. The Signal tool also hands signal-cli the path, so
+the file is read by the daemon under its own sandbox as well as checked by
+corvidae. Two soft mitigations today: the root is
+configurable, and the upload names the file. Neither is a boundary, because
+`shell` and `read_file` are unjailed already; the meaningful control is the
+allowlist of who can reach a turn at all. Taking the calling channel unless a
+turn explicitly overrides it is the structural fix and is not done.
 
-No tool sends a *message* to another channel yet. PRD §3.5.9 now requires one, with no
+No tool sends a *message* to the person on another channel yet (the
+cross-channel `send_message` of #234 queues a turn there instead). PRD §3.5.9 now requires one, with no
 allowlist of target channels: any turn may speak on any channel (#234).
 Finding 15 is its entry. PRD §3.9.7 also lets the agent set recurring
 reminders, which the tree doesn't yet: a recurring reminder set because of

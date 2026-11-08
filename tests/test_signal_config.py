@@ -368,8 +368,18 @@ class TestShippedExampleConfig:
 
     def test_example_signal_block_matches_documented_shape(self):
         """Uncommenting the example's signal: block must yield exactly the
-        documented config — same keys, same defaults."""
-        assert _example_signal_block() == DOCUMENTED_SIGNAL_CONFIG
+        documented config plus the optional attachment keys (#544) — same
+        keys, same defaults."""
+        expected = {
+            "signal": {
+                **DOCUMENTED_SIGNAL_CONFIG["signal"],
+                # Optional keys the example lists at their defaults.
+                "attachment_dir": "state/signal-attachments",
+                "max_attachment_size": 10485760,
+                "send_attachment_root": "state",
+            }
+        }
+        assert _example_signal_block() == expected
 
     async def test_example_signal_block_is_accepted_by_on_init(self):
         """on_init must accept the example's block as-is and store the
@@ -381,3 +391,6 @@ class TestShippedExampleConfig:
         assert plugin._account == "+15550001111"
         assert plugin._allow == {"+15551234567"}
         assert plugin._message_chunk_size == 2000
+        # The optional attachment keys are stored, not just tolerated.
+        assert plugin._max_attachment_size == 10485760
+        assert str(plugin._send_attachment_root) == "state"

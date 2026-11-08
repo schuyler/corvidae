@@ -3218,6 +3218,38 @@ envelope whose send timestamp is more than five minutes old gets a
 `[sent YYYY-MM-DD HH:MM UTC]` prefix prepended, so backlog delivered after
 a reconnect reads as backlog rather than as current.
 
+**Outbound files.** `register_tools` offers `send_signal_attachment` when a
+`signal:` block is present. It takes a `signal:<aci>` channel the registry
+knows, a path and an optional caption, and sends one `send` RPC with the
+file's absolute path under `attachments` and the caption as `message`
+(signal-cli's JSON-RPC takes a multi-value option as an array: v0.14.7
+`signal-cli-jsonrpc(5)`). The path is resolved and refused if it lands
+outside `signal.send_attachment_root` (default `state`), and the file is refused
+above `signal.max_attachment_size`; the jail runs before any existence
+check, so a missing path outside the root gets the root error. The
+caption splits like any reply, the first piece riding with the file; the rest go
+out through `_send_rpc`, not `_deliver`, because `_deliver` logs and swallows a
+failure and the tool must not report success for a lost caption. A failure
+returns a "Could not send:" string that says how far the send got: nothing
+delivered (retry, and check the daemon can read the file), signal-cli not
+connected, or the file delivered with caption part *i* of *n* failed (do not
+resend the file). The name differs from Discord's `send_attachment` because the
+tool registry keeps the last of two tools sharing a name while still advertising
+both schemas. Known limits: the daemon must be able to read the path (it is
+local and runs as the corvidae user; `docs/signal-ops.md`, "Sending files"
+covers the unit's sandbox); a `send` result that reports a per-recipient
+failure without a JSON-RPC error is not inspected, for files or text alike;
+a file send is not recorded in the contact's history; and the file send has
+not been run against a live signal-cli daemon (the wire format and the error
+path come from reading signal-cli's documentation and source, and
+`tests/test_signal_send_attachment.py` pins the same shape). The target gate is
+registry membership, as for Discord's tool and PRD §3.5.9 (nothing gates which
+channel a turn may speak on): a channel is in the registry, for example, when an
+allowlisted sender has written since the last start, when it is listed under
+`channels:` (including a `signal:+E164` alias, which then receives the
+file at the E.164 address, bypassing `resolve_channel`), or when a reminder or
+scheduler job (or any other caller that resolves a persisted id) has resolved it since the start.
+
 **Authorization.** `should_process_message` is a default-deny gate: the
 sender's ACI must appear in `allow:` directly, or be what a configured
 E.164 `allow` entry resolved to. A refusal is logged at INFO naming the
@@ -3302,7 +3334,8 @@ monitored.
 text is never truncated, and chunks go out verbatim, without the newline
 stripping IRC needs. `send_progress` uses the same delivery path but skips
 the outstanding-count bookkeeping: it is mid-turn liveness, not the reply.
-Outbound is text only.
+Replies and progress are text; a file goes out through the separate
+`send_signal_attachment` tool (**Outbound files**, above).
 
 Signal delivers a reply to a turn of any origin on a channel it owns. A
 reminder firing on a `signal:` channel injects through `on_notify`, and
