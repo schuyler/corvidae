@@ -86,7 +86,7 @@ def _reset_attribution():
 
 
 class TestSendMessageDelivery:
-    """send_message calls on_notify with the right parameters."""
+    """notify_other_channel calls on_notify with the right parameters."""
 
     async def test_calls_on_notify_with_correct_params(self):
         plugin, registry, db, agent = await _build_harness()
@@ -109,7 +109,7 @@ class TestSendMessageDelivery:
         notify = AsyncMock()
         pm.ahook.on_notify = notify
 
-        result = await plugin.send_message(ch_b.id, "hello bob")
+        result = await plugin.notify_other_channel(ch_b.id, "hello bob")
         assert result == f"Queued on {ch_b.id}."
         assert notify.call_count == 1
 
@@ -153,7 +153,7 @@ class TestSendMessageDelivery:
 
         # Even if the LLM passes a different channel_id, the source
         # is always from attribution
-        await plugin.send_message(ch_b.id, "hello")
+        await plugin.notify_other_channel(ch_b.id, "hello")
         kwargs = notify.call_args.kwargs
         assert kwargs["annotations"]["source_channel"] == ch_a.id
         assert kwargs["source"] == f"agent_send from {ch_a.id}"
@@ -170,7 +170,7 @@ class TestSendMessageDelivery:
         notify = AsyncMock()
         pm.ahook.on_notify = notify
 
-        result = await plugin.send_message(ch_b.id, "hello")
+        result = await plugin.notify_other_channel(ch_b.id, "hello")
         assert "no source channel" in result
         assert notify.call_count == 0
 
@@ -201,7 +201,7 @@ class TestHopCount:
         notify = AsyncMock()
         pm.ahook.on_notify = notify
 
-        await plugin.send_message(ch_b.id, "hello")
+        await plugin.notify_other_channel(ch_b.id, "hello")
         kwargs = notify.call_args.kwargs
         assert kwargs["annotations"]["hop_count"] == 3
 
@@ -228,7 +228,7 @@ class TestHopCount:
         notify = AsyncMock()
         pm.ahook.on_notify = notify
 
-        result = await plugin.send_message(ch_b.id, "hello")
+        result = await plugin.notify_other_channel(ch_b.id, "hello")
         assert "loop detected" in result
         assert str(ch_b.id) in result
         assert notify.call_count == 0
@@ -256,7 +256,7 @@ class TestHopCount:
         notify = AsyncMock()
         pm.ahook.on_notify = notify
 
-        await plugin.send_message(ch_b.id, "hello")
+        await plugin.notify_other_channel(ch_b.id, "hello")
         kwargs = notify.call_args.kwargs
         assert kwargs["annotations"]["hop_count"] == 1  # reset to 1
 
@@ -283,7 +283,7 @@ class TestHopCount:
         notify = AsyncMock()
         pm.ahook.on_notify = notify
 
-        await plugin.send_message(ch_b.id, "hello")
+        await plugin.notify_other_channel(ch_b.id, "hello")
         kwargs = notify.call_args.kwargs
         assert kwargs["annotations"]["hop_count"] == 1  # reset to 1
 
@@ -313,7 +313,7 @@ class TestInputValidation:
         notify = AsyncMock()
         pm.ahook.on_notify = notify
 
-        result = await plugin.send_message("signal:nonexistent", "hello")
+        result = await plugin.notify_other_channel("signal:nonexistent", "hello")
         assert "not registered" in result
         assert "signal:nonexistent" in result
         assert "list_channels" in result
@@ -339,7 +339,7 @@ class TestInputValidation:
             }
         )
 
-        result = await plugin.send_message(ch_b.id, "")
+        result = await plugin.notify_other_channel(ch_b.id, "")
         assert "text" in result.lower()
         assert "non-empty" in result
 
@@ -363,7 +363,7 @@ class TestInputValidation:
             }
         )
 
-        result = await plugin.send_message(ch_b.id, "   ")
+        result = await plugin.notify_other_channel(ch_b.id, "   ")
         assert "text" in result.lower()
         assert "non-empty" in result
 
@@ -388,7 +388,7 @@ class TestInputValidation:
         )
 
         long_text = "x" * 8001
-        result = await plugin.send_message(ch_b.id, long_text)
+        result = await plugin.notify_other_channel(ch_b.id, long_text)
         assert "8001" in result
         assert "8000" in result
 
@@ -411,9 +411,141 @@ class TestInputValidation:
             }
         )
 
-        result = await plugin.send_message("", "hello")
+        result = await plugin.notify_other_channel("", "hello")
         assert "channel_id" in result
         assert "non-empty" in result
+
+        await db.close()
+
+
+class TestSameChannelGuard:
+    """notify_other_channel refuses a target that equals the source channel.
+
+    A self-send triggers a fresh inference turn on the same channel, which
+    delivers a second response to the user — the duplicate-reply bug this
+    guard closes.
+    """
+
+    async def test_same_channel_refused(self):
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "annotations": {},
+            }
+        )
+
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+
+        result = await plugin.notify_other_channel(ch_a.id, "hello self")
+        assert result.startswith("Could not send")
+        assert "same as the source" in result
+        # the guard fires before delivery: no notification is queued
+        assert notify.call_count == 0
+
+        await db.close()
+
+    async def test_different_channel_still_sends(self):
+        # the guard is specific to self-sends: a genuine cross-channel
+        # send is unaffected.
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "annotations": {},
+            }
+        )
+
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+
+        result = await plugin.notify_other_channel(ch_b.id, "hello bob")
+        assert result == f"Queued on {ch_b.id}."
+        assert notify.call_count == 1
+
+        await db.close()
+
+
+    async def test_self_send_takes_precedence_over_hop_limit(self):
+        # a self-send is refused even when the hop count is already over
+        # the limit — the self-send guard fires before the hop check.
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "annotations": {"hop_count": 5},  # over the default max of 3
+            }
+        )
+
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+
+        result = await plugin.notify_other_channel(ch_a.id, "hello self")
+        # self-send refusal, not the hop-limit refusal
+        assert "same as the source" in result
+        assert "loop detected" not in result
+        assert notify.call_count == 0
+
+        await db.close()
+
+
+    async def test_self_send_refused_via_resolved_target_id(self):
+        # pins the reason for comparing target.id (not the raw channel_id):
+        # if the registry resolves a differently-formatted channel_id to the
+        # source channel, the self-send is still refused. This test fails
+        # against a raw `source_channel == channel_id` comparison.
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+        from unittest.mock import patch
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "annotations": {},
+            }
+        )
+
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+
+        # a differently-formatted id that the registry resolves to ch_a
+        with patch.object(registry, "get", return_value=ch_a):
+            result = await plugin.notify_other_channel("signal:ALICE", "hello self")
+
+        assert "same as the source" in result
+        assert notify.call_count == 0
 
         await db.close()
 
@@ -569,7 +701,7 @@ class TestIntegration:
         )
 
         # Send from A to B
-        result = await plugin.send_message(ch_b.id, "hello bob")
+        result = await plugin.notify_other_channel(ch_b.id, "hello bob")
         assert result == f"Queued on {ch_b.id}."
 
         # Drain B's queue
@@ -667,7 +799,7 @@ class TestIntegration:
 
         # Send 3 messages to B (more than max_turns=2)
         for i in range(3):
-            result = await plugin.send_message(ch_b.id, f"msg {i}")
+            result = await plugin.notify_other_channel(ch_b.id, f"msg {i}")
             assert result == f"Queued on {ch_b.id}."
             if ch_b.id in agent.queues:
                 await agent.queues[ch_b.id].drain()
@@ -740,7 +872,7 @@ class TestIntegration:
             }
         )
 
-        result = await plugin.send_message(ch_b.id, "this should fail")
+        result = await plugin.notify_other_channel(ch_b.id, "this should fail")
         assert "loop detected" in result
         assert "hop 3" in result
         assert "max 2" in result
@@ -772,7 +904,7 @@ class TestNegativeHopCount:
         notify = AsyncMock()
         pm.ahook.on_notify = notify
 
-        result = await plugin.send_message(ch_b.id, "hello")
+        result = await plugin.notify_other_channel(ch_b.id, "hello")
         assert result == f"Queued on {ch_b.id}."
         kwargs = notify.call_args.kwargs
         assert kwargs["annotations"]["hop_count"] == 1  # clamped, not -99
@@ -800,7 +932,7 @@ class TestNegativeHopCount:
         notify = AsyncMock()
         pm.ahook.on_notify = notify
 
-        result = await plugin.send_message(ch_b.id, "hello")
+        result = await plugin.notify_other_channel(ch_b.id, "hello")
         assert result == f"Queued on {ch_b.id}."
         kwargs = notify.call_args.kwargs
         assert kwargs["annotations"]["hop_count"] == 1
@@ -832,7 +964,7 @@ class TestNonDictMeta:
         notify = AsyncMock()
         pm.ahook.on_notify = notify
 
-        result = await plugin.send_message(ch_b.id, "hello")
+        result = await plugin.notify_other_channel(ch_b.id, "hello")
         assert result == f"Queued on {ch_b.id}."
         kwargs = notify.call_args.kwargs
         assert kwargs["annotations"]["hop_count"] == 1
@@ -863,7 +995,7 @@ class TestOnNotifyFailure:
 
         pm.ahook.on_notify = AsyncMock(side_effect=RuntimeError("boom"))
 
-        result = await plugin.send_message(ch_b.id, "hello")
+        result = await plugin.notify_other_channel(ch_b.id, "hello")
         assert "unexpected error" in result
 
         await db.close()
@@ -934,7 +1066,7 @@ class TestHopPropagation:
         )
 
         # Send from A to B
-        await plugin.send_message(ch_b.id, "hello bob")
+        await plugin.notify_other_channel(ch_b.id, "hello bob")
 
         # Drain B's queue
         if ch_b.id in agent.queues:
@@ -1012,7 +1144,7 @@ class TestHopPropagation:
             }
         )
 
-        await plugin.send_message(ch_b.id, "hello bob")
+        await plugin.notify_other_channel(ch_b.id, "hello bob")
 
         if ch_b.id in agent.queues:
             await agent.queues[ch_b.id].drain()
@@ -1051,7 +1183,7 @@ class TestHopDoesNotPersist:
         # B sends to C — this should use hop_count=3
         notify = AsyncMock()
         pm.ahook.on_notify = notify
-        await plugin.send_message(ch_c.id, "from b")
+        await plugin.notify_other_channel(ch_c.id, "from b")
         kwargs = notify.call_args.kwargs
         assert kwargs["annotations"]["hop_count"] == 3
 
@@ -1067,7 +1199,7 @@ class TestHopDoesNotPersist:
         # B sends to C again — this should use hop_count=1
         notify2 = AsyncMock()
         pm.ahook.on_notify = notify2
-        await plugin.send_message(ch_c.id, "fresh turn")
+        await plugin.notify_other_channel(ch_c.id, "fresh turn")
         kwargs2 = notify2.call_args.kwargs
         assert kwargs2["annotations"]["hop_count"] == 1
 
@@ -1080,7 +1212,7 @@ class TestMinorCoverage:
     async def test_registry_none(self):
         plugin = CrossChannelSendPlugin()
         # Don't call on_start, so _registry is None
-        result = await plugin.send_message("signal:bob", "hello")
+        result = await plugin.notify_other_channel("signal:bob", "hello")
         assert "registry is not available" in result
 
     async def test_register_tools(self):
@@ -1091,7 +1223,7 @@ class TestMinorCoverage:
         tools = []
         plugin.register_tools(tools)
         assert len(tools) == 2
-        assert tools[0].__name__ == "send_message"
+        assert tools[0].__name__ == "notify_other_channel"
         assert tools[1].__name__ == "list_channels"
         await db.close()
 
@@ -1117,7 +1249,7 @@ class TestMinorCoverage:
         pm.ahook.on_notify = notify
 
         exact_text = "x" * 8000
-        result = await plugin.send_message(ch_b.id, exact_text)
+        result = await plugin.notify_other_channel(ch_b.id, exact_text)
         assert result == f"Queued on {ch_b.id}."
         assert notify.call_count == 1
 
@@ -1144,7 +1276,7 @@ class TestMinorCoverage:
         notify = AsyncMock()
         pm.ahook.on_notify = notify
 
-        result = await plugin.send_message(ch_b.id, "x" * 8001)
+        result = await plugin.notify_other_channel(ch_b.id, "x" * 8001)
         assert "8001" in result
         assert notify.call_count == 0
 
@@ -1170,7 +1302,7 @@ class TestMinorCoverage:
         notify = AsyncMock()
         pm.ahook.on_notify = notify
 
-        result = await plugin.send_message("", "hello")
+        result = await plugin.notify_other_channel("", "hello")
         assert "non-empty" in result
         assert notify.call_count == 0
 

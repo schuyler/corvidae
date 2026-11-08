@@ -1,6 +1,6 @@
 """Cross-channel send: the agent can message any channel from any context (#234).
 
-The send_message tool lets any turn send an instruction to another channel
+The notify_other_channel tool lets any turn notify a different channel
 context. The message is delivered as a system-role notification (via
 on_notify), the same mechanism the scheduler uses for reminders. The
 target mints its own trace and gets a fresh turn budget.
@@ -47,7 +47,7 @@ MAX_TEXT_CHARS = 8000
 
 
 class CrossChannelSendPlugin(CorvidaePlugin):
-    """Provides send_message and list_channels tools for cross-channel delivery."""
+    """Provides notify_other_channel and list_channels tools for cross-channel delivery."""
 
     depends_on = frozenset({"registry"})
     model_visible_annotations = frozenset({"origin"})
@@ -78,21 +78,24 @@ class CrossChannelSendPlugin(CorvidaePlugin):
 
     @hookimpl
     def register_tools(self, tool_registry):
-        tool_registry.append(self.send_message)
+        tool_registry.append(self.notify_other_channel)
         tool_registry.append(self.list_channels)
 
-    async def send_message(self, channel_id: str, text: str) -> str:
-        """Send an instruction to another channel context.
+    async def notify_other_channel(self, channel_id: str, text: str) -> str:
+        """Notify a *different* channel context, waking it for an inference turn.
 
-        The message triggers an inference turn on the target channel. The
-        receiving context sees a system notification identifying this
-        channel as the source. Use this to ask another context of yourself
-        to take action on a different channel (e.g. heartbeat asking Signal
-        to ping the user with news).
+        This does NOT message the user on your current channel — your normal
+        reply already reaches them. It queues a system notification on the
+        *target* channel, which wakes that context for a fresh turn (it mints
+        its own trace and gets a new turn budget). Use it to ask another
+        context of yourself to act on a different channel (e.g. heartbeat
+        asking Signal to ping the user with news). Never use it to reply on
+        the channel you are already on: a self-send is refused.
 
         Args:
             channel_id: The target channel in "transport:scope" form,
-                e.g. "signal:4d8d4445-..." or "web:main".
+                e.g. "signal:4d8d4445-..." or "web:main". Must differ from
+                the current channel.
             text: The instruction for the receiving context.
 
         Returns:
@@ -115,6 +118,19 @@ class CrossChannelSendPlugin(CorvidaePlugin):
             if not source_channel:
                 return "Could not send: no source channel in the current context."
 
+            target = self._registry.get(channel_id)
+            if target is None:
+                return (
+                    f"Could not send: channel {channel_id!r} is not registered; "
+                    "use list_channels to see available targets."
+                )
+            if source_channel == target.id:
+                return (
+                    f"Could not send: target {channel_id!r} is the same as the "
+                    "source channel; reply directly instead of using "
+                    "notify_other_channel."
+                )
+
             annotations = attribution.get("annotations")
             if not isinstance(annotations, dict):
                 annotations = {}
@@ -127,13 +143,6 @@ class CrossChannelSendPlugin(CorvidaePlugin):
                 return (
                     f"Could not send: cross-channel loop detected on "
                     f"{channel_id!r} (hop {hop} > max {self._max_hops})."
-                )
-
-            target = self._registry.get(channel_id)
-            if target is None:
-                return (
-                    f"Could not send: channel {channel_id!r} is not registered; "
-                    "use list_channels to see available targets."
                 )
 
             await self.pm.ahook.on_notify(
@@ -158,7 +167,7 @@ class CrossChannelSendPlugin(CorvidaePlugin):
 
         Returns the IDs of all channels currently registered in the
         ChannelRegistry. Use this to discover valid targets for
-        send_message.
+        notify_other_channel.
 
         Returns:
             A newline-separated list of channel IDs (sorted), or a message

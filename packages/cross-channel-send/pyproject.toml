@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cross-channel-send"
 version = "0.0.1"
-description = "Cross-channel send plugin for corvidae: send_message and list_channels tools"
+description = "Cross-channel send plugin for corvidae: notify_other_channel and list_channels tools"
 requires-python = ">=3.13"
 dependencies = ["corvidae"]
 
