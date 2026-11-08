@@ -68,7 +68,6 @@ _MIME_TO_EXT = {
     "image/avif": ".avif",
     "text/plain": ".txt",
     "text/csv": ".csv",
-    "text/html": ".html",
     "text/markdown": ".md",
     "text/xml": ".xml",
     "audio/mpeg": ".mp3",
@@ -707,7 +706,7 @@ class SignalPlugin(TransportPlugin):
             logger.warning("signal: getAttachment response has no data")
             return None
 
-        # Decode off the event loop: base64 on a ~14 MB line would
+        # Decode off the event loop: base64 on a line up to max_attachment_size * 4/3 would
         # block other channels.
         try:
             raw = await asyncio.to_thread(
@@ -717,26 +716,18 @@ class SignalPlugin(TransportPlugin):
             logger.exception("signal: attachment data is not valid base64")
             return None
 
-        if len(raw) > self._max_attachment_size:
-            logger.warning(
-                "signal: attachment %s is %d bytes, exceeds cap %d; refusing",
-                safe_id, len(raw), self._max_attachment_size,
-            )
-            return None
-
-        # Extension: MIME map first, else safe filename/id extension.
+        # Extension: MIME map first, else the filename's safe extension. An
+        # id that already ends in an extension keeps it through the stem.
         # The MIME type is sender-controlled — a labelling convenience,
         # not a security boundary. No content sniffing is done.
-        suffix = _MIME_TO_EXT.get(mime_base, "")
-        if not suffix:
-            suffix = safe_suffix(attachment.get("filename") or "")
-        if not suffix:
-            suffix = safe_suffix(safe_id)
+        suffix = _MIME_TO_EXT.get(mime_base) or safe_suffix(attachment.get("filename"))
 
         ts = envelope.get("timestamp", 0)
         att_type = attachment.get("type", 0)
         filename = f"{ts}-{att_type}-{safe_id}"
 
+        # save_attachment enforces the size cap and keeps the path inside
+        # the attachment dir.
         path = await save_attachment(
             raw,
             self._attachment_dir,

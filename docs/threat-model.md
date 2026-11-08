@@ -1354,9 +1354,11 @@ embedded scripts and the agent has no safe renderer for them.
 The attachment id is restricted to `[A-Za-z0-9._-]` before use in a filename;
 ids with any other character refuse the download. The file extension comes
 from a MIME-to-extension map first, then from `safe_suffix()` (fullmatch,
-lowercased, 1–10 chars) on the sender-supplied filename or id. The extension
-is passed to `save_attachment` as a separate parameter, not embedded in the
-stem.
+lowercased, 1–10 chars) on the sender-supplied filename; an id that already
+ends in an extension keeps it through the file name. The extension is passed
+to `save_attachment` as a separate parameter, not embedded in the stem.
+`save_attachment` enforces `max_attachment_size` and refuses a path that
+resolves outside the attachment directory.
 
 The MIME type is sender-controlled and treated as a labelling convenience,
 not a security boundary. No content sniffing is performed. A sender can label

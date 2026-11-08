@@ -499,8 +499,9 @@ Per transport:
   connect, never at startup, and a failed resolution retries after the next
   connect. Non-`dataMessage` envelopes (including the account's own sync
   traffic) are dropped. An attachment from an allowlisted sender is
-  downloaded when its MIME type passes the download gate (the allowlist is
-  specified in the threat model) and is named in the text: downloaded
+  downloaded when its MIME type (or, with no MIME type, its legacy type)
+  passes the download gate (the allowlist is specified in the threat model)
+  and is named in the text: downloaded
   attachments use the major type (image, text, audio) or the subtype for
   application/* (pdf, json, xml); attachments that are not downloaded use
   the sanitized subtype (svg, html, ...), so the agent can see why nothing
