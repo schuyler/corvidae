@@ -212,3 +212,55 @@ def test_live_keys_still_do_not_warn(tmp_path, caplog):
         messages = [m for m in _warnings(caplog) if "compaction_threshold" in m]
 
     assert not messages, f"a live key must not warn: {messages}"
+
+
+# ---------------------------------------------------------------------------
+# R473.3: the two observers agree
+#
+# The ticket requires that a revert produce no restart-only line *and* no
+# `llm config changed` line. The second half is LLMPlugin's, and it was never
+# covered by a test even though its behaviour is correct (#473 review).
+# ---------------------------------------------------------------------------
+
+
+def _llm_plugin_with(running_llm: dict) -> object:
+    """An LLMPlugin whose parsed running config is ``running_llm``."""
+    from corvidae.llm_plugin import LLMPlugin, parse_llm_config
+
+    plugin = LLMPlugin()
+    plugin._config = parse_llm_config(running_llm)
+    return plugin
+
+
+async def test_a_revert_produces_no_llm_config_changed_line(caplog):
+    """R473.3: a revert logs neither observer's line.
+
+    `LLMPlugin` compares against its own running config, so a file reverted to
+    that config is not a change and it stays silent — the same conclusion
+    ConfigWatcher reaches after this ticket.
+    """
+    running = {"main": {"base_url": "http://localhost:8080/v1", "model": "startup"}}
+    plugin = _llm_plugin_with(running)
+
+    with caplog.at_level(logging.WARNING):
+        # A reload that reverts to the running model.
+        await plugin.on_config_reload({"llm": dict(running)})
+
+    assert not _warnings(caplog), (
+        f"a revert must not log: {_warnings(caplog)}"
+    )
+
+
+async def test_a_real_llm_change_still_produces_the_summary_line(caplog):
+    """The summary line is not silenced, only made truthful on a revert."""
+    running = {"main": {"base_url": "http://localhost:8080/v1", "model": "startup"}}
+    plugin = _llm_plugin_with(running)
+    changed = {"main": {"base_url": "http://localhost:8080/v1", "model": "other"}}
+
+    with caplog.at_level(logging.WARNING):
+        await plugin.on_config_reload({"llm": changed})
+
+    assert any("llm config changed" in m for m in _warnings(caplog)), (
+        "a real llm change must still be reported"
+    )
+
