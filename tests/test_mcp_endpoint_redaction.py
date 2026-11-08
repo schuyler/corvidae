@@ -713,3 +713,46 @@ def test_a_malformed_notes_attribute_does_not_raise():
     exc = RuntimeError("boom")
     exc.__notes__ = 5  # type: ignore[attr-defined]
     _safe_exc_info(exc, {"transport": "sse", "url": "https://h.example/?t=SECRET1"})
+
+
+class _UnreadableNote(str):
+    """A note whose str() raises -- legal through add_note()."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("note unreadable")
+
+
+async def test_an_unreadable_note_neither_raises_nor_stops_on_start(caplog):
+    """Scrubbing must never raise: a failure there would abort on_start and
+    skip every later server (review). The fallback attaches a placeholder,
+    never the original exception, so it cannot leak either."""
+    url = f"https://wiki.example.com/mcp?token={QUERY_SECRET}"
+    servers = {
+        "wiki": {"transport": "sse", "url": url},
+        "docs": {"transport": "sse", "url": "https://docs.example.com/mcp"},
+    }
+    plugin = await _plugin_with(servers)
+    attempted: list[str] = []
+
+    async def connect(name, cfg):
+        attempted.append(name)
+        exc = ConnectionError(f"refused for url '{cfg['url']}'")
+        exc.add_note(_UnreadableNote("n"))
+        raise exc
+
+    plugin._connect_server = connect
+    with caplog.at_level(logging.WARNING):
+        await plugin.on_start({"mcp": {"servers": servers}})
+
+    assert sorted(attempted) == ["docs", "wiki"]
+    rendered = _rendered(caplog.records)
+    assert QUERY_SECRET not in rendered
+    assert "'wiki'" in rendered and "'docs'" in rendered
+
+
+def test_a_credential_free_endpoint_is_not_scrubbed():
+    """No credential, nothing to remove: the exception is attached as is."""
+    from corvidae.mcp_client import _safe_exc_info
+
+    exc = RuntimeError("Client error '404 Not Found' for url 'https://wiki.example.com/mcp'")
+    assert _safe_exc_info(exc, {"transport": "sse", "url": "https://wiki.example.com/mcp"}) is True

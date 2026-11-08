@@ -77,11 +77,27 @@ def _safe_exc_info(exc: BaseException, cfg: dict) -> object:
     Returns the value for ``exc_info``: a scrubbed exception instance, or
     ``True`` when nothing in the chain needs scrubbing.
     """
-    secrets = _credential_material(cfg)
-    if not secrets:
-        return True
-    scrubbed = _scrub_exception(exc, secrets)
-    return scrubbed if scrubbed is not None else True
+    # One guard for the whole scrub: it runs inside an except handler, so any
+    # failure here would replace the connect failure being reported and abort
+    # the caller (#386 review). The fallback attaches a placeholder, never the
+    # original, so a scrub that cannot finish cannot leak either.
+    try:
+        secrets = _credential_material(cfg)
+        if not secrets:
+            return True
+        scrubbed = _scrub_exception(exc, secrets)
+        return scrubbed if scrubbed is not None else True
+    except Exception:
+        # Not exc_info: the failing scrub's own traceback could quote the
+        # text it was scrubbing.
+        logger.warning(
+            "could not scrub %s for the log; attaching a placeholder instead",
+            type(exc).__name__,
+        )
+        return _RedactedException(
+            f"{type(exc).__module__}.{type(exc).__qualname__}: "
+            "(details withheld: the error text could not be scrubbed)"
+        )
 
 
 def _credential_material(cfg: dict) -> tuple[str, ...]:
@@ -95,6 +111,10 @@ def _credential_material(cfg: dict) -> tuple[str, ...]:
         return ()
     url = cfg.get("url")
     if not isinstance(url, str) or not url:
+        return ()
+    # Without "@" or "?" there is no userinfo or query, so nothing to remove;
+    # scrubbing the bare URL would only mislabel it as a credential.
+    if "@" not in url and "?" not in url:
         return ()
     found: list[str] = []
     # The whole value first, so a longer match wins over its parts.
