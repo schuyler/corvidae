@@ -279,6 +279,9 @@ agent:
 # logging:
 #   level: INFO                # DEBUG | INFO | WARNING | ERROR | CRITICAL
 #   file: corvidae.log         # log to file; omit for stderr (CLI defaults to file)
+#   jsonl:                     # caps for daemon.jsonl_log_dir transcripts and daemon.metrics_jsonl
+#     max_bytes: 10485760      # per file; 0 = never rotate
+#     backup_count: 5          # rotated files kept (x.jsonl.1 ... .N); 0 = keep none
 
 # MCP servers (optional) — tools from external Model Context Protocol servers
 # mcp:

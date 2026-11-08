@@ -1523,7 +1523,10 @@ Implements three hooks:
   summary dict.
 
 File names are derived from the channel ID with `/` and `:` replaced by `_`.
-File handles are opened in append mode and kept open until `on_stop`.
+Files are opened in append mode and kept open until `on_stop`. Each is capped
+by `logging.jsonl.max_bytes` and `backup_count` (default 10 MiB x 5, as for
+`logging.file`): a write that would pass the cap first rotates the file to
+`<name>.1` and shifts older ones up (`corvidae/jsonl_rotate.py`).
 
 **Config:**
 ```yaml
@@ -1564,7 +1567,8 @@ logged with a traceback and never breaks an LLM call.
 - **`MetricsJsonlPlugin`** (entry point `"metrics_jsonl"`) — consumes
   `on_metrics` and appends one JSON line per event
   (`{"ts", "name", "value", "tags"}`) to the file named by
-  `daemon.metrics_jsonl`. A complete no-op when the key is unset.
+  `daemon.metrics_jsonl`, rotated by the same `logging.jsonl.*` caps as the
+  transcripts. A complete no-op when the key is unset.
 
 **Config:**
 ```yaml

@@ -21,11 +21,11 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import IO
 
 import aiosqlite
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.jsonl_rotate import RotatingAppender, parse_rotation
 from corvidae.persistence import add_column_if_missing
 
 logger = logging.getLogger(__name__)
@@ -301,7 +301,7 @@ class MetricsJsonlPlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self._path: Path | None = None
-        self._handle: IO | None = None
+        self._handle: RotatingAppender | None = None
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -311,6 +311,8 @@ class MetricsJsonlPlugin(CorvidaePlugin):
             return
         base_dir = config.get("_base_dir", Path("."))
         self._path = Path(base_dir) / path
+        # logging.jsonl caps this file (#404); a bad value is a config error.
+        self._max_bytes, self._backup_count = parse_rotation(config)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -336,9 +338,8 @@ class MetricsJsonlPlugin(CorvidaePlugin):
     def _write_record(self, record: dict) -> None:
         """Write a single JSON record (sync, for use with to_thread)."""
         if self._handle is None:
-            self._handle = open(self._path, "a")
-        self._handle.write(json.dumps(record) + "\n")
-        self._handle.flush()
+            self._handle = RotatingAppender(self._path, self._max_bytes, self._backup_count)
+        self._handle.write_line(json.dumps(record))
 
     @hookimpl
     async def on_stop(self) -> None:
