@@ -1,4 +1,4 @@
-# Signal `send_attachment` (#544)
+# Signal `send_signal_attachment` (#544)
 
 ## Requirements (settled; autonomous run, minimum-scope reading)
 
@@ -37,7 +37,8 @@ Provenance: stated = user/issue/PRD words; inferred = my reading, vetoable.
   whether or not it is in the registry) returns an error naming the id and
   saying the target must be a Signal channel (`signal:<id>`); a `signal:<id>`
   not in the registry returns an error naming the id and saying it is not a
-  known Signal channel (a contact who has messaged this account is known);
+  known Signal channel (an allowlisted contact who has messaged since this
+  start is known);
   no RPC either way. With no registry set (defensive: the tool is collected
   after `on_start`, but a guard is cheap), it returns an error, not a raise.
 - **R6 (stated: AGENTS.md error rules)** A failure to deliver (not connected,
@@ -106,16 +107,21 @@ Mirror `DiscordPlugin.send_attachment` (`corvidae/channels/discord.py`) in
   directory", which its code contradicts, so do not copy it. `tool_to_schema`
   marks every parameter required, so the model must pass `caption=""`;
   "optional" holds for Python callers (same as Discord).
-  Flow: validate args -> registry guard (None -> error) -> transport check:
+  Flow: validate args as Discord does (`channel_id` and `path` non-empty
+  strings; a `None` caption is `""`; any other non-string caption is an
+  error; each failure returns an error naming the argument) -> registry guard
+  (None -> error) -> transport check:
   `channel_id.partition(":")[0] != "signal"` -> not-Signal error (as
   `resolve_channel` does, so a foreign id absent from the registry still gets
   it) -> `registry.get(channel_id)` is None -> not-known error (a `signal:`
   id that is in the registry is a Signal channel by construction, so there is
   no separate `owns` check) -> inside `try/except (OSError, ValueError)`
-  (logged at warning with traceback, returning "Could not send:" naming the
-  path): resolve, then the root jail (`is_relative_to(root)` -> R2 error)
+  (logged at warning with traceback, returning "Could not send: cannot read
+  <path> (<exc type>); check the path and its permissions"): resolve, then
+  the root jail (`is_relative_to(root)` -> R2 error)
   before `is_file()` and `stat()`, so a missing path outside the root gets
-  the R2 message -> size vs `_max_attachment_size` (R3) -> chunks, computed
+  the R2 message; a path in the root that is not a file returns "Could not
+  send: <path> is not a file; check it exists under <root>" -> size vs `_max_attachment_size` (R3) -> chunks, computed
   outside that `try`: the non-blank (`c.strip()`) pieces of
   `split_message(caption, max_len=_message_chunk_size)` -> inside
   `try/except Exception` (so `CancelledError` still propagates): the file
@@ -147,8 +153,9 @@ Mirror `DiscordPlugin.send_attachment` (`corvidae/channels/discord.py`) in
   the unit `docs/signal-ops.md` tells operators to install (lines ~168-172)
   sets `PrivateTmp=yes`, `ProtectHome=yes`, `ProtectSystem=strict`, and the
   harness unit (`harness/install-signal-cli.sh` ~123-126) sets
-  `PrivateTmp`/`ProtectSystem=strict`; under them the daemon cannot see a
-  root under `/home` or `/tmp`, and every send would fail inside signal-cli.
+  `PrivateTmp`/`ProtectSystem=strict` only; under the ops unit the daemon
+  cannot see a root under `/home`, and under both it cannot see `/tmp`, so a
+  send of such a file would fail inside signal-cli.
   So the docs phase must tell operators to give the daemon read access to
   `signal.send_attachment_root` (what the unit change is, is checked against
   the systemd documentation then, not assumed), and the error text above
