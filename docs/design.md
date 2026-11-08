@@ -1363,8 +1363,9 @@ role:
   `spill_chars` and `spill_failed` (see [Notification
   spill](#notification-spill-spillpy));
 - tool result: `tool` and `target`, the dispatched call's name and the first
-  argument naming another registered channel, read from the call's
-  row in the window (`on_notify` with a `tool_call_id`, and
+  argument naming another registered channel (the name from the dispatch
+  record when there is one, else the call's row; the target from the call's
+  row in the window) (`on_notify` with a `tool_call_id`, and
   `deliver_tool_error`); and `untrusted`, True when the tool declared its
   output untrusted as of dispatch (see [Untrusted tool
   results](#untrusted-tool-results)), otherwise absent.
@@ -1433,7 +1434,8 @@ NFKC, no control, format or bracket characters, one line, names cut at 64
 characters and ids never cut; `clean_payload` for fenced text: control and
 format characters removed, newline and tab kept). The log keeps the
 original text. A cross-channel result with no content fences an empty payload. The
-fenced text is the stored `content`, unchanged; an orphaned result
+fenced text is the stored `content` after `clean_payload` (the stored row
+is unchanged); an orphaned result
 (`ContextWindow.build_prompt` rendering it as a `system` message, #79) gets
 the same header and fence inside the orphan label.
 
@@ -1463,7 +1465,7 @@ for `target`; with the call row gone it returns the record's name, `untrusted`
 and no target. The record is removed in `_process_queue_item` where the
 `_queued_tool_results` entry is discarded, after `on_notify` computed the
 metadata. A second delivery for the same id (a subagent's confirmation, then
-its result) finds no record: its name comes from the window and it is not
+its result) processed after the first finds no record: its name comes from the window and it is not
 stamped, so the rule is one: declared at dispatch, or not fenced. Kernel error
 text for a declared tool (refusal, timeout, task unavailable) is stamped and
 fenced too.

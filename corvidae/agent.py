@@ -589,7 +589,7 @@ class Agent(CorvidaePlugin):
 
     def _tool_result_metadata(self, channel, tool_call_id: str) -> ItemMetadata:
         """The tool and the other registered channel that the call answered by
-        ``tool_call_id`` named, read from the call's row in the window.
+        ``tool_call_id`` named, from the dispatch-time record and the window.
 
         The name and the untrusted flag come from the dispatch-time record when
         there is one; without it (a repeat delivery) the name comes from the

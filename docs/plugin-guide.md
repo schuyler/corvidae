@@ -753,6 +753,10 @@ cannot reach.
 
 ### Declaring untrusted output
 
+Tuning (directory, size cap, age) is in
+[configuration.md](configuration.md#daemon--daemon-level-settings), and the
+mechanism in [design.md](design.md#notification-spill-spillpy).
+
 A tool whose result carries text its author doesn't control (a fetched page,
 a file's contents, a search snippet, a third-party service's reply) declares
 it the same way, on the registered callable:
@@ -775,9 +779,7 @@ on the result row, so changing it later does not re-render history, and a
 tool unregistered while it runs stays fenced. It is strict: only `True` counts
 (`1` or a callable does not). Without it a result reaches the model as before.
 MCP tools are declared by the client for every server, with no setting. See
-[design.md](design.md#untrusted-tool-results). Tuning (directory, size cap, age) is in
-[configuration.md](configuration.md#daemon--daemon-level-settings), and the
-mechanism in [design.md](design.md#notification-spill-spillpy).
+[design.md](design.md#untrusted-tool-results).
 
 ## Plugin dependencies
 

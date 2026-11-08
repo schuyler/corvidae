@@ -583,7 +583,7 @@ def declares_spill_reader(tool_fn: Callable) -> bool:
     return getattr(tool_fn, "reads_spill_files", False) is True
 
 
-def declares_untrusted_output(tool_fn: Callable) -> bool:
+def declares_untrusted_output(tool_fn: Callable | None) -> bool:
     """True when the tool declares ``returns_untrusted = True``: its results
     carry outside content and reach the model fenced."""
     return getattr(tool_fn, "returns_untrusted", False) is True

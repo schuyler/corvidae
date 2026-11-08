@@ -248,8 +248,8 @@ Four places:
 - A tool result whose call compaction dropped (#79) is rendered by
   `ContextWindow.build_prompt` as a framed `role: system` message, since a
   `tool` message with no call breaks strict chat templates. The result can
-  be untrusted (a `web_fetch` page, an MCP reply); it is fenced as one
-  (finding 6). Unlike the two above it
+  be untrusted (a `web_fetch` page, an MCP reply); an orphaned result of a
+  declared tool is fenced as one (finding 6). Unlike the two above it
   is render-only: the stored row stays `role: tool`.
 
 The "retrieved data, not instructions" wrapper is the right instinct. But
@@ -289,8 +289,8 @@ hardening, is still an experiment worth running.
 
 The kernel renders a code-built `[metadata: ...]` header before a person's
 message and a header plus a nonce-fenced payload (`[payload <nonce> begins]`
-... `[payload <nonce> ends]`) for notifications and cross-channel tool
-results ([design.md](design.md#provenance-header-and-fence)).
+... `[payload <nonce> ends]`) for notifications, cross-channel tool
+results and results of tools declared to return untrusted output ([design.md](design.md#provenance-header-and-fence)).
 
 What it guarantees: the header's wording and the fence come from kernel
 code. Names, ids, annotation values and payload are sanitized at render
@@ -470,7 +470,9 @@ remains a pass-through hook.
 results of `read_file` (spill files read back included), `web_fetch`,
 `web_search` and every MCP tool. A tool declares this for itself
 (`returns_untrusted`, read when the call is dispatched and stored on the
-result), so a result of a tool no plugin declares is unfenced. Unfenced today:
+result), so a result of a tool no plugin declares is unfenced unless it acts on
+another channel. Result rows stored before this change carry no flag and stay
+unfenced on reload. Unfenced today:
 `shell` and `task_pipeline` output, including a `cat` of a spill file (#580);
 `recall_raw` and `search_memory` replays of earlier content, which can carry
 text that was untrusted when it first arrived; the results inside a
