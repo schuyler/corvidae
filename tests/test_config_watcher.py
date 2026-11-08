@@ -442,6 +442,55 @@ async def test_config_watcher_handles_invalid_yaml(tmp_path, caplog):
     assert error_records, "Invalid YAML must produce an ERROR log"
 
 
+async def test_a_non_string_llm_key_refuses_the_reload(tmp_path, caplog):
+    """R471.2: a reload carrying a non-string `llm:` key changes nothing.
+
+    YAML turns an unquoted `2:` into an int. That used to raise a TypeError
+    from inside the config error's own message, which the watcher does not
+    catch, so the reload escaped with a traceback instead of the skip line.
+    """
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    good = "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(good)
+
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    plugin = ConfigWatcherPlugin()
+    running = {"llm": {"main": {"base_url": "http://localhost", "model": "m"}}}
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            **running,
+        },
+    )
+
+    # An unquoted integer profile key, which YAML reads as an int.
+    config_file.write_text(
+        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "  2:\n    base_url: http://other\n    model: n\n"
+    )
+
+    dispatched = []
+
+    async def capture_dispatch(config: dict) -> None:
+        dispatched.append(config)
+
+    plugin._dispatch_config_reload = capture_dispatch
+
+    with caplog.at_level(logging.ERROR, logger="corvidae.config_watcher"):
+        await plugin._reload_config()
+
+    assert not dispatched, "a rejected llm section must not dispatch"
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    joined = "\n".join(errors)
+    assert "reload skipped" in joined, f"must say the reload was skipped: {errors}"
+    assert "2" in joined, f"must name the offending key: {errors}"
+
+
 async def _reload_refused(tmp_path: Path, caplog, payload: bytes):
     """Write ``payload`` over a loaded config, reload, and return
     (dispatched configs, ERROR messages, config path) (#310)."""
