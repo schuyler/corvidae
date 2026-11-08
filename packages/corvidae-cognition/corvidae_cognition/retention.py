@@ -201,6 +201,10 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
         client = memory._llm().get_client("embedding")
         texts = [row[1] for row in backfill_rows]
         embeddings = await client.embed(texts, kind="document")
+        # A wrong-width vector would make vec0 reject its INSERT and roll
+        # back the whole batch on every run; skip and log that row, keep the
+        # rest (same handling as the write path).
+        embeddings = [memory._check_embedding_width(e) for e in embeddings]
         # Embeddings are computed above, so no network await runs inside the
         # transaction; the batch commits whole or rolls back whole (#257).
         # Each row is re-checked inside the transaction before its vec row
@@ -209,6 +213,8 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
         backfilled_count = 0
         async with memory._db_lock, memory._write_txn() as wdb:
             for (mid, _summary), embedding in zip(backfill_rows, embeddings):
+                if embedding is None:
+                    continue
                 cursor = await wdb.execute(
                     "UPDATE memory SET embedded = 1 WHERE id = ? AND indexed = 1 "
                     "AND redacted = 0 AND superseded_by IS NULL AND embedded = 0",

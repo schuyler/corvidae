@@ -189,7 +189,11 @@ ranges fold only within one channel: `message_log` ids are global, and
 `recall_raw` and `/redact` read a record's range on its own channel, so on
 a cross-channel merge each record keeps its own range and the superseded
 record still leads to its channel's source dialog. Overlapping triggers on the same
-range discard the loser's record — no duplicates. Embedding failure
+range discard the loser's record — no duplicates. Embedding failure —
+including a wrong-width vector, which is refused before the write
+transaction (vec0 rejects it on insert, and the resulting
+`OperationalError` would roll back the whole consolidation: record,
+vec row and watermark, stalling the channel on every later trigger) —
 stores the record with `embedded=0` for later backfill; the summary text
 is canonical and vectors are a rebuildable cache. All consolidation LLM
 calls carry `stage="consolidation"` attribution, along with the `trigger`

@@ -1649,6 +1649,8 @@ class MemoryPlugin(CorvidaePlugin):
                     "memory embedding failed; storing record with "
                     "embedded=0 for backfill", exc_info=True,
                 )
+            if embedding is not None:
+                embedding = self._check_embedding_width(embedding)
 
         # Atomic commit section: insert, vec row, near-dup merge and
         # watermark advance are one transaction on the write connection,
@@ -1870,6 +1872,8 @@ class MemoryPlugin(CorvidaePlugin):
                     "memory embedding failed; storing record with "
                     "embedded=0 for backfill", exc_info=True,
                 )
+            if embedding is not None:
+                embedding = self._check_embedding_width(embedding)
         async with self._db_lock, self._write_txn() as wdb:
             memory_id = await self._insert_record(
                 wdb, channel_id=channel_id, summary=summary,
@@ -2458,6 +2462,26 @@ class MemoryPlugin(CorvidaePlugin):
             return None
         dimensions = self._embedding_cfg.get("dimensions")
         return int(dimensions) if dimensions is not None else None
+
+    def _check_embedding_width(self, embedding: list[float]) -> list[float] | None:
+        """A wrong-width vector is an embed failure.
+
+        vec0 rejects a wrong-width insert; letting one reach the vec INSERT
+        inside a write transaction rolls the whole transaction back — on the
+        consolidation path that is record, vec row and watermark, and every
+        later trigger re-summarizes the same range and fails the same way,
+        stalling the channel. Returning None routes the row through the
+        existing embedded=0 backfill handling (degrade, never block).
+        """
+        declared = self._embedding_dimensions()
+        if declared is not None and len(embedding) != declared:
+            logger.warning(
+                "memory embedding width mismatch (%d vs declared %d); "
+                "storing record with embedded=0 for backfill",
+                len(embedding), declared,
+            )
+            return None
+        return embedding
 
     async def _load_vec_extension(self, db: aiosqlite.Connection) -> bool:
         """Load the sqlite-vec extension into the connection.
