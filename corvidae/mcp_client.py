@@ -177,10 +177,10 @@ def _describe_string(value: str) -> str:
     if not any(marker in value for marker in _CREDENTIAL_MARKERS):
         return repr(value)
     # It could hold a credential. A URL we can read keeps the parts that
-    # identify the endpoint; anything else is withheld entirely, because we
+    # identify the endpoint; anything else is replaced entirely, because we
     # cannot tell which part was the secret.
     redacted = _redact_url(value)
-    return redacted if redacted != _UNPARSEABLE else "(value withheld)"
+    return redacted if redacted != _UNPARSEABLE else "(credentials removed)"
 
 
 def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
