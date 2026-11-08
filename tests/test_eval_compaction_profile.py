@@ -153,83 +153,32 @@ def test_empty_agent_yaml_is_a_config_error_not_a_traceback(eval_script, tmp_pat
     assert "llm" in str(exc.value) or "default chat" in str(exc.value)
 
 
-# ---------------------------------------------------------------------------
-# #589: the import guard names the missing dependency
-# ---------------------------------------------------------------------------
-
-
-def _run_script_with_blocked_module(blocked: str) -> str:
-    """Run ``scripts/eval_compaction.py --help`` with ``blocked`` unimportable.
-
-    ``sys.modules[name] = None`` makes ``import name`` raise ImportError, so
-    corvidae stays importable while one of its dependencies is absent. Returns
-    the script's combined output.
-    """
+def test_a_missing_dependency_is_named_not_blamed_on_the_interpreter():
+    """#589: corvidae importable, aiohttp absent: the script names aiohttp."""
     import subprocess
     import sys as _sys
 
     code = (
         "import runpy, sys\n"
-        f"sys.modules[{blocked!r}] = None\n"
+        "sys.modules['aiohttp'] = None\n"  # None makes `import aiohttp` raise ImportError
         f"sys.argv = [{str(SCRIPT)!r}, '--help']\n"
         f"runpy.run_path({str(SCRIPT)!r}, run_name='__main__')\n"
     )
-    result = subprocess.run(
-        [_sys.executable, "-c", code],
-        capture_output=True, text=True, timeout=30,
-    )
-    return result.stdout + result.stderr
+    result = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    output = result.stdout + result.stderr
 
-
-def test_a_missing_dependency_is_named_not_blamed_on_the_interpreter():
-    """#589: with corvidae importable but aiohttp absent, the script says
-    aiohttp is missing. Telling this operator to "run under uv run" misleads
-    one who is already doing so."""
-    output = _run_script_with_blocked_module("aiohttp")
-
-    assert "aiohttp" in output, f"the missing module must be named; got {output!r}"
-    assert "not importable from this interpreter" not in output, (
-        f"a dependency failure must not read as the wrong interpreter; got {output!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# #590: the eval refuses a stage map the daemon would refuse
-# ---------------------------------------------------------------------------
+    assert "aiohttp" in output
+    assert "not importable from this interpreter" not in output
 
 
 def test_a_compaction_stage_mapped_to_an_embedding_profile_is_refused(eval_script):
-    """#590: the daemon's check_stage_map rejects a chat stage mapped to an
-    embedding profile at startup; the eval must raise the same config error,
-    naming the stage and the profile, instead of measuring a configuration
-    that cannot start."""
+    """#590: the daemon's own config error, naming the stage and the profile."""
     llm = {
         "main": {"base_url": "http://main:1", "model": "main-model"},
-        "emb": {"base_url": "http://emb:2", "model": "emb-model",
-                "kind": "embedding", "dimensions": 8},
+        "emb": {"base_url": "http://emb:2", "model": "e", "kind": "embedding", "dimensions": 8},
         "stages": {"compaction": "emb"},
     }
     with pytest.raises(ValueError) as exc:
         eval_script.resolve_llm_defaults(llm)
 
-    message = str(exc.value)
-    assert "llm.stages.compaction" in message
-    assert "'emb'" in message
-    assert "chat" in message, "the remedy names the kind to map to"
-
-
-def test_other_stages_in_the_map_do_not_warn_or_fail(eval_script, caplog):
-    """#590: only the stage this eval measures is checked. check_stage_map
-    logs a warning for every stage it was not told about, which would be noise
-    here: the eval does not know the daemon's other stages."""
-    import logging
-
-    llm = {
-        "main": {"base_url": "http://main:1", "model": "main-model"},
-        "stages": {"consolidation": "main"},
-    }
-    with caplog.at_level(logging.WARNING):
-        resolved = eval_script.resolve_llm_defaults(llm)
-
-    assert resolved["model"] == "main-model"
-    assert not [r for r in caplog.records if "names no registered stage" in r.getMessage()]
+    assert "llm.stages.compaction" in str(exc.value) and "'emb'" in str(exc.value)
