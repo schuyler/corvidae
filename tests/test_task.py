@@ -1445,6 +1445,29 @@ class TestTaskResultPersistence:
         assert TaskQueue(results_path="   ").results_path is None
         assert TaskQueue().results_path is None
 
+    async def test_multi_worker_persistence_no_lost_records(self, tmp_path):
+        """Concurrent completions (max_workers=4) each persist exactly one valid record."""
+        results_file = tmp_path / "task-results.jsonl"
+        queue = TaskQueue(max_workers=4, results_path=results_file)
+        channel = _make_channel()
+
+        tasks = [
+            Task(work=_const_result(f"multi-{i}"), channel=channel, description=f"mw{i}")
+            for i in range(8)
+        ]
+
+        async def on_complete(t, result):
+            pass
+
+        await _run_until_completed(queue, tasks, on_complete)
+
+        records = _read_records(results_file)  # raises if any line is not valid JSON
+        assert len(records) == 8
+        assert sorted(r["task_id"] for r in records) == sorted(t.task_id for t in tasks)
+        by_id = {r["task_id"]: r["result"] for r in records}
+        for t in tasks:
+            assert by_id[t.task_id] == f"multi-{t.description[2:]}"
+
     async def test_fast_path_when_file_absent(self, tmp_path):
         """The deque fast path works even when the results file does not exist."""
         queue = TaskQueue(max_workers=1, results_path=tmp_path / "never-created.jsonl")
