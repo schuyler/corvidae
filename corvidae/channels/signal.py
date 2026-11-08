@@ -291,8 +291,9 @@ class SignalPlugin(TransportPlugin):
                 f"got {max_size!r}"
             )
         self._max_attachment_size = max_size
-        # The send root must be a non-empty string; None (an explicit null)
-        # is rejected too, so a typo'd key cannot silently mean "default".
+        # The send root must be a non-empty string. An explicit null is a
+        # stated value, not an omission, so it is rejected rather than read
+        # as "use the default" (an absent key does mean the default).
         send_root = signal_config.get("send_attachment_root", "state")
         if not isinstance(send_root, str) or not send_root:
             raise ValueError(
@@ -1274,7 +1275,7 @@ class SignalPlugin(TransportPlugin):
     async def send_signal_attachment(
         self, channel_id: str, path: str, caption: str = "",
     ) -> str:
-        """Send a file under signal.send_attachment_root to a Signal contact (channel_id "signal:<id>"), with an optional caption.
+        """Send a file under signal.send_attachment_root to a Signal contact, with an optional caption.
 
         Args:
             channel_id: The target contact in "signal:<id>" form. Only a
@@ -1349,6 +1350,8 @@ class SignalPlugin(TransportPlugin):
                 f"Could not send: cannot read {path!r} ({type(exc).__name__}); "
                 f"check the path and its permissions."
             )
+        # The inbound size cap bounds outbound files too (R3): one setting,
+        # both directions. A file exactly at the cap is sent.
         if size > self._max_attachment_size:
             return (
                 f"Could not send: {target.name} is {size} bytes, over the "
@@ -1371,6 +1374,9 @@ class SignalPlugin(TransportPlugin):
         }
         if chunks:
             params["message"] = chunks[0]
+        # file_sent tells the handler how far the send got; part counts the
+        # caption chunk in flight, 1 being the one riding with the file (it is
+        # bound here so the handler can always read it).
         file_sent = False
         part = 1
         try:

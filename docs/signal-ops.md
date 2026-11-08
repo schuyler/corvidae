@@ -293,7 +293,12 @@ differ so both transports can run in one agent.)
 - **The caption** goes in the same message as the file. One longer than
   `signal.message_chunk_size` is split: the first part rides with the file
   and the rest follow as text. If a later part fails, the tool says the file
-  already went and not to send it again.
+  already went and not to send it again. The tool's schema marks `caption`
+  required, so the model passes an empty string for none.
+- **When it fails**, the tool's answer names the file and channel and the
+  exception type; signal-cli's own error text is in corvidae's log (a
+  `signal: send_signal_attachment failed ...` warning with the traceback),
+  not in the answer.
 
 **signal-cli has to be able to read the file.** corvidae sends the daemon the
 absolute path of the file, not its contents, so the file must be visible to
