@@ -292,8 +292,10 @@ async def test_config_error_skip_line_hides_a_headers_bare_string(caplog):
 async def test_config_error_skip_line_hides_a_url_inside_a_container(caplog):
     """A credential-bearing URL is redacted wherever the skip line echoes it.
 
-    A malformed `url` that is a list instead of a string, or an `args` entry
-    holding an endpoint, was echoed verbatim.
+    Both cases must be *rejected by validation*, or there is no skip line for
+    the assertion to check and the test asserts nothing. `args: [endpoint]` is
+    a list of strings and is accepted, so it belongs to the connect path,
+    which `_server_endpoint` already covers (review).
     """
     endpoint = (
         f"https://user:{USERINFO_PASSWORD}@wiki.example.com/mcp"
@@ -301,7 +303,8 @@ async def test_config_error_skip_line_hides_a_url_inside_a_container(caplog):
     )
     cases = [
         {"transport": "streamable_http", "url": [endpoint]},
-        {"transport": "stdio", "command": "c", "args": [endpoint]},
+        # A mixed list is rejected; a list of only the URL is not.
+        {"transport": "stdio", "command": "c", "args": [endpoint, 5]},
     ]
     for server in cases:
         plugin = await _plugin_with({"wiki": server})
@@ -312,10 +315,37 @@ async def test_config_error_skip_line_hides_a_url_inside_a_container(caplog):
         joined = "\n".join(
             r.getMessage() for r in caplog.records if "wiki" in r.getMessage()
         )
-        assert joined, f"the config-error skip must be logged for {server!r}"
+        assert "config error" in joined, (
+            f"this case must be a config error, or it asserts nothing: {server!r}"
+        )
         assert "wiki" in joined
         assert QUERY_SECRET not in joined, f"query token leaked via {server!r}"
         assert USERINFO_PASSWORD not in joined, f"userinfo leaked via {server!r}"
+
+
+async def test_config_error_skip_line_hides_a_url_given_as_the_transport(caplog):
+    """The `transport:` rejection names the key without quoting a secret.
+
+    This was the one config-error site still interpolating its value raw
+    (review).
+    """
+    endpoint = (
+        f"https://user:{USERINFO_PASSWORD}@wiki.example.com/mcp"
+        f"?token={QUERY_SECRET}"
+    )
+    server = {"transport": endpoint, "url": "https://h.example.com/mcp"}
+    plugin = await _plugin_with({"wiki": server})
+    with caplog.at_level(logging.WARNING):
+        await plugin.on_start({"mcp": {"servers": {"wiki": server}}})
+
+    joined = "\n".join(
+        r.getMessage() for r in caplog.records if "wiki" in r.getMessage()
+    )
+    assert joined, "the config-error skip must be logged"
+    assert "transport" in joined, "the message must still name the key"
+    assert QUERY_SECRET not in joined
+    assert USERINFO_PASSWORD not in joined
+
 
 
 def test_validate_mcp_config_hides_a_url_that_is_the_whole_block():
@@ -360,3 +390,84 @@ def test_a_pathologically_nested_value_does_not_raise():
     self_ref: dict = {}
     self_ref["self"] = self_ref
     assert isinstance(_describe_config_value(self_ref), str)
+
+
+# ---------------------------------------------------------------------------
+# The invariant, as a property rather than a list of shapes
+#
+# Four rounds of this review each found a shape the previous round's fix did
+# not cover: a list, then a bare string, then a URL inside a container, then
+# a URL `urlsplit` rejects. Enumerating shapes is what kept failing. The
+# property the helper must hold is narrower and total:
+#
+#   No string containing `@`, `?` or `://` is ever echoed into a message.
+#
+# Those three markers are userinfo, query and scheme. Anything without them
+# is echoed, because a wrong value is the diagnostic the operator needs.
+# ---------------------------------------------------------------------------
+
+
+# Every one of these carries a credential and must never appear.
+CREDENTIAL_STRINGS = [
+    "https://user:hunter2@h.example.com/mcp?token=SECRET1",
+    # shapes urlsplit rejects, one per reason
+    "https://user:hunter2@h.example.com:99999/mcp?token=SECRET1",  # port range
+    "https://user:hunter2@h.example.com:abc/mcp?token=SECRET1",    # bad port
+    "https://user:p/ss@h.example.com/mcp?token=SECRET1",           # '/' in pw
+    "https://user:hunter2@[unclosed/mcp?token=SECRET1",            # bad v6
+    # shapes that are not parseable as URLs at all -- the plausible typos
+    "wiki.example.com/mcp?token=SECRET1",                          # no scheme
+    "user:hunter2@internal:8080/mcp",                              # no scheme
+]
+
+# Values that carry nothing secret and must stay visible.
+INNOCUOUS_VALUES = ["abc", "[1]", 42, None, True, 1.5]
+
+
+@pytest.mark.parametrize("secret", CREDENTIAL_STRINGS)
+def test_no_credential_string_ever_reaches_a_description(secret):
+    """The invariant, over the shapes urlsplit accepts and rejects."""
+    from corvidae.mcp_client import _describe_config_value
+
+    for value in (
+        secret,
+        [secret],
+        (secret,),
+        {"k": secret},
+        {secret: 1},          # a URL as a dict *key*
+        [[secret]],           # nested
+        {"a": [{"b": secret}]},
+    ):
+        described = _describe_config_value(value)
+        assert secret not in described, (
+            f"credential echoed for {value!r}: {described!r}"
+        )
+        # The secret itself, not just the whole string, must be absent.
+        assert "SECRET1" not in described, f"token echoed for {value!r}"
+        assert "hunter2" not in described, f"password echoed for {value!r}"
+
+
+@pytest.mark.parametrize("value", INNOCUOUS_VALUES)
+def test_innocuous_values_are_still_shown(value):
+    """The invariant must not swallow the diagnostic.
+
+    A wrong value is what tells the operator what to fix, so anything without
+    a credential marker stays visible.
+    """
+    from corvidae.mcp_client import _describe_config_value
+
+    described = _describe_config_value(value)
+    assert repr(value) in described or str(value) in described
+
+
+def test_describing_never_raises_on_a_cycle():
+    """No shape of input may raise from inside config-error handling."""
+    from corvidae.mcp_client import _describe_config_value
+
+    cyclic: list = []
+    cyclic.append(cyclic)
+    assert isinstance(_describe_config_value(cyclic), str)
+
+    d: dict = {}
+    d["self"] = d
+    assert isinstance(_describe_config_value(d), str)

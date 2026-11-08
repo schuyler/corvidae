@@ -117,38 +117,39 @@ def _describe_config_value(
 ) -> str:
     """A rejected config value, in a form safe to put in a log line.
 
-    Config errors are reported in the daemon log, and a value the validator
-    rejected can still be one that carries a credential: a server entry that
-    is the URL itself, a ``headers`` value holding ``Bearer <token>``, or a
-    URL nested inside a malformed ``url``/``args``/``command``. So:
+    The invariant, rather than a list of shapes:
 
-    - a string that parses as a URL keeps scheme, host, port and path -- what
-      tells the operator which endpoint is misconfigured -- and loses its
-      userinfo and query;
-    - a container is described recursively, so a URL inside it is redacted the
-      same way, and every other element stays visible because a wrong shape is
-      what the operator must see to fix it;
-    - ``secret_bearing`` is for the key whose value is a credential by
-      definition -- ``headers`` -- where only the type and size are reported,
-      whatever shape the value arrived in (#386 review).
+        No string containing ``@``, ``?`` or ``://`` is echoed into a message.
 
-    Nesting is bounded: this runs inside config-error handling, and a
-    deeply nested or self-referential value would otherwise raise
-    RecursionError and replace the error it is describing.
+    Those three markers are userinfo, query and scheme -- the positions a
+    credential can occupy. A string without them holds nothing secret, and is
+    echoed because a wrong value is what tells the operator what to fix.
+
+    An earlier version enumerated shapes instead, and four review rounds each
+    found one it missed: a list, a bare string, a URL inside a container, and
+    a URL ``urlsplit`` rejects. The marker test is total, so a new shape
+    cannot defeat it (#386 review).
+
+    Containers are described element-wise, so the invariant holds wherever a
+    URL is nested, including as a dict key. ``secret_bearing`` marks the key
+    whose whole value is a credential by definition -- ``headers`` -- which is
+    summarised by type and size whatever shape it arrived in.
+
+    Never raises and never recurses without bound: this runs inside
+    config-error handling, so it must not replace the error it describes.
     """
     if _depth >= _MAX_DESCRIBE_DEPTH:
         return f"{type(value).__name__} (nested too deeply to show)"
     if secret_bearing and not isinstance(value, (int, float, bool, type(None))):
         if isinstance(value, str):
             return f"str of length {len(value)}"
-        if isinstance(value, (dict, list, tuple, set)):
-            return f"{type(value).__name__} of length {len(value)}"
+        return f"{type(value).__name__}"
     if isinstance(value, str):
-        redacted = _redact_url(value)
-        return repr(value) if redacted == _UNPARSEABLE else redacted
+        return _describe_string(value)
     if isinstance(value, dict):
         inner = ", ".join(
-            f"{k!r}: {_describe_config_value(v, _depth=_depth + 1)}"
+            f"{_describe_config_value(k, _depth=_depth + 1)}: "
+            f"{_describe_config_value(v, _depth=_depth + 1)}"
             for k, v in list(value.items())[:4]
         )
         more = ", …" if len(value) > 4 else ""
@@ -160,7 +161,26 @@ def _describe_config_value(
         )
         more = ", …" if len(value) > 4 else ""
         return "[" + inner + more + "]"
-    return repr(value)
+    # Anything else is described by type: a repr can hold a credential, and
+    # the key in the message is the actionable part.
+    if isinstance(value, (int, float, bool, type(None))):
+        return repr(value)
+    return type(value).__name__
+
+
+def _describe_string(value: str) -> str:
+    """A string for a log line: redacted if it could hold a credential.
+
+    See ``_describe_config_value`` for the invariant. A string with none of
+    the credential markers is returned as its repr, which is the diagnostic.
+    """
+    if not any(marker in value for marker in _CREDENTIAL_MARKERS):
+        return repr(value)
+    # It could hold a credential. A URL we can read keeps the parts that
+    # identify the endpoint; anything else is withheld entirely, because we
+    # cannot tell which part was the secret.
+    redacted = _redact_url(value)
+    return redacted if redacted != _UNPARSEABLE else "(value withheld)"
 
 
 def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
@@ -212,6 +232,9 @@ _UNPARSEABLE = "(unparseable endpoint)"
 # nesting is shallow; the bound exists so a pathological value cannot raise
 # RecursionError inside config-error handling.
 _MAX_DESCRIBE_DEPTH = 8
+# The positions a credential can occupy in a string: userinfo, query, scheme.
+# A string with none of these is safe to echo.
+_CREDENTIAL_MARKERS = ("@", "?", "://")
 # Reconnect backoff ladder for servers that failed at startup; the same
 # 10 s doubling to 300 s as the IRC, Signal and Discord transports.
 _INITIAL_BACKOFF = 10
@@ -304,7 +327,8 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
     # An unknown transport can never connect.
     if transport not in _TRANSPORTS:
         raise ValueError(
-            f"unknown transport {transport!r} for MCP server {name!r}; "
+            f"unknown transport {_describe_config_value(transport)} "
+            f"for MCP server {name!r}; "
             f"set mcp.servers.{name}.transport to one of {', '.join(_TRANSPORTS)}"
         )
     # Each transport needs its endpoint key (KeyError names it), as a string.
