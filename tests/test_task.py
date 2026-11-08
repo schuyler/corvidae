@@ -1185,6 +1185,16 @@ def _const_result(value: str):
     return work
 
 
+def _get_result(queue, task_id):
+    """Test helper: the deque leg then the file leg, as the task_result tool
+    does. Replaces TaskQueue.get_result, which was deleted (a combined helper
+    that a future to_thread caller could resurrect the deque race with)."""
+    res = queue.get_result_from_deque(task_id)
+    if res is None:
+        res = queue.get_result_from_file(task_id)
+    return res
+
+
 async def _run_until_completed(
     queue: "TaskQueue",
     tasks: list[Task],
@@ -1308,13 +1318,13 @@ class TestTaskResultPersistence:
         deque_ids = [tid for tid, _ in queue.completed]
         assert tasks[0].task_id not in deque_ids
         assert len(deque_ids) == 2
-        assert queue.get_result(tasks[0].task_id) == "result-0"
+        assert _get_result(queue, tasks[0].task_id) == "result-0"
 
     async def test_get_result_unknown_id_returns_none(self, tmp_path):
         """get_result returns None for an id that was never persisted."""
         results_file = tmp_path / "task-results.jsonl"
         queue = TaskQueue(max_workers=1, results_path=results_file)
-        assert queue.get_result("deadbeef0000") is None
+        assert _get_result(queue, "deadbeef0000") is None
 
     async def test_no_results_path_no_file_and_deque_only(self, tmp_path):
         """Default (results_path=None): evicted results are gone for good."""
@@ -1339,8 +1349,8 @@ class TestTaskResultPersistence:
         deque_ids = [tid for tid, _ in queue.completed]
         assert len(deque_ids) == 1
         assert tasks[0].task_id not in deque_ids
-        assert queue.get_result(tasks[1].task_id) == "r1"
-        assert queue.get_result(tasks[0].task_id) is None
+        assert _get_result(queue, tasks[1].task_id) == "r1"
+        assert _get_result(queue, tasks[0].task_id) is None
 
     async def test_get_result_survives_queue_reconstruction(self, tmp_path):
         """A fresh TaskQueue (daemon restart) retrieves results from the existing file."""
@@ -1361,7 +1371,7 @@ class TestTaskResultPersistence:
 
         # Simulate the restart: a brand-new queue over the same file.
         queue2 = TaskQueue(max_workers=1, results_path=results_file)
-        assert queue2.get_result(task.task_id) == "surviving result"
+        assert _get_result(queue2, task.task_id) == "surviving result"
 
     async def test_persist_failure_does_not_break_completion(self, tmp_path, caplog):
         """An unwritable results path: the task completes, on_complete fires, a warning is logged."""
@@ -1395,7 +1405,7 @@ class TestTaskResultPersistence:
             '{"ts": 2.0, "task_id": "abc", "resu\n'
         )
         queue = TaskQueue(max_workers=1, results_path=results_file)
-        assert queue.get_result("abc") == "ok"
+        assert _get_result(queue, "abc") == "ok"
 
     async def test_get_result_last_matching_record_wins(self, tmp_path):
         """When the same id appears twice, the last record's result wins."""
@@ -1405,19 +1415,15 @@ class TestTaskResultPersistence:
             '{"ts": 2.0, "task_id": "abc", "result": "second"}\n'
         )
         queue = TaskQueue(max_workers=1, results_path=results_file)
-        assert queue.get_result("abc") == "second"
+        assert _get_result(queue, "abc") == "second"
 
-    async def test_get_result_missing_file_returns_none(self, tmp_path):
-        """results_path set but the file does not exist: None, no raise."""
-        queue = TaskQueue(max_workers=1, results_path=tmp_path / "absent.jsonl")
-        assert queue.get_result("abc") is None
 
     async def test_get_result_non_utf8_file_returns_none(self, tmp_path):
         """A non-UTF-8 byte sequence in the file: None, no raise."""
         results_file = tmp_path / "task-results.jsonl"
         results_file.write_bytes(b"\xff\xfe\x00garbage\n")
         queue = TaskQueue(max_workers=1, results_path=results_file)
-        assert queue.get_result("abc") is None
+        assert _get_result(queue, "abc") is None
 
     async def test_appends_to_preexisting_file(self, tmp_path):
         """A new queue appends to an existing results file (audit-log semantics)."""
@@ -1467,59 +1473,6 @@ class TestTaskResultPersistence:
         by_id = {r["task_id"]: r["result"] for r in records}
         for t in tasks:
             assert by_id[t.task_id] == f"multi-{t.description[2:]}"
-
-    async def test_get_result_during_completion_burst_no_deque_race(self, tmp_path):
-        """get_result must not race the completed deque (review #594-1).
-
-        The deque leg runs on the loop thread and the file leg off it, so a
-        completion burst (append + eviction at maxlen) cannot mutate the deque
-        under a concurrent get_result iteration. Hammer the tool's split path
-        while completions land: no RuntimeError, and any result found is the
-        right one.
-        """
-        results_file = tmp_path / "task-results.jsonl"
-        # Small buffer so eviction (the mutation that used to race) happens.
-        queue = TaskQueue(max_workers=4, completed_buffer=4, results_path=results_file)
-        channel = _make_channel()
-
-        n = 60
-        tasks = [
-            Task(work=_const_result(f"burst-{i}"), channel=channel, description=f"b{i}")
-            for i in range(n)
-        ]
-        seen = [0]
-        done = asyncio.Event()
-
-        async def on_complete(t, result):
-            seen[0] += 1
-            if seen[0] == n:
-                done.set()
-
-        worker = asyncio.create_task(queue.run_worker(on_complete))
-        for t in tasks:
-            await queue.enqueue(t)
-
-        async def hammer():
-            for t in tasks:
-                # The tool's split path: deque leg on the loop thread, file
-                # leg off it.
-                res = queue.get_result_from_deque(t.task_id)
-                if res is None:
-                    res = await asyncio.to_thread(queue.get_result_from_file, t.task_id)
-                assert res is None or res == f"burst-{t.description[1:]}", (
-                    f"get_result returned a stale/foreign result: {res!r}"
-                )
-
-        await asyncio.gather(hammer(), asyncio.wait_for(done.wait(), timeout=5.0))
-        worker.cancel()
-        try:
-            await worker
-        except asyncio.CancelledError:
-            pass
-
-        # Every result is retrievable (deque for recent, file for evicted).
-        for t in tasks:
-            assert queue.get_result(t.task_id) == f"burst-{t.description[1:]}"
 
     async def test_task_result_tool_race_deque_gil_span(self, tmp_path):
         """The task_result tool must not raise when a lookup spans a GIL switch.
@@ -1593,21 +1546,23 @@ class TestTaskResultPersistence:
             pass
         await plugin.on_stop()
 
-    async def test_fast_path_when_file_absent(self, tmp_path):
-        """The deque fast path works even when the results file does not exist."""
-        queue = TaskQueue(max_workers=1, results_path=tmp_path / "never-created.jsonl")
+    async def test_get_result_file_absent(self, tmp_path):
+        """With the results file absent, the deque fast path serves a known id
+        and an unknown id is None (review #594-8: fast_path + missing_file)."""
+        results_file = tmp_path / "task-results.jsonl"
+        queue = TaskQueue(max_workers=1, results_path=results_file)
         channel = _make_channel()
-
         task = Task(work=_const_result("in memory only"), channel=channel, description="fp")
 
         async def on_complete(t, result):
             pass
 
         await _run_until_completed(queue, [task], on_complete)
-
-        # Remove the persisted record: the deque fast path must still serve it.
-        (tmp_path / "never-created.jsonl").unlink()
-        assert queue.get_result(task.task_id) == "in memory only"
+        # Remove the persisted record: the deque fast path must still serve the
+        # known id, and an unknown id must be None.
+        results_file.unlink()
+        assert _get_result(queue, task.task_id) == "in memory only"
+        assert _get_result(queue, "deadbeef0000") is None
 
 # ---------------------------------------------------------------------------
 # TestTaskResultTool — TaskPlugin task_result tool + config wiring

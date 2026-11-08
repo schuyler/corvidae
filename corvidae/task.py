@@ -313,23 +313,6 @@ class TaskQueue:
         except (OSError, UnicodeDecodeError):
             return None
 
-    def get_result(self, task_id: str) -> str | None:
-        """Return the stored result of a completed task by id, or None.
-
-        Fast path: the in-memory completed deque. Fallback: the persisted
-        JSONL file (when results_path is set), so a result is retrievable
-        after the deque has evicted it and after a daemon restart.
-
-        The deque leg must run on the loop thread and the file leg off it
-        (see get_result_from_deque / get_result_from_file). This combined
-        helper is for synchronous, single-threaded callers (tests); the
-        task_result tool uses the split path.
-        """
-        res = self.get_result_from_deque(task_id)
-        if res is not None:
-            return res
-        return self.get_result_from_file(task_id)
-
     def status(self) -> str:
         """Return a human-readable status summary.
 
