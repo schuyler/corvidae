@@ -274,19 +274,89 @@ Other things worth knowing when it misbehaves:
   while the daemon is up will fail, and can leave the store in a bad state.
   `systemctl stop signal-cli` first.
 
+## Sending files
+
+The agent has one tool for sending a file to a Signal contact:
+`send_signal_attachment(channel_id, path, caption)`. It exists whenever the
+`signal:` block is configured. (Discord's tool is `send_attachment`; the names
+differ so both transports can run in one agent.)
+
+- **Where it reads from.** `signal.send_attachment_root`, default `state`,
+  relative to the directory corvidae runs in. A relative `path` is read
+  under that root, and a path that lands outside it is refused.
+- **How big.** `signal.max_attachment_size` caps a file in both directions;
+  a larger one is refused before anything is sent.
+- **To whom.** A `signal:<id>` channel corvidae holds in its registry. That
+  is, for example, an allowlisted sender who has written since corvidae started, a channel
+  you list under `channels:` in `agent.yaml`, or one a reminder or scheduled
+  job has fired on since the start. The registry is rebuilt at every start,
+  so a contact who has not written since a restart (and has no reminder or
+  job) is refused until they do. The tool does not check `signal.allow`
+  itself: membership in the registry is the whole gate, as it is for the
+  Discord tool.
+- **The caption** goes in the same message as the file. One longer than
+  `signal.message_chunk_size` is split: the first part rides with the file
+  and the rest follow as text. If a later part fails, the tool says the file
+  already went and not to send it again. The tool's schema marks `caption`
+  required, so the model passes an empty string for none.
+- **When it fails**, the tool's answer names the file and channel and the
+  exception type; signal-cli's own error text is in corvidae's log (a
+  `signal: send_signal_attachment failed ...` warning with the traceback),
+  not in the answer.
+
+**signal-cli has to be able to read the file.** corvidae sends the daemon the
+absolute path of the file, not its contents, so the file must be visible to
+the signal-cli process. The unit in "Run the daemon" sets `ProtectHome=yes`,
+which makes `/home`, `/root` and `/run/user` inaccessible to the daemon, and
+`PrivateTmp=yes`, which gives it its own empty `/tmp` and `/var/tmp`. A send
+root under any of those fails inside signal-cli (by reading signal-cli's source, an
+unreadable file comes back as a JSON-RPC error; this has not been run against
+a live daemon), and the tool answers `Could not send: ... check the signal-cli
+daemon can read <path>`. The harness unit has no `ProtectHome`, so under it
+only `/tmp` and `/var/tmp` are hidden. A root under `/tmp` or `/var/tmp` is
+fixed by option 1 below or by setting `PrivateTmp=no`; a root under `/home`
+can use any of the three. Ways to fix it, from least to most exposure:
+
+1. Keep the send root outside those directories, for example
+   `/var/lib/corvidae/outbox`. `ProtectSystem=strict` leaves the rest of the
+   filesystem readable, so no unit change is needed.
+2. Keep it under a home directory, and change the unit to
+   `ProtectHome=tmpfs` plus `BindReadOnlyPaths=/home/<user>/corvidae/state`
+   (the absolute send root). `BindReadOnlyPaths=` cannot mount under `/home`
+   while `ProtectHome=yes`, which is why `tmpfs` is the documented route.
+3. `ProtectHome=read-only`, which leaves the whole of `/home` readable to the
+   daemon.
+
+These come from `systemd.exec(5)` (v255) and have not been run against a live
+signal-cli unit here. Run `systemctl daemon-reload` and restart the unit after
+a change.
+
+The tool assumes signal-cli runs on the same host as corvidae and as the same
+user, which this page already recommends for the socket. If it ever ran in a
+container or on another host, the path would mean nothing to it, and the tool
+would need to send the file's contents instead.
+
 ## What corvidae ignores
 
 Behavior that looks like a bug and isn't:
 
 - **Group messages** are dropped. Signal support is DM-only.
-- **Attachments** are dropped, logged at DEBUG. Text sent alongside an
-  attachment is still processed normally.
+- **Attachments** from an allowlisted sender are downloaded when their type
+  passes the download gate, and named in the message text (`[image:
+  /abs/path]`); a message from a sender the allowlist refuses is dropped
+  before anything is fetched. Text sent alongside an attachment is processed
+  normally.
 - **Reactions, quotes, edits, and delete-for-everyone** are ignored. None of
   them carry message text, so they fall out of the same filter.
-- **Outbound is text only.** The agent cannot send attachments.
-- **The bot can't message a different channel on its own.** A
+- **Outbound files go one per send**, through the `send_signal_attachment`
+  tool (see [Sending files](#sending-files)). There is no way to attach
+  several files to one message.
+- **Messaging a different channel is not the Signal transport's job.** A
   reminder or other agent-started turn on a Signal channel is delivered
-  there, but a send to a different channel isn't implemented.
+  there. With the optional `cross-channel-send` package the agent can send
+  an instruction to another channel's context; `send_signal_attachment`
+  sends a file straight to any Signal contact corvidae knows, with or
+  without that package.
 - **Disappearing messages are stored like any other message**, with no
   privacy flag and no expiry. If a conversation has a disappearing-message
   timer, it applies on the phones, not to corvidae's copy.
