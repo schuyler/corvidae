@@ -661,3 +661,62 @@ def test_validate_mcp_config_hides_headers_in_a_list_shaped_servers_block():
     assert "SECRET5" not in message
 
 
+
+
+# ---------------------------------------------------------------------------
+# #588: a logged URL carries no line-boundary character
+# ---------------------------------------------------------------------------
+
+# Every character str.splitlines() treats as a line boundary, so a log viewer
+# or `grep` that splits on any of them cannot read one warning as two lines.
+_LINE_BOUNDARIES = "\n\r\x0b\x0c\x1c\x1d\x1e\x85  "
+
+
+def _has_line_boundary(text: str) -> bool:
+    """True when ``text`` would be split into more than one line."""
+    return len(text.splitlines()) != 1 or any(c in text for c in _LINE_BOUNDARIES)
+
+
+@pytest.mark.parametrize("separator", [" ", " ", "\x85", "\x0b", "\x0c"])
+def test_redact_url_strips_a_line_separator_from_the_path(separator):
+    """#588: U+2028 and friends in a path never reach the log line."""
+    redacted = mcp_client_mod._redact_url(f"https://wiki.example.com/a{separator}b")
+    assert not _has_line_boundary(redacted)
+    # The path is still recognisable: the separator is encoded, not dropped.
+    assert redacted.startswith("https://wiki.example.com/a")
+    assert redacted.endswith("b")
+
+
+def test_redact_url_strips_a_line_separator_from_the_query():
+    """#588: the query is shown as "?…", but a separator in it must not leak
+    through any other part of the rebuilt URL either."""
+    redacted = mcp_client_mod._redact_url(
+        "https://wiki.example.com/mcp?token=a b&x= "
+    )
+    assert not _has_line_boundary(redacted)
+    assert "token" not in redacted
+
+
+def test_redact_url_encodes_the_separator_rather_than_hiding_it():
+    """#588: the operator can still tell the URL held an odd character."""
+    redacted = mcp_client_mod._redact_url("https://wiki.example.com/a b")
+    assert redacted == "https://wiki.example.com/a%E2%80%A8b"
+
+
+def test_server_endpoint_strips_a_separator_from_a_marker_free_value():
+    """#588: a schemeless typo with no credential marker is echoed as
+    configured, so that path needs the same guard as ``_redact_url``."""
+    endpoint = _server_endpoint(
+        {"transport": "streamable_http", "url": "localhost:8080/a b"}
+    )
+    assert not _has_line_boundary(endpoint)
+    assert "localhost:8080/a" in endpoint
+
+
+def test_server_endpoint_strips_a_separator_from_a_credentialed_url():
+    """#588: the redacted form of a URL with userinfo carries none either."""
+    endpoint = _server_endpoint(
+        {"transport": "sse", "url": "https://user:pw@wiki.example.com/a b"}
+    )
+    assert not _has_line_boundary(endpoint)
+    assert "pw" not in endpoint

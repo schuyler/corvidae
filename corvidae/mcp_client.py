@@ -117,6 +117,24 @@ def _redact_urls_in_text(text: str) -> str:
     return _URL_IN_TEXT.sub(lambda m: _describe_string(m.group(0)), text)
 
 
+# Every character ``str.splitlines`` treats as a line boundary, mapped to its
+# percent-encoded UTF-8 form. A logged URL must not carry one: a log viewer or
+# `grep` that splits on it would read one warning as two lines (#588).
+_LINE_BOUNDARY_ENCODING = {
+    ord(char): "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
+    for char in "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+}
+
+
+def _one_line(text: str) -> str:
+    """``text`` with every line-boundary character percent-encoded.
+
+    Encoded rather than dropped, so the operator can still see that the
+    configured value held an odd character. Never raises.
+    """
+    return text.translate(_LINE_BOUNDARY_ENCODING)
+
+
 def _server_endpoint(cfg: dict) -> str:
     """The server's command (stdio) or url (sse, streamable_http), for logs.
 
@@ -132,7 +150,7 @@ def _server_endpoint(cfg: dict) -> str:
     """
     key = "command" if cfg.get("transport") == "stdio" else "url"
     if key == "command":
-        return str(cfg.get(key, "?"))
+        return _one_line(str(cfg.get(key, "?")))
     # A config that failed validation may lack the key entirely; keep the
     # historical "?" so the log still says the endpoint was unreadable.
     if key not in cfg:
@@ -144,7 +162,8 @@ def _server_endpoint(cfg: dict) -> str:
     if isinstance(value, str) and value and not any(
         marker in value for marker in _CREDENTIAL_MARKERS
     ):
-        return value
+        # Shown as configured, except for a line-boundary character (#588).
+        return _one_line(value)
     return _redact_url(value)
 
 
@@ -177,7 +196,10 @@ def _redact_url(value: object) -> str:
     netloc = f"[{host}]" if ":" in host else host
     if port is not None:
         netloc = f"{netloc}:{port}"
-    return f"{parts.scheme}://{netloc}{parts.path}{'?…' if parts.query else ''}"
+    # A separator in the path or host must not put a second line in the log (#588).
+    return _one_line(
+        f"{parts.scheme}://{netloc}{parts.path}{'?…' if parts.query else ''}"
+    )
 
 
 def _describe_config_value(
