@@ -2,7 +2,9 @@
 
 Contains:
   - Task: dataclass representing a unit of async work with delivery context
-  - TaskQueue: async worker queue that processes Tasks one at a time
+  - TaskQueue: async worker queue that processes Tasks one at a time;
+    optionally persists each completion to a JSONL file (results_path)
+    so results survive deque eviction and daemon restarts
   - TaskPlugin: plugin that owns the TaskQueue and delivers results via on_notify
 """
 
@@ -11,10 +13,12 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextvars
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from time import time
 from typing import TYPE_CHECKING
 
@@ -91,11 +95,21 @@ class Task:
 class TaskQueue:
     """Async worker queue that processes Tasks with configurable concurrency."""
 
-    def __init__(self, max_workers: int = 1, completed_buffer: int = 100) -> None:
+    def __init__(
+        self,
+        max_workers: int = 1,
+        completed_buffer: int = 100,
+        results_path: str | Path | None = None,
+    ) -> None:
         self.max_workers = max_workers
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
         self._active_tasks: list[Task] = []
         self.completed: collections.deque[tuple[str, str]] = collections.deque(maxlen=completed_buffer)
+        # When set, every completion (success or failure) appends one JSON
+        # line to this file, so results survive the in-memory deque's
+        # eviction and a daemon restart. Audit side channel: a write
+        # failure is logged and swallowed, never breaking completion.
+        self.results_path: Path | None = Path(results_path) if results_path is not None else None
 
     @property
     def active_task(self) -> Task | None:
@@ -198,7 +212,68 @@ class TaskQueue:
                 self._active_tasks.remove(task)
             except ValueError:
                 pass
+            # Deliberately synchronous (no to_thread): this completion path's
+            # event-loop ordering is load-bearing for burst coalescing (#398
+            # R5/R6 invariants). The write is one small local JSON line —
+            # the same cost class as the deque append beside it — and a
+            # thread hop here perturbs the interleaving and drops a
+            # tool-result call under max_turns.
+            self._persist_result(task, result)
             await on_complete(task, result)
+
+    def _persist_result(self, task: Task, result: str) -> None:
+        """Append one JSONL record for a completed task (sync — see call site).
+
+        Record: {"ts", "task_id", "channel", "description", "result"}.
+        A disk failure is logged and swallowed: persistence is an audit
+        side channel and must never break task completion or delivery.
+        """
+        if self.results_path is None:
+            return
+        record = {
+            "ts": time(),
+            "task_id": task.task_id,
+            "channel": task.channel.id,
+            "description": task.description,
+            "result": result,
+        }
+        try:
+            with open(self.results_path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record) + "\n")
+        except Exception:
+            logger.warning(
+                "task result persist failed for task %s at %s",
+                task.task_id,
+                self.results_path,
+                exc_info=True,
+            )
+
+    def get_result(self, task_id: str) -> str | None:
+        """Return the stored result of a completed task by id, or None.
+
+        Fast path: the in-memory completed deque. Fallback: the persisted
+        JSONL file (when results_path is set), so a result is retrievable
+        after the deque has evicted it and after a daemon restart. The
+        last matching record wins.
+        """
+        for tid, res in self.completed:
+            if tid == task_id:
+                return res
+        if self.results_path is None:
+            return None
+        try:
+            with open(self.results_path, "r", encoding="utf-8") as fh:
+                found: str | None = None
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    if rec.get("task_id") == task_id:
+                        found = rec.get("result")
+            return found
+        except (OSError, json.JSONDecodeError):
+            return None
 
     def status(self) -> str:
         """Return a human-readable status summary.
@@ -229,7 +304,7 @@ class TaskQueue:
 
 
 class TaskPlugin(CorvidaePlugin):
-    """Plugin owning the TaskQueue and task_status tool."""
+    """Plugin owning the TaskQueue and the task_status / task_result tools."""
 
     depends_on = frozenset()
 
@@ -240,6 +315,7 @@ class TaskPlugin(CorvidaePlugin):
         self._worker_task: asyncio.Task | None = None
         self._max_workers: int = 4
         self._completed_buffer: int = 100
+        self._results_path: Path | None = None
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -247,6 +323,10 @@ class TaskPlugin(CorvidaePlugin):
         daemon_config = config.get("daemon", {})
         self._max_workers = daemon_config.get("max_task_workers", 4)
         self._completed_buffer = daemon_config.get("completed_task_buffer", 100)
+        results_path = daemon_config.get("task_results_path")
+        if results_path is not None:
+            base_dir = config.get("_base_dir", Path("."))
+            self._results_path = Path(base_dir) / results_path
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
@@ -258,13 +338,32 @@ class TaskPlugin(CorvidaePlugin):
                 return "Task queue not initialized."
             return plugin.task_queue.status()
 
+        async def task_result(task_id: str) -> str:
+            """Return the stored result of a completed task by its task id."""
+            if plugin.task_queue is None:
+                return "Task queue not initialized."
+            result = await asyncio.to_thread(plugin.task_queue.get_result, task_id)
+            if result is None:
+                return (
+                    f"No stored result for task {task_id}. It may have "
+                    "completed before result persistence was enabled, or "
+                    "the id is wrong."
+                )
+            return result
+
         tool_registry.append(Tool.from_function(task_status))
+        tool_registry.append(Tool.from_function(task_result))
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
+        if self._results_path is not None:
+            await asyncio.to_thread(
+                self._results_path.parent.mkdir, parents=True, exist_ok=True
+            )
         self.task_queue = TaskQueue(
             max_workers=self._max_workers,
             completed_buffer=self._completed_buffer,
+            results_path=self._results_path,
         )
 
         self._worker_task = asyncio.create_task(

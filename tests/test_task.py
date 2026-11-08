@@ -1170,3 +1170,361 @@ class TestTaskAttributionContext:
             pass
 
         assert observed == {}
+
+
+# ---------------------------------------------------------------------------
+# TestTaskResultPersistence — results_path JSONL persistence + get_result
+# ---------------------------------------------------------------------------
+
+
+def _read_records(path):
+    """Read all JSONL records from a results file (empty list if absent)."""
+    import json
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+
+
+class TestTaskResultPersistence:
+    """TaskQueue(results_path=...): completions persist to JSONL; get_result retrieves."""
+
+    async def test_completed_task_persists_jsonl_record(self, tmp_path):
+        """A completed task appends one JSONL line: ts/task_id/channel/description/result."""
+        results_file = tmp_path / "task-results.jsonl"
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        channel = _make_channel(transport="test", scope="chan1")
+        done = asyncio.Event()
+
+        async def work():
+            done.set()
+            return "hello world"
+
+        task = Task(work=work, channel=channel, description="the job")
+        completions = []
+
+        async def on_complete(t, result):
+            completions.append((t.task_id, result))
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        await queue.enqueue(task)
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        # Let the worker finish its post-completion work (persist + on_complete).
+        await asyncio.sleep(0.05)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        assert completions == [(task.task_id, "hello world")]
+        records = _read_records(results_file)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["task_id"] == task.task_id
+        assert rec["channel"] == channel.id
+        assert rec["description"] == "the job"
+        assert rec["result"] == "hello world"
+        assert isinstance(rec["ts"], float)
+
+    async def test_failed_task_persists_failure_record(self, tmp_path):
+        """A task whose work raises persists the failure-template result."""
+        from corvidae.task import TASK_FAILURE_TEMPLATE
+
+        results_file = tmp_path / "task-results.jsonl"
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        channel = _make_channel()
+        done = asyncio.Event()
+
+        async def work():
+            done.set()
+            raise RuntimeError("boom")
+
+        task = Task(work=work, channel=channel, description="failing job")
+
+        async def on_complete(t, result):
+            pass
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        await queue.enqueue(task)
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        await asyncio.sleep(0.05)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        records = _read_records(results_file)
+        assert len(records) == 1
+        assert records[0]["result"] == TASK_FAILURE_TEMPLATE.format(
+            task_id=task.task_id, error=RuntimeError("boom")
+        )
+
+    async def test_get_result_after_deque_eviction(self, tmp_path):
+        """get_result returns a result the in-memory deque has already evicted."""
+        results_file = tmp_path / "task-results.jsonl"
+        queue = TaskQueue(max_workers=1, completed_buffer=2, results_path=results_file)
+        channel = _make_channel()
+        all_done = asyncio.Event()
+
+        def make_work(i):
+            async def work():
+                if i == 2:
+                    all_done.set()
+                return f"result-{i}"
+            return work
+
+        tasks = [
+            Task(work=make_work(i), channel=channel, description=f"t{i}")
+            for i in range(3)
+        ]
+
+        async def on_complete(t, result):
+            pass
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        for t in tasks:
+            await queue.enqueue(t)
+        await asyncio.wait_for(all_done.wait(), timeout=2.0)
+        await asyncio.sleep(0.05)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        # The maxlen=2 deque holds only the last 2 — the first task is evicted.
+        deque_ids = [tid for tid, _ in queue.completed]
+        assert tasks[0].task_id not in deque_ids
+        assert len(deque_ids) == 2
+        assert queue.get_result(tasks[0].task_id) == "result-0"
+
+    async def test_get_result_unknown_id_returns_none(self, tmp_path):
+        """get_result returns None for an id that was never persisted."""
+        results_file = tmp_path / "task-results.jsonl"
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        assert queue.get_result("deadbeef0000") is None
+
+    async def test_no_results_path_no_file_and_deque_only(self, tmp_path):
+        """Default (results_path=None): no file created; evicted results are gone."""
+        queue = TaskQueue(max_workers=1, completed_buffer=1)
+        channel = _make_channel()
+        all_done = asyncio.Event()
+
+        def make_work(i):
+            async def work():
+                if i == 1:
+                    all_done.set()
+                return f"r{i}"
+            return work
+
+        async def on_complete(t, result):
+            pass
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        for i in range(2):
+            await queue.enqueue(Task(work=make_work(i), channel=channel, description=f"t{i}"))
+        await asyncio.wait_for(all_done.wait(), timeout=2.0)
+        await asyncio.sleep(0.05)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        # First result evicted from the maxlen=1 deque; nothing persisted → gone.
+        evicted_id = [tid for tid, _ in queue.completed]
+        assert len(evicted_id) == 1
+        # No file was created anywhere under the queue's control.
+        assert queue.get_result(evicted_id[0]) == "r1"
+
+    async def test_get_result_survives_queue_reconstruction(self, tmp_path):
+        """A fresh TaskQueue (daemon restart) retrieves results from the existing file."""
+        results_file = tmp_path / "task-results.jsonl"
+        channel = _make_channel()
+        done = asyncio.Event()
+        saved_id = {}
+
+        async def work():
+            done.set()
+            return "surviving result"
+
+        queue1 = TaskQueue(max_workers=1, results_path=results_file)
+        task = Task(work=work, channel=channel, description="before restart")
+
+        async def on_complete(t, result):
+            saved_id["id"] = t.task_id
+
+        worker = asyncio.create_task(queue1.run_worker(on_complete))
+        await queue1.enqueue(task)
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        await asyncio.sleep(0.05)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        # Simulate the restart: a brand-new queue over the same file.
+        queue2 = TaskQueue(max_workers=1, results_path=results_file)
+        assert queue2.get_result(saved_id["id"]) == "surviving result"
+
+    async def test_persist_failure_does_not_break_completion(self, tmp_path, caplog):
+        """An unwritable results path: the task completes, on_complete fires, a warning is logged."""
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory")
+        results_file = blocker / "task-results.jsonl"  # open() raises NotADirectoryError
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        channel = _make_channel()
+        done = asyncio.Event()
+        completions = []
+
+        async def work():
+            done.set()
+            return "still fine"
+
+        task = Task(work=work, channel=channel, description="resilient")
+
+        async def on_complete(t, result):
+            completions.append(result)
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        await queue.enqueue(task)
+        with caplog.at_level(logging.WARNING, logger="corvidae.task"):
+            await asyncio.wait_for(done.wait(), timeout=2.0)
+            await asyncio.sleep(0.05)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        assert completions == ["still fine"]
+        assert any("persist" in msg.lower() for msg in caplog.messages)
+
+
+
+# ---------------------------------------------------------------------------
+# TestTaskResultTool — TaskPlugin task_result tool + config wiring
+# ---------------------------------------------------------------------------
+
+
+class TestTaskResultTool:
+    """The task_result tool registered by TaskPlugin, and daemon.task_results_path."""
+
+    def test_register_tools_registers_task_result(self):
+        """TaskPlugin.register_tools appends a task_result tool."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+
+        tool_names = [
+            item.name if hasattr(item, "name") else item.__name__
+            for item in tool_registry
+        ]
+        assert "task_result" in tool_names
+        assert "task_status" in tool_names  # existing tool unaffected
+
+    async def test_task_result_tool_returns_stored_result(self, tmp_path):
+        """End to end: configured path, completed task, tool returns the result."""
+        pm = create_plugin_manager()
+        pm.ahook.on_notify = AsyncMock()
+        plugin = TaskPlugin(pm)
+        results_file = tmp_path / "subdir" / "task-results.jsonl"
+        config = {
+            "daemon": {"task_results_path": str(results_file)},
+            "_base_dir": tmp_path,
+        }
+        await plugin.on_init(pm, config)
+        await plugin.on_start(config)
+
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+        tool = next(t for t in tool_registry if getattr(t, "name", None) == "task_result")
+
+        channel = _make_channel()
+        done = asyncio.Event()
+
+        async def work():
+            done.set()
+            return "the stored answer"
+
+        task = Task(work=work, channel=channel, description="persist me")
+
+        # Drive the queue through the plugin's own completion callback.
+        worker = asyncio.create_task(
+            plugin.task_queue.run_worker(plugin._on_task_complete)
+        )
+        await plugin.task_queue.enqueue(task)
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        await asyncio.sleep(0.05)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        out = await tool.fn(task_id=task.task_id)
+        assert out == "the stored answer"
+
+        await plugin.on_stop()
+
+    async def test_task_result_tool_unknown_id(self, tmp_path):
+        """Unknown id: a polite miss that names the id and the likely cause."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+        config = {"daemon": {"task_results_path": str(tmp_path / "r.jsonl")}, "_base_dir": tmp_path}
+        await plugin.on_init(pm, config)
+        await plugin.on_start(config)
+
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+        tool = next(t for t in tool_registry if getattr(t, "name", None) == "task_result")
+
+        out = await tool.fn(task_id="deadbeef0000")
+        assert "deadbeef0000" in out
+        assert "No stored result" in out
+
+        await plugin.on_stop()
+
+    async def test_task_result_tool_queue_not_initialized(self):
+        """Before on_start, the tool reports the queue is not initialized."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+        tool = next(t for t in tool_registry if getattr(t, "name", None) == "task_result")
+
+        out = await tool.fn(task_id="abc123def456")
+        assert "not initialized" in out
+
+    async def test_on_start_creates_results_parent_dir(self, tmp_path):
+        """on_start creates the results file's parent directory."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+        nested = tmp_path / "a" / "b" / "task-results.jsonl"
+        config = {"daemon": {"task_results_path": str(nested)}, "_base_dir": tmp_path}
+        await plugin.on_init(pm, config)
+        await plugin.on_start(config)
+
+        assert nested.parent.is_dir()
+        assert plugin.task_queue.results_path == nested
+
+        await plugin.on_stop()
+
+    async def test_on_init_without_results_path_keeps_default_off(self, tmp_path):
+        """No daemon.task_results_path in config: persistence stays off (None)."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+        await plugin.on_init(pm, {"daemon": {}, "_base_dir": tmp_path})
+        assert plugin._results_path is None
+
+        await plugin.on_start({})
+        assert plugin.task_queue.results_path is None
+        await plugin.on_stop()
