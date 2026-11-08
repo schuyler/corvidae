@@ -545,18 +545,25 @@ prompt is framed as the operator's. It is hot-reloaded, so it joins the
 just at the next restart. The mitigation is the one finding 4 already
 gives: keep `agent.yaml` unwritable by the daemon user.
 
-`discord.send_attachment` (issue #521) is the first tool that sends to a
-channel the model chooses: `channel_id` is an argument, and the file comes
-from anywhere under `discord.send_attachment_root`, which defaults to the
-working directory — `agent.yaml` and its tokens included. Text from a fetched
-page or an MCP result can therefore turn into a file upload on any channel
-already in the registry, and the file's contents never appear in the
-transcript. Two soft mitigations today: the root is configurable, and the
-upload names the file. Neither is a boundary, because `shell` and `read_file`
-are unjailed already; the meaningful control is the allowlist of who can
-reach a turn at all. Narrowing the default root, or taking the calling
-channel unless a turn explicitly overrides it, is the structural fix and is
-not done.
+`discord.send_attachment` (issue #521) and `send_signal_attachment` (issue
+#544) are the first tools that send to a channel the model chooses:
+`channel_id` is an argument, and the file comes from under
+`discord.send_attachment_root` or `signal.send_attachment_root`, each `state`
+by default, relative to the working directory. `state/` holds what corvidae
+writes there (downloaded attachments, spilled notification content); an
+operator who widens a root to the working directory puts `agent.yaml` and its
+tokens in reach. Text from a fetched page or an MCP result can therefore turn
+into a file upload on any channel already in the registry, and the file's
+contents never appear in the transcript. The Signal tool reaches only a
+contact the registry holds, which is an allowlisted sender who has written
+since the last start, so it can only upload to someone the allowlist already
+admits; Discord's reaches any channel the registry holds. The Signal tool also
+hands signal-cli the path, so the file is read by the daemon under its own
+sandbox as well as checked by corvidae. Two soft mitigations today: the root is
+configurable, and the upload names the file. Neither is a boundary, because
+`shell` and `read_file` are unjailed already; the meaningful control is the
+allowlist of who can reach a turn at all. Taking the calling channel unless a
+turn explicitly overrides it is the structural fix and is not done.
 
 No tool sends a *message* to another channel yet. PRD §3.5.9 now requires one, with no
 allowlist of target channels: any turn may speak on any channel (#234).

@@ -3202,6 +3202,29 @@ envelope whose send timestamp is more than five minutes old gets a
 `[sent YYYY-MM-DD HH:MM UTC]` prefix prepended, so backlog delivered after
 a reconnect reads as backlog rather than as current.
 
+**Outbound files.** `register_tools` offers `send_signal_attachment` when a
+`signal:` block is present. It takes a `signal:<aci>` channel the registry
+knows, a path and an optional caption, and sends one `send` RPC with the
+file's absolute path under `attachments` and the caption as `message`
+(signal-cli's JSON-RPC takes a multi-value option as an array: v0.14.7
+`signal-cli-jsonrpc(5)`). The path is resolved and refused if it lands
+outside `signal.send_attachment_root` (default `state`), and the file is refused
+above `signal.max_attachment_size`; the jail runs before any existence
+check, so a missing path outside the root gets the root error. The
+caption splits like any reply, the first piece riding with the file; the rest go
+out through `_send_rpc`, not `_deliver`, because `_deliver` logs and swallows a
+failure and the tool must not report success for a lost caption. A failure
+returns a "Could not send:" string that says how far the send got: nothing
+delivered (retry, and check the daemon can read the file), signal-cli not
+connected, or the file delivered with caption part *i* of *n* failed (do not
+resend the file). The name differs from Discord's `send_attachment` because the
+tool registry keeps the last of two tools sharing a name while still advertising
+both schemas. Known limits: the daemon must be able to read the path (it is
+local and runs as the corvidae user; `docs/signal-ops.md`, "Sending files"
+covers the unit's sandbox); a `send` result that reports a per-recipient
+failure without a JSON-RPC error is not inspected, for files or text alike;
+and a file send is not recorded in the contact's history.
+
 **Authorization.** `should_process_message` is a default-deny gate: the
 sender's ACI must appear in `allow:` directly, or be what a configured
 E.164 `allow` entry resolved to. A refusal is logged at INFO naming the
