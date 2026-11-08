@@ -723,6 +723,7 @@ CREATE TABLE IF NOT EXISTS memory (
     superseded_by INTEGER,              -- near-dup merge target (Phase 1b)
     redacted INTEGER NOT NULL DEFAULT 0,-- redact tombstone flag (Phase 1b)
     embedded INTEGER NOT NULL DEFAULT 0,-- 0 = embedding pending/failed (backfillable)
+    embedded_dim INTEGER,               -- #597: dim of the vector actually written; NULL = none
     prompt_hash TEXT,                   -- sha256 of the instruction text; NULL = unknown/direct
     mode TEXT,                          -- fork | standalone | direct; NULL = unknown (pre-stamp)
     model TEXT                          -- model the consolidation call was sent with
@@ -1740,6 +1741,28 @@ class MemoryPlugin(CorvidaePlugin):
         )
         memory_id = cursor.lastrowid
 
+        # #597 — the write path is the unchecked side. vec0 validates query
+        # dimension, not insert dimension, so a differently-widthed encoder
+        # (a misnamed model serving the wrong width) would otherwise write a
+        # wrong-width vector into the FLOAT[declared] table silently. Validate
+        # the stored width here: refuse the vec insert, fail loud, and leave
+        # the row unembedded (embedded=0, backfillable).
+        if embedding is not None:
+            declared_dim = self._embedding_dimensions()
+            if declared_dim is not None and len(embedding) != declared_dim:
+                logger.error(
+                    "embedding dim drift: encoder produced a %d-dim vector but "
+                    "the vector table declares %d-dim (encoder %s); refusing to "
+                    "insert row %d and leaving it unembedded (embedded=0, "
+                    "backfillable). Check the embedding config / encoder.",
+                    len(embedding), declared_dim,
+                    (self._embedding_cfg or {}).get("model", "?"), memory_id,
+                )
+                await db.execute(
+                    "UPDATE memory SET embedded = 0 WHERE id = ?", (memory_id,)
+                )
+                return memory_id
+
         # WP1b.2 — near-dup check: query BEFORE inserting the new vec row
         # so the new record is naturally excluded from the results.
         # Candidates come from the agent's whole memory (PRD §3.7 Memory 3,
@@ -1786,6 +1809,13 @@ class MemoryPlugin(CorvidaePlugin):
             await db.execute(
                 "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
                 (memory_id, sqlite_vec.serialize_float32(embedding)),
+            )
+            # #597 — record the stored dimension as a queryable fact (Part 1):
+            # the width the encoder actually wrote, so a drift is a row-level
+            # query, not something inferred from a BLOB byte length.
+            await db.execute(
+                "UPDATE memory SET embedded_dim = ? WHERE id = ?",
+                (len(embedding), memory_id),
             )
 
         # If a near-dup was found, fold the old record into the new one.
@@ -2506,6 +2536,8 @@ class MemoryPlugin(CorvidaePlugin):
         await add_column_if_missing(db, "memory", "prompt_hash", "TEXT")
         await add_column_if_missing(db, "memory", "mode", "TEXT")
         await add_column_if_missing(db, "memory", "model", "TEXT")
+        # #597: stored-dim provenance. Rows from before this column read NULL.
+        await add_column_if_missing(db, "memory", "embedded_dim", "INTEGER")
         await db.execute(MEMORY_PROMPT_DDL)
         await db.execute(WATERMARK_DDL)
         await db.execute(EMBEDDING_META_DDL)
