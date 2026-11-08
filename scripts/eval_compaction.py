@@ -18,18 +18,31 @@ Requirements:
 
 import argparse
 import asyncio
+import dataclasses
+import importlib.util
 import json
 import sys
 import time
 from pathlib import Path
 
-try:
-    from corvidae.envref import EnvRefError, expand_env_refs
-    from corvidae.llm_plugin import parse_llm_config
-except ImportError:  # pragma: no cover - depends on how the script is launched
+# Tell "corvidae is not on this interpreter's path" (run it under uv) apart
+# from "corvidae is here but one of its dependencies is not" (install that
+# dependency): the second used to be reported as the first (#589).
+if importlib.util.find_spec("corvidae") is None:  # pragma: no cover - launch dependent
     sys.exit(
         "eval_compaction: corvidae is not importable from this interpreter. "
         "Run it in the project environment: uv run python scripts/eval_compaction.py"
+    )
+try:
+    from corvidae.envref import EnvRefError, expand_env_refs
+    from corvidae.llm_plugin import check_stage_map, parse_llm_config
+except ImportError as _import_error:  # pragma: no cover - depends on the environment
+    # `name` is the module that failed (aiohttp); fall back to the message for
+    # an ImportError raised without one.
+    _missing = _import_error.name or str(_import_error)
+    sys.exit(
+        f"eval_compaction: corvidae is installed but could not import "
+        f"{_missing!r}; install it in this environment (uv sync) and re-run"
     )
 
 # ---------------------------------------------------------------------------
@@ -59,6 +72,12 @@ def resolve_llm_defaults(llm_section: dict | None) -> dict:
         ValueError: naming the problem, for a malformed ``llm:`` section.
     """
     config = parse_llm_config(llm_section)
+    # Refuse a stage map the daemon would refuse at startup (#590). Only the
+    # stage this eval measures is checked: check_stage_map warns about every
+    # stage it was not told about, and the eval does not know the daemon's
+    # other stages, so the map is narrowed to this one entry first.
+    measured = {k: v for k, v in config.stages.items() if k == EVAL_STAGE}
+    check_stage_map(dataclasses.replace(config, stages=measured), {EVAL_STAGE: "chat"})
     # `parse_llm_config` guarantees a default chat profile (PRD §3.11.1), so
     # this always resolves; `profile_for` falls back to it for any stage.
     profile = config.profile_for(EVAL_STAGE, "chat")
