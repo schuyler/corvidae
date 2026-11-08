@@ -124,7 +124,7 @@ def test_a_failing_rotation_keeps_appending_and_warns_once(tmp_path, caplog, mon
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
 
     assert len(_read(path)) == 6, "no record is lost to the failed rotation"
-    assert len(warnings) == 1 and str(path) in warnings[0] and "permission" in warnings[0].lower()
+    assert len(warnings) == 1 and str(path) in warnings[0] and "check the directory" in warnings[0]
 
     # Once the directory works again, the next write rotates and logging recovers.
     monkeypatch.undo()
