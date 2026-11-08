@@ -287,7 +287,7 @@ differ so both transports can run in one agent.)
 - **How big.** `signal.max_attachment_size` caps a file in both directions;
   a larger one is refused before anything is sent.
 - **To whom.** A `signal:<id>` channel corvidae holds in its registry. That
-  is an allowlisted sender who has written since corvidae started, a channel
+  is, for example, an allowlisted sender who has written since corvidae started, a channel
   you list under `channels:` in `agent.yaml`, or one a reminder or scheduled
   job has fired on since the start. The registry is rebuilt at every start,
   so a contact who has not written since a restart (and has no reminder or
@@ -332,7 +332,7 @@ signal-cli unit here. Run `systemctl daemon-reload` and restart the unit after
 a change.
 
 The tool assumes signal-cli runs on the same host as corvidae and as the same
-user, which this page already requires for the socket. If it ever ran in a
+user, which this page already recommends for the socket. If it ever ran in a
 container or on another host, the path would mean nothing to it, and the tool
 would need to send the file's contents instead.
 

@@ -558,7 +558,7 @@ puts `agent.yaml` and its tokens in reach. Text from a fetched page or an MCP
 result can therefore turn into a file upload on any channel already in the
 registry, and the file's contents never appear in the transcript. Neither tool
 checks the inbound allowlist: registry membership is the whole gate. For
-Signal a channel is in the registry when an allowlisted sender has written
+Signal a channel is in the registry, for example, when an allowlisted sender has written
 since the last start, when it is listed under `channels:`, or when a reminder
 or scheduler job has resolved it since the start, so the reach is the contacts
 the operator or the allowlist has already put there, and (as PRD §3.5.9 says)
@@ -570,7 +570,8 @@ configurable, and the upload names the file. Neither is a boundary, because
 allowlist of who can reach a turn at all. Taking the calling channel unless a
 turn explicitly overrides it is the structural fix and is not done.
 
-No tool sends a *message* to another channel yet. PRD §3.5.9 now requires one, with no
+No tool sends a *message* to the person on another channel yet (the
+cross-channel `send_message` of #234 queues a turn there instead). PRD §3.5.9 now requires one, with no
 allowlist of target channels: any turn may speak on any channel (#234).
 Finding 15 is its entry. PRD §3.9.7 also lets the agent set recurring
 reminders, which the tree doesn't yet: a recurring reminder set because of

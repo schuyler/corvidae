@@ -3225,14 +3225,14 @@ covers the unit's sandbox); a `send` result that reports a per-recipient
 failure without a JSON-RPC error is not inspected, for files or text alike;
 a file send is not recorded in the contact's history; and the file send has
 not been run against a live signal-cli daemon (the wire format and the error
-path come from reading signal-cli's documentation and source, and the fake
-daemon in `tests/signal_fake.py` pins the same shape). The target gate is
+path come from reading signal-cli's documentation and source, and
+`tests/test_signal_send_attachment.py` pins the same shape). The target gate is
 registry membership, as for Discord's tool and PRD §3.5.9 (nothing gates which
-channel a turn may speak on): a channel is in the registry when an
+channel a turn may speak on): a channel is in the registry, for example, when an
 allowlisted sender has written since the last start, when it is listed under
 `channels:` (including a `signal:+E164` alias, which then receives the
 file at the E.164 address, bypassing `resolve_channel`), or when a reminder or
-scheduler job has resolved it since the start.
+scheduler job (or any other caller that resolves a persisted id) has resolved it since the start.
 
 **Authorization.** `should_process_message` is a default-deny gate: the
 sender's ACI must appear in `allow:` directly, or be what a configured
