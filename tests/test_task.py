@@ -1521,6 +1521,78 @@ class TestTaskResultPersistence:
         for t in tasks:
             assert queue.get_result(t.task_id) == f"burst-{t.description[1:]}"
 
+    async def test_task_result_tool_race_deque_gil_span(self, tmp_path):
+        """The task_result tool must not raise when a lookup spans a GIL switch.
+
+        Strengthens test_get_result_during_completion_burst_no_deque_race, which
+        cannot actually trigger the race: with a small completed_buffer the deque
+        iteration is nanoseconds, so CPython's GIL (switch interval ~5ms)
+        serializes the worker-thread iteration and the loop-thread append, and
+        the burst test inlines the split path rather than driving the tool. Here
+        the deque is pre-filled to 200k (a single get_result iteration takes
+        ~9.5ms, spanning a GIL switch) and the REAL registered tool is driven, so
+        on the pre-fix code (whole get_result in to_thread) a worker thread
+        iterates the deque while the loop thread appends/evicts -> RuntimeError:
+        deque mutated during iteration.
+        """
+        pm = create_plugin_manager()
+        pm.ahook.on_notify = AsyncMock()
+        plugin = TaskPlugin(pm)
+        results_file = tmp_path / "task-results.jsonl"
+        config = {"daemon": {"task_results_path": str(results_file)}, "_base_dir": tmp_path}
+        await plugin.on_init(pm, config)
+        await plugin.on_start(config)
+
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+        tool = next(t for t in tool_registry if getattr(t, "name", None) == "task_result")
+
+        # The plugin's own worker would race this test's worker; cancel it and
+        # drive the queue directly (mirrors test_task_result_tool_returns_stored_result).
+        plugin._worker_task.cancel()
+        try:
+            await plugin._worker_task
+        except asyncio.CancelledError:
+            pass
+
+        # A deque large enough that one get_result iteration spans a CPython GIL
+        # switch (~5ms); below that the GIL serializes the iteration and the
+        # append, so the race never manifests. Pre-fill to maxlen so every
+        # feeder append evicts (the mutation that breaks a mid-iteration worker).
+        buf = 200000
+        queue = TaskQueue(max_workers=8, completed_buffer=buf, results_path=results_file)
+        queue.completed.extend((f"seed{i}", f"r{i}") for i in range(buf))
+        channel = _make_channel()
+        plugin.task_queue = queue  # the tool reads plugin.task_queue dynamically
+
+        async def on_complete(t, result):
+            pass
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+
+        n = 4000
+
+        async def feeder():
+            for i in range(n):
+                await queue.enqueue(Task(work=_const_result(f"r{i}"), channel=channel))
+
+        async def hammer():
+            for _ in range(20):
+                await asyncio.gather(
+                    *(tool.fn(task_id=f"probe{i:05d}") for i in range(24))
+                )
+
+        # If the race were present, a to_thread deque iteration would raise
+        # RuntimeError and gather would propagate it.
+        await asyncio.gather(feeder(), hammer())
+
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+        await plugin.on_stop()
+
     async def test_fast_path_when_file_absent(self, tmp_path):
         """The deque fast path works even when the results file does not exist."""
         queue = TaskQueue(max_workers=1, results_path=tmp_path / "never-created.jsonl")
