@@ -1194,7 +1194,7 @@ class DiscordPlugin(TransportPlugin):
         channel_id: str,
         name: str,
         from_message_id: str | None = None,
-        text: str = "",
+        text: str | None = "",
     ) -> str:
         """Start a Discord thread and return its scope (#593).
 
@@ -1261,10 +1261,19 @@ class DiscordPlugin(TransportPlugin):
                 message = await messageable.fetch_message(message_id)
                 thread = await message.create_thread(name=title)
             else:
+                forum = getattr(_sdk(), "ForumChannel", None)
+                if forum is not None and isinstance(messageable, forum):
+                    # A forum calls its threads posts: the first message is the
+                    # starter and the thread is created with it, so "start a
+                    # thread and post into it" is two different shapes there.
+                    return (
+                        f"Could not start a thread: {channel_id} is a forum, which "
+                        "takes posts; name a message in it instead."
+                    )
                 if not hasattr(messageable, "create_thread"):
                     return (
-                        f"Could not start a thread: {channel_id} is not a text channel, "
-                        "so it takes no threads of its own; name a message instead."
+                        f"Could not start a thread: {channel_id} has no threads of "
+                        "its own; name a message instead."
                     )
                 thread = await messageable.create_thread(name=title)
         except Exception as exc:
@@ -1282,13 +1291,16 @@ class DiscordPlugin(TransportPlugin):
         # own scope (#513), so register it: a later send to that scope has to
         # find it, and the inbound path would have registered it had someone
         # typed in the thread first.
-        thread_scope = str(getattr(thread, "id", ""))
-        if not thread_scope:
+        thread_id = getattr(thread, "id", None)
+        if thread_id is None:
             return f"Started a thread in {channel_id}, but Discord returned no id."
-        thread_channel = self._registry.get_or_create("discord", thread_scope)
+        thread_channel = self._registry.get_or_create("discord", str(thread_id))
         # The same name the inbound path gives a thread (#513): its title and
-        # the channel it hangs off, so "a thread in #home" reads as one.
-        thread_channel.name = _channel_name(thread)
+        # the channel it hangs off, so "a thread in #home" reads as one. A
+        # thread without a name of its own keeps what the registry gave it.
+        thread_name = _channel_name(thread)
+        if thread_name is not None:
+            thread_channel.name = thread_name
 
         if text.strip():
             for chunk in split_discord_message(text, self._message_chunk_size):

@@ -25,7 +25,11 @@ class FakeThread:
         self.parent = parent
         self.sends: list[tuple[str, dict]] = []
 
+    refuse_send_with: Exception | None = None
+
     async def send(self, content, **kwargs):
+        if self.refuse_send_with is not None:
+            raise self.refuse_send_with
         self.sends.append((content, kwargs))
 
 
@@ -38,12 +42,15 @@ class FakeParent(FakeMessageable):
         self.created: list[str] = []
         self.thread: FakeThread | None = None
         self.refuse_with: Exception | None = None
+        #: Applied to the thread the channel creates, to fail its first message.
+        self.thread_refuse_with: Exception | None = None
 
     async def create_thread(self, *, name: str, **kwargs) -> FakeThread:
         if self.refuse_with is not None:
             raise self.refuse_with
         self.created.append(name)
         self.thread = FakeThread(9001, name, parent=self)
+        self.thread.refuse_send_with = self.thread_refuse_with
         return self.thread
 
     async def fetch_message(self, message_id: int):
@@ -68,9 +75,14 @@ class Forbidden(Exception):
     ``isinstance`` check and a fresh class per call would never match."""
 
 
+class ForumChannel:
+    """The SDK's forum type. Present so the forum case is a value, not a guess."""
+
+
 _SDK = SimpleNamespace(
     AllowedMentions=SimpleNamespace(none=lambda: "none"),
     Forbidden=Forbidden,
+    ForumChannel=ForumChannel,
 )
 
 
@@ -170,6 +182,34 @@ class TestStartThread:
         try:
             out = await h.plugin.start_thread("signal:abc", "Deploy notes")
             assert "not a Discord channel" in out
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_a_failed_first_message_still_names_the_thread(self, monkeypatch):
+        h, channel, target = await self._ready(monkeypatch)
+        try:
+            target.thread_refuse_with = Forbidden("Missing Permissions")
+            out = await h.plugin.start_thread(channel.id, "Deploy notes", text="step 3")
+            # The thread exists and is registered, so the message must say which
+            # one: a retry would otherwise create a second thread.
+            assert "Started thread discord:9001" in out
+            assert "could not post in it" in out
+            assert h.registry.get("discord:9001") is not None
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_a_forum_is_refused_not_mistaken_for_a_text_channel(self, monkeypatch):
+        h, channel, _ = await self._ready(monkeypatch)
+
+        class Forum(ForumChannel):
+            async def create_thread(self, *, name, **kwargs):
+                raise AssertionError("a forum takes posts, not threads")
+
+        h.plugin._messageable = AsyncMock(return_value=Forum())
+        try:
+            out = await h.plugin.start_thread(channel.id, "Deploy notes")
+            assert "is a forum" in out
+            assert h.registry.get("discord:9001") is None
         finally:
             await h.plugin.on_stop()
 

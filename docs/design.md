@@ -3449,8 +3449,9 @@ if it lands outside that root, and the file is refused above
 **Starting a thread.** The `start_thread` tool creates one and returns its
 `discord:<thread_id>` scope (#593). Given `from_message_id` it hangs a thread
 off that message; without one it starts a standalone thread on the channel, so
-a DM — which has no threads — is refused along with any target that is not a
-text channel. Discord's 1–100 character name rule is enforced in the tool, and
+a DM — which has no threads — is refused, a forum is refused because it takes
+posts rather than plain threads, and so is any other channel with no threads of
+its own. Discord's 1–100 character name rule is enforced in the tool, and
 an optional first message is posted into the thread rather than into the parent,
 split like any reply and sent with `allowed_mentions` none. The new thread is
 registered in the channel registry, because a thread is a channel in its own
