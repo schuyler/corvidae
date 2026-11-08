@@ -104,3 +104,30 @@ async def test_both_sinks_rotate(tmp_path):
         assert live.stat().st_size <= 200 and live.with_name(live.name + ".1").exists()
         assert not live.with_name(live.name + ".2").exists()
         assert all(json.loads(line) for line in _read(live))
+
+
+def test_a_failing_rotation_keeps_appending_and_warns_once(tmp_path, caplog, monkeypatch):
+    """The directory is unwritable, so rotation cannot rename: the file grows past
+    the cap instead of dropping every later record, as it did before the cap."""
+    import corvidae.jsonl_rotate as mod
+
+    path = tmp_path / "chan.jsonl"
+    appender = RotatingAppender(path, max_bytes=30, backup_count=2)
+
+    def denied(*args, **kwargs):
+        raise PermissionError("read-only directory")
+
+    monkeypatch.setattr(mod.os, "replace", denied)
+    with caplog.at_level(logging.WARNING, logger="corvidae.jsonl_rotate"):
+        for i in range(6):
+            appender.write_line(f"record-{i:02d}")
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+    assert len(_read(path)) == 6, "no record is lost to the failed rotation"
+    assert len(warnings) == 1 and str(path) in warnings[0] and "permission" in warnings[0].lower()
+
+    # Once the directory works again, the next write rotates and logging recovers.
+    monkeypatch.undo()
+    appender.write_line("record-06")
+    appender.close()
+    assert _read(tmp_path / "chan.jsonl.1")[0] == "record-00" and _read(path) == ["record-06"]

@@ -1786,8 +1786,10 @@ closes the file, shifts `x.jsonl` → `.1` → … → `.N` (`backup_count`, def
 5, the oldest dropped) and reopens in append mode, logging the rotation at INFO
 with the file's path. The size is read from the open file, so a file already
 over the cap rotates on its first write and an external `copytruncate` still
-works. A lock serialises writers, since both plugins write from worker
-threads. `parse_rotation` validates the two keys in `on_init`; a bad value is
+works. A lock serialises writers, since one appender can be written from several
+worker threads at once. A rotation that fails (a read-only directory) is
+logged once per streak at WARNING, naming the file, and the file keeps
+growing past the cap until rotation works again. `parse_rotation` validates the two keys in `on_init`; a bad value is
 a config error. Nothing reads a rotated segment; `message_log` is the durable
 record (principle 4).
 

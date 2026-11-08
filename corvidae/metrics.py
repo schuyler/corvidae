@@ -302,6 +302,7 @@ class MetricsJsonlPlugin(CorvidaePlugin):
             self.pm = pm
         self._path: Path | None = None
         self._handle: RotatingAppender | None = None
+        self._max_bytes, self._backup_count = parse_rotation({})
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -333,7 +334,7 @@ class MetricsJsonlPlugin(CorvidaePlugin):
         try:
             await asyncio.to_thread(self._write_record, record)
         except Exception:
-            logger.warning("metrics JSONL write failed", exc_info=True)
+            logger.warning("metrics JSONL write failed for %s", self._path, exc_info=True)
 
     def _write_record(self, record: dict) -> None:
         """Write a single JSON record (sync, for use with to_thread)."""

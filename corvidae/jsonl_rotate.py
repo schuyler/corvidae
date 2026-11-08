@@ -58,8 +58,9 @@ def parse_rotation(config: dict) -> tuple[int, int]:
 class RotatingAppender:
     """An append-mode JSONL file that rotates itself before it passes a cap.
 
-    Synchronous: callers run it in worker threads (``asyncio.to_thread``), so
-    a lock serialises writes: two threads must not both decide to rotate.
+    Synchronous: callers run it in worker threads (``asyncio.to_thread``), and
+    one appender can be written from several at once (concurrent metrics
+    events), so a lock serialises writes: two threads must not both rotate.
     The handle is opened lazily and flushed per write, so an external
     ``copytruncate`` rotation still works on a file this class has open.
     """
@@ -70,6 +71,9 @@ class RotatingAppender:
         self._backup_count = backup_count
         self._fh: IO[str] | None = None
         self._lock = threading.Lock()
+        # True while rotation keeps failing, so the warning is logged once per
+        # streak and not once per record.
+        self._rotation_failing = False
 
     def write_line(self, line: str) -> None:
         """Append ``line`` and a newline, rotating first when it would not fit."""
@@ -77,6 +81,7 @@ class RotatingAppender:
             self._write_line_locked(line)
 
     def _write_line_locked(self, line: str) -> None:
+        """The body of ``write_line``; the caller holds the lock."""
         if self._fh is None:
             self._fh = open(self._path, "a", encoding="utf-8")
         # Size from the file itself, not a counter: the file may already be over
@@ -86,7 +91,22 @@ class RotatingAppender:
         # `size > 0` keeps a single record larger than the cap from rotating an
         # empty file forever; it is written whole.
         if self._max_bytes and size > 0 and size + incoming > self._max_bytes:
-            self._rotate()
+            try:
+                self._rotate()
+                self._rotation_failing = False
+            except OSError as exc:
+                # shortcut: keep appending past the cap while rotation fails (a
+                # read-only directory, say). Losing every later record is worse
+                # than a file over its cap; rotation is retried on each write.
+                if not self._rotation_failing:
+                    logger.warning(
+                        "could not rotate JSONL file %s (%s: %s); appending past its "
+                        "%d-byte cap until rotation works — check the directory's "
+                        "permissions and free space",
+                        self._path, type(exc).__name__, exc, self._max_bytes,
+                        exc_info=True,
+                    )
+                self._rotation_failing = True
             self._fh = open(self._path, "a", encoding="utf-8")
         self._fh.write(line + "\n")
         self._fh.flush()
