@@ -112,26 +112,25 @@ def _redact_url(value: object) -> str:
 
 
 
-def _describe_config_value(value: object) -> str:
+def _describe_config_value(value: object, secret_bearing: bool = False) -> str:
     """A rejected config value, in a form safe to put in a log line.
 
     Config errors are reported in the daemon log, and a value the validator
     rejected can still be one that carries a credential: a server entry that
-    is the URL itself, or a ``headers`` list holding ``Bearer <token>``. So:
+    is the URL itself, or a ``headers`` list holding ``Bearer <token>``. So a
+    string that parses as a URL keeps scheme, host, port and path -- what
+    tells the operator which endpoint is misconfigured -- and loses its
+    userinfo and query.
 
-    - a string that parses as a URL keeps scheme, host, port and path -- what
-      tells the operator which endpoint is misconfigured -- and loses its
-      userinfo and query;
-    - any other scalar is shown, because a typo ("abc" for a number) is the
-      thing the operator must see to fix it;
-    - a container is described by type and length, never by contents, since a
-      container is where a token hides and the key in the message is the
-      actionable part (#386 review).
+    Every other value is shown, because a typo (`"abc"` for a number) or a
+    wrong shape is what the operator must see to fix it. ``secret_bearing`` is
+    for the key whose value is a credential by definition -- ``headers`` --
+    where only the type and size are reported (#386 review).
     """
     if isinstance(value, str):
         redacted = _redact_url(value)
         return repr(value) if redacted == _UNPARSEABLE else redacted
-    if isinstance(value, (dict, list, tuple, set)):
+    if secret_bearing and isinstance(value, (dict, list, tuple, set)):
         return f"{type(value).__name__} of length {len(value)}"
     return repr(value)
 
@@ -313,7 +312,7 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
     if raw_headers is not None and not isinstance(raw_headers, dict):
         raise ValueError(
             f"mcp.servers.{name}.headers must be a mapping of header names "
-            f"to values, got {_describe_config_value(raw_headers)}"
+            f"to values, got {_describe_config_value(raw_headers, secret_bearing=True)}"
         )
     # Resolve ${VAR} references: a missing variable raises McpHeaderEnvError.
     headers = _resolve_headers(name, cfg.get("headers"))
