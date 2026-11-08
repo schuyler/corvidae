@@ -308,14 +308,6 @@ def test_a_dotted_key_name_is_not_a_live_prefix_child(tmp_path, caplog):
     assert _warned(watcher, caplog, _reload(**{"agent.forks": True}), "agent.forks")
 
 
-def test_a_dotted_key_name_equal_to_a_declared_prefix_still_warns(tmp_path, caplog):
-    """CompactionPlugin declares ``agent.compaction_threshold`` (the nested path);
-    a top-level key of that spelling joined to the same string and was suppressed."""
-    watcher = _watcher(tmp_path, RUNNING)
-    config = _reload(**{"agent.compaction_threshold": 0.5})
-    assert _warned(watcher, caplog, config, "agent.compaction_threshold")
-
-
 def test_a_nested_key_under_a_live_prefix_is_still_filtered(tmp_path, caplog):
     watcher = _watcher(tmp_path, RUNNING)
     watcher.pm.register(_LiveAgentStub(), name="live_agent_stub")

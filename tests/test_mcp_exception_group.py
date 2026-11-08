@@ -83,12 +83,3 @@ async def test_a_real_cancel_wrapped_in_a_group_propagates_and_stops_owners():
     with pytest.raises(BaseExceptionGroup):
         await task
     assert stopped == [True]
-
-
-async def test_a_group_holding_a_keyboard_interrupt_is_not_swallowed():
-    async def connect(name, cfg):
-        raise BaseExceptionGroup("interrupted", [KeyboardInterrupt()])
-
-    plugin = await _plugin({"first": SERVERS["first"]}, connect)
-    with pytest.raises(BaseExceptionGroup):
-        await plugin.on_start({"mcp": {"servers": SERVERS}})

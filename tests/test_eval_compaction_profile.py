@@ -167,7 +167,7 @@ def test_a_missing_dependency_is_named_not_blamed_on_the_interpreter():
     result = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
     output = result.stdout + result.stderr
 
-    assert "aiohttp" in output
+    assert "could not import 'aiohttp'" in output
     assert "not importable from this interpreter" not in output
 
 

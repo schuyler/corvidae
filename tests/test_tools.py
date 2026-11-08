@@ -325,6 +325,7 @@ class TestReadFileLines:
         header, _, body = (await fn(str(f), start_line=2)).partition("\n")
 
         assert "line 2 cut after" in header and "of 3 in" in header
+        assert header.endswith(", then next start_line 3]")
         offset = int(re.search(r"continue with offset (\d+)", header).group(1))
         assert offset == len("first\n") + len(body)
         rest = await fn(str(f), offset=offset, length=50)  # the character read resumes the line

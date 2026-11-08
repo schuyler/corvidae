@@ -2821,7 +2821,7 @@ group around a real cancel propagates, and `on_start` still stops the owners
 already started; a group holding `KeyboardInterrupt` or `SystemExit` always
 propagates. The connect-failure warnings name the server, its endpoint (URL or
 command) and the unwrapped exception types, and say the background retry will
-try again. A URL in that endpoint has any line-boundary character
+try again. A line-boundary character in that endpoint (a URL, or a stdio command) is
 percent-encoded, so one warning is one log line (#588).
 
 ### Tool naming

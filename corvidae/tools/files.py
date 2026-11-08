@@ -178,8 +178,10 @@ def _read_lines(
 
     # An unterminated last line still counts; a trailing newline does not open one.
     total_lines = line_no - 1 if ended_with_newline else line_no
+    # An empty file has no line to start from.
     if pos == 0:
         return f"Error: {path} is empty; there is nothing to read"
+    # A start beyond the last line names the file and its line count.
     if start > total_lines:
         return (
             f"Error: start_line {start} is past the end of {path}, "
@@ -191,7 +193,7 @@ def _read_lines(
     header_bound = len(
         f"[lines {start}-{total_lines} of {total_lines} in {path}; "
         f"line {total_lines} cut after {max_chars} characters; "
-        f"continue with offset {pos}]"
+        f"continue with offset {pos}, then next start_line {total_lines}]"
     )
     body = "".join(kept)[: max(0, max_chars - header_bound - 1)]
     last_wanted = total_lines if end is None else min(end, total_lines)
@@ -211,10 +213,12 @@ def _read_lines(
         return f"[lines {start}-{last} of {total_lines} in {path}; next start_line {last + 1}]\n{body}"
 
     # The first line alone overflows the page: say how far it was cut and where
-    # to continue, as a character offset into the file.
+    # to continue, as a character offset into the file, then where line paging
+    # resumes once that line is finished (when a later line exists).
+    resume = f", then next start_line {start + 1}" if start < total_lines else ""
     return (
         f"[lines {start}-{start} of {total_lines} in {path}; line {start} cut "
-        f"after {len(body)} characters; continue with offset {region_start + len(body)}]\n{body}"
+        f"after {len(body)} characters; continue with offset {region_start + len(body)}{resume}]\n{body}"
     )
 
 
