@@ -124,7 +124,7 @@ class TestWindowExclusion:
         query = "where is the rain gauge"
         in_window = {
             await seed(db, channel.id, query, WINDOW_START + 1, WINDOW_START + 2)
-            for _ in range(k * VEC_OVERFETCH + 8)
+            for _ in range(k * VEC_OVERFETCH * 4)
         }
         out_of_window = {
             await seed(db, channel.id, f"rain gauge note {n} about wiring",

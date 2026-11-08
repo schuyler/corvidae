@@ -223,7 +223,28 @@ one message is just itself. The query is embedded and matched against `memory_ve
 (sqlite-vec exact KNN, cosine distance); candidates are filtered to
 `indexed=1 AND redacted=0`. There is no per-channel scope: records from
 every channel are candidates (PRD principle 14, #168), and
-[threat-model.md](threat-model.md) finding 15 records what that costs. Scores are
+[threat-model.md](threat-model.md) finding 15 records what that costs.
+
+**Window exclusion (#634):** records that only echo the live window are
+left out. A record is excluded when it belongs to the current channel
+*and* its `msg_id_start` is at or past the oldest `message_log` id in the
+window (`min(window_db_ids(conv.messages))`), that is, its whole range is
+still in view. Both conditions matter: `message_log` ids are global, so an
+id test alone would hide other channels' recent records too. A record that
+straddles the window's oldest id is still admitted, so the part of it that
+compaction dropped stays recallable; a window with no ids excludes nothing.
+The exclusion is a `retrieve(..., exclude=(channel_id, min_msg_id))`
+argument applied in the candidate queries' `WHERE`, before the cut to k:
+the FTS5 path filters ahead of its `LIMIT`, and the KNN fetches `k × 4`
+plus a `COUNT(*)` of the excluded records, so in-window records can't take
+every slot. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
+and `search_memory` see everything. It is not a scope: other channels'
+records, and this channel's once their rows leave the window, are
+retrieved normally. Known limit: the bound assumes the window is a
+contiguous id suffix of the channel's log, which rows imported with old
+timestamps can break (#638).
+
+Scores are
 `cosine_similarity × exp(-age_days / memory.half_life_days)`, where
 `age_days` runs from `created_at`, or from `max(created_at,
 last_retrieved_at)` under `memory.retrieval.recency_from: last_used`.
@@ -421,7 +442,8 @@ Implements five hooks and two kernel timers:
   `compacted_ids` range above the per-channel watermark, using the stashed
   fork record when there is one for that range and watermark, else catch-up
   (after the drop the range has left the window).
-- `before_agent_turn` — embeds the inbound user text, scores candidates
+- `before_agent_turn` — embeds the inbound user text, leaves out this
+  channel's records still wholly in its window, scores candidates
   (`similarity × exp(-age_days / half_life)`, with age from `created_at` or,
   under `memory.retrieval.recency_from: last_used`, from the last
   retrieval), bands them (strong/moderate/weak, on the score or, under
