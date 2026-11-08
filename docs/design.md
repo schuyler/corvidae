@@ -2176,10 +2176,25 @@ Tracks active tasks and completed results (bounded deque, last 100).
 and no tasks are currently executing.
 
 **TaskPlugin** — hookimpl that owns the TaskQueue. Reads
-`daemon.max_task_workers` from config (default 4) to set concurrency, and
+`daemon.max_task_workers` from config (default 4) to set concurrency,
 `daemon.completed_task_buffer` (default 100) to set the completed-result
-history bound. Starts/stops the worker on lifecycle hooks. Registers the
-`task_status` tool. On task completion, fires `on_notify`.
+history bound, and `daemon.task_results_path` (unset by default) to enable
+JSONL result persistence. Starts/stops the worker on lifecycle hooks.
+Registers the `task_status` and `task_result` tools. On task completion,
+persists a JSONL record (when enabled) and fires `on_notify`.
+
+Results are kept in two places: an in-memory bounded deque (last
+`completed_task_buffer` entries, serving `task_status` and the fast path of
+`task_result`) and, when `daemon.task_results_path` is set, a JSONL audit
+file — one record per completion, `{"ts", "task_id", "channel",
+"description", "result"}` — that outlives the deque and a daemon restart.
+`TaskQueue.get_result(task_id)` serves the fast path from the deque and
+falls back to a file scan; the `task_result` tool runs the deque leg on the
+event-loop thread and the file leg off it, because the worker appends to (and
+evicts from) the deque on the loop thread and CPython's deque iterator raises
+if it is mutated during iteration. The file has no rotation or cap; operators
+own rotating it (an index by `task_id`, e.g. SQLite, is the longer-term
+option for lookups that outgrow a full re-scan).
 
 ## LLMPlugin
 
@@ -2823,6 +2838,7 @@ registers `task_status` as tool closures during `on_start`.
 |------|------|---------|
 | `subagent(instructions, description)` | `tools/subagent.py` | Launch background subagent using shared LLM client |
 | `task_status()` | `task.py` | Report task queue status |
+| `task_result(task_id)` | `task.py` | Return a completed task's stored result by id (in-memory deque, then the JSONL file when persistence is enabled) |
 
 `SchedulerPlugin` registers three tools scoped to the calling channel
 (see [SchedulerPlugin](#schedulerplugin)):

@@ -1006,6 +1006,18 @@ decision (2026-11-01), and these are its costs.
   **Without it, this gap is accepted:**
   keep the agent out of rooms where people you haven't allowed can read it,
   or accept that anything it knows can surface there.
+- **Background task results are channel-blind.** `task_status` already shows
+  every channel's active, pending and completed tasks, and `task_result`
+  (PR #594) returns any channel's persisted result *body* by task id — with
+  no channel check — and, when `daemon.task_results_path` is set, across a
+  restart (the JSONL audit file outlives the 100-entry in-memory deque). A
+  task started on a private channel (a Signal contact's request) leaves a
+  result that a turn on a public channel can read by id and surface. This is
+  the first bullet's gap (what the agent knows can surface anywhere) applied
+  to the task side channel, plus a persistence leg. The operator control is
+  the same as the first bullet: keep the agent out of rooms where disallowed
+  readers can read it, or leave `daemon.task_results_path` unset so results
+  are gone with the deque.
 - **Text from one channel can steer action on every other.** A web page,
   an MCP result or a distilled memory read on one channel can make the
   model message any contact, send another channel's context a note, or
