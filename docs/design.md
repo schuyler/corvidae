@@ -3237,7 +3237,10 @@ a reconnect reads as backlog rather than as current.
 **Outbound files.** `register_tools` offers `send_signal_attachment` when a
 `signal:` block is present. It takes a `signal:<aci>` channel the registry
 knows, a path and an optional caption, and sends one `send` RPC with the
-file's absolute path under `attachments` and the caption as `message`
+file as a data URI (`data:<type>;filename=<name>;base64,<payload>`; the type is
+guessed from the file name, falling back to `application/octet-stream`, and
+`filename=` is the file's name; read and encoded in one thread call) under
+`attachments` and the caption as `message`
 (signal-cli's JSON-RPC takes a multi-value option as an array: v0.14.7
 `signal-cli-jsonrpc(5)`). The path is resolved and refused if it lands
 outside `signal.send_attachment_root` (default `state`), and the file is refused
@@ -3246,19 +3249,18 @@ check, so a missing path outside the root gets the root error. The
 caption splits like any reply, the first piece riding with the file; the rest go
 out through `_send_rpc`, not `_deliver`, because `_deliver` logs and swallows a
 failure and the tool must not report success for a lost caption. A failure
-returns a "Could not send:" string that says how far the send got: nothing
-delivered (retry, and check the daemon can read the file), signal-cli not
+returns a "Could not send:" string that says how far the send got: the file
+unreadable ("cannot read ... check the path and its permissions"), nothing
+delivered (retry), signal-cli not
 connected, or the file delivered with caption part *i* of *n* failed (do not
 resend the file). The name differs from Discord's `send_attachment` because the
 tool registry keeps the last of two tools sharing a name while still advertising
-both schemas. Known limits: the daemon must be able to read the path (it is
-local and runs as the corvidae user; `docs/signal-ops.md`, "Sending files"
-covers the unit's sandbox); a `send` result that reports a per-recipient
+both schemas. Known limits: a `send` result that reports a per-recipient
 failure without a JSON-RPC error is not inspected, for files or text alike;
 a file send is not recorded in the contact's history; and the file send has
-not been run against a live signal-cli daemon (the wire format and the error
-path come from reading signal-cli's documentation and source, and
-`tests/test_signal_send_attachment.py` pins the same shape). The target gate is
+been run against a live signal-cli 0.14.7 daemon only with a tiny plain-named
+file, so large files and unusual file names (`;`, `,` are not escaped) are
+unverified; `tests/test_signal_send_attachment.py` pins the wire shape. The target gate is
 registry membership, as for Discord's tool and PRD §3.5.9 (nothing gates which
 channel a turn may speak on): a channel is in the registry, for example, when an
 allowlisted sender has written since the last start, when it is listed under

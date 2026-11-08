@@ -14,7 +14,9 @@ with ``registry.get_or_create`` rather than by pushing an inbound envelope
 
 from __future__ import annotations
 
+import base64
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +34,7 @@ from tests.test_signal_plugin import (
 
 # A few bytes standing in for an image; the daemon is fake, so content is moot.
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+PNG_URI = "data:image/png;filename=pic.png;base64," + base64.b64encode(PNG).decode()
 
 
 @dataclass
@@ -135,12 +138,25 @@ class TestSend:
         assert len(frames) == 1
         assert frames[0]["params"] == {
             "recipient": AUTH_ACI,
-            "attachments": [str(env.f.resolve())],
+            "attachments": [PNG_URI],
             "message": "here you go",
         }
         # The confirmation names the file and the channel.
         assert not out.startswith("Could not send")
         assert "pic.png" in out and env.channel.id in out
+
+    @pytest.mark.parametrize(
+        "name, mime",
+        [("pic.png", "image/png"), ("blob.zzunknown", "application/octet-stream")],
+    )
+    async def test_attachment_is_a_data_uri_of_the_file_bytes(self, env, name, mime):
+        f = env.root / name
+        f.write_bytes(PNG)
+        await env.h.plugin.send_signal_attachment(env.channel.id, str(f), "")
+        (attachment,) = _send_frames(env.h)[0]["params"]["attachments"]
+        header, payload = attachment.split(",", 1)
+        assert header == f"data:{mime};filename={name};base64"
+        assert base64.b64decode(payload) == PNG
 
     @pytest.mark.parametrize("caption", ["", "   "])
     async def test_blank_caption_sends_no_message_key(self, env, caption):
@@ -150,7 +166,7 @@ class TestSend:
         assert len(frames) == 1
         assert frames[0]["params"] == {
             "recipient": AUTH_ACI,
-            "attachments": [str(env.f.resolve())],
+            "attachments": [PNG_URI],
         }
 
     async def test_long_caption_is_split_not_truncated(self, start_env):
@@ -181,7 +197,7 @@ class TestRootAndSize:
         out = await env.h.plugin.send_signal_attachment(env.channel.id, "pic.png", "")
         assert not out.startswith("Could not send"), out
         frames = _send_frames(env.h)
-        assert frames[0]["params"]["attachments"] == [str(env.f.resolve())]
+        assert frames[0]["params"]["attachments"] == [PNG_URI]
 
     async def test_path_outside_root_is_refused_naming_path_root_and_setting(
         self, env, tmp_path
@@ -228,6 +244,17 @@ class TestRootAndSize:
         out = await env.h.plugin.send_signal_attachment(env.channel.id, str(f), "")
         assert not out.startswith("Could not send"), out
         assert len(_send_frames(env.h)) == 1
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    async def test_unreadable_file_is_refused_naming_path_and_remedy(self, env):
+        f = env.root / "locked.png"
+        f.write_bytes(PNG)
+        f.chmod(0)
+        out = await env.h.plugin.send_signal_attachment(env.channel.id, str(f), "")
+        assert out.startswith("Could not send:")
+        assert "cannot read" in out and "locked.png" in out
+        assert "check the path and its permissions" in out
+        assert _send_frames(env.h) == []
 
     async def test_directory_in_root_is_not_a_file(self, env):
         (env.root / "sub").mkdir()
@@ -277,15 +304,14 @@ class TestFailures:
 
     async def test_file_frame_error_says_nothing_was_delivered(self, env, caplog):
         env.h.server.fail_next_matching("send", "boom")
-        # The resolved path, so the remedy's path can be matched exactly.
         path = str(env.f.resolve())
         with caplog.at_level(logging.WARNING):
             out = await env.h.plugin.send_signal_attachment(env.channel.id, path, "hi")
         assert out.startswith("Could not send:")
         assert "pic.png" in out and env.channel.id in out
         assert "nothing was delivered" in out
-        # The remedy for a daemon that cannot see the file.
-        assert "read" in out and path in out
+        assert "retry" in out
+        assert "daemon can read" not in out
         # Logged at warning with the traceback and the identifiers.
         records = [r for r in caplog.records if r.levelno >= logging.WARNING and r.exc_info]
         assert any("pic.png" in r.getMessage() for r in records)
