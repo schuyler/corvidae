@@ -3446,6 +3446,19 @@ with the caption split like any other reply. The path is resolved and refused
 if it lands outside that root, and the file is refused above
 `discord.max_attachment_size`.
 
+**Starting a thread.** The `start_thread` tool creates one and returns its
+`discord:<thread_id>` scope (#593). Given `from_message_id` it hangs a thread
+off that message; without one it starts a standalone thread on the channel, so
+a DM — which has no threads — is refused along with any target that is not a
+text channel. Discord's 1–100 character name rule is enforced in the tool, and
+an optional first message is posted into the thread rather than into the parent,
+split like any reply and sent with `allowed_mentions` none. The new thread is
+registered in the channel registry, because a thread is a channel in its own
+right: a later send to that scope has to find it, and an inbound message would
+have registered it had someone typed in the thread first. A permission refusal
+is reported as the permission Discord wanted (Create Public Threads), not as an
+SDK exception.
+
 **Ordering.** discord.py runs every gateway event as its own task, so
 handling a message inside `on_message` would let two quick messages
 overtake each other. The client's `on_message` therefore only puts the

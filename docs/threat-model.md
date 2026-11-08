@@ -569,6 +569,19 @@ configurable, and the upload names the file. Neither is a boundary, because
 allowlist of who can reach a turn at all. Taking the calling channel unless a
 turn explicitly overrides it is the structural fix and is not done.
 
+`discord.start_thread` (#593) is the first transport tool that creates the
+place a message will land in rather than choosing one: it starts a public
+thread on a channel already in the registry, registers the new thread as a
+channel, and may post the thread's first message. The reach is the same as
+`discord.send_attachment` — registry membership, no inbound-allowlist check —
+with one addition worth naming: a thread is a new scope, so it is a new
+`transport:scope` key in `sessions.db`, the jsonl logs and memory. Text from a
+fetched page can therefore make the agent create conversation contexts, not
+only messages, and each one persists a history. The thread is public and its
+name is generated text, so it also appears in the channel's thread list to
+everyone who can read the channel. Deleting a thread is not offered, so an
+agent that creates them in a loop leaves them; Discord archives them instead.
+
 No tool sends a *message* to the person on another channel yet (the
 cross-channel `send_message` of #234 queues a turn there instead). PRD §3.5.9 now requires one, with no
 allowlist of target channels: any turn may speak on any channel (#234).

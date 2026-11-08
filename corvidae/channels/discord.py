@@ -276,6 +276,11 @@ def remember_sender_name(names: dict[str, str], sender: str, name: str) -> None:
     names[sender] = name
 
 
+#: Discord refuses a thread name over 100 characters, so the tool refuses it
+#: first and says which limit was hit rather than relaying an API error (#593).
+_MAX_THREAD_NAME = 100
+
+
 def _channel_name(channel: Any) -> str | None:
     """The name to show the model for a Discord channel or thread (#513).
 
@@ -1095,13 +1100,15 @@ class DiscordPlugin(TransportPlugin):
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
-        """Offer the agent one way to post a file (#521).
+        """Offer the agent a way to post a file (#521) and to start a thread
+        (#593).
 
         Only when the transport is configured: without a token there is no
-        Discord to send to, and the tool would only ever say so.
+        Discord to send to, and the tools would only ever say so.
         """
         if self._token is not None:
             tool_registry.append(self.send_attachment)
+            tool_registry.append(self.start_thread)
 
     async def send_attachment(
         self, channel_id: str, path: str, caption: str = "",
@@ -1181,3 +1188,122 @@ class DiscordPlugin(TransportPlugin):
             logger.warning("discord: send_attachment failed: %s", exc, exc_info=True)
             return f"Could not send: Discord rejected the upload ({exc})."
         return f"Sent {target_path.name} to {channel_id}."
+
+    async def start_thread(
+        self,
+        channel_id: str,
+        name: str,
+        from_message_id: str | None = None,
+        text: str = "",
+    ) -> str:
+        """Start a Discord thread and return its scope (#593).
+
+        Args:
+            channel_id: The channel to start the thread in, in "discord:<scope>"
+                form, as list_channels reports it.
+            name: The thread's title, 1-100 characters.
+            from_message_id: Optional id of a message in that channel to hang
+                the thread off. Omitted, a standalone thread on the channel.
+            text: Optional first message, posted into the new thread.
+
+        Returns:
+            The new thread's "discord:<thread_id>" scope, or an error saying
+            what was wrong and how to fix it.
+        """
+        if self._registry is None:
+            return "Could not start a thread: the channel registry is not available."
+        if not isinstance(channel_id, str) or not channel_id:
+            return "Could not start a thread: channel_id must be a non-empty string."
+        if not isinstance(name, str) or not name.strip():
+            return "Could not start a thread: name must be a non-empty string."
+        title = name.strip()
+        if len(title) > _MAX_THREAD_NAME:
+            return (
+                f"Could not start a thread: the name is {len(title)} characters, "
+                f"over Discord's {_MAX_THREAD_NAME} limit."
+            )
+        if text is None:
+            text = ""
+        if not isinstance(text, str):
+            return "Could not start a thread: text must be a string."
+        if from_message_id is not None:
+            if isinstance(from_message_id, bool) or not isinstance(
+                from_message_id, (str, int)
+            ):
+                return (
+                    "Could not start a thread: from_message_id must be a message id "
+                    "as a string, or null for a standalone thread."
+                )
+            try:
+                message_id = int(from_message_id)
+            except (TypeError, ValueError):
+                return (
+                    f"Could not start a thread: {from_message_id!r} is not a message id."
+                )
+
+        channel = self._registry.get(channel_id)
+        if channel is None or not self.owns(channel):
+            return (
+                f"Could not start a thread: {channel_id!r} is not a Discord channel; "
+                "the target must start with 'discord:'."
+            )
+        if channel.scope.startswith("dm:"):
+            # Discord has no threads in DMs: a DM is already the narrowest
+            # conversation there is.
+            return "Could not start a thread: DMs have no threads."
+
+        messageable = await self._messageable(channel)
+        if messageable is None:
+            return f"Could not start a thread: no live destination for {channel_id}."
+
+        try:
+            if from_message_id is not None:
+                message = await messageable.fetch_message(message_id)
+                thread = await message.create_thread(name=title)
+            else:
+                if not hasattr(messageable, "create_thread"):
+                    return (
+                        f"Could not start a thread: {channel_id} is not a text channel, "
+                        "so it takes no threads of its own; name a message instead."
+                    )
+                thread = await messageable.create_thread(name=title)
+        except Exception as exc:
+            logger.warning("discord: start_thread failed: %s", exc, exc_info=True)
+            # A refusal is almost always the bot's permission, and the SDK's
+            # message says "Missing Permissions" without naming which one.
+            if isinstance(exc, _sdk().Forbidden):
+                return (
+                    "Could not start a thread: Discord refused permission. The bot "
+                    "needs Create Public Threads in this channel."
+                )
+            return f"Could not start a thread: Discord rejected it ({exc})."
+
+        # A thread is a channel in its own right, with its own history and its
+        # own scope (#513), so register it: a later send to that scope has to
+        # find it, and the inbound path would have registered it had someone
+        # typed in the thread first.
+        thread_scope = str(getattr(thread, "id", ""))
+        if not thread_scope:
+            return f"Started a thread in {channel_id}, but Discord returned no id."
+        thread_channel = self._registry.get_or_create("discord", thread_scope)
+        # The same name the inbound path gives a thread (#513): its title and
+        # the channel it hangs off, so "a thread in #home" reads as one.
+        thread_channel.name = _channel_name(thread)
+
+        if text.strip():
+            for chunk in split_discord_message(text, self._message_chunk_size):
+                if not chunk.strip():
+                    continue
+                try:
+                    # Generated text must not be able to ping anyone, the first
+                    # message of a thread included (#513).
+                    await thread.send(chunk, allowed_mentions=_sdk().AllowedMentions.none())
+                except Exception as exc:
+                    logger.warning(
+                        "discord: thread first message failed: %s", exc, exc_info=True
+                    )
+                    return (
+                        f"Started thread {thread_channel.id}, but could not post in it "
+                        f"({exc})."
+                    )
+        return f"Started thread {thread_channel.id}."
