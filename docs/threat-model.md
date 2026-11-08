@@ -471,7 +471,7 @@ results of `read_file` (spill files read back included), `web_fetch`,
 `web_search` and every MCP tool. A tool declares this for itself
 (`returns_untrusted`, read when the call is dispatched and stored on the
 result), so a result of a tool no plugin declares is unfenced unless it acts on
-another channel. Result rows stored before this change carry no flag and stay
+another channel. Result rows stored before #557 carry no flag and stay
 unfenced on reload. Unfenced today:
 `shell` and `task_pipeline` output, including a `cat` of a spill file (#580);
 `recall_raw` and `search_memory` replays of earlier content, which can carry

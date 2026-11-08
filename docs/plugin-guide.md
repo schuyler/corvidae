@@ -750,12 +750,11 @@ read_log.reads_spill_files = True
 Set it only on a tool that can open an arbitrary path (`read_file` and
 `shell` do). Declare a tool that cannot, and the agent is told about a file it
 cannot reach.
-
-### Declaring untrusted output
-
 Tuning (directory, size cap, age) is in
 [configuration.md](configuration.md#daemon--daemon-level-settings), and the
 mechanism in [design.md](design.md#notification-spill-spillpy).
+
+### Declaring untrusted output
 
 A tool whose result carries text its author doesn't control (a fetched page,
 a file's contents, a search snippet, a third-party service's reply) declares

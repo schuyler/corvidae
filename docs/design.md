@@ -1363,10 +1363,10 @@ role:
   `spill_chars` and `spill_failed` (see [Notification
   spill](#notification-spill-spillpy));
 - tool result: `tool` and `target`, the dispatched call's name and the first
-  argument naming another registered channel (the name from the dispatch
+  argument naming another registered channel, set by `on_notify` with a
+  `tool_call_id` and by `deliver_tool_error` (the name from the dispatch
   record when there is one, else the call's row; the target from the call's
-  row in the window) (`on_notify` with a `tool_call_id`, and
-  `deliver_tool_error`); and `untrusted`, True when the tool declared its
+  row in the window); and `untrusted`, True when the tool declared its
   output untrusted as of dispatch (see [Untrusted tool
   results](#untrusted-tool-results)), otherwise absent.
 
