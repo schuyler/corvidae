@@ -86,7 +86,8 @@ def test_script_reports_a_missing_corvidae_import_clearly(tmp_path):
 
     Before the module-scope guard, a plain interpreter died with a bare
     ModuleNotFoundError from inside a helper, which reads as a broken script
-    rather than the wrong environment.
+    rather than the wrong environment. `--help` exits before any deferred
+    import, so this does assert the guard rather than an early exit.
     """
     import subprocess
     import sys as _sys
@@ -98,4 +99,55 @@ def test_script_reports_a_missing_corvidae_import_clearly(tmp_path):
         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": ""},
     )
     output = result.stdout + result.stderr
-    assert "uv run" in output or result.returncode == 0
+    assert "uv run" in output, (
+        "the guard must name how to run the script; got "
+        f"rc={result.returncode} output={output!r}"
+    )
+
+
+def test_api_key_environment_reference_is_expanded(eval_script, monkeypatch):
+    """R470.1: the key is resolved the way the daemon resolves it.
+
+    A profile holds `api_key: "${OPENAI_API_KEY}"` (docs/configuration.md) and
+    the daemon expands it in `LLMPlugin._create_client`. Passing the raw
+    reference sends `Bearer ${OPENAI_API_KEY}` and 401s against the very
+    deployment the eval claims to mirror (#470 review).
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+    llm = {
+        "main": {"base_url": "http://main:1", "model": "main-model"},
+        "foo": {"base_url": "http://foo:2", "model": "foo-model",
+                "api_key": "${OPENAI_API_KEY}"},
+        "stages": {"compaction": "foo"},
+    }
+    resolved = eval_script.resolve_llm_defaults(llm)
+    assert resolved["api_key"] == "sk-test-123"
+
+
+def test_an_unset_api_key_variable_is_a_config_error(eval_script, monkeypatch):
+    """An unset ${VAR} names the variable instead of sending the reference."""
+    monkeypatch.delenv("CORVIDAE_EVAL_MISSING_KEY", raising=False)
+    llm = {
+        "main": {"base_url": "http://main:1", "model": "m",
+                 "api_key": "${CORVIDAE_EVAL_MISSING_KEY}"},
+    }
+    with pytest.raises(ValueError) as exc:
+        eval_script.resolve_llm_defaults(llm)
+
+    assert "CORVIDAE_EVAL_MISSING_KEY" in str(exc.value)
+
+
+def test_empty_agent_yaml_is_a_config_error_not_a_traceback(eval_script, tmp_path):
+    """R470.4: an empty config file is reported, not an AttributeError.
+
+    `yaml.safe_load` returns None for an empty file, so `config.get("llm")`
+    raised `AttributeError: 'NoneType' object has no attribute 'get'` (#470
+    review).
+    """
+    empty = tmp_path / "agent.yaml"
+    empty.write_text("")
+
+    with pytest.raises(ValueError) as exc:
+        eval_script.resolve_llm_from_file(empty)
+
+    assert "llm" in str(exc.value) or "default chat" in str(exc.value)

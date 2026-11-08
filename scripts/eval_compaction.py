@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 try:
+    from corvidae.envref import EnvRefError, expand_env_refs
     from corvidae.llm_plugin import parse_llm_config
 except ImportError:  # pragma: no cover - depends on how the script is launched
     sys.exit(
@@ -62,11 +63,47 @@ def resolve_llm_defaults(llm_section: dict | None) -> dict:
     # this always resolves; `profile_for` falls back to it for any stage.
     profile = config.profile_for(EVAL_STAGE, "chat")
     resolved = config.profiles[profile]
+    api_key = resolved.get("api_key")
+    # A profile holds `"${VAR}"` rather than the secret, and the daemon
+    # expands it in LLMPlugin._create_client. Sending the reference instead
+    # would 401 against exactly the deployment this eval mirrors (#470 review).
+    if isinstance(api_key, str):
+        try:
+            api_key = expand_env_refs(api_key)
+        except EnvRefError as exc:
+            raise ValueError(
+                f"llm.{profile}.api_key references ${{{exc.var}}}, which is "
+                f"{'not set' if exc.reason == 'unset' else 'unusable'} in this "
+                f"environment; set {exc.var} and re-run"
+            ) from None
     return {
         "base_url": resolved.get("base_url"),
         "model": resolved.get("model"),
-        "api_key": resolved.get("api_key"),
+        "api_key": api_key,
     }
+
+
+def resolve_llm_from_file(config_path: str | Path) -> dict:
+    """Read ``config_path`` and resolve its compaction profile settings.
+
+    Split out of ``main`` so the empty and malformed cases are testable: the
+    inline version called ``config.get`` on whatever ``yaml.safe_load``
+    returned, which is ``None`` for an empty file and raised AttributeError
+    rather than the config error R470.4 requires (#470 review).
+
+    Raises:
+        ValueError: naming the problem, for a malformed or empty ``llm:``.
+    """
+    import yaml
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"{config_path} is empty or is not a mapping; "
+            "it needs an llm: section with a profile"
+        )
+    return resolve_llm_defaults(config.get("llm"))
 
 
 def load_fixture(fixture_path: str | Path) -> dict:
@@ -431,11 +468,8 @@ def main():
     if not args.base_url or not args.model:
         config_path = Path(__file__).parent.parent / "agent.yaml"
         if config_path.exists():
-            import yaml
-            with open(config_path) as f:
-                config = yaml.safe_load(f)
             try:
-                resolved = resolve_llm_defaults(config.get("llm"))
+                resolved = resolve_llm_from_file(config_path)
             except ValueError as exc:
                 print(f"Config error: {exc} — check {config_path}", file=sys.stderr)
                 sys.exit(1)
