@@ -122,6 +122,10 @@ async def test_registers_tool_through_the_real_pm():
     assert [Tool.from_function(f).name for f in registry] == ["echo"]
 ```
 
+If the plugin writes files, make the path a config key and set it to
+`tmp_path` in every test that reaches the write. A default under `state/`
+otherwise lands in the checkout, and `tests/state_dir_guard.py` fails the test.
+
 ## 4. Traps that fail silently
 
 0. **`annotations` are invisible to the model.** A key reaches the prompt only

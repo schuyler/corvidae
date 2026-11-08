@@ -11,6 +11,10 @@ import aiosqlite
 # otherwise hang pytest at exit (GitHub issue #64).
 from aiosqlite_guard import close_leaked_aiosqlite_connections  # noqa: F401
 
+# Autouse: fails a test that writes files into the checkout's state/ instead
+# of tmp_path (the #522 committed-PNGs bug).
+from state_dir_guard import forbid_writes_to_cwd_state  # noqa: F401
+
 # Suppress iscoroutinefunction deprecation warning that can trigger SIGINT in pytest async runner.
 # conftest-level suppression ensures the filter is active before any test module imports happen.
 warnings.filterwarnings("ignore", message=".*iscoroutinefunction.*deprecated.*")
