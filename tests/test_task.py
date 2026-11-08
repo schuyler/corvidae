@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1170,3 +1171,586 @@ class TestTaskAttributionContext:
             pass
 
         assert observed == {}
+
+
+# ---------------------------------------------------------------------------
+# TestTaskResultPersistence — results_path JSONL persistence + get_result
+# ---------------------------------------------------------------------------
+
+
+def _const_result(value: str):
+    """Build a no-arg async work function that returns ``value``."""
+    async def work():
+        return value
+    return work
+
+
+def _get_result(queue, task_id):
+    """Test helper: the deque leg then the file leg, as the task_result tool
+    does. Replaces TaskQueue.get_result, which was deleted (a combined helper
+    that a future to_thread caller could resurrect the deque race with)."""
+    res = queue.get_result_from_deque(task_id)
+    if res is None:
+        res = queue.get_result_from_file(task_id)
+    return res
+
+
+async def _run_until_completed(
+    queue: "TaskQueue",
+    tasks: list[Task],
+    on_complete,
+    *,
+    timeout: float = 2.0,
+):
+    """Run the worker, enqueue ``tasks``, await on_complete for every one.
+
+    Waiting on the completion callback — which the worker invokes only
+    after its post-completion work (persistence) — makes the test
+    deterministic: no sleep-based settling.
+    """
+    completions: list[tuple[Task, str]] = []
+    all_done = asyncio.Event()
+
+    async def _hook(t, result):
+        await on_complete(t, result)
+        completions.append((t, result))
+        if len(completions) == len(tasks):
+            all_done.set()
+
+    worker = asyncio.create_task(queue.run_worker(_hook))
+    for t in tasks:
+        await queue.enqueue(t)
+    await asyncio.wait_for(all_done.wait(), timeout=timeout)
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+    return completions
+
+
+def _read_records(path):
+    """Read all JSONL records from a results file (empty list if absent)."""
+    import json
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+
+
+class TestTaskResultPersistence:
+    """TaskQueue(results_path=...): completions persist to JSONL; get_result retrieves."""
+
+    async def test_completed_task_persists_jsonl_record(self, tmp_path):
+        """A completed task appends one JSONL line: ts/task_id/channel/description/result."""
+        results_file = tmp_path / "task-results.jsonl"
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        channel = _make_channel(transport="test", scope="chan1")
+
+        async def work():
+            return "hello world"
+
+        task = Task(work=work, channel=channel, description="the job")
+        completions = []
+
+        async def on_complete(t, result):
+            completions.append((t.task_id, result))
+
+        await _run_until_completed(queue, [task], on_complete)
+
+        assert completions == [(task.task_id, "hello world")]
+        records = _read_records(results_file)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["task_id"] == task.task_id
+        assert rec["channel"] == channel.id
+        assert rec["description"] == "the job"
+        assert rec["result"] == "hello world"
+        assert isinstance(rec["ts"], float)
+
+    async def test_failed_task_persists_failure_record(self, tmp_path):
+        """A task whose work raises persists the failure-template result."""
+        from corvidae.task import TASK_FAILURE_TEMPLATE
+
+        results_file = tmp_path / "task-results.jsonl"
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        channel = _make_channel()
+
+        async def work():
+            raise RuntimeError("boom")
+
+        task = Task(work=work, channel=channel, description="failing job")
+
+        async def on_complete(t, result):
+            pass
+
+        await _run_until_completed(queue, [task], on_complete)
+
+        records = _read_records(results_file)
+        assert len(records) == 1
+        assert records[0]["result"] == TASK_FAILURE_TEMPLATE.format(
+            task_id=task.task_id, error=RuntimeError("boom")
+        )
+
+    async def test_get_result_after_deque_eviction(self, tmp_path):
+        """get_result returns a result the in-memory deque has already evicted."""
+        results_file = tmp_path / "task-results.jsonl"
+        queue = TaskQueue(max_workers=1, completed_buffer=2, results_path=results_file)
+        channel = _make_channel()
+
+        tasks = [
+            Task(
+                work=_const_result(f"result-{i}"),
+                channel=channel,
+                description=f"t{i}",
+            )
+            for i in range(3)
+        ]
+
+        async def on_complete(t, result):
+            pass
+
+        await _run_until_completed(queue, tasks, on_complete)
+
+        # The maxlen=2 deque holds only the last 2 — the first task is evicted.
+        deque_ids = [tid for tid, _ in queue.completed]
+        assert tasks[0].task_id not in deque_ids
+        assert len(deque_ids) == 2
+        assert _get_result(queue, tasks[0].task_id) == "result-0"
+
+    async def test_get_result_unknown_id_returns_none(self, tmp_path):
+        """get_result returns None for an id that was never persisted."""
+        results_file = tmp_path / "task-results.jsonl"
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        assert _get_result(queue, "deadbeef0000") is None
+
+    async def test_no_results_path_no_file_and_deque_only(self, tmp_path):
+        """Default (results_path=None): evicted results are gone for good."""
+        queue = TaskQueue(max_workers=1, completed_buffer=1)
+        channel = _make_channel()
+
+        tasks = [
+            Task(
+                work=_const_result(f"r{i}"),
+                channel=channel,
+                description=f"t{i}",
+            )
+            for i in range(2)
+        ]
+
+        async def on_complete(t, result):
+            pass
+
+        await _run_until_completed(queue, tasks, on_complete)
+
+        # First result evicted from the maxlen=1 deque; nothing persisted → gone.
+        deque_ids = [tid for tid, _ in queue.completed]
+        assert len(deque_ids) == 1
+        assert tasks[0].task_id not in deque_ids
+        assert _get_result(queue, tasks[1].task_id) == "r1"
+        assert _get_result(queue, tasks[0].task_id) is None
+
+    async def test_get_result_survives_queue_reconstruction(self, tmp_path):
+        """A fresh TaskQueue (daemon restart) retrieves results from the existing file."""
+        results_file = tmp_path / "task-results.jsonl"
+        channel = _make_channel()
+
+        task = Task(
+            work=_const_result("surviving result"),
+            channel=channel,
+            description="before restart",
+        )
+
+        async def on_complete(t, result):
+            pass
+
+        queue1 = TaskQueue(max_workers=1, results_path=results_file)
+        await _run_until_completed(queue1, [task], on_complete)
+
+        # Simulate the restart: a brand-new queue over the same file.
+        queue2 = TaskQueue(max_workers=1, results_path=results_file)
+        assert _get_result(queue2, task.task_id) == "surviving result"
+
+    async def test_persist_failure_does_not_break_completion(self, tmp_path, caplog):
+        """An unwritable results path: the task completes, on_complete fires, a warning is logged."""
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory")
+        results_file = blocker / "task-results.jsonl"  # open() raises NotADirectoryError
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        channel = _make_channel()
+
+        task = Task(work=_const_result("still fine"), channel=channel, description="resilient")
+        completions = []
+
+        async def on_complete(t, result):
+            completions.append(result)
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.task"):
+            await _run_until_completed(queue, [task], on_complete)
+
+        assert completions == ["still fine"]
+        assert any("persist" in msg.lower() for msg in caplog.messages)
+
+    async def test_get_result_skips_malformed_lines(self, tmp_path):
+        """A corrupt, partial, non-dict, or non-string-result line does not
+        discard earlier valid records."""
+        results_file = tmp_path / "task-results.jsonl"
+        results_file.write_text(
+            '{"ts": 1.0, "task_id": "abc", "channel": "c", "description": "d", "result": "ok"}\n'
+            "[1, 2, 3]\n"
+            "not json\n"
+            '{"ts": 1.5, "task_id": "abc", "result": {"nested": true}}\n'
+            '{"ts": 2.0, "task_id": "abc", "resu\n'
+        )
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        assert _get_result(queue, "abc") == "ok"
+
+    async def test_get_result_last_matching_record_wins(self, tmp_path):
+        """When the same id appears twice, the last record's result wins."""
+        results_file = tmp_path / "task-results.jsonl"
+        results_file.write_text(
+            '{"ts": 1.0, "task_id": "abc", "result": "first"}\n'
+            '{"ts": 2.0, "task_id": "abc", "result": "second"}\n'
+        )
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        assert _get_result(queue, "abc") == "second"
+
+
+    async def test_get_result_non_utf8_file_returns_none(self, tmp_path):
+        """A non-UTF-8 byte sequence in the file: None, no raise."""
+        results_file = tmp_path / "task-results.jsonl"
+        results_file.write_bytes(b"\xff\xfe\x00garbage\n")
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        assert _get_result(queue, "abc") is None
+
+    async def test_appends_to_preexisting_file(self, tmp_path):
+        """A new queue appends to an existing results file (audit-log semantics)."""
+        results_file = tmp_path / "task-results.jsonl"
+        results_file.write_text(
+            '{"ts": 0.5, "task_id": "oldid", "result": "preexisting"}\n'
+        )
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        channel = _make_channel()
+
+        task = Task(work=_const_result("fresh"), channel=channel, description="append me")
+
+        async def on_complete(t, result):
+            pass
+
+        await _run_until_completed(queue, [task], on_complete)
+
+        records = _read_records(results_file)
+        assert [r["task_id"] for r in records] == ["oldid", task.task_id]
+        assert records[1]["result"] == "fresh"
+
+    async def test_constructor_empty_string_results_path_is_none(self):
+        """An empty/whitespace results_path string is treated as unset."""
+        assert TaskQueue(results_path="").results_path is None
+        assert TaskQueue(results_path="   ").results_path is None
+        assert TaskQueue().results_path is None
+
+    async def test_multi_worker_persistence_no_lost_records(self, tmp_path):
+        """Concurrent completions (max_workers=4) each persist exactly one valid record."""
+        results_file = tmp_path / "task-results.jsonl"
+        queue = TaskQueue(max_workers=4, results_path=results_file)
+        channel = _make_channel()
+
+        tasks = [
+            Task(work=_const_result(f"multi-{i}"), channel=channel, description=f"mw{i}")
+            for i in range(8)
+        ]
+
+        async def on_complete(t, result):
+            pass
+
+        await _run_until_completed(queue, tasks, on_complete)
+
+        records = _read_records(results_file)  # raises if any line is not valid JSON
+        assert len(records) == 8
+        assert sorted(r["task_id"] for r in records) == sorted(t.task_id for t in tasks)
+        by_id = {r["task_id"]: r["result"] for r in records}
+        for t in tasks:
+            assert by_id[t.task_id] == f"multi-{t.description[2:]}"
+
+    async def test_task_result_tool_race_deque_gil_span(self, tmp_path):
+        """The task_result tool must not raise when a lookup spans a GIL switch.
+
+        Strengthens test_get_result_during_completion_burst_no_deque_race, which
+        cannot actually trigger the race: with a small completed_buffer the deque
+        iteration is nanoseconds, so CPython's GIL (switch interval ~5ms)
+        serializes the worker-thread iteration and the loop-thread append, and
+        the burst test inlines the split path rather than driving the tool. Here
+        the deque is pre-filled to 200k (a single get_result iteration takes
+        ~9.5ms, spanning a GIL switch) and the REAL registered tool is driven, so
+        on the pre-fix code (whole get_result in to_thread) a worker thread
+        iterates the deque while the loop thread appends/evicts -> RuntimeError:
+        deque mutated during iteration.
+        """
+        pm = create_plugin_manager()
+        pm.ahook.on_notify = AsyncMock()
+        plugin = TaskPlugin(pm)
+        results_file = tmp_path / "task-results.jsonl"
+        config = {"daemon": {"task_results_path": str(results_file)}, "_base_dir": tmp_path}
+        await plugin.on_init(pm, config)
+        await plugin.on_start(config)
+
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+        tool = next(t for t in tool_registry if getattr(t, "name", None) == "task_result")
+
+        # The plugin's own worker would race this test's worker; cancel it and
+        # drive the queue directly (mirrors test_task_result_tool_returns_stored_result).
+        plugin._worker_task.cancel()
+        try:
+            await plugin._worker_task
+        except asyncio.CancelledError:
+            pass
+
+        # A deque large enough that one get_result iteration spans a CPython GIL
+        # switch (~5ms); below that the GIL serializes the iteration and the
+        # append, so the race never manifests. Pre-fill to maxlen so every
+        # feeder append evicts (the mutation that breaks a mid-iteration worker).
+        buf = 200000
+        queue = TaskQueue(max_workers=8, completed_buffer=buf, results_path=results_file)
+        queue.completed.extend((f"seed{i}", f"r{i}") for i in range(buf))
+        channel = _make_channel()
+        plugin.task_queue = queue  # the tool reads plugin.task_queue dynamically
+
+        async def on_complete(t, result):
+            pass
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+
+        n = 4000
+
+        async def feeder():
+            for i in range(n):
+                await queue.enqueue(Task(work=_const_result(f"r{i}"), channel=channel))
+
+        async def hammer():
+            for _ in range(20):
+                await asyncio.gather(
+                    *(tool.fn(task_id=f"probe{i:05d}") for i in range(24))
+                )
+
+        # If the race were present, a to_thread deque iteration would raise
+        # RuntimeError and gather would propagate it.
+        await asyncio.gather(feeder(), hammer())
+
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+        await plugin.on_stop()
+
+    async def test_get_result_file_absent(self, tmp_path):
+        """With the results file absent, the deque fast path serves a known id
+        and an unknown id is None (review #594-8: fast_path + missing_file)."""
+        results_file = tmp_path / "task-results.jsonl"
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        channel = _make_channel()
+        task = Task(work=_const_result("in memory only"), channel=channel, description="fp")
+
+        async def on_complete(t, result):
+            pass
+
+        await _run_until_completed(queue, [task], on_complete)
+        # Remove the persisted record: the deque fast path must still serve the
+        # known id, and an unknown id must be None.
+        results_file.unlink()
+        assert _get_result(queue, task.task_id) == "in memory only"
+        assert _get_result(queue, "deadbeef0000") is None
+
+# ---------------------------------------------------------------------------
+# TestTaskResultTool — TaskPlugin task_result tool + config wiring
+# ---------------------------------------------------------------------------
+
+
+class TestTaskResultTool:
+    """The task_result tool registered by TaskPlugin, and daemon.task_results_path."""
+
+    def test_register_tools_registers_task_result(self):
+        """TaskPlugin.register_tools appends a task_result tool."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+
+        tool_names = [
+            item.name if hasattr(item, "name") else item.__name__
+            for item in tool_registry
+        ]
+        assert "task_result" in tool_names
+        assert "task_status" in tool_names  # existing tool unaffected
+
+    async def test_task_result_tool_returns_stored_result(self, tmp_path):
+        """End to end: configured path, completed task, tool returns the result."""
+        pm = create_plugin_manager()
+        pm.ahook.on_notify = AsyncMock()
+        plugin = TaskPlugin(pm)
+        results_file = tmp_path / "subdir" / "task-results.jsonl"
+        config = {
+            "daemon": {"task_results_path": str(results_file)},
+            "_base_dir": tmp_path,
+        }
+        await plugin.on_init(pm, config)
+        await plugin.on_start(config)
+
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+        tool = next(t for t in tool_registry if getattr(t, "name", None) == "task_result")
+
+        channel = _make_channel()
+
+        async def work():
+            return "the stored answer"
+
+        task = Task(work=work, channel=channel, description="persist me")
+
+        # on_start already spawned the plugin's own worker, which would race
+        # this test's worker for the task (and use the plugin's on_complete,
+        # not this test's). Cancel it: this test drives the queue itself.
+        plugin._worker_task.cancel()
+        try:
+            await plugin._worker_task
+        except asyncio.CancelledError:
+            pass
+
+        # Await the completion callback (invoked post-persistence) for
+        # determinism; delivery via on_notify is out of scope for this test.
+        completed = asyncio.Event()
+
+        async def on_complete(t, result):
+            completed.set()
+
+        worker = asyncio.create_task(plugin.task_queue.run_worker(on_complete))
+        await plugin.task_queue.enqueue(task)
+        await asyncio.wait_for(completed.wait(), timeout=2.0)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        out = await tool.fn(task_id=task.task_id)
+        assert out == "the stored answer"
+
+        await plugin.on_stop()
+
+    async def test_task_result_tool_unknown_id(self, tmp_path):
+        """Unknown id: a polite miss that names the id and the likely cause."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+        config = {"daemon": {"task_results_path": str(tmp_path / "r.jsonl")}, "_base_dir": tmp_path}
+        await plugin.on_init(pm, config)
+        await plugin.on_start(config)
+
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+        tool = next(t for t in tool_registry if getattr(t, "name", None) == "task_result")
+
+        out = await tool.fn(task_id="deadbeef0000")
+        assert "deadbeef0000" in out
+        assert "No stored result" in out
+
+        await plugin.on_stop()
+
+    async def test_task_result_tool_queue_not_initialized(self):
+        """Before on_start, the tool reports the queue is not initialized."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+        tool = next(t for t in tool_registry if getattr(t, "name", None) == "task_result")
+
+        out = await tool.fn(task_id="abc123def456")
+        assert "not initialized" in out
+
+    async def test_on_start_creates_results_parent_dir(self, tmp_path):
+        """on_start creates the results file's parent directory."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+        nested = tmp_path / "a" / "b" / "task-results.jsonl"
+        config = {"daemon": {"task_results_path": str(nested)}, "_base_dir": tmp_path}
+        await plugin.on_init(pm, config)
+        await plugin.on_start(config)
+
+        assert nested.parent.is_dir()
+        assert plugin.task_queue.results_path == nested
+
+        await plugin.on_stop()
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            pytest.param(None, None, id="absent"),
+            pytest.param("   ", None, id="whitespace"),
+            pytest.param(
+                "nested/task-results.jsonl",
+                "nested/task-results.jsonl",
+                id="relative",
+            ),
+            pytest.param(
+                "/abs/task-results.jsonl",
+                Path("/abs/task-results.jsonl"),
+                id="absolute",
+            ),
+        ],
+    )
+    async def test_on_init_results_path_resolution(self, tmp_path, raw, expected):
+        """daemon.task_results_path resolution: absent/whitespace -> None,
+        relative -> base_dir / path, absolute -> as-is (review #594-8)."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+        daemon = {} if raw is None else {"task_results_path": raw}
+        await plugin.on_init(pm, {"daemon": daemon, "_base_dir": tmp_path})
+        if expected is None:
+            assert plugin._results_path is None
+        elif isinstance(expected, str):
+            assert plugin._results_path == tmp_path / expected
+        else:
+            assert plugin._results_path == expected
+
+    async def test_tool_returns_empty_string_result(self, tmp_path):
+        """A stored empty-string result is returned as-is, not treated as a miss."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+        results_file = tmp_path / "task-results.jsonl"
+        results_file.write_text(
+            '{"ts": 1.0, "task_id": "emptyid", "result": ""}\n'
+        )
+        config = {
+            "daemon": {"task_results_path": str(results_file)},
+            "_base_dir": tmp_path,
+        }
+        await plugin.on_init(pm, config)
+        await plugin.on_start(config)
+
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+        tool = next(t for t in tool_registry if getattr(t, "name", None) == "task_result")
+
+        out = await tool.fn(task_id="emptyid")
+        assert out == ""
+
+        await plugin.on_stop()
+
+    async def test_on_init_repeated_clears_results_path(self, tmp_path):
+        """A second on_init without the key clears a previously set path."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+        config1 = {
+            "daemon": {"task_results_path": "a/task-results.jsonl"},
+            "_base_dir": tmp_path,
+        }
+        await plugin.on_init(pm, config1)
+        assert plugin._results_path == tmp_path / "a" / "task-results.jsonl"
+
+        await plugin.on_init(pm, {"daemon": {}, "_base_dir": tmp_path})
+        assert plugin._results_path is None
+
