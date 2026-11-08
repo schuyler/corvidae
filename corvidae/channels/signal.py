@@ -706,7 +706,7 @@ class SignalPlugin(TransportPlugin):
             logger.warning("signal: getAttachment response has no data")
             return None
 
-        # Decode off the event loop: base64 on a ~14 MB line would
+        # Decode off the event loop: base64 on a line up to max_attachment_size * 4/3 would
         # block other channels.
         try:
             raw = await asyncio.to_thread(

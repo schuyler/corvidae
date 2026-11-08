@@ -707,8 +707,10 @@ class TestInboundFiltering:
 
         The filename is consulted only when the MIME type has no mapped
         extension, so the type here is a downloadable text/* one that is
-        not in the map. A name used past safe_suffix would put a separator
-        in the path and the download would be refused.
+        not in the map. The name's last dot starts ``.py/x``, an extension
+        followed by a separator: used past safe_suffix (or matched on its
+        prefix only), it would put a directory in the path and the write
+        would fail.
         """
         import base64
         h = await _start_plugin(tmp_path)
@@ -722,7 +724,7 @@ class TestInboundFiltering:
                 make_data_envelope(
                     source_uuid=AUTH_ACI, source_number=None, text="traversal",
                     attachments=[{"id": "1730-evil", "type": 0, "contentType": "text/x-log",
-                                   "filename": "evil.py/../../x"}],
+                                   "filename": "evil.py/x"}],
                 ),
             )
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
