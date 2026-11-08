@@ -42,48 +42,60 @@ from corvidae.tool_collection import parse_tool_timeouts
 
 logger = logging.getLogger(__name__)
 
-#: Distinguishes "this key is absent from the config" from a stored None.
+#: A key absent from a config. Distinct from a stored None, and distinct from
+#: `_UNREPORTED` below: conflating the two silently suppressed the warning for
+#: any key that was deleted, because an absent value compared equal to the
+#: "never reported" default (#473).
 _ABSENT = object()
 
+#: No value has been reported for this key yet.
+_UNREPORTED = object()
 
-def _leaf_value(config: dict, dotted: str, default: object = None) -> object:
-    """The value at a dotted key, or ``default`` when any step is missing.
 
-    ``_changed_leaf_keys`` reports dotted paths, so reading a reported key's
-    pending value means walking the same path.
+def _leaf_value(config: object, path: tuple[str, ...]) -> object:
+    """The value at ``path`` (key names, outermost first), or ``_ABSENT``.
+
+    The path is walked by key name rather than by re-splitting a dotted
+    string: a key name may itself contain a dot (`llm.qwen3.6.model`), and
+    splitting turned such a key into a path that never resolved, so its
+    changes were never reported (#473).
     """
     current: object = config
-    for part in dotted.split("."):
+    for part in path:
         if not isinstance(current, dict) or part not in current:
-            return default
+            return _ABSENT
         current = current[part]
     return current
 
 
-def _changed_leaf_keys(old: dict, new: dict, prefix: str = "") -> set[str]:
-    """Dotted leaf keys whose value differs between two config dicts.
+def _changed_leaf_keys(
+    old: dict, new: dict, prefix: tuple[str, ...] = ()
+) -> set[tuple[str, ...]]:
+    """Leaf key paths whose value differs between two config dicts.
 
-    A whole subtree appearing or disappearing reports each leaf under it
-    rather than the subtree name, so the warning names something the operator
-    can act on.
+    Paths are tuples of key names, so a dotted key name survives intact. A
+    whole subtree appearing or disappearing reports each leaf under it rather
+    than the subtree name, so the warning names something the operator can act
+    on.
     """
-    changed: set[str] = set()
+    changed: set[tuple[str, ...]] = set()
     for key in set(old) | set(new):
-        dotted = f"{prefix}.{key}" if prefix else str(key)
+        path = (*prefix, str(key))
         in_old, in_new = key in old, key in new
         if in_old and in_new:
             a, b = old[key], new[key]
             if isinstance(a, dict) and isinstance(b, dict):
-                changed |= _changed_leaf_keys(a, b, dotted)
+                changed |= _changed_leaf_keys(a, b, path)
             elif a != b:
-                changed.add(dotted)
+                changed.add(path)
         else:
             value = new[key] if in_new else old[key]
             if isinstance(value, dict):
-                changed |= _changed_leaf_keys({} if in_new else value,
-                                              value if in_new else {}, dotted)
+                changed |= _changed_leaf_keys(
+                    {} if in_new else value, value if in_new else {}, path
+                )
             else:
-                changed.add(dotted)
+                changed.add(path)
     return changed
 
 
@@ -349,23 +361,26 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         reported = getattr(self, "_reported_pending", None)
         if not isinstance(reported, dict):
             reported = {}
-        still_pending: dict[str, object] = {}
+        still_pending: dict[tuple[str, ...], object] = {}
 
-        for key in sorted(_changed_leaf_keys(running, new_config)):
-            if key.startswith("_") or any(
-                key == p or key.startswith(p + ".") for p in live
+        for path in sorted(_changed_leaf_keys(running, new_config)):
+            dotted = ".".join(path)
+            if dotted.startswith("_") or any(
+                dotted == p or dotted.startswith(p + ".") for p in live
             ):
                 continue
-            value = _leaf_value(new_config, key, _ABSENT)
-            # Reported once per pending value, not once per reload.
-            if reported.get(key, _ABSENT) != value:
+            # `_ABSENT` here means the key was deleted; `_UNREPORTED` means
+            # nothing was reported for it yet. They must differ, or a deletion
+            # compares equal to the default and is silently never reported.
+            value = _leaf_value(new_config, path)
+            if reported.get(path, _UNREPORTED) != value:
                 logger.warning(
                     "config reload: %s changed; restart-only, takes effect "
                     "on restart",
-                    key,
-                    extra={"key": key},
+                    dotted,
+                    extra={"key": dotted},
                 )
-            still_pending[key] = value
+            still_pending[path] = value
 
         self._reported_pending = still_pending
 

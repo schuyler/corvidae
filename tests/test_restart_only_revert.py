@@ -120,14 +120,50 @@ def test_a_reverted_key_can_warn_again_after_a_new_edit(tmp_path, caplog):
     assert again, "after a revert, a fresh edit must be reported"
 
 
-def test_a_key_removed_back_to_absence_does_not_warn(tmp_path, caplog):
-    """Deleting a key that the running config does not have is not a change."""
+def test_a_key_removed_from_the_file_is_reported(tmp_path, caplog):
+    """R473.1: deleting a restart-only key changes what a restart produces.
+
+    An absent value and the "never reported" default must be distinguishable
+    sentinels; conflating them silently suppressed this warning entirely.
+    """
     watcher = _watcher(tmp_path, RUNNING)
 
     with caplog.at_level(logging.WARNING):
+        # The reloaded file no longer names `model` at all.
         watcher._warn_restart_only_changes(
-            {"_config_path": "agent.yaml", **RUNNING}
+            {"_config_path": "agent.yaml",
+             "llm": {"main": {"base_url": "http://localhost:8080/v1"}}}
         )
+        messages = [m for m in _warnings(caplog) if "llm.main.model" in m]
+
+    assert messages, "deleting a restart-only key must be reported"
+
+
+def test_a_key_name_containing_a_dot_is_reported(tmp_path, caplog):
+    """A profile name may contain a dot (harness models are `qwen3.6:35b`).
+
+    The changed path is walked by key name, not by splitting a dotted string,
+    so `llm.qwen3.6.model` resolves and is reported.
+    """
+    running = {"llm": {"qwen3.6": {"base_url": "http://h:1", "model": "a"}}}
+    watcher = _watcher(tmp_path, running)
+
+    with caplog.at_level(logging.WARNING):
+        watcher._warn_restart_only_changes(
+            {"_config_path": "agent.yaml",
+             "llm": {"qwen3.6": {"base_url": "http://h:1", "model": "b"}}}
+        )
+        messages = [m for m in _warnings(caplog) if "qwen3.6" in m]
+
+    assert messages, "a dotted profile name's change must be reported"
+
+
+def test_an_unchanged_file_does_not_warn(tmp_path, caplog):
+    """A reload that changes nothing draws no warning."""
+    watcher = _watcher(tmp_path, RUNNING)
+
+    with caplog.at_level(logging.WARNING):
+        watcher._warn_restart_only_changes({"**": None, **RUNNING})
         messages = [m for m in _warnings(caplog) if "llm.main.model" in m]
 
     assert not messages, f"an unchanged file must not warn: {messages}"
