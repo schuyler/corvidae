@@ -1468,6 +1468,59 @@ class TestTaskResultPersistence:
         for t in tasks:
             assert by_id[t.task_id] == f"multi-{t.description[2:]}"
 
+    async def test_get_result_during_completion_burst_no_deque_race(self, tmp_path):
+        """get_result must not race the completed deque (review #594-1).
+
+        The deque leg runs on the loop thread and the file leg off it, so a
+        completion burst (append + eviction at maxlen) cannot mutate the deque
+        under a concurrent get_result iteration. Hammer the tool's split path
+        while completions land: no RuntimeError, and any result found is the
+        right one.
+        """
+        results_file = tmp_path / "task-results.jsonl"
+        # Small buffer so eviction (the mutation that used to race) happens.
+        queue = TaskQueue(max_workers=4, completed_buffer=4, results_path=results_file)
+        channel = _make_channel()
+
+        n = 60
+        tasks = [
+            Task(work=_const_result(f"burst-{i}"), channel=channel, description=f"b{i}")
+            for i in range(n)
+        ]
+        seen = [0]
+        done = asyncio.Event()
+
+        async def on_complete(t, result):
+            seen[0] += 1
+            if seen[0] == n:
+                done.set()
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        for t in tasks:
+            await queue.enqueue(t)
+
+        async def hammer():
+            for t in tasks:
+                # The tool's split path: deque leg on the loop thread, file
+                # leg off it.
+                res = queue.get_result_from_deque(t.task_id)
+                if res is None:
+                    res = await asyncio.to_thread(queue.get_result_from_file, t.task_id)
+                assert res is None or res == f"burst-{t.description[1:]}", (
+                    f"get_result returned a stale/foreign result: {res!r}"
+                )
+
+        await asyncio.gather(hammer(), asyncio.wait_for(done.wait(), timeout=5.0))
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        # Every result is retrievable (deque for recent, file for evicted).
+        for t in tasks:
+            assert queue.get_result(t.task_id) == f"burst-{t.description[1:]}"
+
     async def test_fast_path_when_file_absent(self, tmp_path):
         """The deque fast path works even when the results file does not exist."""
         queue = TaskQueue(max_workers=1, results_path=tmp_path / "never-created.jsonl")
@@ -1605,38 +1658,36 @@ class TestTaskResultTool:
 
         await plugin.on_stop()
 
-    async def test_on_init_without_results_path_keeps_default_off(self, tmp_path):
-        """No daemon.task_results_path in config: persistence stays off (None)."""
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            pytest.param(None, None, id="absent"),
+            pytest.param("   ", None, id="whitespace"),
+            pytest.param(
+                "nested/task-results.jsonl",
+                "nested/task-results.jsonl",
+                id="relative",
+            ),
+            pytest.param(
+                "/abs/task-results.jsonl",
+                Path("/abs/task-results.jsonl"),
+                id="absolute",
+            ),
+        ],
+    )
+    async def test_on_init_results_path_resolution(self, tmp_path, raw, expected):
+        """daemon.task_results_path resolution: absent/whitespace -> None,
+        relative -> base_dir / path, absolute -> as-is (review #594-8)."""
         pm = create_plugin_manager()
         plugin = TaskPlugin(pm)
-        await plugin.on_init(pm, {"daemon": {}, "_base_dir": tmp_path})
-        assert plugin._results_path is None
-
-        await plugin.on_start({})
-        assert plugin.task_queue.results_path is None
-        await plugin.on_stop()
-
-    async def test_on_init_resolves_relative_results_path(self, tmp_path):
-        """A relative daemon.task_results_path resolves against _base_dir."""
-        pm = create_plugin_manager()
-        plugin = TaskPlugin(pm)
-        config = {
-            "daemon": {"task_results_path": "nested/task-results.jsonl"},
-            "_base_dir": tmp_path,
-        }
-        await plugin.on_init(pm, config)
-        assert plugin._results_path == tmp_path / "nested" / "task-results.jsonl"
-
-    async def test_on_init_empty_results_path_stays_off(self, tmp_path):
-        """An empty-string daemon.task_results_path is treated as unset."""
-        pm = create_plugin_manager()
-        plugin = TaskPlugin(pm)
-        config = {
-            "daemon": {"task_results_path": "   "},
-            "_base_dir": tmp_path,
-        }
-        await plugin.on_init(pm, config)
-        assert plugin._results_path is None
+        daemon = {} if raw is None else {"task_results_path": raw}
+        await plugin.on_init(pm, {"daemon": daemon, "_base_dir": tmp_path})
+        if expected is None:
+            assert plugin._results_path is None
+        elif isinstance(expected, str):
+            assert plugin._results_path == tmp_path / expected
+        else:
+            assert plugin._results_path == expected
 
     async def test_tool_returns_empty_string_result(self, tmp_path):
         """A stored empty-string result is returned as-is, not treated as a miss."""
@@ -1676,13 +1727,3 @@ class TestTaskResultTool:
         await plugin.on_init(pm, {"daemon": {}, "_base_dir": tmp_path})
         assert plugin._results_path is None
 
-    async def test_on_init_absolute_results_path_stays_absolute(self, tmp_path):
-        """An absolute task_results_path is not joined onto _base_dir."""
-        pm = create_plugin_manager()
-        plugin = TaskPlugin(pm)
-        config = {
-            "daemon": {"task_results_path": "/abs/task-results.jsonl"},
-            "_base_dir": tmp_path,
-        }
-        await plugin.on_init(pm, config)
-        assert plugin._results_path == Path("/abs/task-results.jsonl")

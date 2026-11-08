@@ -92,6 +92,16 @@ class Task:
             )
 
 
+def _is_valid_results_path(value: object) -> bool:
+    """True if ``value`` is a usable results path.
+
+    Canonical empty/whitespace -> invalid validation (review #594-9). Both
+    on_init (plugin path, after base_dir prepend) and TaskQueue.__init__
+    (direct construction) use this, so the check lives in one place.
+    """
+    return value is not None and str(value).strip() != ""
+
+
 class TaskQueue:
     """Async worker queue that processes Tasks with configurable concurrency."""
 
@@ -109,12 +119,12 @@ class TaskQueue:
         # line to this file, so results survive the in-memory deque's
         # eviction and a daemon restart. Audit side channel: a write
         # failure is logged and swallowed, never breaking completion.
-        # An empty/whitespace string is treated as unset (Path("") would
-        # silently become the current directory).
-        if results_path is None or (isinstance(results_path, str) and not results_path.strip()):
-            self.results_path: Path | None = None
-        else:
-            self.results_path = Path(results_path)
+        # An empty/whitespace path is treated as unset (Path("") would
+        # silently become the current directory). Shared validation with
+        # on_init (review #594-9).
+        self.results_path: Path | None = (
+            Path(results_path) if _is_valid_results_path(results_path) else None
+        )
 
     @property
     def active_task(self) -> Task | None:
@@ -217,12 +227,17 @@ class TaskQueue:
                 self._active_tasks.remove(task)
             except ValueError:
                 pass
-            # Deliberately synchronous (no to_thread): this completion path's
-            # event-loop ordering is load-bearing for burst coalescing (#398
-            # R5/R6 invariants). The write is one small local JSON line —
-            # the same cost class as the deque append beside it — and a
-            # thread hop here perturbs the interleaving and drops a
-            # tool-result call under max_turns.
+            # Synchronous, and BEFORE on_complete, deliberately (review
+            # #594-2): (a) the append -> on_complete ordering (no await
+            # between them) is load-bearing for burst coalescing (#398 R5/R6);
+            # (b) a synchronous write means on_complete firing implies the
+            # record is durable, which the audit contract and the tests rely
+            # on. Tradeoff: a stalled disk (NFS) blocks the event loop for the
+            # write's duration. Mitigations: the write is one small local JSON
+            # line; a full disk fails fast (open() raises, caught in
+            # _persist_result); NFS is not the expected deployment for a local
+            # agent's audit log. A fire-and-forget writer is the longer-term
+            # option if that tradeoff changes.
             self._persist_result(task, result)
             await on_complete(task, result)
 
@@ -253,17 +268,30 @@ class TaskQueue:
                 exc_info=True,
             )
 
-    def get_result(self, task_id: str) -> str | None:
-        """Return the stored result of a completed task by id, or None.
+    def get_result_from_deque(self, task_id: str) -> str | None:
+        """Return the result from the in-memory completed deque, or None.
 
-        Fast path: the in-memory completed deque. Fallback: the persisted
-        JSONL file (when results_path is set), so a result is retrievable
-        after the deque has evicted it and after a daemon restart. The
-        last matching record wins.
+        MUST run on the event-loop thread: the worker appends to (and, at
+        maxlen, evicts from) self.completed on the loop thread, and CPython's
+        deque iterator raises RuntimeError if the deque is mutated during
+        iteration. Calling this off-loop (e.g. via to_thread) races that
+        mutation (review #594-1).
         """
         for tid, res in self.completed:
             if tid == task_id:
                 return res
+        return None
+
+    def get_result_from_file(self, task_id: str) -> str | None:
+        """Return the result from the persisted JSONL file, or None.
+
+        Safe off the loop thread (via to_thread): it reads only the file,
+        never the deque. The last matching record wins. A partial or corrupt
+        line (the file is appended to while this scans) is skipped, not
+        allowed to discard earlier records; a non-UTF-8 byte sequence raises
+        while iterating and is caught. Only string results honor the tool's
+        contract.
+        """
         if self.results_path is None:
             return None
         try:
@@ -273,25 +301,34 @@ class TaskQueue:
                     line = line.strip()
                     if not line:
                         continue
-                    # Per-line resilience: the file is appended to by the
-                    # completion path while this scan runs, so a partial or
-                    # corrupt line must not discard earlier records.
                     try:
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         continue
                     if isinstance(rec, dict) and rec.get("task_id") == task_id:
-                        # Only string results honor the tool's contract; a
-                        # corrupt/preexisting record with a non-string
-                        # result is skipped.
                         result = rec.get("result")
                         if isinstance(result, str):
                             found = result
             return found
         except (OSError, UnicodeDecodeError):
-            # A non-UTF-8 byte sequence raises while iterating the file;
-            # retrieval of an audit file must not raise.
             return None
+
+    def get_result(self, task_id: str) -> str | None:
+        """Return the stored result of a completed task by id, or None.
+
+        Fast path: the in-memory completed deque. Fallback: the persisted
+        JSONL file (when results_path is set), so a result is retrievable
+        after the deque has evicted it and after a daemon restart.
+
+        The deque leg must run on the loop thread and the file leg off it
+        (see get_result_from_deque / get_result_from_file). This combined
+        helper is for synchronous, single-threaded callers (tests); the
+        task_result tool uses the split path.
+        """
+        res = self.get_result_from_deque(task_id)
+        if res is not None:
+            return res
+        return self.get_result_from_file(task_id)
 
     def status(self) -> str:
         """Return a human-readable status summary.
@@ -341,14 +378,14 @@ class TaskPlugin(CorvidaePlugin):
         daemon_config = config.get("daemon", {})
         self._max_workers = daemon_config.get("max_task_workers", 4)
         self._completed_buffer = daemon_config.get("completed_task_buffer", 100)
-        # Reset first: a later on_init without the key must not keep a
-        # stale path (consistent with _max_workers/_completed_buffer,
-        # which are unconditionally overwritten).
+        # Reset first: a later on_init without the key must not keep a stale
+        # path (consistent with _max_workers/_completed_buffer, which are
+        # unconditionally overwritten). on_init prepends base_dir; the
+        # empty/whitespace validation is shared with the constructor via
+        # _is_valid_results_path (review #594-9).
         self._results_path = None
         results_path = daemon_config.get("task_results_path")
-        # An empty string would resolve Path(base_dir) / "" to the base
-        # directory itself — a directory, not a file. Treat it as unset.
-        if results_path is not None and str(results_path).strip():
+        if _is_valid_results_path(results_path):
             base_dir = config.get("_base_dir", Path("."))
             self._results_path = Path(base_dir) / results_path
 
@@ -366,8 +403,19 @@ class TaskPlugin(CorvidaePlugin):
             """Return the stored result of a completed task by its task id."""
             if plugin.task_queue is None:
                 return "Task queue not initialized."
-            result = await asyncio.to_thread(plugin.task_queue.get_result, task_id)
+            q = plugin.task_queue
+            # Deque leg on the loop thread (no race with the worker's
+            # append/evict); file leg off the loop thread (review #594-1).
+            result = q.get_result_from_deque(task_id)
             if result is None:
+                result = await asyncio.to_thread(q.get_result_from_file, task_id)
+            if result is None:
+                if q.results_path is None:
+                    return (
+                        f"No stored result for task {task_id}. Result "
+                        "persistence is disabled; set daemon.task_results_path "
+                        "to record results across deque eviction and restarts."
+                    )
                 return (
                     f"No stored result for task {task_id}. It may have "
                     "completed before result persistence was enabled, or "
