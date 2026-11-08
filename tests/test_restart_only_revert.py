@@ -282,3 +282,97 @@ async def test_a_real_llm_change_still_produces_the_summary_line(caplog):
         "a real llm change must still be reported"
     )
 
+
+
+# ---------------------------------------------------------------------------
+# #591: the live-prefix filter compares path segments, not a dotted string
+# ---------------------------------------------------------------------------
+
+
+class _LiveAgentStub:
+    """A plugin that declares the whole ``agent`` section live, as the issue's
+    acceptance criteria assume; no shipped plugin declares a bare prefix."""
+
+    reloadable_keys = ("agent",)
+
+
+def _watcher_with_live_agent(tmp_path) -> ConfigWatcherPlugin:
+    """A watcher whose only live prefix is ``agent``."""
+    watcher = _watcher(tmp_path, RUNNING)
+    watcher.pm.register(_LiveAgentStub(), name="live_agent_stub")
+    return watcher
+
+
+def _reload(**top_level) -> dict:
+    """A reloaded config holding exactly ``top_level`` (plus the bookkeeping key)."""
+    return {"_config_path": "agent.yaml", **top_level}
+
+
+def test_a_dotted_key_name_is_not_mistaken_for_a_live_prefix_child(tmp_path, caplog):
+    """#591: with a live prefix ``agent``, a top-level key literally named
+    ``agent.forks`` is a different key and must still warn.
+
+    Joined to a dotted string it reads ``agent.forks``, which starts with
+    ``agent.``, so a string `startswith` filter silently suppressed it.
+    """
+    watcher = _watcher_with_live_agent(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        watcher._warn_restart_only_changes(_reload(**{"agent.forks": True}))
+
+    assert [m for m in _warnings(caplog) if "agent.forks" in m], (
+        "a key named 'agent.forks' is not under the live prefix 'agent' and "
+        "must report as restart-only"
+    )
+
+
+def test_a_dotted_key_name_equal_to_a_declared_prefix_still_warns(tmp_path, caplog):
+    """#591: the shipped plugins declare ``agent.compaction_threshold`` live,
+    meaning the nested path ``agent`` -> ``compaction_threshold``. A top-level
+    key *named* ``agent.compaction_threshold`` joins to the very same string
+    and was suppressed as live, though no plugin reads it."""
+    watcher = _watcher(tmp_path, RUNNING)
+
+    with caplog.at_level(logging.WARNING):
+        watcher._warn_restart_only_changes(
+            _reload(**{"agent.compaction_threshold": 0.5})
+        )
+
+    assert [m for m in _warnings(caplog) if "agent.compaction_threshold" in m]
+
+
+def test_a_nested_key_under_a_live_prefix_is_still_filtered(tmp_path, caplog):
+    """#591: the converse — ``agent`` is live, so a nested key under it is
+    reloaded by a plugin and must not warn."""
+    watcher = _watcher_with_live_agent(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        watcher._warn_restart_only_changes(
+            _reload(agent={"compaction_threshold": 0.5})
+        )
+
+    assert not [m for m in _warnings(caplog) if "compaction_threshold" in m]
+
+
+def test_a_declared_dotted_prefix_still_filters_its_nested_path(tmp_path, caplog):
+    """#591: a shipped prefix such as ``agent.compaction_threshold`` still
+    filters the real nested key, so the segment comparison keeps the
+    behaviour the plugins rely on."""
+    watcher = _watcher(tmp_path, RUNNING)
+
+    with caplog.at_level(logging.WARNING):
+        watcher._warn_restart_only_changes(
+            _reload(agent={"compaction_threshold": 0.5})
+        )
+
+    assert not [m for m in _warnings(caplog) if "compaction_threshold" in m]
+
+
+def test_a_key_equal_to_a_live_prefix_is_filtered(tmp_path, caplog):
+    """#591: a path equal to the prefix itself (``agent`` as a scalar) is live."""
+    watcher = _watcher_with_live_agent(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        watcher._warn_restart_only_changes(_reload(agent="x"))
+
+    assert not [m for m in _warnings(caplog) if "agent changed" in m]
