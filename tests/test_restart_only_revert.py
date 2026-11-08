@@ -143,19 +143,28 @@ def test_a_key_name_containing_a_dot_is_reported(tmp_path, caplog):
     """A profile name may contain a dot (harness models are `qwen3.6:35b`).
 
     The changed path is walked by key name, not by splitting a dotted string,
-    so `llm.qwen3.6.model` resolves and is reported.
+    so `llm.qwen3.6.model` resolves and every change to it is reported.
+    Splitting it made the lookup read `_ABSENT` each time, which still lets
+    the first change through, so one reload cannot tell the two apart: the
+    second and third reloads are the ones the bug silenced (#473).
     """
     running = {"llm": {"qwen3.6": {"base_url": "http://h:1", "model": "a"}}}
     watcher = _watcher(tmp_path, running)
 
-    with caplog.at_level(logging.WARNING):
-        watcher._warn_restart_only_changes(
-            {"_config_path": "agent.yaml",
-             "llm": {"qwen3.6": {"base_url": "http://h:1", "model": "b"}}}
-        )
-        messages = [m for m in _warnings(caplog) if "qwen3.6" in m]
+    def reload_with(model: str) -> dict:
+        return {"_config_path": "agent.yaml",
+                "llm": {"qwen3.6": {"base_url": "http://h:1", "model": model}}}
 
-    assert messages, "a dotted profile name's change must be reported"
+    reported = []
+    with caplog.at_level(logging.WARNING):
+        for model in ("b", "c", "d"):
+            caplog.clear()
+            watcher._warn_restart_only_changes(reload_with(model))
+            reported.append([m for m in _warnings(caplog) if "llm.qwen3.6.model" in m])
+
+    assert [bool(r) for r in reported] == [True, True, True], (
+        f"every change to a dotted profile name must be reported; got {reported}"
+    )
 
 
 def test_an_unchanged_file_does_not_warn(tmp_path, caplog):

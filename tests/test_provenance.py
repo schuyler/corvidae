@@ -598,6 +598,21 @@ async def test_a_declared_tool_result_is_stamped_untrusted_and_an_undeclared_one
     assert encode(plain.metadata, {}) == {"tool": "web_fetch"}
 
 
+async def test_target_is_the_registered_other_channel_the_arguments_name(started):
+    """The target is the first argument that names a registered channel other
+    than this one: the call's own channel and an unregistered id that looks
+    like a channel are both passed over, in that order, before the real one."""
+    plugin, channel, _db, _persisted = await started()
+    other = plugin._registry.get_or_create("irc", "#other")
+    call = {"id": "call_t", "type": "function", "function": {
+        "name": "send_message", "arguments": json.dumps({
+            "from": channel.id, "maybe": "irc:#nobody", "to": other.id, "text": "hi",
+        })}}
+    _window_with(channel, call)
+    item = await _dispatch_and_notify(plugin, channel, call, {"send_message": _declared(False)})
+    assert item.metadata.target == other.id
+
+
 async def test_a_result_after_compaction_removed_the_call_row_is_still_untrusted(started):
     """R2: the call row is gone from the window, but the dispatch record stamps the result."""
     plugin, channel, _db, _persisted = await started()
