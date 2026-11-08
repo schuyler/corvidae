@@ -16,6 +16,9 @@ make the read side honest second, and measure both against a labelled
 query set because right now nobody can see what the right record scored
 when it lost.
 
+The design that follows from this, with corrections to some findings
+below, is [memory-consolidation-incremental.md](memory-consolidation-incremental.md).
+
 ## How retrieval works today
 
 For orientation; [cognition.md](cognition.md#retrieval-read-path) has the
