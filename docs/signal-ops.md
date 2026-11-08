@@ -304,37 +304,16 @@ differ so both transports can run in one agent.)
   `signal: send_signal_attachment failed ...` warning with the traceback),
   not in the answer.
 
-**signal-cli has to be able to read the file.** corvidae sends the daemon the
-absolute path of the file, not its contents, so the file must be visible to
-the signal-cli process. The unit in "Run the daemon" sets `ProtectHome=yes`,
-which makes `/home`, `/root` and `/run/user` inaccessible to the daemon, and
-`PrivateTmp=yes`, which gives it its own empty `/tmp` and `/var/tmp`. A send
-root under any of those fails inside signal-cli (by reading signal-cli's source, an
-unreadable file comes back as a JSON-RPC error; this has not been run against
-a live daemon), and the tool answers `Could not send: ... check the signal-cli
-daemon can read <path>`. The harness unit has no `ProtectHome`, so under it
-only `/tmp` and `/var/tmp` are hidden. A root under `/tmp` or `/var/tmp` is
-fixed by option 1 below or by setting `PrivateTmp=no`; a root under `/home`
-can use any of the three. Ways to fix it, from least to most exposure:
-
-1. Keep the send root outside those directories, for example
-   `/var/lib/corvidae/outbox`. `ProtectSystem=strict` leaves the rest of the
-   filesystem readable, so no unit change is needed.
-2. Keep it under a home directory, and change the unit to
-   `ProtectHome=tmpfs` plus `BindReadOnlyPaths=/home/<user>/corvidae/state`
-   (the absolute send root). `BindReadOnlyPaths=` cannot mount under `/home`
-   while `ProtectHome=yes`, which is why `tmpfs` is the documented route.
-3. `ProtectHome=read-only`, which leaves the whole of `/home` readable to the
-   daemon.
-
-These come from `systemd.exec(5)` (v255) and have not been run against a live
-signal-cli unit here. Run `systemctl daemon-reload` and restart the unit after
-a change.
-
-The tool assumes signal-cli runs on the same host as corvidae and as the same
-user, which this page already recommends for the socket. If it ever ran in a
-container or on another host, the path would mean nothing to it, and the tool
-would need to send the file's contents instead.
+**corvidae reads the file; the daemon never sees the path.** The tool reads
+the file, base64-encodes it and sends it as a `data:` URI
+(`data:<type>;filename=<name>;base64,<payload>`) in the `send` RPC. The type
+is guessed from the file name, falling back to `application/octet-stream`.
+The daemon needs no access to the send root, so the unit's sandbox does not
+affect it, and corvidae and signal-cli need not share a filesystem view (a
+container and its host, say), though the socket must still be reachable as a
+local path. A file that corvidae cannot read is answered `cannot read <path> (<ExcName>); check
+the path and its permissions`. Sizes are bounded by `signal.max_attachment_size`;
+base64 inflates the frame by about a third.
 
 ## What corvidae ignores
 

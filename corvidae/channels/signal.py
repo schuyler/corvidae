@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import logging
+import mimetypes
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,6 +86,14 @@ _MIME_TO_EXT = {
 # Sanitize a sender-controlled subtype for use in agent-visible notes.
 # Restrict to [a-z0-9.+-], cap length, fallback to "attachment" if empty.
 _SAFE_SUBTYPE = re.compile(r"[^a-z0-9.+-]")
+
+
+def _file_data_uri(path: Path) -> str:
+    # signal-cli needs a media type in the data URI; guess it from the name,
+    # as it once did from the file, so images do not arrive as generic files.
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    payload = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};filename={path.name};base64,{payload}"
 
 
 def _mime_base(content_type: str) -> str:
@@ -1341,6 +1350,18 @@ class SignalPlugin(TransportPlugin):
                     f"exists under {root}."
                 )
             size = target.stat().st_size
+            # The inbound size cap bounds outbound files too (R3): one
+            # setting, both directions. A file exactly at the cap is sent.
+            if size > self._max_attachment_size:
+                return (
+                    f"Could not send: {target.name} is {size} bytes, over the "
+                    f"{self._max_attachment_size} byte limit "
+                    f"(signal.max_attachment_size)."
+                )
+            # The daemon gets the bytes as a data URI, not a path it would
+            # have to read itself. Read and encode off the loop: the string
+            # can be megabytes.
+            uri = await asyncio.to_thread(_file_data_uri, target)
         except (OSError, ValueError) as exc:
             logger.warning(
                 "signal: cannot read %r for send_signal_attachment (%s)",
@@ -1349,14 +1370,6 @@ class SignalPlugin(TransportPlugin):
             return (
                 f"Could not send: cannot read {path!r} ({type(exc).__name__}); "
                 f"check the path and its permissions."
-            )
-        # The inbound size cap bounds outbound files too (R3): one setting,
-        # both directions. A file exactly at the cap is sent.
-        if size > self._max_attachment_size:
-            return (
-                f"Could not send: {target.name} is {size} bytes, over the "
-                f"{self._max_attachment_size} byte limit "
-                f"(signal.max_attachment_size)."
             )
 
         # The caption rides with the file; one longer than a message is split
@@ -1370,7 +1383,7 @@ class SignalPlugin(TransportPlugin):
         # follow as text frames through _send_rpc, not _deliver, which would
         # swallow a failure and let this report success for a lost caption.
         params: dict[str, Any] = {
-            "recipient": channel.scope, "attachments": [str(target)],
+            "recipient": channel.scope, "attachments": [uri],
         }
         if chunks:
             params["message"] = chunks[0]
@@ -1413,7 +1426,6 @@ class SignalPlugin(TransportPlugin):
                 )
             return (
                 f"Could not send: {target.name} to {channel_id} failed "
-                f"({type(exc).__name__}); nothing was delivered, retry, and "
-                f"check the signal-cli daemon can read {target}."
+                f"({type(exc).__name__}); nothing was delivered, retry."
             )
         return f"Sent {target.name} to {channel_id}."

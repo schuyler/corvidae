@@ -562,9 +562,8 @@ Signal a channel is in the registry, for example, when an allowlisted sender has
 since the last start, when it is listed under `channels:`, or when a reminder
 or scheduler job has resolved it since the start, so the reach is the contacts
 the operator or the allowlist has already put there, and (as PRD §3.5.9 says)
-nothing narrows it further. The Signal tool also hands signal-cli the path, so
-the file is read by the daemon under its own sandbox as well as checked by
-corvidae. Two soft mitigations today: the root is
+nothing narrows it further. The Signal tool reads the file itself and sends signal-cli
+its bytes as a data URI, so the daemon never sees the path. Two soft mitigations today: the root is
 configurable, and the upload names the file. Neither is a boundary, because
 `shell` and `read_file` are unjailed already; the meaningful control is the
 allowlist of who can reach a turn at all. Taking the calling channel unless a
