@@ -2,6 +2,7 @@
 
 This document explains how the system prompt is assembled before each LLM call. Understanding this pipeline helps you configure prompts correctly, write plugins that inject context, and reason about what the LLM actually sees.
 
+
 ---
 
 ## Overview
@@ -193,7 +194,7 @@ Chat apps have their own social norms: short turns, one thought at a time, and n
 |-----------|------------------|--------------|
 | Signal | `chat.md` + `signal_dm.md` | Texting norms (match the other person's length, answer first, no headers or bold, gist before detail, example exchanges); plain text only, since Signal shows Markdown as literal asterisks and pound signs. |
 | Discord DMs (`discord:dm:*`) | `chat.md` | Texting norms. |
-| Discord server channels | `chat.md` + `discord_group.md` | Texting norms; group manners, short turns so the bot doesn't take over the channel; code blocks are fine. |
+| Discord server channels | `chat.md` + `discord_group.md` | Texting norms; group manners, short turns so the bot doesn't take over the channel; code blocks are fine. ; user mentions use <@user_id> syntax but do not notify users because pings are disabled.|
 | IRC | `chat.md` + `irc.md` | Texting norms; plain, line-based text, shorter in channels than in private messages. |
 | Web, CLI, ACP | none | Longer answers are the point there. |
 
