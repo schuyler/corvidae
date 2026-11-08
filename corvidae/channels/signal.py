@@ -202,6 +202,13 @@ class SignalPlugin(TransportPlugin):
         self._max_attachment_size: int = 10 * 1024 * 1024
         # The only directory tree send_signal_attachment may read from (#544).
         self._send_attachment_root: Path = Path("state")
+        # Optional daemon-side view of the send root: when the signal-cli
+        # daemon runs on a filesystem that does not share corvidae's view
+        # of the root (a host daemon with the root bind-mounted into the
+        # container), the wire path is the prefix plus the target's
+        # position under the root. Absent = the daemon reads the same
+        # path this process resolved.
+        self._daemon_outbound_prefix: Optional[str] = None
 
         # Connection state.
         self._connect_task: Optional[asyncio.Task] = None
@@ -301,6 +308,17 @@ class SignalPlugin(TransportPlugin):
                 f"got {send_root!r}"
             )
         self._send_attachment_root = Path(send_root)
+        # An optional daemon-side view of the send root. Unset (absent or
+        # null) means the daemon reads the same path corvidae resolved.
+        daemon_prefix = signal_config.get("daemon_outbound_prefix")
+        if daemon_prefix is not None and (
+            not isinstance(daemon_prefix, str) or not daemon_prefix
+        ):
+            raise ValueError(
+                f"signal: daemon_outbound_prefix must be a non-empty "
+                f"string when set, got {daemon_prefix!r}"
+            )
+        self._daemon_outbound_prefix = daemon_prefix
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -1283,7 +1301,9 @@ class SignalPlugin(TransportPlugin):
                 known.
             path: The file to send, relative to signal.send_attachment_root
                 (or an absolute path inside it). Paths outside that root are
-                refused.
+                refused. When signal.daemon_outbound_prefix is set, the
+                daemon receives the prefix plus the file's position under
+                the root.
             caption: Optional text to send with the file. Pass "" for none.
 
         Returns:
@@ -1369,8 +1389,20 @@ class SignalPlugin(TransportPlugin):
         # The file frame carries the first chunk as its message. Later chunks
         # follow as text frames through _send_rpc, not _deliver, which would
         # swallow a failure and let this report success for a lost caption.
+        # When the daemon lives on a filesystem that does not share this
+        # process's view of the root, the wire path is the prefix plus the
+        # target's position under it. The jail, the existence check, and
+        # the size cap all ran on the local path; only the path on the
+        # wire is translated, so the prefix cannot widen what is read.
+        if self._daemon_outbound_prefix is None:
+            daemon_path = target
+        else:
+            daemon_path = (
+                Path(self._daemon_outbound_prefix) / target.relative_to(root)
+            )
+
         params: dict[str, Any] = {
-            "recipient": channel.scope, "attachments": [str(target)],
+            "recipient": channel.scope, "attachments": [str(daemon_path)],
         }
         if chunks:
             params["message"] = chunks[0]

@@ -284,6 +284,12 @@ differ so both transports can run in one agent.)
 - **Where it reads from.** `signal.send_attachment_root`, default `state`,
   relative to the directory corvidae runs in. A relative `path` is read
   under that root, and a path that lands outside it is refused.
+- **Where the daemon sees it.** When the daemon runs on a filesystem that
+  does not share corvidae's view of the root (a host daemon with the root
+  bind-mounted into the container), `signal.daemon_outbound_prefix` names
+  the host-side directory: the wire path is the prefix plus the file's
+  position under the root. The jail and the size cap run on the local
+  path, so the prefix cannot widen what the tool reads.
 - **How big.** `signal.max_attachment_size` caps a file in both directions;
   a larger one is refused before anything is sent.
 - **To whom.** A `signal:<id>` channel corvidae holds in its registry. That

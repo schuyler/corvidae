@@ -245,6 +245,79 @@ class TestRootAndSize:
         assert _send_frames(env.h) == []
 
 
+class TestDaemonPrefix:
+    """R9: signal.daemon_outbound_prefix translates the path on the wire
+    when the signal-cli daemon runs on a filesystem that does not share
+    corvidae's view of the send root (a host daemon with the root
+    bind-mounted into the container). The jail, the existence check, and
+    the size cap always run on the local path."""
+
+    async def test_prefix_translates_the_wire_path(self, start_env):
+        env = await start_env(daemon_outbound_prefix="/home/sderle/signal-out")
+        out = await env.h.plugin.send_signal_attachment(
+            env.channel.id, "pic.png", ""
+        )
+        frames = _send_frames(env.h)
+        assert len(frames) == 1
+        # The daemon receives the host-side path; the local file is the
+        # same file, reached through the mount.
+        assert frames[0]["params"] == {
+            "recipient": AUTH_ACI,
+            "attachments": ["/home/sderle/signal-out/pic.png"],
+        }
+        assert not out.startswith("Could not send")
+        assert "pic.png" in out
+
+    async def test_prefix_applies_to_an_absolute_local_path(self, start_env):
+        env = await start_env(daemon_outbound_prefix="/home/sderle/signal-out")
+        await env.h.plugin.send_signal_attachment(
+            env.channel.id, str(env.f), ""
+        )
+        frames = _send_frames(env.h)
+        assert frames[0]["params"]["attachments"] == [
+            "/home/sderle/signal-out/pic.png"
+        ]
+
+    async def test_prefix_preserves_subdirectories(self, start_env):
+        env = await start_env(daemon_outbound_prefix="/home/sderle/signal-out")
+        sub = env.root / "sub"
+        sub.mkdir()
+        (sub / "deep.png").write_bytes(PNG)
+        await env.h.plugin.send_signal_attachment(
+            env.channel.id, "sub/deep.png", ""
+        )
+        frames = _send_frames(env.h)
+        assert frames[0]["params"]["attachments"] == [
+            "/home/sderle/signal-out/sub/deep.png"
+        ]
+
+    async def test_prefix_does_not_widen_the_root_jail(self, start_env, tmp_path):
+        env = await start_env(daemon_outbound_prefix="/home/sderle/signal-out")
+        outside = tmp_path / "outside.png"
+        outside.write_bytes(PNG)
+        out = await env.h.plugin.send_signal_attachment(
+            env.channel.id, str(outside), ""
+        )
+        assert out.startswith("Could not send")
+        assert "outside the allowed root" in out
+        assert _send_frames(env.h) == []
+
+    @pytest.mark.parametrize("bad", ["", 5])
+    async def test_bad_prefix_is_rejected_naming_key_and_value(
+        self, tmp_path, bad
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            await _start_plugin(
+                tmp_path,
+                signal_overrides={"daemon_outbound_prefix": bad},
+                wait_connect=False,
+            )
+        message = str(excinfo.value)
+        assert "daemon_outbound_prefix" in message
+        assert f"got {bad!r}" in message
+        assert "non-empty string" in message
+
+
 class TestTarget:
     """R5: only a known Signal channel is a valid target, and each refusal
     says which case it is."""
