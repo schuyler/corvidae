@@ -80,16 +80,15 @@ Assets, roughly in order of how bad it is to lose them:
    environment, which `shell` can read (`env`, `/proc/self/environ`), and
    grants whatever that server grants. A credential embedded in a server's
    `url` instead — a query-string token or a `user:pass@` userinfo — stays
-   out of corvidae's own MCP log lines: the connect-failure and retry
-   warnings name only the endpoint's scheme, host, port and path, and for
-   such a server they carry the exception's text with every URL in it
-   reduced the same way instead of its traceback (an HTTP client quotes
-   the URL in its errors); a config-error skip describes a rejected value
-   likewise (#386). Library
-   loggers — the MCP SDK's `mcp.*` and the HTTP client's `httpx2` — are not
-   filtered and can write the URL whole (at the default WARNING level only
-   `mcp.*` errors do), so prefer a `${VAR}` header to a credential in the
-   URL.
+   out of the MCP connect-failure and retry warnings and the MCP
+   config-error messages: the two warnings name only the endpoint's scheme,
+   host, port and path, and for such a server they carry the exception's
+   text with every URL in it reduced the same way instead of its traceback
+   (an HTTP client quotes the URL in its errors); a config-error skip
+   describes a rejected value likewise (#386). Library loggers — the MCP
+   SDK's `mcp.*` and the HTTP client's `httpx2` — are not filtered and can
+   write the URL whole (at the default WARNING level only `mcp.*` errors
+   do), so prefer a `${VAR}` header to a credential in the URL.
 2. The host account corvidae runs as, and anything it can read or run.
 3. `sessions.db`, the JSONL logs, and the memory tables: plaintext copies
    of every conversation, including end-to-end-encrypted Signal ones.

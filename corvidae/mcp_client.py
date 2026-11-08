@@ -308,7 +308,10 @@ _MAX_DESCRIBE_DEPTH = 8
 _CREDENTIAL_MARKERS = ("@", "?", "://")
 # A URL inside free text such as an exception message: a scheme, "://", and
 # everything up to whitespace or a quote/bracket that commonly delimits it.
-_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+# The lookbehind starts a match only at the start of a scheme-character run;
+# without it a long run with no "://" backtracks quadratically (100k chars
+# took ~7 s on the event loop).
+_URL_IN_TEXT = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
 # Reconnect backoff ladder for servers that failed at startup; the same
 # 10 s doubling to 300 s as the IRC, Signal and Discord transports.
 _INITIAL_BACKOFF = 10
