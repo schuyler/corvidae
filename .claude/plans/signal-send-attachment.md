@@ -29,19 +29,28 @@ Provenance: stated = user/issue/PRD words; inferred = my reading, vetoable.
   value and the accepted shape.
 - **R5 (inferred)** A target that is not a Signal channel this transport owns
   is refused with an error naming the channel and saying which case it is.
-  *Accept:* a `discord:x` id returns an error naming the id and saying the
-  target must be a Signal channel (`signal:<id>`); a `signal:<id>` not in the
-  registry returns an error naming the id and saying it is not a known Signal
-  channel (list_channels shows the known ids); no RPC either way. Called
-  before the registry is set (tool registered ahead of `on_start`), it returns
-  an error rather than raising.
+  *Accept:* an id whose transport prefix is not `signal` (e.g. `discord:x`,
+  whether or not it is in the registry) returns an error naming the id and
+  saying the target must be a Signal channel (`signal:<id>`); a `signal:<id>`
+  not in the registry returns an error naming the id and saying it is not a
+  known Signal channel (a contact who has messaged this account is known);
+  no RPC either way. With no registry set (defensive: the tool is collected
+  after `on_start`, but a guard is cheap), it returns an error, not a raise.
 - **R6 (stated: AGENTS.md error rules)** A failure to deliver (not connected,
   signal-cli error reply, unreadable file) returns an error string naming the
   file/channel and the remedy, logs with traceback, and never raises into the
   turn. *Accept:* with signal-cli answering the RPC with an error, the tool
   returns "Could not send: …" naming the file and channel, and does so
   whichever frame fails: the file frame or a later caption chunk (a failed
-  chunk must not be reported as "Sent").
+  chunk must not be reported as "Sent"). The message says how far it got, so
+  the remedy is right: if the file frame failed, nothing was delivered and the
+  whole send may be retried; if a later caption chunk failed, the file and the
+  earlier chunks were delivered, and the message says to send only the rest
+  of the caption as text, not the file again. A file that cannot be stat'ed
+  or a path that cannot be resolved (an `OSError` or `ValueError`) is the same
+  kind of failure: an error naming the path, no RPC. A failure of the file
+  frame itself also says the signal-cli daemon must be able to read the file
+  (the sandbox note in the design).
 - **R7 (inferred)** A caption longer than `signal.message_chunk_size` is not
   truncated: the first chunk rides with the file and the rest follow as text.
   *Accept:* a 2.5x-chunk caption yields the file+first chunk then the rest,
@@ -83,19 +92,30 @@ Mirror `DiscordPlugin.send_attachment` (`corvidae/channels/discord.py`) in
 - `async send_signal_attachment(channel_id: str, path: str, caption: str = "")
   -> str`; the method name is the tool name (`Tool.from_function` uses
   `__name__`), hence not `send_attachment`, which Discord's tool already
-  holds. Its docstring is the LLM-facing description: say the path is read
-  relative to the root, as the code does (Discord's docstring says otherwise;
-  do not copy it).
-  Flow: validate args -> registry guard (None -> error) -> registry lookup +
-  `self.owns(channel)` (two distinct errors, R5) -> resolve under root ->
-  `is_file()` and `stat()` size vs `_max_attachment_size` -> chunks =
+  holds. Only the docstring's first line reaches the model as the tool
+  description (`tool_to_schema`), so that line names the Signal contact and
+  the root-relative path; Discord's docstring says "relative to the working
+  directory", which its code contradicts, so do not copy it. `tool_to_schema`
+  marks every parameter required, so the model must pass `caption=""`;
+  "optional" holds for Python callers (same as Discord).
+  Flow: validate args -> registry guard (None -> error) -> transport check:
+  `channel_id.partition(":")[0] != "signal"` -> not-Signal error (as
+  `resolve_channel` does, so a foreign id absent from the registry still gets
+  it) -> `registry.get(channel_id)` None or not `owns` -> not-known error ->
+  inside `try/except (OSError, ValueError)`: resolve under root, `is_file()`,
+  `stat()` -> size vs `_max_attachment_size` -> chunks =
   non-blank pieces of `split_message(caption, max_len=_message_chunk_size)`
   -> inside one `try`: `_send_rpc("send", {"recipient": channel.scope,
   "attachments": [str(resolved)]})` plus `"message": chunks[0]` when there is
   one, then each remaining chunk by `_send_rpc("send", {"recipient":
   channel.scope, "message": chunk})` (not `_deliver`, which swallows
-  failures) -> confirmation. Any exception in the `try`: log warning with
-  traceback naming file and channel, return "Could not send: …".
+  failures) -> confirmation. One flag, set when the file frame returns,
+  chooses the message on an exception: file frame failed -> "Could not send
+  <file> to <channel> (<exc type>): nothing was delivered; retry, and check
+  the signal-cli daemon can read <path>"; later chunk failed -> "Sent <file>
+  to <channel> but caption part i of n failed (<exc type>): do not resend the
+  file; send the rest of the caption as a message". Either way: log warning
+  with traceback naming file and channel, and return the string.
 - Wire format: signal-cli's JSON-RPC man page (v0.14.7, lines 91-95) says
   `--attachment A B` is `"attachments": ["A","B"]` (camelCase, multi-value
   as array) and `send` params are `recipient`, `message`. Verified from the
@@ -103,7 +123,16 @@ Mirror `DiscordPlugin.send_attachment` (`corvidae/channels/discord.py`) in
 - The path sent is the absolute resolved path: the daemon's cwd is not ours.
   The daemon must run on the same host and be able to read the file
   (`harness/install-signal-cli.sh` and `docs/signal-ops.md` require it to run
-  as the corvidae user, since the unix socket is owner-writable). *shortcut: path
+  as the corvidae user, since the unix socket is owner-writable). **Sandbox:**
+  the unit `docs/signal-ops.md` tells operators to install (lines ~168-172)
+  sets `PrivateTmp=yes`, `ProtectHome=yes`, `ProtectSystem=strict`, and the
+  harness unit (`harness/install-signal-cli.sh` ~123-126) sets
+  `PrivateTmp`/`ProtectSystem=strict`; under them the daemon cannot see a
+  root under `/home` or `/tmp`, and every send would fail inside signal-cli.
+  So the docs phase must tell operators to give the daemon read access to
+  `signal.send_attachment_root` (what the unit change is, is checked against
+  the systemd documentation then, not assumed), and the error text above
+  points at it. The path premise stands; the data URI is the escalation. *shortcut: path
   not data URI; switch to a `data:` URI if the daemon ever runs as another
   user or in a container.*
 - MIME type: left to signal-cli.
@@ -125,9 +154,18 @@ Mirror `DiscordPlugin.send_attachment` (`corvidae/channels/discord.py`) in
 - Extract the root-jail/size check shared by Discord and Signal into
   `corvidae/attachments.py`. So that the two jails cannot drift.
 - Data-URI send for a daemon that cannot read our filesystem.
-- A bound on the `send` RPC so a wedged signal-cli cannot hold a turn (E1).
-  So that a hung daemon degrades to an error. Deliberately unbounded today
-  for text (#413: a timed-out send may still have been delivered).
+- A bound on the `send` RPC so a wedged signal-cli degrades to an error
+  sooner (E1). Today `tools.call_timeout` (600 s, `corvidae/tool.py`) bounds
+  the tool call, so a wedged daemon holds a turn ten minutes, not forever.
+  `send` is deliberately unbounded for text (#413: a timed-out send may still
+  have been delivered).
+- Inspect the `send` result for per-recipient failures (signal-cli can reply
+  success with a failed recipient inside the result), for text and files
+  alike. So that "Sent" is never said of a message that did not go. The
+  result's JSON shape is not verified here; `_deliver` has the same blind
+  spot today, so this is pre-existing and transport-wide.
+- Validate `signal.message_chunk_size` at `on_init` (a value under 6, or a
+  non-integer, makes `split_message` raise).
 - Sends to a `signal:+E164` alias placeholder channel, or to a contact known
   to persistence but not yet in the registry, resolve to the real channel
   (`resolve_channel`) instead of being refused or keyed on the wrong scope
@@ -137,12 +175,39 @@ Mirror `DiscordPlugin.send_attachment` (`corvidae/channels/discord.py`) in
 
 `docs/signal-ops.md`: lines 282-283 (attachments are surfaced, not dropped),
 286 (outbound now sends one file via `send_signal_attachment`), 287-289 (the
-"can't message a different channel" claim, check against the cross-channel
-send package); `docs/configuration.md` (`signal.send_attachment_root`, and
-`max_attachment_size` now covers both directions); `docs/design.md` (Signal
-outbound files); `docs/threat-model.md` (generalise the `discord.send_attachment`
-paragraph to cover both tools, do not add a parallel one); `agent.yaml.example`.
-No PRD change.
+"can't message a different channel" claim, now half-true: the cross-channel
+send package queues a turn on any registered channel, and this tool sends a
+file to any registered Signal channel), and a short section saying the
+daemon must be able to read `signal.send_attachment_root` and what to change
+in the unit (the sandbox note above); `docs/configuration.md`
+(`signal.send_attachment_root`, and `max_attachment_size` now covers both
+directions); `docs/design.md` (Signal outbound files); `docs/threat-model.md`
+(generalise the `discord.send_attachment` paragraph to cover both tools, do not
+add a parallel one, and fix its stale "defaults to the working directory":
+the default is `state`); `agent.yaml.example`. No PRD change.
+
+## Design review: tranche 2 triage and meta-review
+
+The loop failed twice, so this is the meta-review. Diagnosis: converging, not
+a flawed design. Round 1 found one critical (tool-name collision); round 2
+found none and three important, each a gap in what the design text says for an
+error path or a deployment fact, none reopening a premise. The remedy is to
+state those paths and re-review, not to redesign.
+
+I-1 (R5 unreachable for a foreign id): fixed, prefix check before lookup. I-2
+(a trailing chunk failure reported as nothing sent): fixed, one flag and two
+messages (R6). I-3 (documented unit sandboxes the daemon off the file):
+verified in `docs/signal-ops.md`; accepted as a docs requirement and an error
+remedy (R6, docs list). Cosmetics accepted: docstring line 1 and the
+all-required schema, R5 parenthetical, remedy wording without `list_channels`
+(an optional package), `stat`/NUL handler, E1 wording, threat-model default.
+Fake-daemon test notes go to the Red phase. Edge cases: per-recipient send
+results (pre-existing, transport-wide, shape unverified) and `message_chunk_size`
+validation deferred; symlink wording dropped. Out of scope, filed at wrap-up:
+`docs/signal-ops.md` lines ~165 and ~183-184 call `--ignore-attachments` safe
+because "corvidae is going to discard" attachments, which #520 contradicts
+(whether the flag breaks `getAttachment` is unverified), and `docs/design.md`
+~3492-3495 is stale in the Discord section.
 
 ## Design review: tranche 1 triage
 
