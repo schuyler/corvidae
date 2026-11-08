@@ -538,3 +538,119 @@ async def test_the_rendered_record_hides_a_url_carrying_exception(
     assert rendered.strip(), "the connect failure must be logged"
     assert QUERY_SECRET not in rendered, "a URL-bearing exception leaked the token"
     assert USERINFO_PASSWORD not in rendered, "a URL-bearing exception leaked the password"
+
+
+# ---------------------------------------------------------------------------
+# Round-seven review: the retry site's record, re-encoded tokens, and the
+# diagnostic that scrubbing must keep
+# ---------------------------------------------------------------------------
+
+
+class _UrlBearingError(Exception):
+    """Stands in for httpx2.HTTPStatusError, which formats the URL in."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(f"Client error '401 Unauthorized' for url '{url}'")
+
+
+async def _failing_with(servers: dict, make_exc) -> "mcp_client_mod.McpClientPlugin":
+    """A started plugin whose connects raise ``make_exc(cfg)``."""
+    plugin = await _plugin_with(servers)
+
+    async def connect(name, cfg):
+        raise make_exc(cfg)
+
+    plugin._connect_server = connect
+    return plugin
+
+
+async def test_the_rendered_retry_record_hides_a_url_carrying_exception(
+    secret_url_server, caplog
+):
+    """The retry-round warning's traceback is scrubbed too, not just on_start's."""
+    plugin = await _failing_with(
+        {"wiki": secret_url_server}, lambda cfg: _UrlBearingError(cfg["url"])
+    )
+    await plugin.on_start({"mcp": {"servers": {"wiki": secret_url_server}}})
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING):
+        await plugin._retry_round(from_loop=True)
+
+    rendered = _rendered(caplog.records)
+    assert "reconnect failed" in rendered, "the reconnect failure must be logged"
+    assert QUERY_SECRET not in rendered, "query token reached the retry record"
+    assert USERINFO_PASSWORD not in rendered, "userinfo reached the retry record"
+
+
+async def test_a_percent_encoded_token_does_not_reach_the_record(caplog):
+    """httpx2 percent-encodes the URL it reports, so `SEC RET1` arrives as
+    `SEC%20RET1`; an exact-substring scrub misses that form (review)."""
+    cfg = {
+        "transport": "sse",
+        "url": "https://wiki.example.com/mcp?token=SEC RET1&x=sécret2",
+    }
+    encoded = "https://wiki.example.com/mcp?token=SEC%20RET1&x=s%C3%A9cret2"
+    plugin = await _failing_with({"wiki": cfg}, lambda _cfg: _UrlBearingError(encoded))
+    with caplog.at_level(logging.WARNING):
+        await plugin.on_start({"mcp": {"servers": {"wiki": cfg}}})
+
+    rendered = _rendered(caplog.records)
+    assert "failed to connect" in rendered, "the connect failure must be logged"
+    assert "RET1" not in rendered, "the encoded token reached the record"
+    assert "cret2" not in rendered, "the encoded non-ASCII token reached the record"
+
+
+class _KeywordOnlyStatusError(Exception):
+    """Mirrors httpx2.HTTPStatusError's constructor: the message plus
+    required keyword-only arguments, so it cannot be rebuilt from a string."""
+
+    def __init__(self, message: str, *, request: object, response: object) -> None:
+        super().__init__(message)
+        self.request = request
+        self.response = response
+
+
+async def test_scrubbing_keeps_the_error_text_around_the_secret(
+    secret_url_server, caplog
+):
+    """The status line is the diagnostic; only the credential is removed.
+
+    The type is not reconstructible from a string here, as with httpx2, so
+    the scrubbed copy must still carry the original type name and status.
+    """
+    plugin = await _failing_with(
+        {"wiki": secret_url_server},
+        lambda cfg: _KeywordOnlyStatusError(
+            f"Client error '401 Unauthorized' for url '{cfg['url']}'",
+            request=None,
+            response=None,
+        ),
+    )
+    with caplog.at_level(logging.WARNING):
+        await plugin.on_start({"mcp": {"servers": {"wiki": secret_url_server}}})
+
+    rendered = _rendered(caplog.records)
+    assert "401 Unauthorized" in rendered, "the status code was scrubbed away"
+    assert "_KeywordOnlyStatusError" in rendered, "the original type was lost"
+    assert "wiki.example.com/mcp" in rendered
+
+
+def test_a_schemeless_endpoint_is_still_shown():
+    """`localhost:8080` has no credential position, and is the typo to fix."""
+    endpoint = _server_endpoint({"transport": "sse", "url": "localhost:8080"})
+    assert "localhost:8080" in endpoint
+
+
+def test_a_header_name_that_is_a_credential_url_is_not_echoed(monkeypatch):
+    """The header-env error names the header without echoing a credential."""
+    from corvidae.mcp_client import McpHeaderEnvError, _resolve_headers
+
+    monkeypatch.delenv("NOPE_UNSET_VAR", raising=False)
+    header = f"https://u:{USERINFO_PASSWORD}@h.example/?t={QUERY_SECRET}"
+    with pytest.raises(McpHeaderEnvError) as info:
+        _resolve_headers("wiki", {header: "${NOPE_UNSET_VAR}"})
+    message = str(info.value)
+    assert "'wiki'" in message and "NOPE_UNSET_VAR" in message
+    assert QUERY_SECRET not in message
+    assert USERINFO_PASSWORD not in message

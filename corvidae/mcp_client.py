@@ -28,9 +28,9 @@ import asyncio
 import inspect
 import logging
 import math
+import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-import traceback
 from urllib.parse import urlsplit
 
 from corvidae.clock import Clock
@@ -67,11 +67,12 @@ def _safe_exc_info(exc: BaseException, cfg: dict) -> object:
     and query token into the daemon log even though the message itself was
     clean (#386 review).
 
-    The configured endpoint's credential material is replaced wherever it
-    appears in the exception chain's text -- message, notes, and cause -- and
-    the scrubbed copy is attached in place of the original. The type and
-    traceback survive, so the operator still sees which error occurred and
-    where; only the secret is removed.
+    Every URL in the exception chain's text -- message, notes, cause and
+    context -- is redacted like the endpoint, any remaining copy of the
+    configured endpoint's credential material is removed, and the scrubbed
+    copy is attached in place of the original. It names the original type and
+    keeps the rest of the text and the traceback frames, so the operator
+    still sees which error occurred, why, and where; only the secret goes.
 
     Returns the value for ``exc_info``: a scrubbed exception instance, or
     ``True`` when nothing in the chain needs scrubbing.
@@ -116,8 +117,45 @@ def _credential_material(cfg: dict) -> tuple[str, ...]:
             if piece:
                 found.append(piece)
     # Longest first: replacing a sub-secret before the whole URL would leave
-    # the URL's own copy of it behind.
+    # the URL's own copy of it behind. shortcut: pieces under three characters
+    # are not replaced on their own (they would shred ordinary words in the
+    # message); a URL in the text is still redacted whole by
+    # _redact_urls_in_text, so this only matters for a tiny secret quoted
+    # outside any URL -- upgrade if a server is ever configured that way.
     return tuple(sorted({s for s in found if len(s) >= 3}, key=len, reverse=True))
+
+
+class _RedactedException(Exception):
+    """Stands in for an exception whose text carried a credential.
+
+    Its message is the original's text with the credential removed, prefixed
+    by the original's qualified type name, so the rendered traceback still
+    says which error occurred and why. A dedicated type, rather than
+    rebuilding the original one, because constructors differ: httpx2's
+    ``HTTPStatusError`` needs keyword-only arguments, and a constructor that
+    formats its argument into a template would garble the scrubbed text.
+    """
+
+
+def _redact_urls_in_text(text: str) -> str:
+    """``text`` with every URL in it reduced as ``_describe_string`` would.
+
+    This catches the configured URL in whatever form a library reports it --
+    httpx2 percent-encodes the URL it puts in an error, so ``token=SEC RET1``
+    arrives as ``token=SEC%20RET1`` and an exact-substring match misses it
+    (#386 review). A URL that cannot be read is replaced entirely. Every
+    match contains "://", so ``_describe_string`` always redacts it rather
+    than echoing it.
+    """
+    return _URL_IN_TEXT.sub(lambda m: _describe_string(m.group(0)), text)
+
+
+def _scrub_text(text: str, secrets: tuple[str, ...]) -> str:
+    """``text`` with URLs redacted and any remaining secret substring removed."""
+    redacted = _redact_urls_in_text(text)
+    for secret in secrets:
+        redacted = redacted.replace(secret, "(credentials removed)")
+    return redacted
 
 
 def _scrub_exception(
@@ -126,41 +164,55 @@ def _scrub_exception(
     """A copy of ``exc`` whose text carries no secret, or None if unchanged.
 
     Copies rather than mutates: the exception is still propagating, and its
-    original text may be needed by a caller. Only the text is rewritten; the
-    type, traceback and args count are preserved.
+    original text may be needed by a caller. The copy is a
+    ``_RedactedException`` naming the original type, with the scrubbed
+    message, the original traceback frames, and scrubbed notes, cause and
+    context.
     """
     if _depth >= _MAX_DESCRIBE_DEPTH:
         return None
-    text = "".join(traceback.format_exception_only(type(exc), exc))
-    redacted = text
-    for secret in secrets:
-        redacted = redacted.replace(secret, "(credentials removed)")
+    # The message and any notes are the text a handler renders for this link
+    # of the chain; scrub each.
+    try:
+        message = str(exc)
+    except Exception:
+        # A __str__ that fails renders as a placeholder anyway; say so here.
+        logger.warning(
+            "could not read %s's message while scrubbing it for the log",
+            type(exc).__name__, exc_info=True,
+        )
+        message = "(message unavailable)"
+    notes = [str(n) for n in getattr(exc, "__notes__", ())]
+    redacted = _scrub_text(message, secrets)
+    redacted_notes = [_scrub_text(n, secrets) for n in notes]
     cause = _scrub_exception(exc.__cause__, secrets, _depth + 1) if exc.__cause__ else None
     context = (
         _scrub_exception(exc.__context__, secrets, _depth + 1)
         if exc.__context__
         else None
     )
-    if redacted == text and cause is None and context is None:
+    if (
+        redacted == message
+        and redacted_notes == notes
+        and cause is None
+        and context is None
+    ):
         return None
-    # Rebuild with the scrubbed message. `args` is what str() and the
-    # traceback formatter read for a plain exception.
-    replacement: BaseException
-    try:
-        replacement = type(exc)("(credentials removed)")
-    except Exception:
-        # A type whose constructor needs other arguments: fall back to a
-        # plain exception, trading the specific type for never leaking.
-        replacement = RuntimeError("(credentials removed)")
+    # Build the stand-in: original type name, scrubbed message and notes.
+    type_name = f"{type(exc).__module__}.{type(exc).__qualname__}"
+    replacement = _RedactedException(f"{type_name}: {redacted}")
+    for note in redacted_notes:
+        replacement.add_note(note)
     # Carry the traceback so the operator still sees where it failed. Setting
     # it rather than re-raising keeps the frames without running the handler
     # stack twice.
     if exc.__traceback__ is not None:
         replacement = replacement.with_traceback(exc.__traceback__)
-    if cause is not None:
-        replacement.__cause__ = cause
-    if context is not None:
-        replacement.__context__ = context
+    # Keep the chain, swapping in a scrubbed link wherever one was needed,
+    # and keep `raise ... from None` hiding its context as before.
+    replacement.__cause__ = cause if cause is not None else exc.__cause__
+    replacement.__context__ = context if context is not None else exc.__context__
+    replacement.__suppress_context__ = exc.__suppress_context__
     return replacement
 
 
@@ -184,7 +236,15 @@ def _server_endpoint(cfg: dict) -> str:
     # historical "?" so the log still says the endpoint was unreadable.
     if key not in cfg:
         return "?"
-    return _redact_url(cfg[key])
+    value = cfg[key]
+    # A string with no credential marker (a schemeless `localhost:8080`) has
+    # no position a credential could occupy, and is the typo the operator
+    # must see, so it is shown as configured.
+    if isinstance(value, str) and value and not any(
+        marker in value for marker in _CREDENTIAL_MARKERS
+    ):
+        return value
+    return _redact_url(value)
 
 
 def _redact_url(value: object) -> str:
@@ -217,7 +277,6 @@ def _redact_url(value: object) -> str:
     if port is not None:
         netloc = f"{netloc}:{port}"
     return f"{parts.scheme}://{netloc}{parts.path}{'?…' if parts.query else ''}"
-
 
 
 def _describe_config_value(
@@ -310,13 +369,13 @@ def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
         except EnvRefError as exc:
             if exc.reason == "multiline":
                 raise McpHeaderEnvError(
-                    f"MCP server {name!r}: header {header!r} references "
+                    f"MCP server {name!r}: header {_describe_config_value(header)} references "
                     f"${{{exc.var}}}, whose value contains a newline or NUL "
                     f"(often a trailing newline); fix {exc.var} in the daemon's "
                     "environment and restart. Server skipped."
                 ) from None
             raise McpHeaderEnvError(
-                f"MCP server {name!r}: header {header!r} references "
+                f"MCP server {name!r}: header {_describe_config_value(header)} references "
                 f"${{{exc.var}}}, which is not set in the daemon's environment; "
                 f"set {exc.var} in the environment corvidae runs in and restart. "
                 "Server skipped."
@@ -343,6 +402,9 @@ _MAX_DESCRIBE_DEPTH = 8
 # The positions a credential can occupy in a string: userinfo, query, scheme.
 # A string with none of these is safe to echo.
 _CREDENTIAL_MARKERS = ("@", "?", "://")
+# A URL inside free text such as an exception message: a scheme, "://", and
+# everything up to whitespace or a quote/bracket that commonly delimits it.
+_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
 # Reconnect backoff ladder for servers that failed at startup; the same
 # 10 s doubling to 300 s as the IRC, Signal and Discord transports.
 _INITIAL_BACKOFF = 10
