@@ -6,6 +6,7 @@ URL -- userinfo or a query-string token -- would otherwise write it to the
 daemon log at every failed connect and every retry.
 """
 
+import io
 import logging
 
 import pytest
@@ -471,3 +472,69 @@ def test_describing_never_raises_on_a_cycle():
     d: dict = {}
     d["self"] = d
     assert isinstance(_describe_config_value(d), str)
+
+
+# ---------------------------------------------------------------------------
+# The rendered record, not just the message
+#
+# Every assertion above reads `getMessage()`, which excludes the traceback a
+# handler appends from `exc_info=True`. That blind spot hid a real leak: an
+# SSE server answering 401 raises httpx2.HTTPStatusError, whose message is
+# `Client error '401 Unauthorized' for url '<the configured url>'` -- with the
+# userinfo and query intact. These tests render the whole record.
+# ---------------------------------------------------------------------------
+
+
+def _rendered(records) -> str:
+    """Everything a log handler would write, traceback included."""
+    handler = logging.StreamHandler(io.StringIO())
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    return "\n".join(handler.format(r) for r in records)
+
+
+async def test_the_rendered_record_hides_credentials_on_a_connect_failure(
+    secret_url_server, caplog
+):
+    """The full rendered line -- traceback included -- carries no credential.
+
+    A failed connect attaches the exception. If that exception's own message
+    embeds the URL (httpx2 does), redacting only the message text is not
+    enough (review).
+    """
+    plugin = await _plugin_with({"wiki": secret_url_server})
+    with caplog.at_level(logging.WARNING):
+        await plugin.on_start({"mcp": {"servers": {"wiki": secret_url_server}}})
+
+    rendered = _rendered(caplog.records)
+    assert rendered.strip(), "the connect failure must be logged"
+    assert QUERY_SECRET not in rendered, "query token reached the log record"
+    assert USERINFO_PASSWORD not in rendered, "userinfo reached the log record"
+
+
+async def test_the_rendered_record_hides_a_url_carrying_exception(
+    secret_url_server, caplog
+):
+    """An exception whose message embeds the URL does not reach the record.
+
+    This is the shape httpx2 raises on a non-2xx response; it is reproduced
+    here without a server so the assertion is about our logging, not httpx.
+    """
+    class UrlBearingError(Exception):
+        """Stands in for httpx2.HTTPStatusError, which formats the URL in."""
+
+        def __init__(self, url: str) -> None:
+            super().__init__(f"Client error '401 Unauthorized' for url '{url}'")
+
+    plugin = await _plugin_with({"wiki": secret_url_server})
+
+    async def connect(name, cfg):
+        raise UrlBearingError(cfg["url"])
+
+    plugin._connect_server = connect
+    with caplog.at_level(logging.WARNING):
+        await plugin.on_start({"mcp": {"servers": {"wiki": secret_url_server}}})
+
+    rendered = _rendered(caplog.records)
+    assert rendered.strip(), "the connect failure must be logged"
+    assert QUERY_SECRET not in rendered, "a URL-bearing exception leaked the token"
+    assert USERINFO_PASSWORD not in rendered, "a URL-bearing exception leaked the password"

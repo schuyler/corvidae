@@ -30,6 +30,7 @@ import logging
 import math
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+import traceback
 from urllib.parse import urlsplit
 
 from corvidae.clock import Clock
@@ -54,6 +55,113 @@ def _exc_type_names(exc: BaseException) -> str:
     if isinstance(exc, BaseExceptionGroup):
         return ", ".join(sorted({_exc_type_names(e) for e in exc.exceptions}))
     return type(exc).__name__
+
+
+def _safe_exc_info(exc: BaseException, cfg: dict) -> object:
+    """What to pass as ``exc_info`` so the rendered traceback holds no secret.
+
+    Redacting the message is not enough. The handler renders the attached
+    exception too, and an HTTP client reports the URL it failed on:
+    ``httpx2.HTTPStatusError`` formats ``Client error '401 …' for url
+    '<url>'``, so an SSE server answering 401 wrote the configured userinfo
+    and query token into the daemon log even though the message itself was
+    clean (#386 review).
+
+    The configured endpoint's credential material is replaced wherever it
+    appears in the exception chain's text -- message, notes, and cause -- and
+    the scrubbed copy is attached in place of the original. The type and
+    traceback survive, so the operator still sees which error occurred and
+    where; only the secret is removed.
+
+    Returns the value for ``exc_info``: a scrubbed exception instance, or
+    ``True`` when nothing in the chain needs scrubbing.
+    """
+    secrets = _credential_material(cfg)
+    if not secrets:
+        return True
+    scrubbed = _scrub_exception(exc, secrets)
+    return scrubbed if scrubbed is not None else True
+
+
+def _credential_material(cfg: dict) -> tuple[str, ...]:
+    """The credential-bearing substrings of a server's configured URL.
+
+    Userinfo, query, and the whole URL when it cannot be parsed -- the same
+    three positions ``_describe_string`` treats as secret-bearing. Empty for
+    a stdio server, whose ``command`` is not credential material (R386.4).
+    """
+    if cfg.get("transport") == "stdio":
+        return ()
+    url = cfg.get("url")
+    if not isinstance(url, str) or not url:
+        return ()
+    found: list[str] = []
+    # The whole value first, so a longer match wins over its parts.
+    found.append(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return tuple(found)
+    if parts.query:
+        found.append(parts.query)
+        for pair in parts.query.split("&"):
+            if "=" in pair:
+                value = pair.split("=", 1)[1]
+                if value:
+                    found.append(value)
+    if parts.netloc and "@" in parts.netloc:
+        userinfo = parts.netloc.rsplit("@", 1)[0]
+        found.append(userinfo)
+        for piece in userinfo.split(":", 1):
+            if piece:
+                found.append(piece)
+    # Longest first: replacing a sub-secret before the whole URL would leave
+    # the URL's own copy of it behind.
+    return tuple(sorted({s for s in found if len(s) >= 3}, key=len, reverse=True))
+
+
+def _scrub_exception(
+    exc: BaseException, secrets: tuple[str, ...], _depth: int = 0
+) -> BaseException | None:
+    """A copy of ``exc`` whose text carries no secret, or None if unchanged.
+
+    Copies rather than mutates: the exception is still propagating, and its
+    original text may be needed by a caller. Only the text is rewritten; the
+    type, traceback and args count are preserved.
+    """
+    if _depth >= _MAX_DESCRIBE_DEPTH:
+        return None
+    text = "".join(traceback.format_exception_only(type(exc), exc))
+    redacted = text
+    for secret in secrets:
+        redacted = redacted.replace(secret, "(credentials removed)")
+    cause = _scrub_exception(exc.__cause__, secrets, _depth + 1) if exc.__cause__ else None
+    context = (
+        _scrub_exception(exc.__context__, secrets, _depth + 1)
+        if exc.__context__
+        else None
+    )
+    if redacted == text and cause is None and context is None:
+        return None
+    # Rebuild with the scrubbed message. `args` is what str() and the
+    # traceback formatter read for a plain exception.
+    replacement: BaseException
+    try:
+        replacement = type(exc)("(credentials removed)")
+    except Exception:
+        # A type whose constructor needs other arguments: fall back to a
+        # plain exception, trading the specific type for never leaking.
+        replacement = RuntimeError("(credentials removed)")
+    # Carry the traceback so the operator still sees where it failed. Setting
+    # it rather than re-raising keeps the frames without running the handler
+    # stack twice.
+    if exc.__traceback__ is not None:
+        replacement = replacement.with_traceback(exc.__traceback__)
+    if cause is not None:
+        replacement.__cause__ = cause
+    if context is not None:
+        replacement.__context__ = context
+    return replacement
 
 
 def _server_endpoint(cfg: dict) -> str:
@@ -515,7 +623,7 @@ class McpClientPlugin(CorvidaePlugin):
                         server_name, _server_endpoint(server_cfg),
                         _exc_type_names(exc),
                         extra={"server": server_name},
-                        exc_info=True,
+                        exc_info=_safe_exc_info(exc, server_cfg),
                     )
                 # A server that did not register (exception or timeout) is
                 # kept for the retry loop rather than skipped for the
@@ -703,7 +811,7 @@ class McpClientPlugin(CorvidaePlugin):
                     "MCP server %r (%s) reconnect failed (%s); %s",
                     name, _server_endpoint(cfg), _exc_type_names(exc), when,
                     extra={"server": name},
-                    exc_info=True,
+                    exc_info=_safe_exc_info(exc, cfg),
                 )
                 continue
             if any(server.name == name for server in self._servers):
