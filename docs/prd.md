@@ -1051,8 +1051,8 @@ only through the funnel.
 against CONTEXT already in the window; per-source token budgets
 (`funnel.default_budget`, `funnel.budgets.<source>`), in priority order,
 skipping entries that don't fit, drops logged; data-not-instructions
-framing of retrieved data, labelled with where it came from, written once here (everything else is framed by the
-kernel, §3.3.11); append and persist one CONTEXT row with its rowid attached. Non-
+framing of retrieved data, labelled with where it came from, written
+once here (everything else is framed by the kernel, §3.3.11); append and persist one CONTEXT row with its rowid attached. Non-
 tool-call notification payloads register with the funnel and are admitted
 at the turn their stub triggers, coalesced per `(channel, origin)`, so a
 critique verdict cannot ride a reminder's stub; payloads unregister at
