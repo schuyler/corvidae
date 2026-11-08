@@ -327,6 +327,29 @@ class MemoryToolsPlugin(CorvidaePlugin):
 
             return "\n".join(output_parts)
 
+        async def memory_vector_backfill() -> str:
+            """Re-embed memory rows whose vector is missing or the wrong width
+            (#597). Repairs 'pending' rows (embedded=0: the embed failed at
+            insert) and 'drifted' rows (embedded=1 but embedded_dim differs
+            from the declared dimension: a wrong-width vec row left behind by an
+            older sqlite-vec build). Idempotent and crash-safe: a rerun repairs
+            only the rows that still need it. Requires an enabled embedding
+            profile. Returns a summary of the rows repaired by class."""
+            memory = plugin._memory()
+            db = await plugin._wait_for_schema(memory)
+            if db is None:
+                return "Error: memory schema not available"
+            summary = await memory.backfill_vectors()
+            if "error" in summary:
+                return f"Error: {summary['error']}"
+            return (
+                f"Vector backfill: repaired {summary['repaired']} "
+                f"({summary['pending']} pending, {summary['drifted']} drifted), "
+                f"skipped {summary['skipped']} (embed failed, or the encoder is "
+                f"still serving the wrong width), declared dim "
+                f"{summary['declared_dim']}."
+            )
+
         tool_registry.append(Tool(
             name="search_memory",
             fn=search_memory,
@@ -336,4 +359,9 @@ class MemoryToolsPlugin(CorvidaePlugin):
             name="recall_raw",
             fn=recall_raw,
             schema=tool_to_schema(recall_raw),
+        ))
+        tool_registry.append(Tool(
+            name="memory_vector_backfill",
+            fn=memory_vector_backfill,
+            schema=tool_to_schema(memory_vector_backfill),
         ))

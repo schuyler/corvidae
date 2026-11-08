@@ -1910,6 +1910,119 @@ class MemoryPlugin(CorvidaePlugin):
             )
         return memory_id
 
+    async def backfill_vectors(self) -> dict:
+        """Re-embed memory rows whose vector is missing or the wrong width.
+
+        The repair half of #597: Parts 1+2 make a stored-dimension drift
+        detectable (record the width per row; refuse a wrong-width insert);
+        this re-embeds the rows that still need a vector. It handles two
+        classes:
+
+          - pending: ``embedded = 0`` — the embed failed at insert (service or
+            network), so no vec row was written;
+          - drifted: ``embedded = 1`` but ``embedded_dim != declared`` — a
+            wrong-width vec row left behind by an older sqlite-vec build (one
+            that did not validate insert dim) or a manual write. The current
+            vec0 rejects a wrong-width insert, so the normal write path cannot
+            produce this; the leg is defensive.
+
+        Crash-safe and idempotent: the row query matches only rows that still
+        need repair, so a rerun after a mid-backfill crash (or a second run)
+        picks up only the remainder. Rows with ``embedded_dim IS NULL``
+        (written before Part 1 recorded the width) are presumed correct and
+        left alone — re-embedding them is a full rebuild, not a repair. If the
+        encoder is *still* serving the wrong width, the row is refused (left
+        unembedded) so the drift stays visible rather than re-baked. Returns a
+        summary dict (``repaired``/``pending``/``drifted``/``skipped``/
+        ``declared_dim``) with an ``error`` key when it cannot run.
+        """
+        declared_dim = self._embedding_dimensions()
+        summary = {
+            "repaired": 0,
+            "pending": 0,
+            "drifted": 0,
+            "skipped": 0,
+            "declared_dim": declared_dim,
+        }
+        if not self._embedding_enabled():
+            summary["error"] = (
+                "embedding is not enabled (no embedding profile, or an encoder "
+                "mismatch has disabled it) — nothing to backfill"
+            )
+            return summary
+        if declared_dim is None:
+            summary["error"] = "no declared embedding dimension in config"
+            return summary
+        if not self._vec_available:
+            summary["error"] = (
+                "the vector table is unavailable (sqlite-vec not loaded) — "
+                "cannot write repaired vectors"
+            )
+            return summary
+
+        db = await self._ensure_schema()
+        if db is None:
+            summary["error"] = "memory database is not open"
+            return summary
+
+        client = self._llm().get_client("embedding")
+
+        # Rows needing repair: never embedded, or embedded under a different
+        # width. (embedded_dim IS NULL = pre-provenance, presumed correct.)
+        async with db.execute(
+            "SELECT id, summary, embedded FROM memory "
+            "WHERE embedded = 0 "
+            "   OR (embedded_dim IS NOT NULL AND embedded_dim != ?) "
+            "ORDER BY id",
+            (declared_dim,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        import sqlite_vec
+        for memory_id, row_summary, was_embedded in rows:
+            try:
+                embedding = (await client.embed([row_summary], kind="document"))[0]
+            except Exception:
+                logger.warning(
+                    "vector backfill: embed failed for memory %d; leaving it "
+                    "for the next run", memory_id, exc_info=True,
+                )
+                summary["skipped"] += 1
+                continue
+            # #597 — if the encoder is still serving the wrong width, refuse to
+            # write it again: leave the row unembedded so the drift stays
+            # visible rather than getting re-baked into the vec table.
+            if len(embedding) != declared_dim:
+                logger.error(
+                    "vector backfill: encoder produced a %d-dim vector for "
+                    "memory %d but the table declares %d-dim; refusing to "
+                    "write it (the encoder is still misconfigured)",
+                    len(embedding), memory_id, declared_dim,
+                )
+                summary["skipped"] += 1
+                continue
+            async with self._db_lock, self._write_txn() as wdb:
+                # Replace any existing (wrong-width) vec row, then write the
+                # repaired one; record the new width as the provenance fact.
+                await wdb.execute(
+                    "DELETE FROM memory_vec WHERE memory_id = ?", (memory_id,)
+                )
+                await wdb.execute(
+                    "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
+                    (memory_id, sqlite_vec.serialize_float32(embedding)),
+                )
+                await wdb.execute(
+                    "UPDATE memory SET embedded = 1, embedded_dim = ? "
+                    "WHERE id = ?",
+                    (len(embedding), memory_id),
+                )
+            summary["repaired"] += 1
+            if was_embedded:
+                summary["drifted"] += 1
+            else:
+                summary["pending"] += 1
+        return summary
+
     def _skip_consolidation(
         self, channel_id: str, rows: list[tuple], watermark: int, reason: str, **kwargs
     ) -> None:
