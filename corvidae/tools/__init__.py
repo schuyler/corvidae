@@ -59,8 +59,14 @@ class CoreToolsPlugin(CorvidaePlugin):
         # A shell command can read a notification spill file.
         shell.reads_spill_files = True  # type: ignore[attr-defined]
 
-        async def read_file(path: str, offset: int | None = None, length: int | None = None) -> str:
-            """Read a file; offset and length are in characters, and a ranged result's header names the next offset."""
+        async def read_file(
+            path: str,
+            offset: int | None = None,
+            length: int | None = None,
+            start_line: int | None = None,
+            end_line: int | None = None,
+        ) -> str:
+            """Read a file. offset and length select a character range; start_line and end_line (1-based, inclusive) select a line range; use one kind per call. A ranged result's header names what it returned and where to continue."""
             from corvidae.tools.files import read_file as _read_file_impl
             # A spill file past its age is gone; say so rather than "not found".
             stale = get_dependency(plugin.pm, "spill", NotificationSpill).stale_pointer_error(path)
@@ -68,10 +74,13 @@ class CoreToolsPlugin(CorvidaePlugin):
                 return stale
             # An unranged read is untouched; a ranged one is clamped to the
             # live result cap so it is never truncated after the fact.
-            if offset is None and length is None:
+            if offset is None and length is None and start_line is None and end_line is None:
                 return await _read_file_impl(path, max_size=plugin._max_file_read_bytes)
             max_chars = get_dependency(plugin.pm, "tools", ToolCollectionPlugin).max_result_chars
-            return await _read_file_impl(path, offset=offset, length=length, max_chars=max_chars)
+            return await _read_file_impl(
+                path, offset=offset, length=length, max_chars=max_chars,
+                start_line=start_line, end_line=end_line,
+            )
 
         # read_file reads notification spill files.
         read_file.reads_spill_files = True  # type: ignore[attr-defined]

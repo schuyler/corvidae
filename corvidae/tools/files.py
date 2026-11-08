@@ -16,9 +16,14 @@ async def read_file(
     offset: int | None = None,
     length: int | None = None,
     max_chars: int = MAX_TOOL_RESULT_CHARS,
+    start_line: int | None = None,
+    end_line: int | None = None,
 ) -> str:
-    """Read a file, or a character range of it when offset or length is given."""
-    return await asyncio.to_thread(_read_file_sync, path, max_size, offset, length, max_chars)
+    """Read a file, a character range of it (offset, length) or a line range
+    of it (start_line, end_line)."""
+    return await asyncio.to_thread(
+        _read_file_sync, path, max_size, offset, length, max_chars, start_line, end_line
+    )
 
 
 def _read_file_sync(
@@ -27,9 +32,29 @@ def _read_file_sync(
     offset: int | None = None,
     length: int | None = None,
     max_chars: int = MAX_TOOL_RESULT_CHARS,
+    start_line: int | None = None,
+    end_line: int | None = None,
 ) -> str:
-    # Either parameter makes the read ranged; reject out-of-range values first.
-    ranged = offset is not None or length is not None
+    # Any range parameter makes the read ranged; reject bad values first.
+    lined = start_line is not None or end_line is not None
+    charred = offset is not None or length is not None
+    ranged = lined or charred
+    # The two kinds of range name positions differently, so one call takes one.
+    if lined and charred:
+        return (
+            f"Error: start_line/end_line and offset/length were both given for {path}; "
+            "use a line range (start_line, end_line) or a character range "
+            "(offset, length), not both"
+        )
+    if start_line is not None and start_line < 1:
+        return f"Error: start_line is {start_line} for {path}; use 1 or greater"
+    if end_line is not None and end_line < 1:
+        return f"Error: end_line is {end_line} for {path}; use 1 or greater"
+    if start_line is not None and end_line is not None and end_line < start_line:
+        return (
+            f"Error: end_line {end_line} is before start_line {start_line} for {path}; "
+            f"use an end_line of {start_line} or greater"
+        )
     if offset is not None and offset < 0:
         return f"Error: offset is {offset} for {path}; use 0 or greater"
     if length is not None and length < 1:
@@ -44,6 +69,8 @@ def _read_file_sync(
         return f"Error: file not found: {path}"
     if os.path.isdir(path):
         return f"Error: not a file (is a directory): {path}"
+    if lined:
+        return _read_lines(p, path, start_line or 1, end_line, max_chars)
     if ranged:
         return _read_range(p, path, offset or 0, length, max_chars)
 
@@ -105,6 +132,90 @@ def _read_range(
     end = offset + len(content)
     tail = "end of file" if end == total else f"next offset {end}"
     return f"[characters {offset}-{end} of {total} in {path}; {tail}]\n{content}"
+
+
+def _read_lines(
+    p: pathlib.Path, path: str, start: int, end: int | None, max_chars: int
+) -> str:
+    """Return a header naming the lines returned, then those lines.
+
+    One streaming pass in ``_CHUNK``-sized pieces, so a file of any size, even
+    one that is a single enormous line, is never held whole: it skips to
+    ``start``, keeps at most ``max_chars`` of the selected lines, and counts
+    the rest. The header plus content never exceeds ``max_chars``. Characters
+    are counted the way ``_read_range`` counts them (same text-mode open), so
+    the offset a cut line reports can be passed to a character-range read.
+    """
+    pos = 0  # characters consumed before the current piece
+    line_no = 1  # the line the next character belongs to
+    ended_with_newline = False
+    region_start: int | None = None  # file offset of the first selected character
+    region_len = 0  # characters in the selected lines, kept or not
+    kept: list[str] = []
+    kept_len = 0
+    try:
+        with p.open(errors="replace") as f:
+            while chunk := f.read(_CHUNK):
+                ended_with_newline = chunk.endswith("\n")
+                # A piece is the text of one line within this chunk; every piece
+                # but the last ends where a newline did.
+                pieces = chunk.split("\n")
+                for i, piece in enumerate(pieces):
+                    text = piece + "\n" if i < len(pieces) - 1 else piece
+                    # Selected lines are start..end (an open end runs to EOF).
+                    if text and line_no >= start and (end is None or line_no <= end):
+                        if region_start is None:
+                            region_start = pos
+                        region_len += len(text)
+                        if kept_len < max_chars:
+                            kept.append(text)
+                            kept_len += len(text)
+                    pos += len(text)
+                    if i < len(pieces) - 1:
+                        line_no += 1
+    except OSError as exc:
+        return f"Error: could not read file: {exc}"
+
+    # An unterminated last line still counts; a trailing newline does not open one.
+    total_lines = line_no - 1 if ended_with_newline else line_no
+    if pos == 0:
+        return f"Error: {path} is empty; there is nothing to read"
+    if start > total_lines:
+        return (
+            f"Error: start_line {start} is past the end of {path}, "
+            f"which has {total_lines} lines; use a start_line of {total_lines} or less"
+        )
+
+    # Size the content from the longest header this range could produce,
+    # leaving room for the newline after it.
+    header_bound = len(
+        f"[lines {start}-{total_lines} of {total_lines} in {path}; "
+        f"line {total_lines} cut after {max_chars} characters; "
+        f"continue with offset {pos}]"
+    )
+    body = "".join(kept)[: max(0, max_chars - header_bound - 1)]
+    last_wanted = total_lines if end is None else min(end, total_lines)
+
+    if len(body) == region_len:
+        # Everything selected fit.
+        tail = "end of file" if last_wanted == total_lines else f"next start_line {last_wanted + 1}"
+        return f"[lines {start}-{last_wanted} of {total_lines} in {path}; {tail}]\n{body}"
+
+    # The cap cut the selection. Back up to the last whole line when there is
+    # one, so paging continues by line number; only a first line that is by
+    # itself longer than a page is cut inside.
+    complete = body.count("\n")
+    if complete:
+        body = body[: body.rfind("\n") + 1]
+        last = start + complete - 1
+        return f"[lines {start}-{last} of {total_lines} in {path}; next start_line {last + 1}]\n{body}"
+
+    # The first line alone overflows the page: say how far it was cut and where
+    # to continue, as a character offset into the file.
+    return (
+        f"[lines {start}-{start} of {total_lines} in {path}; line {start} cut "
+        f"after {len(body)} characters; continue with offset {region_start + len(body)}]\n{body}"
+    )
 
 
 async def write_file(path: str, content: str) -> str:
