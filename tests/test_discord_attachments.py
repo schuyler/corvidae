@@ -178,15 +178,14 @@ class TestInbound:
         # file in a subdirectory of the attachment dir (or outside it).
         h = await _start_plugin(discord_overrides={"attachment_dir": str(tmp_path / "att")})
         try:
-            await h.plugin._handle_message(
-                make_dm("", attachments=[_att(filename="../../etc/passwd.png", content_type="")]),
-                BOT_ID,
-            )
+            msg = make_dm("", attachments=[_att(filename="../../etc/passwd.png", content_type="")])
+            await h.plugin._handle_message(msg, BOT_ID)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
             assert text.startswith("[image: "), text
             path = Path(text.split("[image: ")[1].rstrip("]"))
-            assert path.parent == (tmp_path / "att").resolve()
-            assert path.suffix == ".png"
+            # The name is ours (<message id>-<index>) plus the extension, and
+            # nothing else from the remote name.
+            assert path == (tmp_path / "att").resolve() / f"{msg.id}-0.png"
             assert path.read_bytes() == PNG
         finally:
             await h.plugin.on_stop()
@@ -303,6 +302,8 @@ class TestSharedHelper:
         assert safe_suffix("a/b/photo.JPG") == ".jpg"
         assert safe_suffix("no-extension") == ""
         assert safe_suffix("evil.py/../../x") == ""
+        # A valid extension followed by more must not pass on its prefix.
+        assert safe_suffix("a.png/x") == ""
         assert safe_suffix(None) == ""
 
     async def test_data_over_max_bytes_is_not_written(self, tmp_path):
