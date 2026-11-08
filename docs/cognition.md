@@ -212,6 +212,9 @@ after a redact run on a database you suspect is damaged.
 
 #### Retrieval (read path)
 
+Why retrieved memories come back vague, and what we propose to do about
+it, is written up in [memory-retrieval-fidelity.md](memory-retrieval-fidelity.md).
+
 `before_agent_turn` runs when the window tail is a plain user MESSAGE
 (notification-triggered turns skip retrieval entirely). The query is every
 unanswered user message in the window (`unanswered_user_messages`), joined

@@ -975,32 +975,47 @@ only through the funnel.
 1. Consolidation runs on compaction (the dropped range, carried on the hook
    payload, never reconstructed from timestamps; a range that has left the
    window is written from its rendered view, §3.8) and on idle (channels
-   idle, per §3.1.16, for `memory.idle_consolidate_after`), against a
-   per-channel watermark so the two never double-store, in a plugin-owned
-   task that never starts a turn.
-2. A record is a first-person summary with epistemic framing preserved,
-   dated by when the conversation happened, embedded, and linked to its
-   `message_log` id range. It carries the instructions, mode (`fork |
+   idle, per §3.1.16, for `memory.idle_consolidate_after`), and at the end
+   of a turn: once the agent loop has produced its final reply with no
+   tool calls pending, and the channel's un-consolidated window messages
+   (CONTEXT, SUMMARY and UNSENT excluded) reach
+   `memory.consolidate_after_tokens`. The turn trigger is live-window work
+   that forks or skips (§3.8 item 5); it needs forks for consolidation,
+   and a range that has left the window is left to compaction and idle.
+   All of them work against a per-channel watermark so they never
+   double-store, in a plugin-owned task that never starts a turn.
+2. A consolidation writes one or more records. A record is a
+   self-contained first-person narrative entry about one stretch or topic
+   of the range, with epistemic framing preserved and facts and opinions
+   kept as expressed, attributed to who expressed them; dated by when the
+   conversation happened, embedded, and linked to its consolidation's
+   `message_log` id range. The records of one consolidation share that
+   range, its importance and its stamp: the instructions, mode (`fork |
    standalone`, the latter being the view call, not the windowless
-   standalone work of §3.8 item 5)
-   and model of the call that produced it, so the records a
-   given prompt wrote can be found; a record no consolidation call
-   produced is marked as such. It is scored by a pluggable importance
-   prior (cheap-model rubric by default; the appraisal vector when
-   appraisal is registered; a surprise term as a toggle, below).
+   standalone work of §3.8 item 5), model and trigger of the call that
+   produced it, so the records a given prompt or trigger wrote can be
+   found; a record no consolidation call produced is marked as such.
+   It is scored by a pluggable importance prior (the consolidation's own
+   rating when it gave one, else a cheap-model rubric, by default; the
+   appraisal vector when appraisal is registered and covers the range;
+   a surprise term as a toggle, below).
    Surprise modulates encoding strength only, never entry into the raw
    log.
 3. Before inserting, consolidation merges a near-duplicate (cosine at or
-   above `memory.dup_threshold`) anywhere in the agent's memory,
-   superseding the old record and summing its access statistics.
-   Overlapping triggers on one range keep one record.
+   above `memory.dup_threshold`) anywhere in the agent's memory, other
+   than records of the same consolidation, superseding the old record and
+   summing its access statistics. Overlapping triggers on one range keep
+   one consolidation's records.
 4. Retrieval runs before each user-originated turn: embed the inbound
    text, exact KNN over `memory_vec`, filter to indexed and unredacted
    records from every channel (and, where the operator applies the
    sensitivity capability, to records whose sensitivity fits who is
    present; with
    the trust plugin loaded, low-trust records stay retrievable but
-   quarantined, §3.7 Trust), score by similarity times recency decay
+   quarantined, §3.7 Trust), exclude the current channel's records whose
+   whole range is still in its live window (before candidates are cut to
+   k; this keeps admission from echoing what the window already holds and
+   is not a retrieval scope), score by similarity times recency decay
    (`half_life_days`, from creation or last use), band strong/moderate/
    weak on score or raw similarity, drop weak unless nothing else matched,
    annotate conflicts between records with opposed claims and prefer the
@@ -1044,10 +1059,10 @@ only through the funnel.
 
 **Funnel.** The single admission chokepoint for tail CONTEXT: dedupe
 against CONTEXT already in the window; per-source token budgets
-(`funnel.default_budget`, `funnel.budgets.<source>`), greedy, drops
-logged; data-not-instructions framing of retrieved data, labelled with
-where it came from, written once here (everything else is framed by the
-kernel, §3.3.11); append and persist one CONTEXT row with its rowid attached. Non-
+(`funnel.default_budget`, `funnel.budgets.<source>`), in priority order,
+skipping entries that don't fit, drops logged; data-not-instructions
+framing of retrieved data, labelled with where it came from, written
+once here (everything else is framed by the kernel, §3.3.11); append and persist one CONTEXT row with its rowid attached. Non-
 tool-call notification payloads register with the funnel and are admitted
 at the turn their stub triggers, coalesced per `(channel, origin)`, so a
 critique verdict cannot ride a reminder's stub; payloads unregister at
@@ -1329,7 +1344,9 @@ design, not requirement. The requirements are outcomes:
    naming the stage, the channel, the trace if there is one, and what was
    missing (principle 5): judgment (item 2) and consolidation of a range
    still in the window, which is retried and reaches the view once it has
-   left the window. Compaction is the exception: it is never skipped; on a
+   left the window. The turn trigger (§3.7 Memory 1) is not attempted at
+   all when consolidation doesn't fork, so it neither skips nor warns.
+   Compaction is the exception: it is never skipped; on a
    miss it makes the view call, then keeps §3.3's can't-fail fallback. A
    range that has left the window, such as catch-up consolidation, is
    written by the view call, and a replay sends the request the running
