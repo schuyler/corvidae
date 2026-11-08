@@ -598,8 +598,8 @@ corvidae talks JSON-RPC to a `signal-cli daemon` that is already running; it doe
 | `signal.account` | string | *required* | The bot's own number, E.164, e.g. `"+15550001111"`. Quote it — bare `+…` is not valid YAML. Used to recognize and ignore the account's own traffic. |
 | `signal.allow` | list of strings | `[]` | Senders permitted to drive the agent. Each entry is either an E.164 number or an ACI (the account UUID). Default-deny: an empty or absent list refuses everyone, silently — no reply, no typing indicator, no read receipt. |
 | `signal.message_chunk_size` | integer | `2000` | Maximum UTF-8 bytes per outbound Signal message. Longer replies are split paragraphs → sentences → words and sent as several messages; nothing is truncated. Must be at least 6; a smaller value raises `ValueError` the first time a reply is split. |
-| `signal.attachment_dir` | string | `state/signal-attachments` | Directory where downloaded image attachments are written. Created on first download. Files are not pruned automatically — retention is the operator's responsibility. |
-| `signal.max_attachment_size` | integer | `10485760` (10 MB) | Maximum bytes for a single downloaded attachment. Larger payloads are rejected with `[image: download failed]`. |
+| `signal.attachment_dir` | string | `state/signal-attachments` | Directory where downloaded attachments are written. Created on first download. Files are not pruned automatically — retention is the operator's responsibility. |
+| `signal.max_attachment_size` | integer | `10485760` (10 MB) | Maximum bytes for a single downloaded attachment. Must be a positive integer; the value also sizes the StreamReader buffer limit for the signal-cli connection (the cap in base64 terms, 4/3, plus 64 KiB for JSON framing; a response that trips the limit fails its in-flight RPC immediately). Larger payloads are rejected with `[<type>: download failed]`. |
 
 ```yaml
 signal:
@@ -956,6 +956,16 @@ No restart is required for the changes listed below. Changes that require restar
 | `agent` defaults | `ChannelRegistry.agent_defaults` is updated. `max_turns`, `max_context_tokens` and `reasoning_history` are resolved every turn, so running channels pick them up at their next turn; `system_prompt` and `register_prompt` reach only conversations that start after the reload. |
 
 ### What requires restart
+
+A restart-only key that a reload changes is named in a warning, one line per
+key: `config reload: <key> changed; restart-only, takes effect on restart`.
+The comparison is against the config the running daemon is using, so editing a
+key back to its running value draws no warning — the file and the process agree
+and a restart would change nothing. A key that stays pending is reported once,
+when its pending value first appears or changes, and not again on later reloads
+that leave it alone; to see a still-pending key, read the reload that
+introduced it. Reverting the key clears that record, so a later edit is reported
+again.
 
 | Setting | Reason |
 |---------|--------|

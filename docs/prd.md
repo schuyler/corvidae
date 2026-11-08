@@ -498,12 +498,18 @@ Per transport:
   `channels:`; those resolve forward to ACIs in one batched call after each
   connect, never at startup, and a failed resolution retries after the next
   connect. Non-`dataMessage` envelopes (including the account's own sync
-  traffic) are dropped; an attachment is downloaded for an allowlisted sender
-  and named in the text;
-  backlog older than five minutes is prefixed with its send time. Typing
-  starts on the first outstanding message and refreshes every 10 s; the
-  read receipt is sent at processing start, not arrival. Notifications are
-  never handled inline in the read loop.
+  traffic) are dropped. An attachment from an allowlisted sender is
+  downloaded when its MIME type passes the download gate (the allowlist is
+  specified in the threat model) and is named in the text: downloaded
+  attachments use the major type (image, text, audio) or the subtype for
+  application/* (pdf, json, xml); attachments that are not downloaded use
+  the sanitized subtype (svg, html, ...), so the agent can see why nothing
+  was fetched; with no MIME type, the legacy protobuf type name applies.
+  The `getAttachment` RPC sends the attachment id only. Backlog older than
+  five minutes is prefixed with its send time. Typing starts on the first
+  outstanding message and refreshes every 10 s; the read receipt is sent at
+  processing start, not arrival. Notifications are never handled inline in
+  the read loop.
 - **Discord**: discord.py's gateway behind the `discord` extra, default
   intents, and the privileged Message Content intent only when a server
   channel answers unaddressed — the transport default or any per-channel
@@ -678,8 +684,9 @@ Per transport:
     it addressed the agent, reaches the model with a header the code builds,
     never with framing taken from text the item's author controls. The
     non-human items are notifications (from the scheduler, the heartbeat,
-    cross-channel sends, plugins and webhooks) and the results of the
-    agent's own actions on another channel. From the header the model can
+    cross-channel sends, plugins and webhooks), the results of the
+    agent's own actions on another channel, and the results of tools a
+    tool plugin declares as returning untrusted output. From the header the model can
     tell an item's kind, where it came from as distinct from the channel it
     arrived on, whether it is a principal's instruction or untrusted data,
     and what it answers. An item produced outside the channel's own human
@@ -719,7 +726,8 @@ Per transport:
     read spill files is a tool plugin's static declaration; the kernel
     names none. The marker is the kernel's and is derived from the stored
     row like the rest of the header. Content read back from a spill file
-    is not yet fenced (#571).
+    through a tool declared to return untrusted output is fenced like any
+    other such result.
 
 ### 3.4 Persistence
 
@@ -803,7 +811,12 @@ Per transport:
    so dependents do not run.
 4. Tool results are truncated to `tools.max_result_chars`. Results from
    tools that return untrusted output are fenced as data by the kernel
-   (§3.3.11); a tool plugin declares which of its tools those are.
+   (§3.3.11); a tool plugin declares which of its tools those are. The
+   declaration is an attribute of the registered tool, as it stood when
+   the call was dispatched, recorded in the result row's provenance, so a
+   later change does not re-render history. Tools that bring in outside
+   content (file reads, web fetch and search) are declared, and tools
+   served by an MCP server are always declared.
 5. Tools run in the daemon's process. Process separation (tool workers in
    another process with a narrowed filesystem and network, credentials and
    the database on the trusted side) is out of scope until corvidae runs

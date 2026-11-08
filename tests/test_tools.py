@@ -900,3 +900,30 @@ async def test_shell_cancel_before_spawn_reraises():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 2)
+
+
+# ---------------------------------------------------------------------------
+# Untrusted tool output (#557, #571): the declaration and who makes it.
+# ---------------------------------------------------------------------------
+
+
+def test_declares_untrusted_output_is_true_only_for_the_literal_true():
+    """R1: only ``returns_untrusted is True`` declares; absent or truthy-non-True does not."""
+    from corvidae.tool import declares_untrusted_output
+
+    def fn() -> None: ...
+
+    assert declares_untrusted_output(fn) is False
+    fn.returns_untrusted = 1  # type: ignore[attr-defined]
+    assert declares_untrusted_output(fn) is False
+    fn.returns_untrusted = True  # type: ignore[attr-defined]
+    assert declares_untrusted_output(fn) is True
+
+
+def test_read_file_web_fetch_and_web_search_declare_untrusted_output():
+    """R5/R6: the core tools that return outside text declare it."""
+    from corvidae.tool import declares_untrusted_output
+
+    fns = _tool_fns(CoreToolsPlugin(None))
+    for name in ("read_file", "web_fetch", "web_search"):
+        assert declares_untrusted_output(fns[name]), f"{name} must declare returns_untrusted"
