@@ -218,6 +218,19 @@ class TestRootAndSize:
         finally:
             await _stop_plugin(h)
 
+    async def test_file_exactly_at_the_cap_is_sent(self, tmp_path):
+        # R3 refuses a file *over* the cap, so one exactly at it must go.
+        h, root = await _start(tmp_path, max_attachment_size=1000)
+        try:
+            f = root / "edge.png"
+            f.write_bytes(b"x" * 1000)
+            channel = h.registry.get_or_create("signal", AUTH_ACI)
+            out = await h.plugin.send_signal_attachment(channel.id, str(f), "")
+            assert not out.startswith("Could not send"), out
+            assert len(_send_frames(h)) == 1
+        finally:
+            await _stop_plugin(h)
+
     async def test_directory_in_root_is_not_a_file(self, tmp_path):
         h, root = await _start(tmp_path)
         try:
@@ -238,7 +251,7 @@ class TestRootAndSize:
             channel = h.registry.get_or_create("signal", AUTH_ACI)
             out = await h.plugin.send_signal_attachment(channel.id, "pic\x00.png", "")
             assert out.startswith("Could not send:")
-            assert "pic" in out and "cannot read" in out
+            assert "pic" in out and ".png" in out and "cannot read" in out
             assert _send_frames(h) == []
         finally:
             await _stop_plugin(h)
