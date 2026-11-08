@@ -351,6 +351,9 @@ async def _start_plugin(
             "account": BOT_NUMBER,
             "allow": [AUTH_ACI],
             "message_chunk_size": 2000,
+            # Keep downloads out of the checkout: the plugin's default is
+            # the relative state/signal-attachments (#522 committed them).
+            "attachment_dir": str(tmp_path / "signal-attachments"),
         }
         if signal_overrides:
             signal_config.update(signal_overrides)
