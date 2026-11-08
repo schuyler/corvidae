@@ -749,7 +749,33 @@ read_log.reads_spill_files = True
 
 Set it only on a tool that can open an arbitrary path (`read_file` and
 `shell` do). Declare a tool that cannot, and the agent is told about a file it
-cannot reach. Tuning (directory, size cap, age) is in
+cannot reach.
+
+### Declaring untrusted output
+
+A tool whose result carries text its author doesn't control (a fetched page,
+a file's contents, a search snippet, a third-party service's reply) declares
+it the same way, on the registered callable:
+
+```python
+async def fetch_ticket(id: str) -> str:
+    "Fetch a ticket body."
+    ...
+
+fetch_ticket.returns_untrusted = True
+```
+
+The kernel then renders each result of that tool in the nonce fence under a
+header it builds, naming the tool and the call id and labelling the content
+untrusted outside content, so the text can't imitate a header, a role or an
+instruction. Your tool returns plain text and does no framing of its own; the
+stored result is unchanged and the fence is applied when the prompt is built.
+The declaration is read when the call is dispatched and the answer is stored
+on the result row, so changing it later does not re-render history, and a
+tool unregistered while it runs stays fenced. It is strict: only `True` counts
+(`1` or a callable does not). Without it a result reaches the model as before.
+MCP tools are declared by the client for every server, with no setting. See
+[design.md](design.md#untrusted-tool-results). Tuning (directory, size cap, age) is in
 [configuration.md](configuration.md#daemon--daemon-level-settings), and the
 mechanism in [design.md](design.md#notification-spill-spillpy).
 
