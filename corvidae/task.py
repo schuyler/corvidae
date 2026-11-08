@@ -268,11 +268,17 @@ class TaskQueue:
                     line = line.strip()
                     if not line:
                         continue
-                    rec = json.loads(line)
-                    if rec.get("task_id") == task_id:
+                    # Per-line resilience: the file is appended to by the
+                    # completion path while this scan runs, so a partial or
+                    # corrupt line must not discard earlier records.
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(rec, dict) and rec.get("task_id") == task_id:
                         found = rec.get("result")
             return found
-        except (OSError, json.JSONDecodeError):
+        except OSError:
             return None
 
     def status(self) -> str:
@@ -324,7 +330,9 @@ class TaskPlugin(CorvidaePlugin):
         self._max_workers = daemon_config.get("max_task_workers", 4)
         self._completed_buffer = daemon_config.get("completed_task_buffer", 100)
         results_path = daemon_config.get("task_results_path")
-        if results_path is not None:
+        # An empty string would resolve Path(base_dir) / "" to the base
+        # directory itself — a directory, not a file. Treat it as unset.
+        if results_path is not None and str(results_path).strip():
             base_dir = config.get("_base_dir", Path("."))
             self._results_path = Path(base_dir) / results_path
 

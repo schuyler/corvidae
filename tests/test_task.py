@@ -1405,6 +1405,68 @@ class TestTaskResultPersistence:
         assert completions == ["still fine"]
         assert any("persist" in msg.lower() for msg in caplog.messages)
 
+    async def test_get_result_skips_malformed_lines(self, tmp_path):
+        """A corrupt or partial line does not discard earlier valid records."""
+        results_file = tmp_path / "task-results.jsonl"
+        # Matching record, then a non-dict JSON line, a garbage line, and a
+        # truncated final line (concurrent-append race shape).
+        results_file.write_text(
+            '{"ts": 1.0, "task_id": "abc", "channel": "c", "description": "d", "result": "ok"}\n'
+            "[1, 2, 3]\n"
+            "not json\n"
+            '{"ts": 2.0, "task_id": "abc", "resu\n'
+        )
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        assert queue.get_result("abc") == "ok"
+
+    async def test_get_result_last_matching_record_wins(self, tmp_path):
+        """When the same id appears twice, the last record's result wins."""
+        results_file = tmp_path / "task-results.jsonl"
+        results_file.write_text(
+            '{"ts": 1.0, "task_id": "abc", "result": "first"}\n'
+            '{"ts": 2.0, "task_id": "abc", "result": "second"}\n'
+        )
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        assert queue.get_result("abc") == "second"
+
+    async def test_get_result_missing_file_returns_none(self, tmp_path):
+        """results_path set but the file does not exist: None, no raise."""
+        queue = TaskQueue(max_workers=1, results_path=tmp_path / "absent.jsonl")
+        assert queue.get_result("abc") is None
+
+    async def test_appends_to_preexisting_file(self, tmp_path):
+        """A new queue appends to an existing results file (audit-log semantics)."""
+        results_file = tmp_path / "task-results.jsonl"
+        results_file.write_text(
+            '{"ts": 0.5, "task_id": "oldid", "result": "preexisting"}\n'
+        )
+        queue = TaskQueue(max_workers=1, results_path=results_file)
+        channel = _make_channel()
+        done = asyncio.Event()
+
+        async def work():
+            done.set()
+            return "fresh"
+
+        task = Task(work=work, channel=channel, description="append me")
+
+        async def on_complete(t, result):
+            pass
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        await queue.enqueue(task)
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        await asyncio.sleep(0.05)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        records = _read_records(results_file)
+        assert [r["task_id"] for r in records] == ["oldid", task.task_id]
+        assert records[1]["result"] == "fresh"
+
 
 
 # ---------------------------------------------------------------------------
@@ -1528,3 +1590,25 @@ class TestTaskResultTool:
         await plugin.on_start({})
         assert plugin.task_queue.results_path is None
         await plugin.on_stop()
+
+    async def test_on_init_resolves_relative_results_path(self, tmp_path):
+        """A relative daemon.task_results_path resolves against _base_dir."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+        config = {
+            "daemon": {"task_results_path": "nested/task-results.jsonl"},
+            "_base_dir": tmp_path,
+        }
+        await plugin.on_init(pm, config)
+        assert plugin._results_path == tmp_path / "nested" / "task-results.jsonl"
+
+    async def test_on_init_empty_results_path_stays_off(self, tmp_path):
+        """An empty-string daemon.task_results_path is treated as unset."""
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+        config = {
+            "daemon": {"task_results_path": "   "},
+            "_base_dir": tmp_path,
+        }
+        await plugin.on_init(pm, config)
+        assert plugin._results_path is None
