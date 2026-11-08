@@ -117,21 +117,38 @@ def _describe_config_value(value: object, secret_bearing: bool = False) -> str:
 
     Config errors are reported in the daemon log, and a value the validator
     rejected can still be one that carries a credential: a server entry that
-    is the URL itself, or a ``headers`` list holding ``Bearer <token>``. So a
-    string that parses as a URL keeps scheme, host, port and path -- what
-    tells the operator which endpoint is misconfigured -- and loses its
-    userinfo and query.
+    is the URL itself, a ``headers`` value holding ``Bearer <token>``, or a
+    URL nested inside a malformed ``url``/``args``/``command``. So:
 
-    Every other value is shown, because a typo (`"abc"` for a number) or a
-    wrong shape is what the operator must see to fix it. ``secret_bearing`` is
-    for the key whose value is a credential by definition -- ``headers`` --
-    where only the type and size are reported (#386 review).
+    - a string that parses as a URL keeps scheme, host, port and path -- what
+      tells the operator which endpoint is misconfigured -- and loses its
+      userinfo and query;
+    - a container is described recursively, so a URL inside it is redacted the
+      same way, and every other element stays visible because a wrong shape is
+      what the operator must see to fix it;
+    - ``secret_bearing`` is for the key whose value is a credential by
+      definition -- ``headers`` -- where only the type and size are reported,
+      whatever shape the value arrived in (#386 review).
     """
+    if secret_bearing and not isinstance(value, (int, float, bool, type(None))):
+        if isinstance(value, str):
+            return f"str of length {len(value)}"
+        if isinstance(value, (dict, list, tuple, set)):
+            return f"{type(value).__name__} of length {len(value)}"
     if isinstance(value, str):
         redacted = _redact_url(value)
         return repr(value) if redacted == _UNPARSEABLE else redacted
-    if secret_bearing and isinstance(value, (dict, list, tuple, set)):
-        return f"{type(value).__name__} of length {len(value)}"
+    if isinstance(value, dict):
+        inner = ", ".join(
+            f"{k!r}: {_describe_config_value(v)}"
+            for k, v in list(value.items())[:4]
+        )
+        more = ", …" if len(value) > 4 else ""
+        return "{" + inner + more + "}"
+    if isinstance(value, (list, tuple)):
+        inner = ", ".join(_describe_config_value(v) for v in list(value)[:4])
+        more = ", …" if len(value) > 4 else ""
+        return "[" + inner + more + "]"
     return repr(value)
 
 
@@ -236,7 +253,8 @@ def validate_mcp_config(config: dict) -> dict:
         return {}
     if not isinstance(block, dict):
         raise ValueError(
-            f"mcp must be a mapping with a servers key, got {block!r}"
+            "mcp must be a mapping with a servers key, got "
+            f"{_describe_config_value(block)}"
         )
     # servers: null configures nothing; otherwise a mapping of name to entry.
     servers = block.get("servers")
@@ -245,7 +263,7 @@ def validate_mcp_config(config: dict) -> dict:
     if not isinstance(servers, dict):
         raise ValueError(
             f"mcp.servers must be a mapping of server names to settings, "
-            f"got {servers!r}"
+            f"got {_describe_config_value(servers)}"
         )
     return servers
 
@@ -280,7 +298,7 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
     if not isinstance(endpoint, str) or not endpoint:
         raise ValueError(
             f"mcp.servers.{name}.{endpoint_key} must be a non-empty string, "
-            f"got {endpoint!r}"
+            f"got {_describe_config_value(endpoint)}"
         )
     # args is a list of strings and env a mapping; the SDK rejects anything
     # else at connect time, which would be retried forever.

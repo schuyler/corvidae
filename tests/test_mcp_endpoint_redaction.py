@@ -266,3 +266,75 @@ async def test_config_error_skip_line_hides_a_headers_bearer_token(caplog):
     assert "wiki" in joined
     assert headers_secret not in joined
 
+
+async def test_config_error_skip_line_hides_a_headers_bare_string(caplog):
+    """A `headers` value given as a bare string is also a credential.
+
+    A string is the most likely malformed shape for a mapping key, and
+    `"Bearer SECRET"` in it is the token itself. The type test used to run
+    before the key was consulted, so this shape echoed it whole (review).
+    """
+    headers_secret = "SECRET4"
+    server = {"transport": "streamable_http", "url": "https://h.example.com/mcp",
+              "headers": f"Bearer {headers_secret}"}
+    plugin = await _plugin_with({"wiki": server})
+    with caplog.at_level(logging.WARNING):
+        await plugin.on_start({"mcp": {"servers": {"wiki": server}}})
+
+    joined = "\n".join(
+        r.getMessage() for r in caplog.records if "wiki" in r.getMessage()
+    )
+    assert joined, "the config-error skip must be logged"
+    assert "headers" in joined
+    assert headers_secret not in joined
+
+
+async def test_config_error_skip_line_hides_a_url_inside_a_container(caplog):
+    """A credential-bearing URL is redacted wherever the skip line echoes it.
+
+    A malformed `url` that is a list instead of a string, or an `args` entry
+    holding an endpoint, was echoed verbatim.
+    """
+    endpoint = (
+        f"https://user:{USERINFO_PASSWORD}@wiki.example.com/mcp"
+        f"?token={QUERY_SECRET}"
+    )
+    cases = [
+        {"transport": "streamable_http", "url": [endpoint]},
+        {"transport": "stdio", "command": "c", "args": [endpoint]},
+    ]
+    for server in cases:
+        plugin = await _plugin_with({"wiki": server})
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            await plugin.on_start({"mcp": {"servers": {"wiki": server}}})
+
+        joined = "\n".join(
+            r.getMessage() for r in caplog.records if "wiki" in r.getMessage()
+        )
+        assert joined, f"the config-error skip must be logged for {server!r}"
+        assert "wiki" in joined
+        assert QUERY_SECRET not in joined, f"query token leaked via {server!r}"
+        assert USERINFO_PASSWORD not in joined, f"userinfo leaked via {server!r}"
+
+
+def test_validate_mcp_config_hides_a_url_that_is_the_whole_block():
+    """`mcp:` given as the URL itself is reported without its credentials.
+
+    `Runtime` prints this as `Config error: … — check agent.yaml`, so the
+    value reaches stderr; it was interpolated raw (review).
+    """
+    from corvidae.mcp_client import validate_mcp_config
+
+    endpoint = (
+        f"https://user:{USERINFO_PASSWORD}@wiki.example.com/mcp"
+        f"?token={QUERY_SECRET}"
+    )
+    with pytest.raises(ValueError) as excinfo:
+        validate_mcp_config({"mcp": endpoint})
+
+    message = str(excinfo.value)
+    assert "mcp" in message
+    assert QUERY_SECRET not in message
+    assert USERINFO_PASSWORD not in message
+
