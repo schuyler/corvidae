@@ -20,7 +20,6 @@ from pathlib import Path
 import pytest
 
 from corvidae.tool import Tool
-from tests.test_discord_plugin import _start_plugin as _start_discord
 from tests.test_signal_plugin import AUTH_ACI, _start_plugin, _stop_plugin, _wait_until
 
 # A few bytes standing in for an image; the daemon is fake, so content is moot.
@@ -71,18 +70,26 @@ class TestRegistration:
     async def test_tool_name_does_not_collide_with_discords(self, tmp_path):
         # The registry keeps the last tool of a given name while still
         # advertising both schemas, so two transports must not share a name.
+        # Importing the Discord harness skips the whole module when the
+        # optional discord extra is absent (the kernel CI job), so it is
+        # imported here, where only this test needs it.
+        pytest.importorskip("discord")
+        from tests.test_discord_plugin import _start_plugin as _start_discord
+
         h, _ = await _start(tmp_path)
-        d = await _start_discord()
         try:
-            tools: list = []
-            h.plugin.register_tools(tools)
-            d.plugin.register_tools(tools)
-            names = [Tool.from_function(t).name for t in tools]
-            assert "send_signal_attachment" in names
-            assert len(names) == len(set(names)), names
+            d = await _start_discord()
+            try:
+                tools: list = []
+                h.plugin.register_tools(tools)
+                d.plugin.register_tools(tools)
+                names = [Tool.from_function(t).name for t in tools]
+                assert "send_signal_attachment" in names
+                assert len(names) == len(set(names)), names
+            finally:
+                await d.plugin.on_stop()
         finally:
             await _stop_plugin(h)
-            await d.plugin.on_stop()
 
 
 class TestSend:
@@ -136,7 +143,8 @@ class TestSend:
             tokens = [f"w{i:03d}" for i in range(50)]
             await h.plugin.send_signal_attachment(channel.id, str(f), " ".join(tokens))
             frames = _send_frames(h)
-            assert len(frames) >= 3
+            # 100 bytes per chunk over ~250 bytes of text: exactly three frames.
+            assert len(frames) == 3
             # Only the first frame carries the file; the rest are text.
             assert "attachments" in frames[0]["params"]
             assert all("attachments" not in fr["params"] for fr in frames[1:])
@@ -195,14 +203,16 @@ class TestRootAndSize:
             await _stop_plugin(h)
 
     async def test_oversized_file_is_refused_naming_file_size_cap_and_setting(self, tmp_path):
-        h, root = await _start(tmp_path, max_attachment_size=10)
+        # A cap of 1000 and a file of 1001 bytes: distinctive numbers that a
+        # tmp path cannot contain by accident.
+        h, root = await _start(tmp_path, max_attachment_size=1000)
         try:
             f = root / "big.png"
-            f.write_bytes(b"x" * 11)
+            f.write_bytes(b"x" * 1001)
             channel = h.registry.get_or_create("signal", AUTH_ACI)
             out = await h.plugin.send_signal_attachment(channel.id, str(f), "")
             assert out.startswith("Could not send:")
-            assert "big.png" in out and "11" in out and "10" in out
+            assert "big.png" in out and "1001" in out and "1000" in out
             assert "signal.max_attachment_size" in out
             assert _send_frames(h) == []
         finally:
@@ -216,6 +226,19 @@ class TestRootAndSize:
             out = await h.plugin.send_signal_attachment(channel.id, "sub", "")
             assert out.startswith("Could not send:")
             assert "sub" in out and "is not a file" in out
+            assert _send_frames(h) == []
+        finally:
+            await _stop_plugin(h)
+
+    async def test_unresolvable_path_is_refused_naming_the_path(self, tmp_path):
+        # An embedded NUL makes Path.resolve() raise ValueError, the R6 case of
+        # a path that cannot be resolved: an error naming it, and no frame.
+        h, root = await _start(tmp_path)
+        try:
+            channel = h.registry.get_or_create("signal", AUTH_ACI)
+            out = await h.plugin.send_signal_attachment(channel.id, "pic\x00.png", "")
+            assert out.startswith("Could not send:")
+            assert "pic" in out and "cannot read" in out
             assert _send_frames(h) == []
         finally:
             await _stop_plugin(h)
@@ -276,13 +299,15 @@ class TestFailures:
             f.write_bytes(PNG)
             channel = h.registry.get_or_create("signal", AUTH_ACI)
             h.server.fail_next_matching("send", "boom")
+            # The resolved path, so the remedy's path can be matched exactly.
+            path = str(f.resolve())
             with caplog.at_level(logging.WARNING):
-                out = await h.plugin.send_signal_attachment(channel.id, str(f), "hi")
+                out = await h.plugin.send_signal_attachment(channel.id, path, "hi")
             assert out.startswith("Could not send:")
             assert "pic.png" in out and channel.id in out
             assert "nothing was delivered" in out
             # The remedy for a daemon that cannot see the file.
-            assert "read" in out and str(f.resolve()) in out
+            assert "read" in out and path in out
             # Logged at warning with the traceback and the identifiers.
             records = [r for r in caplog.records if r.levelno >= logging.WARNING and r.exc_info]
             assert any("pic.png" in r.getMessage() for r in records)
