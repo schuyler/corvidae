@@ -1773,9 +1773,25 @@ a JSON line with `type: "summary"`.
 
 ### File handles
 
-Per-channel file handles are opened lazily in `_get_handle` and held
-open for the plugin lifetime. Channel IDs are sanitized (`/` and `:` →
-`_`) for filenames. All handles are flushed and closed in `on_stop`.
+Per-channel files are opened lazily in `_get_handle` as `RotatingAppender`s
+(`jsonl_rotate.py`) and held open for the plugin lifetime. Channel IDs are
+sanitized (`/` and `:` → `_`) for filenames. All are flushed and closed in
+`on_stop`.
+
+### Rotation (#404)
+
+`MetricsJsonlPlugin` writes through the same class. Before a write that would
+pass `logging.jsonl.max_bytes` (default 10 MiB; `0` disables), the appender
+closes the file, shifts `x.jsonl` → `.1` → … → `.N` (`backup_count`, default
+5, the oldest dropped) and reopens in append mode, logging the rotation at INFO
+with the file's path. The size is read from the open file, so a file already
+over the cap rotates on its first write and an external `copytruncate` still
+works. A lock serialises writers, since one appender can be written from
+several worker threads at once. A rotation that fails (a read-only directory)
+is logged once per streak at WARNING, naming the file, and the file keeps
+growing past the cap until rotation works again. `parse_rotation` validates
+the two keys in `on_init`; a bad value is a config error. Nothing reads a
+rotated segment; `message_log` is the durable record (principle 4).
 
 ## Clock and idle tracker (`clock.py`, `idle.py`)
 

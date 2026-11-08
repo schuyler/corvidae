@@ -177,7 +177,7 @@ Keeping a fork's cached prefix is the operator's job. A stage mapped to another 
 | `daemon.max_task_workers` | integer | `4` | Number of concurrent background task workers in `TaskQueue`. |
 | `daemon.completed_task_buffer` | integer | `100` | Number of completed task records retained in memory for `task_status` output. |
 | `daemon.sqlite_journal_mode` | string | `wal` | SQLite journal mode for the session database. Allowed values: `delete`, `truncate`, `persist`, `memory`, `wal`, `off`. Read by `PersistencePlugin`. |
-| `daemon.jsonl_log_dir` | string | — | Directory for per-channel JSONL conversation logs. When set, `JsonlLogPlugin` appends one JSON line per conversation event to `<dir>/<channel_id>.jsonl`. Relative paths are resolved against `_base_dir`. Omit to disable JSONL logging. |
+| `daemon.jsonl_log_dir` | string | — | Directory for per-channel JSONL conversation logs. When set, `JsonlLogPlugin` appends one JSON line per conversation event to `<dir>/<channel_id>.jsonl`. Relative paths are resolved against `_base_dir`. Omit to disable JSONL logging. Each file is capped by `logging.jsonl.*`. |
 | `daemon.metrics_jsonl` | string | — | Path of the metrics event log. When set, `MetricsJsonlPlugin` appends one JSON line (`{"ts", "name", "value", "tags"}`) per `on_metrics` event. Relative paths are resolved against `_base_dir`. Omit to disable the metrics JSONL sink. |
 | `daemon.config_poll_interval` | float | `2.0` | Seconds between `agent.yaml` mtime checks by `ConfigWatcherPlugin`. |
 | `daemon.notification_spill_dir` | string | `state/notification-spill` | Directory where the full text of a cut notification is written, one file per notification, mode 0600. Relative paths are resolved against `_base_dir`. Startup fails, naming the key, if the resolved path contains characters a notification header would not render verbatim (brackets, `<`, `>`, `;`, control characters, doubled or edge whitespace, or anything NFKC normalisation changes). Restart to apply. |
@@ -1009,6 +1009,10 @@ The `logging` section is optional. Omitting it applies defaults (INFO level; fil
 |-----|------|---------|-------------|
 | `logging.level` | string | `INFO` | Minimum log level. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. Case-insensitive. |
 | `logging.file` | string | none (CLI: `corvidae.log`) | Path to a rotating log file (10 MB, 5 backups). When set, logs go to this file. When absent, logs go to stderr. In CLI mode, defaults to `corvidae.log`. |
+| `logging.jsonl.max_bytes` | integer | `10485760` | Size cap, in bytes, for each JSONL file: every per-channel transcript under `daemon.jsonl_log_dir` and the metrics log `daemon.metrics_jsonl`. A write that would pass it first rotates the file to `<name>.1` (the previous `.1` becomes `.2`, and so on). `0` never rotates. Restart-only. |
+| `logging.jsonl.backup_count` | integer | `5` | How many rotated files each JSONL sink keeps; the oldest is deleted. `0` keeps none, so the live file simply starts over. Restart-only. |
+
+The JSONL files are a debugging aid; `message_log` in `sessions.db` is the durable record. Rotation is in-process, so no external `logrotate` is needed; a file already over the cap when the daemon starts rotates on its first write. Each file is capped separately, so the worst case on disk is the number of channels times `(1 + backup_count) * max_bytes`, plus the metrics log. If a rotation fails (a read-only directory, a full disk), the daemon logs one warning naming the file and keeps appending past the cap until rotation works again, rather than dropping records. A value that is not an integer of 0 or greater is a startup config error naming the key.
 
 When `logging.file` is set in YAML, logs go to that rotating file regardless of mode. When `logging.file` is absent, logs go to stderr — except in CLI mode, where the default is `corvidae.log` to avoid polluting the chat interface.
 

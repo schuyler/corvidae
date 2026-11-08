@@ -752,8 +752,11 @@ Per transport:
    sequential, transactional steps; a fresh or legacy database reads as
    version 0.
 6. The JSONL log, when `daemon.jsonl_log_dir` is set, mirrors every
-   persisted row and summary per channel, append-only, with sanitized
-   file names, flushed and closed on stop.
+   persisted row and summary per channel, append-only within a file, with
+   sanitized file names, flushed and closed on stop. A file is capped by
+   size (`logging.jsonl`), rotated in-process to numbered backups with the
+   oldest dropped; `message_log` is the durable record, so dropping an old
+   segment loses nothing the agent depends on.
 7. A failing test that leaves an aiosqlite connection open cannot hang
    pytest at exit; the test suite's guard closes them at teardown.
 8. The agent keeps a write-ahead log of accepted work, in its database
@@ -1395,7 +1398,8 @@ design, not requirement. The requirements are outcomes:
    `finally`; `Task` captures the context at creation because queue
    workers do not inherit it.
 3. Sinks: `MetricsPlugin` (`on_metrics` events for tokens, latency,
-   errors), `UsageLogPlugin` (one `usage_log` row per call), a JSONL sink.
+   errors), `UsageLogPlugin` (one `usage_log` row per call), a JSONL sink, capped
+   and rotated like the §3.4.6 log.
    Core plugins emit their own `on_metrics` events for the things an
    operator watches (queue depth, compaction, task latency). Never emit
    `on_metrics` from inside an `on_metrics` implementation.
