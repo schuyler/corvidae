@@ -661,3 +661,20 @@ def test_validate_mcp_config_hides_headers_in_a_list_shaped_servers_block():
     assert "SECRET5" not in message
 
 
+
+
+# #588: a logged URL carries no line-boundary character, so one warning cannot
+# read as two lines. These are the characters str.splitlines() splits on.
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\x85", "\x0b", "\x0c"])
+def test_redact_url_encodes_a_line_separator(sep):
+    redacted = mcp_client_mod._redact_url(f"https://wiki.example.com/a{sep}b?t=x{sep}")
+    assert len(redacted.splitlines()) == 1
+    assert redacted.startswith("https://wiki.example.com/a%") and "t=" not in redacted
+
+
+def test_server_endpoint_encodes_a_separator_on_every_path():
+    """A marker-free value is echoed as configured, so it needs the guard too."""
+    plain = _server_endpoint({"transport": "sse", "url": "localhost:8080/a\u2028b"})
+    creds = _server_endpoint({"transport": "sse", "url": "https://u:pw@h.example/a\u2029b"})
+    assert plain == "localhost:8080/a%E2%80%A8b"
+    assert len(creds.splitlines()) == 1 and "pw" not in creds

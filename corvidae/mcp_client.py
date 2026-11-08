@@ -57,6 +57,37 @@ def _exc_type_names(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _leaf_exceptions(exc: BaseException) -> list[BaseException]:
+    """The exceptions at the bottom of a (possibly nested) exception group."""
+    if isinstance(exc, BaseExceptionGroup):
+        return [leaf for member in exc.exceptions for leaf in _leaf_exceptions(member)]
+    return [exc]
+
+
+def _is_connect_failure(exc: BaseException) -> bool:
+    """True when ``exc`` from a connect is a failed connect to skip and retry.
+
+    False means it must propagate. One rule serves ``on_start`` and
+    ``_retry_round`` so the two cannot drift apart (#596):
+
+    - An ``Exception`` is a failed connect.
+    - A ``CancelledError`` is a failed connect only when nobody is cancelling
+      this task; a cancel of the task itself is a shutdown (#385).
+    - A ``BaseExceptionGroup`` follows its leaves: any leaf that is neither an
+      ``Exception`` nor a ``CancelledError`` (``KeyboardInterrupt``,
+      ``SystemExit``) propagates, and a group of cancels is judged as a bare
+      cancel is. A group is not an ``Exception`` when a member is a
+      ``BaseException``, which is how it slipped past the old handlers.
+    """
+    if isinstance(exc, Exception):
+        return True
+    leaves = _leaf_exceptions(exc)
+    if any(not isinstance(leaf, (Exception, asyncio.CancelledError)) for leaf in leaves):
+        return False
+    task = asyncio.current_task()
+    return not (task is not None and task.cancelling())
+
+
 def _failure_log_parts(exc: BaseException, cfg: dict) -> tuple[str, bool]:
     """How a connect-failure warning reports ``exc``: (message suffix, exc_info).
 
@@ -117,6 +148,24 @@ def _redact_urls_in_text(text: str) -> str:
     return _URL_IN_TEXT.sub(lambda m: _describe_string(m.group(0)), text)
 
 
+# Every character ``str.splitlines`` treats as a line boundary, mapped to its
+# percent-encoded UTF-8 form. A logged URL must not carry one: a log viewer or
+# `grep` that splits on it would read one warning as two lines (#588).
+_LINE_BOUNDARY_ENCODING = {
+    ord(char): "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
+    for char in "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+}
+
+
+def _one_line(text: str) -> str:
+    """``text`` with every line-boundary character percent-encoded.
+
+    Encoded rather than dropped, so the operator can still see that the
+    configured value held an odd character. Never raises.
+    """
+    return text.translate(_LINE_BOUNDARY_ENCODING)
+
+
 def _server_endpoint(cfg: dict) -> str:
     """The server's command (stdio) or url (sse, streamable_http), for logs.
 
@@ -132,7 +181,7 @@ def _server_endpoint(cfg: dict) -> str:
     """
     key = "command" if cfg.get("transport") == "stdio" else "url"
     if key == "command":
-        return str(cfg.get(key, "?"))
+        return _one_line(str(cfg.get(key, "?")))
     # A config that failed validation may lack the key entirely; keep the
     # historical "?" so the log still says the endpoint was unreadable.
     if key not in cfg:
@@ -144,7 +193,8 @@ def _server_endpoint(cfg: dict) -> str:
     if isinstance(value, str) and value and not any(
         marker in value for marker in _CREDENTIAL_MARKERS
     ):
-        return value
+        # Shown as configured, except for a line-boundary character (#588).
+        return _one_line(value)
     return _redact_url(value)
 
 
@@ -177,7 +227,10 @@ def _redact_url(value: object) -> str:
     netloc = f"[{host}]" if ":" in host else host
     if port is not None:
         netloc = f"{netloc}:{port}"
-    return f"{parts.scheme}://{netloc}{parts.path}{'?…' if parts.query else ''}"
+    # A separator in the path or host must not put a second line in the log (#588).
+    return _one_line(
+        f"{parts.scheme}://{netloc}{parts.path}{'?…' if parts.query else ''}"
+    )
 
 
 def _describe_config_value(
@@ -578,18 +631,17 @@ class McpClientPlugin(CorvidaePlugin):
                     continue
                 try:
                     await self._connect_server(server_name, server_cfg)
-                except (Exception, asyncio.CancelledError) as exc:
-                    # A real cancel (shutdown) goes to the outer handler. A
-                    # cancel with no one cancelling this task is a failed
-                    # connect that surfaced as CancelledError (#385).
-                    if (
-                        isinstance(exc, asyncio.CancelledError)
-                        and asyncio.current_task().cancelling()
-                    ):
+                except BaseException as exc:
+                    # A real cancel (shutdown), bare or wrapped in a group,
+                    # goes to the outer handler. A cancel with no one
+                    # cancelling this task is a failed connect that surfaced
+                    # as CancelledError (#385), alone or in a group (#596).
+                    if not _is_connect_failure(exc):
                         raise
                     detail, with_traceback = _failure_log_parts(exc, server_cfg)
                     logger.warning(
-                        "MCP server %r (%s) failed to connect (%s), skipping%s",
+                        "MCP server %r (%s) failed to connect (%s), skipping%s; "
+                        "the background retry will try again",
                         server_name, _server_endpoint(server_cfg),
                         _exc_type_names(exc), detail,
                         extra={"server": server_name},
@@ -600,10 +652,11 @@ class McpClientPlugin(CorvidaePlugin):
                 # process lifetime.
                 if not any(server.name == server_name for server in self._servers):
                     self._pending_servers[server_name] = server_cfg
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, BaseExceptionGroup):
             # Interrupted mid-connect: the servers already connected have
             # owner tasks that nothing else will stop, so close them before
-            # the cancellation continues.
+            # the cancellation continues. A group reaches here only when the
+            # inner handler decided it must propagate (#596).
             await self._stop_owners()
             raise
 
@@ -763,14 +816,12 @@ class McpClientPlugin(CorvidaePlugin):
                 continue
             try:
                 await self._connect_server(name, cfg)
-            except (Exception, asyncio.CancelledError) as exc:
+            except BaseException as exc:
                 # A real cancel propagates; a cancel with no one cancelling
                 # this task is a failed connect surfacing as CancelledError
-                # (#385) and is handled like any other connect failure.
-                if (
-                    isinstance(exc, asyncio.CancelledError)
-                    and asyncio.current_task().cancelling()
-                ):
+                # (#385), alone or in a group (#596), and is handled like any
+                # other connect failure.
+                if not _is_connect_failure(exc):
                     raise
                 # The loop knows its next delay; a tool-call retry does not.
                 when = (

@@ -369,7 +369,11 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         record is rebuilt each pass, so a key that reverts is forgotten and a
         later edit to it is news again.
         """
-        live = self._reloadable_prefixes()
+        # Each declared prefix as its own key segments. A changed key is
+        # matched on its path, never on a re-joined dotted string: a key whose
+        # *name* contains a dot ("agent.forks") joins to the same string as a
+        # nested path and was mistaken for it (#591).
+        live = [tuple(prefix.split(".")) for prefix in self._reloadable_prefixes()]
         running = self.config if isinstance(getattr(self, "config", None), dict) else {}
         reported = getattr(self, "_reported_pending", None)
         if not isinstance(reported, dict):
@@ -379,7 +383,7 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         for path in sorted(_changed_leaf_keys(running, new_config), key=_dotted):
             dotted = _dotted(path)
             if dotted.startswith("_") or any(
-                dotted == p or dotted.startswith(p + ".") for p in live
+                tuple(map(str, path[: len(prefix)])) == prefix for prefix in live
             ):
                 continue
             # `_ABSENT` here means the key was deleted; `_UNREPORTED` means

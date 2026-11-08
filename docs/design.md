@@ -1540,7 +1540,7 @@ The age is the only policy: nothing bounds the directory's total size, so its
 worst case is the cap times the notification rate times the age.
 
 **Reading it back.** `read_file` takes any path, so the agent pages through a
-spill file with `offset` and `length`. `read_file` asks the service first: a
+spill file with `offset` and `length` (or `start_line` and `end_line`). `read_file` asks the service first: a
 missing path inside the spill directory (a file the sweep deleted, or a name
 that never existed) returns an error saying it was a spill file, that spill
 files are deleted after the configured days, and which key sets that. The
@@ -2813,8 +2813,16 @@ exception from the teardown, which is the real failure
 exception, and the server is skipped and queued like any failed connect
 (#385). As a backstop, `on_start` and `_retry_round` treat a `CancelledError`
 that arrives while their own task isn't being cancelled as a connect failure,
-and re-raise a real cancel. The connect-failure warnings name the server, its
-endpoint (URL or command) and the unwrapped exception type.
+and re-raise a real cancel. The same test covers a `BaseExceptionGroup`
+(`_is_connect_failure`, #596): a group is not an `Exception` when a member is
+a `CancelledError`, so it is judged by its leaves. A group of failures and
+uncancelled cancels is a failed connect, skipped and queued like any other; a
+group around a real cancel propagates, and `on_start` still stops the owners
+already started; a group holding `KeyboardInterrupt` or `SystemExit` always
+propagates. The connect-failure warnings name the server, its endpoint (URL or
+command) and the unwrapped exception types, and say the background retry will
+try again. A line-boundary character in that endpoint (a URL, or a stdio command) is
+percent-encoded, so one warning is one log line (#588).
 
 ### Tool naming
 
@@ -2962,7 +2970,7 @@ Registered via `CoreToolsPlugin` in `tools/__init__.py`:
 | Tool | File | Purpose |
 |------|------|---------|
 | `shell(command)` | `tools/shell.py` | Execute shell command (declares `reads_spill_files`), 30s timeout (configurable). On cancellation (the call bound, shutdown) it kills and reaps its `/bin/sh` process, then re-raises; `task_pipeline` inherits this. Grandchildren of the shell are not killed. Its companion `run_shell` returns the exit code beside the output, for callers that must know whether the command succeeded (#105). |
-| `read_file(path, offset, length)` | `tools/files.py` | Read file (declares `reads_spill_files`; a missing path in the spill directory gets the stale-spill error; 1MB limit, configurable), or a character range of any size behind a header naming the range, total and next offset; a range is clamped to `tools.max_result_chars` |
+| `read_file(path, offset, length, start_line, end_line)` | `tools/files.py` | Read file (declares `reads_spill_files`; a missing path in the spill directory gets the stale-spill error; 1MB limit, configurable), or a character range (`offset`, `length`) or a line range (`start_line`, `end_line`, 1-based, inclusive) of any size behind a header naming the range, total and next position; the two kinds cannot be combined; a range is clamped to `tools.max_result_chars`, a line range backing up to the last whole line (a first line longer than a page is cut, and the header gives the character offset to continue from and the start line where line paging resumes) |
 | `write_file(path, content)` | `tools/files.py` | Write file, creates parent dirs |
 | `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation (configurable) |
 | `web_search(query, max_results)` | `tools/web.py` | Search via DuckDuckGo, default 8 results (configurable) |

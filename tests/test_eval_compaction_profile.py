@@ -151,3 +151,34 @@ def test_empty_agent_yaml_is_a_config_error_not_a_traceback(eval_script, tmp_pat
         eval_script.resolve_llm_from_file(empty)
 
     assert "llm" in str(exc.value) or "default chat" in str(exc.value)
+
+
+def test_a_missing_dependency_is_named_not_blamed_on_the_interpreter():
+    """#589: corvidae importable, aiohttp absent: the script names aiohttp."""
+    import subprocess
+    import sys as _sys
+
+    code = (
+        "import runpy, sys\n"
+        "sys.modules['aiohttp'] = None\n"  # None makes `import aiohttp` raise ImportError
+        f"sys.argv = [{str(SCRIPT)!r}, '--help']\n"
+        f"runpy.run_path({str(SCRIPT)!r}, run_name='__main__')\n"
+    )
+    result = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    output = result.stdout + result.stderr
+
+    assert "could not import 'aiohttp'" in output
+    assert "not importable from this interpreter" not in output
+
+
+def test_a_compaction_stage_mapped_to_an_embedding_profile_is_refused(eval_script):
+    """#590: the daemon's own config error, naming the stage and the profile."""
+    llm = {
+        "main": {"base_url": "http://main:1", "model": "main-model"},
+        "emb": {"base_url": "http://emb:2", "model": "e", "kind": "embedding", "dimensions": 8},
+        "stages": {"compaction": "emb"},
+    }
+    with pytest.raises(ValueError) as exc:
+        eval_script.resolve_llm_defaults(llm)
+
+    assert "llm.stages.compaction" in str(exc.value) and "'emb'" in str(exc.value)

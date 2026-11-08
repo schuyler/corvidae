@@ -227,6 +227,112 @@ class TestReadFileRange:
 
 
 # ---------------------------------------------------------------------------
+# TestReadFileLines — line range on read_file (#573)
+# ---------------------------------------------------------------------------
+
+# A line-ranged header: first, last, total lines, then the next start line or EOF.
+_LINE_HEADER = re.compile(
+    r"^\[lines (\d+)-(\d+) of (\d+) in (.+?); (?:next start_line (\d+)|end of file)\]\n"
+)
+
+
+class TestReadFileLines:
+    def test_schema_exposes_nullable_start_line_and_end_line(self):
+        from corvidae.tool import Tool
+        registry: list = []
+        CoreToolsPlugin(None).register_tools(tool_registry=registry)
+        tool = next(t for t in registry if isinstance(t, Tool) and t.name == "read_file")
+        props = tool.schema["function"]["parameters"]["properties"]
+        nullable_int = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+        assert props["start_line"] == props["end_line"] == nullable_int
+
+    async def test_ranges_are_one_based_inclusive_and_name_lines_total_and_next(self, tmp_path):
+        f = tmp_path / "four.txt"
+        f.write_text("a\nb\nc\nd\n")
+        fn, _ = await _ranged_read_file()
+        assert await fn(str(f), start_line=2, end_line=3) == (
+            f"[lines 2-3 of 4 in {f}; next start_line 4]\nb\nc\n"
+        )
+        # An open end reads to the last line; an end past the file is clamped to it.
+        assert await fn(str(f), start_line=3) == f"[lines 3-4 of 4 in {f}; end of file]\nc\nd\n"
+        assert await fn(str(f), start_line=4, end_line=99) == f"[lines 4-4 of 4 in {f}; end of file]\nd\n"
+        # An open start begins at line 1.
+        assert await fn(str(f), end_line=1) == f"[lines 1-1 of 4 in {f}; next start_line 2]\na\n"
+
+    async def test_an_unterminated_last_line_counts_as_a_line(self, tmp_path):
+        f = tmp_path / "tail.txt"
+        f.write_text("a\nb")
+        fn, _ = await _ranged_read_file()
+        assert await fn(str(f), start_line=2) == f"[lines 2-2 of 2 in {f}; end of file]\nb"
+
+    async def test_a_line_range_cannot_be_combined_with_a_character_range(self, tmp_path):
+        f = tmp_path / "x.txt"
+        f.write_text("a\nb\n")
+        fn, _ = await _ranged_read_file()
+        result = await fn(str(f), start_line=1, offset=0)
+        assert result.startswith("Error:") and str(f) in result and "not both" in result
+        assert all(name in result for name in ("start_line", "end_line", "offset", "length"))
+
+    @pytest.mark.parametrize("kwargs, expected", [
+        ({"start_line": 0}, "start_line is 0 for {f}; use 1 or greater"),
+        ({"end_line": -2}, "end_line is -2 for {f}; use 1 or greater"),
+        ({"start_line": 3, "end_line": 2},
+         "end_line 2 is before start_line 3 for {f}; use an end_line of 3 or greater"),
+        ({"start_line": 4}, "start_line 4 is past the end of {f}, which has 3 lines; "
+                            "use a start_line of 3 or less"),
+    ])
+    async def test_bad_ranges_name_the_parameter_value_and_accepted_values(
+        self, tmp_path, kwargs, expected
+    ):
+        f = tmp_path / "three.txt"
+        f.write_text("a\nb\nc\n")
+        fn, _ = await _ranged_read_file()
+        assert await fn(str(f), **kwargs) == "Error: " + expected.format(f=f)
+
+    async def test_a_line_range_is_not_refused_for_file_size(self, tmp_path):
+        f = tmp_path / "over.txt"
+        f.write_text("".join(f"line {i}\n" for i in range(1000)))
+        fn, _ = await _ranged_read_file({"max_file_read_bytes": 100})
+        assert await fn(str(f), start_line=500, end_line=500) == (
+            f"[lines 500-500 of 1000 in {f}; next start_line 501]\nline 499\n"
+        )
+
+    async def test_paging_by_line_reconstructs_the_file_within_the_cap(self, tmp_path):
+        """The clamp backs up to whole lines, so each next start_line resumes cleanly."""
+        content = "".join(f"row {i} " + "x" * (i % 37) + "\n" for i in range(3000))
+        f = tmp_path / "rows.log"
+        f.write_text(content)
+        cap = 2_000
+        fn, _ = await _ranged_read_file({"max_result_chars": cap})
+
+        pieces, start = [], 1
+        while True:
+            result = await fn(str(f), start_line=start)
+            match = _LINE_HEADER.match(result)
+            assert len(result) <= cap and match and int(match.group(1)) == start, result[:200]
+            pieces.append(result[match.end():])
+            if match.group(5) is None:
+                break
+            start = int(match.group(5))
+        assert "".join(pieces) == content
+
+    async def test_a_line_longer_than_a_page_is_cut_with_a_continuing_offset(self, tmp_path):
+        long_line = "".join(chr(ord("a") + i % 26) for i in range(5000))
+        f = tmp_path / "wide.txt"
+        f.write_text("first\n" + long_line + "\nlast\n")
+        fn, _ = await _ranged_read_file({"max_result_chars": 1_000})
+
+        header, _, body = (await fn(str(f), start_line=2)).partition("\n")
+
+        assert "line 2 cut after" in header and "of 3 in" in header
+        assert header.endswith(", then next start_line 3]")
+        offset = int(re.search(r"continue with offset (\d+)", header).group(1))
+        assert offset == len("first\n") + len(body)
+        rest = await fn(str(f), offset=offset, length=50)  # the character read resumes the line
+        assert rest.partition("\n")[2] == long_line[len(body):len(body) + 50]
+
+
+# ---------------------------------------------------------------------------
 # Notification spill files (#558): read_file and shell can read them, and a
 # removed one fails naming the path and the age policy.
 # ---------------------------------------------------------------------------

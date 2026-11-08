@@ -282,3 +282,34 @@ async def test_a_real_llm_change_still_produces_the_summary_line(caplog):
         "a real llm change must still be reported"
     )
 
+
+
+# #591: the live-prefix filter compares key segments, not a dotted string.
+class _LiveAgentStub:
+    """Declares the whole ``agent`` section live, as the issue's criteria assume."""
+
+    reloadable_keys = ("agent",)
+
+
+def _reload(**top_level) -> dict:
+    return {"_config_path": "agent.yaml", **top_level}
+
+
+def _warned(watcher, caplog, config, needle) -> bool:
+    with caplog.at_level(logging.WARNING):
+        watcher._warn_restart_only_changes(config)
+    return any(needle in m for m in _warnings(caplog))
+
+
+def test_a_dotted_key_name_is_not_a_live_prefix_child(tmp_path, caplog):
+    """A top-level key *named* ``agent.forks`` is not under the live prefix ``agent``."""
+    watcher = _watcher(tmp_path, RUNNING)
+    watcher.pm.register(_LiveAgentStub(), name="live_agent_stub")
+    assert _warned(watcher, caplog, _reload(**{"agent.forks": True}), "agent.forks")
+
+
+def test_a_nested_key_under_a_live_prefix_is_still_filtered(tmp_path, caplog):
+    watcher = _watcher(tmp_path, RUNNING)
+    watcher.pm.register(_LiveAgentStub(), name="live_agent_stub")
+    config = _reload(agent={"compaction_threshold": 0.5})
+    assert not _warned(watcher, caplog, config, "compaction_threshold")

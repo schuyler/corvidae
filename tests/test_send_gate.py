@@ -798,3 +798,29 @@ class TestReasoningReopened:
         # The cut-off warning carries the marker, so the full text was logged.
         texts = [r.getMessage() for r in caplog.records if r.name == "corvidae.agent"]
         assert any(long_reasoning in t for t in texts), texts
+
+
+class TestMarkerRowIdAcrossAwait:
+    async def test_a_row_appended_during_persist_does_not_steal_the_id(self, env):
+        """#517: a row appended between the marker's append and its rowid write
+        must not receive the marker's id."""
+        from types import SimpleNamespace
+
+        from corvidae.context import ContextWindow
+
+        plugin, channel, _db = env
+        conv = channel.conversation = ContextWindow(channel.id)
+
+        async def persist(channel, message, message_type):
+            conv.append({"role": "user", "content": "racer"}, MessageType.MESSAGE)
+            return [4242]
+
+        real_pm, plugin.pm = plugin.pm, SimpleNamespace(ahook=SimpleNamespace(persist_message=persist))
+        try:
+            await plugin._append_unsent_marker(channel, "final", "never sent")
+        finally:
+            plugin.pm = real_pm
+
+        marker = next(m for m in conv.messages if unsent_marker_emission(m.get("content")) is not None)
+        racer = next(m for m in conv.messages if m.get("content") == "racer")
+        assert marker.get("_db_id") == 4242 and "_db_id" not in racer
