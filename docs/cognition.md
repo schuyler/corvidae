@@ -376,8 +376,10 @@ point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
 
 1. **Dedupe** against CONTEXT already in the window.
 2. **Budget** per source (`funnel.default_budget`, default 512 tokens;
-   `funnel.budgets.<source>` overrides), greedy in given order, drops
-   logged rather than silent.
+   `funnel.budgets.<source>` overrides), in given order, skipping any
+   entry that would overrun what is left of the budget, so one large
+   entry never blocks smaller ones after it; drops logged rather than
+   silent.
 3. **Frame** every admitted batch in explicit data-not-instructions
    wrapping with a source label (injection defense, written once here).
 4. **Append + persist** one CONTEXT message at the tail through
@@ -389,7 +391,10 @@ funnel also owns deferred registration: non-tool-call notification
 payloads queue per `(channel, origin)` via `register_and_wake()`, one
 stub notification wakes the channel per pending pair, and the drain in
 `before_agent_turn` admits everything queued for the triggering
-exchange's origin. `register()` queues without a stub: those payloads wake
+exchange's origin. Entries the budget dropped stay queued for the next
+drain, except an entry larger than its source's whole budget: it can
+never fit, so the drain drops it with a warning that names the channel,
+the source and `funnel.budgets.<source>`. `register()` queues without a stub: those payloads wake
 nothing and are admitted at the channel's next turn, whatever its origin
 (user turns included), before the origin-matched drain.
 
