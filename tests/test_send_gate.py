@@ -798,3 +798,38 @@ class TestReasoningReopened:
         # The cut-off warning carries the marker, so the full text was logged.
         texts = [r.getMessage() for r in caplog.records if r.name == "corvidae.agent"]
         assert any(long_reasoning in t for t in texts), texts
+
+
+# ---------------------------------------------------------------------------
+# #517: the marker's row id lands on the marker, not on a later row
+# ---------------------------------------------------------------------------
+
+
+class TestMarkerRowIdAcrossAwait:
+    async def test_a_row_appended_during_persist_does_not_steal_the_id(self, env):
+        """#517: ``persist_message`` is awaited between the marker's append and
+        the write of its rowid. A row appended to the window in that gap must
+        not receive the marker's id."""
+        from types import SimpleNamespace
+
+        from corvidae.context import ContextWindow
+
+        plugin, channel, _db = env
+        conv = channel.conversation = ContextWindow(channel.id)
+
+        async def persist(channel, message, message_type):
+            # Something else lands in the window while the marker persists.
+            conv.append({"role": "user", "content": "racer"}, MessageType.MESSAGE)
+            return [4242]
+
+        real_pm = plugin.pm
+        plugin.pm = SimpleNamespace(ahook=SimpleNamespace(persist_message=persist))
+        try:
+            await plugin._append_unsent_marker(channel, "final", "never sent")
+        finally:
+            plugin.pm = real_pm
+
+        marker = next(m for m in conv.messages if unsent_marker_emission(m.get("content")) is not None)
+        racer = next(m for m in conv.messages if m.get("content") == "racer")
+        assert marker.get("_db_id") == 4242, "the marker row carries its own log id"
+        assert "_db_id" not in racer, "a neighbour must not take the marker's id"
