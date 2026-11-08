@@ -957,6 +957,16 @@ No restart is required for the changes listed below. Changes that require restar
 
 ### What requires restart
 
+A restart-only key that a reload changes is named in a warning, one line per
+key: `config reload: <key> changed; restart-only, takes effect on restart`.
+The comparison is against the config the running daemon is using, so editing a
+key back to its running value draws no warning — the file and the process agree
+and a restart would change nothing. A key that stays pending is reported once,
+when its pending value first appears or changes, and not again on later reloads
+that leave it alone; to see a still-pending key, read the reload that
+introduced it. Reverting the key clears that record, so a later edit is reported
+again.
+
 | Setting | Reason |
 |---------|--------|
 | `irc.host`, `irc.port`, `irc.nick` | IRC transport is connected at startup; changing connection parameters requires reconnection. |
