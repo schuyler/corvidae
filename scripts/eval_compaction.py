@@ -28,6 +28,44 @@ from pathlib import Path
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 DEFAULT_FIXTURE = FIXTURE_DIR / "death_spiral_compaction.json"
 
+# The stage this eval measures, so it sends to the profile compaction uses.
+EVAL_STAGE = "compaction"
+
+
+def resolve_llm_defaults(llm_section: dict | None) -> dict:
+    """The endpoint settings for the profile the compaction stage resolves to.
+
+    The daemon resolves a stage through ``llm.stages``, then its kind's
+    default (``llm.defaults``, else ``llm.main``), folding ``extends`` chains.
+    This eval measures compaction quality, so it must send to the same model
+    the daemon would; reading ``llm.main`` raw measured a different model
+    whenever a deployment mapped the stage or used ``defaults`` (#470).
+
+    Returns:
+        A dict with ``base_url``, ``model`` and optionally ``api_key``.
+
+    Raises:
+        ValueError: naming the problem, for a malformed ``llm:`` section or
+            one with no profile the compaction stage can resolve to.
+    """
+    # Imported here so the script still loads (and prints its usage) when it
+    # is run outside the project environment -- see the guard in main().
+    from corvidae.llm_plugin import parse_llm_config
+
+    config = parse_llm_config(llm_section)
+    profile = config.profile_for(EVAL_STAGE, "chat")
+    if profile is None:
+        raise ValueError(
+            f"no profile resolves for the {EVAL_STAGE} stage: llm.stages does "
+            "not name one and there is no default chat profile"
+        )
+    resolved = config.profiles[profile]
+    return {
+        "base_url": resolved.get("base_url"),
+        "model": resolved.get("model"),
+        "api_key": resolved.get("api_key"),
+    }
+
 
 def load_fixture(fixture_path: str | Path) -> dict:
     """Load the compaction fixture.
@@ -387,23 +425,31 @@ def main():
     parser.add_argument("--api-key", default=None, help="LLM API key")
     args = parser.parse_args()
 
-    # Load defaults from agent.yaml if not specified
+    # Load defaults from agent.yaml if not specified.
     if not args.base_url or not args.model:
         config_path = Path(__file__).parent.parent / "agent.yaml"
         if config_path.exists():
             import yaml
             with open(config_path) as f:
                 config = yaml.safe_load(f)
-            llm_config = config.get("llm", {}).get("main", {})
+            try:
+                resolved = resolve_llm_defaults(config.get("llm"))
+            except ValueError as exc:
+                print(f"Config error: {exc} — check {config_path}", file=sys.stderr)
+                sys.exit(1)
+            # An explicit flag still wins over the resolved profile.
             if not args.base_url:
-                args.base_url = llm_config.get("base_url")
+                args.base_url = resolved["base_url"]
             if not args.model:
-                args.model = llm_config.get("model")
+                args.model = resolved["model"]
             if not args.api_key:
-                args.api_key = llm_config.get("api_key")
+                args.api_key = resolved["api_key"]
 
     if not args.base_url or not args.model:
-        print("❌ Must specify --base-url and --model (or have agent.yaml)")
+        print(
+            "❌ Must specify --base-url and --model (or have agent.yaml with an "
+            "llm: section the compaction stage resolves to)"
+        )
         sys.exit(1)
 
     print(f"🌐 LLM: {args.model} @ {args.base_url}")
