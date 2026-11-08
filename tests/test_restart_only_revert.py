@@ -235,15 +235,24 @@ def _llm_plugin_with(running_llm: dict) -> object:
 async def test_a_revert_produces_no_llm_config_changed_line(caplog):
     """R473.3: a revert logs neither observer's line.
 
-    `LLMPlugin` compares against its own running config, so a file reverted to
-    that config is not a change and it stays silent — the same conclusion
-    ConfigWatcher reaches after this ticket.
+    The scenario is the ticket's: reload 1 changes the model, reload 2 sets it
+    back. A single reload of an unchanged config would not distinguish this
+    from the "nothing changed" case, and would pass even if `LLMPlugin` diffed
+    against the previous reload -- the bug #473 exists to prevent (review).
     """
     running = {"main": {"base_url": "http://localhost:8080/v1", "model": "startup"}}
     plugin = _llm_plugin_with(running)
+    changed = {"main": {"base_url": "http://localhost:8080/v1", "model": "other"}}
 
     with caplog.at_level(logging.WARNING):
-        # A reload that reverts to the running model.
+        # Reload 1: a real change, which must be reported.
+        await plugin.on_config_reload({"llm": changed})
+        assert any("llm config changed" in m for m in _warnings(caplog)), (
+            "reload 1 must report the change"
+        )
+
+        # Reload 2: back to the running config, which must not.
+        caplog.clear()
         await plugin.on_config_reload({"llm": dict(running)})
 
     assert not _warnings(caplog), (

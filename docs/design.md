@@ -302,16 +302,20 @@ conversation's system prompt is set once, when its `ContextWindow` is
 created (compaction and forks keep it), so a prompt edit at any layer
 reaches only conversations that start after the reload.
 
-**Live versus restart-only (#408).** Each plugin declares the config-key
+**Live versus restart-only (#408, #473).** Each plugin declares the config-key
 prefixes its `on_config_reload` re-reads, as `reloadable_keys` on
 `CorvidaePlugin`. Before dispatching the reload, `ConfigWatcherPlugin`
-diffs the old and new config and logs one WARNING per changed key that no
-plugin declares, naming the key and saying a restart applies it. Anything
-not declared is restart-only by default, so a plugin that forgets to
-declare a key produces a spurious warning rather than a silent pending
-change. A test in `tests/test_config_watcher.py` reads each reload hook's
-source and fails if it reads a key its class does not declare, so the
-registry cannot drift from the code.
+compares the new config against the one the running daemon is using — not
+against the previous reload — and logs one WARNING per changed key that no
+plugin declares, naming the key and saying a restart applies it. The running
+config is the baseline because the warning claims what a restart would change:
+a key edited back to its running value changes nothing on restart and is not
+reported. A key is reported when its pending value first appears or changes,
+not on every poll. Anything not declared is restart-only by default, so a
+plugin that forgets to declare a key produces a spurious warning rather than a
+silent pending change. A test in `tests/test_config_watcher.py` reads each
+reload hook's source and fails if it reads a key its class does not declare, so
+the registry cannot drift from the code.
 
 **System prompt layers (#316).** A conversation's system prompt is the
 identity (`agent.system_prompt`, never set per channel; a channel-level
