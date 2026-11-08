@@ -122,6 +122,25 @@ class TestBudget:
         assert any("dropped" in rec.message.lower() for rec in caplog.records)
         await db.close()
 
+    async def test_oversized_entry_is_skipped_not_blocking(self, caplog):
+        """An entry that would overrun the budget is skipped, and smaller
+        entries after it are still admitted in order (#603 design §6)."""
+        funnel, channel, conv, db = await build_funnel(
+            {"funnel": {"default_budget": 10}}
+        )
+        entries = [
+            "first",
+            "another entry that is long enough to blow through a ten token budget easily",
+            "third",
+        ]
+        with caplog.at_level(logging.INFO, logger="corvidae.funnel"):
+            admitted = await funnel.admit(channel, conv, "memory", entries)
+        # The long middle entry is skipped; the one after it still fits.
+        assert admitted == ["first", "third"]
+        assert "another entry" not in conv.messages[-1]["content"]
+        assert any("dropped 1 entry" in rec.message for rec in caplog.records)
+        await db.close()
+
     async def test_per_source_budget_override(self):
         funnel, channel, conv, db = await build_funnel(
             {"funnel": {"default_budget": 10_000, "budgets": {"memory": 1}}}

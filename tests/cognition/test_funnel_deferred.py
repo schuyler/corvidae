@@ -17,6 +17,7 @@ Covers the plan's red-test list:
 - Budget-dropped entries survive to the next drain.
 """
 
+import logging
 from unittest.mock import AsyncMock
 
 import aiosqlite
@@ -242,6 +243,44 @@ class TestFailureAndBudget:
         await funnel.before_agent_turn(channel=channel, trace_id="k2", annotations={"origin": "critique"})
         window = _window_context_text(conv)
         assert "bravo" in window
+
+        await db.close()
+
+
+    async def test_entry_larger_than_whole_budget_is_dropped_with_warning(self, caplog):
+        """An entry that exceeds its source's whole budget can never be
+        admitted, so the drain drops it once with a warning naming the
+        channel, the source and the config key, instead of re-queueing it
+        forever (#623). A fitting entry in the same payload is admitted."""
+        funnel, channel, conv, db = await build_funnel(
+            config={"funnel": {"budgets": {"critique": 12}}}
+        )
+
+        oversized = ("charlie " * 30).strip()
+        await funnel.register_and_wake(
+            channel, origin="critique", source="critique",
+            entries=[oversized, "small verdict"],
+        )
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.funnel"):
+            await funnel.before_agent_turn(
+                channel=channel, trace_id="o1", annotations={"origin": "critique"}
+            )
+
+        # The fitting entry is admitted; the oversized one is not.
+        window = _window_context_text(conv)
+        assert "small verdict" in window
+        assert "charlie" not in window
+
+        # The warning names the channel, the source and the remedy key.
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            channel.id in m and "critique" in m and "funnel.budgets.critique" in m
+            for m in warnings
+        ), warnings
+
+        # Nothing stays registered for the pair: the oversized entry is gone.
+        assert (channel.id, "critique") not in funnel._deferred
 
         await db.close()
 
