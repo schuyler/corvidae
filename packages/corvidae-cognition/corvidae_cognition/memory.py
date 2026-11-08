@@ -150,6 +150,7 @@ def _exclude_clause(
         return "", ()
     return " AND NOT (m.channel_id = ? AND m.msg_id_start >= ?)", exclude
 
+
 # How long (ms) the dedicated memory write connection waits for SQLite's
 # write lock before failing the write (the range is then retried).
 # shortcut: a module constant, not an agent.yaml key; make it config if a

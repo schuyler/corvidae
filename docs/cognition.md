@@ -244,8 +244,7 @@ retrieved normally. Known limit: the bound assumes the window is a
 contiguous id suffix of the channel's log, which rows imported with old
 timestamps can break (#638).
 
-Scores are
-`cosine_similarity × exp(-age_days / memory.half_life_days)`, where
+Scores are `cosine_similarity × exp(-age_days / memory.half_life_days)`, where
 `age_days` runs from `created_at`, or from `max(created_at,
 last_retrieved_at)` under `memory.retrieval.recency_from: last_used`.
 Candidates rank by score and are annotated into relevance bands (strong
@@ -515,7 +514,8 @@ Implements one hook:
 **Whole memory:** both tools span every channel's records, as passive
 retrieval does (PRD principle 14, #168); neither takes the calling channel
 into account, so neither declares `_ctx`. They reach further than passive
-retrieval in *status* (demoted, superseded, and redacted-tombstone records).
+retrieval in *status* (demoted, superseded, and redacted-tombstone records),
+and they don't apply passive retrieval's window exclusion (#634).
 `search_memory`'s optional `channel=` argument narrows to one channel's
 records by equality and is never treated as a pattern; an id nothing was
 written on simply matches nothing. `recall_raw` replays a record's raw range

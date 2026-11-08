@@ -11,8 +11,8 @@ no ids are retrieved as before. The exclusion acts before the cut to k.
 import time
 
 import pytest
-
 from corvidae_cognition.memory import VEC_OVERFETCH
+
 from tests.cognition.test_memory_retrieval import (
     bow_embed,
     build_retrieval_env,
