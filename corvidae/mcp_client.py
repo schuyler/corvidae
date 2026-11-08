@@ -57,104 +57,51 @@ def _exc_type_names(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def _safe_exc_info(exc: BaseException, cfg: dict) -> object:
-    """What to pass as ``exc_info`` so the rendered traceback holds no secret.
+def _failure_log_parts(exc: BaseException, cfg: dict) -> tuple[str, bool]:
+    """How a connect-failure warning reports ``exc``: (message suffix, exc_info).
 
-    Redacting the message is not enough. The handler renders the attached
-    exception too, and an HTTP client reports the URL it failed on:
-    ``httpx2.HTTPStatusError`` formats ``Client error '401 …' for url
-    '<url>'``, so an SSE server answering 401 wrote the configured userinfo
-    and query token into the daemon log even though the message itself was
-    clean (#386 review).
+    A server whose configured URL carries credentials (a userinfo or a query
+    string) gets no traceback: the HTTP client quotes the URL in its errors --
+    httpx2's ``HTTPStatusError`` reads ``Client error '401 …' for url
+    '<url>'`` -- so the rendered record would carry the secret (#386). The
+    warning instead ends with the exception's own text, every URL in it
+    redacted like the endpoint, which keeps the status the operator needs.
 
-    Every URL in the exception chain's text -- message, notes, cause and
-    context -- is redacted like the endpoint, any remaining copy of the
-    configured endpoint's credential material is removed, and the scrubbed
-    copy is attached in place of the original. It names the original type and
-    keeps the rest of the text and the traceback frames, so the operator
-    still sees which error occurred, why, and where; only the secret goes.
-
-    Returns the value for ``exc_info``: a scrubbed exception instance, or
-    ``True`` when nothing in the chain needs scrubbing.
+    Any other server keeps its full traceback and no suffix. Never raises.
     """
-    # One guard for the whole scrub: it runs inside an except handler, so any
-    # failure here would replace the connect failure being reported and abort
-    # the caller (#386 review). The fallback attaches a placeholder, never the
-    # original, so a scrub that cannot finish cannot leak either.
+    url = cfg.get("url")
+    credentialed = (
+        cfg.get("transport") != "stdio"
+        and isinstance(url, str)
+        and ("@" in url or "?" in url)
+    )
+    if not credentialed:
+        return "", True
+    return (
+        f": {_redact_urls_in_text(_exc_text(exc))} "
+        "(traceback withheld: the configured URL carries credentials)",
+        False,
+    )
+
+
+def _exc_text(exc: BaseException) -> str:
+    """An exception's message on one line, reading through exception groups
+    to the errors inside them, since a group's own text names none.
+
+    Never raises: it runs inside failure logging.
+    """
     try:
-        secrets = _credential_material(cfg)
-        if not secrets:
-            return True
-        scrubbed = _scrub_exception(exc, secrets)
-        return scrubbed if scrubbed is not None else True
+        if isinstance(exc, BaseExceptionGroup):
+            return "; ".join(_exc_text(e) for e in exc.exceptions)
+        return " ".join(str(exc).split())
     except Exception:
-        # Not exc_info: the failing scrub's own traceback could quote the
-        # text it was scrubbing.
+        # A __str__ that raises, or a pathologically deep group. The type is
+        # already in the warning, so a placeholder loses little.
         logger.warning(
-            "could not scrub %s for the log; attaching a placeholder instead",
+            "could not read the text of %s for the MCP failure log",
             type(exc).__name__,
         )
-        return _RedactedException(
-            f"{type(exc).__module__}.{type(exc).__qualname__}: "
-            "(details withheld: the error text could not be scrubbed)"
-        )
-
-
-def _credential_material(cfg: dict) -> tuple[str, ...]:
-    """The credential-bearing substrings of a server's configured URL.
-
-    Userinfo, query, and the whole URL when it cannot be parsed -- the same
-    three positions ``_describe_string`` treats as secret-bearing. Empty for
-    a stdio server, whose ``command`` is not credential material (R386.4).
-    """
-    if cfg.get("transport") == "stdio":
-        return ()
-    url = cfg.get("url")
-    if not isinstance(url, str) or not url:
-        return ()
-    # Without "@" or "?" there is no userinfo or query, so nothing to remove;
-    # scrubbing the bare URL would only mislabel it as a credential.
-    if "@" not in url and "?" not in url:
-        return ()
-    found: list[str] = []
-    # The whole value first, so a longer match wins over its parts.
-    found.append(url)
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return tuple(found)
-    if parts.query:
-        found.append(parts.query)
-        for pair in parts.query.split("&"):
-            if "=" in pair:
-                value = pair.split("=", 1)[1]
-                if value:
-                    found.append(value)
-    if parts.netloc and "@" in parts.netloc:
-        userinfo = parts.netloc.rsplit("@", 1)[0]
-        found.append(userinfo)
-        for piece in userinfo.split(":", 1):
-            if piece:
-                found.append(piece)
-    # Longest first: replacing a sub-secret before the whole URL would leave
-    # the URL's own copy of it behind. shortcut: pieces under three characters
-    # are not replaced on their own (they would shred ordinary words in the
-    # message); a URL in the text is still redacted whole by
-    # _redact_urls_in_text, so this only matters for a tiny secret quoted
-    # outside any URL -- upgrade if a server is ever configured that way.
-    return tuple(sorted({s for s in found if len(s) >= 3}, key=len, reverse=True))
-
-
-class _RedactedException(Exception):
-    """Stands in for an exception whose text carried a credential.
-
-    Its message is the original's text with the credential removed, prefixed
-    by the original's qualified type name, so the rendered traceback still
-    says which error occurred and why. A dedicated type, rather than
-    rebuilding the original one, because constructors differ: httpx2's
-    ``HTTPStatusError`` needs keyword-only arguments, and a constructor that
-    formats its argument into a template would garble the scrubbed text.
-    """
+        return "(message unavailable)"
 
 
 def _redact_urls_in_text(text: str) -> str:
@@ -162,84 +109,12 @@ def _redact_urls_in_text(text: str) -> str:
 
     This catches the configured URL in whatever form a library reports it --
     httpx2 percent-encodes the URL it puts in an error, so ``token=SEC RET1``
-    arrives as ``token=SEC%20RET1`` and an exact-substring match misses it
-    (#386 review). A URL that cannot be read is replaced entirely. Every
+    arrives as ``token=SEC%20RET1`` and an exact-substring match would miss
+    it (#386 review). A URL that cannot be read is replaced entirely. Every
     match contains "://", so ``_describe_string`` always redacts it rather
     than echoing it.
     """
     return _URL_IN_TEXT.sub(lambda m: _describe_string(m.group(0)), text)
-
-
-def _scrub_text(text: str, secrets: tuple[str, ...]) -> str:
-    """``text`` with URLs redacted and any remaining secret substring removed."""
-    redacted = _redact_urls_in_text(text)
-    for secret in secrets:
-        redacted = redacted.replace(secret, "(credentials removed)")
-    return redacted
-
-
-def _scrub_exception(
-    exc: BaseException, secrets: tuple[str, ...], _depth: int = 0
-) -> BaseException | None:
-    """A copy of ``exc`` whose text carries no secret, or None if unchanged.
-
-    Copies rather than mutates: the exception is still propagating, and its
-    original text may be needed by a caller. The copy is a
-    ``_RedactedException`` naming the original type, with the scrubbed
-    message, the original traceback frames, and scrubbed notes, cause and
-    context.
-    """
-    if _depth >= _MAX_DESCRIBE_DEPTH:
-        # Past the bound, replace the rest of the chain rather than keep it:
-        # returning None here would mean "unchanged" and attach the original,
-        # unscrubbed links (#386 review).
-        return _RedactedException("(exception chain too deep to show)")
-    # The message and any notes are the text a handler renders for this link
-    # of the chain; scrub each.
-    try:
-        message = str(exc)
-    except Exception:
-        # A __str__ that fails renders as a placeholder anyway; say so here.
-        logger.warning(
-            "could not read %s's message while scrubbing it for the log",
-            type(exc).__name__, exc_info=True,
-        )
-        message = "(message unavailable)"
-    # __notes__ is a list by convention only; anything else is ignored
-    # rather than allowed to raise inside the except handler logging this.
-    raw_notes = getattr(exc, "__notes__", None)
-    notes = [str(n) for n in raw_notes] if isinstance(raw_notes, list) else []
-    redacted = _scrub_text(message, secrets)
-    redacted_notes = [_scrub_text(n, secrets) for n in notes]
-    cause = _scrub_exception(exc.__cause__, secrets, _depth + 1) if exc.__cause__ else None
-    context = (
-        _scrub_exception(exc.__context__, secrets, _depth + 1)
-        if exc.__context__
-        else None
-    )
-    if (
-        redacted == message
-        and redacted_notes == notes
-        and cause is None
-        and context is None
-    ):
-        return None
-    # Build the stand-in: original type name, scrubbed message and notes.
-    type_name = f"{type(exc).__module__}.{type(exc).__qualname__}"
-    replacement = _RedactedException(f"{type_name}: {redacted}")
-    for note in redacted_notes:
-        replacement.add_note(note)
-    # Carry the traceback so the operator still sees where it failed. Setting
-    # it rather than re-raising keeps the frames without running the handler
-    # stack twice.
-    if exc.__traceback__ is not None:
-        replacement = replacement.with_traceback(exc.__traceback__)
-    # Keep the chain, swapping in a scrubbed link wherever one was needed,
-    # and keep `raise ... from None` hiding its context as before.
-    replacement.__cause__ = cause if cause is not None else exc.__cause__
-    replacement.__context__ = context if context is not None else exc.__context__
-    replacement.__suppress_context__ = exc.__suppress_context__
-    return replacement
 
 
 def _server_endpoint(cfg: dict) -> str:
@@ -709,12 +584,13 @@ class McpClientPlugin(CorvidaePlugin):
                         and asyncio.current_task().cancelling()
                     ):
                         raise
+                    detail, with_traceback = _failure_log_parts(exc, server_cfg)
                     logger.warning(
-                        "MCP server %r (%s) failed to connect (%s), skipping",
+                        "MCP server %r (%s) failed to connect (%s), skipping%s",
                         server_name, _server_endpoint(server_cfg),
-                        _exc_type_names(exc),
+                        _exc_type_names(exc), detail,
                         extra={"server": server_name},
-                        exc_info=_safe_exc_info(exc, server_cfg),
+                        exc_info=with_traceback,
                     )
                 # A server that did not register (exception or timeout) is
                 # kept for the retry loop rather than skipped for the
@@ -898,11 +774,13 @@ class McpClientPlugin(CorvidaePlugin):
                     f"retrying in {self._next_delay:g}s" if from_loop
                     else "the background retry will try again"
                 )
+                detail, with_traceback = _failure_log_parts(exc, cfg)
                 logger.warning(
-                    "MCP server %r (%s) reconnect failed (%s); %s",
-                    name, _server_endpoint(cfg), _exc_type_names(exc), when,
+                    "MCP server %r (%s) reconnect failed (%s)%s; %s",
+                    name, _server_endpoint(cfg), _exc_type_names(exc), detail,
+                    when,
                     extra={"server": name},
-                    exc_info=_safe_exc_info(exc, cfg),
+                    exc_info=with_traceback,
                 )
                 continue
             if any(server.name == name for server in self._servers):

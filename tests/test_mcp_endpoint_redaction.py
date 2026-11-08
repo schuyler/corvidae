@@ -10,11 +10,10 @@ import io
 import logging
 
 import pytest
+from fake_clock import clock_pm
 
 import corvidae.mcp_client as mcp_client_mod
 from corvidae.mcp_client import _server_endpoint
-from fake_clock import clock_pm
-
 
 # Secrets that must never reach a log line.
 QUERY_SECRET = "SECRET1"
@@ -477,11 +476,11 @@ def test_describing_never_raises_on_a_cycle():
 # ---------------------------------------------------------------------------
 # The rendered record, not just the message
 #
-# Every assertion above reads `getMessage()`, which excludes the traceback a
-# handler appends from `exc_info=True`. That blind spot hid a real leak: an
-# SSE server answering 401 raises httpx2.HTTPStatusError, whose message is
-# `Client error '401 Unauthorized' for url '<the configured url>'` -- with the
-# userinfo and query intact. These tests render the whole record.
+# Both warnings used to attach the exception, and an HTTP client quotes the URL
+# in its errors: httpx2.HTTPStatusError reads `Client error '401 Unauthorized'
+# for url '<the configured url>'`. So a server whose URL carries credentials
+# gets no traceback; the warning carries the exception's text with every URL
+# redacted instead. These tests render the whole record as a handler would.
 # ---------------------------------------------------------------------------
 
 
@@ -490,60 +489,6 @@ def _rendered(records) -> str:
     handler = logging.StreamHandler(io.StringIO())
     handler.setFormatter(logging.Formatter("%(message)s"))
     return "\n".join(handler.format(r) for r in records)
-
-
-async def test_the_rendered_record_hides_credentials_on_a_connect_failure(
-    secret_url_server, caplog
-):
-    """The full rendered line -- traceback included -- carries no credential.
-
-    A failed connect attaches the exception. If that exception's own message
-    embeds the URL (httpx2 does), redacting only the message text is not
-    enough (review).
-    """
-    plugin = await _plugin_with({"wiki": secret_url_server})
-    with caplog.at_level(logging.WARNING):
-        await plugin.on_start({"mcp": {"servers": {"wiki": secret_url_server}}})
-
-    rendered = _rendered(caplog.records)
-    assert rendered.strip(), "the connect failure must be logged"
-    assert QUERY_SECRET not in rendered, "query token reached the log record"
-    assert USERINFO_PASSWORD not in rendered, "userinfo reached the log record"
-
-
-async def test_the_rendered_record_hides_a_url_carrying_exception(
-    secret_url_server, caplog
-):
-    """An exception whose message embeds the URL does not reach the record.
-
-    This is the shape httpx2 raises on a non-2xx response; it is reproduced
-    here without a server so the assertion is about our logging, not httpx.
-    """
-    class UrlBearingError(Exception):
-        """Stands in for httpx2.HTTPStatusError, which formats the URL in."""
-
-        def __init__(self, url: str) -> None:
-            super().__init__(f"Client error '401 Unauthorized' for url '{url}'")
-
-    plugin = await _plugin_with({"wiki": secret_url_server})
-
-    async def connect(name, cfg):
-        raise UrlBearingError(cfg["url"])
-
-    plugin._connect_server = connect
-    with caplog.at_level(logging.WARNING):
-        await plugin.on_start({"mcp": {"servers": {"wiki": secret_url_server}}})
-
-    rendered = _rendered(caplog.records)
-    assert rendered.strip(), "the connect failure must be logged"
-    assert QUERY_SECRET not in rendered, "a URL-bearing exception leaked the token"
-    assert USERINFO_PASSWORD not in rendered, "a URL-bearing exception leaked the password"
-
-
-# ---------------------------------------------------------------------------
-# Round-seven review: the retry site's record, re-encoded tokens, and the
-# diagnostic that scrubbing must keep
-# ---------------------------------------------------------------------------
 
 
 class _UrlBearingError(Exception):
@@ -564,77 +509,106 @@ async def _failing_with(servers: dict, make_exc) -> "mcp_client_mod.McpClientPlu
     return plugin
 
 
-async def test_the_rendered_retry_record_hides_a_url_carrying_exception(
-    secret_url_server, caplog
-):
-    """The retry-round warning's traceback is scrubbed too, not just on_start's."""
-    plugin = await _failing_with(
-        {"wiki": secret_url_server}, lambda cfg: _UrlBearingError(cfg["url"])
-    )
-    await plugin.on_start({"mcp": {"servers": {"wiki": secret_url_server}}})
-    caplog.clear()
-
+async def _render_failure(servers: dict, make_exc, caplog, *, retry: bool) -> str:
+    """Render the on_start warning, or the retry-round one if ``retry``."""
+    plugin = await _failing_with(servers, make_exc)
+    if retry:
+        await plugin.on_start({"mcp": {"servers": servers}})
+        caplog.clear()
     with caplog.at_level(logging.WARNING):
-        await plugin._retry_round(from_loop=True)
+        if retry:
+            await plugin._retry_round(from_loop=True)
+        else:
+            await plugin.on_start({"mcp": {"servers": servers}})
+    return _rendered(caplog.records)
 
-    rendered = _rendered(caplog.records)
-    assert "reconnect failed" in rendered, "the reconnect failure must be logged"
-    assert QUERY_SECRET not in rendered, "query token reached the retry record"
-    assert USERINFO_PASSWORD not in rendered, "userinfo reached the retry record"
+
+@pytest.mark.parametrize("retry", [False, True], ids=["on_start", "retry_round"])
+async def test_the_rendered_record_hides_a_url_carrying_exception(
+    secret_url_server, caplog, retry
+):
+    """No credential in the rendered record at either site, and the status
+    the operator needs survives."""
+    rendered = await _render_failure(
+        {"wiki": secret_url_server},
+        lambda cfg: _UrlBearingError(cfg["url"]),
+        caplog,
+        retry=retry,
+    )
+    assert "wiki.example.com/mcp" in rendered
+    assert "401 Unauthorized" in rendered, "the status text was lost"
+    assert "traceback withheld" in rendered
+    assert "Traceback" not in rendered
+    assert QUERY_SECRET not in rendered, "query token reached the record"
+    assert USERINFO_PASSWORD not in rendered, "userinfo reached the record"
 
 
 async def test_a_percent_encoded_token_does_not_reach_the_record(caplog):
     """httpx2 percent-encodes the URL it reports, so `SEC RET1` arrives as
-    `SEC%20RET1`; an exact-substring scrub misses that form (review)."""
+    `SEC%20RET1`; the URL is redacted whatever its encoding (review)."""
     cfg = {
         "transport": "sse",
-        "url": "https://wiki.example.com/mcp?token=SEC RET1&x=sécret2",
+        "url": "https://wiki.example.com/mcp?token=SEC RET1&x=s\u00e9cret2",
     }
     encoded = "https://wiki.example.com/mcp?token=SEC%20RET1&x=s%C3%A9cret2"
-    plugin = await _failing_with({"wiki": cfg}, lambda _cfg: _UrlBearingError(encoded))
-    with caplog.at_level(logging.WARNING):
-        await plugin.on_start({"mcp": {"servers": {"wiki": cfg}}})
-
-    rendered = _rendered(caplog.records)
-    assert "failed to connect" in rendered, "the connect failure must be logged"
+    rendered = await _render_failure(
+        {"wiki": cfg}, lambda _cfg: _UrlBearingError(encoded), caplog, retry=False
+    )
+    assert "failed to connect" in rendered
     assert "RET1" not in rendered, "the encoded token reached the record"
     assert "cret2" not in rendered, "the encoded non-ASCII token reached the record"
 
 
-class _KeywordOnlyStatusError(Exception):
-    """Mirrors httpx2.HTTPStatusError's constructor: the message plus
-    required keyword-only arguments, so it cannot be rebuilt from a string."""
-
-    def __init__(self, message: str, *, request: object, response: object) -> None:
-        super().__init__(message)
-        self.request = request
-        self.response = response
-
-
-async def test_scrubbing_keeps_the_error_text_around_the_secret(
+async def test_an_exception_group_is_read_through_to_its_errors(
     secret_url_server, caplog
 ):
-    """The status line is the diagnostic; only the credential is removed.
-
-    The type is not reconstructible from a string here, as with httpx2, so
-    the scrubbed copy must still carry the original type name and status.
-    """
-    plugin = await _failing_with(
+    """streamable_http failures arrive as an ExceptionGroup, whose own text
+    names nothing; the status inside is shown, the URL inside redacted."""
+    rendered = await _render_failure(
         {"wiki": secret_url_server},
-        lambda cfg: _KeywordOnlyStatusError(
-            f"Client error '401 Unauthorized' for url '{cfg['url']}'",
-            request=None,
-            response=None,
-        ),
+        lambda cfg: ExceptionGroup("unhandled errors", [_UrlBearingError(cfg["url"])]),
+        caplog,
+        retry=False,
     )
-    with caplog.at_level(logging.WARNING):
-        await plugin.on_start({"mcp": {"servers": {"wiki": secret_url_server}}})
+    assert "401 Unauthorized" in rendered
+    assert QUERY_SECRET not in rendered
+    assert USERINFO_PASSWORD not in rendered
 
-    rendered = _rendered(caplog.records)
-    assert "401 Unauthorized" in rendered, "the status code was scrubbed away"
-    assert "_KeywordOnlyStatusError" in rendered, "the original type was lost"
-    assert "wiki.example.com/mcp" in rendered
 
+async def test_a_credential_free_endpoint_keeps_its_traceback(caplog):
+    """Withholding the traceback is only for URLs that carry credentials."""
+    cfg = {"transport": "sse", "url": "https://wiki.example.com/mcp"}
+    rendered = await _render_failure(
+        {"wiki": cfg}, lambda c: _UrlBearingError(c["url"]), caplog, retry=False
+    )
+    assert "Traceback" in rendered
+    assert "traceback withheld" not in rendered
+
+
+class _UnreadableError(Exception):
+    """An exception whose str() raises."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("unreadable")
+
+
+async def test_an_unreadable_exception_neither_raises_nor_stops_on_start(caplog):
+    """Reading the failure's text runs inside the except handler; a failure
+    there must not abort on_start and skip the later servers."""
+    servers = {
+        "wiki": {"transport": "sse", "url": f"https://wiki.example.com/mcp?token={QUERY_SECRET}"},
+        "docs": {"transport": "sse", "url": f"https://docs.example.com/mcp?token={QUERY_SECRET}"},
+    }
+    rendered = await _render_failure(
+        servers, lambda _cfg: _UnreadableError(), caplog, retry=False
+    )
+    assert "'wiki'" in rendered and "'docs'" in rendered
+    assert "(message unavailable)" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Config-error and header-env messages
+# ---------------------------------------------------------------------------
 
 def test_a_schemeless_endpoint_is_still_shown():
     """`localhost:8080` has no credential position, and is the typo to fix."""
@@ -687,72 +661,3 @@ def test_validate_mcp_config_hides_headers_in_a_list_shaped_servers_block():
     assert "SECRET5" not in message
 
 
-def test_a_chain_deeper_than_the_scrub_bound_does_not_leak():
-    """Past the depth bound the remaining chain is replaced, not kept."""
-    import traceback as tb
-
-    from corvidae.mcp_client import _safe_exc_info
-
-    url = f"https://user:{USERINFO_PASSWORD}@wiki.example.com/mcp?token={QUERY_SECRET}"
-    exc: BaseException = RuntimeError(f"for url '{url}'")
-    for i in range(12):
-        nxt = RuntimeError(f"link {i}")
-        nxt.__cause__ = exc
-        exc = nxt
-    info = _safe_exc_info(exc, {"transport": "sse", "url": url})
-    assert isinstance(info, BaseException)
-    rendered = "".join(tb.format_exception(info))
-    assert QUERY_SECRET not in rendered
-    assert USERINFO_PASSWORD not in rendered
-
-
-def test_a_malformed_notes_attribute_does_not_raise():
-    """Scrubbing runs inside an except handler and must never raise."""
-    from corvidae.mcp_client import _safe_exc_info
-
-    exc = RuntimeError("boom")
-    exc.__notes__ = 5  # type: ignore[attr-defined]
-    _safe_exc_info(exc, {"transport": "sse", "url": "https://h.example/?t=SECRET1"})
-
-
-class _UnreadableNote(str):
-    """A note whose str() raises -- legal through add_note()."""
-
-    def __str__(self) -> str:
-        raise RuntimeError("note unreadable")
-
-
-async def test_an_unreadable_note_neither_raises_nor_stops_on_start(caplog):
-    """Scrubbing must never raise: a failure there would abort on_start and
-    skip every later server (review). The fallback attaches a placeholder,
-    never the original exception, so it cannot leak either."""
-    url = f"https://wiki.example.com/mcp?token={QUERY_SECRET}"
-    servers = {
-        "wiki": {"transport": "sse", "url": url},
-        "docs": {"transport": "sse", "url": "https://docs.example.com/mcp"},
-    }
-    plugin = await _plugin_with(servers)
-    attempted: list[str] = []
-
-    async def connect(name, cfg):
-        attempted.append(name)
-        exc = ConnectionError(f"refused for url '{cfg['url']}'")
-        exc.add_note(_UnreadableNote("n"))
-        raise exc
-
-    plugin._connect_server = connect
-    with caplog.at_level(logging.WARNING):
-        await plugin.on_start({"mcp": {"servers": servers}})
-
-    assert sorted(attempted) == ["docs", "wiki"]
-    rendered = _rendered(caplog.records)
-    assert QUERY_SECRET not in rendered
-    assert "'wiki'" in rendered and "'docs'" in rendered
-
-
-def test_a_credential_free_endpoint_is_not_scrubbed():
-    """No credential, nothing to remove: the exception is attached as is."""
-    from corvidae.mcp_client import _safe_exc_info
-
-    exc = RuntimeError("Client error '404 Not Found' for url 'https://wiki.example.com/mcp'")
-    assert _safe_exc_info(exc, {"transport": "sse", "url": "https://wiki.example.com/mcp"}) is True

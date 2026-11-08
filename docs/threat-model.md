@@ -81,10 +81,11 @@ Assets, roughly in order of how bad it is to lose them:
    grants whatever that server grants. A credential embedded in a server's
    `url` instead — a query-string token or a `user:pass@` userinfo — stays
    out of corvidae's own MCP log lines: the connect-failure and retry
-   warnings name only the endpoint's scheme, host, port and path, the
-   exception chain attached to them has every URL in its text reduced the
-   same way (sub-exceptions of an exception group are not yet walked), and
-   a config-error skip describes a rejected value likewise (#386). Library
+   warnings name only the endpoint's scheme, host, port and path, and for
+   such a server they carry the exception's text with every URL in it
+   reduced the same way instead of its traceback (an HTTP client quotes
+   the URL in its errors); a config-error skip describes a rejected value
+   likewise (#386). Library
    loggers — the MCP SDK's `mcp.*` and the HTTP client's `httpx2` — are not
    filtered and can write the URL whole (at the default WARNING level only
    `mcp.*` errors do), so prefer a `${VAR}` header to a credential in the
