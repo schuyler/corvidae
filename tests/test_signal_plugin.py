@@ -682,31 +682,6 @@ class TestInboundFiltering:
         finally:
             await _stop_plugin(h)
 
-    async def test_attachment_size_cap(self, tmp_path):
-        """An attachment exceeding max_attachment_size is rejected."""
-        import base64
-        # 11 MB of data, exceeding the default 10 MB cap.
-        big_bytes = b"\x00" * (11 * 1024 * 1024)
-        h = await _start_plugin(tmp_path)
-        try:
-            h.server.respond_when_contains(
-                "getAttachment",
-                {"data": base64.b64encode(big_bytes).decode()},
-            )
-            await h.server.push_notification(
-                "receive",
-                make_data_envelope(
-                    source_uuid=AUTH_ACI, source_number=None, text=None,
-                    attachments=[{"id": "1730-big", "type": 1, "contentType": "image/png",
-                                   "filename": "big.png"}],
-                ),
-            )
-            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
-            text = h.pm.ahook.on_message.await_args.kwargs["text"]
-            assert "download failed" in text
-        finally:
-            await _stop_plugin(h)
-
     async def test_attachment_missing_id_is_refused(self, tmp_path):
         """An attachment with no id field is refused, not defaulted to 0."""
         h = await _start_plugin(tmp_path)
@@ -727,50 +702,53 @@ class TestInboundFiltering:
             await _stop_plugin(h)
 
     async def test_attachment_malicious_filename_is_sanitised(self, tmp_path):
-        """A crafted filename with path traversal is reduced to a safe suffix."""
+        """A crafted filename contributes no extension, so the file lands
+        in the attachment dir under our own name.
+
+        The filename is consulted only when the MIME type has no mapped
+        extension, so the type here is a downloadable text/* one that is
+        not in the map. A name used past safe_suffix would put a separator
+        in the path and the download would be refused.
+        """
         import base64
-        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
         h = await _start_plugin(tmp_path)
         try:
             h.server.respond_when_contains(
                 "getAttachment",
-                {"data": base64.b64encode(png_bytes).decode()},
+                {"data": base64.b64encode(b"log line").decode()},
             )
             await h.server.push_notification(
                 "receive",
                 make_data_envelope(
                     source_uuid=AUTH_ACI, source_number=None, text="traversal",
-                    attachments=[{"id": "1730-evil", "type": 1, "contentType": "image/png",
-                                   "filename": "../../etc/cron.d/evil.png"}],
+                    attachments=[{"id": "1730-evil", "type": 0, "contentType": "text/x-log",
+                                   "filename": "evil.py/../../x"}],
                 ),
             )
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
-            assert "[image:" in text
-            path_str = text.split("[image: ")[1].split("]")[0]
-            path = Path(path_str)
-            # The file must be under the attachment dir, not in /etc. The
-            # note carries a resolved path, so compare resolved forms.
-            assert path.resolve().is_relative_to(h.plugin._attachment_dir.resolve()), (
-                f"path escaped attachment dir: {path}"
-            )
-            assert path.exists()
+            assert "[text: " in text, text
+            path = Path(text.split("[text: ")[1].split("]")[0])
+            assert path.parent == h.plugin._attachment_dir.resolve()
+            assert path.name.endswith("-0-1730-evil"), path.name
+            assert path.read_bytes() == b"log line"
         finally:
             await _stop_plugin(h)
 
     async def test_attachment_over_cap_under_stream_limit_is_size_capped(self, tmp_path):
-        """The 2x stream-limit design: a response between 1x and 2x of
-        the cap is read in full and rejected by the size cap (no
-        ValueError). With the default 10 MB cap the stream limit is
-        ~26.7 MB; an 11 MB attachment is ~14.7 MB in base64, under it.
+        """A response over max_attachment_size that still fits under the
+        stream limit (cap * 4/3 + 64 KiB) is read in full and refused by
+        the size cap, and nothing is written. An 8 KiB cap keeps the
+        payload well under the limit, so the cap is what refuses it, not
+        the read loop (test_read_loop_survives_over_limit_line covers that).
         """
         import base64
-        h = await _start_plugin(tmp_path)
+        cap = 8 * 1024
+        h = await _start_plugin(tmp_path, signal_overrides={"max_attachment_size": cap})
         try:
-            big_bytes = b"\x00" * (11 * 1024 * 1024)
             h.server.respond_when_contains(
                 "getAttachment",
-                {"data": base64.b64encode(big_bytes).decode()},
+                {"data": base64.b64encode(b"\x00" * (cap + 1)).decode()},
             )
             await h.server.push_notification(
                 "receive",
@@ -780,9 +758,12 @@ class TestInboundFiltering:
                                    "contentType": "image/png"}],
                 ),
             )
-            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=10)
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
-            assert "[image: download failed]" in text
+            assert text == "[image: download failed]"
+            assert not h.plugin._attachment_dir.exists() or not any(
+                h.plugin._attachment_dir.iterdir()
+            )
         finally:
             await _stop_plugin(h)
 
@@ -970,29 +951,30 @@ class TestInboundFiltering:
             await _stop_plugin(h)
 
     async def test_filename_suffix_is_lowercased_on_disk(self, tmp_path):
-        """A filename with an uppercase extension gets a lowercased
-        suffix on disk (safe_suffix wiring in _download_attachment)."""
+        """A filename with an uppercase extension gets a lowercased suffix
+        on disk. The MIME type is an unmapped text/* one, so the suffix
+        comes from the filename (safe_suffix wiring in _download_attachment).
+        """
         import base64
-        pdf_bytes = b"%PDF-1.4 x"
         h = await _start_plugin(tmp_path)
         try:
             h.server.respond_when_contains(
                 "getAttachment",
-                {"data": base64.b64encode(pdf_bytes).decode()},
+                {"data": base64.b64encode(b"log line").decode()},
             )
             await h.server.push_notification(
                 "receive",
                 make_data_envelope(
                     source_uuid=AUTH_ACI, source_number=None, text=None,
                     attachments=[{"id": "1730-case", "type": 0,
-                                   "contentType": "application/pdf",
-                                   "filename": "x.PDF"}],
+                                   "contentType": "text/x-log",
+                                   "filename": "x.LOG"}],
                 ),
             )
             await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
-            path_str = text.split("[pdf: ")[1].split("]")[0]
-            assert path_str.endswith(".pdf"), path_str
+            path_str = text.split("[text: ")[1].split("]")[0]
+            assert path_str.endswith("-1730-case.log"), path_str
             assert Path(path_str).exists()
         finally:
             await _stop_plugin(h)
