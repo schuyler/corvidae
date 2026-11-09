@@ -90,7 +90,10 @@ Three triggers, one watermarked code path:
   `CONTEXT` (admitted memories aren't new conversation), `SUMMARY` and
   `UNSENT` rows. `range_end` is the newest `_db_id` in the window when the
   hook runs and is fixed there, so a message persisted after the reply
-  isn't in the range. The hook runs before the reply is sent, so it awaits
+  isn't in the range. The fork renders the window with a cut just past
+  `range_end` (#622; idle forks the same way), so a message that reaches
+  the window between the hook and the fork's render isn't narrated by this
+  consolidation and then again by the next. The hook runs before the reply is sent, so it awaits
   nothing: it checks, fixes `range_end` and spawns the task; the task
   reads the watermark and does the counting. This trigger only ever forks.
   With forks off for `consolidation` it does nothing and logs nothing, and

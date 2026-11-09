@@ -447,10 +447,10 @@ Not designed here; listed so the change can be judged:
   merge replaces the other channel's older record with one in the current
   channel whose range is in the window, so the older content is excluded
   until those rows leave. Rare; small fix.
-- **Forking with a `cut` just past `range_end`** for turn and idle, so a
-  message processed between the hook and the fork's render isn't
-  narrated too and then again by the next consolidation. Idle has the
-  same window today; near-dup merge is the backstop.
+- ~~**Forking with a `cut` just past `range_end`**~~ Done in #622: turn
+  and idle fork with the cut just past `range_end`, so a message processed
+  between the hook and the fork's render is narrated once, by the next
+  consolidation.
 - ~~**Backoff for a fork that keeps failing.**~~ Done in #620: three
   consecutive failed turn forks back the turn trigger off until the
   watermark moves or `memory.idle_consolidate_after` passes.

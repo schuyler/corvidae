@@ -582,6 +582,22 @@ def _fork_range_sentence(prefix: list[dict], dialog_ids: set[int]) -> str:
     )
 
 
+def _cut_after(messages: list[dict], range_end: int) -> int:
+    """The fork cut just past ``range_end`` (#622): one past the last window
+    message whose ``_db_id`` is at or below it, or 0 when none is.
+
+    Rows without a ``_db_id`` before that point (one whose persist failed
+    or hasn't resolved yet) stay in view; anything after it, persisted or not, is cut. No tool-boundary
+    snap: ``build_fork_prompt`` renders calls straddling the cut as pending.
+    """
+    cut = 0
+    for i, m in enumerate(messages):
+        db_id = m.get("_db_id")
+        if isinstance(db_id, int) and db_id <= range_end:
+            cut = i + 1
+    return cut
+
+
 async def fetch_range_rows(
     db: aiosqlite.Connection, channel_id: str, after_id: int, through_id: int
 ) -> list[tuple]:
@@ -1721,8 +1737,8 @@ class MemoryPlugin(CorvidaePlugin):
         window the fork would see (``messages[:cut]``), else None.
 
         The record must be about rows the model can read. Summary rows are
-        skipped (summaries are never consolidated, and a live window's
-        summary has no rowid). Pure: no await, so a caller can check and
+        skipped (summaries are never consolidated, and a summary may have
+        no rowid in the window). Pure: no await, so a caller can check and
         render with the window unchanged between them.
         """
         prefix = conv.messages if cut is None else conv.messages[:cut]
@@ -2655,7 +2671,11 @@ class MemoryPlugin(CorvidaePlugin):
             registry = self.pm.get_plugin("registry")
             channel = registry.get(channel_id) if registry is not None else None
             conv = getattr(channel, "conversation", None)
-            contained = self._range_in_window(conv, rows, None) if conv is not None else None
+            # Fork only what the record is stamped with: a message that
+            # reached the window after range_end was fixed lies past the cut,
+            # so the next consolidation narrates it, not this one too (#622).
+            cut = _cut_after(conv.messages, range_end) if conv is not None else None
+            contained = self._range_in_window(conv, rows, cut) if conv is not None else None
             if contained is not None:
                 # Live-window work: fork or skip, never the rebuilt view (PRD §3.8.5).
                 agent = fork_agent(self.pm, "consolidation")
@@ -2671,7 +2691,7 @@ class MemoryPlugin(CorvidaePlugin):
                     return "skip", None
                 # No await between the containment check and the render.
                 try:
-                    return "record", await self._fork_record(agent, channel, contained, None)
+                    return "record", await self._fork_record(agent, channel, contained, cut)
                 except Exception as exc:
                     # A turn failure that starts the backoff (#620) is retried
                     # by idle or compaction, or by the turn trigger only once
