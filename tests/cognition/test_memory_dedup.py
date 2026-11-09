@@ -671,3 +671,71 @@ class TestMergeAnywhere:
         assert far_b["superseded_by"] is None and far_b["indexed"] == 1
         assert near_a["superseded_by"] == new_b["id"]
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Several narrative entries per consolidation (#635, C7)
+# ---------------------------------------------------------------------------
+
+
+def _two_identical_entries_reply() -> str:
+    """A reply whose two entries have the same narrative."""
+    return json.dumps({
+        "entries": [
+            {"narrative": _NEAR_IDENTICAL_SUMMARY, "topic_tags": ["wifi"]},
+            {"narrative": _NEAR_IDENTICAL_SUMMARY, "topic_tags": ["esp32"]},
+        ],
+        "participants": ["kestrel"],
+        "importance": 0.5,
+    })
+
+
+async def _consolidate_new_dialog(memory, persistence, channel, texts):
+    """Seed ``texts`` and run the compaction trigger over them to completion."""
+    rowids = await seed_dialog(persistence, channel, [("user", t) for t in texts])
+    await memory.on_compaction(
+        channel=channel, summary_msg={}, retain_count=0, compacted_ids=rowids
+    )
+    await memory.wait_for_background_tasks()
+
+
+async def test_sibling_entries_never_merge_into_each_other():
+    """C7: two entries of one consolidation with identical narratives (so
+    similarity 1.0) are both stored: both indexed, neither superseded."""
+    memory, persistence, stub, channel, db = await build_dedup_env()
+    if not memory._vec_available:
+        pytest.skip("sqlite-vec unavailable; dedup requires vec similarity")
+    stub.chat_text = _two_identical_entries_reply()
+    stub.fixed_embeddings[_NEAR_IDENTICAL_SUMMARY[:20]] = [1.0, 0.0, 0.0, 0.0]
+
+    await _consolidate_new_dialog(memory, persistence, channel, ["wifi talk", "more wifi talk"])
+
+    memories = await fetch_all_memories(db)
+    assert len(memories) == 2
+    assert all(m["indexed"] == 1 and m["superseded_by"] is None for m in memories)
+    await db.close()
+
+
+async def test_entry_merges_with_an_older_record_but_not_its_sibling():
+    """C7: both entries of a later consolidation equal an older record. The
+    first merges with it (the older record is superseded by that entry's
+    row); the second finds its sibling excluded and the older record already
+    superseded, so it is stored unmerged: both entries stay indexed."""
+    memory, persistence, stub, channel, db = await build_dedup_env()
+    if not memory._vec_available:
+        pytest.skip("sqlite-vec unavailable; dedup requires vec similarity")
+    stub.fixed_embeddings[_NEAR_IDENTICAL_SUMMARY[:20]] = [1.0, 0.0, 0.0, 0.0]
+    stub.chat_text = json.dumps({
+        "entries": [{"narrative": _NEAR_IDENTICAL_SUMMARY, "topic_tags": ["wifi"]}],
+        "importance": 0.5,
+    })
+    await _consolidate_new_dialog(memory, persistence, channel, ["first wifi talk", "reply"])
+    stub.chat_text = _two_identical_entries_reply()
+    await _consolidate_new_dialog(memory, persistence, channel, ["second wifi talk", "reply"])
+
+    old, first, second = await fetch_all_memories(db)
+    assert old["superseded_by"] == first["id"]
+    assert old["indexed"] == 0
+    assert (first["indexed"], first["superseded_by"]) == (1, None)
+    assert (second["indexed"], second["superseded_by"]) == (1, None)
+    await db.close()

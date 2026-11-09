@@ -73,3 +73,60 @@ def test_no_shipped_default_names_an_operator():
     ]
 
     assert not offenders, f"shipped defaults name an operator: {offenders}"
+
+
+#: The #635 consolidation instruction: paragraphs separated by a blank line,
+#: the JSON template's lines separated by newlines.
+_OPENING = (
+    "[Memory consolidation] Pause the conversation here and write a record of "
+    "part of it for your long-term autobiographical memory, in the first "
+    "person, as yourself. " + PRIVATE_MEMORY_SENTENCE
+)
+_NARRATE = (
+    "Narrate this stretch of the conversation from your own point of view, "
+    "step by step, in your own words: what was said, what you did, what you "
+    "learned, and what was decided or left open. Don't quote anyone verbatim, "
+    "but keep facts and opinions exactly as they were expressed, and who "
+    "expressed each (names, numbers, dates, identifiers, preferences, "
+    "commitments, corrections), so you can recall them accurately later. Keep "
+    "what you were told apart from what you inferred or speculated "
+    '("so-and-so told me...", "I guessed that..."). Say what you did with '
+    "tools and what it told you, not their raw output. Bracketed CONTEXT "
+    "blocks are things you recalled or were shown, not new events; don't "
+    "record them as if they happened now. Skip pleasantries and chatter."
+)
+_ENTRIES = (
+    "Write it as separate entries, one for each distinct stretch or topic, in "
+    "order. Each entry is a paragraph at most and must make sense read on its "
+    "own, months from now, with nothing else: name the people, projects and "
+    "things involved rather than \"he\" or \"it\". Don't attribute a fact from "
+    "one entry's topic to another's."
+)
+_RATE = (
+    "Then rate how important this stretch is to remember long-term, from 0 "
+    "(routine) to 1 (essential). Do not call tools."
+)
+_TEMPLATE = "\n".join([
+    "Respond with a single JSON object, nothing else:",
+    "{",
+    '  "entries": [',
+    '    {"narrative": "<first-person narrative of one stretch or topic>",',
+    '     "topic_tags": ["<short topic tag>", "..."]}',
+    "  ],",
+    '  "participants": ["<sender name>", "..."],',
+    '  "importance": "<number from 0 to 1>"',
+    "}",
+])
+
+
+def test_consolidation_instruction_asks_for_entries():
+    """C5: the code default is exactly the entries-shape instruction, and the
+    prompts/ copy carries the same body paragraphs and template keys."""
+    expected = "\n\n".join([_OPENING, _NARRATE, _ENTRIES, _RATE, _TEMPLATE])
+    copy = _flat((REPO / "prompts" / "memory_consolidation_fork.md").read_text())
+
+    assert DEFAULT_CONSOLIDATION_FORK_PROMPT == expected
+    for paragraph in (_NARRATE, _ENTRIES, _RATE):
+        assert _flat(paragraph) in copy
+    for key in ('"entries"', '"narrative"', '"topic_tags"', '"participants"', '"importance"'):
+        assert key in copy

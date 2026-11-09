@@ -36,8 +36,10 @@ from test_mid_conversation_system_role import render_swift
 
 from .test_memory_consolidation import (
     CONSOLIDATION_JSON,
+    assert_shared_columns_equal,
     build_consolidation_env,
     fetch_memories,
+    fetch_stamped_memories,
     fetch_watermark,
 )
 
@@ -566,3 +568,61 @@ async def test_catchup_request_with_tool_rows_renders_without_tools(env):
     # The template renders it (raises on a malformed request) and emits the call.
     rendered = render_swift(_as_server_renders(made["messages"]))
     assert "<tool_call>" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Several narrative entries per consolidation (#635)
+# ---------------------------------------------------------------------------
+
+
+async def test_catchup_segment_reply_with_two_entries_stores_two_rows(env):
+    """C1: a catch-up segment whose reply has 2 entries stores 2 rows that
+    share range, importance, participants and stamp, each with its own text
+    and tags."""
+    env.main.text = json.dumps({
+        "entries": [
+            {"narrative": "I diagnosed the wifi dropouts.", "topic_tags": ["wifi"]},
+            {"narrative": "I ordered transistors.", "topic_tags": ["parts"]},
+        ],
+        "participants": ["kestrel"],
+        "importance": 0.4,
+    })
+    env.memory._llm()._clients["embedding"].embed_result = [[1.0, 0, 0, 0], [0, 1.0, 0, 0]]
+    rows = await env.rows(alternating(["hello there", "hi, how can I help"]))
+
+    await env.consolidate(rows[-1])
+
+    stored = await fetch_stamped_memories(env.db)
+    assert len(stored) == 2
+    assert_shared_columns_equal(stored)
+    assert (stored[0]["msg_id_start"], stored[0]["msg_id_end"]) == (rows[0], rows[-1])
+    assert [r["summary"] for r in stored] == [
+        "I diagnosed the wifi dropouts.", "I ordered transistors.",
+    ]
+    assert [json.loads(r["topic_tags"]) for r in stored] == [["wifi"], ["parts"]]
+
+
+async def test_catchup_unusable_replies_store_the_raw_transcript(env):
+    """C2 (catch-up): the first reply has only blank entries (beside a stray
+    summary), the retry has neither entries nor summary; after exactly one
+    retry the segment is stored as one row holding the raw transcript."""
+    replies = [
+        json.dumps({"entries": [{"narrative": " "}], "summary": "A stray summary."}),
+        json.dumps({"participants": ["kestrel"]}),
+    ]
+
+    async def chat(messages, tools=None, extra_body=None):
+        """Answer the next canned reply."""
+        env.main.chat_calls.append({"messages": messages})
+        return {"choices": [{"message": {"role": "assistant", "content": replies.pop(0)}}]}
+
+    env.main.chat = chat
+    rows = await env.rows(alternating(["the weather station keeps dropping", "try WIFI_PS_NONE"]))
+
+    await env.consolidate(rows[-1])
+
+    assert len(env.main.chat_calls) == 2
+    [row] = await fetch_memories(env.db)
+    assert "the weather station keeps dropping" in row["summary"]
+    assert "assistant: try WIFI_PS_NONE" in row["summary"]
+    assert "stray summary" not in row["summary"]

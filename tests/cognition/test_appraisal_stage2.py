@@ -1064,3 +1064,35 @@ def test_parse_json_block_error_names_appraisal_phase_and_long_text():
     message = str(excinfo.value)
     assert "appraisal" in message.lower()
     assert "PROVIDER_ERROR_MARKER" in message
+
+
+class TestAppraisalPriorHint:
+    """#635 C8: the reply's importance reaches the prior as ``hint``;
+    appraisal wins where it covers the range, else the fallback gets it."""
+
+    @pytest.mark.parametrize(("covered", "expected_score"), [(True, 0.55), (False, 0.33)])
+    async def test_hint_goes_to_the_fallback_only_when_uncovered(
+        self, tmp_path, covered, expected_score
+    ):
+        from corvidae_cognition.appraisal import AppraisalPrior
+        env = await build_env(tmp_path)
+        if covered:
+            # An exchange inside (25, 35) with stage-1 salience 0.55.
+            await env.outcome.upsert_exchange(
+                "h1", env.channel.id, "user", appraisal={"stage1": {"salience": 0.55}},
+            )
+            await env.outcome.update_exchange("h1", message_rowid=30)
+        fallback = MagicMock()
+        fallback.score = AsyncMock(return_value=0.33)
+        prior = AppraisalPrior(appraisal=env.appraisal, fallback=fallback)
+
+        result = await prior.score([{"role": "user", "content": "x"}],
+                                   msg_id_range=(25, 35), channel=env.channel, hint=0.2)
+
+        assert result == pytest.approx(expected_score)
+        if covered:
+            fallback.score.assert_not_awaited()
+        else:
+            fallback.score.assert_awaited_once()
+            assert fallback.score.await_args.kwargs["hint"] == 0.2
+        await _teardown(env)
