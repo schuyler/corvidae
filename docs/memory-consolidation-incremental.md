@@ -434,8 +434,10 @@ Not designed here; listed so the change can be judged:
 - **Compaction's fork off the response path**, by forking against a
   snapshot of the pre-compaction window in a background task. Needs the
   fork API to accept a rendered message list.
-- **Compaction waiting for an in-flight turn task** on the same range
-  instead of forking it again. Both run and `_commit` keeps one reply.
+- ~~**Compaction waiting for an in-flight turn task**~~ Done in #621:
+  both halves of compaction's consolidation wait for the in-flight turn or
+  idle task, then take only what lies past its watermark. Originally: on
+  the same range instead of forking it again. Both run and `_commit` keeps one reply.
   The cost is duplicate decode on the response path, and, when the turn
   commit lands between the compaction task's watermark read and its
   commit, the compaction reply is discarded and the rows past the turn's

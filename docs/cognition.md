@@ -120,9 +120,17 @@ TaskQueue — every TaskQueue completion wakes the main model). The turn and
 idle triggers share one in-flight set: while a channel has a turn or idle
 task running (or an idle firing is still setting one up), neither trigger
 starts another for it, so at most one turn-or-idle consolidation runs per
-channel. Compaction doesn't consult the set, since it must never be
-skipped; an overlap with it is settled by the watermark compare-and-set
-below. The task
+channel. Compaction is never skipped, so it doesn't consult the set;
+instead it waits (#621): both halves of compaction's consolidation (the
+inline fork in `before_compaction` and the `on_compaction` task) first wait
+for the channel's in-flight turn or idle task to finish, then read the
+watermark it left and consolidate only what lies past it, so neither reply
+is thrown away. A failed or cancelled in-flight task just means compaction
+consolidates the whole range. The wait in `before_compaction` is on the
+response path, so a compacting turn can take as long as the rest of that
+fork. An idle firing that has claimed the channel but not yet spawned its
+task has nothing to wait for; that overlap, like any other, is settled by
+the watermark compare-and-set below. The task
 reads the per-channel **consolidation watermark**, fetches the working
 range, produces the entries (first-person narrative with epistemic framing,
 JSON out) — from a fork of the live window when the range is in it (see
