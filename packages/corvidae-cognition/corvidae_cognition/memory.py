@@ -392,9 +392,9 @@ def _string_tuple(value: object, key: str) -> tuple[str, ...]:
     """Read ``value`` (absent, None, a string or a list) as a tuple of strings.
 
     A lone string reads as a one-item list (a small model's "participants":
-    "kestrel"). Raises ValueError naming ``key`` for anything else, so a
-    wrong-typed array makes the reply unusable rather than escaping as a
-    TypeError.
+    "kestrel"). Raises ValueError naming ``key`` for anything else, rather
+    than escaping as a TypeError; the caller decides what that costs (a
+    malformed entry is dropped, a malformed participants reads as none).
     """
     # Absent and null both mean "none given".
     if value is None:
@@ -411,10 +411,13 @@ def _string_tuple(value: object, key: str) -> tuple[str, ...]:
 
 
 def _coerce_importance(value: object) -> float | None:
-    """The reply's importance as a finite float, else None (absent).
+    """The reply's importance as a finite float in [0, 1], else None (absent).
 
-    A bool is not a number here (``true`` would become 1.0), and a
-    non-finite value is dropped (``nan`` would clamp to maximum).
+    A bool is not a number here (``true`` would become 1.0), a non-finite
+    value is dropped (``nan`` would clamp to maximum), and so is one outside
+    [0, 1] (#655): a rating on another scale (``7`` out of 10, ``"1e3"``)
+    would otherwise clamp to 1.0 and exempt the record from retention
+    demotion, so the rubric rates it instead.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
@@ -423,7 +426,7 @@ def _coerce_importance(value: object) -> float | None:
     except (ValueError, OverflowError):
         # Unparseable text, or an integer too large for a float.
         return None
-    return number if math.isfinite(number) else None
+    return number if math.isfinite(number) and 0.0 <= number <= 1.0 else None
 
 
 def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
@@ -431,9 +434,9 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
 
     ``entries`` items with a non-blank string ``narrative`` become entries;
     any other item is dropped. Without an ``entries`` key, a legacy
-    ``summary`` reads as the one entry. Raises ValueError on unusable output
-    (no JSON, no usable entries, a wrong-typed ``participants``), which each
-    caller already handles.
+    ``summary`` reads as the one entry. A wrong-typed ``participants`` reads
+    as none, with a warning (#655). Raises ValueError on unusable output (no
+    JSON, no usable entries), which each caller already handles.
     """
     data = _parse_json_block(text)
     entries: list[ConsolidationEntry] = []
@@ -457,8 +460,6 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
             if isinstance(summary, str) and summary.strip():
                 tags = _string_tuple(data.get("topic_tags"), "topic_tags")
                 entries.append(ConsolidationEntry(summary.strip(), tags))
-        # Participants are shared by every entry of the consolidation.
-        participants = _string_tuple(data.get("participants"), "participants")
     except ValueError as exc:
         raise ValueError(f"consolidation output is malformed: {exc}") from exc
     if not entries:
@@ -466,6 +467,16 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
             "consolidation output has no usable entries "
             "(each needs a non-empty narrative)"
         )
+    # Participants are shared by every entry of the consolidation. A
+    # wrong-typed value loses only itself, not the entries (#655).
+    try:
+        participants = _string_tuple(data.get("participants"), "participants")
+    except ValueError as exc:
+        logger.warning(
+            "consolidation reply's participants is unusable (%s); storing the "
+            "entries with no participants", exc,
+        )
+        participants = ()
     return Consolidation(
         entries=tuple(entries),
         participants=participants,
@@ -2165,21 +2176,16 @@ class MemoryPlugin(CorvidaePlugin):
         # otherwise be dated at import time (issue #52).
         created_at = await source_timestamp(db, rows[-1][0])
 
-        # Embed every entry's narrative in one call; failure stores
+        # Embed every entry's narrative (in halves if the server caps the
+        # batch, #655); failure stores
         # embedded=0 for later backfill (trap #10 — degrade, never block).
         embeddings: list[list[float] | None] = [None] * len(record.entries)
         if self._embedding_enabled():
             try:
                 client = self._llm().get_client("embedding")
-                vectors = await client.embed(
-                    [e.narrative for e in record.entries], kind="document"
+                embeddings = await self._embed_in_chunks(
+                    client, [e.narrative for e in record.entries], channel_id
                 )
-                if len(vectors) != len(record.entries):
-                    raise ValueError(
-                        f"embedding returned {len(vectors)} vectors "
-                        f"for {len(record.entries)} entries"
-                    )
-                embeddings = list(vectors)
             except Exception:
                 logger.warning(
                     "memory embedding failed for channel %s (%d entries); "
@@ -2250,6 +2256,39 @@ class MemoryPlugin(CorvidaePlugin):
             },
         )
         return True
+
+    async def _embed_in_chunks(
+        self, client: Any, texts: list[str], channel_id: str,
+    ) -> list[list[float] | None]:
+        """Embed ``texts`` as documents, halving a batch the server rejects (#655).
+
+        A server with a per-request cap rejects a large batch; the two halves
+        are retried, recursively, so depth is bounded by log2 of the count.
+        A single text that fails means the encoder itself is failing, not a
+        cap: that raises, and the caller stores everything unembedded, as it
+        did before the retry existed.
+        """
+        try:
+            vectors = await client.embed(texts, kind="document")
+            if len(vectors) != len(texts):
+                raise ValueError(
+                    f"embedding returned {len(vectors)} vectors for {len(texts)} texts"
+                )
+            return list(vectors)
+        except Exception as exc:
+            if len(texts) == 1:
+                raise
+            logger.warning(
+                "memory embedding of %d entries failed for channel %s (%s); "
+                "retrying in two smaller batches, in case the server caps the "
+                "batch size",
+                len(texts), channel_id, type(exc).__name__,
+            )
+        mid = len(texts) // 2
+        return (
+            await self._embed_in_chunks(client, texts[:mid], channel_id)
+            + await self._embed_in_chunks(client, texts[mid:], channel_id)
+        )
 
     async def _insert_record(
         self, db: aiosqlite.Connection, *, channel_id: str, summary: str,

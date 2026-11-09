@@ -666,7 +666,9 @@ What bounds it:
 - Fork output is parsed, not executed: JSON for consolidation, appraisal
   and critique, plain text for the summary.
 - The consolidation reply's own `importance` rating (#635) becomes the
-  importance prior of each record it writes, clamped to [0, 1], wherever appraisal doesn't
+  importance prior of each record it writes, if it is within [0, 1] (a
+  value outside that, a rating on another scale, counts as absent and the
+  rubric rates the range, #655), wherever appraisal doesn't
   cover the range; the separate `rubric` call is then skipped. The rubric
   call read the same dialog, so no new text reaches the prior, but the
   number now comes from the fork that read the whole window. A window that
