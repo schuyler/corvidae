@@ -6,7 +6,7 @@ import asyncio
 
 from helpers import window_of
 
-from .test_memory_consolidation import fetch_stamped_memories, fetch_watermark
+from .test_memory_consolidation import fetch_stamped_memories, fetch_watermark, seed_dialog
 from .test_memory_fork import DIALOG
 from .test_memory_turn_trigger import (  # noqa: F401 (make_env fixture)
     REPLY,
@@ -107,8 +107,9 @@ async def test_compaction_task_without_stash_waits_then_views_the_rest(make_env)
 
 
 async def test_compaction_proceeds_when_the_inflight_task_fails(make_env):  # noqa: F811
-    """A failing in-flight turn fork doesn't block compaction: it waits, then
-    consolidates the whole range itself (compaction is never skipped)."""
+    """Guard: a failing in-flight turn fork doesn't leave compaction hanging;
+    it waits, then consolidates the whole range itself (compaction is never
+    skipped). Passes without the wait too; it fails only if the wait hangs."""
     env = await start_gated_turn(make_env)
     memory, ids = env.memory, env.ids
     env.agent.error = RuntimeError("backend down")
@@ -129,3 +130,64 @@ async def test_compaction_proceeds_when_the_inflight_task_fails(make_env):  # no
     rows = await fetch_stamped_memories(env.db)
     assert ranges(rows) == {(ids[0], ids[3], "compaction")}
     assert await fetch_watermark(env.db, env.channel.id) == ids[-1]
+
+
+async def test_cancelling_compaction_leaves_the_turn_task_running(make_env):  # noqa: F811
+    """Cancelling before_compaction while it waits must not cancel the turn
+    task it waits on: the turn still commits its record."""
+    env = await start_gated_turn(make_env)
+    memory, ids = env.memory, env.ids
+
+    before = asyncio.create_task(
+        memory.before_compaction(channel=env.channel, compacted_ids=ids, cut=len(ids))
+    )
+    for _ in range(5):
+        await asyncio.sleep(0)
+    before.cancel()
+    await asyncio.gather(before, return_exceptions=True)
+
+    env.agent.gate.set()
+    await memory.wait_for_background_tasks()
+    rows = await fetch_stamped_memories(env.db)
+    assert ranges(rows) == {(ids[0], ids[1], "turn")}
+
+
+async def test_inflight_idle_is_waited_for_off_the_response_path(make_env):  # noqa: F811
+    """An idle task can be a multi-call catch-up, so before_compaction (on
+    the response path) doesn't wait for it: it returns without forking. The
+    on_compaction task waits for the idle task instead, then consolidates
+    only the rest."""
+    agent = GatedForkAgent({"consolidation"}, text=REPLY)
+    env = await make_env(tokens_of(DIALOG), agent=agent)
+    env.memory._dup_threshold = 1.01
+    memory, channel = env.memory, env.channel
+    # Idle over everything in message_log: an in-window fork, blocked.
+    await memory._on_channel_idle(channel.id)
+    assert channel.id in memory._idle_inflight
+    # Two more messages arrive while the idle fork is pending.
+    more = await seed_dialog(env.persistence, channel, DIALOG[:2])
+    ids = env.ids + more
+    channel.conversation = window_of(
+        channel.id, ids, contents=[c for _, c in DIALOG + DIALOG[:2]]
+    )
+
+    # Compaction over all six: the inline half returns at once, no fork.
+    await asyncio.wait_for(
+        memory.before_compaction(channel=channel, compacted_ids=ids, cut=len(ids)),
+        timeout=1,
+    )
+    assert memory._fork_stash == {}
+    await memory.on_compaction(
+        channel=channel, summary_msg={}, retain_count=1, compacted_ids=ids
+    )
+
+    # The idle fork answers; the compaction task then views only the rest.
+    agent.gate.set()
+    await memory.wait_for_background_tasks()
+    rows = await fetch_stamped_memories(env.db)
+    assert ranges(rows) == {
+        (ids[0], ids[3], "idle"),
+        (ids[4], ids[5], "compaction"),
+    }
+    assert len(agent.calls) == 1
+    assert len(view_requests(env.stub)) == 1
