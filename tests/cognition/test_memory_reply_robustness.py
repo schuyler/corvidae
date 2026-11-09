@@ -2,6 +2,7 @@
 is absent, a wrong-typed participants is no participants, and entries are
 embedded in chunks when the embedding server caps the batch size."""
 
+import json
 import logging
 
 import pytest
@@ -37,7 +38,12 @@ async def test_wrong_typed_participants_keeps_the_entries(caplog):
     memory, persistence, stub, channel, db = await build_consolidation_env()
     try:
         stub.embed_result = [[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0]]
-        stub.chat_text = entries_reply(THREE_ENTRIES, participants=5)
+        # Built directly: entries_reply would choke on a non-list itself.
+        stub.chat_text = json.dumps({
+            "entries": [{"narrative": n, "topic_tags": t} for n, t in THREE_ENTRIES],
+            "participants": 5,
+            "importance": 0.4,
+        })
         caplog.set_level(logging.WARNING)
         caplog.clear()
         await drive_compaction_consolidation(memory, persistence, channel)
@@ -61,11 +67,9 @@ async def test_entries_over_the_server_batch_cap_are_all_embedded():
     memory, persistence, stub, channel, db = await build_consolidation_env()
     try:
         cap = 2
-        calls: list[int] = []
 
         async def capped_embed(texts, kind=None):
             # Reject an oversized batch as a server with a batch cap would.
-            calls.append(len(texts))
             if len(texts) > cap:
                 raise RuntimeError(f"batch of {len(texts)} exceeds the limit of {cap}")
             return [[1.0, float(i), 0.0, 0.0] for i, _ in enumerate(texts)]
