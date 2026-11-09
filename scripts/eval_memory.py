@@ -38,7 +38,7 @@ daemon's client setup expands every profile's key; no request is sent to it.
 --k defaults to memory.retrieval.k from --config in this mode (5 otherwise).
 Scores decay against the wall clock of the run, which is recorded as run_at.
 Without sqlite-vec, or when the config's encoder differs from the snapshot's,
-retrieval degrades to FTS5; the run says so per query and in the summary (on a
+retrieval degrades to FTS5; the run says so per query and in the summary (on an
 install without sqlite-vec memory logs a load warning with a traceback).
 
 LABELS_JSON (queries, and the snapshot's integer memory ids they should find;
@@ -122,7 +122,6 @@ async def run_live_evaluation(args) -> None:
     and reports the deterministic metrics plus per-stage token cost from
     usage_log ("recall at a fixed token budget" — bootstrap-mapping §6).
     """
-    import tempfile
 
     import aiosqlite
     from corvidae_cognition.funnel import FunnelPlugin
@@ -621,7 +620,7 @@ async def run_snapshot_evaluation(
         pool_out.write_text(json.dumps(
             {"run_at": run_at, "k": effective_k, "queries": results, "summary": summary},
             indent=2,
-        ))
+        ), encoding="utf-8")
         print(f"\nPool written to {pool_out}")
     finally:
         # Release everything before main's temp dir deletes the copy; a
@@ -655,10 +654,27 @@ def snapshot_arg_error(args: argparse.Namespace) -> str | None:
         if getattr(args, attr) is None:
             return f"--snapshot needs {flag} {hint}."
 
-    # The pool file must not be the source or the labels it reads (S1).
+    # A rank cutoff below 1 would silently fall back to the config's k (0)
+    # or drop candidates (negative).
+    if args.k is not None and args.k <= 0:
+        return (
+            f"--k must be a positive integer, got {args.k}; pass --k 1 or "
+            "more, or omit it to use memory.retrieval.k."
+        )
+
+    # The pool file must not be the source (or its WAL/shm files), the
+    # labels or the config it reads (S1).
     target = args.pool_out.resolve()
-    for flag, other in (("--snapshot", args.snapshot), ("--labels", args.labels)):
-        if target == other.resolve():
+    source = args.snapshot.resolve()
+    protected = (
+        ("--snapshot", source),
+        ("--snapshot's WAL file", source.with_name(source.name + "-wal")),
+        ("--snapshot's shared-memory file", source.with_name(source.name + "-shm")),
+        ("--labels", args.labels.resolve()),
+        ("--config", args.config.resolve()),
+    )
+    for flag, other in protected:
+        if target == other:
             return (
                 f"--pool-out {target} is the same file as {flag}; choose a "
                 "different --pool-out path so that file is not overwritten."

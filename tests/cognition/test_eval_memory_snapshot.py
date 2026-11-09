@@ -27,12 +27,11 @@ from typing import Any
 
 import pytest
 import yaml
-
-from corvidae.llm import LLMClient
 from evals.metrics import mrr, recall_at_k
 
+from corvidae.llm import LLMClient
+
 from .test_memory_retrieval import (
-    DIMS,
     EMBED_CONFIG,
     bow_embed,
     build_retrieval_env,
