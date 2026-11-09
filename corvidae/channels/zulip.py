@@ -2,7 +2,7 @@
 
 Connects to a Zulip organisation as a bot user and talks in direct messages,
 group direct messages and channels. In channels (and group DMs) the bot by
-default only reacts when it is directly mentioned; a 1:1 DM always reaches it.
+default only reacts when it is mentioned; a 1:1 DM always reaches it.
 Only allowlisted Zulip user ids may drive the agent.
 
 There is no SDK: the transport speaks five endpoints over aiohttp, which the
@@ -70,8 +70,8 @@ ZULIP_MESSAGE_LIMIT = 10000
 # out and "direct" needs 7.0).
 MIN_FEATURE_LEVEL = 248
 
-# Where a reply goes when no message has told us a topic (a reminder, the
-# heartbeat, the first turn after a restart). 60 is the longest topic every
+# Where a reply goes when no topic is remembered for the channel (the first
+# turn after a restart, or a channel no allowed message has reached yet). 60 is the longest topic every
 # Zulip server accepts (newer ones allow 1024), so the default always fits.
 DEFAULT_TOPIC = "corvidae"
 _MAX_DEFAULT_TOPIC = 60
@@ -97,8 +97,8 @@ _DEFAULT_RETRY_AFTER = 5.0
 _SEND_RATE_LIMIT_RETRIES = 2
 
 # Channel scopes this transport owns: a bare stream id, or "dm:" and the
-# comma-separated user ids. Ascii digits only.
-_SCOPE_RE = re.compile(r"[0-9]+|dm:[0-9]+(,[0-9]+)*")
+# comma-separated user ids. Ascii digits only, no leading zero (a second spelling of one id would be a second channel).
+_SCOPE_RE = re.compile(r"[1-9][0-9]*|dm:[1-9][0-9]*(,[1-9][0-9]*)*")
 
 # Codes that mean the credentials (or the account, or the organisation) are
 # unusable. Retrying cannot fix any of them.
@@ -263,8 +263,8 @@ class ZulipPlugin(TransportPlugin):
             return
         if not isinstance(block, dict):
             raise ValueError(
-                "zulip: the zulip: block of agent.yaml must be a mapping of "
-                f"settings, got {block!r}"
+                "zulip: config field zulip must be a mapping of settings, got "
+                f"{block!r}; write it as a zulip: block in agent.yaml"
             )
 
         # The site: a bare scheme://host[:port], no path, query or credentials.
@@ -285,16 +285,24 @@ class ZulipPlugin(TransportPlugin):
             or parts.username
             or parts.password
         ):
+            # A URL with a user:password in it carries a secret; never echo it.
+            hidden = parts is not None and bool(parts.username or parts.password)
+            shown = "a URL with credentials in it (not shown)" if hidden else repr(site)
             raise ValueError(
-                f"zulip: config field 'site' must be a bare http(s) URL such as "
-                f"https://chat.example.org, got {site!r}; fix zulip.site in agent.yaml"
+                f"zulip: config field zulip.site must be a bare http(s) URL such as "
+                f"https://chat.example.org, got {shown}; fix zulip.site in agent.yaml"
             )
         site = f"{parts.scheme}://{parts.netloc}"
 
         # The bot's login. The email is not secret but the key is, so both may
         # come from the environment; an empty value falls through to it.
         email = block.get("email") or os.environ.get("ZULIP_EMAIL")
-        if not email or not isinstance(email, str):
+        if email and not isinstance(email, str):
+            raise ValueError(
+                f"zulip: config field zulip.email must be a string, got {email!r}; "
+                "fix zulip.email in agent.yaml"
+            )
+        if not email:
             raise ValueError(
                 "zulip: no bot email; set zulip.email in agent.yaml or the "
                 "ZULIP_EMAIL environment variable (the bot's email, from "
@@ -360,7 +368,7 @@ class ZulipPlugin(TransportPlugin):
             or len(default_topic) > _MAX_DEFAULT_TOPIC
         ):
             raise ValueError(
-                "zulip: config field 'default_topic' must be a non-empty string of "
+                "zulip: config field 'default_topic' must be a non-blank string of "
                 f"at most {_MAX_DEFAULT_TOPIC} characters, got {default_topic!r}; "
                 "fix zulip.default_topic in agent.yaml"
             )
@@ -401,23 +409,26 @@ class ZulipPlugin(TransportPlugin):
             return {}
         if not isinstance(channels, dict):
             raise ValueError(
-                "zulip: config field 'channels' must be a mapping of stream id to "
+                "zulip: config field zulip.channels must be a mapping of stream id to "
                 f'settings, got {channels!r}; write `channels: {{"7": '
                 "{require_mention: false}}` in the zulip: block of agent.yaml"
             )
         result: dict[str, bool] = {}
+        # Every key seen, including entries that set nothing, so a quoted and an
+        # unquoted spelling of one id cannot hide behind an empty entry.
+        seen: set[str] = set()
         for stream_id, entry in channels.items():
             key = str(stream_id)
             if not re.fullmatch(r"[1-9][0-9]*", key):
                 raise ValueError(
-                    f"zulip: config entry 'channels.{stream_id}' is not a Zulip "
+                    f"zulip: config entry zulip.channels.{stream_id} is not a Zulip "
                     "stream id; use the number alone, as it appears after `zulip:` "
                     "in the agent's logs — digits only, quoted or not, no leading "
                     "zeros and no prefix — in the zulip: block of agent.yaml"
                 )
             if not isinstance(entry, dict):
                 raise ValueError(
-                    f"zulip: config entry 'channels.{stream_id}' must be a mapping "
+                    f"zulip: config entry zulip.channels.{stream_id} must be a mapping "
                     f'of settings, got {entry!r}; write `channels: {{"{key}": '
                     "{require_mention: false}}` in the zulip: block of agent.yaml"
                 )
@@ -425,24 +436,25 @@ class ZulipPlugin(TransportPlugin):
             if unknown:
                 written = ", ".join(f"{k}={entry[k]!r}" for k in unknown)
                 raise ValueError(
-                    f"zulip: config entry 'channels.{stream_id}' has unknown "
+                    f"zulip: config entry zulip.channels.{stream_id} has unknown "
                     f"key(s) {written}; accepted: require_mention — fix the key in "
                     "the zulip: block of agent.yaml"
                 )
+            if key in seen:
+                raise ValueError(
+                    f"zulip: config entry zulip.channels.{key} is listed twice — as a "
+                    "quoted string and as a number — and only one would take "
+                    "effect; keep one entry in the zulip: block of agent.yaml"
+                )
+            seen.add(key)
             if "require_mention" not in entry:
                 continue
             value = entry["require_mention"]
             if not isinstance(value, bool):
                 raise ValueError(
-                    f"zulip: config field 'channels.{stream_id}.require_mention' "
+                    f"zulip: config field zulip.channels.{stream_id}.require_mention "
                     f"must be true or false, got {value!r}; fix it in the zulip: "
                     "block of agent.yaml"
-                )
-            if key in result:
-                raise ValueError(
-                    f"zulip: config entry 'channels.{key}' is listed twice — as a "
-                    "quoted string and as a number — and only one would take "
-                    "effect; keep one entry in the zulip: block of agent.yaml"
                 )
             result[key] = value
         return result
@@ -741,7 +753,7 @@ class ZulipPlugin(TransportPlugin):
         except Exception:
             message = event.get("message")
             logger.warning(
-                "zulip: skipping a malformed message event from %s (event id %s, "
+                "zulip: skipping a message event from %s that could not be handled (event id %s, "
                 "message id %s) and continuing",
                 self._site,
                 event.get("id"),
@@ -793,7 +805,8 @@ class ZulipPlugin(TransportPlugin):
         else:
             raise ValueError(f"unknown message type {kind!r}")
 
-        # Direct mention only: a wildcard (@all, @topic) pages everyone, not us.
+        # The server's `mentioned` flag: a direct mention, or one through a user
+        # group the bot is in. A wildcard (@all, @topic) pages everyone, not us.
         mentioned = "mentioned" in flags
         addressed: Optional[bool] = (
             None if (kind in ("private", "direct") and not is_group) else mentioned
@@ -1176,8 +1189,8 @@ class ZulipPlugin(TransportPlugin):
                         reason = exc.msg if isinstance(exc, _Rejected) else str(exc)
                         logger.warning(
                             "zulip: could not post to %s (topic %r) on %s: %s; the "
-                            "message was dropped — check the bot is subscribed to "
-                            "the channel and allowed to post there",
+                            "message was dropped — if the server says the bot may not "
+                            "post, check it is subscribed to the channel and allowed to",
                             item.channel_id,
                             item.form.get("topic"),
                             self._site,

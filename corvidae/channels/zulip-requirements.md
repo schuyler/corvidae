@@ -84,7 +84,8 @@ verified (see the last section).
     naming the id; nothing is sent back, no typing is shown, and no channel is
     registered for the sender. [PRD 3.2.2, 3.2.5, 3.2.6]
 21. In a channel or group DM a message is admitted only when the server's
-    `mentioned` flag is set, unless `require_mention` (global, or the channel's
+    `mentioned` flag is set (a direct mention, or a mention through a user group
+    the bot belongs to), unless `require_mention` (global, or the channel's
     entry) is false. Wildcard mentions (`@**all**`, `@**topic**`) never count. A
     1:1 DM needs no mention. A dropped unmentioned message is one DEBUG line
     naming the sender and channel. [PRD 3.2.2, PRD p9]
@@ -92,7 +93,8 @@ verified (see the last section).
     channels and group DMs, `None` in a 1:1 DM.
 23. The bot's own mention token is stripped from the text (`@**Name**`,
     `@**Name|id**`, silent `@_**Name**`, any name carrying the bot's id); other
-    people's mentions stay. A message with nothing left is dropped.
+    people's mentions stay (so a user-group token that admitted the message stays
+    in the text). A message with nothing left is dropped.
 24. The channel label, the sender-name cache and the reply topic are set only by
     an allowed sender, so a stranger cannot relabel a channel or move where the
     agent answers. [PRD p9]
@@ -103,8 +105,11 @@ verified (see the last section).
 ## Outbound
 
 26. A reply goes to the topic of the newest allowed message on that channel, held
-    in memory only; with none (a reminder, the heartbeat, a cross-channel send,
-    the first turn after a restart) it goes to `default_topic`. The empty topic
+    in memory only, whatever started the turn (a message, a reminder, the
+    heartbeat, a cross-channel send); only when none is remembered for the channel
+    (the first turn after a restart, or a channel no allowed message has reached)
+    does it go to `default_topic`. Two allowed senders in different topics of one
+    channel can therefore have an answer land in the other's topic. The empty topic
     round-trips as the empty topic. A DM goes to its user ids. [#640 D1, PRD 3.2.10]
 27. Reasoning and tool status are not displayed. [PRD 3.2.3]
 28. Text is split, never truncated, at the smaller of `message_chunk_size` and the
@@ -146,7 +151,25 @@ verified (see the last section).
 ## Taken from the documentation, not observed
 
 No real server has been run against this transport. Until one is, treat these as
-assumptions: that `mentioned` is set for a direct mention and not for a wildcard;
-the exact `@**Name**` token forms; that the server expires a typing notice after
-roughly 15 s, which the 8 s refresh assumes; and that a bot receives channel
-messages only for channels it is subscribed to.
+assumptions:
+
+- `mentioned` is set for a direct mention and for a user-group mention, and not
+  for a wildcard (the user-group part is documented, the rest is not observed);
+- the exact `@**Name**` token forms;
+- the server expires a typing notice after roughly 15 s, which the 8 s refresh
+  assumes;
+- a bot receives channel messages only for channels it is subscribed to;
+- `max_message_length` and the empty-topic label are returned only with
+  `fetch_event_types=["realm"]`, and `event_types=["message"]` excludes edits and
+  deletes;
+- the error codes `BAD_EVENT_QUEUE_ID`, `RATE_LIMIT_HIT`, `UNAUTHORIZED`,
+  `USER_DEACTIVATED` and `REALM_DEACTIVATED`, and `retry-after` in the body;
+- the server counts message length in code points;
+- the empty topic round-trips with the `empty_topic_name` capability on every
+  server version from feature level 248;
+- the web-app steps in `docs/zulip-ops.md` (Personal settings → Bots; a profile
+  showing the user ID).
+
+Known parity gap: PRD §3.2 item 2 admits a sender the agent has messaged first
+(§3.5.9). This transport's gate is the allowlist only, as Discord's is; nothing
+in the tree implements that admission for either.

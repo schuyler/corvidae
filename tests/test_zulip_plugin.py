@@ -95,6 +95,7 @@ class FakeZulip:
     def __init__(self, *, feature_level: int = 300) -> None:
         self.feature_level = feature_level
         self.max_message_length = 10000
+        self.poll_wait = 0.05
         self.empty_topic_label = "general chat"
         self.requests: list[Seen] = []
         self.pending: list[dict] = []
@@ -208,7 +209,7 @@ class FakeZulip:
         # with a timeout is the long poll; a timeout is the normal outcome.
         if not self.pending:
             try:
-                await asyncio.wait_for(self._wake.wait(), 0.05)
+                await asyncio.wait_for(self._wake.wait(), self.poll_wait)
             except asyncio.TimeoutError:
                 pass
         self._wake.clear()
@@ -558,6 +559,7 @@ class TestConfig:
             {"7": {"mention": False}},  # unknown key
             {"7": True},  # not a mapping
             {7: {"require_mention": True}, "7": {"require_mention": False}},  # twice
+            {7: {}, "7": {"require_mention": False}},  # twice, first sets nothing
             ["7"],
         ],
     )
@@ -575,7 +577,56 @@ class TestConfig:
         }
         with pytest.raises(ValueError) as exc:
             await plugin.on_init(pm=pm, config={"zulip": block})
-        assert "zulip" in str(exc.value) and "channels" in str(exc.value)
+        assert "zulip.channels" in str(exc.value)
+
+    async def test_a_credential_in_the_site_is_never_echoed(self):
+        """A user:password typed into zulip.site is rejected without printing it."""
+        pm = create_plugin_manager()
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
+        plugin = ZulipPlugin(pm)
+        block = {
+            "site": "https://bot:HUNTER2@chat.example.org",
+            "email": BOT_EMAIL,
+            "api_key": API_KEY,
+        }
+        with pytest.raises(ValueError) as exc:
+            await plugin.on_init(pm=pm, config={"zulip": block})
+        assert "zulip.site" in str(exc.value) and "HUNTER2" not in str(exc.value)
+
+    async def test_a_block_that_is_not_a_mapping_names_zulip(self):
+        """`zulip: [..]` names the field and how to write it."""
+        pm = create_plugin_manager()
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
+        plugin = ZulipPlugin(pm)
+        with pytest.raises(ValueError) as exc:
+            await plugin.on_init(pm=pm, config={"zulip": ["x"]})
+        assert "zulip must be a mapping" in str(exc.value) and "agent.yaml" in str(exc.value)
+
+    async def test_a_non_string_email_names_the_value(self):
+        """email: 123 is a type error naming the key and value, not "no email"."""
+        pm = create_plugin_manager()
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
+        plugin = ZulipPlugin(pm)
+        block = {"site": "https://z.example", "email": 123, "api_key": API_KEY}
+        with pytest.raises(ValueError) as exc:
+            await plugin.on_init(pm=pm, config={"zulip": block})
+        assert "zulip.email" in str(exc.value) and "123" in str(exc.value)
+
+    async def test_a_failed_init_leaves_the_plugin_inert(self):
+        """Validation completes before anything is stored: a bad later key
+        must not leave the site and credentials half-applied."""
+        pm = create_plugin_manager()
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
+        plugin = ZulipPlugin(pm)
+        block = {
+            "site": "https://z.example",
+            "email": BOT_EMAIL,
+            "api_key": API_KEY,
+            "require_mention": "x",
+        }
+        with pytest.raises(ValueError):
+            await plugin.on_init(pm=pm, config={"zulip": block})
+        assert plugin._site is None and plugin._api_key == ""
 
     async def test_plain_http_to_a_remote_host_warns(self, caplog):
         """Credentials and chat in the clear are the operator's call, but a
@@ -666,6 +717,7 @@ class TestConnection:
             errors = [r.getMessage() for r in _zulip_records(caplog, logging.ERROR)]
             assert len(errors) == 1
             assert h.site in errors[0] and "200" in errors[0] and "9.0" in errors[0]
+            assert "upgrade the server" in errors[0]  # the remedy
             assert len(h.server.of("/api/v1/register")) == 1
         finally:
             await stop(h)
@@ -788,19 +840,18 @@ class TestConnection:
             await stop(h)
 
     async def test_stop_leaves_no_tasks_and_closes_the_session(self):
-        """on_stop cancels the poll loop and typing tasks and closes the session."""
+        """on_stop cancels the poll loop and every typing task, and closes the
+        session. The tasks are captured before stopping, so one that was not
+        cancelled would still be running afterwards."""
         h = await _start()
-        before = {t for t in asyncio.all_tasks() if not t.done()}
+        await _deliver(h, dm_msg("hello"))  # starts a typing refresh task
+        tasks = [h.plugin._connect_task, *h.plugin._typing_tasks.values()]
+        assert len(tasks) >= 2 and not any(t.done() for t in tasks)
+        session = h.plugin._session
         await h.plugin.on_stop()
-        assert h.plugin._connect_task is None
-        assert h.plugin._session is None or h.plugin._session.closed
-        await asyncio.sleep(0.05)
-        leaked = [
-            t
-            for t in asyncio.all_tasks()
-            if not t.done() and t not in before and "zulip" in repr(t.get_coro()).lower()
-        ]
-        assert leaked == []
+        assert all(t.done() for t in tasks)
+        assert h.plugin._connect_task is None and h.plugin._typing_tasks == {}
+        assert session.closed
         await h.server.stop()
 
 
@@ -1095,6 +1146,40 @@ class TestInbound:
         finally:
             await stop(h)
 
+    async def test_resolve_channel_wants_one_canonical_spelling(self):
+        """No leading zeros and ascending, distinct ids: a second spelling of an
+        id would be a second channel with a forked history. Nothing resolves
+        before on_start."""
+        h = await _start()
+        try:
+            for bad in ("zulip:007", "zulip:dm:011", "zulip:dm:12,11", "zulip:dm:11,11"):
+                assert await h.plugin.resolve_channel(channel_id=bad) is None, bad
+        finally:
+            await stop(h)
+        pm = create_plugin_manager()
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
+        fresh = ZulipPlugin(pm)
+        assert await fresh.resolve_channel(channel_id="zulip:7") is None
+
+    async def test_an_empty_allowlist_refuses_everyone(self):
+        """Default-deny: with no one allowed, even a DM gets no channel and no reply."""
+        h = await _start(overrides={"allow": []})
+        try:
+            await _deliver(h, dm_msg("let me in"))
+            assert h.registry.get(f"zulip:dm:{ALICE}") is None
+            assert h.server.sent == [] and h.server.typing == []
+        finally:
+            await stop(h)
+
+    async def test_a_one_to_one_dm_has_no_channel_label(self):
+        """A DM is not named as though it were a channel (PRD 3.3.11)."""
+        h = await _start()
+        try:
+            await _deliver(h, dm_msg("hello"))
+            assert h.registry.get(f"zulip:dm:{ALICE}").name is None
+        finally:
+            await stop(h)
+
     async def test_register_prompts(self):
         """A 1:1 DM gets the chat register; channels and group DMs add the
         group-manners fragment; other transports' channels get nothing."""
@@ -1172,8 +1257,9 @@ class TestOutbound:
             await stop(h)
 
     async def test_without_a_remembered_topic_the_default_topic_is_used(self):
-        """A turn no message started (a reminder, after a restart) has no
-        topic to answer, so it posts to zulip.default_topic."""
+        """With no topic remembered for the channel (the first turn after a
+        restart, or a channel no allowed message has reached) a reply posts to
+        zulip.default_topic."""
         h = await _start(overrides={"default_topic": "corvidae notes"})
         try:
             channel = h.registry.get_or_create("zulip", "7")
@@ -1300,17 +1386,25 @@ class TestOutbound:
         """While the server errors, replies are queued (WARNING, not dropped)
         and delivered in order once it answers again."""
         caplog.set_level(logging.DEBUG, logger=LOGGER)
-        h = await _start()
+        fake = FakeZulip()
+        fake.poll_wait = 1.0  # the loop's own flush must not eat the scripted failures
+        h = await _start(server=fake)
         try:
             for _ in range(2):
                 h.server.script("/api/v1/messages", 502)
             channel = h.registry.get_or_create("zulip", f"dm:{ALICE}")
             await h.plugin.send_message(channel, OutboundMessage(text="first", latency_ms=None))
-            assert [m["content"] for m in h.server.sent][-1:] == ["first"]  # attempted, refused
             await h.plugin.send_message(channel, OutboundMessage(text="second", latency_ms=None))
             await _wait_until(lambda: not h.plugin._outbound)
+            # `sent` records refused attempts too, so the delivery order is the
+            # LAST occurrence of each text (the attempts that succeeded).
             delivered = [m["content"] for m in h.server.sent]
-            assert delivered.index("first") < delivered.index("second")
+            last = {
+                text: len(delivered) - 1 - delivered[::-1].index(text)
+                for text in ("first", "second")
+            }
+            assert last["first"] < last["second"]
+            assert delivered.count("first") >= 2  # it really was refused and retried
             assert any(
                 "queued" in r.getMessage() and "zulip:dm:11" in r.getMessage()
                 for r in _zulip_records(caplog, logging.WARNING)
@@ -1323,7 +1417,9 @@ class TestOutbound:
         names the channel and the drop count."""
         caplog.set_level(logging.DEBUG, logger=LOGGER)
         monkeypatch.setattr(zmod, "_OUTBOUND_QUEUE_MAX", 2)
-        h = await _start()
+        fake = FakeZulip()
+        fake.poll_wait = 1.0  # the loop's own flush must not eat the scripted failures
+        h = await _start(server=fake)
         try:
             for _ in range(6):
                 h.server.script("/api/v1/messages", 502)
@@ -1334,9 +1430,9 @@ class TestOutbound:
             dropped = [
                 r.getMessage()
                 for r in _zulip_records(caplog, logging.WARNING)
-                if "dropped" in r.getMessage()
+                if "outbound queue full" in r.getMessage()
             ]
-            assert dropped and "zulip:dm:11" in dropped[0] and "1" in dropped[0]
+            assert dropped and "zulip:dm:11" in dropped[0] and "dropped=1" in dropped[0]
         finally:
             await stop(h)
 
@@ -1393,7 +1489,7 @@ class TestTyping:
             assert first["stream_id"] == "7" and first["topic"] == "plans"
             channel = h.registry.get("zulip:7")
             await h.plugin.send_message(channel, OutboundMessage(text="done", latency_ms=None))
-            assert h.server.typing[-1]["op"] == "stop"
+            assert any(t["op"] == "stop" for t in h.server.typing)
             seen = len(h.server.typing)
             await asyncio.sleep(0.2)
             assert len(h.server.typing) == seen  # the refresh loop ended

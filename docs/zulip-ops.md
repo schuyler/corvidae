@@ -30,16 +30,16 @@ The allowlist and `channels` take numbers, not names or emails, because names an
 
 ## How it behaves
 
-- **1:1 DMs**: every message from an allowed user gets an answer.
-- **Channels**: only a direct @-mention of the bot (`@**Corvidae Bot**`) does, unless `zulip.require_mention` is `false` (everywhere) or `zulip.channels.<id>.require_mention` is (one channel). `@**all**`, `@**channel**` and `@**topic**` do not count.
+- **1:1 DMs**: every message from an allowed user reaches the agent (which may still decline to reply).
+- **Channels**: only a mention of the bot does (`@**Corvidae Bot**`, or a user group it belongs to, since Zulip sets its `mentioned` flag for both; the group's token stays in the text), unless `zulip.require_mention` is `false` (everywhere) or `zulip.channels.<id>.require_mention` is (one channel). `@**all**`, `@**channel**` and `@**topic**` do not count.
 - **Group DMs** follow `zulip.require_mention` like a channel does.
 - **Everyone else** is refused silently: one INFO line naming their user id, nothing sent back.
 
 ### Topics
 
-Every channel message in Zulip lives in a topic, and corvidae answers in the topic of the message it is answering. The topic is not part of the channel's identity: history, memory and `channels.zulip:*` entries are keyed on the channel id (`zulip:7`), so everything said in any topic of that channel shares one conversation. The model sees the channel as `#general > plans`, so it knows where it is. Topics can be renamed by anyone, and an id that depends on a name would orphan its history when they do (PRD principle 10). If you want a separate conversation per topic, that is a decision to make in the PRD, not a setting.
+Every channel message in Zulip lives in a topic, and corvidae answers in the topic of the latest message from an allowed user in that channel. The topic is not part of the channel's identity: history, memory and `channels.zulip:*` entries are keyed on the channel id (`zulip:7`), so everything said in any topic of that channel shares one conversation. The model sees the channel as `#general > plans`, so it knows where it is. Topics can be renamed by anyone, and an id that depends on a name would orphan its history when they do (PRD principle 10). If you want a separate conversation per topic, that is a decision to make in the PRD, not a setting.
 
-The topic to answer in is remembered in memory only. After a restart, or for a turn nothing started (a reminder, the heartbeat), the reply goes to `zulip.default_topic` (default `corvidae`). The cross-channel `send_message` tool addresses `zulip:7` with no topic, so it lands there too.
+The topic to answer in is remembered in memory only. Only when nothing is remembered for the channel (the first turn after a restart, or a channel no allowed message has reached yet) does the reply go to `zulip.default_topic` (default `corvidae`). Otherwise a reminder, a heartbeat post or a cross-channel `send_message` to `zulip:7` lands in that last remembered topic. If two allowed people write in different topics of one channel close together, the answer to the first goes to the second's topic.
 
 ### Mentions in replies
 
@@ -65,4 +65,4 @@ Zulip has no switch like Discord's allowed-mentions, so corvidae breaks the sigi
 
 ## Content is stored in plaintext
 
-Zulip messages aren't end-to-end encrypted: your Zulip server has them. On this side they land in `sessions.db`, the JSONL log (`zulip_<stream_id>.jsonl`, or `zulip_dm_<user ids>.jsonl`, when enabled) and memory, as ordinary text. Use `corvidae redact` as described in [configuration.md](configuration.md) for Signal, with `channel_id = 'zulip:<stream_id>'` or `'zulip:dm:<user ids>'`.
+Zulip messages aren't end-to-end encrypted: your Zulip server has them. On this side they land in `sessions.db`, the JSONL log (`zulip_<stream_id>.jsonl`, or `zulip_dm_<user ids>.jsonl`, when enabled) and memory, as ordinary text. Use `corvidae redact` as described in the [Signal section of configuration.md](configuration.md#signal--signal-transport), with `channel_id = 'zulip:<stream_id>'` or `'zulip:dm:<user ids>'`.

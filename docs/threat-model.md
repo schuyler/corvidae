@@ -39,7 +39,7 @@ them:
   a channel other people can read (with `discord.require_mention: false`,
   or a `discord.channels` entry setting it false for that channel, every
   message that user posts there),
-  every Zulip message that directly mentions the bot from an allowlisted
+  every Zulip message that mentions the bot from an allowlisted
   user in a channel other people can read (with `zulip.require_mention:
   false`, or a `zulip.channels` entry, every message that user posts there),
   every webhook payload,
@@ -134,10 +134,12 @@ Adversaries:
   bot in a mention-only channel is dropped before the kernel sees it, and the
   DEBUG line recording the drop names the sender's user id. The prompt's
   `addressed: yes` comes from the server's `mentioned` flag, not the message
-  text. Two strings an attacker chooses reach the prompt header as transport-
-  supplied names, never as instructions: the **topic** (anyone who can post can
-  title it) and the display name. Both are framed as data like every other
-  name (PRD §3.3.11).
+  text (the flag is also set by a user-group mention, so a group the bot is in
+  can address it). Several strings an attacker chooses reach the prompt header
+  as transport-supplied names, never as instructions: the **topic** (anyone who
+  can post can title it), the **channel name**, the sender's display name and,
+  for a group DM, the other members' names. All are framed as data like every
+  other name (PRD §3.3.11).
 - **Anyone who can reach the web listener**, if it's bound beyond
   loopback, and anyone who gets the token or cookie; also any web page
   open in the operator's browser, which can try cross-site requests. See

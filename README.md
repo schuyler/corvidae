@@ -119,7 +119,7 @@ other tenants.
 | SchedulerPlugin | Reminders the agent sets with `remind_me` and operator-scheduled jobs, fired into channels on the clock |
 | SignalPlugin | Signal transport via a running `signal-cli` daemon |
 | DiscordPlugin | Discord transport (needs `--extra discord`) |
-| ZulipPlugin | Zulip transport: channels (answered in the topic you were asked in) and DMs; no extra needed, see [docs/zulip-ops.md](docs/zulip-ops.md) |
+| ZulipPlugin | Zulip transport: channels (answered in the topic of the latest message) and DMs; no extra needed, see [docs/zulip-ops.md](docs/zulip-ops.md) |
 | WebPlugin | Browser chat UI on localhost |
 | WebhookPlugin | Webhook ingress: routes `POST /hook/<endpoint>` events to subscribing plugins |
 | AcpPlugin | Agent Client Protocol over stdio for editors (`corvidae acp`, needs `--extra acp`) |
