@@ -74,15 +74,21 @@ async def test_chain_of_merges_keeps_the_foreign_content(dedup_env):
     assert [h["id"] for h in hits] == [latest["id"]]
 
 
-async def test_in_window_record_without_foreign_content_is_still_excluded(dedup_env):
-    """R3: a same-channel record whose whole range is in the window, with no
-    foreign merge behind it, is still excluded."""
+async def test_in_window_same_channel_merge_is_still_excluded(dedup_env):
+    """R3: a same-channel merge inside the window holds no foreign content:
+    the surviving record's whole range is in the window, so it is still
+    excluded (a flag set on every merge would wrongly return it)."""
     memory, persistence, stub, db = dedup_env
     _same_summary(stub)
     y = Channel(transport="irc", scope="#garden")
     rows_y = await _consolidate(
         memory, persistence, y, [("user", "solar data"), ("assistant", "MQTT")]
     )
+    await _consolidate(
+        memory, persistence, y, [("user", "solar again"), ("assistant", "same MQTT")]
+    )
+    old, merged = await fetch_all_memories(db)
+    assert old["superseded_by"] == merged["id"]
 
     hits, _degraded = await memory.retrieve(QUERY, exclude=(y.id, rows_y[0]))
 
