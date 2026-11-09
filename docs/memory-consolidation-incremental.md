@@ -7,7 +7,7 @@ a few sentences. Each entry is its own memory record. Retrieval stops
 admitting records of conversation the agent can still see, and the funnel
 stops letting one oversized entry block the rest.
 
-This is a design; nothing here is built yet. It answers the analysis in
+This is a design. Status: §1, §2 and §4 are implemented (#635); the rest is not built yet. It answers the analysis in
 [memory-retrieval-fidelity.md](memory-retrieval-fidelity.md), with the
 corrections listed at the end of this doc.
 

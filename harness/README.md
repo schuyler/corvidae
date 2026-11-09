@@ -445,13 +445,13 @@ explicitly if you are not in the repo root):
 - `input.txt` — the transcript exactly as sent
 - `meta.json` — channel, the inclusive range and the resolved half-open
   bounds, raw row and dialog counts, prompt path and sha256, model, base_url
-- `trials.jsonl` — one record per trial: raw output, parsed summary, latency
+- `trials.jsonl` — one record per trial: raw output, parsed `entries` and `participants`, latency
 
 A malformed completion is recorded as that trial's `error` and the run
 continues, since a model emitting unparseable JSON is a result. An unreachable
 server aborts the whole run, since it is not.
 
-Nothing here scores anything. The point is to put N summaries of identical
+Nothing here scores anything. The point is to put N replies to identical
 input side by side so a reader can judge whether a variant covers every topic
 in a heterogeneous range and attributes facts to the right one.
 
