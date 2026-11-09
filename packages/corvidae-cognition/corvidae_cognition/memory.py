@@ -19,7 +19,8 @@ This module owns the memory schema:
     consolidation call.
   - ``memory_prompt``: ``hash`` -> instruction text, stored once per hash.
   - ``consolidation_watermark``: per-channel last-consolidated
-    ``message_log`` id; what makes the compaction/idle trigger overlap safe.
+    ``message_log`` id; what makes overlapping triggers
+    (compaction, idle, turn) safe.
   - ``embedding_meta``: the encoder identity the vector cache was built
     with. Summaries are canonical text; vectors are a rebuildable cache.
   - ``memory_fts``: external-content FTS5 over summaries with content-sync
@@ -2282,7 +2283,8 @@ class MemoryPlugin(CorvidaePlugin):
     ) -> None:
         """Log that an in-window range was skipped: channel, message range and
         what was missing (consolidation has no trace id). The watermark is
-        untouched, so the next ``trigger`` (idle or turn) trigger retries."""
+        untouched; ``trigger`` names what retries (idle, turn, or idle or
+        compaction for a turn range skipped with forks off)."""
         logger.warning(
             "consolidation skipped for channel %s, messages %d-%d: %s; "
             "the watermark stays at %d and the next %s trigger retries",
@@ -2323,7 +2325,7 @@ class MemoryPlugin(CorvidaePlugin):
                         channel_id, rows, watermark,
                         "forks are not enabled for consolidation "
                         "(agent.forks.enabled / agent.forks.stages)",
-                        # With forks off the turn hook never fires again, so
+                        # While forks stay off the turn hook doesn't fire, so
                         # idle or compaction is what retries a turn range.
                         trigger if trigger == "idle" else "idle or compaction",
                     )

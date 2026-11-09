@@ -4,7 +4,7 @@ The documented copy of `DEFAULT_CONSOLIDATION_FORK_PROMPT` in
 `packages/corvidae-cognition/corvidae_cognition/memory.py`. With `agent.forks.enabled` (and `consolidation` in
 `agent.forks.stages`), the memory entries are written by a fork of the live
 window: the main turn's render (up to the compaction cut, or the whole
-window for the idle trigger), followed by this text as a `user` turn
+window for the idle and turn triggers), followed by this text as a `user` turn
 (GitHub issue #51). A range that has left the window is written the same
 way from a rebuilt view of it, as a plain call on the `consolidation` stage's profile. Either
 way the agent's own system prompt is above it, so "I" needs no explaining.

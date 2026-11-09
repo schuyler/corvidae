@@ -130,7 +130,8 @@ JSON out) — from a fork of the live window when the range is in it (see
 sent as the `consolidation` stage (catch-up, below). An idle or turn range
 that is in the window but can't be forked (forks off, fork failed, unusable
 reply) is skipped instead, with a warning naming the trigger ("the next
-idle trigger retries" or "the next turn trigger retries"), and the
+idle trigger retries" or "the next turn trigger retries"; a turn range
+skipped because forks were reloaded off names "idle or compaction"), and the
 watermark stays put. An idle range reaches catch-up once it has left the
 window; a turn range is left to idle or compaction, as above. Both
 calls are constrained by a
@@ -1205,7 +1206,8 @@ decide gate treats it as non-user, and `exchange_log` records it.
 **Its window.** The window grows beat by beat and is bounded by ordinary
 compaction at the channel's budget, `channels.internal:heartbeat.max_context_tokens`
 (else the agent default). The summary and the rows stay in `message_log`, and
-the channel is consolidated by compaction, like any other. After a
+the channel is consolidated like any other: at turn ends (forks on),
+on idle, and at compaction. After a
 compaction the window holds the summary, then the most recent rows that
 `agent.compaction_retention` keeps, then the beats since.
 

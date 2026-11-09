@@ -1932,7 +1932,7 @@ the `"compaction"` entry point. Declares `depends_on = {"llm"}`.
 Logger name: `corvidae.compaction`.
 
 **ContextCompactPlugin** (`context_compact.py`) has been removed: superseded
-by `MemoryPlugin` (compaction-time memory consolidation plus retrieval), and
+by `MemoryPlugin` (memory consolidation plus retrieval), and
 per-turn token stats now live in the `usage_log` table.
 
 ### resolve_compaction
