@@ -794,3 +794,36 @@ async def test_redact_memory_form_tombstones_corrupt_row(value_sql, params):
     assert stored["role"] == "unknown"
     assert stored["content"].startswith("[redacted by operator")
     await db.close()
+
+
+async def test_redact_memory_dry_run_counts_the_cascade_like_the_real_run():
+    """#625: two same-channel records over overlapping ranges and one
+    foreign-channel record over the same numeric ids. The dry run on the
+    first reports 2 affected memories and changes nothing; the real run then
+    reports 2 and leaves the foreign record alone."""
+    db = await make_full_db()
+    channel_a = "irc:#electronics"
+    channel_b = "irc:#garden"
+    # Interleaved global ids: a1, b1, a2.
+    a1 = await insert_message(db, channel_a, "user", "kestrel station secret")
+    b1 = await insert_message(db, channel_b, "user", "garden chatter")
+    a2 = await insert_message(db, channel_a, "assistant", "noted the secret")
+    # Siblings of one consolidation share the range; the foreign record's
+    # numeric range covers the same ids on another channel.
+    first = await insert_memory(db, channel_a, "first entry", a1, a2)
+    sibling = await insert_memory(db, channel_a, "sibling entry", a1, a2)
+    foreign = await insert_memory(db, channel_b, "garden entry", a1, a2)
+
+    dry = await redact_memory_id(db, first, dry_run=True)
+
+    assert dry["affected_memories"] == 2
+    # The dry run wrote nothing.
+    assert (await get_memory(db, sibling))["redacted"] == 0
+    assert (await get_memory(db, first))["redacted"] == 0
+
+    real = await redact_memory_id(db, first)
+
+    assert real["affected_memories"] == dry["affected_memories"]
+    assert (await get_memory(db, sibling))["redacted"] == 1
+    assert (await get_memory(db, foreign))["redacted"] == 0
+    await db.close()
