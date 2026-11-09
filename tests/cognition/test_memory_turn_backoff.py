@@ -62,7 +62,7 @@ async def test_turns_stop_forking_after_n_failures_with_one_warning(make_env, ca
     ]
     assert len(skips) == TURN_FORK_FAILURE_LIMIT
     assert all("the next turn trigger retries" in m for m in skips[:-1])
-    assert "the next idle or compaction trigger retries" in skips[-1]
+    assert "the next idle or compaction (or, after the backoff, turn) trigger retries" in skips[-1]
     # The watermark never moved.
     assert await fetch_watermark(env.db, env.channel.id) is None
 

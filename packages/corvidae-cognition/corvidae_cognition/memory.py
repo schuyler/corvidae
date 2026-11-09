@@ -2542,12 +2542,13 @@ class MemoryPlugin(CorvidaePlugin):
                     return "record", await self._fork_record(agent, channel, contained, None)
                 except Exception as exc:
                     # A turn failure that starts the backoff (#620) is retried
-                    # by idle or compaction, not the next turn: say so.
+                    # by idle or compaction, or by the turn trigger only once
+                    # the backoff ends: say so.
                     retried_by = trigger
                     if trigger == "turn" and self._note_turn_fork_failure(
                         channel_id, rows, watermark
                     ):
-                        retried_by = "idle or compaction"
+                        retried_by = "idle or compaction (or, after the backoff, turn)"
                     self._skip_consolidation(
                         channel_id, rows, watermark,
                         f"the fork failed or its reply was unusable ({type(exc).__name__})",
