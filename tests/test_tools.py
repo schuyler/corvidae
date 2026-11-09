@@ -1,6 +1,5 @@
-"""Tests for corvidae.tools — CoreToolsPlugin and its four tool functions.
-
-All tests are expected to FAIL until corvidae/tools.py is implemented.
+"""Tests for corvidae.tools — the built-in tool plugins (ShellToolPlugin,
+FileToolsPlugin, WebToolsPlugin) and their tool functions.
 """
 
 import asyncio
@@ -10,8 +9,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# The import under test — will raise ImportError until the file exists.
-from corvidae.tools import CoreToolsPlugin, read_file, shell, web_fetch, write_file, web_search
+# The plugins and raw tool functions under test.
+from corvidae.tools import (
+    FileToolsPlugin,
+    ShellToolPlugin,
+    WebToolsPlugin,
+    read_file,
+    shell,
+    web_fetch,
+    web_search,
+    write_file,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +101,7 @@ async def _ranged_read_file(tools_config: dict | None = None, daemon: dict | Non
     Ranged calls look up the "tools" plugin for max_result_chars, and every
     call looks up the "spill" service for the stale-pointer check, so this
     builds a real plugin manager with the tools, the spill service on a
-    FakeClock, and CoreToolsPlugin registered, and the tool registry built.
+    FakeClock, and FileToolsPlugin registered, and the tool registry built.
     ``daemon`` is the config's daemon section (the spill keys).
     """
     from corvidae.hooks import create_plugin_manager
@@ -110,11 +118,11 @@ async def _ranged_read_file(tools_config: dict | None = None, daemon: dict | Non
     pm.register(spill, name="spill")
     await collection.on_init(pm=pm, config=config)
     await spill.on_init(pm=pm, config=config)
-    core = CoreToolsPlugin(pm)
-    pm.register(core, name="core_tools")
-    await core.on_init(pm=pm, config=config)
+    files = FileToolsPlugin(pm)
+    pm.register(files, name="file_tools")
+    await files.on_init(pm=pm, config=config)
     await collection.rebuild_registry()
-    return _tool_fns(core)["read_file"], collection
+    return _tool_fns(files)["read_file"], collection
 
 
 class TestReadFileRange:
@@ -130,7 +138,7 @@ class TestReadFileRange:
         """R1: the schema lists offset and length as nullable integers."""
         from corvidae.tool import Tool
         registry: list = []
-        CoreToolsPlugin(None).register_tools(tool_registry=registry)
+        FileToolsPlugin(None).register_tools(tool_registry=registry)
         tool = next(t for t in registry if isinstance(t, Tool) and t.name == "read_file")
         props = tool.schema["function"]["parameters"]["properties"]
         nullable_int = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
@@ -240,7 +248,7 @@ class TestReadFileLines:
     def test_schema_exposes_nullable_start_line_and_end_line(self):
         from corvidae.tool import Tool
         registry: list = []
-        CoreToolsPlugin(None).register_tools(tool_registry=registry)
+        FileToolsPlugin(None).register_tools(tool_registry=registry)
         tool = next(t for t in registry if isinstance(t, Tool) and t.name == "read_file")
         props = tool.schema["function"]["parameters"]["properties"]
         nullable_int = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
@@ -342,7 +350,7 @@ def test_read_file_and_shell_declare_spill_reading():
     """The read_file and shell tools declare, statically, that they read spill files."""
     from corvidae.tool import declares_spill_reader
 
-    fns = _tool_fns(CoreToolsPlugin(None))
+    fns = _tool_fns(FileToolsPlugin(None)) | _tool_fns(ShellToolPlugin(None))
     assert declares_spill_reader(fns["read_file"])
     assert declares_spill_reader(fns["shell"])
 
@@ -657,30 +665,16 @@ class TestWebFetchStreaming:
 
 
 # ---------------------------------------------------------------------------
-# TestCoreToolsPlugin
+# TestWebToolsPlugin (which plugin registers which tool: tests/test_tool_plugins.py)
 # ---------------------------------------------------------------------------
 
 
-class TestCoreToolsPlugin:
-    def test_register_tools_adds_six_tools(self):
-        plugin = CoreToolsPlugin(None)
-        registry = []
-        plugin.register_tools(tool_registry=registry)
-        assert len(registry) == 6
-
-    def test_registered_tool_names(self):
-        from corvidae.tool import Tool
-        plugin = CoreToolsPlugin(None)
-        registry = []
-        plugin.register_tools(tool_registry=registry)
-        names = {item.name if isinstance(item, Tool) else item.__name__ for item in registry}
-        assert names == {"task_pipeline", "shell", "read_file", "write_file", "web_fetch", "web_search"}
-
+class TestWebToolsPlugin:
     def test_web_search_max_results_config(self):
-        plugin = CoreToolsPlugin(None)
+        plugin = WebToolsPlugin(None)
         assert plugin._web_search_max_results == 8
 
-        plugin2 = CoreToolsPlugin(None)
+        plugin2 = WebToolsPlugin(None)
         import asyncio
         from unittest.mock import MagicMock
         config = {"tools": {"web_search_max_results": 15}}
@@ -698,29 +692,29 @@ class TestCoreToolsPlugin:
 
 
 class TestWebFetchSessionReuse:
-    def test_core_tools_plugin_has_on_start(self):
-        plugin = CoreToolsPlugin(None)
-        assert hasattr(plugin, "on_start"), "CoreToolsPlugin must have an on_start method"
+    def test_web_tools_plugin_has_on_start(self):
+        plugin = WebToolsPlugin(None)
+        assert hasattr(plugin, "on_start"), "WebToolsPlugin must have an on_start method"
         assert callable(plugin.on_start)
 
-    def test_core_tools_plugin_has_on_stop(self):
-        plugin = CoreToolsPlugin(None)
-        assert hasattr(plugin, "on_stop"), "CoreToolsPlugin must have an on_stop method"
+    def test_web_tools_plugin_has_on_stop(self):
+        plugin = WebToolsPlugin(None)
+        assert hasattr(plugin, "on_stop"), "WebToolsPlugin must have an on_stop method"
         assert callable(plugin.on_stop)
 
     async def test_session_created_on_start(self):
         import aiohttp
-        plugin = CoreToolsPlugin(None)
+        plugin = WebToolsPlugin(None)
         await plugin.on_start(config={})
         try:
-            assert hasattr(plugin, "_session"), "CoreToolsPlugin must have a _session attribute after on_start"
+            assert hasattr(plugin, "_session"), "WebToolsPlugin must have a _session attribute after on_start"
             assert isinstance(plugin._session, aiohttp.ClientSession)
         finally:
             if hasattr(plugin, "_session") and plugin._session is not None:
                 await plugin._session.close()
 
     async def test_session_closed_on_stop(self):
-        plugin = CoreToolsPlugin(None)
+        plugin = WebToolsPlugin(None)
         await plugin.on_start(config={})
         session = plugin._session
         await plugin.on_stop()
@@ -909,24 +903,24 @@ async def test_shell_and_web_fetch_declare_live_own_timeout():
     """R4: shell/web_fetch declare own_timeout, read live from the plugin."""
     from corvidae.tool import resolve_own_timeout
 
-    plugin = CoreToolsPlugin(None)
-    await plugin.on_init(
-        pm=MagicMock(),
-        config={"tools": {"shell_timeout": 7, "web_fetch_timeout": 9}},
-    )
+    config = {"tools": {"shell_timeout": 7, "web_fetch_timeout": 9}}
+    shell_plugin = ShellToolPlugin(None)
+    web_plugin = WebToolsPlugin(None)
+    await shell_plugin.on_init(pm=MagicMock(), config=config)
+    await web_plugin.on_init(pm=MagicMock(), config=config)
     try:
-        fns = _tool_fns(plugin)
+        fns = _tool_fns(shell_plugin) | _tool_fns(web_plugin)
         assert resolve_own_timeout(fns["shell"]) == 7
         assert resolve_own_timeout(fns["web_fetch"]) == 9
 
         # Read at call time: changing the plugin attribute changes the answer.
-        plugin._shell_timeout = 3
+        shell_plugin._shell_timeout = 3
         assert resolve_own_timeout(fns["shell"]) == 3
-        plugin._web_fetch_timeout = 2
+        web_plugin._web_fetch_timeout = 2
         assert resolve_own_timeout(fns["web_fetch"]) == 2
     finally:
-        # Close the HTTP session on_init opened.
-        await plugin.on_stop()
+        # on_stop closes a session only if on_start opened one.
+        await web_plugin.on_stop()
 
 
 def _pid_alive(pid: int) -> bool:
@@ -950,7 +944,7 @@ async def test_shell_cancelled_by_call_timeout_kills_process(tmp_path):
 
     from corvidae.tool import ToolTimeouts, dispatch_tool_call
 
-    plugin = CoreToolsPlugin(None)
+    plugin = ShellToolPlugin(None)
     await plugin.on_init(pm=MagicMock(), config={"tools": {"shell_timeout": 30}})
     shell_fn = _tool_fns(plugin)["shell"]
 
@@ -986,8 +980,6 @@ async def test_shell_cancelled_by_call_timeout_kills_process(tmp_path):
                 os.kill(int(pidfile.read_text().strip()), signal.SIGKILL)
             except (ProcessLookupError, ValueError):
                 pass
-        # Close the HTTP session on_init opened.
-        await plugin.on_stop()
 
 
 async def test_shell_cancel_before_spawn_reraises():
@@ -1027,9 +1019,9 @@ def test_declares_untrusted_output_is_true_only_for_the_literal_true():
 
 
 def test_read_file_web_fetch_and_web_search_declare_untrusted_output():
-    """R5/R6: the core tools that return outside text declare it."""
+    """R5/R6: the built-in tools that return outside text declare it."""
     from corvidae.tool import declares_untrusted_output
 
-    fns = _tool_fns(CoreToolsPlugin(None))
+    fns = _tool_fns(FileToolsPlugin(None)) | _tool_fns(WebToolsPlugin(None))
     for name in ("read_file", "web_fetch", "web_search"):
         assert declares_untrusted_output(fns[name]), f"{name} must declare returns_untrusted"

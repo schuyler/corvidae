@@ -6,7 +6,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Error string returned when the subprocess exceeds the configured timeout.
-# Format with timeout=<seconds>. Used by CoreToolsPlugin.shell.
+# Format with timeout=<seconds>. Used by ShellToolPlugin.shell.
 TIMEOUT_ERROR_TEMPLATE = "Error: command timed out after {timeout} seconds"
 
 

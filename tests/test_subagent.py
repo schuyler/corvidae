@@ -17,7 +17,7 @@ from corvidae.tools.subagent import (
     run_agent_loop,
 )
 
-from helpers import CORE_LLM_STAGES, collect_llm_stages, stub_llm_config
+from helpers import KERNEL_LLM_STAGES, collect_llm_stages, stub_llm_config
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -71,7 +71,7 @@ def _make_pm_with_tool_registry(*tool_names: str):
 
     # Register a mock LLMPlugin so SubagentPlugin._launch can get a client.
     mock_llm = LLMPlugin(pm)
-    mock_llm._stages = dict(CORE_LLM_STAGES)
+    mock_llm._stages = dict(KERNEL_LLM_STAGES)
     mock_llm._clients["main"] = MagicMock(name="main")
     stub_llm_config(mock_llm)
     pm.register(mock_llm, name="llm")

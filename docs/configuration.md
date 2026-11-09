@@ -58,11 +58,11 @@ channels:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `plugins.disabled` | list of strings | `[]` | Entry-point plugin names to block from loading. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before entry points are loaded; blocked plugins are never instantiated. Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml` (e.g. `memory`, `funnel`, `appraisal`, `critique`, `outcome_log`, `memory_tools`, `goals`, `silence`, `skills`, `subagent`, `mcp`, `cli`). Only entry-point plugins can be disabled this way — manually registered plugins cannot be blocked via config. A null `plugins:` or `disabled:` means nothing is disabled; any other non-list value (a bare string, say) or a non-string entry fails startup with a `Config error` naming the key and value. |
+| `plugins.disabled` | list of strings | `[]` | Entry-point plugin names to block from loading. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before entry points are loaded; blocked plugins are never instantiated. Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml` (e.g. `memory`, `funnel`, `appraisal`, `critique`, `outcome_log`, `memory_tools`, `goals`, `silence`, `skills`, `subagent`, `mcp`, `cli`). Only entry-point plugins can be disabled this way — manually registered plugins cannot be blocked via config. A name that matches no installed plugin (a typo, the retired `core_tools`, or a cognition plugin on a kernel-only install) blocks nothing and logs one `WARNING` at startup naming the value and the installed plugin names. A null `plugins:` or `disabled:` means nothing is disabled; any other non-list value (a bare string, say) or a non-string entry fails startup with a `Config error` naming the key and value. |
 
 `agent.minimal.yaml.example` disables `memory`, `memory_tools`, `funnel`, `appraisal`, `critique`, `outcome_log`, `gates`, `silence`, `heartbeat` and `goals` — the cognition plugin set — leaving the core agent loop, multi-turn tool calling, compaction, and persistence/restart recovery intact. See the [Plugin Guide](plugin-guide.md#plugin-disable) for the hook-level mechanics.
 
-A misspelled entry is not an error — `pm.set_blocked` on a name that matches nothing simply blocks nothing, and the daemon starts normally with the plugin still loaded. To confirm a disable took effect, check the `"plugins loaded"` line the daemon logs at startup: it carries `loaded` (the plugins that actually registered) and `blocked` (this list, verbatim). A name present in `blocked` but still showing up in `loaded` is a typo.
+A misspelled entry is not an error: it blocks nothing, the daemon starts normally with the plugin still loaded, and a `WARNING` names the entry and the installed plugin names (see the table above). To confirm a disable took effect, check the `"plugins loaded"` line the daemon logs at startup: it carries `loaded` (the plugins that actually registered) and `blocked` (this list, verbatim). A plugin you meant to disable that still shows up under `loaded` was not blocked.
 
 ---
 
@@ -554,7 +554,7 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 
 ## `tools` — built-in tool settings
 
-Configured by `CoreToolsPlugin`. `tools.max_result_chars` is read by `ToolCollectionPlugin`.
+The built-in tool keys are read by the plugin that owns the tool: `shell_timeout` by `ShellToolPlugin` (entry point `shell_tools`), `max_file_read_bytes` by `FileToolsPlugin` (`file_tools`), and the `web_*` keys by `WebToolsPlugin` (`web_tools`). These three replaced `CoreToolsPlugin` (`core_tools`); a config that still lists `core_tools` under `plugins.disabled` disables nothing and logs a WARNING, so list the plugins you meant instead (`shell_tools` also removes `task_pipeline`). `tools.max_result_chars` and the other dispatch keys are read by `ToolCollectionPlugin`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

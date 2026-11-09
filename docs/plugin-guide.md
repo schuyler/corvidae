@@ -1162,7 +1162,9 @@ Plugins are loaded via `pm.load_setuptools_entrypoints("corvidae")`. The entry p
 registry          (ChannelRegistry)     — explicit, before entry points load
 persistence       (PersistencePlugin)   — entry point
 jsonl_log         (JsonlLogPlugin)      — entry point
-core_tools        (CoreToolsPlugin)     — entry point
+shell_tools       (ShellToolPlugin)     — entry point
+file_tools        (FileToolsPlugin)     — entry point
+web_tools         (WebToolsPlugin)      — entry point
 cli               (CLIPlugin)           — entry point
 irc               (IRCPlugin)           — entry point
 signal            (SignalPlugin)        — entry point
@@ -1215,10 +1217,10 @@ Right after entry points load, `Runtime.start()` logs a `"plugins loaded"`
 line with `loaded` (the sorted names that actually registered, not the
 blocked ones) and
 `blocked` (the `plugins.disabled` list from config, verbatim). Compare the
-two to confirm a disable took effect: a misspelled name lands in
-`blocked` while the plugin it was meant to block still appears in
-`loaded` — `pm.set_blocked` on a name that matches nothing is silent
-otherwise.
+two to confirm a disable took effect. A name that matches no installed
+plugin (a typo, a retired name, a plugin from an extra that isn't
+installed) blocks nothing, and `Runtime.start()` logs one `WARNING` for it
+naming `plugins.disabled`, the value, and the installed entry-point names.
 
 ## Hook exception safety
 
@@ -1303,9 +1305,18 @@ tools:
 
 The legacy key `agent.max_tool_result_chars` is still accepted but deprecated; a warning is logged at startup when it is present.
 
-### CoreToolsPlugin tools
+### Built-in tool plugins
 
-Registered by `CoreToolsPlugin` (entry point name: `core_tools`).
+Three plugins register the built-in tools, each from its own entry point:
+
+| Plugin | Entry point | Tools |
+|--------|-------------|-------|
+| `ShellToolPlugin` | `shell_tools` | `shell`, `task_pipeline` (one capability: PRD §3.5.3) |
+| `FileToolsPlugin` | `file_tools` | `read_file`, `write_file` |
+| `WebToolsPlugin` | `web_tools` | `web_fetch`, `web_search` |
+
+Each can be disabled by name in `plugins.disabled` and the others keep
+working. They replaced `CoreToolsPlugin` (`core_tools`), with no alias.
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
@@ -1316,7 +1327,7 @@ Registered by `CoreToolsPlugin` (entry point name: `core_tools`).
 | `web_search` | `query: str`, `max_results: int` (optional) | Searches the web via DuckDuckGo and returns formatted results with titles, URLs, and snippets. Defaults to 8 results per page. |
 | `task_pipeline` | `definition: str` | Executes a task graph defined in YAML or JSON. The definition must contain a `tasks` key with a list of objects, each having `name`, `command`, and optionally `depends_on`. Tasks run in topological order; failed tasks block their dependents. Returns a status summary; a task failure names the task and the command. The whole pipeline is cut at `tools.call_timeout` (600 s by default); set `tools.timeouts.task_pipeline` for longer runs. |
 
-**CoreToolsPlugin config:**
+**`tools` config** (the three tool plugins each read only their own keys; `call_timeout` and `timeouts` are read by `ToolCollectionPlugin`):
 
 ```yaml
 tools:

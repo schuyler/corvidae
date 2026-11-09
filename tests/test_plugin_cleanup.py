@@ -116,10 +116,11 @@ def test_jsonl_log_plugin_no_arg_constructor():
     assert plugin is not None
 
 
-def test_core_tools_plugin_no_arg_constructor():
-    """CoreToolsPlugin() must work with no arguments."""
-    from corvidae.tools import CoreToolsPlugin
-    plugin = CoreToolsPlugin()
+@pytest.mark.parametrize("class_name", ["ShellToolPlugin", "FileToolsPlugin", "WebToolsPlugin"])
+def test_builtin_tool_plugins_no_arg_constructor(class_name):
+    """Each built-in tool plugin must work with no arguments."""
+    import corvidae.tools
+    plugin = getattr(corvidae.tools, class_name)()
     assert plugin is not None
 
 
@@ -228,11 +229,13 @@ def test_jsonl_log_plugin_subclasses_corvidae_plugin():
     )
 
 
-def test_core_tools_plugin_subclasses_corvidae_plugin():
+@pytest.mark.parametrize("class_name", ["ShellToolPlugin", "FileToolsPlugin", "WebToolsPlugin"])
+def test_builtin_tool_plugins_subclass_corvidae_plugin(class_name):
+    import corvidae.tools
     from corvidae.hooks import CorvidaePlugin
-    from corvidae.tools import CoreToolsPlugin
-    assert issubclass(CoreToolsPlugin, CorvidaePlugin), (
-        "CoreToolsPlugin must subclass CorvidaePlugin"
+    cls = getattr(corvidae.tools, class_name)
+    assert issubclass(cls, CorvidaePlugin), (
+        f"{class_name} must subclass CorvidaePlugin"
     )
 
 
@@ -348,7 +351,9 @@ def test_corvidae_entry_points_contain_expected_names():
     expected = {
         "persistence",
         "jsonl_log",
-        "core_tools",
+        "shell_tools",
+        "file_tools",
+        "web_tools",
         "cli",
         "irc",
         "task",
@@ -374,7 +379,9 @@ def test_corvidae_entry_points_load_correct_classes():
     expected_map = {
         "persistence": "corvidae.persistence:PersistencePlugin",
         "jsonl_log": "corvidae.jsonl_log:JsonlLogPlugin",
-        "core_tools": "corvidae.tools:CoreToolsPlugin",
+        "shell_tools": "corvidae.tools:ShellToolPlugin",
+        "file_tools": "corvidae.tools:FileToolsPlugin",
+        "web_tools": "corvidae.tools:WebToolsPlugin",
         "cli": "corvidae.channels.cli:CLIPlugin",
         "irc": "corvidae.channels.irc:IRCPlugin",
         "task": "corvidae.task:TaskPlugin",

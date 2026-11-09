@@ -37,7 +37,6 @@ from collections import deque
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from corvidae.hooks import CorePluginManager
     from corvidae.tool import ToolContext
 
 logger = logging.getLogger(__name__)

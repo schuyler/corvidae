@@ -24,7 +24,7 @@ from corvidae.tool_collection import ToolCollectionPlugin
 from corvidae.tool_policy import disabled_on, expand_disabled
 
 from helpers import (
-    CORE_LLM_STAGES, build_plugin_and_channel, drain, drain_task_queue,
+    KERNEL_LLM_STAGES, build_plugin_and_channel, drain, drain_task_queue,
     recording_llm_plugin, stub_llm_config,
 )
 from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
@@ -387,7 +387,7 @@ class TestSubagentInherits:
         pm = create_plugin_manager()
         pm.register(ChannelRegistry({}), name="registry")
         llm = LLMPlugin(pm)
-        llm._stages = dict(CORE_LLM_STAGES)
+        llm._stages = dict(KERNEL_LLM_STAGES)
         llm._clients["main"] = MagicMock()
         stub_llm_config(llm)
         pm.register(llm, name="llm")

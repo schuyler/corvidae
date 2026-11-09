@@ -1,4 +1,20 @@
 # corvidae/tools/__init__.py
+"""The built-in tool plugins.
+
+Three plugins, each loaded from its own entry point and disableable by name
+in ``plugins.disabled``:
+
+- ``ShellToolPlugin`` (``shell_tools``): ``shell`` and ``task_pipeline``.
+  ``task_pipeline`` runs each step through the shell, so it rides with
+  ``shell``: disabling the plugin removes both (PRD §3.5.3).
+- ``FileToolsPlugin`` (``file_tools``): ``read_file`` and ``write_file``.
+- ``WebToolsPlugin`` (``web_tools``): ``web_fetch`` and ``web_search``; owns
+  the ``aiohttp.ClientSession`` ``web_fetch`` reuses.
+
+Each reads only its own keys from the ``tools`` config block. The tool
+implementations live in ``shell.py``, ``files.py`` and ``web.py``; the raw
+functions are re-exported here for callers and tests.
+"""
 
 import aiohttp
 
@@ -12,41 +28,25 @@ from corvidae.tools.files import read_file, write_file
 from corvidae.tools.web import web_fetch, web_fetch_with_session, web_search
 
 
-class CoreToolsPlugin(CorvidaePlugin):
-    depends_on = frozenset({"tools", "spill"})
+class ShellToolPlugin(CorvidaePlugin):
+    """Registers ``shell`` and ``task_pipeline``; owns ``tools.shell_timeout``."""
+
+    # Resolves no other plugin: the shell closure reads only its own timeout.
+    depends_on = frozenset()
 
     def __init__(self, pm=None) -> None:
         self.pm = pm  # May be None; on_init will set it via CorvidaePlugin.on_init
-        self._session: aiohttp.ClientSession | None = None
         self._shell_timeout: int = 30
-        self._web_fetch_timeout: int = 15
-        self._web_max_response_bytes: int = 50_000
-        self._max_file_read_bytes: int = 1024 * 1024
-        self._web_search_max_results: int = 8
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
+        # Read this plugin's one key from the shared tools block.
         await super().on_init(pm, config)
-        tools_config = config.get("tools", {})
-        self._shell_timeout = tools_config.get("shell_timeout", 30)
-        self._web_fetch_timeout = tools_config.get("web_fetch_timeout", 15)
-        self._web_max_response_bytes = tools_config.get("web_max_response_bytes", 50_000)
-        self._max_file_read_bytes = tools_config.get("max_file_read_bytes", 1024 * 1024)
-        self._web_search_max_results = tools_config.get("web_search_max_results", 8)
-
-    @hookimpl
-    async def on_start(self, config: dict) -> None:
-        self._session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=self._web_fetch_timeout)
-        )
-
-    @hookimpl
-    async def on_stop(self) -> None:
-        if self._session is not None:
-            await self._session.close()
+        self._shell_timeout = config.get("tools", {}).get("shell_timeout", 30)
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
+        # The tool closures read this plugin's settings live, at call time.
         plugin = self
 
         async def shell(command: str) -> str:
@@ -58,6 +58,39 @@ class CoreToolsPlugin(CorvidaePlugin):
         shell.own_timeout = lambda: plugin._shell_timeout  # type: ignore[attr-defined]
         # A shell command can read a notification spill file.
         shell.reads_spill_files = True  # type: ignore[attr-defined]
+
+        # task_pipeline is shell by another name (PRD §3.5.3), so the shell
+        # plugin registers it: disabling shell_tools removes both.
+        from corvidae.tools.task_pipeline import TaskPipelinePlugin
+
+        TaskPipelinePlugin(self.pm).register_tools(tool_registry)
+
+        tool_registry.append(Tool.from_function(shell))
+
+
+class FileToolsPlugin(CorvidaePlugin):
+    """Registers ``read_file`` and ``write_file``; owns ``tools.max_file_read_bytes``."""
+
+    # read_file resolves the spill service (stale pointers) and the tool
+    # collection (the live result cap for ranged reads).
+    depends_on = frozenset({"tools", "spill"})
+
+    def __init__(self, pm=None) -> None:
+        self.pm = pm  # May be None; on_init will set it via CorvidaePlugin.on_init
+        self._max_file_read_bytes: int = 1024 * 1024
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        # Read this plugin's one key from the shared tools block.
+        await super().on_init(pm, config)
+        self._max_file_read_bytes = config.get("tools", {}).get(
+            "max_file_read_bytes", 1024 * 1024
+        )
+
+    @hookimpl
+    def register_tools(self, tool_registry: list) -> None:
+        # The tool closures read this plugin's settings live, at call time.
+        plugin = self
 
         async def read_file(
             path: str,
@@ -87,6 +120,53 @@ class CoreToolsPlugin(CorvidaePlugin):
         # File contents are outside text, spill files included.
         read_file.returns_untrusted = True  # type: ignore[attr-defined]
 
+        tool_registry.extend([
+            Tool.from_function(read_file),
+            Tool.from_function(write_file),
+        ])
+
+
+class WebToolsPlugin(CorvidaePlugin):
+    """Registers ``web_fetch`` and ``web_search``; owns the HTTP session and
+    the ``tools.web_*`` keys."""
+
+    # Resolves no other plugin: both closures read only this plugin's state.
+    depends_on = frozenset()
+
+    def __init__(self, pm=None) -> None:
+        self.pm = pm  # May be None; on_init will set it via CorvidaePlugin.on_init
+        self._session: aiohttp.ClientSession | None = None
+        self._web_fetch_timeout: int = 15
+        self._web_max_response_bytes: int = 50_000
+        self._web_search_max_results: int = 8
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        # Read this plugin's keys from the shared tools block.
+        await super().on_init(pm, config)
+        tools_config = config.get("tools", {})
+        self._web_fetch_timeout = tools_config.get("web_fetch_timeout", 15)
+        self._web_max_response_bytes = tools_config.get("web_max_response_bytes", 50_000)
+        self._web_search_max_results = tools_config.get("web_search_max_results", 8)
+
+    @hookimpl
+    async def on_start(self, config: dict) -> None:
+        # One session for every web_fetch call, bounded by the fetch timeout.
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=self._web_fetch_timeout)
+        )
+
+    @hookimpl
+    async def on_stop(self) -> None:
+        # Close the session opened in on_start, if it was.
+        if self._session is not None:
+            await self._session.close()
+
+    @hookimpl
+    def register_tools(self, tool_registry: list) -> None:
+        # The tool closures read this plugin's settings live, at call time.
+        plugin = self
+
         async def web_fetch(url: str) -> str:
             """Fetch a URL and return its text content."""
             return await web_fetch_with_session(
@@ -107,15 +187,7 @@ class CoreToolsPlugin(CorvidaePlugin):
         # Search snippets are outside text.
         _web_search.returns_untrusted = True  # type: ignore[attr-defined]
 
-        from corvidae.tools.task_pipeline import TaskPipelinePlugin
-
-        task_plugin = TaskPipelinePlugin(self.pm)
-        task_plugin.register_tools(tool_registry)
-
         tool_registry.extend([
-            Tool.from_function(shell),
-            Tool.from_function(read_file),
-            Tool.from_function(write_file),
             Tool.from_function(web_fetch),
             Tool.from_function(_web_search),
         ])

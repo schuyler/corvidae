@@ -665,10 +665,10 @@ async def test_a_second_delivery_for_the_same_call_id_is_not_stamped(started):
 async def test_a_read_file_result_of_a_spill_file_renders_fenced(started):
     """R8: read_file is declared, so reading a spill file stamps the result and it renders fenced."""
     from corvidae.provenance import frame
-    from corvidae.tools import CoreToolsPlugin
+    from corvidae.tools import FileToolsPlugin
 
     registry: list = []
-    CoreToolsPlugin(None).register_tools(tool_registry=registry)
+    FileToolsPlugin(None).register_tools(tool_registry=registry)
     read_file_fn = next(t.fn for t in registry if t.name == "read_file")
     call = {"id": "call_1", "type": "function", "function": {
         "name": "read_file", "arguments": json.dumps({"path": SPILL})}}
