@@ -20,7 +20,7 @@ FRAGMENTS = [
 ]
 
 # Registers shipped inside the package (issue #316); sent to the model whole.
-SHIPPED_REGISTERS = ["chat", "signal_dm", "discord_group", "irc"]
+SHIPPED_REGISTERS = ["chat", "signal_dm", "discord_group", "irc", "zulip_group"]
 
 
 @pytest.mark.parametrize("path", FRAGMENTS)

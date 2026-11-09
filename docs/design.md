@@ -19,7 +19,7 @@ Three layers:
    dispatch: one LLM call per queue item, tool calls dispatched as
    background tasks, results arrive as notifications.
 
-3. **Transport plugins** — CLI, IRC, Signal, Discord, web, ACP (stdio). Each
+3. **Transport plugins** — CLI, IRC, Signal, Discord, Zulip, web, ACP (stdio). Each
    transport converts platform-specific messages to/from a common Channel
    abstraction.
 
@@ -189,7 +189,7 @@ owner's plugin name after the prefix.
 | `send` | broadcast (imperative) | outbound delivery. `Agent` sends `OutboundMessage` (replies, error text), `OutboundThinking` (when the LLM response carries `reasoning_content`), `OutboundProgress` (intermediate text alongside tool calls) and `OutboundToolStatus` (tool call dispatched); `TaskPlugin` sends `OutboundToolStatus` on completion. Transports receive it through `TransportPlugin.send`, which filters by `owns(channel)` and dispatches by event type |
 | `register_tools` | broadcast (sync) | startup tool collection |
 | `register_llm_stages` | broadcast (sync, imperative) | `LLMPlugin.on_start`, once, before it creates clients: plugins add `stages[name] = kind` (`chat` or `embedding`) for each model-calling stage they own |
-| `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines |
+| `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, Zulip, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
 | `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes an exact `NO_REPLY` final of any origin (cognition extra); a raising implementation fails open (logged, sent); no kernel implementation, so with none registered everything is sent |
@@ -204,8 +204,8 @@ owner's plugin name after the prefix.
 | `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before the reply is sent; return transformed text or None to leave unchanged |
 | `transform_system_prompt` | firstresult=True wrapper chain | `Agent.channel_system_prompt`, when the identity and register are composed: a new conversation, a restart, a compaction boundary, and the background views that share it. Return the transformed prompt or None to leave unchanged. A raising wrapper is logged at WARNING with the channel and the untransformed prompt is used. A transform that modifies the identity+register prefix is rejected with a WARNING; the untransformed prompt is used. Appending is the expected use. `SilencePlugin` appends its instruction on conversational channels |
 | `resolve_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
-| `resolve_register_prompt` | firstresult=True | `Agent`, when a conversation starts on a channel with no `register_prompt` configured at any layer; the owning transport returns its default register text, others return None. `SignalPlugin`, `DiscordPlugin` and `IRCPlugin` implement it, from fragments shipped in `corvidae/channels/registers/`. ACP, web and CLI return nothing. No answer means no register |
-| `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it. A transport may also return None for an id it owns but cannot build yet (Signal before its first alias resolution). For an id whose prefix names a transport that implements the hook, the scheduler retries; for other ids, callers fall back to `registry.get_or_create` from the split id |
+| `resolve_register_prompt` | firstresult=True | `Agent`, when a conversation starts on a channel with no `register_prompt` configured at any layer; the owning transport returns its default register text, others return None. `SignalPlugin`, `DiscordPlugin`, `ZulipPlugin` and `IRCPlugin` implement it, from fragments shipped in `corvidae/channels/registers/`. ACP, web and CLI return nothing. No answer means no register |
+| `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin`, `DiscordPlugin` and `ZulipPlugin` implement it. A transport may also return None for an id it owns but cannot build yet (Signal before its first alias resolution). For an id whose prefix names a transport that implements the hook, the scheduler retries; for other ids, callers fall back to `registry.get_or_create` from the split id |
 | `persist_message` | broadcast (imperative) | `_process_queue_item` after every `conv.append()`, and `FunnelPlugin` for the CONTEXT it persists; every implementation runs (persistence, JSONL logging). `PersistencePlugin` returns the `message_log` rowid and the caller resolves the list with `resolve_single_result` into `_db_id` |
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
@@ -335,8 +335,8 @@ default, a custom `register_prompt`, or none). The seed on `_SeedHooksPlugin`
 returns the text unchanged; a wrapper that raises is logged at WARNING
 naming the channel and the untransformed prompt is used. The result is fixed
 when the conversation starts or restarts and is not rebuilt at compaction.
-`TransportPlugin.conversational` (default False; IRC, Discord and Signal
-set True) is the neutral fact a plugin reads to tell a chat transport from
+`TransportPlugin.conversational` (default False; IRC, Discord, Signal and
+Zulip set True) is the neutral fact a plugin reads to tell a chat transport from
 one that always answers. `SilencePlugin` is the one implementation: it
 appends the `NO_REPLY` instruction on conversational channels
 ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)).
@@ -3027,10 +3027,10 @@ registers `task_status` as tool closures during `on_start`.
 
 ## Transports
 
-Every transport (CLI, IRC, Signal, Discord, web, ACP) subclasses
+Every transport (CLI, IRC, Signal, Discord, Zulip, web, ACP) subclasses
 `TransportPlugin` (`hooks.py`) and sets `transport` to the name its
 channel ids start with. A chat transport also sets
-`conversational = True` (IRC, Discord and Signal do; the default is False),
+`conversational = True` (IRC, Discord, Signal and Zulip do; the default is False),
 which a `transform_system_prompt` wrapper can read to tailor the prompt to chats. The base class implements the outbound `send`
 hook once: it drops events for channels the transport does not own
 (`owns(channel)`, by default `channel.matches_transport(self.transport)`;
@@ -3578,6 +3578,39 @@ empty, plus a budget); see the scheduler's "Not in phase one: a
 Out of scope: voice, slash commands, embeds, and reactions. Attachments are in
 scope in both directions — see **Attachments** above for the inbound rules and
 `send_attachment` for the outbound one.
+
+### Zulip (`channels/zulip.py`)
+
+`ZulipPlugin` — Zulip transport over Zulip's REST event-queue API. It logs in as a bot user and talks in 1:1 DMs, group DMs and channels. There is no SDK and no extra: five endpoints over aiohttp (`GET /users/me`, `POST /register`, `GET /events`, `POST /messages`, `POST /typing`). Creating the bot and finding ids are in [zulip-ops.md](zulip-ops.md); the keys are in [configuration.md](configuration.md#zulip--zulip-transport). It lives in the kernel next to the other transports, by the owner's decision on #640, not as a package.
+
+With no `zulip:` block the plugin loads, resolves its registry dependency and does nothing else: no session, no tasks, nothing logged above DEBUG. A malformed block raises in `on_init` naming the field (`zulip.<key>`) and what is accepted. All validation runs before anything is stored, so a failed init leaves the plugin inert and not half-configured.
+
+**Connection.** `_connection_loop` registers a queue and long-polls it. `/register` is sent with `event_types=["message"]` (edits and deletes are other event types and are never delivered, which is how the append-only log is kept), `apply_markdown=false` (raw Markdown for the model), `client_capabilities={"empty_topic_name": true}` and `fetch_event_types=["realm"]`. The last one matters: `max_message_length`, `max_topic_length` and the empty-topic label are returned only if `realm` is in `fetch_event_types`, which otherwise defaults to `event_types`. The response's `zulip_feature_level` must be at least 248 (Zulip 9.0, the first release with `channel` as a message and typing type), or the loop ends with one ERROR naming the site, the level and the remedy. Every call sorts its outcome into one of five signals: `_Fatal` (401 or a deactivated user or organisation: one ERROR, loop ends, not retried), `_QueueLost` (`BAD_EVENT_QUEUE_ID`: WARNING, re-register at once), `_RateLimited` (429: wait the server's `retry-after`, capped at 60 s), `_Transient` (network error, timeout, 5xx, a reply that is not Zulip's JSON: retry the same queue on the shared ladder, 10 s doubling to 300 s, reset on success) and `_Rejected` (a 4xx the server meant). Events are processed in id order and acknowledged by the next poll's `last_event_id`, after handling. A malformed message event is skipped with a WARNING naming the event and message ids, and does not stop the loop.
+
+**A lost queue is not replayed (#640 D4).** The server drops an idle queue, and a restart starts a new one. Messages sent in the gap are not fetched; the WARNING says so, naming the site and the bot. Catching up (persist the last admitted id per channel, `GET /messages` from it on re-register, deduplicate by id) is a follow-up.
+
+**Identity.** A channel's scope is built from ids only (PRD principle 10): `zulip:<stream_id>`; `zulip:dm:<user_id>` for a 1:1 DM, keyed on the other person; `zulip:dm:<id>,<id>` for a group DM, ids ascending, the bot's own left out. A Zulip *topic* has no stable id (the API pages for register, events, messages, topics and update-message expose none) and users can rename or move topics, so a topic-keyed scope would orphan its history on a rename. It is therefore a label and reply routing, never a key: `channel.name` is `#general > plans` (the empty topic shows as the realm's `realm_empty_topic_display_name`), and the topic of the newest *allowed* message is kept in `_topics[channel.id]`, in memory only. This is the same rule Discord applies to threads, which have their own immutable id; Zulip topics don't. The sender passed to `on_message` is the sender's user id, with the display name in `channel.sender_names`.
+
+**The empty topic.** From Zulip 10 a channel message may have `""` as its topic. Without the `empty_topic_name` capability the server rewrites it to its display label in events; with it, the transport receives `""`, replies with the same `""`, and shows the label only to the model. The reply therefore lands where the question was asked on every server version.
+
+**`resolve_channel`.** For a `zulip:<scope>` id the registry does not hold, the plugin returns the registry's channel. It returns None for other transports, for scopes that are not a stream id or `dm:` and ascending user ids, and before `on_start`. A reply needs no connection to be addressed: the destination is built from the scope.
+
+**Authorization.** `should_process_message` is default-deny: the sender's user id must be in `allow`. A refusal is one INFO line naming the id, and nothing is sent. The allowlist is checked before the channel is resolved, so a refused sender never creates a registry entry (a transient `Channel("zulip", <scope>)` is gated instead), and only an allowed sender's message sets the channel's label, the sender-name cache or the reply topic: a stranger's topic must not steer where the agent answers.
+
+**Addressing.** A message in a channel or group DM is admitted only when `flags` contains `mentioned` (a direct mention, as Zulip's own server judged it); `stream_wildcard_mentioned` and `topic_wildcard_mentioned` do not count, as `@everyone` does not for Discord. A 1:1 DM needs none. `channel.addressed` is set before every `on_message`, `None` for a 1:1 DM. The bot's own mention token (`@**Name**`, `@**Name|id**`, silent `@_**Name**`, or any name with the bot's id) is stripped from the text; other people's mentions stay. The bot's own messages come back through its queue and are dropped by sender id, which is the only thing between the agent and answering itself if its id is ever put on the allowlist with `require_mention: false`.
+
+**Liveness.** Typing only; Zulip bots have no read receipts. The first outstanding message on a channel sends `POST /typing` `op=start` (for a channel, `type=channel` with `stream_id` and `topic`; for a DM, `type=direct` with the user ids) and starts a refresh loop re-sending every 8 s while the count stays positive. Unlike Discord, Zulip has a stop frame, so a final (`send_message`), a withheld final (`on_agent_response` with `final_was_unsent`) or a message the gate never admitted sends `op=stop` once the last slot is released. The ownership check, `final_was_unsent` and the release happen before the first `await`, as for Discord and Signal. A failed typing call is a WARNING, never a lost reply. Only an allowed sender ever takes a slot.
+
+**Outbound.** `_deliver` defuses mentions, splits with `split_message` at the smaller of `message_chunk_size` and the server's `max_message_length` (bytes, conservatively, since the server counts code points), skips whitespace-only chunks, and posts each in order through a bounded queue (50 chunks): a transient failure leaves it queued with a WARNING and the connection loop flushes it after the next successful poll (PRD §3.2 item 8); past the bound the oldest is dropped and the count logged; a refusal drops the rest of that reply and logs the channel, the topic and the server's own explanation. A 429 on a send waits `retry-after` up to twice. Two properties apply to every send:
+
+- *Mentions are defused.* Zulip has no allowed-mentions switch, so `@` followed by `*` (`@**all**`, `@**Name**`, `@*group*`) gets a zero-width space between them before splitting, and the chunks concatenate to the defused text. Silent mentions (`@_**Name**`) notify no one and pass through.
+- *Replies go to the topic they answer.* The topic of the newest allowed message, else `default_topic`; a DM goes to its user ids.
+
+`send_thinking` and `send_tool_status` are not overridden, so reasoning and tool traffic never reach Zulip.
+
+**Testing.** There is no local Zulip server to run in `harness/`, so this transport has no end-to-end harness test (PRD §3.2 item 9). `tests/test_zulip_plugin.py` runs the real client against an aiohttp server on loopback that implements the five endpoints, with scripted failures, so request encoding, Basic auth, 429 and `BAD_EVENT_QUEUE_ID` are exercised for real. What it cannot show is a real server's behaviour; these were taken from Zulip's API documentation and not observed: that `mentioned` is set for a direct mention and not for a wildcard, the exact `@**Name**` token forms, and the typing expiry that the 8 s refresh assumes (the server's own web client re-sends every 10 s).
+
+**Known limits.** No attachments (an upload is the link Zulip put in the text), no edits or deletes, one organisation per block, no catch-up after a lost queue, and a plain split that can cut a Markdown code fence across two messages (`shortcut:` upgrade to a fence-aware split, as Discord has, if seen).
 
 ### Web (`channels/web.py`)
 
@@ -4219,4 +4252,4 @@ seamlessly. Not implemented; current compaction is stop-the-world.
 ### Additional transports
 
 BlueSky and other transports are future work. The hook system supports
-them; the implemented transports are CLI, IRC, Signal, Discord, and Web.
+them; the implemented transports are CLI, IRC, Signal, Discord, Zulip, and Web.

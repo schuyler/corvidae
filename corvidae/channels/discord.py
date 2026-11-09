@@ -36,7 +36,14 @@ from typing import Any, Optional
 import aiohttp
 
 from corvidae.attachments import save_attachment
-from corvidae.channel import Channel, ChannelRegistry
+# The sender-name cache helper moved to corvidae.channel (shared with Zulip);
+# both names stay importable from here, where tests and callers already look.
+from corvidae.channel import (  # noqa: F401
+    SENDER_NAME_CACHE_MAX,
+    Channel,
+    ChannelRegistry,
+    remember_sender_name,
+)
 from corvidae.channels._registers import shipped_register
 from corvidae.channels.split import split_message
 from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
@@ -254,26 +261,6 @@ def _client_class() -> type:
             self._plugin._enqueue(message, self.user.id if self.user is not None else None)
 
     return _DiscordClient
-
-
-#: How many sender display names one channel remembers (#513).
-SENDER_NAME_CACHE_MAX = 256
-
-
-def remember_sender_name(names: dict[str, str], sender: str, name: str) -> None:
-    """Record a sender's display name on the channel, keeping the map bounded.
-
-    A channel people talk in all day would otherwise keep a name for every
-    sender it has ever seen. The cache is a convenience for the next turn's
-    attribution, so the least recently seen entry goes when it is full (#513).
-    """
-    # Re-stating a name moves it to the newest end, so the person who talks
-    # most is not the first evicted for having been seen first.
-    if sender in names:
-        del names[sender]
-    elif len(names) >= SENDER_NAME_CACHE_MAX:
-        names.pop(next(iter(names)))
-    names[sender] = name
 
 
 #: Discord refuses a thread name over 100 characters, so the tool refuses it
