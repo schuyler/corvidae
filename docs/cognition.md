@@ -761,7 +761,7 @@ created only when the extension loads), `retrieval_log`,
 (one-row table persisting `last_run` for the retention job interval), and
 `message_fts` (regular FTS5 table over `message_log` content, maintained by
 `message_log_ai`/`message_log_au` triggers; queried and cleared by `corvidae
-redact` — not by `search_memory`, which queries `memory_fts`). All on the persistence connection in
+redact` — not by `search_memory`, which queries `memory_fts` and `memory_vec`). All on the persistence connection in
 `sessions.db`; `message_log` stays append-only except for the
 operator-only redaction tombstone.
 
@@ -926,15 +926,43 @@ from the record's own channel: `message_log` ids are global, so the range
 holds other channels' interleaved rows and the `channel_id` predicate keeps
 them out.
 
+**Search by meaning (#667).** With the vector path up, `search_memory`
+embeds the query (`kind="query"`) and ranks two lists over the same filters
+by reciprocal rank fusion, as passive retrieval does (#666):
+
+- an exact cosine scan of the filtered records that have a vector
+  (`memory JOIN memory_vec`, filtered in `WHERE`, `LIMIT 50`). A KNN would
+  cut before the filters and could leave a `channel=` or date-filtered
+  search with no vector hits;
+- the FTS5 keyword search, with common words left out.
+
+So a paraphrase ("what did we decide about the deploy schedule?") finds a
+record that shares no words with it ("agreed to ship on Thursdays"), and a
+name still finds the record that names it. Unlike passive retrieval, it
+ranks by raw cosine with no recency decay: a deliberate search wants the best
+answer, and the age is on every line. A keyword hit the scan didn't reach
+gets its cosine from its stored vector. A demoted record has no vector
+(retention deletes it), so with `include_demoted=True` it is found by
+keyword only and shows `kw` as its score. If the FTS query fails, a warning
+is logged and the cosine results stand alone.
+
+**Keyword fallback.** With no embedding profile, sqlite-vec not loaded, a
+stored encoder that differs from the configured one, or the query encoder
+failing, `search_memory` logs a warning naming itself and the cause and runs
+the keyword search alone. Its first output line is then
+`(keyword search only: semantic search unavailable)`, so the agent knows a
+paraphrase may have been missed. If that FTS5 query fails as well, it falls
+back to a `LIKE` scan over record summaries instead of returning an internal
+error. Tool searches write no `retrieval_log` rows.
+
 Both tools retry briefly when the memory schema is still being created by
-another task. If `search_memory`'s FTS5 query fails, it falls back to a
-`LIKE` scan over record summaries instead of returning an internal error.
+another task.
 
 **Tools:**
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
-| `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | FTS5 keyword search over `memory_fts`. Returns a numbered list `id. score (age)[flags] summary` sorted by FTS relevance, capped at approximately `max_tokens`. `channel` narrows to one channel's records by exact id; a channel with no records matches nothing. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
+| `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | Search by meaning and keywords (above). Returns a list `id. score (age)[flags] summary`, led by each memory id (for `recall_raw`), best match first, capped at approximately `max_tokens`. The score is the cosine similarity to the query (two decimals), or `kw` for a keyword hit with no vector. In keyword-only fallback the first line says so, results are in FTS order, and the score is the negated bm25 rank. `channel` narrows to one channel's records by exact id; a channel with no records matches nothing. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
 | `recall_raw` | `memory_id: int`, `max_tokens: int` (default `1000`) | Replays the raw `message_log` dialog for the record's `[msg_id_start, msg_id_end]` range using `WHERE channel_id = record.channel_id AND id BETWEEN ...` — the channel predicate is load-bearing because the `message_log` id sequence is global across all channels. Returns a participants header (`[memory N: messages S–E, participants: {...}]`) followed by verbatim `role: content` lines, truncated at `max_tokens` with an explicit marker. Works on demoted, superseded, and tombstoned records. Reaches any channel's record. **Bumps `retrieval_count` and `last_retrieved_at`** on the record — the bump is what makes the record eligible for re-promotion by the next retention job run. |
 
 **Recall-stat semantics:** `recall_raw` bumps the record's access stats;

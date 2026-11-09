@@ -1279,7 +1279,10 @@ it.
   records gain little, since bm25 normalises for length and fusion takes
   only one rank from the keyword list. Set
   `memory.retrieval.candidates: vector` to go back to embedding-only
-  candidates.
+  candidates. `search_memory` now searches by meaning as well as keywords
+  (#667). It reaches the same records it always did, filters and demoted
+  records included, but a paraphrase now finds what only a shared word found
+  before.
 
 - Untrusted text in a chat channel can talk the agent into silence. Where
   `SilencePlugin` is loaded, the system prompt of every IRC, Discord and

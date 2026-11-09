@@ -6,7 +6,9 @@ principle 14, GitHub issue #168); they reach further than passive retrieval in
 *status* (demoted and superseded records are visible).
 
 Tool semantics:
-  search_memory  — FTS keyword search; does NOT update access stats.
+  search_memory  — search by meaning and keywords (cosine scan fused with FTS5,
+                   #667), keyword-only when the vector path is down; does NOT
+                   update access stats.
   recall_raw     — verbatim dialog replay; DOES update access stats.
 """
 
@@ -22,13 +24,63 @@ from datetime import datetime, timezone
 from corvidae.context import MessageType
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.persistence import decode_message_row, parse_message_type
-from corvidae_cognition.memory import _format_age, _fts_match_query
+from corvidae_cognition.memory import _format_age, _fts_match_query, _fused_keys
 from corvidae.tool import Tool, tool_to_schema
 
 logger = logging.getLogger("corvidae.tools.memory_tools")
 
 # Rough characters-per-token approximation for the token cap.
 _CHARS_PER_TOKEN = 4
+
+# Most rows each search side contributes, as the keyword search always took.
+_SEARCH_LIMIT = 50
+
+# First line of a keyword-only result, so the agent knows a paraphrase may
+# have been missed (#667).
+KEYWORD_ONLY_NOTE = "(keyword search only: semantic search unavailable)"
+
+
+def _semantic_unavailable_reason(memory) -> str | None:
+    """Why the vector path can't serve a search, or None when it can."""
+    if memory._embedding_cfg is None:
+        return "no embedding profile configured"
+    if memory._encoder_mismatch:
+        return "stored encoder differs from the configured one"
+    if not memory._vec_available:
+        return "sqlite-vec not loaded"
+    return None
+
+
+def _format_results(
+    entries: list[tuple[int, str, str, float, int, int | None]], max_tokens: int,
+) -> str:
+    """Render (id, score text, summary, created_at, indexed, superseded_by)
+    entries as numbered lines, capped at roughly ``max_tokens``."""
+    now = time.time()
+    max_chars = max_tokens * _CHARS_PER_TOKEN
+    lines: list[str] = []
+    used_chars = 0
+    truncated = False
+    for mid, score_text, summary, created_at, indexed, superseded_by in entries:
+        # Status flags: superseded wins over demoted (both are indexed=0).
+        flags = []
+        if superseded_by is not None:
+            flags.append("[superseded]")
+        elif indexed == 0:
+            flags.append("[demoted]")
+        flag_str = (" " + " ".join(flags)) if flags else ""
+        age_str = _format_age(max(0.0, now - created_at))
+        line = f"{mid}. {score_text} ({age_str}){flag_str} {summary}"
+        # Stop before the line that would cross the cap.
+        if used_chars + len(line) + 1 > max_chars:
+            truncated = True
+            break
+        lines.append(line)
+        used_chars += len(line) + 1
+    if truncated:
+        lines.append("[truncated — token limit reached]")
+    return "\n".join(lines)
+
 
 # A None schema can mean another task is still creating it, so wait briefly
 # before reporting it unavailable.
@@ -66,6 +118,117 @@ class MemoryToolsPlugin(CorvidaePlugin):
                 await asyncio.sleep(_SCHEMA_RETRY_DELAY)
         return None
 
+    async def _keyword_rows(
+        self, db, query: str, match: str, where: str, params: list,
+    ) -> list[tuple] | None:
+        """FTS5 keyword rows (id, summary, created_at, indexed, superseded_by,
+        rank) best first, falling back to a LIKE scan when the FTS query
+        fails. None when the scan fails too."""
+        sql = (
+            "SELECT m.id, m.summary, m.created_at, m.indexed, m.superseded_by, "
+            "memory_fts.rank "
+            "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
+            f"WHERE memory_fts MATCH ? AND {where} "
+            f"ORDER BY rank LIMIT {_SEARCH_LIMIT}"
+        )
+        try:
+            async with db.execute(sql, (match, *params)) as cursor:
+                return list(await cursor.fetchall())
+        except Exception:
+            logger.warning(
+                "search_memory FTS query failed; falling back to summary scan",
+                exc_info=True,
+            )
+        # Degrade to a plain LIKE scan over summaries using the same word
+        # tokens, so a broken FTS index does not fail the search.
+        tokens = re.findall(r"\w+", query)[:20]
+        like_sql = (
+            "SELECT m.id, m.summary, m.created_at, m.indexed, "
+            "m.superseded_by, 0.0 FROM memory m "
+            f"WHERE {where} AND ("
+            + " OR ".join("m.summary LIKE ?" for _ in tokens)
+            + f") ORDER BY m.created_at DESC LIMIT {_SEARCH_LIMIT}"
+        )
+        like_params = [f"%{token}%" for token in tokens]
+        try:
+            async with db.execute(like_sql, (*params, *like_params)) as cursor:
+                return list(await cursor.fetchall())
+        except Exception:
+            logger.warning("search_memory fallback scan failed", exc_info=True)
+            return None
+
+    async def _semantic_entries(
+        self, db, memory, query: str, query_vector: list[float],
+        where: str, params: list,
+    ) -> list[tuple[int, str, str, float, int, int | None]]:
+        """Rank filtered records by meaning and keywords (#667).
+
+        Two lists over the same filters: an exact cosine scan of the records
+        that have a vector (filtered before the cut, which a KNN can't do),
+        and the stopworded FTS5 search. They are fused by reciprocal rank as
+        passive retrieval fuses them (#666), but on raw cosine with no
+        recency decay: a deliberate search wants the best answer, and age is
+        shown. A keyword hit outside the scan gets its cosine from its stored
+        vector; one with no vector (demoted, unembedded) is ranked by FTS
+        alone and shows ``kw``. A failing FTS side is logged and the scan's
+        results stand alone. Returns display entries, best first.
+        """
+        import sqlite_vec
+
+        # The cosine scan, filtered in WHERE so filters apply before LIMIT.
+        async with db.execute(
+            "SELECT m.id, m.summary, m.created_at, m.indexed, m.superseded_by, "
+            "vec_distance_cosine(v.embedding, ?) AS distance "
+            "FROM memory m JOIN memory_vec v ON v.memory_id = m.id "
+            f"WHERE {where} ORDER BY distance LIMIT {_SEARCH_LIMIT}",
+            (sqlite_vec.serialize_float32(query_vector), *params),
+        ) as cursor:
+            scanned = await cursor.fetchall()
+        records: dict[int, tuple] = {}
+        cosine: dict[int, float] = {}
+        for mid, summary, created_at, indexed, superseded_by, distance in scanned:
+            records[mid] = (summary, created_at, indexed, superseded_by)
+            cosine[mid] = 1.0 - distance
+
+        # The keyword side, in bm25 order; common words left out.
+        fts_order: list[int] = []
+        match = _fts_match_query(query, stopwords=True)
+        if match is not None:
+            try:
+                async with db.execute(
+                    "SELECT m.id, m.summary, m.created_at, m.indexed, m.superseded_by "
+                    "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
+                    f"WHERE memory_fts MATCH ? AND {where} "
+                    f"ORDER BY rank LIMIT {_SEARCH_LIMIT}",
+                    (match, *params),
+                ) as cursor:
+                    keyword = await cursor.fetchall()
+            except Exception:
+                logger.warning(
+                    "search_memory FTS query failed; falling back to the "
+                    "semantic results alone for %r", query, exc_info=True,
+                )
+                keyword = []
+            for mid, summary, created_at, indexed, superseded_by in keyword:
+                fts_order.append(mid)
+                records.setdefault(mid, (summary, created_at, indexed, superseded_by))
+            # Keyword hits the scan didn't reach: measure their cosine.
+            missing = [mid for mid in fts_order if mid not in cosine]
+            cosine.update(await memory._vec_similarities(db, query_vector, missing))
+
+        # Fuse: cosine list over measured records, FTS list in bm25 order.
+        pool = [{"id": mid, "score": cosine.get(mid, 0.0)} for mid in records]
+        keys = _fused_keys(pool, [], cosine, fts_order)
+        ranked = sorted(records, key=lambda mid: keys[mid], reverse=True)
+        return [
+            (
+                mid,
+                f"{cosine[mid]:.2f}" if mid in cosine else "kw",
+                records[mid][0], records[mid][1], records[mid][2], records[mid][3],
+            )
+            for mid in ranked
+        ]
+
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
         plugin = self
@@ -79,9 +242,13 @@ class MemoryToolsPlugin(CorvidaePlugin):
             include_demoted: bool = True,
             max_tokens: int = 2000,
         ) -> str:
-            """Search memory records using keyword search. Returns a numbered list with
-            score, age, flags ([demoted]/[superseded]), and summary. Does not update
-            access stats. Use include_demoted=False to restrict to active (indexed=1)
+            """Search memory records by meaning and keywords. Returns a numbered list
+            led by each memory id, with score (cosine similarity to the query, or
+            "kw" for a keyword hit with no embedding), age, flags
+            ([demoted]/[superseded]), and summary; best match first, by relevance
+            alone. Demoted records are found by keyword only. If semantic search
+            is unavailable the first line says so and results are keyword matches.
+            Does not update access stats. Use include_demoted=False to restrict to active (indexed=1)
             records. Use after/before (YYYY-MM-DD or ISO-8601, UTC) to filter by
             creation date. Use channel to restrict to one channel's records
             (an exact id such as irc:#lex). Use tags=[...] to filter by
@@ -155,73 +322,46 @@ class MemoryToolsPlugin(CorvidaePlugin):
                 params.extend(tags)
 
             where = " AND ".join(conditions) if conditions else "1"
-            sql = (
-                "SELECT m.id, m.summary, m.created_at, m.indexed, m.superseded_by, "
-                "memory_fts.rank "
-                "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
-                f"WHERE memory_fts MATCH ? AND {where} "
-                "ORDER BY rank LIMIT 50"
-            )
 
-            try:
-                async with db.execute(sql, (match, *params)) as cursor:
-                    rows = await cursor.fetchall()
-            except Exception:
-                logger.warning(
-                    "search_memory FTS query failed; falling back to summary scan",
-                    exc_info=True,
-                )
-                # Degrade to a plain LIKE scan over summaries using the same
-                # word tokens, so a broken FTS index does not fail the search.
-                tokens = re.findall(r"\w+", query)[:20]
-                like_sql = (
-                    "SELECT m.id, m.summary, m.created_at, m.indexed, "
-                    "m.superseded_by, 0.0 FROM memory m "
-                    f"WHERE {where} AND ("
-                    + " OR ".join("m.summary LIKE ?" for _ in tokens)
-                    + ") ORDER BY m.created_at DESC LIMIT 50"
-                )
-                like_params = [f"%{token}%" for token in tokens]
+            # Embed the query when the vector path is up (#667); otherwise,
+            # or when the encoder fails, search by keyword and say so.
+            query_vector: list[float] | None = None
+            reason = _semantic_unavailable_reason(memory)
+            if reason is None:
                 try:
-                    async with db.execute(like_sql, (*params, *like_params)) as cursor:
-                        rows = await cursor.fetchall()
+                    client = memory._llm().get_client("embedding")
+                    query_vector = (await client.embed([query], kind="query"))[0]
                 except Exception:
                     logger.warning(
-                        "search_memory fallback scan failed", exc_info=True
+                        "search_memory: the query encoder failed; falling back "
+                        "to keyword search for %r", query, exc_info=True,
                     )
-                    return "Error: search failed internally"
+            else:
+                logger.warning(
+                    "search_memory: semantic search unavailable (%s); using "
+                    "keyword search for %r", reason, query,
+                )
 
+            if query_vector is not None:
+                entries = await plugin._semantic_entries(
+                    db, memory, query, query_vector, where, params,
+                )
+                if not entries:
+                    return "No memories found matching your query."
+                return _format_results(entries, max_tokens)
+
+            rows = await plugin._keyword_rows(db, query, match, where, params)
+            if rows is None:
+                return "Error: search failed internally"
             if not rows:
-                return "No memories found matching your query."
-
-            now = time.time()
-            max_chars = max_tokens * _CHARS_PER_TOKEN
-            lines: list[str] = []
-            used_chars = 0
-            truncated = False
-            for mid, summary, created_at, indexed, superseded_by, rank in rows:
-                age = max(0.0, now - created_at)
-                flags = []
-                if superseded_by is not None:
-                    flags.append("[superseded]")
-                elif indexed == 0:
-                    flags.append("[demoted]")
-                flag_str = (" " + " ".join(flags)) if flags else ""
-                age_str = _format_age(age)
-                # FTS5 rank is negative (more negative = more relevant);
-                # display as a positive band-less score.
-                score = -(rank or 0.0)
-                line = f"{mid}. {score:.4f} ({age_str}){flag_str} {summary}"
-                if used_chars + len(line) + 1 > max_chars:
-                    truncated = True
-                    break
-                lines.append(line)
-                used_chars += len(line) + 1
-
-            if truncated:
-                lines.append("[truncated — token limit reached]")
-
-            return "\n".join(lines)
+                return f"{KEYWORD_ONLY_NOTE}\nNo memories found matching your query."
+            # FTS5 rank is negative (more negative = more relevant); display
+            # as a positive band-less score, as the keyword search always has.
+            entries = [
+                (mid, f"{-(rank or 0.0):.4f}", summary, created_at, indexed, superseded_by)
+                for mid, summary, created_at, indexed, superseded_by, rank in rows
+            ]
+            return f"{KEYWORD_ONLY_NOTE}\n" + _format_results(entries, max_tokens)
 
         async def recall_raw(
             memory_id: int,
