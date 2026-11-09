@@ -146,10 +146,12 @@ and falls back to the rubric prior and NULL valence), embeds every entry's
 narrative in one call on the `embedding` stage's profile (`llm.embedding` by default), and
 commits one memory row per entry (each with its vec row and any near-duplicate
 merge) together with the watermark advance in one compare-and-set
-section. The rows share the message range, `created_at`, importance,
+section. At insert the rows share the message range, `created_at`, importance,
 valence, participants and [record stamp](#record-stamps); each has its own
 narrative (stored as `summary`), `topic_tags` and embedding. A lost
-compare-and-set stores none of them.
+compare-and-set stores none of them. (A row that then merges with an older
+near-duplicate takes the wider range, the later date and the higher
+importance, as any merge does.)
 
 ### Corrupt `message_log` rows
 

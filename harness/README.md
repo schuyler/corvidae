@@ -385,7 +385,7 @@ range of some legacy `standalone` records, written before catch-up was
 segmented, so such a record's range can be rejected even though the daemon
 wrote it as one record, and the range of a record whose span absorbed a
 preceding segment with no dialog (catch-up folds that span into the next
-record). `--prompt-file` defaults to
+segment's records). `--prompt-file` defaults to
 `memory.consolidation_fork_prompt` from `--config`, then to
 `DEFAULT_CONSOLIDATION_FORK_PROMPT` (the text in
 `prompts/memory_consolidation_fork.md`), as the daemon resolves it, and

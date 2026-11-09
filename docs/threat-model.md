@@ -665,6 +665,14 @@ What bounds it:
   raises `ForkRefused`. The fork code has no path to `dispatch_tool_call`.
 - Fork output is parsed, not executed: JSON for consolidation, appraisal
   and critique, plain text for the summary.
+- The consolidation reply's own `importance` rating (#635) becomes the
+  record's importance prior, clamped to [0, 1], wherever appraisal doesn't
+  cover the range; the separate `rubric` call is then skipped. The rubric
+  call read the same dialog, so no new text reaches the prior, but the
+  number now comes from the fork that read the whole window. A window that
+  steers the fork to rate 1 (or any value at or above
+  `memory.retention.importance_floor`, 0.8 by default) makes that record
+  exempt from retention demotion. It stays subject to `redact`.
 - The fork instructions and `agent.forks.*` are static config (finding 2).
   That bound holds only while they stay locked; PRD principle 15 lets the
   operator unlock them (finding 13).
@@ -806,7 +814,7 @@ endpoint and takes it off the default's. Weigh the endpoint per stage:
 | `compaction` | The dropped prefix, in a fork or, on a miss or with forks off, as a plain view call. On a miss it is the uncapped prefix at the cut, since the window is over budget when compaction runs. |
 | `consolidation` | The same window as a fork, and for a range that has left the window the rebuilt view (PRD §3.8), one segment at a time, trimmed to the channel's `max_context_tokens` (an oversized row or tool cycle can still exceed it). |
 | `appraisal`, `critique` | The window at run time (the provenance check, the prefix ending at the exchange's reply), with the stage's instruction. These are forks, and a fork is a rendered view like any other: mapping the stage off the default chat profile sends the whole window, system prompt and tool schemas to the other endpoint. |
-| `rubric` | The importance prior's call: the text being scored. |
+| `rubric` | The importance prior's call: the text being scored. Skipped when the consolidation reply gave its own importance (#635). |
 | `subagent` | A subagent's task context and tool results. |
 | `embedding` | Memory embedding and retrieval queries, and retention. |
 

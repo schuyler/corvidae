@@ -341,7 +341,8 @@ def _string_tuple(value: object, key: str) -> tuple[str, ...]:
         return (value,)
     if not isinstance(value, list):
         raise ValueError(
-            f"{key} must be a list of strings, got {type(value).__name__}"
+            f"{key} must be a list of strings or a string, "
+            f"got {type(value).__name__}"
         )
     return tuple(str(v) for v in value)
 
@@ -391,9 +392,8 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
         else:
             summary = data.get("summary")
             if isinstance(summary, str) and summary.strip():
-                entries.append(
-                    ConsolidationEntry(summary.strip(), _string_tuple(data.get("topic_tags"), "topic_tags"))
-                )
+                tags = _string_tuple(data.get("topic_tags"), "topic_tags")
+                entries.append(ConsolidationEntry(summary.strip(), tags))
         # Participants are shared by every entry of the consolidation.
         participants = _string_tuple(data.get("participants"), "participants")
     except ValueError as exc:
