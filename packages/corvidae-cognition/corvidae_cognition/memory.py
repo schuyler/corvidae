@@ -1429,6 +1429,10 @@ class MemoryPlugin(CorvidaePlugin):
         # Channels with a turn or idle consolidation task in flight; a repeat
         # trigger (turn or idle) for one of them is skipped.
         self._idle_inflight: set[str] = set()
+        # The running turn or idle consolidation task per channel, with its
+        # trigger, so compaction can wait for it instead of forking the range
+        # again (#621).
+        self._inflight_tasks: dict[str, tuple[asyncio.Task, str]] = {}
         # Consecutive turn-fork failures per channel, for the backoff (#620).
         self._turn_failures: dict[str, _TurnFailures] = {}
         # Kernel clock and idle tracker; both set in on_start, or both None.
@@ -1693,6 +1697,20 @@ class MemoryPlugin(CorvidaePlugin):
             stage="consolidation", channel_id=channel.id, trigger="compaction"
         )
         try:
+            # A consolidation in flight would commit part of this range (#621).
+            # A turn task is at most one fork: wait for it, then fork only what
+            # lies past it. An idle task may be a multi-call catch-up, too long
+            # to hold the response path for: leave the range to the
+            # on_compaction task, which waits for it off the response path.
+            inflight = self._inflight_tasks.get(channel.id)
+            if inflight is not None and not inflight[0].done() and inflight[1] != "turn":
+                logger.debug(
+                    "consolidation fork at compaction left to the on_compaction "
+                    "task: an idle consolidation is in flight for channel %s",
+                    channel.id, extra={"channel_id": channel.id},
+                )
+                return
+            await self._wait_for_inflight(channel.id)
             db = await self._ensure_schema()
             if db is None:
                 return
@@ -1721,6 +1739,33 @@ class MemoryPlugin(CorvidaePlugin):
             )
         finally:
             reset_attribution(attribution_token)
+
+    def _track_inflight(self, channel_id: str, task: asyncio.Task, trigger: str) -> None:
+        """Record ``task`` as the channel's ``trigger`` (turn or idle)
+        consolidation, so compaction can wait for it (#621); the entry
+        clears when it ends."""
+        self._inflight_tasks[channel_id] = (task, trigger)
+
+        def _clear(done: asyncio.Task) -> None:
+            # Only drop the entry if it is still this task's.
+            entry = self._inflight_tasks.get(channel_id)
+            if entry is not None and entry[0] is done:
+                del self._inflight_tasks[channel_id]
+
+        task.add_done_callback(_clear)
+
+    async def _wait_for_inflight(self, channel_id: str) -> None:
+        """Wait for the channel's in-flight turn or idle consolidation, if any.
+
+        ``asyncio.wait`` rather than ``await task``: cancelling the waiter
+        (compaction's caller) must not cancel the consolidation task, and the
+        task's own failures are handled and logged inside it. Compaction then
+        reads the watermark that task left and consolidates the rest.
+        """
+        entry = self._inflight_tasks.get(channel_id)
+        if entry is None or entry[0].done():
+            return
+        await asyncio.wait({entry[0]})
 
     def _stash_put(self, key: tuple[str, int], value: tuple[int, Consolidation]) -> None:
         """Stash a fork record, evicting the oldest past the bound."""
@@ -1832,6 +1877,7 @@ class MemoryPlugin(CorvidaePlugin):
                 return
             task = self._spawn(self._consolidate_range(channel_id, max_id, "idle"))
             spawned = True
+            self._track_inflight(channel_id, task, "idle")
             # The task's end frees the channel, however it ends.
             task.add_done_callback(lambda _t: self._idle_inflight.discard(channel_id))
         finally:
@@ -1867,6 +1913,7 @@ class MemoryPlugin(CorvidaePlugin):
         # task's end frees it, however it ends.
         self._idle_inflight.add(channel.id)
         task.add_done_callback(lambda _t: self._idle_inflight.discard(channel.id))
+        self._track_inflight(channel.id, task, "turn")
 
     async def _turn_consolidation(self, channel, range_end: int) -> None:
         """Fork-consolidate ``(watermark, range_end]`` once the window tokens
@@ -2145,6 +2192,10 @@ class MemoryPlugin(CorvidaePlugin):
         range_desc = f"up to {range_end}"
         stored = "nothing was stored"
         try:
+            # Compaction lets an in-flight turn or idle consolidation finish
+            # first and takes only what lies past it (#621).
+            if trigger == "compaction":
+                await self._wait_for_inflight(channel_id)
             db = await self._ensure_schema()
             if db is None:
                 return

@@ -434,14 +434,12 @@ Not designed here; listed so the change can be judged:
 - **Compaction's fork off the response path**, by forking against a
   snapshot of the pre-compaction window in a background task. Needs the
   fork API to accept a rendered message list.
-- **Compaction waiting for an in-flight turn task** on the same range
-  instead of forking it again. Both run and `_commit` keeps one reply.
-  The cost is duplicate decode on the response path, and, when the turn
-  commit lands between the compaction task's watermark read and its
-  commit, the compaction reply is discarded and the rows past the turn's
-  range (now out of the window) wait for the next idle or compaction.
-  The same race exists between idle and compaction today; the turn
-  trigger makes it more frequent.
+- ~~**Compaction waiting for an in-flight turn task**~~ Done in #621:
+  `before_compaction` waits for an in-flight turn task and forks only the
+  rest; the `on_compaction` task waits for an in-flight turn or idle task.
+  Left open: an idle firing that has claimed the channel but not yet
+  spawned its task, and a turn or idle task started while compaction's
+  task runs, are still settled by the compare-and-set (one reply kept).
 - ~~**Exclusion after a cross-channel merge.**~~ Done in #627: the
   survivor is marked `merged_foreign` and never window-excluded. Originally: A cross-channel near-dup
   merge replaces the other channel's older record with one in the current
