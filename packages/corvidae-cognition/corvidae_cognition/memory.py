@@ -58,7 +58,8 @@ Changes to ``idle_consolidate_after``, ``consolidate_after_tokens`` and
 ``retention.*`` take effect at restart: the idle watch and retention timer
 are set when the plugin starts, and ``consolidate_after_tokens`` is read
 once at startup.
-A channel that never goes quiet is consolidated through compaction.
+A channel that never goes quiet is consolidated at turn ends (forks on)
+and through compaction.
 """
 
 from __future__ import annotations
@@ -1601,7 +1602,8 @@ class MemoryPlugin(CorvidaePlugin):
             watermark = await self._get_watermark(db, channel.id)
         except Exception:
             logger.warning(
-                "turn consolidation watermark read failed for channel %s; "
+                "turn consolidation could not read the watermark for channel %s "
+                "(schema setup or watermark query failed); "
                 "the next turn trigger retries", channel.id, exc_info=True,
             )
             return
@@ -1829,13 +1831,15 @@ class MemoryPlugin(CorvidaePlugin):
         """Consolidate message_log rows (watermark, range_end] into records.
 
         A range wholly in the live window is one record (a fork, or a skip).
-        A range that has left it is written from the agent's rebuilt view on
+        A range that has left it (compaction and idle; a turn range that has
+        left it is skipped, see ``_live_record``) is written from the agent's
+        rebuilt view on
         the consolidation stage's client, one record per segment (split at summary boundaries
         and wherever a segment would exceed the channel's budget); each
         segment commits and moves the watermark by itself.
 
-        Overlap safety (trap #6): the triggers (compaction, idle, turn) WILL race to the same
-        range. The watermark is read optimistically before the LLM work,
+        Overlap safety (trap #6): the triggers (compaction, idle, turn)
+        WILL race to the same range. The watermark is read optimistically before the LLM work,
         then re-checked under the DB lock in the same atomic section as the
         insert + watermark advance; any concurrent advance discards this
         task's record (and, for a multi-segment range, the rest of it).

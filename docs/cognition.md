@@ -111,8 +111,9 @@ Three triggers, one watermarked code path:
   tail consolidated, and again each period while the quiet lasts. Channels
   with history but no traffic since boot count as quiet since their last
   message, so a restart does not lose them. A channel that never goes
-  quiet never reaches this trigger; it is consolidated through compaction,
-  as dialog leaves the window.
+  quiet never reaches this trigger; it is consolidated at the end of a
+  turn (above) when forks are on for `consolidation`, and through
+  compaction as dialog leaves the window.
 
 All three spawn a tracked plugin-owned `asyncio.create_task` (never the
 TaskQueue — every TaskQueue completion wakes the main model). The turn and
