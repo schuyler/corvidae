@@ -974,7 +974,8 @@ only through the funnel.
 
 1. Consolidation runs on compaction (the dropped range, carried on the hook
    payload, never reconstructed from timestamps; a range that has left the
-   window is written from its rendered view, §3.8) and on idle (channels
+   window is written from its rendered view, or, for the range a
+   compaction drops, a fork of the window as it stood before, §3.8) and on idle (channels
    idle, per §3.1.16, for `memory.idle_consolidate_after`), and at the end
    of a turn: once the agent loop has produced its final reply with no
    tool calls pending, and the channel's un-consolidated window messages
@@ -1311,7 +1312,9 @@ the channel's `reasoning_history`; a range too long for one budget is
 written as several views. A fork is the view of the live window sent with
 the agent's tools under the stage's profile, which is what lets it
 reuse the cache, as long as that profile renders the prompt as the
-profile of the window's main turns does. The view call is the same view
+profile of the window's main turns does. A compaction's consolidation may
+instead fork the window as it stood when that compaction fired, a copy
+taken then, so the fork runs after the turn rather than on it. The view call is the same view
 sent under the same profile with no tools, and it is
 allowed for exactly two uses: compaction's summary on a fork miss, and
 consolidation of a range that has left the window. Judgment
@@ -1354,7 +1357,8 @@ design, not requirement. The requirements are outcomes:
    Compaction is the exception: it is never skipped; on a
    miss it makes the view call, then keeps §3.3's can't-fail fallback. A
    range that has left the window, such as catch-up consolidation, is
-   written by the view call, and a replay sends the request the running
+   written by the view call, except the range a compaction drops, which is
+   written by a fork of that pre-compaction copy when one was taken, and a replay sends the request the running
    agent would. Seeding and imports have no window and run standalone (a windowless call,
    unlike the view call, which is also `mode = standalone` in `usage_log`).
    Subagents never fork.

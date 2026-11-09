@@ -572,3 +572,28 @@ async def test_fork_attribution_names_the_mapped_profile(mapped_agent):
     await plugin.fork(channel, INSTRUCTION, stage="appraisal")
 
     assert [r["profile"] for r in recorder.responses] == ["forks", "main"]
+
+
+async def test_fork_renders_a_snapshot_not_the_live_window(forking_agent):
+    """#628: a fork given a snapshot renders the window as it stood when the
+    snapshot was taken, even after the live window has changed (a compaction
+    replaced it); the live window is not touched."""
+    from corvidae.fork import snapshot_window
+
+    plugin, channel, client = forking_agent
+    channel.pending_tool_call_ids = {"zz"}
+    expected = channel.conversation.build_prompt(
+        frozenset({"zz"}), mid_conversation_system_role="user"
+    )[:3] + [{"role": "user", "content": INSTRUCTION}]
+    snapshot = snapshot_window(channel.conversation, frozenset(channel.pending_tool_call_ids))
+    # The live window changes after the snapshot: a compaction replaced it.
+    channel.conversation.messages[:] = [
+        {"role": "assistant", "content": "[Summary] it was about wifi"}
+    ]
+    channel.pending_tool_call_ids = set()
+    after = [dict(m) for m in channel.conversation.messages]
+
+    await plugin.fork(channel, INSTRUCTION, stage="consolidation", cut=2, snapshot=snapshot)
+
+    assert client.chat.call_args.args[0] == expected
+    assert channel.conversation.messages == after

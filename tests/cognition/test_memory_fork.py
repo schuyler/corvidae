@@ -122,6 +122,8 @@ async def test_stash_from_a_different_watermark_is_discarded(env):
     memory, stub, channel, db, ids = env
     _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON))
     await memory.before_compaction(channel=channel, compacted_ids=ids[:3], cut=3)
+    # Let the background fork (#628) read the watermark and finish first.
+    await memory.wait_for_background_tasks()
     mem_db = await memory._ensure_schema()
     await memory._set_watermark(mem_db, channel.id, ids[0])
     await mem_db.commit()
@@ -143,6 +145,8 @@ async def test_summary_rows_in_range_do_not_block_the_fork(env):
     later = ids + await seed_dialog(memory.pm.get_plugin("persistence"), channel, [("user", "more")])
     channel.conversation = window_of(channel.id, later, summary=True)
     await memory.before_compaction(channel=channel, compacted_ids=later[:5], cut=6)
+    # The compaction fork runs in the background (#628).
+    await memory.wait_for_background_tasks()
     assert len(agent.calls) == 1
 
 

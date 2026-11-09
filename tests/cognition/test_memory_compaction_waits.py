@@ -45,24 +45,22 @@ def ranges(rows: list[dict]) -> set[tuple[int, int, str]]:
     return {(r["msg_id_start"], r["msg_id_end"], r["trigger"]) for r in rows}
 
 
-async def test_compaction_fork_waits_for_the_turn_and_forks_the_rest(make_env):  # noqa: F811
-    """Acceptance: turn over 1-2 in flight, compaction over 1-4. before_compaction
-    blocks until the turn commits, then forks only 3-4; no reply is discarded
-    and no view call is made."""
+async def test_compaction_fork_waits_for_the_turn_in_the_background(make_env):  # noqa: F811
+    """Acceptance (#621, as moved off the response path by #628): turn over
+    1-2 in flight, compaction over 1-4. before_compaction returns at once;
+    its background fork waits for the turn to commit, then forks only 3-4;
+    no reply is discarded and no view call is made."""
     env = await start_gated_turn(make_env)
     memory, ids = env.memory, env.ids
 
-    # Compaction fires while the turn fork is still blocked.
-    before = asyncio.create_task(
-        memory.before_compaction(channel=env.channel, compacted_ids=ids, cut=len(ids))
+    # Compaction fires while the turn fork is still blocked: no waiting.
+    await asyncio.wait_for(
+        memory.before_compaction(channel=env.channel, compacted_ids=ids, cut=len(ids)),
+        timeout=1,
     )
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert not before.done(), "before_compaction must wait for the in-flight turn task"
 
     # The turn fork answers; compaction proceeds over what is left.
     env.agent.gate.set()
-    await asyncio.wait_for(before, timeout=5)
     await memory.on_compaction(
         channel=env.channel, summary_msg={}, retain_count=1, compacted_ids=ids
     )
@@ -133,18 +131,19 @@ async def test_compaction_proceeds_when_the_inflight_task_fails(make_env):  # no
 
 
 async def test_cancelling_compaction_leaves_the_turn_task_running(make_env):  # noqa: F811
-    """Cancelling before_compaction while it waits must not cancel the turn
-    task it waits on: the turn still commits its record."""
+    """Cancelling compaction's background fork while it waits must not
+    cancel the turn task it waits on: the turn still commits its record."""
     env = await start_gated_turn(make_env)
     memory, ids = env.memory, env.ids
 
-    before = asyncio.create_task(
-        memory.before_compaction(channel=env.channel, compacted_ids=ids, cut=len(ids))
-    )
+    await memory.before_compaction(channel=env.channel, compacted_ids=ids, cut=len(ids))
+    # Let the stashed background fork start and park on the turn task,
+    # then cancel it there.
     for _ in range(5):
         await asyncio.sleep(0)
-    before.cancel()
-    await asyncio.gather(before, return_exceptions=True)
+    [pending] = list(memory._fork_stash.values())
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
 
     env.agent.gate.set()
     await memory.wait_for_background_tasks()
@@ -153,10 +152,9 @@ async def test_cancelling_compaction_leaves_the_turn_task_running(make_env):  # 
 
 
 async def test_inflight_idle_is_waited_for_off_the_response_path(make_env):  # noqa: F811
-    """An idle task can be a multi-call catch-up, so before_compaction (on
-    the response path) doesn't wait for it: it returns without forking. The
-    on_compaction task waits for the idle task instead, then consolidates
-    only the rest."""
+    """An in-flight idle task (possibly a multi-call catch-up) is waited for
+    in the background: before_compaction returns at once, and its snapshot
+    fork takes only what lies past the idle task's watermark."""
     agent = GatedForkAgent({"consolidation"}, text=REPLY)
     env = await make_env(tokens_of(DIALOG), agent=agent)
     env.memory._dup_threshold = 1.01
@@ -171,17 +169,16 @@ async def test_inflight_idle_is_waited_for_off_the_response_path(make_env):  # n
         channel.id, ids, contents=[c for _, c in DIALOG + DIALOG[:2]]
     )
 
-    # Compaction over all six: the inline half returns at once, no fork.
+    # Compaction over all six: the hook returns at once.
     await asyncio.wait_for(
         memory.before_compaction(channel=channel, compacted_ids=ids, cut=len(ids)),
         timeout=1,
     )
-    assert memory._fork_stash == {}
     await memory.on_compaction(
         channel=channel, summary_msg={}, retain_count=1, compacted_ids=ids
     )
 
-    # The idle fork answers; the compaction task then views only the rest.
+    # The idle fork answers; the snapshot fork then takes only the rest.
     agent.gate.set()
     await memory.wait_for_background_tasks()
     rows = await fetch_stamped_memories(env.db)
@@ -189,5 +186,5 @@ async def test_inflight_idle_is_waited_for_off_the_response_path(make_env):  # n
         (ids[0], ids[3], "idle"),
         (ids[4], ids[5], "compaction"),
     }
-    assert len(agent.calls) == 1
-    assert len(view_requests(env.stub)) == 1
+    assert len(agent.calls) == 2
+    assert view_requests(env.stub) == []

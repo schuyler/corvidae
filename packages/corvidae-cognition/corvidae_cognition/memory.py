@@ -90,11 +90,13 @@ from corvidae.context import ContextWindow, MessageType, count_tokens, message_t
 from corvidae.fork import (
     ForkRefused,
     ViewInputs,
+    WindowSnapshot,
     build_fork_prompt,
     fork_agent,
     quote,
     snap_cut_forward,
     snap_cut_to_tool_boundary,
+    snapshot_window,
     view_agent,
     view_call,
     window_db_ids,
@@ -1404,11 +1406,12 @@ class MemoryPlugin(CorvidaePlugin):
         self._memory_cfg: dict = {}
         self._idle_consolidate_after: float = DEFAULT_IDLE_CONSOLIDATE_AFTER
         self._consolidation_fork_prompt: str = DEFAULT_CONSOLIDATION_FORK_PROMPT
-        # Fork records made in before_compaction, waiting for the
-        # on_compaction task: (channel_id, range_end) -> (watermark, record).
-        self._fork_stash: collections.OrderedDict[tuple[str, int], tuple[int, Consolidation]] = (
-            collections.OrderedDict()
-        )
+        # Compaction fork tasks spawned in before_compaction, awaited by the
+        # on_compaction task: (channel_id, range_end) -> task returning
+        # (watermark, record) or None (#628).
+        self._fork_stash: collections.OrderedDict[
+            tuple[str, int], asyncio.Task[tuple[int, Consolidation] | None]
+        ] = collections.OrderedDict()
         self._retrieval_k: int = DEFAULT_RETRIEVAL_K
         self._band_strong: float = DEFAULT_BAND_STRONG
         self._band_moderate: float = DEFAULT_BAND_MODERATE
@@ -1676,67 +1679,82 @@ class MemoryPlugin(CorvidaePlugin):
 
     @hookimpl
     async def before_compaction(self, channel, compacted_ids: list[int], cut: int) -> None:
-        """Fork the compaction-time record while the prefix is still live.
+        """Snapshot the window and fork the compaction-time record off the
+        response path (#628).
 
-        With forks on for "consolidation", runs the record fork over the
-        window's dropped prefix (``cut``) and stashes it under
-        ``(channel_id, max(compacted_ids))`` for the on_compaction task.
-        Runs inline (the hook is awaited before replace_with_summary), so
-        it costs the response path one more generation. Fail-soft: any
-        miss (range not in the window, fork failed) leaves no stash and the
-        on_compaction task uses the background view: after the drop the
-        range has left the window, so it is rebuilt from message_log (#320).
+        With forks on for "consolidation", copies the window as it stands
+        (before replace_with_summary drops the prefix) and spawns a task that
+        forks that copy over the dropped prefix (``cut``); the task is
+        stashed under ``(channel_id, max(compacted_ids))`` for the
+        on_compaction task, which awaits it. Nothing here awaits, so the turn
+        doesn't wait for the fork. Fail-soft: any miss (range not in the
+        window, fork failed) yields no record and the on_compaction task uses
+        the background view, rebuilt from message_log (#320).
         """
         if not compacted_ids:
             return
         agent = fork_agent(self.pm, "consolidation")
         if agent is None:
             return
+        conv = getattr(channel, "conversation", None)
+        if conv is None:
+            return
+        # Copy now, before the first await: this is the window the fork sees.
+        snapshot = snapshot_window(conv, frozenset(channel.pending_tool_call_ids))
         range_end = max(compacted_ids)
+        task = self._spawn(
+            self._compaction_fork(agent, channel, snapshot, cut, range_end)
+        )
+        self._stash_put((channel.id, range_end), task)
+
+    async def _compaction_fork(
+        self, agent, channel, snapshot: WindowSnapshot, cut: int, range_end: int,
+    ) -> tuple[int, Consolidation] | None:
+        """The compaction-time record from a fork of ``snapshot`` (#628).
+
+        Runs in the background: waits for an in-flight turn or idle
+        consolidation (#621), reads the watermark it left, checks the rest of
+        the range is in the snapshot's prefix, and forks. Returns
+        ``(watermark, record)``, or None on any miss (logged), in which case
+        the on_compaction task makes the view call.
+        """
         attribution_token = set_attribution(
             stage="consolidation", channel_id=channel.id, trigger="compaction"
         )
         try:
-            # A consolidation in flight would commit part of this range (#621).
-            # A turn task is at most one fork: wait for it, then fork only what
-            # lies past it. An idle task may be a multi-call catch-up, too long
-            # to hold the response path for: leave the range to the
-            # on_compaction task, which waits for it off the response path.
-            inflight = self._inflight_tasks.get(channel.id)
-            if inflight is not None and not inflight[0].done() and inflight[1] != "turn":
-                logger.debug(
-                    "consolidation fork at compaction left to the on_compaction "
-                    "task: an idle consolidation is in flight for channel %s",
-                    channel.id, extra={"channel_id": channel.id},
-                )
-                return
+            # A consolidation in flight would commit part of this range: let
+            # it, then fork only what lies past it (#621).
             await self._wait_for_inflight(channel.id)
             db = await self._ensure_schema()
             if db is None:
-                return
+                return None
             watermark = await self._get_watermark(db, channel.id)
             if range_end <= watermark:
-                return
+                return None
             rows = await fetch_range_rows(db, channel.id, watermark, range_end)
             if not dialog_from_rows(rows, channel.id):
-                return
+                return None
             # The range must be wholly in the prefix the fork will see.
-            conv = getattr(channel, "conversation", None)
-            contained = self._range_in_window(conv, rows, cut) if conv is not None else None
+            contained = self._range_in_window(snapshot.conv, rows, cut)
             if contained is None:
                 logger.debug(
-                    "consolidation range not in the window",
+                    "consolidation range not in the compaction snapshot",
                     extra={"channel_id": channel.id},
                 )
-                return
-            record = await self._fork_record(agent, channel, contained, cut)
-            self._stash_put((channel.id, range_end), (watermark, record))
+                return None
+            record = await self._fork_record(
+                agent, channel, contained, cut, snapshot=snapshot
+            )
+            return watermark, record
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.warning(
                 "consolidation fork at compaction failed for channel %s; "
                 "the on_compaction task uses the background view", channel.id,
                 exc_info=True, extra={"channel_id": channel.id},
             )
+            return None
         finally:
             reset_attribution(attribution_token)
 
@@ -1767,12 +1785,14 @@ class MemoryPlugin(CorvidaePlugin):
             return
         await asyncio.wait({entry[0]})
 
-    def _stash_put(self, key: tuple[str, int], value: tuple[int, Consolidation]) -> None:
-        """Stash a fork record, evicting the oldest past the bound."""
-        self._fork_stash[key] = value
+    def _stash_put(self, key: tuple[str, int], task: asyncio.Task) -> None:
+        """Stash a compaction fork task, evicting (and cancelling) the oldest
+        past the bound."""
+        self._fork_stash[key] = task
         self._fork_stash.move_to_end(key)
         while len(self._fork_stash) > FORK_STASH_MAXSIZE:
-            self._fork_stash.popitem(last=False)
+            _key, evicted = self._fork_stash.popitem(last=False)
+            evicted.cancel()
 
     @staticmethod
     def _range_in_window(
@@ -1793,7 +1813,8 @@ class MemoryPlugin(CorvidaePlugin):
         return prefix, dialog_ids
 
     async def _fork_record(
-        self, agent, channel, contained: tuple[list[dict], set[int]], cut: int | None
+        self, agent, channel, contained: tuple[list[dict], set[int]], cut: int | None,
+        snapshot: WindowSnapshot | None = None,
     ) -> Consolidation:
         """The memory record from a fork of ``channel``'s window.
 
@@ -1807,9 +1828,12 @@ class MemoryPlugin(CorvidaePlugin):
             self._consolidation_fork_prompt + "\n\n"
             + _fork_range_sentence(prefix, dialog_ids)
         )
+        # A snapshot (compaction, #628) is passed through; otherwise the
+        # fork renders the live window.
+        fork_kwargs = {"snapshot": snapshot} if snapshot is not None else {}
         result = await agent.fork(
             channel, instruction, stage="consolidation", cut=cut,
-            extra_body=CONSOLIDATION_EXTRA_BODY,
+            extra_body=CONSOLIDATION_EXTRA_BODY, **fork_kwargs,
         )
         # Stamp the fork instruction (not the code-generated range
         # sentence, which quotes conversation text) and the model sent.
@@ -2715,7 +2739,10 @@ class MemoryPlugin(CorvidaePlugin):
         compaction consolidates it).
         """
         if trigger == "compaction":
-            stashed = self._fork_stash.pop((channel_id, range_end), None)
+            # The snapshot fork runs in the background (#628): await it here,
+            # off the response path. Its failures are logged inside it.
+            pending = self._fork_stash.pop((channel_id, range_end), None)
+            stashed = await pending if pending is not None else None
             if stashed is not None and stashed[0] == watermark:
                 return "record", stashed[1]
         elif trigger in ("idle", "turn"):
