@@ -325,16 +325,24 @@ class Consolidation:
     stamp: RecordStamp                        # trigger still None; _commit sets it
 
 
-def _string_tuple(value: object) -> tuple[str, ...]:
-    """Read ``value`` (absent, None or a list) as a tuple of strings.
+def _string_tuple(value: object, key: str) -> tuple[str, ...]:
+    """Read ``value`` (absent, None, a string or a list) as a tuple of strings.
 
-    Raises ValueError for anything else, so a wrong-typed array makes the
-    reply unusable rather than escaping as a TypeError.
+    A lone string reads as a one-item list (a small model's "participants":
+    "kestrel"). Raises ValueError naming ``key`` for anything else, so a
+    wrong-typed array makes the reply unusable rather than escaping as a
+    TypeError.
     """
+    # Absent and null both mean "none given".
     if value is None:
         return ()
+    # A bare string is one item, not a sequence of characters.
+    if isinstance(value, str):
+        return (value,)
     if not isinstance(value, list):
-        raise ValueError(f"expected a list, got {type(value).__name__}")
+        raise ValueError(
+            f"{key} must be a list of strings, got {type(value).__name__}"
+        )
     return tuple(str(v) for v in value)
 
 
@@ -348,7 +356,8 @@ def _coerce_importance(value: object) -> float | None:
         return None
     try:
         number = float(value)
-    except ValueError:
+    except (ValueError, OverflowError):
+        # Unparseable text, or an integer too large for a float.
         return None
     return number if math.isfinite(number) else None
 
@@ -365,6 +374,7 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
     data = _parse_json_block(text)
     entries: list[ConsolidationEntry] = []
     try:
+        # New shape: keep each entry with a non-blank narrative, in order.
         if "entries" in data:
             items = data["entries"]
             for item in items if isinstance(items, list) else []:
@@ -372,18 +382,20 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
                 if not isinstance(narrative, str) or not narrative.strip():
                     continue
                 try:
-                    tags = _string_tuple(item.get("topic_tags"))
+                    tags = _string_tuple(item.get("topic_tags"), "topic_tags")
                 except ValueError:
                     # A malformed entry is dropped like any other.
                     continue
                 entries.append(ConsolidationEntry(narrative.strip(), tags))
+        # Legacy shape (no "entries" key): the summary is the one entry.
         else:
             summary = data.get("summary")
             if isinstance(summary, str) and summary.strip():
                 entries.append(
-                    ConsolidationEntry(summary.strip(), _string_tuple(data.get("topic_tags")))
+                    ConsolidationEntry(summary.strip(), _string_tuple(data.get("topic_tags"), "topic_tags"))
                 )
-        participants = _string_tuple(data.get("participants"))
+        # Participants are shared by every entry of the consolidation.
+        participants = _string_tuple(data.get("participants"), "participants")
     except ValueError as exc:
         raise ValueError(f"consolidation output is malformed: {exc}") from exc
     if not entries:
