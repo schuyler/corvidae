@@ -2016,8 +2016,10 @@ default priority) returned non-None first. The caller does not use the return va
    (#56). The role is persisted with the summary row, so a reload renders
    the same prompt.
 8. Fire `before_compaction(channel, compacted_ids, cut)` (broadcast,
-   awaited) while the window is still whole. `MemoryPlugin` forks the
-   compaction-time memory record here. Failures are logged and ignored.
+   awaited) while the window is still whole. `MemoryPlugin` copies the
+   window here and starts the background fork of the compaction-time
+   memory record (#628), without waiting for it. Failures are logged and
+   ignored.
 9. Call `conversation.replace_with_summary(summary_msg, retain_count)`.
 10. Fire `on_compaction(channel, summary_msg, retain_count, compacted_ids)`
    (broadcast) so persistence plugins can update the DB.

@@ -247,8 +247,8 @@ What happens to the other triggers falls out of the watermark:
   copy of the window taken in `before_compaction` and forked in the
   background since #628. With the turn trigger running, the watermark
   is usually within N of the window's end and compaction keeps far more
-  than N, so the range is usually empty and `before_compaction` returns
-  early. It is large when compaction fires in
+  than N, so the range is usually empty and the background fork task
+  returns without forking (`before_compaction` still copies the window). It is large when compaction fires in
   the middle of a long tool loop, since the turn trigger doesn't fire
   inside the loop;
   then one fork writes several entries over it. The entries are small
