@@ -191,7 +191,20 @@ def _write_config(tmp_path, disabled: list[str]) -> str:
     return str(path)
 
 
-async def test_disabling_web_tools_keeps_shell_and_file_tools(tmp_path) -> None:
+@pytest.fixture
+def keep_test_logging(monkeypatch):
+    """Stop Runtime.start() from reconfiguring logging.
+
+    configure_logging replaces the root handlers and stops the corvidae
+    logger propagating, which hides every later record from caplog and leaks
+    a handler into later tests (same patch as tests/test_runtime.py).
+    """
+    monkeypatch.setattr("corvidae.runtime.configure_logging", lambda **kwargs: None)
+
+
+async def test_disabling_web_tools_keeps_shell_and_file_tools(
+    tmp_path, keep_test_logging
+) -> None:
     """plugins.disabled: [web_tools] drops only the web tools (R5)."""
     from corvidae.runtime import Runtime
 
@@ -206,16 +219,18 @@ async def test_disabling_web_tools_keeps_shell_and_file_tools(tmp_path) -> None:
 
 
 async def test_unknown_disabled_name_warns_with_key_value_and_choices(
-    tmp_path, caplog
+    tmp_path, caplog, keep_test_logging
 ) -> None:
     """A plugins.disabled entry naming no plugin logs one WARNING naming the
     key, the value and the installed plugins (R6)."""
     from corvidae.runtime import Runtime
 
     rt = Runtime(config_path=_write_config(tmp_path, ["no_such_plugin"]))
-    with caplog.at_level(logging.WARNING, logger="corvidae.runtime"):
-        await rt.start()
-    await rt.stop()
+    try:
+        with caplog.at_level(logging.WARNING, logger="corvidae.runtime"):
+            await rt.start()
+    finally:
+        await rt.stop()
 
     warnings = [
         r.getMessage() for r in caplog.records
@@ -226,14 +241,18 @@ async def test_unknown_disabled_name_warns_with_key_value_and_choices(
     assert "shell_tools" in warnings[0], "the warning must list the installed plugins"
 
 
-async def test_known_disabled_name_does_not_warn(tmp_path, caplog) -> None:
+async def test_known_disabled_name_does_not_warn(
+    tmp_path, caplog, keep_test_logging
+) -> None:
     """A real plugin name in plugins.disabled raises no unknown-name warning (R6)."""
     from corvidae.runtime import Runtime
 
     rt = Runtime(config_path=_write_config(tmp_path, ["web_tools"]))
-    with caplog.at_level(logging.WARNING, logger="corvidae.runtime"):
-        await rt.start()
-    await rt.stop()
+    try:
+        with caplog.at_level(logging.WARNING, logger="corvidae.runtime"):
+            await rt.start()
+    finally:
+        await rt.stop()
 
     # Match the quoted value, not the installed-plugins list every unknown-name
     # warning carries (a kernel-only install warns for the cognition names).
