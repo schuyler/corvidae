@@ -29,7 +29,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 
 | Plugin | Entry point | What it does |
 |---|---|---|
-| `MemoryPlugin` | `memory` | Consolidates compacted conversation into durable memories and retrieves them into context; owns `sqlite-vec` |
+| `MemoryPlugin` | `memory` | Consolidates conversation (at turn ends, on idle, and at compaction) into durable memories and retrieves them into context; owns `sqlite-vec` |
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
@@ -79,8 +79,27 @@ of file-based fact scraping.
 
 #### Consolidation (write path)
 
-Two triggers, one watermarked code path:
+Three triggers, one watermarked code path:
 
+- **End of a turn** (`on_agent_response`, #636) — when a final reply
+  leaves enough new conversation in the window, consolidation forks it
+  then, instead of waiting for compaction or quiet. "Enough" is
+  `memory.consolidate_after_tokens` (default 4000) window tokens, counted
+  with the window's own estimator (`message_tokens`) over the window
+  messages above the watermark and at or below `range_end`, skipping
+  `CONTEXT` (admitted memories aren't new conversation), `SUMMARY` and
+  `UNSENT` rows. `range_end` is the newest `_db_id` in the window when the
+  hook runs and is fixed there, so a message persisted after the reply
+  isn't in the range. The hook runs before the reply is sent, so it awaits
+  nothing: it checks, fixes `range_end` and spawns the task; the task
+  reads the watermark and does the counting. This trigger only ever forks.
+  With forks off for `consolidation` it does nothing and logs nothing, and
+  a reply produced while tool calls are still outstanding isn't a turn
+  boundary, so it doesn't fire then either. A turn range that isn't wholly
+  in the live window (the watermark lags behind the window, say after a
+  failed compaction consolidation) is skipped with one DEBUG line and
+  never goes to catch-up: idle or compaction consolidates it, and a
+  warning would repeat every turn until one of them does.
 - **`on_compaction(channel, summary_msg, retain_count, compacted_ids)`** —
   the moment dialog leaves the active window it enters long-term memory.
   The compacted `message_log` id range rides the hook payload (rowid
@@ -92,18 +111,29 @@ Two triggers, one watermarked code path:
   tail consolidated, and again each period while the quiet lasts. Channels
   with history but no traffic since boot count as quiet since their last
   message, so a restart does not lose them. A channel that never goes
-  quiet never reaches this trigger; it is consolidated through compaction,
-  as dialog leaves the window.
+  quiet never reaches this trigger; it is consolidated at the end of a
+  turn (above) when forks are on for `consolidation`, and through
+  compaction as dialog leaves the window.
 
-Both spawn a tracked plugin-owned `asyncio.create_task` (never the
-TaskQueue — every TaskQueue completion wakes the main model). The task
+All three spawn a tracked plugin-owned `asyncio.create_task` (never the
+TaskQueue — every TaskQueue completion wakes the main model). The turn and
+idle triggers share one in-flight set: while a channel has a turn or idle
+task running (or an idle firing is still setting one up), neither trigger
+starts another for it, so at most one turn-or-idle consolidation runs per
+channel. Compaction doesn't consult the set, since it must never be
+skipped; an overlap with it is settled by the watermark compare-and-set
+below. The task
 reads the per-channel **consolidation watermark**, fetches the working
 range, produces the entries (first-person narrative with epistemic framing,
 JSON out) — from a fork of the live window when the range is in it (see
 [Forks](design.md#forks)), else from the agent's rebuilt view of the range
-sent as the `consolidation` stage (catch-up, below); an idle range that is in the
-window but can't be forked is skipped instead, with a warning, and retried
-on the next trigger (it reaches catch-up once it has left the window). Both
+sent as the `consolidation` stage (catch-up, below). An idle or turn range
+that is in the window but can't be forked (forks off, fork failed, unusable
+reply) is skipped instead, with a warning naming the trigger ("the next
+idle trigger retries" or "the next turn trigger retries"; a turn range
+skipped because forks were reloaded off names "idle or compaction"), and the
+watermark stays put. An idle range reaches catch-up once it has left the
+window; a turn range is left to idle or compaction, as above. Both
 calls are constrained by a
 `response_format` JSON schema, like appraisal and critique, so a model can't
 answer the transcript instead of writing a reply. The reply is one object:
@@ -237,7 +267,8 @@ number of vectors every entry is stored `embedded=0`; a wrong-width vector
 costs only its own entry. The narrative text
 is canonical and vectors are a rebuildable cache. All consolidation LLM
 calls carry `stage="consolidation"` attribution, along with the `trigger`
-that started the run (`"compaction"` or `"idle"`) — set once at
+that started the run (`"compaction"`, `"idle"` or `"turn"`; `"eval"` from
+`scripts/eval_memory.py`) — set once at
 `_consolidate_range`'s entry, so it rides into the `on_llm_response`
 attribution snapshot for that call, into `MetricsPlugin`'s emitted tags,
 the `usage_log.trigger` column, and the `memory consolidated` completion
@@ -576,7 +607,8 @@ nullable `memory` columns:
   row written without a model (a pre-stamp row, or a `ForkResult` built
   without one).
 - `trigger`: what started the consolidation, the value `_consolidate_range`
-  was called with: `compaction`, `idle`, or `eval` (`scripts/eval_memory.py`).
+  was called with: `compaction`, `idle`, `turn`, or `eval`
+  (`scripts/eval_memory.py`).
   Catch-up is a path, not a trigger: a compaction or idle trigger that falls
   through to the view call stores its own trigger, and its
   `mode = standalone` already marks the view. `_commit` sets it, so every
@@ -587,7 +619,7 @@ What each path stamps:
 
 | Path | `mode` | Instruction text | `model` |
 |---|---|---|---|
-| Fork of the live window (compaction or idle) | `fork` | `memory.consolidation_fork_prompt` | `ForkResult.model` |
+| Fork of the live window (compaction, idle or turn) | `fork` | `memory.consolidation_fork_prompt` | `ForkResult.model` |
 | Catch-up: the rebuilt view on the `consolidation` stage's profile | `standalone` | `memory.consolidation_fork_prompt` | `LLMClient.request_model` of that profile's client |
 | Raw-transcript fallback after two unusable replies | `standalone` | `memory.consolidation_fork_prompt` | as above (the call was sent; only its reply was unusable) |
 | `write_record` (goal retirement) | `direct` | none: `prompt_hash` NULL, no `memory_prompt` row | NULL (`trigger` NULL too) |
@@ -698,12 +730,12 @@ nothing and are admitted at the channel's next turn, whatever its origin
 
 ### MemoryPlugin (`packages/corvidae-cognition/corvidae_cognition/memory.py`)
 
-Autobiographical memory: consolidates compacted dialog into first-person
+Autobiographical memory: consolidates dialog (at turn ends, on idle, and at compaction) into first-person
 memory records (SQLite + sqlite-vec + FTS5) and retrieves them into the
 prompt through the admission funnel. Entry point name: `"memory"`;
 `depends_on = {"persistence", "llm", "clock", "idle"}`. Absorbs the removed `DreamPlugin`.
 
-Implements five hooks and two kernel timers:
+Implements six hooks and two kernel timers:
 
 - `on_start` — creates the memory schema on the persistence connection
   (retried lazily on first use; on_start ordering is LIFO across plugins),
@@ -725,6 +757,12 @@ Implements five hooks and two kernel timers:
   `memory.retrieval.band_on: similarity`, on raw similarity), admits winners through the funnel, bumps access
   stats for admitted records, and writes a `retrieval_log` row plus one
   `retrieval_candidate` row per logged candidate.
+- `on_agent_response` — the turn trigger: with `agent.forks` on for
+  `consolidation`, no tool calls pending and no turn or idle consolidation
+  already in flight for the channel, fixes `range_end` at the window's
+  newest rowid and spawns a task that forks `(watermark, range_end]` once
+  its new window tokens reach `memory.consolidate_after_tokens`. Awaits
+  nothing, since it runs before the reply is sent.
 - `on_stop` — cancels the idle watch and retention timers, then in-flight
   background tasks.
 
@@ -736,7 +774,8 @@ Two kernel registrations replace the old `on_idle` hook:
   (forks off, failed, unusable reply) the run is skipped with a warning, the
   watermark stays and the next period retries. A range not wholly in a live
   window (no registered channel, trimmed rows) goes to catch-up.
-  One run per channel at a time.
+  One run per channel at a time, counting a turn-trigger task: a firing
+  while one is in flight is skipped.
 - **Retention timer** — fires at `last_run + memory.retention.interval`
   on the clock. It then prefers system quiet: it registers a system idle
   watch for 60 s of quiet and a deadline `memory.retention.max_delay`
@@ -752,8 +791,9 @@ Two kernel registrations replace the old `on_idle` hook:
   `retention_meta` with the DB open logs a WARNING with its traceback and
   re-arms the same way.
 
-Changes to `memory.idle_consolidate_after` and `memory.retention.*` take
-effect at restart.
+Changes to `memory.idle_consolidate_after`,
+`memory.consolidate_after_tokens` and `memory.retention.*` take effect at
+restart.
 
 The importance prior is pluggable (`MemoryPlugin.importance_prior`,
 default `RubricPrior`); `AppraisalPlugin` wraps it in `AppraisalPrior`
@@ -1302,7 +1342,8 @@ decide gate treats it as non-user, and `exchange_log` records it.
 **Its window.** The window grows beat by beat and is bounded by ordinary
 compaction at the channel's budget, `channels.internal:heartbeat.max_context_tokens`
 (else the agent default). The summary and the rows stay in `message_log`, and
-the channel is consolidated by compaction, like any other. After a
+the channel is consolidated like any other: at turn ends (forks on),
+on idle, and at compaction. After a
 compaction the window holds the summary, then the most recent rows that
 `agent.compaction_retention` keeps, then the beats since.
 

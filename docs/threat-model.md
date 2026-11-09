@@ -1061,7 +1061,8 @@ Every admitted message costs at least one main turn (or a share of one: see
 the next paragraph), and with cognition
 loaded, background calls on top, among them: stage-2 appraisal per exchange,
 the critique lenses when appraisal selects them, and consolidation as the
-window fills or the channel goes quiet. On a local server that is slot time
+window fills, as each turn's new conversation builds up, or when the channel
+goes quiet. On a local server that is slot time
 the operator's own turns wait behind; on a metered endpoint it is money. An
 admitted sender can drive the cost up by volume or by asking for work that
 loops through tools, and injected text in a fetched page or an MCP result
@@ -1077,6 +1078,29 @@ each message was admitted and would have been in the next prompt regardless.
 What changes is the cost of a poisoned message (PRD §3.1.18: the most one
 item can cost is its own turn): it now extends to the messages coalesced
 with it, which share that turn and its reply.
+
+The turn trigger (#636) hands conversation volume a second lever. With
+forks on for `consolidation`, a final reply that leaves
+`memory.consolidate_after_tokens` (default 4000) window tokens of new
+conversation above the watermark forks a consolidation, so how often that
+fork runs is set by how much new text enters the window, not by the
+operator: what anyone on the channel says, and also tool results (a
+fetched page, an MCP result, a file read) and the agent's own replies
+to them, whose content an outsider may control. A chatty group, one
+sender pasting long messages, or one large fetched page buys a fork at
+the next turn end. Each fork is the cached window prefix plus the
+instruction prefill and the consolidation profile's decode, which on a
+local server is slot time the main turn waits behind and on a metered
+endpoint is cached-input and output tokens. What bounds it: the trigger
+fires only at a turn boundary (a final reply with no tool calls pending),
+at most one turn-or-idle consolidation is in flight per channel (a turn
+that ends while one runs starts nothing), and with forks off it never
+runs. The knob is `memory.consolidate_after_tokens`: raising it means
+fewer, larger forks. A fork that keeps failing has no backoff (#620): the
+watermark stays put, so a failing backend gets one fork and one warning
+per turn past the threshold until a compaction drops the start of the
+range out of the window. From then on the turn trigger skips that range
+at debug and leaves it to compaction's and idle's catch-up.
 
 Where the tree stands: nothing bounds use over time, and under PRD
 principle 16 nothing in corvidae will for now. It schedules a pool's warm

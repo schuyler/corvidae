@@ -189,7 +189,7 @@ owner's plugin name after the prefix.
 | `send` | broadcast (imperative) | outbound delivery. `Agent` sends `OutboundMessage` (replies, error text), `OutboundThinking` (when the LLM response carries `reasoning_content`), `OutboundProgress` (intermediate text alongside tool calls) and `OutboundToolStatus` (tool call dispatched); `TaskPlugin` sends `OutboundToolStatus` on completion. Transports receive it through `TransportPlugin.send`, which filters by `owns(channel)` and dispatches by event type |
 | `register_tools` | broadcast (sync) | startup tool collection |
 | `register_llm_stages` | broadcast (sync, imperative) | `LLMPlugin.on_start`, once, before it creates clients: plugins add `stages[name] = kind` (`chat` or `embedding`) for each model-calling stage they own |
-| `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, Zulip, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines |
+| `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, Zulip, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines; `MemoryPlugin` runs its turn consolidation trigger from it, awaiting nothing, since the send waits on the hook |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
 | `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes an exact `NO_REPLY` final of any origin (cognition extra); a raising implementation fails open (logged, sent); no kernel implementation, so with none registered everything is sent |
@@ -558,7 +558,7 @@ CREATE TABLE usage_log (
     stage TEXT,
     channel_id TEXT,
     trace_id TEXT,              -- NULL when the call ran outside any trace
-    trigger TEXT,               -- 'compaction' or 'idle' for consolidation calls, else NULL
+    trigger TEXT,               -- 'compaction', 'idle', 'turn' or 'eval' for consolidation calls, else NULL
     mode TEXT,                  -- 'fork' or 'standalone' for stages that can fork (#51), else NULL
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
@@ -1935,7 +1935,7 @@ the `"compaction"` entry point. Declares `depends_on = {"llm"}`.
 Logger name: `corvidae.compaction`.
 
 **ContextCompactPlugin** (`context_compact.py`) has been removed: superseded
-by `MemoryPlugin` (compaction-time memory consolidation plus retrieval), and
+by `MemoryPlugin` (memory consolidation plus retrieval), and
 per-turn token stats now live in the `usage_log` table.
 
 ### resolve_compaction
@@ -2148,9 +2148,11 @@ summary on a miss is the standalone view call and then #308, and
 consolidation of a range that has left the window (the compaction trigger's
 task after the drop, an idle range not wholly in the window), which is
 written from a rebuilt view sent as the `consolidation` stage (catch-up, below). Idle
-consolidation of a range wholly in the live window still skips on a miss,
-and is retried on the next idle trigger; once the range has left the window
-it reaches catch-up. A JSON parse failure names the failing phase
+and turn consolidation of a range wholly in the live window still skip on a
+miss, and are retried on the next trigger of the same kind (the warning
+names it); once the range has left the window an idle range reaches
+catch-up, and a turn range is skipped at debug and left to idle or
+compaction. A JSON parse failure names the failing phase
 (consolidation, appraisal, or critique) and includes up to 500 characters of
 the provider text in the `ValueError`.
 
@@ -2163,6 +2165,7 @@ Stage names are opaque to core (it never names cognition plugins).
 | `compaction` | dropped prefix | inline in `resolve_compaction` | standalone view call on the same prefix (the `compaction` stage's profile, no tools), then the over-budget fallback (#308); on a connection-class failure the view is skipped and compaction defers to the turn's retry loop (#400) |
 | `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view, sent as the `consolidation` stage |
 | `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: catch-up (rebuilt view, sent as the `consolidation` stage) |
+| `consolidation` (turn trigger) | full window | in the task `on_agent_response` spawns, once the new window tokens in `(watermark, range_end]` reach `memory.consolidate_after_tokens`; never attempted with forks off for `consolidation` (silent) | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next turn trigger; no registered channel or window, or a range row not in the window: skip at DEBUG, never catch-up (idle or compaction consolidates it) |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
 | `critique` (each stylistic lens) | full window at run time | silent TaskQueue task | same as appraisal; a lens whose fork misses is skipped alone; if no lens ran, no outcome is recorded |
 | `critique` (provenance) | prefix ending at the exchange's final reply | silent TaskQueue task | skip with a warning (forks off, no live window, reply not recorded or not in the window, a compaction since the reply, or a failed fork) |
@@ -2270,7 +2273,7 @@ differently.
 **Fork by default (#180, #320).** Every background call that has a live
 window forks it: compaction from the dropped prefix; compaction-time
 consolidation from the same prefix in `before_compaction`, while the
-window is whole; idle consolidation from the full window; stage-2
+window is whole; idle and turn consolidation from the full window; stage-2
 appraisal and each critique lens from the full window at run time;
 provenance from the prefix ending at the exchange's final reply. Each forks
 only while the rows it needs are still in the window. A miss skips the
@@ -2278,7 +2281,7 @@ stage with a warning (the rescue is a retry or a skip, never a standalone
 call), except compaction, which on a miss sends the same view to
 the `compaction` stage's profile and, if that fails too, leaves the window to the
 over-budget fallback (#308), and consolidation of a range that has left the
-window, which is written from its rebuilt view sent as the `consolidation` stage. Skip-on-miss
+window by the compaction or idle trigger, which is written from its rebuilt view sent as the `consolidation` stage (the turn trigger skips such a range at debug). Skip-on-miss
 and the default are implemented (#320).
 Still targets, not enforced today: stage 2 and the lenses forking only the
 prefix ending at the reply, a reply cap that fits the slot's context (an
@@ -3990,6 +3993,7 @@ tools:
 
 memory:
   idle_consolidate_after: 1800  # seconds a channel must be quiet before idle consolidation
+  consolidate_after_tokens: 4000  # new window tokens that start a turn consolidation (forks only)
   half_life_days: 30            # retrieval recency decay (e-folding time, days)
   retrieval:
     k: 8                        # KNN candidate count

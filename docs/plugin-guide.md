@@ -447,8 +447,9 @@ a contextvar dict describing what the current code path is doing on whose
 behalf. Built-in callers set `stage` (`"turn"`, `"compaction"`,
 `"subagent"`, `"consolidation"`) and `channel_id`; the dict is open for
 plugin-defined fields. `MemoryPlugin`'s consolidation stage adds `trigger`
-(`"compaction"` or `"idle"`), naming which of the two consolidation
-triggers is driving the current `on_llm_request`/`on_llm_response` pair —
+(`"compaction"`, `"idle"` or `"turn"`; `"eval"` when
+`scripts/eval_memory.py` drives it), naming which consolidation trigger
+is driving the current `on_llm_request`/`on_llm_response` pair —
 a plugin consuming the attribution snapshot on a `stage="consolidation"`
 call can rely on `trigger` being present. Set it around a logical
 operation and always reset in a `finally`:

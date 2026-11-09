@@ -130,7 +130,7 @@ other tenants.
 
 | Plugin | Purpose |
 |--------|---------|
-| MemoryPlugin | Consolidates compacted conversation into long-term memories and retrieves them into context |
+| MemoryPlugin | Consolidates conversation (at turn ends, on idle, and at compaction) into long-term memories and retrieves them into context |
 | MemoryToolsPlugin | `search_memory` and `recall_raw` tools |
 | FunnelPlugin | Admits retrieved context into the prompt under a budget |
 | AppraisalPlugin | Scores each exchange as it happens |
