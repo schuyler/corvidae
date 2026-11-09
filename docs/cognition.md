@@ -365,7 +365,8 @@ count but no `excluded_in_window` rows, and the count is not limited to
 records that would have made the top k.
 
 Only passive retrieval (`before_agent_turn`) logs. A direct `retrieve()`
-call (`scripts/eval_memory.py`) and `search_memory` write nothing. There is
+or `_retrieve_pool()` call (`scripts/eval_memory.py`) and `search_memory`
+write nothing. There is
 no `filtered` outcome: redacted, superseded and demoted records have no
 `memory_vec` row, so the KNN never reaches them. Logging is fail-soft: if
 the candidate insert fails, the turn still runs, the `retrieval_log` row
@@ -398,6 +399,138 @@ with one clear startup warning; no embedding profile (the `embedding` stage isn'
 with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
 config → ERROR and embeddings disabled rather than silently mixing
 encoders. Nothing in the memory path raises into the turn loop.
+
+#### Measuring retrieval on a real database (`scripts/eval_memory.py --snapshot`)
+
+`scripts/eval_memory.py` has three modes. With no mode flag it scores a
+`--retriever` callable against a fixture. `--live` runs the real
+`MemoryPlugin` against a scratch database it fills from that fixture.
+`--snapshot` (#658) scores a deployment's real records:
+
+```sh
+uv run python scripts/eval_memory.py --snapshot /path/to/sessions.db \
+    --labels labels.json --config /path/to/agent.yaml \
+    --pool-out pool.json [--k N]
+```
+
+What it does:
+
+- **Copies the database, never writes it.** The source is opened only
+  through a read-only (`mode=ro`) connection and copied with the sqlite
+  backup API in one step. The copy is consistent even while the daemon has
+  the source open in WAL mode, and it includes committed rows still in the
+  `-wal`. Every plugin connection is opened on the copy, because memory's
+  schema setup writes on open.
+- **Runs the real scorer under the deployment's config.** `--config` is
+  loaded the way the daemon loads `agent.yaml`, so the embedding profile
+  and the `memory.*` retrieval settings (`half_life_days`, `retrieval.k`,
+  `band_on`, `recency_from`, the band thresholds) are the deployment's.
+  Each labelled query goes through `_retrieve_pool`, the call `retrieve()`
+  and passive retrieval are built on, with no window exclusion. Memory's
+  `on_start` is not run, so no retention, backfill or consolidation
+  happens, and no chat request is sent. The only model calls are one
+  `kind="query"` embedding per labelled query, on the vector path.
+- **Reports Recall@k and MRR** for each query and as means over the scored
+  queries. Both are computed on the top k, so MRR is MRR@k. `--k` defaults
+  to `memory.retrieval.k` from `--config` and must be at least 1; the vector
+  path fetches `k × 4` candidates, so a different k changes the pool too.
+- **Names labelled ids it can't reach.** A labelled id is reachable when its
+  row exists with `indexed = 1` and `redacted = 0`, the filter both searches
+  apply. Anything else is listed by id with its status, checked in this
+  order: `absent`, `redacted`, `superseded`, `not_indexed`. Unreachable ids
+  are left out of scoring. A query left with no reachable id (or labelled
+  with an empty list, a negative probe) is not scored: its metrics are
+  `null`, stdout says `not scored: no reachable relevant id`, and the means
+  say `over M of N queries`.
+- **Counts FTS5 fallback.** Each query reports `degraded`, and the summary
+  prints `FTS5 fallback on D of N queries` whenever any query fell back.
+- **Writes every query's whole scored pool to `--pool-out`**, for #409's
+  calibration: every candidate the scorer ranked, not only the top k.
+
+The labels file lists queries and the snapshot's integer `memory.id`s that
+should come back. `text` is a non-empty string; `relevant` is a list of
+integers (it may be empty). `description` and `note` are free text the
+script ignores, and so are unknown keys. A malformed file is rejected
+before the copy, with the key, the value and what was expected.
+
+```json
+{
+  "description": "optional",
+  "queries": [
+    {"text": "what did we decide about the battery?", "relevant": [412, 415],
+     "note": "optional"}
+  ]
+}
+```
+
+The pool file is written once, after the last query:
+
+```json
+{
+  "run_at": 1762700000.0,
+  "k": 8,
+  "queries": [
+    {
+      "index": 0,
+      "text": "what did we decide about the battery?",
+      "relevant": [412, 415],
+      "unscorable": [{"id": 415, "status": "superseded"}],
+      "degraded": false,
+      "recall_at_k": 1.0,
+      "mrr": 0.5,
+      "candidates": [
+        {"id": 398, "rank": 1, "similarity": 0.81, "score": 0.77, "band": "strong"},
+        {"id": 412, "rank": 2, "similarity": 0.79, "score": 0.74, "band": "moderate"}
+      ]
+    }
+  ],
+  "summary": {"queries": 1, "scored": 1, "degraded": 0,
+              "mean_recall_at_k": 1.0, "mean_mrr": 0.5}
+}
+```
+
+`candidates` is the ranked pool, best score first; the entries with
+`rank <= k` are what the agent would have seen. It holds ids and scores but
+no memory text; look the ids up in the source. `run_at` is the wall-clock
+time the run started. The means are `null` when no query was scored.
+
+Operator notes:
+
+- **The chat profile's key must be set.** The config still needs a chat
+  profile (the daemon refuses one without), and the daemon's client setup
+  expands every profile's `api_key`, so its `${VAR}` must be set in the
+  environment even though no chat request is made. If it isn't, the run
+  stops with `Config error: llm.<profile>.api_key references ${VAR}, which
+  is not set … — check <config>`.
+- **Scores drift with the run date; rankings don't.** Decay runs against
+  the wall clock at query time, not a time taken from the snapshot. Scoring
+  the same snapshot a month later multiplies every score by the same
+  factor, so the order, Recall@k and MRR are unchanged, but absolute
+  scores, and the bands taken from them, are lower. `run_at` records the
+  date. shortcut: no pinned "now"; add one before comparing pool files
+  scored on different days.
+- **An unreachable embedding server turns every query into FTS5.** Each
+  query's embedding call fails after the client's retries (slow), logs a
+  `retrieval embedding failed; degrading to FTS5` warning with a traceback
+  (noisy), and falls back to keyword search, where every candidate's
+  similarity is the constant 0.6. Such a pool says nothing about cosine
+  similarity, so check the summary's `FTS5 fallback` line before using a
+  pool file for calibration. An encoder in `--config` that differs from the
+  one the snapshot was built with does the same, after memory's encoder
+  mismatch ERROR.
+- **FTS-only installs log a sqlite-vec warning.** Without sqlite-vec,
+  memory logs `sqlite-vec extension failed to load` with a traceback, and
+  every query reports `degraded`. That is expected.
+- **The copy lives in the system temp directory** (in a 0700 directory)
+  and is deleted when the run ends, so a large `sessions.db` needs that
+  much free space there. A SIGKILL mid-run leaves the copy behind; it is a
+  full `sessions.db`, so delete it.
+- Opening a WAL-mode source read-only can leave empty `-wal` and `-shm`
+  files beside it when the daemon isn't running; the main file's bytes are
+  unchanged. The source's directory must be writable for the `-shm` file.
+- `--pool-out` may not name the source, its `-wal` or `-shm`, the labels
+  file or the config. The pool file is overwritten if it exists, and is
+  not written at all if a query raises partway through.
 
 #### Record stamps
 

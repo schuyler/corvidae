@@ -363,10 +363,11 @@ Not designed here; listed so the change can be judged:
   (see [cognition.md](cognition.md), "Retrieval (read path)").
 - **A labelled query set**: twenty to forty real queries from Lex's
   `message_log`, each with the record(s) that should come back.
-  `scripts/eval_memory.py --live` already drives the real `MemoryPlugin`
-  and encoder, but always ingests fixtures into a scratch database; it
-  needs a mode that runs against a snapshot of an existing `sessions.db`
-  with labels keyed to its memory ids.
+  `scripts/eval_memory.py --snapshot` (#658) scores such a set: it runs
+  the real retrieval path over a read-only copy of an existing
+  `sessions.db`, with labels keyed to its memory ids, and writes each
+  query's scored pool (see [cognition.md](cognition.md), "Measuring
+  retrieval on a real database").
 - **Before and after**: the same queries against a snapshot consolidated
   the old way and one consolidated the new way. Recall@k and MRR, entry
   lengths, tokens admitted per retrieval, how often an entry is skipped
@@ -531,6 +532,7 @@ Each needs the owner's sign-off before implementation.
 - **Step 1 needs more than labelling.** `scripts/eval_memory.py --live`
   drives the real retrieval path, but only over fixtures it ingests into
   a scratch database; scoring Lex's real records needs a snapshot mode.
+  That mode now exists: `scripts/eval_memory.py --snapshot` (#658).
 - **Prompt variant B is smaller than it looks.** The current instruction
   already asks for names, decisions, commitments, corrections and
   outcomes; the limit is "a few sentences".

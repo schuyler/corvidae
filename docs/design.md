@@ -600,7 +600,10 @@ CREATE TABLE exchange_log (
 network; the fixture format is documented there
 (`tests/fixtures/memory_retrieval_basic.json` is the operator-authored
 seed). The live runner `scripts/eval_memory.py` is out-of-band only;
-live tests carry the `eval` marker (run with `--run-eval`).
+live tests carry the `eval` marker (run with `--run-eval`). Its
+`--snapshot` mode (#658) scores labelled queries against a read-only copy
+of a real `sessions.db`; see [cognition.md](cognition.md), "Measuring
+retrieval on a real database".
 
 ## Agent Loop
 
