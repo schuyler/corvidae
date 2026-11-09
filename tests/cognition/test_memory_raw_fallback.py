@@ -8,6 +8,7 @@ else ``funnel.default_budget``), stamped ``mode = 'raw'``.
 import copy
 
 import pytest
+from corvidae_cognition.memory import prompt_hash
 
 from corvidae.context import count_tokens
 
@@ -67,14 +68,17 @@ async def test_raw_fallback_splits_to_the_memory_budget(funnel):
         # Each fits the budget as the line the funnel would be offered.
         for r in rows:
             assert count_tokens(WORST_PREFIX + r["summary"]) <= BUDGET, r["summary"]
-        # Together they cover the transcript, in order.
+        # Together they are the transcript, in order, nothing repeated or
+        # lost (line breaks between pieces aside).
         joined = "".join(r["summary"] for r in rows).replace("\n", "")
-        for role, content in LONG_DIALOG:
-            assert f"{role}: {content}" in joined
-        # One range, one stamp: mode raw, with the failed call's prompt and model.
+        transcript = "".join(f"{role}: {content}" for role, content in LONG_DIALOG)
+        assert joined == transcript
+        # One range, one stamp: mode raw, with the failed call's prompt,
+        # model and trigger.
         assert {(r["msg_id_start"], r["msg_id_end"]) for r in rows} == {(rowids[0], rowids[-1])}
         assert {r["mode"] for r in rows} == {"raw"}
-        assert all(r["prompt_hash"] for r in rows)
+        assert {r["prompt_hash"] for r in rows} == {prompt_hash(memory._consolidation_fork_prompt)}
         assert len({r["model"] for r in rows}) == 1 and rows[0]["model"]
+        assert {r["trigger"] for r in rows} == {"compaction"}
     finally:
         await db.close()
