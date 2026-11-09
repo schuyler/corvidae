@@ -187,13 +187,15 @@ def _exclude_clause(
     its ``min_msg_id``. Both conditions: message_log ids are global, so an id
     test alone would also hide other channels' records. Keyed on
     ``msg_id_start`` so a record straddling the window's oldest id stays.
+    A record that holds another channel's content through a near-dup merge
+    (``merged_foreign``, #627) is never excluded: the window doesn't hold it.
     Returns the bare in-window condition and its parameters, or
     ``("0", ())`` (never true) when there is nothing to exclude. Callers
     negate it in WHERE or select it as a flag (#407).
     """
     if exclude is None:
         return "0", ()
-    return "(m.channel_id = ? AND m.msg_id_start >= ?)", exclude
+    return "(m.channel_id = ? AND m.msg_id_start >= ? AND m.merged_foreign = 0)", exclude
 
 
 # One scored-pool input row from a candidate search:
@@ -1039,7 +1041,8 @@ CREATE TABLE IF NOT EXISTS memory (
     prompt_hash TEXT,                   -- sha256 of the instruction text; NULL = unknown/direct
     mode TEXT,                          -- fork | standalone | direct; NULL = unknown (pre-stamp)
     model TEXT,                         -- model the consolidation call was sent with
-    trigger TEXT                        -- compaction | idle | turn | eval; NULL = direct/pre-#633
+    trigger TEXT,                       -- compaction | idle | turn | eval; NULL = direct/pre-#633
+    merged_foreign INTEGER NOT NULL DEFAULT 0 -- 1 = holds another channel's record via near-dup merge (#627)
 )
 """
 
@@ -2328,14 +2331,17 @@ class MemoryPlugin(CorvidaePlugin):
         if dup_old_id is not None:
             async with db.execute(
                 "SELECT retrieval_count, last_retrieved_at, importance, "
-                "msg_id_start, msg_id_end, created_at "
+                "msg_id_start, msg_id_end, created_at, merged_foreign "
                 "FROM memory WHERE id = ?",
                 (dup_old_id,),
             ) as old_cursor:
                 old_row = await old_cursor.fetchone()
             if old_row is not None:
                 (old_rc, old_lra, old_importance,
-                 old_start, old_end, old_created) = old_row
+                 old_start, old_end, old_created, old_foreign) = old_row
+                # The survivor holds another channel's content if this merge
+                # crosses channels or the old record already did (#627).
+                merged_foreign = 1 if (dup_cross_channel or old_foreign) else 0
                 # Fold stats into the new record
                 inherited_rc = (old_rc or 0)  # old record's count to fold in
                 new_importance = max(importance, old_importance or 0.0)
@@ -2362,11 +2368,12 @@ class MemoryPlugin(CorvidaePlugin):
                     "  WHEN ? IS NULL THEN last_retrieved_at "
                     "  ELSE MAX(last_retrieved_at, ?) "
                     "END, "
-                    "msg_id_start = ?, msg_id_end = ?, created_at = ? "
+                    "msg_id_start = ?, msg_id_end = ?, created_at = ?, "
+                    "merged_foreign = ? "
                     "WHERE id = ?",
                     (inherited_rc, new_importance,
                      new_lra, new_lra, new_lra,
-                     new_start, new_end, new_created, memory_id),
+                     new_start, new_end, new_created, merged_foreign, memory_id),
                 )
                 # Supersede the old record
                 await db.execute(
@@ -2762,7 +2769,9 @@ class MemoryPlugin(CorvidaePlugin):
         ``exclude``: optional ``(channel_id, min_msg_id)``. Records of that
         channel whose ``msg_id_start`` is at or past ``min_msg_id`` (their
         whole range still in the live window) are left out before the cut
-        to k (#634). Passive retrieval passes it; this is not a scope.
+        to k (#634), unless they hold another channel's record through a
+        near-dup merge (#627). Passive retrieval passes it; this is not a
+        scope.
 
         Returns:
             (candidates best first: by fused rank on the hybrid path, by
@@ -3366,6 +3375,11 @@ class MemoryPlugin(CorvidaePlugin):
         await add_column_if_missing(db, "memory", "model", "TEXT")
         # Trigger column (#633), likewise nullable; old rows read NULL.
         await add_column_if_missing(db, "memory", "trigger", "TEXT")
+        # Foreign-merge flag (#627); old rows read 0 (no backfill: exclusion
+        # only applies while a range is in the live window).
+        await add_column_if_missing(
+            db, "memory", "merged_foreign", "INTEGER NOT NULL DEFAULT 0"
+        )
         await db.execute(MEMORY_PROMPT_DDL)
         await db.execute(WATERMARK_DDL)
         await db.execute(EMBEDDING_META_DDL)

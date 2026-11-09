@@ -255,7 +255,9 @@ higher importance, and the later of the two records' dates. Message
 ranges fold only within one channel: `message_log` ids are global, and
 `recall_raw` and `/redact` read a record's range on its own channel, so on
 a cross-channel merge each record keeps its own range and the superseded
-record still leads to its channel's source dialog. Overlapping triggers on the same
+record still leads to its channel's source dialog. The survivor of a
+cross-channel merge, or of a merge with a record that already was one, is
+marked `merged_foreign = 1` so window exclusion never hides it (#627). Overlapping triggers on the same
 range discard the loser's record — no duplicates. Embedding failure —
 including a wrong-width vector, which is refused before the write
 transaction (vec0 rejects it on insert, and the resulting
@@ -342,6 +344,13 @@ still in view. Both conditions matter: `message_log` ids are global, so an
 id test alone would hide other channels' recent records too. A record that
 straddles the window's oldest id is still admitted, so the part of it that
 compaction dropped stays recallable; a window with no ids excludes nothing.
+A record marked `merged_foreign` (it superseded another channel's record
+through a near-duplicate merge, directly or through a chain of merges) is
+never excluded, since the window doesn't hold that channel's content
+(#627). A same-channel merge needs no mark: it folds the old record's range
+in, so an older record pulls the survivor's start out of the window. Rows
+from before the column read 0 (no backfill; exclusion only applies while a
+range is still in the window).
 The exclusion is a `retrieve(..., exclude=(channel_id, min_msg_id))`
 argument applied before the cut to k: the degraded FTS5 path filters it in
 `WHERE` ahead of its `LIMIT`, and the vector path selects it as a flag (#407)
@@ -431,7 +440,7 @@ may share a would-be rank, and an excluded record that would not have made
 the top k gets no row.
 
 `retrieval_log.excluded_in_window` counts the in-window records the search
-matched; it is NULL when no exclusion applied (a window with no ids) and on
+matched (a `merged_foreign` record is not in-window by this rule); it is NULL when no exclusion applied (a window with no ids) and on
 rows from before #407. The two paths count differently. On the vector path
 it is the in-window rows inside the KNN (and the hybrid FTS side). On the FTS path it is every
 in-window record the keyword query matches, found with one extra
@@ -750,8 +759,9 @@ FROM memory WHERE prompt_hash LIKE 'abcdef123456%';
 #### Schema
 
 `memory` (records, with `indexed`, `superseded_by`, `redacted`, and
-`embedded` columns, and the stamp columns `prompt_hash`, `mode`,
-`model` and `trigger`), `memory_prompt` (`hash`, `text`: each distinct instruction text
+`embedded` columns, the stamp columns `prompt_hash`, `mode`,
+`model` and `trigger`, and `merged_foreign`, set on a near-dup survivor that
+holds another channel's record, #627), `memory_prompt` (`hash`, `text`: each distinct instruction text
 once), `consolidation_watermark`, `embedding_meta`,
 `memory_fts` (external-content FTS5 with insert/update sync triggers; no
 delete trigger — memory rows are never deleted), `memory_vec` (vec0,

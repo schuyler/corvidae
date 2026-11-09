@@ -89,6 +89,9 @@ async def test_in_window_same_channel_merge_is_still_excluded(dedup_env):
     )
     old, merged = await fetch_all_memories(db)
     assert old["superseded_by"] == merged["id"]
+    # Control: without the exclusion the survivor is a candidate.
+    unexcluded, _degraded = await memory.retrieve(QUERY)
+    assert [h["id"] for h in unexcluded] == [merged["id"]]
 
     hits, _degraded = await memory.retrieve(QUERY, exclude=(y.id, rows_y[0]))
 
