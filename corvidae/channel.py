@@ -277,6 +277,28 @@ def parse_wide_key(key: str) -> str:
     return prefix
 
 
+#: How many sender display names one channel remembers (#513).
+SENDER_NAME_CACHE_MAX = 256
+
+
+def remember_sender_name(names: dict[str, str], sender: str, name: str) -> None:
+    """Record a sender's display name on the channel, keeping the map bounded.
+
+    A channel people talk in all day would otherwise keep a name for every
+    sender it has ever seen. The cache is a convenience for the next turn's
+    attribution, so the least recently seen entry goes when it is full (#513).
+    Lives beside ``Channel.sender_names`` so a transport does not have to import
+    another transport's module to fill it (Discord and Zulip both do).
+    """
+    # Re-stating a name moves it to the newest end, so the person who talks
+    # most is not the first evicted for having been seen first.
+    if sender in names:
+        del names[sender]
+    elif len(names) >= SENDER_NAME_CACHE_MAX:
+        names.pop(next(iter(names)))
+    names[sender] = name
+
+
 @dataclass
 class Channel:
     """A conversation scope tied to a transport."""

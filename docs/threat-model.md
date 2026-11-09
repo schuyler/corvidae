@@ -13,8 +13,8 @@ says so. Within that model it does several things right: Signal is
 default-deny with silent refusal, retrieved context is framed as data, tool
 `_ctx` is hidden from the model, SQL is parameterized, signal-cli is pinned
 and signature-verified, and the docs are candid about plaintext at rest.
-The Discord transport follows Signal's model: default-deny, silent refusal,
-and outbound mentions disabled. The web transport binds loopback by
+The Discord and Zulip transports follow Signal's model: default-deny, silent
+refusal, and outbound mentions disabled. The web transport binds loopback by
 default, needs a token that can't be turned off, and renders model output
 through DOMPurify under a strict CSP.
 
@@ -39,6 +39,9 @@ them:
   a channel other people can read (with `discord.require_mention: false`,
   or a `discord.channels` entry setting it false for that channel, every
   message that user posts there),
+  every Zulip message that mentions the bot from an allowlisted
+  user in a channel other people can read (with `zulip.require_mention:
+  false`, or a `zulip.channels` entry, every message that user posts there),
   every webhook payload,
   every web page `web_fetch` returns, every DuckDuckGo snippet, every MCP
   tool description and result, and every memory distilled from any of the
@@ -74,7 +77,11 @@ Assets, roughly in order of how bad it is to lose them:
    Developer Portal), which the Signal identity is not. The web token
    (`web.token` or `CORVIDAE_WEB_TOKEN`, or the generated one in the
    daemon log) and its session cookie are a third: whoever holds either
-   one drives the agent, tools and all. Changing the token revokes it.
+   one drives the agent, tools and all. Changing the token revokes it. The
+   Zulip bot's API key (`zulip.api_key` or `ZULIP_API_KEY`) is the same
+   kind of asset as the Discord token: whoever holds it is the bot, it sits
+   where `read_file` and `shell` can reach it, and it is revocable (regenerate
+   it on the bot's Zulip settings page). It is never logged.
    An MCP server's bearer token, passed through `${VAR}` in
    `mcp.servers.<name>.headers`, is a fourth: it lives in the daemon's
    environment, which `shell` can read (`env`, `/proc/self/environ`), and
@@ -93,7 +100,8 @@ Assets, roughly in order of how bad it is to lose them:
 3. `sessions.db`, the JSONL logs, and the memory tables: plaintext copies
    of every conversation, including end-to-end-encrypted Signal ones.
    Discord conversations are not end-to-end encrypted to begin with:
-   Discord the company can read them whatever corvidae does.
+   Discord the company can read them whatever corvidae does, and so can the
+   Zulip server's operator.
    The daemon log belongs here too: an anomalous model response (a reply
    cut off mid-reasoning, or one that reopens reasoning after its answer)
    can be logged at warning level with its text, and that text can carry
@@ -120,6 +128,18 @@ Adversaries:
   misconfigured allowlist from a quiet channel. The prompt's `addressed: yes`
   comes from Discord's structured mention list, not the message text, so typing
   "@corvidae" cannot set it; the mention token is still stripped from the text.
+- **Anyone in a Zulip organisation the bot belongs to**, who can @-mention it
+  in a channel it is subscribed to, and anyone Zulip lets DM it. The allowlist
+  refuses them silently, as for Discord. A message that does not mention the
+  bot in a mention-only channel is dropped before the kernel sees it, and the
+  DEBUG line recording the drop names the sender's user id. The prompt's
+  `addressed: yes` comes from the server's `mentioned` flag, not the message
+  text (the flag is also set by a user-group mention, so a group the bot is in
+  can address it). Several strings an attacker chooses reach the prompt header
+  as transport-supplied names, never as instructions: the **topic** (anyone who
+  can post can title it), the **channel name**, the sender's display name and,
+  for a group DM, the other members' names. All are framed as data like every
+  other name (PRD §3.3.11).
 - **Anyone who can reach the web listener**, if it's bound beyond
   loopback, and anyone who gets the token or cookie; also any web page
   open in the operator's browser, which can try cross-site requests. See
@@ -130,7 +150,7 @@ Adversaries:
   reads.
 - **An MCP server**, via its tool descriptions and results.
 - **Anyone who can read a room the bot speaks in** without being
-  allowlisted: a Discord guild channel, a public IRC channel. They can't
+  allowlisted: a Discord guild channel, a public Zulip channel, a public IRC channel. They can't
   drive the agent, but they read its replies, and with one identity
   across channels those replies can carry what it knows from elsewhere
   (finding 15).
@@ -415,8 +435,8 @@ someone's nick is not enough. Residual risks:
 - **Upgrade.** A deployment that used IRC goes silent until `irc.allow` is
   set; startup logs a WARNING saying so.
 
-IRC, Signal and Discord all check the allowlist before resolving the
-channel, so a refused sender leaves no registry entry (#77, #103, #274).
+IRC, Signal, Discord and Zulip all check the allowlist before resolving the
+channel, so a refused sender leaves no registry entry (#77, #103, #274, #640).
 
 Partial mitigation (#149): `channels.<id>.tools.disabled` takes the
 dangerous tools off an IRC channel the operator configures, for example
@@ -463,6 +483,34 @@ Three more things to know:
   transport can ever be made to see, though it is a Discord-side limit
   and not a corvidae one. `discord.require_mention: false` requests the
   intent and removes it.
+
+Zulip is built like Discord. The transport's `should_process_message` is a
+default-deny allowlist of numeric user ids (never emails or names, which
+change); an empty list refuses everyone, and a refusal is one INFO line with no
+reply and no typing notice. A public channel's readers can all @-mention the
+bot, and what stops them is only that allowlist. Four more things to know:
+
+- **Allowed users in a shared channel are an injection path**, for the reason
+  given for Discord: the channel's history is one conversation, and what an
+  allowed user pastes in is untrusted content. In Zulip that history spans
+  every topic of the channel, because a topic is a name people can rename and
+  so is not part of the channel's id (PRD principle 10): text from one topic
+  is in the window while the agent answers another. The agent answers only when
+  mentioned (directly, or through a user group it belongs to) and records only
+  those messages; with `zulip.require_mention: false`, globally or in a
+  `zulip.channels` entry, it records all of an allowed user's messages there.
+- **Outbound mentions are defused.** Zulip has no allowed-mentions switch. A
+  reply containing `@**all**` would page the whole channel, so every send puts
+  a zero-width space between `@` and `*`, which stops Zulip parsing a mention.
+  This closes the ping, not the content: the reply is still visible to
+  everyone who can read the channel, including anything the model was tricked
+  into leaking. Silent mentions (`@_**Name**`) pass through because they
+  notify no one.
+- **The reply topic comes only from allowed senders.** Where the agent answers
+  is the topic of the newest allowed message, so a stranger who posts under
+  another topic cannot move the reply or relabel the channel to the model.
+- **Plain `http://`** to a non-loopback `zulip.site` sends the API key and every
+  message in the clear; startup logs a WARNING naming the site.
 
 ### 6. MCP servers are trusted peers
 

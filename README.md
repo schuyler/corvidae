@@ -1,6 +1,6 @@
 # corvidae
 
-Corvidae is a minimalist, extensible architecture for building LLM agent harnesses. It connects a local LLM to chat transports — CLI, IRC, Signal, Discord, and a browser UI are built in — routes messages through any OpenAI-compatible Chat Completions API, runs a multi-turn tool-calling loop, and sends replies. It's designed as a personal agent daemon for a single machine.
+Corvidae is a minimalist, extensible architecture for building LLM agent harnesses. It connects a local LLM to chat transports — CLI, IRC, Signal, Discord, Zulip, and a browser UI are built in — routes messages through any OpenAI-compatible Chat Completions API, runs a multi-turn tool-calling loop, and sends replies. It's designed as a personal agent daemon for a single machine.
 
 **WARNING: This is a personal project, not a formal release. Interfaces will change without warning.**
 
@@ -41,7 +41,7 @@ The daemon connects to configured transports, listens for messages, and runs unt
 
 For a chat page in your browser, add a `web:` block (an empty one will do) and open the login URL the daemon logs. It listens on `127.0.0.1:8765`, and its token is shell access to the machine, so read the [`web` section](docs/configuration.md#web--browser-chat-ui) before you point it anywhere else.
 
-For a Discord bot backed by a hosted OpenAI-compatible API, see [docs/discord-remote-api.md](docs/discord-remote-api.md).
+For a Discord bot backed by a hosted OpenAI-compatible API, see [docs/discord-remote-api.md](docs/discord-remote-api.md). For a Zulip bot, see [docs/zulip-ops.md](docs/zulip-ops.md).
 
 ## Installation
 
@@ -96,7 +96,7 @@ other tenants.
 - SQLite conversation persistence with an append-only message log
 - `<thinking>` block handling: stripped from display, optionally retained in DB
 - MCP (Model Context Protocol) client: connects to external tool servers over stdio or SSE
-- One identity on every channel, with a per-channel register (chat-app defaults ship for Signal, Discord and IRC); per-channel token budget, turn limits, and more
+- One identity on every channel, with a per-channel register (chat-app defaults ship for Signal, Discord, Zulip and IRC); per-channel token budget, turn limits, and more
 - Runtime settings tool: the LLM can adjust its own parameters mid-session (with optional immutable keys)
 - Plugin system via apluggy (async pluggy) with setuptools entry points
 
@@ -119,6 +119,7 @@ other tenants.
 | SchedulerPlugin | Reminders the agent sets with `remind_me` and operator-scheduled jobs, fired into channels on the clock |
 | SignalPlugin | Signal transport via a running `signal-cli` daemon |
 | DiscordPlugin | Discord transport (needs `--extra discord`) |
+| ZulipPlugin | Zulip transport: channels (answered in the topic of the latest message) and DMs; no extra needed, see [docs/zulip-ops.md](docs/zulip-ops.md) |
 | WebPlugin | Browser chat UI on localhost |
 | WebhookPlugin | Webhook ingress: routes `POST /hook/<endpoint>` events to subscribing plugins |
 | AcpPlugin | Agent Client Protocol over stdio for editors (`corvidae acp`, needs `--extra acp`) |

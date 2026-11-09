@@ -667,6 +667,47 @@ To remove a conversation's stored content, use `corvidae redact` as described fo
 
 ---
 
+## `zulip` — Zulip transport
+
+The transport needs no SDK and no extra: it talks to Zulip's REST API over aiohttp, which corvidae already depends on. The server must be Zulip 9.0 (feature level 248) or newer; an older one is refused at startup with an ERROR naming the server and its level.
+
+The `zulip` section is optional. If absent, `ZulipPlugin` loads but stays inert: no session, no tasks, nothing logged above `DEBUG`. If present, it must be well-formed — a missing `site`, `email` or `api_key` (the last two may come from the environment), a `site` that is not a bare `http(s)://host[:port]` URL, an `allow` that is not a list of user ids, a `message_chunk_size` outside 100 to 10000, a non-boolean `require_mention`, an empty or over-long `default_topic`, or a `channels` entry keyed on anything but a numeric stream id, or with an unknown key, raises at startup naming the field and the remedy.
+
+corvidae logs in as a Zulip bot user (a **Generic bot**); creating it, subscribing it and finding ids are in [zulip-ops.md](zulip-ops.md). In 1:1 DMs every message from an allowed user reaches the agent. In channels and group DMs only a message that mentions the bot does, directly or through a user group it belongs to (Zulip's `mentioned` flag; a wildcard such as `@**all**` doesn't count), unless `zulip.require_mention` is `false`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `zulip.site` | string | required | The organisation's URL, `scheme://host[:port]` with no path. Plain `http://` to anything but loopback logs a WARNING, because the API key and every message cross the network unencrypted. |
+| `zulip.email` | string | `$ZULIP_EMAIL` | The bot's email. If the key is absent, null or empty the environment variable is used; if neither is set, startup fails. |
+| `zulip.api_key` | string | `$ZULIP_API_KEY` | The bot's API key, resolved the same way. Prefer the environment variable if `agent.yaml` is readable by anyone else: the key is the bot. It is never logged. |
+| `zulip.allow` | list of user ids | `[]` | Zulip user ids permitted to drive the agent, as YAML ints or quoted digit strings (compared as strings). Default-deny: an empty or absent list refuses everyone, silently. An email or a name is rejected at startup, naming the entry, because neither is stable. |
+| `zulip.require_mention` | boolean | `true` | The default for every channel and group DM. With `true` only a mention of the bot (directly, or through a user group it belongs to) reaches the agent. With `false` every message from an allowlisted user the bot can see reaches the agent, which may still decline to reply; the bot's own mention token, if present, is still stripped. 1:1 DMs never need a mention. Read at startup only. |
+| `zulip.channels` | mapping | `{}` | Per-channel overrides, keyed by Zulip **stream id** (digits, no prefix, no leading zeros). Each entry's only key is `require_mention`. A name, a `zulip:` prefix or an unknown key fails startup rather than matching nothing. Read at startup only. |
+| `zulip.message_chunk_size` | integer | `10000` | Maximum UTF-8 bytes per outbound message, 100 to 10000. The server's own `max_message_length` is used instead when it is smaller. Longer replies are split and sent as several messages; nothing is truncated. The limit is bytes while Zulip's is code points, so multi-byte text splits earlier than strictly needed. |
+| `zulip.default_topic` | string | `corvidae` | The topic a reply goes to when nothing is remembered for the channel: the first turn after a restart, or a channel no allowed message has reached yet. Otherwise a reply, a reminder or a cross-channel send goes to the topic of the latest allowed message that reached the agent there. 1 to 60 characters, so it fits every Zulip server. |
+
+```yaml
+zulip:
+  site: https://chat.example.org
+  email: corvidae-bot@chat.example.org   # or leave out and set ZULIP_EMAIL
+  api_key: "..."                          # or leave out and set ZULIP_API_KEY
+  allow:
+    - 123
+  # require_mention: false                # answer allowed users without an @-mention
+  channels:
+    "7":                                  # the stream id, as in `zulip:7` in the logs
+      require_mention: false
+  default_topic: corvidae
+```
+
+**Scopes and topics.** A channel is `zulip:<stream_id>`; a topic is a name anyone can rename, so it is never part of an id (PRD principle 10). Every topic in a channel shares one history. A reply goes to the topic of the newest allowed message, which is held in memory only. The model sees the channel as `#general > plans`.
+
+**Replies can't ping.** Zulip has no allowed-mentions switch, so a notifying mention in a reply (`@**all**`, `@**Name**`, `@*group*`) is broken with a zero-width space after the `@`. Silent mentions (`@_**Name**`) pass through.
+
+**Zulip content is stored in plaintext on this host, and your Zulip server has it too.** Messages land in `sessions.db`, the JSONL conversation log and consolidated memory as ordinary text; messages from senders who are not allowlisted are refused before they are persisted. To remove a conversation, use `corvidae redact` as described for Signal above, with `channel_id = 'zulip:<stream_id>'` or `'zulip:dm:<user ids>'`.
+
+---
+
 ## `web` — browser chat UI
 
 The `web` section is optional. If absent, `WebPlugin` loads but stays inert: no listener, nothing logged above `DEBUG`. A bare `web:` with no value turns it on with every default. If present, it must be well-formed: a bad field raises at startup naming it, and a port that's already taken fails startup too.
@@ -782,7 +823,7 @@ Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`), or t
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `register_prompt` | string or list of strings | `agent.register_prompt`, else the transport's shipped default | This channel's register, appended after `agent.system_prompt`. Replaces the shipped default; `""` or `[]` means no register. On a conversational transport (IRC, Discord, Signal) the `silence` plugin still appends its instruction to a custom register, or to `""`; see [Registers](#registers). Same format as `agent.system_prompt`. |
+| `register_prompt` | string or list of strings | `agent.register_prompt`, else the transport's shipped default | This channel's register, appended after `agent.system_prompt`. Replaces the shipped default; `""` or `[]` means no register. On a conversational transport (IRC, Discord, Signal, Zulip) the `silence` plugin still appends its instruction to a custom register, or to `""`; see [Registers](#registers). Same format as `agent.system_prompt`. |
 | `max_context_tokens` | integer | `agent.max_context_tokens` | Token budget for this channel's conversation history. A hard ceiling: a window still over it after compaction loses its oldest rows from memory (the log keeps them). Also the budget for this channel's catch-up consolidation views. |
 | `max_turns` | integer | `agent.max_turns` | Maximum consecutive tool-calling turns for this channel. Must be an integer; a wrong type is rejected when the file is parsed (a `Config error` at startup, a logged reload error on reload), not at turn time. |
 | `reasoning_history` | `drop` \| `exchange` \| `keep` | `agent.reasoning_history` | Controls `reasoning_content` retention for this channel. |
@@ -807,7 +848,7 @@ channels:
 
 Every channel's system prompt is the agent's identity (`agent.system_prompt`) followed by a blank line and the channel's register, if it has one. The register resolves like any channel setting: the exact entry, then transport-wide entries from most to least specific, then `agent.register_prompt`, then the default the channel's transport ships, then none. Each layer replaces the ones below it; nothing is merged. An explicit `""` or `[]` at any layer means no register, which is how to switch a shipped default off.
 
-Signal, Discord and IRC ship defaults (texting-length turns and only the formatting the transport shows; see [prompt-guide.md](prompt-guide.md#chat-register-fragments)). Web, CLI and ACP ship none. A `register_prompt` replaces the whole default. While the `silence` plugin is loaded, a conversational transport's system prompt then gets one more paragraph after the register, which lets the agent reply `NO_REPLY` to send nothing ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy) has the text). It is added whatever the register's source, so a custom register and `register_prompt: ""` still get it; to opt a channel out, disable the plugin (`plugins.disabled: [silence]`). A register file that can't be read logs a WARNING naming the channel and the path, and the conversation starts on the identity alone. Like the identity, the register is fixed when a conversation starts.
+Signal, Discord, Zulip and IRC ship defaults (texting-length turns and only the formatting the transport shows; see [prompt-guide.md](prompt-guide.md#chat-register-fragments)). Web, CLI and ACP ship none. A `register_prompt` replaces the whole default. While the `silence` plugin is loaded, a conversational transport's system prompt then gets one more paragraph after the register, which lets the agent reply `NO_REPLY` to send nothing ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy) has the text). It is added whatever the register's source, so a custom register and `register_prompt: ""` still get it; to opt a channel out, disable the plugin (`plugins.disabled: [silence]`). A register file that can't be read logs a WARNING naming the channel and the path, and the conversation starts on the identity alone. Like the identity, the register is fixed when a conversation starts.
 
 ### Transport-wide entries
 
@@ -861,6 +902,8 @@ Hiding a tool isn't access control. A model can still call a tool it saw earlier
 - Removing a channel's whole exact entry from `channels:` keeps its last list until restart. To re-enable everything on a running channel, set `disabled: []`. Removing a transport-wide entry takes effect live.
 
 Discord channels are keyed on numeric ids: `discord:<channel_id>` for a server channel, `discord:<thread_id>` for a thread (a thread has its own id and its own history, so it does not inherit its parent channel's override), and `discord:dm:<user_id>` for a DM. Names are not accepted, because they change and the id is the persistence key.
+
+Zulip channels are keyed the same way: `zulip:<stream_id>` for a channel (every topic in it shares the entry, because a topic is a name people can rename), `zulip:dm:<user_id>` for a 1:1 DM, and `zulip:dm:<id>,<id>` for a group DM, with the ids ascending and the bot's own left out.
 
 Signal channels accept either form of key. `signal:<aci>` is the real channel id and matches directly. `signal:+15551234567` is an alias: its overrides are copied onto the ACI-keyed channel the first time that person writes, once the number has resolved. The alias entry itself never becomes a live channel, and an alias naming someone absent from `signal.allow` is simply inert — an unauthorized sender never gets a turn for the overrides to apply to.
 

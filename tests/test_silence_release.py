@@ -351,12 +351,15 @@ def _register_cases():
     transport that ships a register."""
     from corvidae.channels.discord import DiscordPlugin
     from corvidae.channels.signal import SignalPlugin
+    from corvidae.channels.zulip import ZulipPlugin
 
     return [
         pytest.param(_irc_plugin, "irc", "#lex", ("chat", "irc"), id="irc"),
         pytest.param(DiscordPlugin, "discord", "dm:7", ("chat",), id="discord-dm"),
         pytest.param(DiscordPlugin, "discord", "1234", ("chat", "discord_group"), id="discord-group"),
         pytest.param(SignalPlugin, "signal", "aci-1", ("chat", "signal_dm"), id="signal"),
+        pytest.param(ZulipPlugin, "zulip", "dm:7", ("chat",), id="zulip-dm"),
+        pytest.param(ZulipPlugin, "zulip", "7", ("chat", "zulip_group"), id="zulip-channel"),
     ]
 
 
