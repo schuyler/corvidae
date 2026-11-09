@@ -980,8 +980,6 @@ async def test_shell_cancelled_by_call_timeout_kills_process(tmp_path):
                 os.kill(int(pidfile.read_text().strip()), signal.SIGKILL)
             except (ProcessLookupError, ValueError):
                 pass
-        # Close the HTTP session on_init opened.
-        await plugin.on_stop()
 
 
 async def test_shell_cancel_before_spawn_reraises():
