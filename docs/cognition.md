@@ -157,10 +157,14 @@ that ignore `response_format` still get the prompt's JSON instruction:
 - A reply with no `entries` key but a `summary` (the old shape) is read as
   one entry, with its top-level `topic_tags`.
 - A lone string where a list belongs (`"participants": "kestrel"`) reads as
-  a one-item list. Any other non-list `participants`, or legacy
-  `topic_tags`, makes the reply unusable, and the error names the key.
+  a one-item list. Any other non-list `participants` reads as no
+  participants, with a warning naming the key, and the entries are kept
+  (#655); a non-list legacy `topic_tags` makes the reply unusable, and the
+  error names the key.
 - `importance` is a number, or a string `float()` accepts (`"0.7"`), if it
-  is finite. A bool, a non-number or `nan` counts as absent.
+  is finite and within [0, 1]. A bool, a non-number, `nan`, or a value
+  outside [0, 1] (a rating on another scale, such as `7` or `"1e3"`) counts
+  as absent, so the rubric rates the range instead (#655).
 
 The task then scores an importance prior through the pluggable
 `MemoryPlugin.importance_prior`, once for the whole range, passing the
@@ -262,9 +266,12 @@ transaction (vec0 rejects it on insert, and the resulting
 `OperationalError` would roll back the whole consolidation: record,
 vec row and watermark, stalling the channel on every later trigger) —
 stores the entry with `embedded=0` for later backfill. The embedding call covers all
-of a consolidation's entries at once, so if it fails or returns the wrong
-number of vectors every entry is stored `embedded=0`; a wrong-width vector
-costs only its own entry. The narrative text
+of a consolidation's entries at once. If that batch fails, it is retried
+as two halves, recursively, with a warning, so a server that caps the
+batch size still embeds every entry (#655); if a single-entry request
+fails or returns the wrong number of vectors (the encoder is failing, not
+capping), every entry is stored `embedded=0`. A
+wrong-width vector costs only its own entry. The narrative text
 is canonical and vectors are a rebuildable cache. All consolidation LLM
 calls carry `stage="consolidation"` attribution, along with the `trigger`
 that started the run (`"compaction"`, `"idle"` or `"turn"`; `"eval"` from
