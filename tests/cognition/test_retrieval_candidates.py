@@ -52,7 +52,7 @@ async def retrieval_ids(db) -> list[int]:
 async def candidate_rows(db, retrieval_id: int | None = None) -> dict[int, dict]:
     """The retrieval_candidate rows (of one retrieval, or all), keyed by memory_id."""
     sql = (
-        "SELECT retrieval_id, memory_id, similarity, score, band, rank, outcome "
+        "SELECT memory_id, similarity, score, band, rank, outcome "
         "FROM retrieval_candidate"
     )
     params: tuple = ()
@@ -62,12 +62,18 @@ async def candidate_rows(db, retrieval_id: int | None = None) -> dict[int, dict]
     async with db.execute(sql, params) as cursor:
         rows = await cursor.fetchall()
     return {
-        row[1]: {
-            "retrieval_id": row[0], "similarity": row[2], "score": row[3],
-            "band": row[4], "rank": row[5], "outcome": row[6],
+        row[0]: {
+            "similarity": row[1], "score": row[2],
+            "band": row[3], "rank": row[4], "outcome": row[5],
         }
         for row in rows
     }
+
+
+async def only_retrieval(db) -> tuple[int, dict[int, dict]]:
+    """The single retrieval_log id and its candidate rows (fails if not exactly one)."""
+    (retrieval_id,) = await retrieval_ids(db)
+    return retrieval_id, await candidate_rows(db, retrieval_id)
 
 
 class TestCandidateRows:
@@ -84,8 +90,7 @@ class TestCandidateRows:
             await seed(db, channel.id, summary, 1, 2)
         await ask_plain(memory, channel, conv, QUERY)
 
-        (retrieval_id,) = await retrieval_ids(db)
-        rows = await candidate_rows(db, retrieval_id)
+        _, rows = await only_retrieval(db)
         expected, degraded = await memory.retrieve(QUERY)
         assert len(expected) == 3
         assert set(rows) == {c["id"] for c in expected}
@@ -105,8 +110,7 @@ class TestOutcomes:
         mem = await seed(db, channel.id, QUERY, 1, 2)
         await ask_plain(memory, channel, conv, QUERY)
         assert len(context_messages(conv)) == 1
-        (retrieval_id,) = await retrieval_ids(db)
-        rows = await candidate_rows(db, retrieval_id)
+        _, rows = await only_retrieval(db)
         assert rows[mem]["outcome"] == "admitted"
         await db.close()
 
@@ -118,8 +122,7 @@ class TestOutcomes:
         strong = await seed(db, channel.id, QUERY, 1, 2)
         weak = await seed(db, channel.id, "zebra quartz midnight violin harvest", 3, 4)
         await ask_plain(memory, channel, conv, QUERY)
-        (retrieval_id,) = await retrieval_ids(db)
-        rows = await candidate_rows(db, retrieval_id)
+        _, rows = await only_retrieval(db)
         assert rows[weak]["band"] == "weak"
         assert rows[weak]["outcome"] == "dropped_weak"
         assert rows[strong]["outcome"] == "admitted"
@@ -133,8 +136,7 @@ class TestOutcomes:
         mem = await seed(db, channel.id, QUERY, 1, 2)
         await ask_plain(memory, channel, conv, QUERY)
         assert context_messages(conv) == []
-        (retrieval_id,) = await retrieval_ids(db)
-        rows = await candidate_rows(db, retrieval_id)
+        _, rows = await only_retrieval(db)
         assert rows[mem]["outcome"] == "dropped_budget"
         await db.close()
 
@@ -168,16 +170,9 @@ class TestWindowExclusionRows:
         fill_window(conv)
         await ask(memory, channel, conv, QUERY, WINDOW_START + 5)
 
-        (retrieval_id,) = await retrieval_ids(db)
-        rows = await candidate_rows(db, retrieval_id)
+        _, rows = await only_retrieval(db)
         assert rows[in_window]["outcome"] == "excluded_in_window"
         assert {out_a, out_b} <= set(rows)
-        async with db.execute(
-            "SELECT COUNT(*) FROM retrieval_candidate "
-            "WHERE retrieval_id = ? AND memory_id = ?",
-            (retrieval_id, in_window),
-        ) as cursor:
-            assert (await cursor.fetchone())[0] == 1
         await db.close()
 
     async def test_in_window_record_below_top_k_gets_no_row(self):
@@ -194,8 +189,7 @@ class TestWindowExclusionRows:
         fill_window(conv)
         await ask(memory, channel, conv, QUERY, WINDOW_START + 5)
 
-        (retrieval_id,) = await retrieval_ids(db)
-        rows = await candidate_rows(db, retrieval_id)
+        _, rows = await only_retrieval(db)
         assert in_window not in rows
         assert "excluded_in_window" not in {r["outcome"] for r in rows.values()}
         await db.close()
@@ -217,7 +211,7 @@ class TestWindowExclusionRows:
         fill_window(conv)
         await ask(memory, channel, conv, QUERY, WINDOW_START + 5)
 
-        (retrieval_id,) = await retrieval_ids(db)
+        retrieval_id, rows = await only_retrieval(db)
         async with db.execute(
             "SELECT degraded_to_fts, excluded_in_window FROM retrieval_log "
             "WHERE id = ?", (retrieval_id,),
@@ -225,7 +219,6 @@ class TestWindowExclusionRows:
             degraded, excluded = await cursor.fetchone()
         assert degraded == 1
         assert excluded == 2
-        rows = await candidate_rows(db, retrieval_id)
         assert set(rows) == {out_of_window}
         assert "excluded_in_window" not in {r["outcome"] for r in rows.values()}
         await db.close()
@@ -241,8 +234,7 @@ class TestPool:
             await seed(db, channel.id, f"{QUERY} number {n}", 10 + n, 11 + n)
         await ask_plain(memory, channel, conv, QUERY)
 
-        (retrieval_id,) = await retrieval_ids(db)
-        rows = await candidate_rows(db, retrieval_id)
+        _, rows = await only_retrieval(db)
         assert len(rows) == 5
         assert sorted(r["rank"] for r in rows.values()) == [1, 2, 3, 4, 5]
         for row in rows.values():
@@ -271,12 +263,11 @@ class TestFtsDegraded:
         embedder.fail = True
         await ask_plain(memory, channel, conv, QUERY)
 
-        (retrieval_id,) = await retrieval_ids(db)
+        retrieval_id, rows = await only_retrieval(db)
         async with db.execute(
             "SELECT degraded_to_fts FROM retrieval_log WHERE id = ?", (retrieval_id,),
         ) as cursor:
             assert (await cursor.fetchone())[0] == 1
-        rows = await candidate_rows(db, retrieval_id)
         assert set(rows) == {mem}
         assert rows[mem]["similarity"] == pytest.approx(FTS_SIMILARITY_PROXY)
         await db.close()

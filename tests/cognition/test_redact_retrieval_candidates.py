@@ -11,6 +11,7 @@ a dry run reports the count and deletes nothing.
 import asyncio
 import time
 
+import pytest
 from click.testing import CliRunner
 
 from corvidae.commands.redact import (
@@ -75,32 +76,31 @@ async def _db_with_candidates(path: str | None = None):
 
 
 class TestRedactForms:
-    async def test_message_form_deletes_rows_of_cascaded_memories(self):
-        # L5 message: redacting u1 cascades onto the memories covering it;
-        # their candidate rows go, everyone else's stay.
+    @pytest.mark.parametrize(
+        "redact",
+        [
+            # L5 message: redacting u1 cascades onto the memories covering it;
+            # their candidate rows go, everyone else's stay.
+            pytest.param(
+                lambda db, ids: redact_messages(db, [ids["u1"]]), id="message",
+            ),
+            # L5 memory: redacting a memory deletes its rows and those of the
+            # records its range cascades onto; unrelated records keep theirs.
+            pytest.param(
+                lambda db, ids: redact_memory_id(db, ids["m_target"]), id="memory",
+            ),
+            # L5 range: redacting the u1..a1 range deletes the rows of memories
+            # intersecting it and keeps the rest.
+            pytest.param(
+                lambda db, ids: redact_range(db, ids["u1"], ids["a1"]), id="range",
+            ),
+        ],
+    )
+    async def test_form_deletes_rows_of_cascaded_memories(self, redact):
+        # Every redact form leaves only the rows of unaffected memories.
         db, ids = await _db_with_candidates()
         try:
-            await redact_messages(db, [ids["u1"]])
-            assert await _remaining(db) == {ids["m_other"], ids["m_chan_b"]}
-        finally:
-            await db.close()
-
-    async def test_memory_form_deletes_target_and_cascaded_rows(self):
-        # L5 memory: redacting a memory deletes its rows and those of the
-        # records its range cascades onto; unrelated records keep theirs.
-        db, ids = await _db_with_candidates()
-        try:
-            await redact_memory_id(db, ids["m_target"])
-            assert await _remaining(db) == {ids["m_other"], ids["m_chan_b"]}
-        finally:
-            await db.close()
-
-    async def test_range_form_deletes_rows_of_intersecting_memories(self):
-        # L5 range: redacting the u1..a1 range deletes the rows of memories
-        # intersecting it and keeps the rest.
-        db, ids = await _db_with_candidates()
-        try:
-            await redact_range(db, ids["u1"], ids["a1"])
+            await redact(db, ids)
             assert await _remaining(db) == {ids["m_other"], ids["m_chan_b"]}
         finally:
             await db.close()
