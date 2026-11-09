@@ -18,6 +18,7 @@ vec = ["sqlite-vec>=0.1.9"]
 
 [project.entry-points."corvidae.redact"]
 exchange_log = "corvidae_cognition.outcome_log:redact_exchange_log"
+retrieval_candidate = "corvidae_cognition.memory:redact_retrieval_candidates"
 
 [project.entry-points."corvidae.commands"]
 goals = "corvidae_cognition.goals:goals_command"
