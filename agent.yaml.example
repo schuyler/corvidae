@@ -205,7 +205,7 @@ agent:
 # Zulip transport (optional — omit to disable Zulip; see docs/zulip-ops.md for
 # creating the bot and finding ids). Needs Zulip 9.0+, no extra install. In
 # channels and group DMs the bot only answers a message that mentions it; 1:1 DMs
-# always reach it. Replies go to the topic of the latest allowed message.
+# always reach it. Replies go to the topic of the latest allowed message that reached the agent.
 # zulip:
 #   site: https://chat.example.org     # scheme://host[:port], no path
 #   email: corvidae-bot@chat.example.org   # or set ZULIP_EMAIL

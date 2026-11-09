@@ -285,9 +285,14 @@ class ZulipPlugin(TransportPlugin):
             or parts.username
             or parts.password
         ):
-            # A URL with a user:password in it carries a secret; never echo it.
-            hidden = parts is not None and bool(parts.username or parts.password)
-            shown = "a URL with credentials in it (not shown)" if hidden else repr(site)
+            # A URL with a user:password or a query string (?api_key=...) may carry a
+            # secret; never echo it.
+            hidden = parts is not None and bool(parts.username or parts.password or parts.query)
+            shown = (
+                "a URL with credentials or a query string in it (not shown)"
+                if hidden
+                else repr(site)
+            )
             raise ValueError(
                 f"zulip: config field zulip.site must be a bare http(s) URL such as "
                 f"https://chat.example.org, got {shown}; fix zulip.site in agent.yaml"

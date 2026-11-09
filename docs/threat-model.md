@@ -496,8 +496,9 @@ bot, and what stops them is only that allowlist. Four more things to know:
   every topic of the channel, because a topic is a name people can rename and
   so is not part of the channel's id (PRD principle 10): text from one topic
   is in the window while the agent answers another. The agent answers only when
-  directly mentioned and records only those messages (all of an allowed user's
-  with `zulip.require_mention: false`).
+  mentioned (directly, or through a user group it belongs to) and records only
+  those messages; with `zulip.require_mention: false`, globally or in a
+  `zulip.channels` entry, it records all of an allowed user's messages there.
 - **Outbound mentions are defused.** Zulip has no allowed-mentions switch. A
   reply containing `@**all**` would page the whole channel, so every send puts
   a zero-width space between `@` and `*`, which stops Zulip parsing a mention.

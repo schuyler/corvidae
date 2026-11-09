@@ -104,7 +104,7 @@ verified (see the last section).
 
 ## Outbound
 
-26. A reply goes to the topic of the newest allowed message on that channel, held
+26. A reply goes to the topic of the newest allowed message that reached the agent on that channel, held
     in memory only, whatever started the turn (a message, a reminder, the
     heartbeat, a cross-channel send); only when none is remembered for the channel
     (the first turn after a restart, or a channel no allowed message has reached)
@@ -135,9 +135,12 @@ verified (see the last section).
     when a final is sent, when a final is withheld, or when a message the gate never
     admitted gives its slot back. It is never left on. A failed typing call is a
     WARNING and never costs the reply. [PRD 3.2.5]
-33. One final releases every outstanding slot (it answers a coalesced burst); the
-    ownership check, `final_was_unsent` and the release run before the first
-    `await`. Progress text is delivered without releasing a slot.
+33. One final releases every outstanding slot (it answers a coalesced burst). On
+    the withheld-final path (`on_agent_response`) the ownership check,
+    `final_was_unsent` and the release run before the first `await`; a sent final
+    releases after it has delivered, as Discord and Signal do, so a message that
+    arrives mid-delivery has its slot released with the rest. Progress text is
+    delivered without releasing a slot.
 
 ## Testing
 

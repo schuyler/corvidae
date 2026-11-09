@@ -25,7 +25,7 @@ There is no local Zulip server in `harness/` (one needs PostgreSQL, Redis, Rabbi
 
 The allowlist and `channels` take numbers, not names or emails, because names and emails change and ids don't.
 
-- **User id** (for `allow`): open the person's profile in the app; it lists their user ID. Or ask the API: `curl -u BOT_EMAIL:API_KEY https://chat.example.org/api/v1/users` returns every `user_id` with its `full_name`.
+- **User id** (for `allow`): open the person's profile in the app; it lists their user ID. Or ask the API: `curl -u BOT_EMAIL:API_KEY https://chat.example.org/api/v1/users` (`-u` puts the key in your shell history and process list; for more than a one-off, use a `~/.netrc` entry and `curl -n`) returns every `user_id` with its `full_name`.
 - **Channel id** (for `channels`): Zulip's API has a "Get channel ID" call (`GET /api/v1/get_stream_id`, see its page in Zulip's API docs for the parameter). Easier: set `logging.level: DEBUG`, post a message in the channel without mentioning the bot, and read the line saying it does not mention the bot: it names the channel as `zulip:7`, and the key is the `7`.
 
 ## How it behaves
@@ -33,11 +33,11 @@ The allowlist and `channels` take numbers, not names or emails, because names an
 - **1:1 DMs**: every message from an allowed user reaches the agent (which may still decline to reply).
 - **Channels**: only a mention of the bot does (`@**Corvidae Bot**`, or a user group it belongs to, since Zulip sets its `mentioned` flag for both; the group's token stays in the text), unless `zulip.require_mention` is `false` (everywhere) or `zulip.channels.<id>.require_mention` is (one channel). `@**all**`, `@**channel**` and `@**topic**` do not count.
 - **Group DMs** follow `zulip.require_mention` like a channel does.
-- **Everyone else** is refused silently: one INFO line naming their user id, nothing sent back.
+- **Everyone else** is refused silently: one INFO line naming their user id, nothing sent back. (A stranger's message that doesn't mention the bot in a mention-only channel is dropped earlier, with a DEBUG line instead.)
 
 ### Topics
 
-Every channel message in Zulip lives in a topic, and corvidae answers in the topic of the latest message from an allowed user in that channel. The topic is not part of the channel's identity: history, memory and `channels.zulip:*` entries are keyed on the channel id (`zulip:7`), so everything said in any topic of that channel shares one conversation. The model sees the channel as `#general > plans`, so it knows where it is. Topics can be renamed by anyone, and an id that depends on a name would orphan its history when they do (PRD principle 10). If you want a separate conversation per topic, that is a decision to make in the PRD, not a setting.
+Every channel message in Zulip lives in a topic, and corvidae answers in the topic of the latest message from an allowed user that reached the agent in that channel (an unmentioned message in a mention-only channel is dropped first, so it does not move the reply). The topic is not part of the channel's identity: history, memory and `channels.zulip:*` entries are keyed on the channel id (`zulip:7`), so everything said in any topic of that channel shares one conversation. The model sees the channel as `#general > plans`, so it knows where it is. Topics can be renamed by anyone, and an id that depends on a name would orphan its history when they do (PRD principle 10). If you want a separate conversation per topic, that is a decision to make in the PRD, not a setting.
 
 The topic to answer in is remembered in memory only. Only when nothing is remembered for the channel (the first turn after a restart, or a channel no allowed message has reached yet) does the reply go to `zulip.default_topic` (default `corvidae`). Otherwise a reminder, a heartbeat post or a cross-channel `send_message` to `zulip:7` lands in that last remembered topic. If two allowed people write in different topics of one channel close together, the answer to the first goes to the second's topic.
 
@@ -54,7 +54,7 @@ Zulip has no switch like Discord's allowed-mentions, so corvidae breaks the sigi
 | `event queue ... was garbage-collected` (WARNING) | The server dropped the bot's queue, usually after a long outage. Corvidae registers a new one. **Messages sent while it was gone are not replayed.** |
 | `connection error to <site> as <email>, retrying in Ns` | Network or 5xx. Retries at 10 s, doubling to 300 s. |
 | `could not post to zulip:7 (topic 'x') ... dropped` | The server refused the message; its own explanation is in the line. Usually the bot isn't subscribed or may not post there. |
-| `message queued until the server answers` | The server is unreachable; replies wait in a 50-message queue and are lost if corvidae stops first. |
+| `message queued until the server answers` | The server is unreachable; replies wait in a 50-chunk queue (a long reply takes several slots) and are lost if corvidae stops first. |
 
 ## Limits
 

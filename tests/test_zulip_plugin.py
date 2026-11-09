@@ -579,13 +579,18 @@ class TestConfig:
             await plugin.on_init(pm=pm, config={"zulip": block})
         assert "zulip.channels" in str(exc.value)
 
-    async def test_a_credential_in_the_site_is_never_echoed(self):
-        """A user:password typed into zulip.site is rejected without printing it."""
+    @pytest.mark.parametrize(
+        "site",
+        ["https://bot:HUNTER2@chat.example.org", "https://chat.example.org/?api_key=HUNTER2"],
+    )
+    async def test_a_credential_in_the_site_is_never_echoed(self, site):
+        """A secret typed into zulip.site, as user:password or as a query
+        string, is rejected without printing it."""
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
         plugin = ZulipPlugin(pm)
         block = {
-            "site": "https://bot:HUNTER2@chat.example.org",
+            "site": site,
             "email": BOT_EMAIL,
             "api_key": API_KEY,
         }
@@ -1427,6 +1432,7 @@ class TestOutbound:
             for n in range(4):
                 await h.plugin.send_message(channel, OutboundMessage(text=f"m{n}", latency_ms=None))
             assert len(h.plugin._outbound) <= 2
+            assert [i.text for i in h.plugin._outbound] == ["m2", "m3"]  # the OLDEST went
             dropped = [
                 r.getMessage()
                 for r in _zulip_records(caplog, logging.WARNING)
@@ -1534,6 +1540,9 @@ class TestTyping:
             await _wait_until(lambda: h.on_message.await_count >= 1)
             await asyncio.sleep(0.2)
             assert h.plugin._outstanding.get(f"zulip:dm:{ALICE}", 0) == 0
+            # No reply is owed, so the notice the start showed must be cleared
+            # explicitly: the refresh loop ending by itself would leave it up.
+            assert h.server.typing[-1]["op"] == "stop"
             starts = len([t for t in h.server.typing if t["op"] == "start"])
             await asyncio.sleep(0.2)
             assert len([t for t in h.server.typing if t["op"] == "start"]) == starts
