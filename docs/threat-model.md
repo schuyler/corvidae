@@ -1301,8 +1301,11 @@ it.
   CONTEXT in the window). `corvidae redact` scrubs both (#160), through
   the `exchange_log` scrubber the cognition extra registers under
   `corvidae.redact`. A plugin that keeps its own copy of conversation text
-  and registers no scrubber is not reached. The
-  owning exchange's claims are tombstoned with their counts kept, and
+  and registers no scrubber is not reached. `retrieval_candidate` (#407)
+  copies no text, only memory ids and scores, but a row naming a redacted
+  memory still records that it was retrieved, so its scrubber deletes
+  those rows, including ones from retrievals on other channels. For
+  `exchange_log`, the owning exchange's claims are tombstoned with their counts kept, and
   every snapshot in the channel from the redacted message on is
   dropped. What `redact` still doesn't reach: exchanges whose
   `message_rowid` is NULL, the JSONL logs and the daemon log, any copy

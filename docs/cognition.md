@@ -57,7 +57,7 @@ as before the split.
 They own these tables in `sessions.db`: `memory`, `memory_fts`,
 `memory_vec`, `memory_prompt`, `embedding_meta`,
 `consolidation_watermark`, `retention_meta`, `retrieval_log`,
-`exchange_log` and `goals`.
+`retrieval_candidate`, `exchange_log` and `goals`.
 
 **One object crosses the line.** `MemoryPlugin` creates `message_fts` and
 two triggers, `message_log_ai` and `message_log_au`, on the kernel's
@@ -279,10 +279,10 @@ id test alone would hide other channels' recent records too. A record that
 straddles the window's oldest id is still admitted, so the part of it that
 compaction dropped stays recallable; a window with no ids excludes nothing.
 The exclusion is a `retrieve(..., exclude=(channel_id, min_msg_id))`
-argument applied in the candidate queries' `WHERE`, before the cut to k:
-the FTS5 path filters ahead of its `LIMIT`, and the KNN fetches `k × 4`
-plus a `COUNT(*)` of the excluded records, so in-window records can't take
-every slot. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
+argument applied before the cut to k: the FTS5 path filters it in `WHERE`
+ahead of its `LIMIT`, and the vector path selects it as a flag (#407) over
+a KNN that fetches `k × 4` plus a `COUNT(*)` of the excluded records, then
+sets the flagged rows aside, so in-window records can't take every slot. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
 and `search_memory` see everything. It is not a scope: other channels'
 records, and this channel's once their rows leave the window, are
 retrieved normally. Known limit: the bound assumes the window is a
@@ -303,7 +303,92 @@ direct CONTEXT append. Admitted memories get their access statistics
 bumped (`retrieval_count`, `last_retrieved_at` — the write half of
 reconsolidation), and every retrieval writes a `retrieval_log` row
 (the top-ranked candidate's decayed score and raw similarity,
-hit/admitted counts, degradation flag).
+hit/admitted counts, degradation flag) and one `retrieval_candidate` row
+per logged candidate (#407, below).
+
+**The candidate log (#407).** `retrieval_log` says what a retrieval
+returned; `retrieval_candidate` says what it considered and what happened
+to each record. Every passive retrieval writes one row per logged
+candidate, in the same commit as its `retrieval_log` row. The rows hold ids
+and numbers, never text:
+
+| column | meaning |
+|---|---|
+| `retrieval_id` | `retrieval_log.id` |
+| `memory_id` | `memory.id` |
+| `similarity` | cosine similarity, or the fixed FTS proxy when the retrieval degraded to FTS |
+| `score` | the recency-decayed score the candidate ranked by |
+| `band` | `strong`, `moderate` or `weak` |
+| `rank` | 1-based position by score among the not-excluded candidates (excluded rows: see below) |
+| `outcome` | one of the values below |
+
+`(retrieval_id, memory_id)` is the key, and an index on `memory_id` makes
+per-record lookups cheap. A candidate's `outcome` is one of:
+
+- `admitted`: the funnel appended its line to the window.
+- `dropped_weak`: banded weak while some other returned candidate was not
+  weak, so it was never offered to the funnel.
+- `dropped_budget`: offered to the funnel, but the `memory` source's token
+  budget had no room for it. (This is the remainder: with the funnel
+  plugin disabled nothing is admitted and selected candidates also read
+  `dropped_budget`.)
+- `dropped_dup`: offered, but the window's CONTEXT already contained that
+  line (the funnel's dedupe is a substring test).
+- `cut`: scored but ranked below k, so never returned.
+- `excluded_in_window`: left out by the window exclusion, but its score
+  would have placed it in the top k.
+
+The log keeps the whole scored pool, not just the k returned. On the
+vector path that is every not-excluded row of the KNN (which fetches
+`k × 4` plus the count of in-window records), so a right record pushed
+past k, by lower similarity or by recency decay, shows up as `cut` with its
+score. The FTS pool is the k rows the query's `LIMIT`
+returns, so FTS retrievals never log `cut` rows. The window exclusion no
+longer filters in the vector query's `WHERE`; the query selects it as a
+flag, so in-window rows come back from the same KNN with their real
+similarity and the rows returned are unchanged.
+
+`excluded_in_window` rows carry a would-be rank: one plus the number of
+not-excluded candidates scoring at least as high. It can therefore equal a
+returned row's rank. Each excluded record is judged alone against the
+ranked pool, not against the other excluded records, so two excluded rows
+may share a would-be rank, and an excluded record that would not have made
+the top k gets no row.
+
+`retrieval_log.excluded_in_window` counts the in-window records the search
+matched; it is NULL when no exclusion applied (a window with no ids) and on
+rows from before #407. The two paths count differently. On the vector path
+it is the in-window rows inside the KNN. On the FTS path it is every
+in-window record the keyword query matches, found with one extra
+`COUNT(*)`: FTS has no scores for rows it dropped, so that path logs the
+count but no `excluded_in_window` rows, and the count is not limited to
+records that would have made the top k.
+
+Only passive retrieval (`before_agent_turn`) logs. A direct `retrieve()`
+call (`scripts/eval_memory.py`) and `search_memory` write nothing. There is
+no `filtered` outcome: redacted, superseded and demoted records have no
+`memory_vec` row, so the KNN never reaches them. Logging is fail-soft: if
+the candidate insert fails, the turn still runs, the `retrieval_log` row
+and exchange profile are still written, and a WARNING names the channel and
+the `retrieval_log` id. Rows are never pruned. Old retrievals have no
+candidate rows.
+
+Why didn't it remember X (here record 123)?
+
+```sql
+SELECT l.ts, l.channel_id, c.outcome, c.rank, c.score, c.similarity, c.band
+FROM retrieval_candidate c
+JOIN retrieval_log l ON l.id = c.retrieval_id
+WHERE c.memory_id = 123
+ORDER BY l.ts DESC;
+```
+
+No row means the record was not logged for that retrieval: outside the
+KNN's reach, not indexed, or redacted; in the window and not good enough to
+make the top k; or, on an FTS-degraded retrieval, not matched by the
+keyword query or past its `LIMIT`. `cut` and `dropped_weak` mean it ranked
+but lost on score (similarity times recency decay) or banding. `corvidae redact` deletes
+rows that reference a redacted memory (below).
 
 **Graceful degradation:** encoder down → FTS5 keyword retrieval over
 `memory_fts` (flagged `degraded_to_fts=1`; the FTS query caps each
@@ -430,7 +515,9 @@ FROM memory WHERE prompt_hash LIKE 'abcdef123456%';
 once), `consolidation_watermark`, `embedding_meta`,
 `memory_fts` (external-content FTS5 with insert/update sync triggers; no
 delete trigger — memory rows are never deleted), `memory_vec` (vec0,
-created only when the extension loads), `retrieval_log`, `retention_meta`
+created only when the extension loads), `retrieval_log`,
+`retrieval_candidate` (one row per logged retrieval candidate; see
+"Retrieval (read path)"), `retention_meta`
 (one-row table persisting `last_run` for the retention job interval), and
 `message_fts` (regular FTS5 table over `message_log` content, maintained by
 `message_log_ai`/`message_log_au` triggers; queried and cleared by `corvidae
@@ -500,7 +587,8 @@ Implements five hooks and two kernel timers:
   under `memory.retrieval.recency_from: last_used`, from the last
   retrieval), bands them (strong/moderate/weak, on the score or, under
   `memory.retrieval.band_on: similarity`, on raw similarity), admits winners through the funnel, bumps access
-  stats for admitted records, and writes a `retrieval_log` row.
+  stats for admitted records, and writes a `retrieval_log` row plus one
+  `retrieval_candidate` row per logged candidate.
 - `on_stop` — cancels the idle watch and retention timers, then in-flight
   background tasks.
 
@@ -539,6 +627,16 @@ hint=None)` takes the consolidation reply's own rating as the keyword-only
 exchanges (message ids are global), logging a failed lookup and falling back to
 the rubric prior and NULL valence. Configuration is documented in
 [configuration.md](configuration.md) (`memory.*`, `llm.embedding`).
+
+The cognition distribution registers the `retrieval_candidate` scrubber
+(`corvidae_cognition.memory:redact_retrieval_candidates`) under the
+`corvidae.redact` entry-point group. The rows hold no
+text, but a row for a redacted memory still records that it was retrieved,
+so `corvidae redact` deletes every `retrieval_candidate` row whose memory
+is already flagged redacted or whose range contains a redacted message id,
+including rows written by retrievals on other channels. `--dry-run` reports
+the count without deleting. The CLI prints it as `<N> retrieval_candidate
+rows`.
 
 `recent(limit)` is the one read API for other plugins: the newest `limit`
 records (indexed, not redacted) of the whole memory, every channel's, as
@@ -605,11 +703,20 @@ by `MemoryPlugin`; only the agent's active access surface is absent.
 
 The context-admission funnel — the single chokepoint for tail CONTEXT
 admission. Entry point name: `"funnel"`. Exposes
-`admit(channel, conv, source, entries, budget_tokens=None) -> int`:
+`admit(channel, conv, source, entries, budget_tokens=None) -> list[str]`
+(the admitted entries; empty when nothing was appended):
 dedupes against CONTEXT already in the window, budgets tokens per source
 (drops are logged, never silent), wraps everything in explicit
 data-not-instructions framing with a source label, appends one CONTEXT
 message at the tail, and persists it with the rowid attached.
+
+`admit_detailed(...)` takes the same arguments and returns an `Admission`
+(frozen dataclass): `admitted` (the entries appended, in input order) and
+`duplicate` (the entries dropped because the window's CONTEXT already
+carried them). An entry in neither list was dropped by the budget.
+`admit()` is `admit_detailed(...).admitted`. Memory retrieval uses the
+detailed form to label `dropped_dup` versus `dropped_budget` in the
+candidate log.
 
 **Without this plugin:** sources that route through the funnel (memory
 retrieval) log a warning and admit nothing.

@@ -305,7 +305,8 @@ conversation's own in-window records fill all k = 8 slots:
 - `_vec_candidates` and `_fts_candidates` apply it in their `WHERE`
   clauses, and the KNN asks for `k × 4` plus the count of excluded records
   (one `COUNT(*)` on `memory`). The KNN is exact and brute force, so a
-  larger k costs the same scan.
+  larger k costs the same scan. (#407 later moved the vec query's exclusion
+  from `WHERE` to a selected flag; the rows returned are the same.)
 
 This narrows what is admitted to *this* window, not what can be retrieved.
 Other channels' records are untouched, and a record is retrievable
@@ -358,7 +359,8 @@ Not designed here; listed so the change can be judged:
 
 - **#407**: one `retrieval_log` candidate row per candidate with
   similarity, score, band, whether it was excluded as in-window, and
-  whether it was admitted.
+  whether it was admitted. Implemented as the `retrieval_candidate` table
+  (see [cognition.md](cognition.md), "Retrieval (read path)").
 - **A labelled query set**: twenty to forty real queries from Lex's
   `message_log`, each with the record(s) that should come back.
   `scripts/eval_memory.py --live` already drives the real `MemoryPlugin`

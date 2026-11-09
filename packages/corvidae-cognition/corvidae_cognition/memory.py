@@ -92,6 +92,7 @@ from corvidae.fork import (
 )
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm_plugin import parse_llm_config
+from corvidae_cognition.funnel import Admission
 from corvidae.persistence import (
     add_column_if_missing,
     decode_message_row,
@@ -148,11 +149,33 @@ def _exclude_clause(
     its ``min_msg_id``. Both conditions: message_log ids are global, so an id
     test alone would also hide other channels' records. Keyed on
     ``msg_id_start`` so a record straddling the window's oldest id stays.
-    Returns ``("", ())`` when there is nothing to exclude.
+    Returns the bare in-window condition and its parameters, or
+    ``("0", ())`` (never true) when there is nothing to exclude. Callers
+    negate it in WHERE or select it as a flag (#407).
     """
     if exclude is None:
-        return "", ()
-    return " AND NOT (m.channel_id = ? AND m.msg_id_start >= ?)", exclude
+        return "0", ()
+    return "(m.channel_id = ? AND m.msg_id_start >= ?)", exclude
+
+
+# One scored-pool input row from a candidate search:
+# (memory_id, summary, created_at, last_retrieved_at, similarity, in_window).
+CandidateRow = tuple[int, str, float, "float | None", float, bool]
+
+
+@dataclass(frozen=True)
+class RetrievalPool:
+    """The whole scored pool of one retrieval (#407)."""
+
+    # Not-excluded candidates, score descending: the whole pool, not just k.
+    ranked: list[dict]
+    # (would-be rank, candidate) for in-window records that would have made
+    # the top k had they not been excluded. Vec path only.
+    excluded: list[tuple[int, dict]]
+    # In-window records the search matched; None when no exclusion applied.
+    excluded_in_window: int | None
+    degraded: bool
+    k: int
 
 
 # How long (ms) the dedicated memory write connection waits for SQLite's
@@ -980,9 +1003,96 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
     top_similarity REAL,            -- raw similarity of that same candidate
     hit_count INTEGER NOT NULL,
     admitted_count INTEGER NOT NULL,
-    degraded_to_fts INTEGER NOT NULL DEFAULT 0
+    degraded_to_fts INTEGER NOT NULL DEFAULT 0,
+    excluded_in_window INTEGER      -- in-window records matched before exclusion; NULL if none applied
 )
 """
+
+# One row per logged candidate of a passive retrieval (#407). Holds ids and
+# numbers only, never text. outcome is one of: admitted, dropped_weak,
+# dropped_budget, dropped_dup, cut, excluded_in_window.
+RETRIEVAL_CANDIDATE_DDL = """
+CREATE TABLE IF NOT EXISTS retrieval_candidate (
+    retrieval_id INTEGER NOT NULL,   -- retrieval_log.id
+    memory_id    INTEGER NOT NULL,   -- memory.id
+    similarity   REAL NOT NULL,      -- cosine similarity, or FTS_SIMILARITY_PROXY when degraded
+    score        REAL NOT NULL,      -- recency-decayed score retrieve() ranked by
+    band         TEXT NOT NULL,      -- strong | moderate | weak
+    rank         INTEGER NOT NULL,   -- 1-based; would-be rank for excluded_in_window rows
+    outcome      TEXT NOT NULL,
+    PRIMARY KEY (retrieval_id, memory_id)
+) WITHOUT ROWID
+"""
+
+# Lookups by memory: "why didn't it remember X" and the redaction delete.
+RETRIEVAL_CANDIDATE_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS retrieval_candidate_memory
+    ON retrieval_candidate (memory_id)
+"""
+
+
+async def redact_retrieval_candidates(
+    db: aiosqlite.Connection,
+    channel_id: str,
+    msg_ids: list[int],
+    dry_run: bool,
+    tombstone: str,
+) -> int | None:
+    """Delete retrieval_candidate rows that reference a redacted memory (#407).
+
+    Registered as the ``retrieval_candidate`` scrubber in the
+    ``corvidae.redact`` entry-point group. The rows hold no text, but a row
+    for a redacted memory still records that it was retrieved. Targets rows
+    of memories in ``channel_id`` that are already flagged redacted or whose
+    range intersects any of ``msg_ids`` (the cascade's own test), whichever
+    channel the retrieval ran on. The predicate runs once per message id so
+    a large range never exceeds SQLite's bound-variable limit. Returns the
+    row count (deleted, or that would be in dry-run mode), or None when the
+    table is absent. ``tombstone`` is unused.
+    """
+    # A DB whose daemon never ran memory has no table to scrub.
+    async with db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'retrieval_candidate'"
+    ) as cursor:
+        if await cursor.fetchone() is None:
+            return None
+
+    # Memories already flagged redacted (also covers a target whose range
+    # has no message_log rows).
+    memory_ids: set[int] = set()
+    async with db.execute(
+        "SELECT id FROM memory WHERE channel_id = ? AND redacted = 1",
+        (channel_id,),
+    ) as cursor:
+        memory_ids.update(row[0] for row in await cursor.fetchall())
+    # Memories the cascade flags (or would flag, in dry-run): range hits x.
+    for msg_id in msg_ids:
+        async with db.execute(
+            "SELECT id FROM memory WHERE channel_id = ? "
+            "AND msg_id_start <= ? AND msg_id_end >= ?",
+            (channel_id, msg_id, msg_id),
+        ) as cursor:
+            memory_ids.update(row[0] for row in await cursor.fetchall())
+
+    # Count or delete per memory id (one bound parameter each).
+    total = 0
+    for memory_id in sorted(memory_ids):
+        if dry_run:
+            async with db.execute(
+                "SELECT COUNT(*) FROM retrieval_candidate WHERE memory_id = ?",
+                (memory_id,),
+            ) as cursor:
+                total += (await cursor.fetchone())[0]
+        else:
+            cursor = await db.execute(
+                "DELETE FROM retrieval_candidate WHERE memory_id = ?",
+                (memory_id,),
+            )
+            total += cursor.rowcount
+    if not dry_run:
+        await db.commit()
+    return total
 
 # Phase 1b: one-row table persisting the retention job's last-run timestamp
 # so restart loops don't re-run it on every start (trap #5).
@@ -2243,7 +2353,9 @@ class MemoryPlugin(CorvidaePlugin):
             # A window with no message_log ids applies no exclusion.
             window_ids = window_db_ids(conv.messages)
             exclude = (channel.id, min(window_ids)) if window_ids else None
-            candidates, degraded = await self.retrieve(query, exclude=exclude)
+            pool = await self._retrieve_pool(query, exclude=exclude)
+            degraded = pool.degraded
+            candidates = pool.ranked[: pool.k]
 
             # Drop weak-banded candidates unless nothing else matched.
             non_weak = [c for c in candidates if c["band"] != "weak"]
@@ -2258,6 +2370,7 @@ class MemoryPlugin(CorvidaePlugin):
             # Admit through the funnel — never append CONTEXT directly
             # (trap #8); the funnel dedupes against the window and budgets.
             admitted_ids: list[int] = []
+            admission = Admission(admitted=[], duplicate=[])
             if lines:
                 funnel = self.pm.get_plugin("funnel")
                 if funnel is None:
@@ -2266,7 +2379,10 @@ class MemoryPlugin(CorvidaePlugin):
                         "cannot admit context"
                     )
                 else:
-                    admitted_lines = await funnel.admit(channel, conv, "memory", lines)
+                    admission = await funnel.admit_detailed(
+                        channel, conv, "memory", lines
+                    )
+                    admitted_lines = admission.admitted
                     if admitted_lines:
                         admitted_ids = [
                             c["id"] for c, line in zip(selected, lines)
@@ -2291,10 +2407,10 @@ class MemoryPlugin(CorvidaePlugin):
             top_score = candidates[0]["score"] if candidates else None
             top_similarity = candidates[0]["similarity"] if candidates else None
             hit_count = len(candidates)
-            await db.execute(
+            log_cursor = await db.execute(
                 "INSERT INTO retrieval_log (ts, channel_id, trace_id, top_score, "
-                "top_similarity, hit_count, admitted_count, degraded_to_fts) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "top_similarity, hit_count, admitted_count, degraded_to_fts, "
+                "excluded_in_window) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     channel.id,
@@ -2304,8 +2420,52 @@ class MemoryPlugin(CorvidaePlugin):
                     hit_count,
                     len(admitted_ids),
                     1 if degraded else 0,
+                    pool.excluded_in_window,
                 ),
             )
+            retrieval_id = log_cursor.lastrowid
+
+            # Log every pool candidate with its outcome (#407). A failure
+            # here must not lose the retrieval_log row or the exchange
+            # profile, so it is caught and warned about on its own.
+            try:
+                weak_dropped = bool(non_weak)
+                rows = []
+                for i, c in enumerate(pool.ranked):
+                    if i >= pool.k:
+                        outcome = "cut"
+                    elif c["band"] == "weak" and weak_dropped:
+                        outcome = "dropped_weak"
+                    else:
+                        line = lines[selected.index(c)]
+                        if line in admission.admitted:
+                            outcome = "admitted"
+                        elif line in admission.duplicate:
+                            outcome = "dropped_dup"
+                        else:
+                            outcome = "dropped_budget"
+                    rows.append((retrieval_id, c["id"], c["similarity"],
+                                 c["score"], c["band"], i + 1, outcome))
+                # Excluded in-window records carry their would-be rank.
+                for would_be_rank, c in pool.excluded:
+                    rows.append((retrieval_id, c["id"], c["similarity"],
+                                 c["score"], c["band"], would_be_rank,
+                                 "excluded_in_window"))
+                await db.executemany(
+                    "INSERT INTO retrieval_candidate (retrieval_id, memory_id, "
+                    "similarity, score, band, rank, outcome) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+            except Exception:
+                logger.warning(
+                    "retrieval candidate log failed for channel %s "
+                    "(retrieval_log id %s); some or all of this retrieval's "
+                    "candidate rows are missing, the retrieval and its "
+                    "profile are logged",
+                    channel.id, retrieval_id,
+                    exc_info=True, extra={"channel_id": channel.id},
+                )
             await db.commit()
 
             # Copy the retrieval profile into exchange_log under the key —
@@ -2352,13 +2512,27 @@ class MemoryPlugin(CorvidaePlugin):
             Each candidate: {id, summary, created_at, similarity, score,
             band, age_seconds}.
         """
+        pool = await self._retrieve_pool(text, k, exclude)
+        return pool.ranked[: pool.k], pool.degraded
+
+    async def _retrieve_pool(
+        self, text: str, k: int | None = None,
+        exclude: tuple[str, int] | None = None,
+    ) -> RetrievalPool:
+        """Score the whole candidate pool for a query text (#407).
+
+        ``retrieve`` returns the top k of ``ranked``; passive retrieval
+        logs the whole pool. ``excluded`` lists in-window records whose
+        score would have placed them in the top k (vec path only; the FTS
+        path reports only their count).
+        """
         db = await self._ensure_schema()
-        if db is None:
-            return [], False
         k = k or self._retrieval_k
+        if db is None:
+            return RetrievalPool([], [], None, False, k)
         now = time.time()
 
-        rows: list[tuple] = []
+        rows: list[CandidateRow] = []
         degraded = False
         if self._vec_available and self._embedding_enabled():
             try:
@@ -2378,7 +2552,11 @@ class MemoryPlugin(CorvidaePlugin):
             rows = await self._fts_candidates(db, text, k, exclude)
 
         candidates = []
-        for memory_id, summary, created_at, last_retrieved_at, similarity in rows:
+        in_window_flags: list[bool] = []
+        for (
+            memory_id, summary, created_at, last_retrieved_at, similarity, in_window,
+        ) in rows:
+            in_window_flags.append(in_window)
             # Displayed age is always when the memory was formed.
             age_seconds = max(0.0, now - created_at)
             # Ranking age: from formation, or (recency_from: last_used)
@@ -2411,8 +2589,26 @@ class MemoryPlugin(CorvidaePlugin):
                 "band": band,
                 "age_seconds": age_seconds,
             })
-        candidates.sort(key=lambda c: c["score"], reverse=True)
-        return candidates[:k], degraded
+        # Split off the in-window rows; the rest is the ranked pool.
+        ranked = sorted(
+            (c for c, w in zip(candidates, in_window_flags) if not w),
+            key=lambda c: c["score"], reverse=True,
+        )
+        in_window_rows = [c for c, w in zip(candidates, in_window_flags) if w]
+        # Each in-window record is judged alone: would it have made top k?
+        excluded: list[tuple[int, dict]] = []
+        for e in in_window_rows:
+            would_be_rank = 1 + sum(1 for c in ranked if c["score"] >= e["score"])
+            if would_be_rank <= k:
+                excluded.append((would_be_rank, e))
+        # The exclusion count: flagged rows (vec) or one COUNT query (FTS).
+        excluded_in_window: int | None = None
+        if exclude is not None:
+            excluded_in_window = (
+                await self._fts_in_window_count(db, text, exclude)
+                if degraded else len(in_window_rows)
+            )
+        return RetrievalPool(ranked, excluded, excluded_in_window, degraded, k)
 
     async def recent(self, limit: int) -> list[dict]:
         """The newest memories of the whole memory, every channel's.
@@ -2441,13 +2637,15 @@ class MemoryPlugin(CorvidaePlugin):
     async def _vec_candidates(
         self, db: aiosqlite.Connection, query_vector: list[float], k: int,
         exclude: tuple[str, int] | None = None,
-    ) -> list[tuple]:
+    ) -> list[CandidateRow]:
         """Exact-KNN candidates:
-        (id, summary, created_at, last_retrieved_at, cosine_similarity).
+        (id, summary, created_at, last_retrieved_at, cosine_similarity,
+        in_window). In-window rows are returned flagged, not filtered (#407).
 
         sqlite-vec is brute-force exact KNN (no ANN index), so the KNN scan
         costs the same regardless of k; we over-fetch and filter by status
-        flags (and the window exclusion, see ``retrieve``) in the join.
+        flags in the join, and select the window exclusion (see
+        ``retrieve``) as the ``in_window`` flag.
         """
         import sqlite_vec
         knn_k = k * VEC_OVERFETCH
@@ -2463,31 +2661,35 @@ class MemoryPlugin(CorvidaePlugin):
                 (excluded_count,) = await cursor.fetchone()
             knn_k += excluded_count
         async with db.execute(
-            "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at, v.distance "
+            "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at, v.distance, "
+            + exclude_sql + " AS in_window "
             "FROM (SELECT memory_id, distance FROM memory_vec "
             "      WHERE embedding MATCH ? AND k = ?) AS v "
             "JOIN memory m ON m.id = v.memory_id "
-            "WHERE m.indexed = 1 AND m.redacted = 0" + exclude_sql + " "
+            "WHERE m.indexed = 1 AND m.redacted = 0 "
             "ORDER BY v.distance",
             (
+                *exclude_params,
                 sqlite_vec.serialize_float32(query_vector),
                 knn_k,
-                *exclude_params,
             ),
         ) as cursor:
             rows = await cursor.fetchall()
         # vec0 cosine distance = 1 - cosine similarity.
         return [
-            (memory_id, summary, created_at, last_retrieved_at, 1.0 - distance)
-            for memory_id, summary, created_at, last_retrieved_at, distance in rows
+            (memory_id, summary, created_at, last_retrieved_at,
+             1.0 - distance, bool(in_window))
+            for memory_id, summary, created_at, last_retrieved_at, distance, in_window
+            in rows
         ]
 
     async def _fts_candidates(
         self, db: aiosqlite.Connection, text: str, k: int,
         exclude: tuple[str, int] | None = None,
-    ) -> list[tuple]:
+    ) -> list[CandidateRow]:
         """FTS5 keyword candidates with a fixed similarity proxy:
-        (id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY).
+        (id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY,
+        False).
 
         The window exclusion (see ``retrieve``) sits in WHERE, ahead of the
         LIMIT, so it applies before the cut to k."""
@@ -2499,14 +2701,36 @@ class MemoryPlugin(CorvidaePlugin):
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at "
             "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
             "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0"
-            + exclude_sql + " ORDER BY rank LIMIT ?",
+            " AND NOT " + exclude_sql + " ORDER BY rank LIMIT ?",
             (match, *exclude_params, k),
         ) as cursor:
             rows = await cursor.fetchall()
         return [
-            (memory_id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY)
+            (memory_id, summary, created_at, last_retrieved_at,
+             FTS_SIMILARITY_PROXY, False)
             for memory_id, summary, created_at, last_retrieved_at in rows
         ]
+
+    async def _fts_in_window_count(
+        self, db: aiosqlite.Connection, text: str, exclude: tuple[str, int],
+    ) -> int:
+        """How many in-window records the FTS query matches (#407).
+
+        Same MATCH and status filters as ``_fts_candidates``, with the
+        window condition un-negated. Count only: no scores without rows.
+        """
+        match = _fts_match_query(text)
+        if match is None:
+            return 0
+        exclude_sql, exclude_params = _exclude_clause(exclude)
+        async with db.execute(
+            "SELECT COUNT(*) FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
+            "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 AND "
+            + exclude_sql,
+            (match, *exclude_params),
+        ) as cursor:
+            (count,) = await cursor.fetchone()
+        return count
 
     # ------------------------------------------------------------------
     # Watermark helpers
@@ -2767,6 +2991,10 @@ class MemoryPlugin(CorvidaePlugin):
         # Schema upgrade: retrieval_log tables from before top_similarity
         # (#66) gain it as a nullable column; old rows read NULL.
         await add_column_if_missing(db, "retrieval_log", "top_similarity", "REAL")
+        # #407: the exclusion count and the per-candidate child table.
+        await add_column_if_missing(db, "retrieval_log", "excluded_in_window", "INTEGER")
+        await db.execute(RETRIEVAL_CANDIDATE_DDL)
+        await db.execute(RETRIEVAL_CANDIDATE_INDEX_DDL)
         # Phase 1b: message_fts and retention_meta
         await db.execute(MESSAGE_FTS_DDL)
         await db.execute(MESSAGE_FTS_INSERT_TRIGGER)
