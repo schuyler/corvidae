@@ -142,6 +142,10 @@ DEFAULT_BAND_MODERATE = 0.60
 # measured from (GitHub issue #52). The first entry is the default.
 BAND_ON_CHOICES = ("score", "similarity")
 RECENCY_FROM_CHOICES = ("created", "last_used")
+# What passive retrieval's query holds besides the unanswered user messages
+# (#665): the agent's previous reply (variant A), or nothing (the pre-#665
+# query). The first entry is the default.
+QUERY_CONTEXT_CHOICES = ("previous_reply", "none")
 # Honest similarity stand-in for FTS5-degraded retrieval, where cosine
 # similarity cannot be measured: keyword hits enter at the moderate band.
 FTS_SIMILARITY_PROXY = 0.6
@@ -785,6 +789,54 @@ def _retrieval_choice(retrieval_cfg: dict, key: str, choices: tuple[str, ...]) -
     return value
 
 
+def _previous_reply(messages: list[dict]) -> str | None:
+    """The text of the window's last sent assistant reply, or None.
+
+    The last assistant MESSAGE row with non-empty string content: tool-call-
+    only rows carry no text to refer back to, and an UNSENT row (vetoed by a
+    send gate) never reached the person, so neither can be what a follow-up
+    means by "that".
+    """
+    # Walk back from the tail to the first qualifying assistant row.
+    for msg in reversed(messages):
+        if (
+            msg.get("role") == "assistant"
+            and msg.get("_message_type", MessageType.MESSAGE) == MessageType.MESSAGE
+            and isinstance(msg.get("content"), str)
+            and msg["content"].strip()
+        ):
+            return msg["content"]
+    return None
+
+
+def retrieval_query(messages: list[dict], query_context: str) -> str:
+    """Build passive retrieval's query text from a window (#665).
+
+    The unanswered user messages (a coalesced burst, #398), preceded with
+    ``query_context: previous_reply`` by the agent's previous reply when the
+    window holds one. Parts are joined by blank lines, so the FTS query's
+    per-paragraph token cap gives each its own budget and a long reply cannot
+    crowd out the user's words. Shared by ``before_agent_turn`` and
+    ``scripts/eval_memory.py`` so the eval scores the query the daemon runs.
+    shortcut: the reply is used whole, however long; trim or cap it if the
+    labelled self-contained probes show it diluting short questions.
+    """
+    from corvidae.context import unanswered_user_messages
+
+    # The user part: every unanswered user message with text.
+    parts = [
+        m["content"]
+        for m in unanswered_user_messages(messages)
+        if isinstance(m.get("content"), str)
+    ]
+    # The context part: the previous reply, ahead of the user's words.
+    if query_context == "previous_reply":
+        reply = _previous_reply(messages)
+        if reply is not None:
+            parts.insert(0, reply)
+    return "\n\n".join(parts)
+
+
 def _format_age(seconds: float) -> str:
     """Compact human age for retrieval lines: 'now', '12m', '5h', '3d'."""
     if seconds < 60:
@@ -1306,6 +1358,10 @@ class MemoryPlugin(CorvidaePlugin):
         self._band_on = _retrieval_choice(retrieval_cfg, "band_on", BAND_ON_CHOICES)
         self._recency_from = _retrieval_choice(
             retrieval_cfg, "recency_from", RECENCY_FROM_CHOICES
+        )
+        # What the passive query holds besides the user's words (#665).
+        self._query_context = _retrieval_choice(
+            retrieval_cfg, "query_context", QUERY_CONTEXT_CHOICES
         )
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold = float(self._memory_cfg.get("dup_threshold", 0.95))
@@ -2446,7 +2502,6 @@ class MemoryPlugin(CorvidaePlugin):
             if conv is None or not conv.messages:
                 return
             tail = conv.messages[-1]
-            from corvidae.context import MessageType, unanswered_user_messages
             if (
                 tail.get("role") != "user"
                 or tail.get("_message_type", MessageType.MESSAGE) != MessageType.MESSAGE
@@ -2460,12 +2515,9 @@ class MemoryPlugin(CorvidaePlugin):
                 return
 
             # Query with every unanswered user message (a coalesced burst),
-            # joined by blank lines so the FTS cap applies to each message.
-            query = "\n\n".join(
-                m["content"]
-                for m in unanswered_user_messages(conv.messages)
-                if isinstance(m.get("content"), str)
-            )
+            # preceded by the agent's previous reply unless configured off
+            # (#665), so a follow-up retrieves the topic it refers to.
+            query = retrieval_query(conv.messages, self._query_context)
             # Leave out this channel's records whose whole range is still in
             # the window (#634): they would only echo what the model can see.
             # A window with no message_log ids applies no exclusion.

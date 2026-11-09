@@ -1007,7 +1007,8 @@ only through the funnel.
    summing its access statistics. Overlapping triggers on one range keep
    one consolidation's records.
 4. Retrieval runs before each user-originated turn: embed the inbound
-   text, exact KNN over `memory_vec`, filter to indexed and unredacted
+   text, preceded by the agent's previous reply when the window holds one
+   (so a follow-up retrieves for the turn it refers to), exact KNN over `memory_vec`, filter to indexed and unredacted
    records from every channel (and, where the operator applies the
    sensitivity capability, to records whose sensitivity fits who is
    present; with

@@ -295,7 +295,17 @@ it, is written up in [memory-retrieval-fidelity.md](memory-retrieval-fidelity.md
 (notification-triggered turns skip retrieval entirely). The query is every
 unanswered user message in the window (`unanswered_user_messages`), joined
 by blank lines: a coalesced burst (#398) is retrieved for as a whole, and
-one message is just itself. The query is embedded and matched against `memory_vec`
+one message is just itself. Ahead of them, as its own paragraph, goes the
+agent's previous reply (#665): the window's last assistant MESSAGE row with
+text. Tool-call-only rows have no text to refer back to, and an UNSENT reply
+never reached the person, so neither counts. A follow-up such as "thanks,
+that worked" or "what about the other one?" has no referent of its own, so
+it is retrieved for together with the reply it answers. The reply is used
+whole. If labelled self-contained probes show a long reply diluting a short
+question, trimming or capping it is the first adjustment.
+`memory.retrieval.query_context: none` restores the user-message-only query.
+`retrieval_query(messages, query_context)` builds the text, and
+`scripts/eval_memory.py` builds its queries with the same function. The query is embedded and matched against `memory_vec`
 (sqlite-vec exact KNN, cosine distance); candidates are filtered to
 `indexed=1 AND redacted=0`. There is no per-channel scope: records from
 every channel are candidates (PRD principle 14, #168), and
@@ -484,12 +494,28 @@ integers (it may be empty). `description` and `note` are free text the
 script ignores, and so are unknown keys. A malformed file is rejected
 before the copy, with the key, the value and what was expected.
 
+Two optional keys support comparing query variants (#665):
+
+- `context` is the agent reply the probe followed. The query is built the
+  way the daemon builds it, with `retrieval_query`: under
+  `memory.retrieval.query_context: previous_reply` the context goes first,
+  as its own paragraph, and under `none` it is left out.
+  `--query-context previous_reply|none` overrides the config, so variant A
+  and the user-message-only baseline can be scored against one snapshot.
+  The query actually used is written to the pool as `query`.
+- `subset` is a non-empty tag such as `deictic` or `self-contained`. The
+  summary reports `queries`, `scored` and the two means for each tag, with
+  untagged probes grouped as `(untagged)`, and prints them when any probe
+  is tagged.
+
 ```json
 {
   "description": "optional",
   "queries": [
     {"text": "what did we decide about the battery?", "relevant": [412, 415],
-     "note": "optional"}
+     "note": "optional"},
+    {"text": "and the other one?", "context": "The porch ESP32 was the one dropping off wifi.",
+     "subset": "deictic", "relevant": [398]}
   ]
 }
 ```
@@ -504,6 +530,9 @@ The pool file is written once, after the last query:
     {
       "index": 0,
       "text": "what did we decide about the battery?",
+      "context": null,
+      "subset": null,
+      "query": "what did we decide about the battery?",
       "relevant": [412, 415],
       "unscorable": [{"id": 415, "status": "superseded"}],
       "degraded": false,
@@ -516,7 +545,10 @@ The pool file is written once, after the last query:
     }
   ],
   "summary": {"queries": 1, "scored": 1, "degraded": 0,
-              "mean_recall_at_k": 1.0, "mean_mrr": 0.5}
+              "mean_recall_at_k": 1.0, "mean_mrr": 0.5,
+              "query_context": "previous_reply",
+              "subsets": {"(untagged)": {"queries": 1, "scored": 1,
+                                         "mean_recall_at_k": 1.0, "mean_mrr": 0.5}}}
 }
 ```
 
@@ -524,7 +556,8 @@ The pool file is written once, after the last query:
 `rank <= k` are `retrieve()`'s top k, what passive retrieval would hand on
 before it drops weak-band entries (unless all are weak) and the funnel
 admits them, with no window exclusion. It holds ids and scores but
-no memory text; look the ids up in the source. `run_at` is the wall-clock
+no memory text beyond the labels' own `text`, `context` and `query`; look the
+ids up in the source. `run_at` is the wall-clock
 time the run started. The means are `null` when no query was scored.
 
 Operator notes:
@@ -749,7 +782,8 @@ Implements six hooks and two kernel timers:
   `compacted_ids` range above the per-channel watermark, using the stashed
   fork record when there is one for that range and watermark, else catch-up
   (after the drop the range has left the window).
-- `before_agent_turn` — embeds the inbound user text, leaves out this
+- `before_agent_turn` — embeds the inbound user text, preceded by the
+  agent's previous reply (`memory.retrieval.query_context`), leaves out this
   channel's records still wholly in its window, scores candidates
   (`similarity × exp(-age_days / half_life)`, with age from `created_at` or,
   under `memory.retrieval.recency_from: last_used`, from the last
