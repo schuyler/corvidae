@@ -38,6 +38,7 @@ from .test_memory_consolidation import (
     CONSOLIDATION_JSON,
     assert_shared_columns_equal,
     build_consolidation_env,
+    entries_reply,
     fetch_memories,
     fetch_stamped_memories,
     fetch_watermark,
@@ -579,14 +580,10 @@ async def test_catchup_segment_reply_with_two_entries_stores_two_rows(env):
     """C1: a catch-up segment whose reply has 2 entries stores 2 rows that
     share range, importance, participants and stamp, each with its own text
     and tags."""
-    env.main.text = json.dumps({
-        "entries": [
-            {"narrative": "I diagnosed the wifi dropouts.", "topic_tags": ["wifi"]},
-            {"narrative": "I ordered transistors.", "topic_tags": ["parts"]},
-        ],
-        "participants": ["kestrel"],
-        "importance": 0.4,
-    })
+    env.main.text = entries_reply([
+        ("I diagnosed the wifi dropouts.", ["wifi"]),
+        ("I ordered transistors.", ["parts"]),
+    ])
     env.memory._llm()._clients["embedding"].embed_result = [[1.0, 0, 0, 0], [0, 1.0, 0, 0]]
     rows = await env.rows(alternating(["hello there", "hi, how can I help"]))
 

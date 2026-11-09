@@ -808,7 +808,6 @@ class TestEntriesParsing:
         # Importance is scored once per consolidation, not once per entry (D4).
         assert memory.importance_prior.score.await_count == 1
         kwargs = memory.importance_prior.score.await_args.kwargs
-        assert "hint" in kwargs
         assert kwargs["hint"] == expected
         await db.close()
 

@@ -32,6 +32,8 @@ from corvidae.persistence import PersistencePlugin, init_db
 
 from helpers import FakeForkAgent, stub_llm_config, with_chat_llm
 
+from .test_memory_consolidation import entries_reply
+
 
 DIMS = 4  # small for speed; dedup uses cosine similarity only
 
@@ -680,14 +682,10 @@ class TestMergeAnywhere:
 
 def _two_identical_entries_reply() -> str:
     """A reply whose two entries have the same narrative."""
-    return json.dumps({
-        "entries": [
-            {"narrative": _NEAR_IDENTICAL_SUMMARY, "topic_tags": ["wifi"]},
-            {"narrative": _NEAR_IDENTICAL_SUMMARY, "topic_tags": ["esp32"]},
-        ],
-        "participants": ["kestrel"],
-        "importance": 0.5,
-    })
+    return entries_reply(
+        [(_NEAR_IDENTICAL_SUMMARY, ["wifi"]), (_NEAR_IDENTICAL_SUMMARY, ["esp32"])],
+        importance=0.5,
+    )
 
 
 async def _consolidate_new_dialog(memory, persistence, channel, texts):
@@ -725,10 +723,7 @@ async def test_entry_merges_with_an_older_record_but_not_its_sibling():
     if not memory._vec_available:
         pytest.skip("sqlite-vec unavailable; dedup requires vec similarity")
     stub.fixed_embeddings[_NEAR_IDENTICAL_SUMMARY[:20]] = [1.0, 0.0, 0.0, 0.0]
-    stub.chat_text = json.dumps({
-        "entries": [{"narrative": _NEAR_IDENTICAL_SUMMARY, "topic_tags": ["wifi"]}],
-        "importance": 0.5,
-    })
+    stub.chat_text = entries_reply([(_NEAR_IDENTICAL_SUMMARY, ["wifi"])], importance=0.5)
     await _consolidate_new_dialog(memory, persistence, channel, ["first wifi talk", "reply"])
     stub.chat_text = _two_identical_entries_reply()
     await _consolidate_new_dialog(memory, persistence, channel, ["second wifi talk", "reply"])
