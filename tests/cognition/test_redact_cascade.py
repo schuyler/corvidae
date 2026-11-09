@@ -820,6 +820,7 @@ async def test_redact_memory_dry_run_counts_the_cascade_like_the_real_run():
     # The dry run wrote nothing.
     assert (await get_memory(db, sibling))["redacted"] == 0
     assert (await get_memory(db, first))["redacted"] == 0
+    assert (await get_message(db, a1))["message"]["content"] == "kestrel station secret"
 
     real = await redact_memory_id(db, first)
 
