@@ -123,6 +123,13 @@ DEFAULT_IDLE_CONSOLIDATE_AFTER = 1800.0
 # Window tokens of un-consolidated conversation that start a turn consolidation.
 DEFAULT_CONSOLIDATE_AFTER_TOKENS: int = 4000
 
+# Consecutive failed turn-trigger forks on a channel after which the turn
+# trigger backs off (#620): it stops forking until the channel's watermark
+# moves or memory.idle_consolidate_after seconds pass.
+# shortcut: a module constant, not an agent.yaml key; make it config if a
+# deployment's backend fails transiently often enough that 3 is too few.
+TURN_FORK_FAILURE_LIMIT = 3
+
 # Seconds between retention runs, and the longest a due run waits for the
 # system to go quiet before running regardless.
 DEFAULT_RETENTION_INTERVAL = 21600.0
@@ -308,6 +315,15 @@ DEFAULT_CONSOLIDATION_FORK_PROMPT = (
 
 # How a consolidation range gets its record (MemoryPlugin._live_record).
 LiveOutcome = Literal["record", "skip", "catch_up"]
+
+
+@dataclass
+class _TurnFailures:
+    """Consecutive failed turn-trigger forks on one channel (#620)."""
+
+    count: int            # failures since the watermark last moved
+    watermark: int        # the watermark the failures were read against
+    backoff_until: float | None = None  # set once count reaches the limit
 
 # Bound on fork records waiting for their on_compaction task (keyed by
 # (channel_id, range end)). An entry is consumed by the task that follows
@@ -1397,6 +1413,8 @@ class MemoryPlugin(CorvidaePlugin):
         # Channels with a turn or idle consolidation task in flight; a repeat
         # trigger (turn or idle) for one of them is skipped.
         self._idle_inflight: set[str] = set()
+        # Consecutive turn-fork failures per channel, for the backoff (#620).
+        self._turn_failures: dict[str, _TurnFailures] = {}
         # Kernel clock and idle tracker; both set in on_start, or both None.
         self._clock: Clock | None = None
         self._idle: IdleTracker | None = None
@@ -1848,6 +1866,23 @@ class MemoryPlugin(CorvidaePlugin):
                 "turn consolidation could not read the watermark for channel %s "
                 "(schema setup or watermark query failed); "
                 "the next turn trigger retries", channel.id, exc_info=True,
+            )
+            return
+        # Backoff after repeated fork failures (#620): any consolidation that
+        # moved the watermark since the last failure ends it; otherwise the
+        # turn trigger stays off until the interval passes.
+        failures = self._turn_failures.get(channel.id)
+        if failures is not None and failures.watermark != watermark:
+            del self._turn_failures[channel.id]
+        elif (
+            failures is not None
+            and failures.backoff_until is not None
+            and self._now() < failures.backoff_until
+        ):
+            logger.debug(
+                "turn consolidation for channel %s is backing off after %d "
+                "consecutive fork failures; not forking",
+                channel.id, failures.count, extra={"channel_id": channel.id},
             )
             return
         # Sum new conversation tokens, stopping once N is reached.
@@ -2565,6 +2600,37 @@ class MemoryPlugin(CorvidaePlugin):
             extra={"channel_id": channel_id}, **kwargs,
         )
 
+    def _note_turn_fork_failure(
+        self, channel_id: str, rows: list[tuple], watermark: int
+    ) -> bool:
+        """Count a failed turn fork; at the limit, start the backoff (#620).
+
+        The count restarts when the watermark has moved since the last
+        failure (some consolidation succeeded). Reaching the limit, or failing
+        the one retry after a backoff ran out, logs one warning and backs the
+        turn trigger off for ``idle_consolidate_after`` seconds. Returns True
+        when this failure started a backoff.
+        """
+        failures = self._turn_failures.get(channel_id)
+        if failures is None or failures.watermark != watermark:
+            failures = _TurnFailures(count=0, watermark=watermark)
+            self._turn_failures[channel_id] = failures
+        failures.count += 1
+        if failures.count < TURN_FORK_FAILURE_LIMIT:
+            return False
+        failures.backoff_until = self._now() + self._idle_consolidate_after
+        logger.warning(
+            "turn consolidation for channel %s backing off after %d consecutive "
+            "fork failures (messages %d-%d): the turn trigger stops forking until "
+            "a consolidation moves the watermark (now %d) or %.0f s pass; idle "
+            "and compaction still consolidate the range. Check the consolidation "
+            "stage's profile and backend (llm.stages.consolidation) and the "
+            "warnings above for the cause",
+            channel_id, failures.count, rows[0][0], rows[-1][0], watermark,
+            self._idle_consolidate_after, extra={"channel_id": channel_id},
+        )
+        return True
+
     async def _live_record(
         self, channel_id: str, rows: list[tuple], watermark: int, range_end: int,
         trigger: str,
@@ -2607,10 +2673,18 @@ class MemoryPlugin(CorvidaePlugin):
                 try:
                     return "record", await self._fork_record(agent, channel, contained, None)
                 except Exception as exc:
+                    # A turn failure that starts the backoff (#620) is retried
+                    # by idle or compaction, or by the turn trigger only once
+                    # the backoff ends: say so.
+                    retried_by = trigger
+                    if trigger == "turn" and self._note_turn_fork_failure(
+                        channel_id, rows, watermark
+                    ):
+                        retried_by = "idle or compaction (or, after the backoff, turn)"
                     self._skip_consolidation(
                         channel_id, rows, watermark,
                         f"the fork failed or its reply was unusable ({type(exc).__name__})",
-                        trigger, exc_info=True,
+                        retried_by, exc_info=True,
                     )
                     return "skip", None
             if trigger == "turn":

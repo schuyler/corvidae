@@ -451,8 +451,9 @@ Not designed here; listed so the change can be judged:
   message processed between the hook and the fork's render isn't
   narrated too and then again by the next consolidation. Idle has the
   same window today; near-dup merge is the backstop.
-- **Backoff for a fork that keeps failing.** Each turn past N re-forks a
-  growing range with a warning until compaction takes it to catch-up.
+- ~~**Backoff for a fork that keeps failing.**~~ Done in #620: three
+  consecutive failed turn forks back the turn trigger off until the
+  watermark moves or `memory.idle_consolidate_after` passes.
 - **Dedupe on summary text, not the whole line**, so a record isn't
   re-admitted when its age string changes (existing behaviour, more
   frequent with many recent records).
