@@ -2039,9 +2039,9 @@ class MemoryPlugin(CorvidaePlugin):
                 # here is intentional — attempting to consolidate the
                 # non-overlapping tail would require re-fetching messages and
                 # risk producing spurious records.  Any rows beyond the
-                # winner's range_end remain unconsolidated, but the idle
-                # trigger provides eventual coverage: the next idle cycle
-                # will see the updated watermark and pick them up.
+                # winner's range_end remain unconsolidated, but the next
+                # trigger (turn, idle or compaction) sees the updated
+                # watermark and picks them up.
                 logger.debug(
                     "watermark moved during consolidation; discarding",
                     extra={"channel_id": channel_id},
