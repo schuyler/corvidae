@@ -327,7 +327,7 @@ of two lists:
 The sum orders the pool, with the decayed score breaking ties. An FTS hit
 the KNN didn't return gets its real cosine from its stored vector (one
 `vec_distance_cosine` point lookup), so it is ranked in the first list as
-well. A hit with no vector (unembedded, or demoted) carries the 0.6 proxy
+well. A hit with no vector (a record not yet embedded) carries the 0.6 proxy
 and is ranked by FTS alone. A query with no lexical match ranks exactly as
 the KNN alone would. If the FTS side fails, a warning is logged and the
 KNN rows are ranked alone. `memory.retrieval.candidates: vector` turns
@@ -941,10 +941,12 @@ record that shares no words with it ("agreed to ship on Thursdays"), and a
 name still finds the record that names it. Unlike passive retrieval, it
 ranks by raw cosine with no recency decay: a deliberate search wants the best
 answer, and the age is on every line. A keyword hit the scan didn't reach
-gets its cosine from its stored vector. A demoted record has no vector
-(retention deletes it), so with `include_demoted=True` it is found by
-keyword only and shows `kw` as its score. If the FTS query fails, a warning
-is logged and the cosine results stand alone.
+gets its cosine from its stored vector. Demoted and superseded records have
+no vector (retention and the near-duplicate merge delete it), so with
+`include_demoted=True` they are found by keyword only and show `kw` as their
+score. If the FTS query fails, a warning is logged and the cosine results
+stand alone; if the cosine scan itself fails, the tool falls back to the
+keyword search below.
 
 **Keyword fallback.** With no embedding profile, sqlite-vec not loaded, a
 stored encoder that differs from the configured one, or the query encoder

@@ -2987,7 +2987,7 @@ class MemoryPlugin(CorvidaePlugin):
         VEC_OVERFETCH``, in-window rows flagged, not filtered), measures the
         real cosine of every FTS hit the KNN didn't return from its stored
         vector, and falls back to ``FTS_SIMILARITY_PROXY`` for a hit with no
-        vector (unembedded, or demoted). Returns (the union of rows, FTS
+        vector (one not yet embedded; demoted records aren't candidates). Returns (the union of rows, FTS
         ids in bm25 order, ids with a measured cosine). A failing FTS side
         is logged and leaves the vec rows alone: the vec pool is the rescue.
         """

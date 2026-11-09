@@ -133,8 +133,8 @@ class TestFusion:
         await db.close()
 
     async def test_fts_only_hit_without_vector_gets_the_proxy(self):
-        """A record with no vector (unembedded, or demoted) can still be
-        found by FTS; its similarity is the proxy, as on the degraded path."""
+        """A record with no vector (not yet embedded) can still be found by
+        FTS; its similarity is the proxy, as on the degraded path."""
         memory, _e, channel, _conv, db = await build_retrieval_env(config())
         for text in DISTRACTORS:
             await seed_memory(db, channel.id, text)

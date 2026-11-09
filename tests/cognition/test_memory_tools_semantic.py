@@ -259,3 +259,22 @@ class TestDegradation:
             for r in caplog.records if r.levelno == logging.WARNING
         )
         await db.close()
+
+    async def test_failing_cosine_scan_falls_back_to_keywords(self, caplog):
+        """A damaged memory_vec doesn't fail the tool: keyword results, the
+        note, and a warning naming search_memory."""
+        _memory, tools_plugin, db, _client = await env()
+        mid = await seed(db, CHANNEL, "deploy schedule moved to Thursdays")
+        await db.execute("DROP TABLE memory_vec")
+        await db.commit()
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.tools.memory_tools"):
+            result = await get_tools(tools_plugin)["search_memory"]("deploy schedule")
+
+        assert result.splitlines()[0] == "(keyword search only: semantic search unavailable)"
+        assert mid in result_ids(result)
+        assert any(
+            "search_memory" in r.getMessage() and "semantic scan failed" in r.getMessage()
+            for r in caplog.records if r.levelno == logging.WARNING
+        )
+        await db.close()

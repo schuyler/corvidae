@@ -246,7 +246,7 @@ class MemoryToolsPlugin(CorvidaePlugin):
             led by each memory id, with score (cosine similarity to the query, or
             "kw" for a keyword hit with no embedding), age, flags
             ([demoted]/[superseded]), and summary; best match first, by relevance
-            alone. Demoted records are found by keyword only. If semantic search
+            alone. Demoted and superseded records are found by keyword only. If semantic search
             is unavailable the first line says so and results are keyword matches.
             Does not update access stats. Use include_demoted=False to restrict to active (indexed=1)
             records. Use after/before (YYYY-MM-DD or ISO-8601, UTC) to filter by
@@ -343,12 +343,21 @@ class MemoryToolsPlugin(CorvidaePlugin):
                 )
 
             if query_vector is not None:
-                entries = await plugin._semantic_entries(
-                    db, memory, query, query_vector, where, params,
-                )
-                if not entries:
-                    return "No memories found matching your query."
-                return _format_results(entries, max_tokens)
+                # A failing cosine scan (a damaged memory_vec) falls through
+                # to the keyword search rather than failing the tool.
+                try:
+                    entries = await plugin._semantic_entries(
+                        db, memory, query, query_vector, where, params,
+                    )
+                except Exception:
+                    logger.warning(
+                        "search_memory: the semantic scan failed; falling back "
+                        "to keyword search for %r", query, exc_info=True,
+                    )
+                else:
+                    if not entries:
+                        return "No memories found matching your query."
+                    return _format_results(entries, max_tokens)
 
             rows = await plugin._keyword_rows(db, query, match, where, params)
             if rows is None:
