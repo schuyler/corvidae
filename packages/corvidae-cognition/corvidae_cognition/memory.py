@@ -134,6 +134,23 @@ FTS_SIMILARITY_PROXY = 0.6
 # indexed/redacted flags after the KNN scan, so fetch more than k.
 VEC_OVERFETCH = 4
 
+
+def _exclude_clause(
+    exclude: tuple[str, int] | None,
+) -> tuple[str, tuple]:
+    """The window-exclusion SQL fragment for a candidate query (#634).
+
+    Leaves out records of ``exclude``'s channel whose range starts at or past
+    its ``min_msg_id``. Both conditions: message_log ids are global, so an id
+    test alone would also hide other channels' records. Keyed on
+    ``msg_id_start`` so a record straddling the window's oldest id stays.
+    Returns ``("", ())`` when there is nothing to exclude.
+    """
+    if exclude is None:
+        return "", ()
+    return " AND NOT (m.channel_id = ? AND m.msg_id_start >= ?)", exclude
+
+
 # How long (ms) the dedicated memory write connection waits for SQLite's
 # write lock before failing the write (the range is then retried).
 # shortcut: a module constant, not an agent.yaml key; make it config if a
@@ -2051,7 +2068,12 @@ class MemoryPlugin(CorvidaePlugin):
                 for m in unanswered_user_messages(conv.messages)
                 if isinstance(m.get("content"), str)
             )
-            candidates, degraded = await self.retrieve(query)
+            # Leave out this channel's records whose whole range is still in
+            # the window (#634): they would only echo what the model can see.
+            # A window with no message_log ids applies no exclusion.
+            window_ids = window_db_ids(conv.messages)
+            exclude = (channel.id, min(window_ids)) if window_ids else None
+            candidates, degraded = await self.retrieve(query, exclude=exclude)
 
             # Drop weak-banded candidates unless nothing else matched.
             non_weak = [c for c in candidates if c["band"] != "weak"]
@@ -2141,13 +2163,19 @@ class MemoryPlugin(CorvidaePlugin):
             )
 
     async def retrieve(
-        self, text: str, k: int | None = None
+        self, text: str, k: int | None = None,
+        exclude: tuple[str, int] | None = None,
     ) -> tuple[list[dict], bool]:
         """Score memory candidates for a query text.
 
         Vector KNN over memory_vec when available; FTS5 keyword search
         otherwise or when the encoder fails (trap #10). Candidates come from
         the agent's whole memory, every channel's (PRD principle 14).
+
+        ``exclude``: optional ``(channel_id, min_msg_id)``. Records of that
+        channel whose ``msg_id_start`` is at or past ``min_msg_id`` (their
+        whole range still in the live window) are left out before the cut
+        to k (#634). Passive retrieval passes it; this is not a scope.
 
         Returns:
             (candidates sorted by score descending, degraded_to_fts).
@@ -2166,7 +2194,7 @@ class MemoryPlugin(CorvidaePlugin):
             try:
                 client = self._llm().get_client("embedding")
                 query_vector = (await client.embed([text], kind="query"))[0]
-                rows = await self._vec_candidates(db, query_vector, k)
+                rows = await self._vec_candidates(db, query_vector, k, exclude)
             except Exception:
                 logger.warning(
                     "retrieval embedding failed; degrading to FTS5",
@@ -2177,7 +2205,7 @@ class MemoryPlugin(CorvidaePlugin):
             degraded = True
 
         if degraded:
-            rows = await self._fts_candidates(db, text, k)
+            rows = await self._fts_candidates(db, text, k, exclude)
 
         candidates = []
         for memory_id, summary, created_at, last_retrieved_at, similarity in rows:
@@ -2242,25 +2270,39 @@ class MemoryPlugin(CorvidaePlugin):
 
     async def _vec_candidates(
         self, db: aiosqlite.Connection, query_vector: list[float], k: int,
+        exclude: tuple[str, int] | None = None,
     ) -> list[tuple]:
         """Exact-KNN candidates:
         (id, summary, created_at, last_retrieved_at, cosine_similarity).
 
         sqlite-vec is brute-force exact KNN (no ANN index), so the KNN scan
         costs the same regardless of k; we over-fetch and filter by status
-        flags in the join.
+        flags (and the window exclusion, see ``retrieve``) in the join.
         """
         import sqlite_vec
+        knn_k = k * VEC_OVERFETCH
+        exclude_sql, exclude_params = _exclude_clause(exclude)
+        if exclude is not None:
+            # The KNN cut happens before the join's filters, so fetch one
+            # extra row per excluded record or in-window records could fill
+            # every slot. The count ignores status flags: an upper bound.
+            async with db.execute(
+                "SELECT COUNT(*) FROM memory WHERE channel_id = ? AND msg_id_start >= ?",
+                exclude,
+            ) as cursor:
+                (excluded_count,) = await cursor.fetchone()
+            knn_k += excluded_count
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at, v.distance "
             "FROM (SELECT memory_id, distance FROM memory_vec "
             "      WHERE embedding MATCH ? AND k = ?) AS v "
             "JOIN memory m ON m.id = v.memory_id "
-            "WHERE m.indexed = 1 AND m.redacted = 0 "
+            "WHERE m.indexed = 1 AND m.redacted = 0" + exclude_sql + " "
             "ORDER BY v.distance",
             (
                 sqlite_vec.serialize_float32(query_vector),
-                k * VEC_OVERFETCH,
+                knn_k,
+                *exclude_params,
             ),
         ) as cursor:
             rows = await cursor.fetchall()
@@ -2271,19 +2313,24 @@ class MemoryPlugin(CorvidaePlugin):
         ]
 
     async def _fts_candidates(
-        self, db: aiosqlite.Connection, text: str, k: int
+        self, db: aiosqlite.Connection, text: str, k: int,
+        exclude: tuple[str, int] | None = None,
     ) -> list[tuple]:
         """FTS5 keyword candidates with a fixed similarity proxy:
-        (id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY)."""
+        (id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY).
+
+        The window exclusion (see ``retrieve``) sits in WHERE, ahead of the
+        LIMIT, so it applies before the cut to k."""
         match = _fts_match_query(text)
         if match is None:
             return []
+        exclude_sql, exclude_params = _exclude_clause(exclude)
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at "
             "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
-            "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 "
-            "ORDER BY rank LIMIT ?",
-            (match, k),
+            "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0"
+            + exclude_sql + " ORDER BY rank LIMIT ?",
+            (match, *exclude_params, k),
         ) as cursor:
             rows = await cursor.fetchall()
         return [
