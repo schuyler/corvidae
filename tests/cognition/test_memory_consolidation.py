@@ -396,11 +396,14 @@ class TestResponseFormat:
         assert fmt["type"] == "json_schema"
         schema = fmt["json_schema"]["schema"]
         assert schema["type"] == "object"
-        assert schema["required"] == ["summary"]
+        assert schema["required"] == ["entries", "importance"]
         props = schema["properties"]
-        assert props["summary"]["type"] == "string"
-        for name in ("topic_tags", "participants"):
-            assert props[name] == {"type": "array", "items": {"type": "string"}}
+        assert props["importance"]["type"] == "number"
+        assert props["participants"] == {"type": "array", "items": {"type": "string"}}
+        item = props["entries"]["items"]
+        assert item["required"] == ["narrative"]
+        assert item["properties"]["narrative"]["type"] == "string"
+        assert item["properties"]["topic_tags"] == {"type": "array", "items": {"type": "string"}}
         await db.close()
 
     async def test_rubric_sends_importance_schema(self):
@@ -745,3 +748,124 @@ async def test_removed_consolidation_prompt_warns_naming_replacement(caplog, val
     assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
     assert "ignored" in warnings[0]
     assert "memory.consolidation_fork_prompt" in warnings[0]
+
+
+# ---------------------------------------------------------------------------
+# Several narrative entries per consolidation (#635)
+# ---------------------------------------------------------------------------
+
+#: The memory columns every entry of one consolidation shares (C1).
+SHARED_COLUMNS = (
+    "msg_id_start", "msg_id_end", "created_at", "importance", "valence",
+    "participants", "prompt_hash", "mode", "model", "trigger",
+)
+
+
+async def fetch_stamped_memories(db) -> list[dict]:
+    """Every memory row with the shared columns, the per-entry columns
+    (summary, topic_tags, embedded) and the stamp, in insertion order."""
+    keys = ["id", "summary", "topic_tags", "embedded", *SHARED_COLUMNS]
+    async with db.execute(f"SELECT {', '.join(keys)} FROM memory ORDER BY id") as cursor:
+        rows = await cursor.fetchall()
+    return [dict(zip(keys, row)) for row in rows]
+
+
+def assert_shared_columns_equal(rows: list[dict]) -> None:
+    """Every row carries the same value in each shared column (C1)."""
+    for column in SHARED_COLUMNS:
+        assert len({r[column] for r in rows}) == 1, f"{column} differs across entries: {rows}"
+
+
+THREE_ENTRIES = [
+    ("I told kestrel the wifi drops came from the brownout detector.", ["wifi"]),
+    ("I ordered BC547 transistors for robin from the usual distributor.", ["parts"]),
+    ("We left open whether the enclosure needs a vent.", ["enclosure"]),
+]
+
+
+def entries_reply(entries, participants=("kestrel",), importance=0.4) -> str:
+    """A consolidation reply in the entries shape."""
+    return json.dumps({
+        "entries": [{"narrative": n, "topic_tags": t} for n, t in entries],
+        "participants": list(participants),
+        "importance": importance,
+    })
+
+
+class TestEntriesParsing:
+    @pytest.mark.parametrize(("importance", "expected"), [
+        ("0.7", 0.7),                       # a numeric string is converted (C4)
+        ("<number from 0 to 1>", None),     # the echoed template placeholder is absent (C4)
+    ])
+    async def test_importance_hint_is_coerced(self, importance, expected):
+        """C4: a numeric-string importance reaches the prior as hint=0.7; a
+        non-numeric one reaches it as hint=None."""
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        stub.embed_result = [[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0]]
+        stub.chat_text = entries_reply(THREE_ENTRIES, importance=importance)
+        await drive_compaction_consolidation(memory, persistence, channel)
+
+        # Importance is scored once per consolidation, not once per entry (D4).
+        assert memory.importance_prior.score.await_count == 1
+        kwargs = memory.importance_prior.score.await_args.kwargs
+        assert kwargs["hint"] == expected
+        await db.close()
+
+
+class TestEntriesCommit:
+    async def test_lost_cas_stores_no_entries(self):
+        """C6: a commit whose compare-and-set is lost (watermark moved by
+        another task) stores none of its 3 entries and returns False."""
+        from corvidae_cognition.memory import (
+            Consolidation, ConsolidationEntry, RecordStamp,
+        )
+
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        rowids = await seed_dialog(persistence, channel, [
+            ("user", "one"), ("assistant", "two"), ("user", "three"),
+        ])
+        stub.embed_result = [[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0]]
+        record = Consolidation(
+            entries=tuple(ConsolidationEntry(n, tuple(t)) for n, t in THREE_ENTRIES),
+            participants=("kestrel",), importance=0.4,
+            stamp=RecordStamp(prompt="p", mode="fork", model="m"),
+        )
+        # The watermark is 0 (none stored); expecting 99 is a lost race.
+        committed = await memory._commit(
+            channel.id, [(r,) for r in rowids],
+            [{"role": "user", "content": "one"}], 99, rowids[-1], record, "idle",
+        )
+
+        assert committed is False
+        assert await fetch_memories(db) == []
+        await db.close()
+
+    async def test_entries_are_embedded_in_one_call(self):
+        """C6: one embed call carries all 3 narratives, in entry order."""
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        stub.chat_text = entries_reply(THREE_ENTRIES)
+        stub.embed_result = [[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0]]
+        await drive_compaction_consolidation(memory, persistence, channel)
+
+        assert stub.embed_calls == [[n for n, _ in THREE_ENTRIES]]
+        await db.close()
+
+
+class TestRubricPriorHint:
+    async def test_hint_is_returned_clamped_without_a_model_call(self):
+        """C8: with a hint the rubric answers it, clamped to [0, 1], and never
+        calls the model."""
+        client = StubClient(chat_text=json.dumps({"importance": 0.1}))
+        prior = RubricPrior(lambda: client)
+
+        assert await prior.score([{"role": "user", "content": "x"}], hint=1.4) == 1.0
+        assert client.chat_calls == []
+
+    async def test_no_hint_runs_the_rubric(self):
+        """C8: without a hint (None) the rubric calls the model and returns
+        its rating."""
+        client = StubClient(chat_text=json.dumps({"importance": 0.85}))
+        prior = RubricPrior(lambda: client)
+
+        assert await prior.score([{"role": "user", "content": "x"}], hint=None) == 0.85
+        assert len(client.chat_calls) == 1

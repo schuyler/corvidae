@@ -98,25 +98,60 @@ Two triggers, one watermarked code path:
 Both spawn a tracked plugin-owned `asyncio.create_task` (never the
 TaskQueue — every TaskQueue completion wakes the main model). The task
 reads the per-channel **consolidation watermark**, fetches the working
-range, produces the record (first-person summary with epistemic framing,
+range, produces the entries (first-person narrative with epistemic framing,
 JSON out) — from a fork of the live window when the range is in it (see
 [Forks](design.md#forks)), else from the agent's rebuilt view of the range
 sent as the `consolidation` stage (catch-up, below); an idle range that is in the
 window but can't be forked is skipped instead, with a warning, and retried
 on the next trigger (it reaches catch-up once it has left the window). Both
 calls are constrained by a
-`response_format` JSON schema (`summary` required, `topic_tags` and
-`participants` optional), like appraisal and critique, so a model can't
-answer the transcript instead of writing a record —
-scores an importance prior through the pluggable
-`MemoryPlugin.importance_prior` (default: cheap-model `RubricPrior`,
-schema-constrained to `{"importance": number}`, 0.5 on failure; `AppraisalPlugin` wraps it in `AppraisalPrior` when
-appraisal is enabled; the prior and the record's mean stage-2 valence read only
-the record's own channel's exchanges, and a failed `exchange_log` lookup is logged
-and falls back to the rubric prior and NULL valence), embeds the summary via
-the `embedding` stage's profile (`llm.embedding` by default), and commits the memory row (with its vec row and any near-duplicate
+`response_format` JSON schema, like appraisal and critique, so a model can't
+answer the transcript instead of writing a reply. The reply is one object:
+
+```json
+{"entries": [{"narrative": "...", "topic_tags": ["..."]}],
+ "participants": ["..."], "importance": 0.7}
+```
+
+`entries` and `importance` are required by the schema; each entry needs a
+`narrative`, and `topic_tags` and `participants` are optional. The model
+writes one entry per distinct stretch or topic, in order, each readable on
+its own, so a record is about one thing rather than the centroid of
+several. The parser is more forgiving than the schema, because providers
+that ignore `response_format` still get the prompt's JSON instruction:
+
+- An entry whose `narrative` is missing, not a string or blank is dropped,
+  as is one that isn't an object or whose `topic_tags` can't be read as a
+  list. If none are left, or `entries` isn't a list, the reply is unusable
+  (below).
+- A reply with no `entries` key but a `summary` (the old shape) is read as
+  one entry, with its top-level `topic_tags`.
+- A lone string where a list belongs (`"participants": "kestrel"`) reads as
+  a one-item list. Any other non-list `participants`, or legacy
+  `topic_tags`, makes the reply unusable, and the error names the key.
+- `importance` is a number, or a string `float()` accepts (`"0.7"`), if it
+  is finite. A bool, a non-number or `nan` counts as absent.
+
+The task then scores an importance prior through the pluggable
+`MemoryPlugin.importance_prior`, once for the whole range, passing the
+reply's `importance` as `hint` (default: cheap-model `RubricPrior`,
+which returns the hint clamped to [0, 1] with no model call, and
+otherwise asks the model, schema-constrained to `{"importance": number}`,
+0.5 on failure; `AppraisalPlugin` wraps it in `AppraisalPrior` when
+appraisal is enabled, which ignores the hint where appraisal covers the
+range and passes it to the rubric fallback where it doesn't; the prior and
+the mean stage-2 valence read only
+the consolidating channel's own exchanges, and a failed `exchange_log` lookup is logged
+and falls back to the rubric prior and NULL valence), embeds every entry's
+narrative in one call on the `embedding` stage's profile (`llm.embedding` by default), and
+commits one memory row per entry (each with its vec row and any near-duplicate
 merge) together with the watermark advance in one compare-and-set
-section.
+section. At insert the rows share the message range, `created_at`, importance,
+valence, participants and [record stamp](#record-stamps); each has its own
+narrative (stored as `summary`), `topic_tags` and embedding. A lost
+compare-and-set stores none of them. (A row that then merges with an older
+near-duplicate takes the wider range, the later date and the higher
+importance, as any merge does.)
 
 ### Corrupt `message_log` rows
 
@@ -182,7 +217,9 @@ retention.
 looks for the nearest indexed record with cosine similarity
 ≥ `memory.dup_threshold` anywhere in the agent's memory, on whatever channel
 it lives (PRD §3.7 Memory 3, #168). Retrieval spans the whole memory, so
-every channel sees the survivor. The old record is superseded (`superseded_by`, `indexed=0`,
+every channel sees the survivor. Entries of the same consolidation never
+merge into each other (they are excluded by id); each can merge with older
+records. The old record is superseded (`superseded_by`, `indexed=0`,
 vector deleted); the survivor takes the summed retrieval count, the
 higher importance, and the later of the two records' dates. Message
 ranges fold only within one channel: `message_log` ids are global, and
@@ -194,14 +231,18 @@ including a wrong-width vector, which is refused before the write
 transaction (vec0 rejects it on insert, and the resulting
 `OperationalError` would roll back the whole consolidation: record,
 vec row and watermark, stalling the channel on every later trigger) —
-stores the record with `embedded=0` for later backfill; the summary text
+stores the entry with `embedded=0` for later backfill. The embedding call covers all
+of a consolidation's entries at once, so if it fails or returns the wrong
+number of vectors every entry is stored `embedded=0`; a wrong-width vector
+costs only its own entry. The narrative text
 is canonical and vectors are a rebuildable cache. All consolidation LLM
 calls carry `stage="consolidation"` attribution, along with the `trigger`
 that started the run (`"compaction"` or `"idle"`) — set once at
 `_consolidate_range`'s entry, so it rides into the `on_llm_response`
 attribution snapshot for that call, into `MetricsPlugin`'s emitted tags,
 the `usage_log.trigger` column, and the `memory consolidated` completion
-log line.
+log line, which carries `memory_ids`, `entries` (their count), `embedded`
+(how many were stored with a vector), the message range and `trigger`.
 
 ### Corrupt `exchange_log` rows
 
@@ -368,16 +409,16 @@ force* (the newest decodable summary dated before the row), groups rows
 under the same summary into runs, and rebuilds each run as that summary
 plus the rows reload would load under it. A run is cut into segments that
 each fit the channel's `max_context_tokens`, so a watermark that lagged
-across several compactions or a long unsummarized history yields several records and every range row reaches some view. Each
+across several compactions or a long unsummarized history yields several consolidations and every range row reaches some view. Each
 view is trimmed oldest-first to the budget, put under the channel's
 `reasoning_history`, headed by the channel's system prompt (identity and
 register, from `Agent.view_inputs`, which also resolves the channel after a
 restart) and ends with `memory.consolidation_fork_prompt` plus the range
-sentence. It goes on the `consolidation` stage's profile with no tools and the record
-schema. Each segment is its own record and its own watermark advance; a
+sentence. It goes on the `consolidation` stage's profile with no tools and the reply
+schema. Each segment is its own consolidation (one or more entries) and its own watermark advance; a
 failure leaves earlier segments stored and retries the rest. A segment
 with no dialog that is followed by another folds its id span into the next
-segment's record (no record or commit of its own); a no-dialog last
+segment's records (no record or commit of its own); a no-dialog last
 segment advances the watermark without a record. Because the
 instruction runs under the agent's own prompt, the default tells the agent
 the record is its private memory, not a message to anyone on the channel.
@@ -580,7 +621,9 @@ effect at restart.
 
 The importance prior is pluggable (`MemoryPlugin.importance_prior`,
 default `RubricPrior`); `AppraisalPlugin` wraps it in `AppraisalPrior`
-when appraisal is enabled; it reads only the consolidating channel's own
+when appraisal is enabled. `score(messages, msg_id_range=None, channel=None, *,
+hint=None)` takes the consolidation reply's own rating as the keyword-only
+`hint`; a replacement prior must accept it; it reads only the consolidating channel's own
 exchanges (message ids are global), logging a failed lookup and falling back to
 the rubric prior and NULL valence. Configuration is documented in
 [configuration.md](configuration.md) (`memory.*`, `llm.embedding`).
@@ -606,7 +649,7 @@ is not open.
 compaction remains plain lossy summarization.
 
 A malformed consolidation reply is retried once; if the retry is also
-unusable, the range is stored with its raw transcript as the summary rather
+unusable, the range is stored as one record holding its raw transcript as the summary rather
 than being dropped (the LLM call has already been paid for).
 
 ### MemoryToolsPlugin (`packages/corvidae-cognition/corvidae_cognition/memory_tools.py`)

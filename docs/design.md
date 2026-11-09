@@ -2189,7 +2189,8 @@ stripping can't alter rows a later segment reuses as context. Warnings, each
 naming the channel and message ids: the budget trim dropped a segment's own
 rows (they commit without reaching a view); a row was truncated; the
 finished request still measures over budget (it is sent anyway). Each
-segment is one `view_call` on the `consolidation` stage's profile, one record, and one commit
+segment is one `view_call` on the `consolidation` stage's profile, one consolidation (one or more
+entries, each its own record), and one commit
 that is a compare-and-set on the previous segment's end; a lost
 compare-and-set discards the rest, and a failure leaves earlier segments
 committed and the failure log says through which id. An unusable reply is

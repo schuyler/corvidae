@@ -184,20 +184,34 @@ class RetrievalPool:
 # deployment with slow disks or long retention runs needs a longer wait.
 WRITE_BUSY_TIMEOUT_MS = 5000
 
-# JSON schema for the consolidation record (#199). Mirrors what
-# _record_from_text reads: only ``summary`` is required, since the parser
-# tolerates missing tags and participants and a grammar that forced them
-# would add empty-array noise on small models. Sent as response_format so a
-# model that wants to continue the chat can only return a record; providers
+# JSON schema for the consolidation reply (#199, #635). Mirrors what
+# _consolidation_from_text reads: ``entries`` (each needing a narrative) and
+# ``importance`` are required; ``topic_tags`` and ``participants`` are not,
+# since the parser tolerates them missing and a grammar that forced the
+# arrays would add empty-array noise on small models. ``importance`` is a
+# scalar, so that reason doesn't apply: it is required so the rubric call
+# can be skipped. Property order is the generation order of grammar
+# backends: the rating comes after the narrative. Sent as response_format so
+# a model that wants to continue the chat can only return a reply; providers
 # that ignore it still get the prompt's JSON instruction.
 CONSOLIDATION_SCHEMA = {
     "type": "object",
     "properties": {
-        "summary": {"type": "string"},
-        "topic_tags": {"type": "array", "items": {"type": "string"}},
+        "entries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "narrative": {"type": "string"},
+                    "topic_tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["narrative"],
+            },
+        },
         "participants": {"type": "array", "items": {"type": "string"}},
+        "importance": {"type": "number"},
     },
-    "required": ["summary"],
+    "required": ["entries", "importance"],
 }
 CONSOLIDATION_EXTRA_BODY = {
     "response_format": {
@@ -220,15 +234,33 @@ DEFAULT_CONSOLIDATION_FORK_PROMPT = (
     "person, as yourself. This record is your private memory, not a message "
     "to anyone on the channel: no one there will read it, so write it for "
     "yourself.\n\n"
-    "Keep what you were told apart from what you inferred or speculated "
-    "(\"so-and-so told me...\", \"I speculated that...\", \"I suggested...\"). "
-    "Keep concrete details that would matter later: names, decisions, "
-    "commitments, corrections, and outcomes. Omit filler. Do not call tools.\n\n"
+    "Narrate this stretch of the conversation from your own point of view, "
+    "step by step, in your own words: what was said, what you did, what you "
+    "learned, and what was decided or left open. Don't quote anyone "
+    "verbatim, but keep facts and opinions exactly as they were expressed, "
+    "and who expressed each (names, numbers, dates, identifiers, "
+    "preferences, commitments, corrections), so you can recall them "
+    "accurately later. Keep what you were told apart from what you "
+    "inferred or speculated (\"so-and-so told me...\", \"I guessed "
+    "that...\"). Say what you did with tools and what it told you, not "
+    "their raw output. Bracketed CONTEXT blocks are things you recalled or "
+    "were shown, not new events; don't record them as if they happened now. "
+    "Skip pleasantries and chatter.\n\n"
+    "Write it as separate entries, one for each distinct stretch or topic, "
+    "in order. Each entry is a paragraph at most and must make sense read "
+    "on its own, months from now, with nothing else: name the people, "
+    "projects and things involved rather than \"he\" or \"it\". Don't "
+    "attribute a fact from one entry's topic to another's.\n\n"
+    "Then rate how important this stretch is to remember long-term, from 0 "
+    "(routine) to 1 (essential). Do not call tools.\n\n"
     "Respond with a single JSON object, nothing else:\n"
     "{\n"
-    '  "summary": "<first-person summary, a few sentences>",\n'
-    '  "topic_tags": ["<short topic tag>", ...],\n'
-    '  "participants": ["<sender name>", ...]\n'
+    '  "entries": [\n'
+    '    {"narrative": "<first-person narrative of one stretch or topic>",\n'
+    '     "topic_tags": ["<short topic tag>", "..."]}\n'
+    "  ],\n"
+    '  "participants": ["<sender name>", "..."],\n'
+    '  "importance": "<number from 0 to 1>"\n'
     "}"
 )
 
@@ -298,21 +330,108 @@ def _dialog_transcript(messages: list[dict]) -> str:
     )
 
 
-def _record_from_text(text: str) -> dict:
-    """Parse a consolidation reply into the record dict.
+@dataclass(frozen=True)
+class ConsolidationEntry:
+    """One narrative entry: becomes one memory row."""
 
-    Returns {"summary": str, "topic_tags": list, "participants": list};
-    raises ValueError on unusable output (no JSON, or no summary).
+    narrative: str              # stripped, non-empty; stored as memory.summary
+    topic_tags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Consolidation:
+    """A usable consolidation reply plus how it was made."""
+
+    entries: tuple[ConsolidationEntry, ...]   # >= 1, reply order
+    participants: tuple[str, ...]             # shared by every entry
+    importance: float | None                  # the reply's rating; None = absent
+    stamp: RecordStamp                        # trigger still None; _commit sets it
+
+
+def _string_tuple(value: object, key: str) -> tuple[str, ...]:
+    """Read ``value`` (absent, None, a string or a list) as a tuple of strings.
+
+    A lone string reads as a one-item list (a small model's "participants":
+    "kestrel"). Raises ValueError naming ``key`` for anything else, so a
+    wrong-typed array makes the reply unusable rather than escaping as a
+    TypeError.
+    """
+    # Absent and null both mean "none given".
+    if value is None:
+        return ()
+    # A bare string is one item, not a sequence of characters.
+    if isinstance(value, str):
+        return (value,)
+    if not isinstance(value, list):
+        raise ValueError(
+            f"{key} must be a list of strings or a string, "
+            f"got {type(value).__name__}"
+        )
+    return tuple(str(v) for v in value)
+
+
+def _coerce_importance(value: object) -> float | None:
+    """The reply's importance as a finite float, else None (absent).
+
+    A bool is not a number here (``true`` would become 1.0), and a
+    non-finite value is dropped (``nan`` would clamp to maximum).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, OverflowError):
+        # Unparseable text, or an integer too large for a float.
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
+    """Parse a consolidation reply into a :class:`Consolidation`.
+
+    ``entries`` items with a non-blank string ``narrative`` become entries;
+    any other item is dropped. Without an ``entries`` key, a legacy
+    ``summary`` reads as the one entry. Raises ValueError on unusable output
+    (no JSON, no usable entries, a wrong-typed ``participants``), which each
+    caller already handles.
     """
     data = _parse_json_block(text)
-    summary = data.get("summary")
-    if not isinstance(summary, str) or not summary.strip():
-        raise ValueError("consolidation output has no usable summary")
-    return {
-        "summary": summary.strip(),
-        "topic_tags": [str(t) for t in data.get("topic_tags") or []],
-        "participants": [str(p) for p in data.get("participants") or []],
-    }
+    entries: list[ConsolidationEntry] = []
+    try:
+        # New shape: keep each entry with a non-blank narrative, in order.
+        if "entries" in data:
+            items = data["entries"]
+            for item in items if isinstance(items, list) else []:
+                narrative = item.get("narrative") if isinstance(item, dict) else None
+                if not isinstance(narrative, str) or not narrative.strip():
+                    continue
+                try:
+                    tags = _string_tuple(item.get("topic_tags"), "topic_tags")
+                except ValueError:
+                    # A malformed entry is dropped like any other.
+                    continue
+                entries.append(ConsolidationEntry(narrative.strip(), tags))
+        # Legacy shape (no "entries" key): the summary is the one entry.
+        else:
+            summary = data.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                tags = _string_tuple(data.get("topic_tags"), "topic_tags")
+                entries.append(ConsolidationEntry(summary.strip(), tags))
+        # Participants are shared by every entry of the consolidation.
+        participants = _string_tuple(data.get("participants"), "participants")
+    except ValueError as exc:
+        raise ValueError(f"consolidation output is malformed: {exc}") from exc
+    if not entries:
+        raise ValueError(
+            "consolidation output has no usable entries "
+            "(each needs a non-empty narrative)"
+        )
+    return Consolidation(
+        entries=tuple(entries),
+        participants=participants,
+        importance=_coerce_importance(data.get("importance")),
+        stamp=stamp,
+    )
 
 
 def _fork_range_sentence(prefix: list[dict], dialog_ids: set[int]) -> str:
@@ -702,6 +821,8 @@ class ImportancePrior(Protocol):
         messages: list[dict],
         msg_id_range: tuple[int, int] | None = None,
         channel=None,
+        *,
+        hint: float | None = None,
     ) -> float: ...   # 0.0–1.0
 
 
@@ -727,9 +848,15 @@ class RubricPrior:
         messages: list[dict],
         msg_id_range: tuple[int, int] | None = None,
         channel=None,
+        *,
+        hint: float | None = None,
     ) -> float:
         # msg_id_range / channel are accepted for protocol conformance
         # (WP2.5) but the rubric ignores both — it rates the dialog text.
+        # The consolidation reply's own rating, when it gave one, stands in
+        # for the model call.
+        if hint is not None:
+            return max(0.0, min(1.0, hint))
         try:
             client = self._get_client()
             response = await client.chat([
@@ -1041,7 +1168,7 @@ class MemoryPlugin(CorvidaePlugin):
         self._consolidation_fork_prompt: str = DEFAULT_CONSOLIDATION_FORK_PROMPT
         # Fork records made in before_compaction, waiting for the
         # on_compaction task: (channel_id, range_end) -> (watermark, record).
-        self._fork_stash: collections.OrderedDict[tuple[str, int], tuple[int, dict]] = (
+        self._fork_stash: collections.OrderedDict[tuple[str, int], tuple[int, Consolidation]] = (
             collections.OrderedDict()
         )
         self._retrieval_k: int = DEFAULT_RETRIEVAL_K
@@ -1292,7 +1419,7 @@ class MemoryPlugin(CorvidaePlugin):
         finally:
             reset_attribution(attribution_token)
 
-    def _stash_put(self, key: tuple[str, int], value: tuple[int, dict]) -> None:
+    def _stash_put(self, key: tuple[str, int], value: tuple[int, Consolidation]) -> None:
         """Stash a fork record, evicting the oldest past the bound."""
         self._fork_stash[key] = value
         self._fork_stash.move_to_end(key)
@@ -1319,7 +1446,7 @@ class MemoryPlugin(CorvidaePlugin):
 
     async def _fork_record(
         self, agent, channel, contained: tuple[list[dict], set[int]], cut: int | None
-    ) -> dict:
+    ) -> Consolidation:
         """The memory record from a fork of ``channel``'s window.
 
         ``contained`` is :meth:`_range_in_window`'s result, so the range is
@@ -1336,14 +1463,12 @@ class MemoryPlugin(CorvidaePlugin):
             channel, instruction, stage="consolidation", cut=cut,
             extra_body=CONSOLIDATION_EXTRA_BODY,
         )
-        record = _record_from_text(result.text)
         # Stamp the fork instruction (not the code-generated range
         # sentence, which quotes conversation text) and the model sent.
-        record["stamp"] = RecordStamp(
-            self._consolidation_fork_prompt, "fork",
-            result.model,
+        return _consolidation_from_text(
+            result.text,
+            RecordStamp(self._consolidation_fork_prompt, "fork", result.model),
         )
-        return record
 
     @hookimpl
     async def on_compaction(
@@ -1716,11 +1841,13 @@ class MemoryPlugin(CorvidaePlugin):
 
     async def _commit(
         self, channel_id: str, rows: list[tuple], dialog: list[dict],
-        expected_wm: int, new_wm: int, record: dict | None, trigger: str,
+        expected_wm: int, new_wm: int, record: Consolidation | None, trigger: str,
     ) -> bool:
-        """Store ``record`` for ``rows`` and move the watermark, atomically.
+        """Store ``record``'s entries for ``rows`` and move the watermark, atomically.
 
-        With no record only the watermark moves (a range with no dialog).
+        Each entry becomes its own row sharing the range, importance,
+        valence, participants and stamp. With no record only the watermark
+        moves (a range with no dialog).
         The write is a compare-and-set on ``expected_wm``: False when another
         task already moved the watermark, True once committed.
         """
@@ -1748,7 +1875,8 @@ class MemoryPlugin(CorvidaePlugin):
         if channel is None:
             channel = _StubChannel(channel_id)
         importance = await self.importance_prior.score(
-            dialog, msg_id_range=msg_id_range, channel=channel
+            dialog, msg_id_range=msg_id_range, channel=channel,
+            hint=record.importance,
         )
 
         # Valence: mean stage-2 valence over the range (NULL when none) —
@@ -1772,20 +1900,32 @@ class MemoryPlugin(CorvidaePlugin):
         # otherwise be dated at import time (issue #52).
         created_at = await source_timestamp(db, rows[-1][0])
 
-        # Embed the summary; failure stores embedded=0 for later
-        # backfill (trap #10 — degrade, never block).
-        embedding: list[float] | None = None
+        # Embed every entry's narrative in one call; failure stores
+        # embedded=0 for later backfill (trap #10 — degrade, never block).
+        embeddings: list[list[float] | None] = [None] * len(record.entries)
         if self._embedding_enabled():
             try:
                 client = self._llm().get_client("embedding")
-                embedding = (await client.embed([record["summary"]], kind="document"))[0]
+                vectors = await client.embed(
+                    [e.narrative for e in record.entries], kind="document"
+                )
+                if len(vectors) != len(record.entries):
+                    raise ValueError(
+                        f"embedding returned {len(vectors)} vectors "
+                        f"for {len(record.entries)} entries"
+                    )
+                embeddings = list(vectors)
             except Exception:
                 logger.warning(
-                    "memory embedding failed; storing record with "
-                    "embedded=0 for backfill", exc_info=True,
+                    "memory embedding failed for channel %s (%d entries); "
+                    "storing them with embedded=0 for backfill",
+                    channel_id, len(record.entries), exc_info=True,
                 )
-            if embedding is not None:
-                embedding = self._check_embedding_width(embedding)
+            # A vector of the wrong width loses only its own entry's vector.
+            embeddings = [
+                self._check_embedding_width(v) if v is not None else None
+                for v in embeddings
+            ]
 
         # Atomic commit section: insert, vec row, near-dup merge and
         # watermark advance are one transaction on the write connection,
@@ -1807,32 +1947,40 @@ class MemoryPlugin(CorvidaePlugin):
                     extra={"channel_id": channel_id},
                 )
                 return False
-            memory_id = await self._insert_record(
-                wdb,
-                channel_id=channel_id,
-                summary=record["summary"],
-                created_at=created_at,
-                importance=importance,
-                valence=valence,
-                topic_tags=record["topic_tags"],
-                participants=record["participants"],
-                msg_id_start=rows[0][0],
-                msg_id_end=rows[-1][0],
-                embedding=embedding,
-                # Every consolidation record passes through here, so this is
-                # where the stamp learns its trigger; catch-up keeps the one
-                # that fell through to it (#633).
-                stamp=dataclasses.replace(record["stamp"], trigger=trigger),
-            )
+            # Every consolidation record passes through here, so this is
+            # where the stamp learns its trigger; catch-up keeps the one
+            # that fell through to it (#633).
+            stamp = dataclasses.replace(record.stamp, trigger=trigger)
+            memory_ids: list[int] = []
+            for entry, embedding in zip(record.entries, embeddings):
+                # Siblings never merge into each other: their ids are
+                # excluded from the near-dup check (by id, since a sibling
+                # that merged with an older record has a widened range).
+                memory_ids.append(await self._insert_record(
+                    wdb,
+                    channel_id=channel_id,
+                    summary=entry.narrative,
+                    created_at=created_at,
+                    importance=importance,
+                    valence=valence,
+                    topic_tags=list(entry.topic_tags),
+                    participants=list(record.participants),
+                    msg_id_start=rows[0][0],
+                    msg_id_end=rows[-1][0],
+                    embedding=embedding,
+                    stamp=stamp,
+                    exclude_ids=frozenset(memory_ids),
+                ))
             await self._set_watermark(wdb, channel_id, new_wm)
         logger.info(
             "memory consolidated",
             extra={
                 "channel_id": channel_id,
-                "memory_id": memory_id,
+                "memory_ids": memory_ids,
+                "entries": len(memory_ids),
                 "msg_id_start": rows[0][0],
                 "msg_id_end": rows[-1][0],
-                "embedded": embedding is not None,
+                "embedded": sum(e is not None for e in embeddings),
                 "trigger": trigger,
             },
         )
@@ -1843,9 +1991,12 @@ class MemoryPlugin(CorvidaePlugin):
         created_at: float, importance: float, valence: float | None,
         topic_tags: list[str], participants: list[str],
         msg_id_start: int, msg_id_end: int, embedding: list[float] | None,
-        stamp: RecordStamp,
+        stamp: RecordStamp, exclude_ids: frozenset[int] = frozenset(),
     ) -> int:
         """Insert + vec row + near-dup merge on ``db``, the write connection.
+
+        ``exclude_ids`` are records the near-dup check must skip (the
+        siblings this consolidation already inserted).
 
         The caller holds ``_db_lock`` inside ``_write_txn`` and so owns the
         commit or rollback. ``stamp`` says how the record was made; its
@@ -1907,12 +2058,15 @@ class MemoryPlugin(CorvidaePlugin):
                     "ORDER BY v.distance",
                     (
                         _sv.serialize_float32(embedding),
-                        VEC_OVERFETCH * 2,
+                        VEC_OVERFETCH * 2 + len(exclude_ids),
                     ),
                 ) as dup_cursor:
-                    dup_rows = await dup_cursor.fetchall()
-                # Rows are nearest first: the nearest one merges if it is
-                # over the threshold, and none farther can be.
+                    dup_rows = [
+                        r for r in await dup_cursor.fetchall()
+                        if r[0] not in exclude_ids
+                    ]
+                # Rows are nearest first: the nearest non-sibling merges if
+                # it is over the threshold, and none farther can be.
                 if dup_rows and dup_rows[0][1] >= self._dup_threshold:
                     dup_old_id, dup_similarity, dup_channel = dup_rows[0]
                     dup_cross_channel = dup_channel != channel_id
@@ -2039,7 +2193,7 @@ class MemoryPlugin(CorvidaePlugin):
     async def _live_record(
         self, channel_id: str, rows: list[tuple], watermark: int, range_end: int,
         trigger: str,
-    ) -> tuple[LiveOutcome, dict | None]:
+    ) -> tuple[LiveOutcome, Consolidation | None]:
         """How to produce the record for (watermark, range_end].
 
         Compaction trigger: the record before_compaction stashed, if it was
@@ -2117,10 +2271,10 @@ class MemoryPlugin(CorvidaePlugin):
     async def _view_record(
         self, client: Any, channel_id: str, segment: CatchupSegment,
         seg_dialog: list[dict], stamp: RecordStamp,
-    ) -> dict:
+    ) -> Consolidation:
         """One view call producing the first-person record for ``segment``.
 
-        Returns {"summary", "topic_tags", "participants", "stamp"}. An
+        Returns the parsed :class:`Consolidation`. An
         unusable reply (unparseable, or a tool call) is retried once; if both
         attempts are unusable it degrades to the raw transcript rather than
         losing the range. Transport errors propagate.
@@ -2132,7 +2286,7 @@ class MemoryPlugin(CorvidaePlugin):
                     client, channel_id, segment.messages,
                     extra_body=CONSOLIDATION_EXTRA_BODY,
                 )
-                return {**_record_from_text(result.text), "stamp": stamp}
+                return _consolidation_from_text(result.text, stamp)
             except (ValueError, ForkRefused) as exc:
                 logger.warning(
                     "consolidation reply unusable for channel %s, message ids %s "
@@ -2145,12 +2299,12 @@ class MemoryPlugin(CorvidaePlugin):
             "storing the raw transcript as the record",
             channel_id, span,
         )
-        return {
-            "summary": _dialog_transcript(seg_dialog),
-            "topic_tags": [],
-            "participants": [],
-            "stamp": stamp,
-        }
+        return Consolidation(
+            entries=(ConsolidationEntry(_dialog_transcript(seg_dialog), ()),),
+            participants=(),
+            importance=None,
+            stamp=stamp,
+        )
 
     # ------------------------------------------------------------------
     # Retrieval read path (§3.1)

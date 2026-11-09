@@ -147,8 +147,10 @@ class _FakeClient:
                     "message": {
                         "content": json.dumps(
                             {
-                                "summary": f"summary {len(self.calls)}",
-                                "topic_tags": ["books"],
+                                "entries": [{
+                                    "narrative": f"summary {len(self.calls)}",
+                                    "topic_tags": ["books"],
+                                }],
                                 "participants": ["Schuyler"],
                             }
                         )
@@ -531,7 +533,9 @@ async def test_trials_writes_one_record_per_trial(tmp_path):
         if line.strip()
     ]
     assert len(records) == 3
-    assert [r["summary"] for r in records] == ["summary 1", "summary 2", "summary 3"]
+    assert [r["entries"][0]["narrative"] for r in records] == [
+        "summary 1", "summary 2", "summary 3",
+    ]
 
 
 async def test_input_messages_are_written_beside_the_output(tmp_path):
