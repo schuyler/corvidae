@@ -99,7 +99,17 @@ Three triggers, one watermarked code path:
   in the live window (the watermark lags behind the window, say after a
   failed compaction consolidation) is skipped with one DEBUG line and
   never goes to catch-up: idle or compaction consolidates it, and a
-  warning would repeat every turn until one of them does.
+  warning would repeat every turn until one of them does. A fork that
+  keeps failing backs the trigger off (#620): after three consecutive
+  failed turn forks on a channel (the fork raised, or its reply was
+  unusable; each is its own skip warning), one more warning names the
+  channel, the message-id range and the remedy, and the turn trigger stops
+  forking for that channel. It resumes once any consolidation moves the
+  channel's watermark (a later success, or an idle or compaction run) or
+  after `memory.idle_consolidate_after` seconds; a retry that fails then
+  backs off again with one more warning. Idle and compaction are never
+  backed off. The count and the limit live in memory only (the limit is the
+  module constant `TURN_FORK_FAILURE_LIMIT`), so a restart starts over.
 - **`on_compaction(channel, summary_msg, retain_count, compacted_ids)`** —
   the moment dialog leaves the active window it enters long-term memory.
   The compacted `message_log` id range rides the hook payload (rowid

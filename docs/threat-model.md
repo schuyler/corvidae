@@ -1096,11 +1096,13 @@ fires only at a turn boundary (a final reply with no tool calls pending),
 at most one turn-or-idle consolidation is in flight per channel (a turn
 that ends while one runs starts nothing), and with forks off it never
 runs. The knob is `memory.consolidate_after_tokens`: raising it means
-fewer, larger forks. A fork that keeps failing has no backoff (#620): the
-watermark stays put, so a failing backend gets one fork and one warning
-per turn past the threshold until a compaction drops the start of the
-range out of the window. From then on the turn trigger skips that range
-at debug and leaves it to compaction's and idle's catch-up.
+fewer, larger forks. A fork that keeps failing is bounded too (#620):
+after three consecutive failed turn forks on a channel the turn trigger
+backs off, with one warning, until some consolidation moves the watermark
+or `memory.idle_consolidate_after` seconds pass, so a failing backend (or
+input that reliably produces an unusable reply) costs three forks and one
+retry per interval rather than one fork per turn. Idle and compaction are
+not backed off, so the range is still consolidated by them.
 
 Where the tree stands: nothing bounds use over time, and under PRD
 principle 16 nothing in corvidae will for now. It schedules a pool's warm
