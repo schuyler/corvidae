@@ -1,0 +1,551 @@
+"""Tests for ``scripts/eval_memory.py --snapshot`` (#658).
+
+Snapshot mode copies a deployment's ``sessions.db`` (never opening the
+original for write), runs the real ``MemoryPlugin`` retrieval path over the
+copy with the deployment's ``agent.yaml``, scores operator labels with
+Recall@k and MRR, and writes every query's whole candidate pool to JSON.
+
+No network: ``LLMClient.embed`` is replaced by the bag-of-words stub and
+``LLMClient.chat`` records and raises. Everything lives under ``tmp_path``.
+"""
+
+import asyncio
+import copy
+import hashlib
+import importlib.util
+import json
+import shutil
+import sqlite3
+import sys
+import time
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+import pytest
+import yaml
+
+from corvidae.llm import LLMClient
+from evals.metrics import mrr, recall_at_k
+
+from .test_memory_retrieval import (
+    DIMS,
+    EMBED_CONFIG,
+    bow_embed,
+    build_retrieval_env,
+    seed_memory,
+)
+
+# Absolute path of the script under test; it is not an importable package.
+SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "eval_memory.py"
+
+# True when the sqlite-vec extension can be imported (the vec path exists).
+HAS_VEC = importlib.util.find_spec("sqlite_vec") is not None
+
+# Marker for tests that need the vector path (the FTS job runs the rest).
+needs_vec = pytest.mark.skipif(not HAS_VEC, reason="sqlite-vec unavailable")
+
+# Three summaries whose bag-of-words overlap with "alpha beta gamma delta"
+# fixes the cosine order (1.0, 0.5, 0.25) so rankings are known in advance.
+TEXT_A = "alpha beta gamma delta"
+TEXT_B = "alpha beta epsilon zeta"
+TEXT_C = "alpha eta theta iota"
+
+# A chat-only config: no embedding profile, so retrieval is FTS5-only.
+FTS_CONFIG: dict[str, Any] = {
+    "llm": {"main": {"base_url": "http://localhost:8080", "model": "chat"}},
+}
+
+
+class StubCalls:
+    """Records of the calls the stubbed ``LLMClient`` received."""
+
+    def __init__(self) -> None:
+        # Each embed call as (texts, kind).
+        self.embeds: list[tuple[list[str], str]] = []
+        # Each chat call's messages.
+        self.chats: list[list[dict]] = []
+
+
+@pytest.fixture
+def stub_calls(monkeypatch: pytest.MonkeyPatch) -> StubCalls:
+    """Replace LLMClient.embed/chat so no request ever leaves the process."""
+    calls = StubCalls()
+
+    # Embed returns deterministic bag-of-words vectors and records the call.
+    async def fake_embed(self: LLMClient, texts: list[str], kind: str) -> list[list[float]]:
+        calls.embeds.append((list(texts), kind))
+        return [bow_embed(t) for t in texts]
+
+    # Chat records the call and raises: retrieval must never reach it.
+    async def fake_chat(self: LLMClient, messages: list[dict], *args: Any, **kwargs: Any) -> dict:
+        calls.chats.append(messages)
+        raise AssertionError("snapshot mode must never call chat()")
+
+    monkeypatch.setattr(LLMClient, "embed", fake_embed)
+    monkeypatch.setattr(LLMClient, "chat", fake_chat)
+    return calls
+
+
+@pytest.fixture
+def script(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """Load scripts/eval_memory.py by path (it is not a package)."""
+    name = "eval_memory_under_test"
+    spec = importlib.util.spec_from_file_location(name, SCRIPT_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # Registered so dataclasses defined in the script resolve their module.
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def private_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point tempfile at a tmp_path subdirectory so work_dir stays inside it."""
+    sub = tmp_path / "systmp"
+    sub.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(sub))
+    return sub
+
+
+def sha256(path: Path) -> str:
+    """Hex sha256 of a file's bytes."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_config(path: Path, config: dict[str, Any], memory: dict[str, Any] | None = None) -> Path:
+    """Write an agent.yaml (deep-copied config plus an optional memory: block)."""
+    data = copy.deepcopy(config)
+    if memory is not None:
+        data["memory"] = memory
+    path.write_text(yaml.safe_dump(data))
+    return path
+
+
+def write_labels(path: Path, queries: list[dict[str, Any]]) -> Path:
+    """Write a labels file in the documented format."""
+    path.write_text(json.dumps({"description": "test", "queries": queries}))
+    return path
+
+
+def build_source(
+    db_path: Path,
+    summaries: list[str],
+    config: dict[str, Any] | None = None,
+    created_at: float | None = None,
+    embedded: bool = HAS_VEC,
+    mutate: Callable[[Any, list[int]], Awaitable[None]] | None = None,
+) -> list[int]:
+    """Build a WAL-mode sessions.db with memory rows; return their ids.
+
+    Rows are embedded by default only when sqlite-vec is present (an FTS-only
+    install cannot write a vec row); pass embedded=False for a config with no
+    embedding profile. ``mutate(db, ids)`` runs after the plugin has
+    stopped and before the final commit, for per-test table edits. The
+    database is closed afterwards, so its WAL is checkpointed.
+    """
+
+    async def build() -> list[int]:
+        # Real schema via the plugin's own startup, on a file database.
+        memory, _embedder, channel, _conv, db = await build_retrieval_env(
+            config or EMBED_CONFIG, db_path=str(db_path)
+        )
+        await memory.wait_for_background_tasks()
+        # Create the memory/vec/embedding_meta tables before seeding rows.
+        await memory._ensure_schema()
+        await db.execute("PRAGMA journal_mode=WAL")
+        ids = [
+            await seed_memory(db, channel.id, s, created_at=created_at, embedded=embedded)
+            for s in summaries
+        ]
+        await memory.on_stop()
+        if mutate is not None:
+            await mutate(db, ids)
+        await db.commit()
+        await db.close()
+        return ids
+
+    return asyncio.run(build())
+
+
+def read_pool(path: Path) -> dict[str, Any]:
+    """Load a written pool JSON file."""
+    return json.loads(path.read_text())
+
+
+def test_snapshot_copy_leaves_source_bytes_and_includes_wal_rows(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S1: the source is only opened read-only, and WAL-only rows are copied."""
+    live_dir = tmp_path / "live"
+    live_dir.mkdir()
+    live_db = live_dir / "sessions.db"
+
+    # Source with the memory schema but no embedding_meta row: a read-write
+    # open by the plugin would insert one and change the file's bytes.
+    async def drop_meta(db: Any, ids: list[int]) -> None:
+        await db.execute("DELETE FROM embedding_meta")
+
+    build_source(live_db, ["harbor lighthouse keeper"], mutate=drop_meta)
+
+    # A still-open stdlib writer commits one more row that lives only in -wal.
+    writer = sqlite3.connect(live_db)
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        if HAS_VEC:
+            import sqlite_vec
+
+            writer.enable_load_extension(True)
+            sqlite_vec.load(writer)
+        wal_text = "zanzibar quokka sighting"
+        cursor = writer.execute(
+            "INSERT INTO memory (channel_id, created_at, summary, importance, "
+            "msg_id_start, msg_id_end, embedded) VALUES (?, ?, ?, 0.5, 1, 2, ?)",
+            ("irc:#electronics", time.time(), wal_text, 1 if HAS_VEC else 0),
+        )
+        wal_id = cursor.lastrowid
+        if HAS_VEC:
+            writer.execute(
+                "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
+                (wal_id, sqlite_vec.serialize_float32(bow_embed(wal_text))),
+            )
+        writer.commit()
+
+        # Crashed-daemon image: the db plus its -wal, copied while writer is open.
+        image_dir = tmp_path / "image"
+        image_dir.mkdir()
+        image_db = image_dir / "sessions.db"
+        shutil.copy(live_db, image_db)
+        shutil.copy(Path(f"{live_db}-wal"), Path(f"{image_db}-wal"))
+    finally:
+        writer.close()
+    image_wal = Path(f"{image_db}-wal")
+    # Sanity: the committed row really is only in the WAL image.
+    assert image_wal.stat().st_size > 0
+
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(
+        tmp_path / "labels.json", [{"text": "zanzibar quokka", "relevant": [wal_id]}]
+    )
+    pool_out = tmp_path / "pool.json"
+    before = (sha256(image_db), sha256(image_wal))
+
+    script.main([
+        "--snapshot", str(image_db), "--labels", str(labels),
+        "--config", str(config), "--pool-out", str(pool_out),
+    ])
+
+    # Neither the db nor its -wal changed, and the WAL-only row was scored.
+    assert (sha256(image_db), sha256(image_wal)) == before
+    pool = read_pool(pool_out)
+    assert wal_id in [c["id"] for c in pool["queries"][0]["candidates"]]
+
+    # Writing the pool onto the source itself is refused before any work.
+    with pytest.raises(SystemExit) as excinfo:
+        script.main([
+            "--snapshot", str(image_db), "--labels", str(labels),
+            "--config", str(config), "--pool-out", str(image_db),
+        ])
+    err = capsys.readouterr().err
+    assert excinfo.value.code == 2
+    assert "--pool-out" in err and str(image_db) in err
+    assert (sha256(image_db), sha256(image_wal)) == before
+
+
+@needs_vec
+def test_snapshot_scores_known_ranking(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S2: per-query and mean Recall@k / MRR equal the hand-computed values."""
+    source = tmp_path / "sessions.db"
+    id_a, id_b, id_c = build_source(source, [TEXT_A, TEXT_B, TEXT_C])
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    # Query 1 ranks A, B, C; query 2 ranks C first.
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [id_b, id_c]},
+        {"text": TEXT_C, "relevant": [id_c]},
+    ])
+    pool_out = tmp_path / "pool.json"
+
+    script.main([
+        "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
+        "--pool-out", str(pool_out), "--k", "2",
+    ])
+
+    # Expected values come from the shared metric functions on the known order.
+    exp1_r = recall_at_k([id_a, id_b], [id_b, id_c], 2)
+    exp1_m = mrr([id_a, id_b], [id_b, id_c])
+    exp2_r = recall_at_k([id_c, id_a], [id_c], 2)
+    exp2_m = mrr([id_c, id_a], [id_c])
+    pool = read_pool(pool_out)
+    q1, q2 = pool["queries"]
+    assert q1["recall_at_k"] == pytest.approx(exp1_r) == pytest.approx(0.5)
+    assert q1["mrr"] == pytest.approx(exp1_m) == pytest.approx(0.5)
+    assert q2["recall_at_k"] == pytest.approx(exp2_r) == pytest.approx(1.0)
+    assert q2["mrr"] == pytest.approx(exp2_m) == pytest.approx(1.0)
+    assert pool["summary"]["mean_recall_at_k"] == pytest.approx((exp1_r + exp2_r) / 2)
+    assert pool["summary"]["mean_mrr"] == pytest.approx((exp1_m + exp2_m) / 2)
+    assert pool["summary"]["scored"] == 2
+
+
+def test_snapshot_reports_fts_fallback_on_encoder_mismatch(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S3: an encoder mismatch degrades every query and the run says so."""
+    # Source built with encoder "test-embedder"; the config names another.
+    source = tmp_path / "sessions.db"
+    ids = build_source(source, [TEXT_A, TEXT_B])
+    other = copy.deepcopy(EMBED_CONFIG)
+    other["llm"]["embedding"]["model"] = "other-embedder"
+    config = write_config(tmp_path / "agent.yaml", other)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [ids[0]]},
+        {"text": TEXT_B, "relevant": [ids[1]]},
+    ])
+    pool_out = tmp_path / "pool.json"
+
+    script.main([
+        "--snapshot", str(source), "--labels", str(labels),
+        "--config", str(config), "--pool-out", str(pool_out),
+    ])
+
+    # Per-query flag, summary count, and the stdout sentence.
+    pool = read_pool(pool_out)
+    assert [q["degraded"] for q in pool["queries"]] == [True, True]
+    assert pool["summary"]["degraded"] == 2
+    assert "FTS5 fallback on 2 of 2 queries" in capsys.readouterr().out
+
+
+def test_snapshot_names_unreachable_label_ids(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S4: unreachable labelled ids are reported by id and status, not scored."""
+    states: dict[str, int] = {}
+
+    # Turn three rows into a redacted, a superseded and an unindexed record.
+    async def mark(db: Any, ids: list[int]) -> None:
+        reachable, redacted, superseded, not_indexed = ids
+        states.update(
+            reachable=reachable, redacted=redacted,
+            superseded=superseded, not_indexed=not_indexed,
+        )
+        await db.execute("UPDATE memory SET redacted = 1 WHERE id = ?", (redacted,))
+        await db.execute(
+            "UPDATE memory SET indexed = 0, superseded_by = ? WHERE id = ?",
+            (reachable, superseded),
+        )
+        await db.execute("UPDATE memory SET indexed = 0 WHERE id = ?", (not_indexed,))
+
+    source = tmp_path / "sessions.db"
+    build_source(source, [TEXT_A, TEXT_A, TEXT_A, TEXT_A], mutate=mark)
+    absent = 9999
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [
+            states["reachable"], absent, states["redacted"],
+            states["superseded"], states["not_indexed"],
+        ]},
+        {"text": TEXT_A, "relevant": [absent, states["redacted"]]},
+    ])
+    pool_out = tmp_path / "pool.json"
+
+    script.main([
+        "--snapshot", str(source), "--labels", str(labels),
+        "--config", str(config), "--pool-out", str(pool_out),
+    ])
+
+    pool = read_pool(pool_out)
+    q0, q1 = pool["queries"]
+    # Each unreachable id carries its status; the reachable one is scored.
+    assert {u["id"]: u["status"] for u in q0["unscorable"]} == {
+        absent: "absent",
+        states["redacted"]: "redacted",
+        states["superseded"]: "superseded",
+        states["not_indexed"]: "not_indexed",
+    }
+    assert q0["recall_at_k"] == pytest.approx(1.0)
+    # A query with no reachable id has null metrics and is not counted.
+    assert q1["recall_at_k"] is None and q1["mrr"] is None
+    assert pool["summary"]["scored"] == 1
+    # Stdout names every unreachable id.
+    out = capsys.readouterr().out
+    for ident in (absent, states["redacted"], states["superseded"], states["not_indexed"]):
+        assert str(ident) in out
+    for status in ("absent", "redacted", "superseded", "not_indexed"):
+        assert status in out
+
+
+def test_snapshot_never_calls_chat_or_embeds_documents(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S5: retrieval only: no chat call, no document embed, no retention."""
+
+    # Leave work a wrongly-run on_start would do: unconsolidated messages,
+    # an embedded=0 record, and no retention_meta row (so retention is due).
+    async def leave_work(db: Any, ids: list[int]) -> None:
+        for n in range(3):
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                ("irc:#electronics",
+                 json.dumps({"role": "user", "content": f"pending message {n}"}),
+                 time.time()),
+            )
+        await seed_memory(db, "irc:#electronics", TEXT_C, embedded=False)
+        await db.execute("DELETE FROM retention_meta")
+
+    source = tmp_path / "sessions.db"
+    ids = build_source(source, [TEXT_A, TEXT_B], mutate=leave_work)
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    query_texts = [TEXT_A, TEXT_B]
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": query_texts[0], "relevant": [ids[0]]},
+        {"text": query_texts[1], "relevant": [ids[1]]},
+    ])
+
+    script.main([
+        "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
+        "--pool-out", str(tmp_path / "pool.json"),
+    ])
+
+    # Never a chat request.
+    assert stub_calls.chats == []
+    if HAS_VEC:
+        # One query-kind embed per labels query, nothing else.
+        assert len(stub_calls.embeds) == len(query_texts)
+        assert all(kind == "query" for _texts, kind in stub_calls.embeds)
+        assert sorted(texts[0] for texts, _kind in stub_calls.embeds) == sorted(query_texts)
+    else:
+        # The FTS path embeds nothing.
+        assert stub_calls.embeds == []
+
+
+def test_fixture_mode_unchanged_and_flag_conflicts_named(
+    script: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S6: fixture mode still works, and a missing --labels is named with its remedy."""
+    # A tiny retriever module on sys.path stands in for a real retriever.
+    module_name = "snapshot_test_reverse_retriever"
+    (tmp_path / f"{module_name}.py").write_text(
+        "def reverse_retriever(query_text, memories):\n"
+        "    return [m['id'] for m in reversed(memories)]\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    # Driven through sys.argv: this half must hold on the pre-snapshot main().
+    monkeypatch.setattr(
+        sys, "argv",
+        ["eval_memory.py", "--retriever", f"{module_name}:reverse_retriever"],
+    )
+    try:
+        script.main()
+    finally:
+        sys.modules.pop(module_name, None)
+    out = capsys.readouterr().out
+    assert str(script.DEFAULT_FIXTURE) in out
+    assert "recall@5" in out
+
+    # --snapshot without --labels: exit 2, naming the flag and the remedy.
+    with pytest.raises(SystemExit) as excinfo:
+        script.main(["--snapshot", str(tmp_path / "sessions.db")])
+    err = capsys.readouterr().err
+    assert excinfo.value.code == 2
+    assert "--labels" in err
+    assert "--labels PATH" in err
+
+
+@needs_vec
+def test_snapshot_pool_json_holds_whole_pool(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S7: with k=1 the pool JSON still lists every scored candidate."""
+    source = tmp_path / "sessions.db"
+    ids = build_source(source, [TEXT_A, TEXT_B, TEXT_C])
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [{"text": TEXT_A, "relevant": [ids[0]]}])
+    pool_out = tmp_path / "pool.json"
+
+    script.main([
+        "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
+        "--pool-out", str(pool_out), "--k", "1",
+    ])
+
+    # All three candidates, ranked 1..3, each with the five documented fields.
+    candidates = read_pool(pool_out)["queries"][0]["candidates"]
+    assert [c["rank"] for c in candidates] == [1, 2, 3]
+    assert [c["id"] for c in candidates] == ids
+    for cand in candidates:
+        assert set(cand) == {"id", "rank", "similarity", "score", "band"}
+        assert cand["band"] in {"strong", "moderate", "weak"}
+    scores = [c["score"] for c in candidates]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_config_half_life_days_changes_scores(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S8: memory.half_life_days from --config reaches the scorer."""
+    # FTS-path source (no embedding profile) with a ten-day-old row.
+    source = tmp_path / "sessions.db"
+    ids = build_source(
+        source, [TEXT_A], config=FTS_CONFIG, created_at=time.time() - 10 * 86400,
+        embedded=False,
+    )
+    labels = write_labels(tmp_path / "labels.json", [{"text": TEXT_A, "relevant": [ids[0]]}])
+
+    # Two runs differing only in the config's half-life.
+    scores: dict[float, float] = {}
+    for half_life in (1, 1000):
+        config = write_config(
+            tmp_path / f"agent{half_life}.yaml", FTS_CONFIG,
+            memory={"half_life_days": half_life},
+        )
+        pool_out = tmp_path / f"pool{half_life}.json"
+        script.main([
+            "--snapshot", str(source), "--labels", str(labels),
+            "--config", str(config), "--pool-out", str(pool_out),
+        ])
+        candidates = read_pool(pool_out)["queries"][0]["candidates"]
+        assert [c["id"] for c in candidates] == ids
+        scores[half_life] = candidates[0]["score"]
+
+    # score = 0.6 (FTS similarity proxy) * exp(-10 / half_life_days).
+    import math
+
+    for half_life, score in scores.items():
+        assert score == pytest.approx(0.6 * math.exp(-10 / half_life), rel=1e-3)
+
+
+def test_snapshot_not_a_database_reports_open_error(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S1 edge: a non-database --snapshot gives one named line, no traceback."""
+    bogus = tmp_path / "notadb.db"
+    bogus.write_text("this is not a sqlite database\n" * 20)
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [{"text": TEXT_A, "relevant": [1]}])
+
+    with pytest.raises(SystemExit) as excinfo:
+        script.main([
+            "--snapshot", str(bogus), "--labels", str(labels),
+            "--config", str(config), "--pool-out", str(tmp_path / "pool.json"),
+        ])
+
+    # Exit 1, exactly one eval_memory: line naming the path and the remedy.
+    err = capsys.readouterr().err
+    assert excinfo.value.code == 1
+    lines = err.strip().splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith(f"eval_memory: cannot open snapshot {bogus.resolve()} read-only (")
+    assert "check the --snapshot path" in lines[0]
+    assert "Traceback" not in err
