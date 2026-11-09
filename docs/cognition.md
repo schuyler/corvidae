@@ -102,7 +102,17 @@ Three triggers, one watermarked code path:
   in the live window (the watermark lags behind the window, say after a
   failed compaction consolidation) is skipped with one DEBUG line and
   never goes to catch-up: idle or compaction consolidates it, and a
-  warning would repeat every turn until one of them does.
+  warning would repeat every turn until one of them does. A fork that
+  keeps failing backs the trigger off (#620): after three consecutive
+  failed turn forks on a channel (the fork raised, or its reply was
+  unusable; each is its own skip warning), one more warning names the
+  channel, the message-id range and the remedy, and the turn trigger stops
+  forking for that channel. It resumes once any consolidation moves the
+  channel's watermark (a later success, or an idle or compaction run) or
+  after `memory.idle_consolidate_after` seconds; a retry that fails then
+  backs off again with one more warning. Idle and compaction are never
+  backed off. The count and the limit live in memory only (the limit is the
+  module constant `TURN_FORK_FAILURE_LIMIT`), so a restart starts over.
 - **`on_compaction(channel, summary_msg, retain_count, compacted_ids)`** —
   the moment dialog leaves the active window it enters long-term memory.
   The compacted `message_log` id range rides the hook payload (rowid
@@ -160,10 +170,14 @@ that ignore `response_format` still get the prompt's JSON instruction:
 - A reply with no `entries` key but a `summary` (the old shape) is read as
   one entry, with its top-level `topic_tags`.
 - A lone string where a list belongs (`"participants": "kestrel"`) reads as
-  a one-item list. Any other non-list `participants`, or legacy
-  `topic_tags`, makes the reply unusable, and the error names the key.
+  a one-item list. Any other non-list `participants` reads as no
+  participants, with a warning naming the key, and the entries are kept
+  (#655); a non-list legacy `topic_tags` makes the reply unusable, and the
+  error names the key.
 - `importance` is a number, or a string `float()` accepts (`"0.7"`), if it
-  is finite. A bool, a non-number or `nan` counts as absent.
+  is finite and within [0, 1]. A bool, a non-number, `nan`, or a value
+  outside [0, 1] (a rating on another scale, such as `7` or `"1e3"`) counts
+  as absent, so the rubric rates the range instead (#655).
 
 The task then scores an importance prior through the pluggable
 `MemoryPlugin.importance_prior`, once for the whole range, passing the
@@ -220,7 +234,9 @@ the watermark hasn't moved, so the next trigger stores exactly one
 record. A failed rollback and a write blocked past the busy timeout (the
 WARNING names the database path and the timeout) are logged too.
 `write_record` (goal retirement) uses the same transaction, as do retention's
-three passes (demotion, re-promotion, vec backfill): each batch commits whole
+passes (demotion, re-promotion, retrieval-log pruning when
+`memory.retention.retrieval_log_max_age_days` is set (#654), vec backfill;
+a pruning failure is logged and leaves backfill to run): each batch commits whole
 or rolls back whole, and the backfill's embeddings are computed before the
 transaction opens. Each pass selects its candidates before its transaction,
 so every write re-checks the selection: demotion skips a row redacted,
@@ -258,16 +274,21 @@ higher importance, and the later of the two records' dates. Message
 ranges fold only within one channel: `message_log` ids are global, and
 `recall_raw` and `/redact` read a record's range on its own channel, so on
 a cross-channel merge each record keeps its own range and the superseded
-record still leads to its channel's source dialog. Overlapping triggers on the same
+record still leads to its channel's source dialog. The survivor of a
+cross-channel merge, or of a merge with a record that already was one, is
+marked `merged_foreign = 1` so window exclusion never hides it (#627). Overlapping triggers on the same
 range discard the loser's record — no duplicates. Embedding failure —
 including a wrong-width vector, which is refused before the write
 transaction (vec0 rejects it on insert, and the resulting
 `OperationalError` would roll back the whole consolidation: record,
 vec row and watermark, stalling the channel on every later trigger) —
 stores the entry with `embedded=0` for later backfill. The embedding call covers all
-of a consolidation's entries at once, so if it fails or returns the wrong
-number of vectors every entry is stored `embedded=0`; a wrong-width vector
-costs only its own entry. The narrative text
+of a consolidation's entries at once. If that batch fails, it is retried
+as two halves, recursively, with a warning, so a server that caps the
+batch size still embeds every entry (#655); if a single-entry request
+fails or returns the wrong number of vectors (the encoder is failing, not
+capping), every entry is stored `embedded=0`. A
+wrong-width vector costs only its own entry. The narrative text
 is canonical and vectors are a rebuildable cache. All consolidation LLM
 calls carry `stage="consolidation"` attribution, along with the `trigger`
 that started the run (`"compaction"`, `"idle"` or `"turn"`; `"eval"` from
@@ -345,6 +366,13 @@ still in view. Both conditions matter: `message_log` ids are global, so an
 id test alone would hide other channels' recent records too. A record that
 straddles the window's oldest id is still admitted, so the part of it that
 compaction dropped stays recallable; a window with no ids excludes nothing.
+A record marked `merged_foreign` (it superseded another channel's record
+through a near-duplicate merge, directly or through a chain of merges) is
+never excluded, since the window doesn't hold that channel's content
+(#627). A same-channel merge needs no mark: it folds the old record's range
+in, so an older record pulls the survivor's start out of the window. Rows
+from before the column read 0 (no backfill; exclusion only applies while a
+range is still in the window).
 The exclusion is a `retrieve(..., exclude=(channel_id, min_msg_id))`
 argument applied before the cut to k: the degraded FTS5 path filters it in
 `WHERE` ahead of its `LIMIT`, and the vector path selects it as a flag (#407)
@@ -406,9 +434,9 @@ per-record lookups cheap. A candidate's `outcome` is one of:
 - `dropped_weak`: banded weak while some other returned candidate was not
   weak, so it was never offered to the funnel.
 - `dropped_budget`: offered to the funnel, but the `memory` source's token
-  budget had no room for it. (This is the remainder: with the funnel
-  plugin disabled nothing is admitted and selected candidates also read
-  `dropped_budget`.)
+  budget had no room for it.
+- `not_admitted`: selected, but no funnel plugin is registered, so nothing
+  could be admitted (#654).
 - `dropped_dup`: offered, but the window's CONTEXT already contained that
   line (the funnel's dedupe is a substring test).
 - `cut`: scored but ranked below k, so never returned.
@@ -434,7 +462,7 @@ may share a would-be rank, and an excluded record that would not have made
 the top k gets no row.
 
 `retrieval_log.excluded_in_window` counts the in-window records the search
-matched; it is NULL when no exclusion applied (a window with no ids) and on
+matched (a `merged_foreign` record is not in-window by this rule); it is NULL when no exclusion applied (a window with no ids) and on
 rows from before #407. The two paths count differently. On the vector path
 it is the in-window rows inside the KNN (and the hybrid FTS side). On the FTS path it is every
 in-window record the keyword query matches, found with one extra
@@ -673,8 +701,10 @@ nullable `memory` columns:
 - `prompt_hash`: sha256 of the UTF-8 instruction text the call used. The
   text itself is stored once per hash in `memory_prompt`, however many
   records share it. An empty prompt is still a prompt and is stored as `''`.
-- `mode`: `fork`, `standalone` (the view call on the `consolidation` stage's profile) or
-  `direct`.
+- `mode`: `fork`, `standalone` (the view call on the `consolidation` stage's profile),
+  `raw` (a catch-up range stored as its transcript after both view-call
+  replies were unusable, #626; the prompt hash, model and trigger are the
+  failed call's) or `direct`.
 - `model`: the model the call was sent with, after any
   `llm.<profile>.extra_body.model` override, so a record says what actually
   ran rather than what `llm.<profile>.model` names. `Agent.fork` always sets
@@ -753,8 +783,9 @@ FROM memory WHERE prompt_hash LIKE 'abcdef123456%';
 #### Schema
 
 `memory` (records, with `indexed`, `superseded_by`, `redacted`, and
-`embedded` columns, and the stamp columns `prompt_hash`, `mode`,
-`model` and `trigger`), `memory_prompt` (`hash`, `text`: each distinct instruction text
+`embedded` columns, the stamp columns `prompt_hash`, `mode`,
+`model` and `trigger`, and `merged_foreign`, set on a near-dup survivor that
+holds another channel's record, #627), `memory_prompt` (`hash`, `text`: each distinct instruction text
 once), `consolidation_watermark`, `embedding_meta`,
 `memory_fts` (external-content FTS5 with insert/update sync triggers; no
 delete trigger — memory rows are never deleted), `memory_vec` (vec0,
@@ -902,8 +933,17 @@ is not open.
 compaction remains plain lossy summarization.
 
 A malformed consolidation reply is retried once; if the retry is also
-unusable, the range is stored as one record holding its raw transcript as the summary rather
-than being dropped (the LLM call has already been paid for).
+unusable, the range is stored as its raw transcript rather than being
+dropped (the LLM call has already been paid for). The transcript is split
+on message lines (a message longer than a piece is cut by characters) into
+records that each fit the memory admission budget as a retrieved memory
+line (`funnel.budgets.memory`, else `funnel.default_budget`, else 512,
+read at startup; each piece leaves room for the longest `[band] (age) `
+prefix), so a raw record can actually be admitted (#626). The pieces are
+records of one consolidation (shared range, importance and stamp) stamped
+`mode = raw`. A budget too small for any memory line keeps the transcript
+as one record, with a warning naming the key. One raw piece can fill the
+whole memory budget for a turn.
 
 ### MemoryToolsPlugin (`packages/corvidae-cognition/corvidae_cognition/memory_tools.py`)
 
