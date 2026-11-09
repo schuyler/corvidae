@@ -366,7 +366,7 @@ records that would have made the top k.
 
 Only passive retrieval (`before_agent_turn`) logs. A direct `retrieve()`
 or `_retrieve_pool()` call (`scripts/eval_memory.py`) and `search_memory`
-write nothing. There is
+write no `retrieval_log` rows. There is
 no `filtered` outcome: redacted, superseded and demoted records have no
 `memory_vec` row, so the KNN never reaches them. Logging is fail-soft: if
 the candidate insert fails, the turn still runs, the `retrieval_log` row
@@ -490,7 +490,9 @@ The pool file is written once, after the last query:
 ```
 
 `candidates` is the ranked pool, best score first; the entries with
-`rank <= k` are what the agent would have seen. It holds ids and scores but
+`rank <= k` are `retrieve()`'s top k, what passive retrieval would hand on
+before it drops weak-band entries (unless all are weak) and the funnel
+admits them, with no window exclusion. It holds ids and scores but
 no memory text; look the ids up in the source. `run_at` is the wall-clock
 time the run started. The means are `null` when no query was scored.
 
@@ -518,16 +520,17 @@ Operator notes:
   pool file for calibration. An encoder in `--config` that differs from the
   one the snapshot was built with does the same, after memory's encoder
   mismatch ERROR.
-- **FTS-only installs log a sqlite-vec warning.** Without sqlite-vec,
-  memory logs `sqlite-vec extension failed to load` with a traceback, and
+- **FTS-only installs log a sqlite-vec warning.** With an embedding
+  profile configured but without sqlite-vec, memory logs `sqlite-vec extension failed to load` with a traceback, and
   every query reports `degraded`. That is expected.
 - **The copy lives in the system temp directory** (in a 0700 directory)
   and is deleted when the run ends, so a large `sessions.db` needs that
   much free space there. A SIGKILL mid-run leaves the copy behind; it is a
   full `sessions.db`, so delete it.
-- Opening a WAL-mode source read-only can leave empty `-wal` and `-shm`
-  files beside it when the daemon isn't running; the main file's bytes are
-  unchanged. The source's directory must be writable for the `-shm` file.
+- Opening a WAL-mode source read-only can leave an empty `-wal` and a
+  32 KiB `-shm` index beside it when the daemon isn't running; the main
+  file's bytes are unchanged. If those files don't already exist, the
+  source's directory must be writable so SQLite can create the `-shm`.
 - `--pool-out` may not name the source, its `-wal` or `-shm`, the labels
   file or the config. The pool file is overwritten if it exists, and is
   not written at all if a query raises partway through.

@@ -48,7 +48,7 @@ not scored; "description" and "note" are free text and unused):
                   "relevant": [412, 415]}]}
 
 POOL_JSON is written once after all queries: run_at, k, one entry per query
-(text, relevant, unscorable ids with their status absent / redacted /
+(index, text, relevant, unscorable ids with their status absent / redacted /
 superseded / not_indexed, degraded, recall_at_k, mrr, and every scored
 candidate as id, rank, similarity, score, band) and a summary. It holds no
 memory text; look the ids up in the source.

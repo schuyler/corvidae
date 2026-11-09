@@ -479,6 +479,30 @@ def test_fixture_mode_unchanged_and_flag_conflicts_named(
     assert "--labels PATH" in err
 
 
+@pytest.mark.parametrize("pool_name, extra, named", [
+    ("sessions.db-wal", [], "WAL file"),
+    ("sessions.db-shm", [], "shared-memory file"),
+    ("agent.yaml", [], "--config"),
+    ("pool.json", ["--k", "0"], "--k must be a positive integer"),
+])
+def test_snapshot_rejects_unsafe_pool_out_and_k(
+    script: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    pool_name: str, extra: list[str], named: str,
+) -> None:
+    """S1 guard (review fix): --pool-out may not overwrite the source's WAL/shm
+    files or the config, and --k must be positive; each is named before any I/O."""
+    # Argument errors exit 2 from parser.error, naming what was refused.
+    with pytest.raises(SystemExit) as excinfo:
+        script.main([
+            "--snapshot", str(tmp_path / "sessions.db"),
+            "--labels", str(tmp_path / "labels.json"),
+            "--config", str(tmp_path / "agent.yaml"),
+            "--pool-out", str(tmp_path / pool_name), *extra,
+        ])
+    assert excinfo.value.code == 2
+    assert named in capsys.readouterr().err
+
+
 @needs_vec
 def test_snapshot_pool_json_holds_whole_pool(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,

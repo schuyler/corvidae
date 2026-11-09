@@ -364,7 +364,7 @@ Not designed here; listed so the change can be judged:
 - **A labelled query set**: twenty to forty real queries from Lex's
   `message_log`, each with the record(s) that should come back.
   `scripts/eval_memory.py --snapshot` (#658) scores such a set: it runs
-  the real retrieval path over a read-only copy of an existing
+  the real retrieval path over a copy, taken through a read-only connection, of an existing
   `sessions.db`, with labels keyed to its memory ids, and writes each
   query's scored pool (see [cognition.md](cognition.md), "Measuring
   retrieval on a real database").
