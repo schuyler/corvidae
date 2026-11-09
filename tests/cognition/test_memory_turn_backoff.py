@@ -6,14 +6,14 @@ unaffected."""
 import logging
 
 from corvidae_cognition.memory import TURN_FORK_FAILURE_LIMIT
-
 from helpers import FakeForkAgent, window_of
+
 from .test_memory_consolidation import fetch_watermark, seed_dialog
 from .test_memory_fork import DIALOG
 from .test_memory_turn_trigger import REPLY, make_env, tokens_of  # noqa: F401 (fixture)
 
 
-async def failing_env(make_env):
+async def failing_env(make_env):  # noqa: F811 (make_env fixture)
     """An env whose consolidation fork always raises."""
     agent = FakeForkAgent({"consolidation"}, error=RuntimeError("backend down"))
     # Threshold met by DIALOG[1:] too, so a watermark at ids[0] still forks.
@@ -34,7 +34,7 @@ def backoff_warnings(caplog) -> list[str]:
     ]
 
 
-async def test_turns_stop_forking_after_n_failures_with_one_warning(make_env, caplog):
+async def test_turns_stop_forking_after_n_failures_with_one_warning(make_env, caplog):  # noqa: F811 (make_env fixture)
     """N failing turns fork N times; later turns don't fork; one warning names
     the channel, the message-id range, the count and the remedy."""
     env = await failing_env(make_env)
@@ -59,7 +59,7 @@ async def test_turns_stop_forking_after_n_failures_with_one_warning(make_env, ca
     assert await fetch_watermark(env.db, env.channel.id) is None
 
 
-async def test_watermark_move_resets_the_backoff(make_env):
+async def test_watermark_move_resets_the_backoff(make_env):  # noqa: F811 (make_env fixture)
     """A consolidation by another trigger (here: the watermark committed as an
     idle run would) ends the backoff; the next turn forks again."""
     env = await failing_env(make_env)
@@ -79,7 +79,7 @@ async def test_watermark_move_resets_the_backoff(make_env):
     assert len(env.agent.calls) == TURN_FORK_FAILURE_LIMIT + 1
 
 
-async def test_backoff_interval_expiry_allows_one_retry(make_env, caplog, monkeypatch):
+async def test_backoff_interval_expiry_allows_one_retry(make_env, caplog, monkeypatch):  # noqa: F811 (make_env fixture)
     """After the interval one turn forks again; failing, it backs off again
     with one more warning, and the turn after that doesn't fork."""
     env = await failing_env(make_env)
@@ -100,7 +100,7 @@ async def test_backoff_interval_expiry_allows_one_retry(make_env, caplog, monkey
     assert len(backoff_warnings(caplog)) == 2
 
 
-async def test_idle_still_forks_during_backoff(make_env):
+async def test_idle_still_forks_during_backoff(make_env):  # noqa: F811 (make_env fixture)
     """Backoff is the turn trigger's only: an idle consolidation still forks."""
     env = await failing_env(make_env)
     for _ in range(TURN_FORK_FAILURE_LIMIT + 1):
@@ -111,7 +111,7 @@ async def test_idle_still_forks_during_backoff(make_env):
     assert len(env.agent.calls) == TURN_FORK_FAILURE_LIMIT + 1
 
 
-async def test_a_success_resets_the_count(make_env):
+async def test_a_success_resets_the_count(make_env):  # noqa: F811 (make_env fixture)
     """N-1 failures, then a success, then fresh dialog and N more failing
     turns: all N fork, because the success moved the watermark and restarted
     the count (without the reset the first of them would start the backoff)."""
