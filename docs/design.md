@@ -2080,7 +2080,7 @@ newest first) are shared by `resolve_conversation` and the catch-up builder.
 written out); transport errors propagate.
 
 **Prefix parity.** `Agent.fork(channel, instruction, *, stage, cut=None,
-extra_body=None)` renders with exactly what step 7 of the agent loop uses:
+extra_body=None, snapshot=None)` renders with exactly what step 7 of the agent loop uses:
 the channel's
 conversation tool schemas (`conv.tool_view.schemas`, per-channel since #149),
 `build_prompt(pending_ids, mid_conversation_system_role)`, and the same
@@ -2091,6 +2091,11 @@ goes differs: `stage` is a required keyword, and the call goes to
 that stage to (else the default chat profile). Its endpoint, model and
 `extra_body` (e.g. `id_slot`) are the stage profile's, not the main turn's.
 With no client for the stage, `Agent.fork` raises `ForkUnavailable`.
+`snapshot` (a `WindowSnapshot` from `corvidae.fork.snapshot_window`, #628)
+renders that copy of the window and its pending ids instead of the live
+window; it is how compaction's consolidation forks after the turn, from the
+window as it stood before `replace_with_summary`. The copy holds the whole
+message list, since the pending-at-cut rule looks past the cut.
 
 Whether a fork hits the cache is therefore the operator's configuration,
 not a guarantee. A fork whose stage maps to a profile on another endpoint or
@@ -2163,7 +2168,7 @@ Stage names are opaque to core (it never names cognition plugins).
 | Stage | Cut | Runs | On a miss |
 |---|---|---|---|
 | `compaction` | dropped prefix | inline in `resolve_compaction` | standalone view call on the same prefix (the `compaction` stage's profile, no tools), then the over-budget fallback (#308); on a connection-class failure the view is skipped and compaction defers to the turn's retry loop (#400) |
-| `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`, after waiting for the channel's in-flight turn consolidation task (#621; with an idle task in flight it doesn't fork); the record is stashed and the `on_compaction` task, which waits for an in-flight turn or idle task, consumes it | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view, sent as the `consolidation` stage |
+| `consolidation` (compaction trigger) | dropped prefix of a copy of the window taken in `before_compaction` (#628) | in a background task `before_compaction` spawns (it returns at once), after waiting for the channel's in-flight turn or idle consolidation task (#621); the task is stashed and the `on_compaction` task, which waits the same way, awaits its record | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view, sent as the `consolidation` stage |
 | `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: catch-up (rebuilt view, sent as the `consolidation` stage) |
 | `consolidation` (turn trigger) | full window | in the task `on_agent_response` spawns, once the new window tokens in `(watermark, range_end]` reach `memory.consolidate_after_tokens`; never attempted with forks off for `consolidation` (silent) | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next turn trigger; no registered channel or window, or a range row not in the window: skip at DEBUG, never catch-up (idle or compaction consolidates it) |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
@@ -2272,8 +2277,8 @@ differently.
 
 **Fork by default (#180, #320).** Every background call that has a live
 window forks it: compaction from the dropped prefix; compaction-time
-consolidation from the same prefix in `before_compaction`, while the
-window is whole; idle and turn consolidation from the full window; stage-2
+consolidation from the same prefix of a copy taken in `before_compaction`,
+while the window is whole, forked in the background (#628); idle and turn consolidation from the full window; stage-2
 appraisal and each critique lens from the full window at run time;
 provenance from the prefix ending at the exchange's final reply. Each forks
 only while the rows it needs are still in the window. A miss skips the

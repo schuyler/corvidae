@@ -137,7 +137,10 @@ async def test_cancelling_compaction_leaves_the_turn_task_running(make_env):  # 
     memory, ids = env.memory, env.ids
 
     await memory.before_compaction(channel=env.channel, compacted_ids=ids, cut=len(ids))
-    # The stashed background fork is waiting on the turn task: cancel it.
+    # Let the stashed background fork start and park on the turn task,
+    # then cancel it there.
+    for _ in range(5):
+        await asyncio.sleep(0)
     [pending] = list(memory._fork_stash.values())
     pending.cancel()
     await asyncio.gather(pending, return_exceptions=True)

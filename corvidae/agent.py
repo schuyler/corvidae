@@ -72,6 +72,7 @@ from corvidae.fork import (
     ForksConfig,
     ForkUnavailable,
     ViewInputs,
+    WindowSnapshot,
     build_fork_prompt,
     fork_body,
     looks_like_tool_call,
@@ -1670,6 +1671,7 @@ class Agent(CorvidaePlugin):
         stage: str,
         cut: int | None = None,
         extra_body: dict | None = None,
+        snapshot: WindowSnapshot | None = None,
     ) -> ForkResult:
         """Run one fork of the channel's window (GitHub issue #51).
 
@@ -1678,7 +1680,9 @@ class Agent(CorvidaePlugin):
         (tool schemas, pending ids, mid-conversation role, override filter,
         reasoning effort untouched), so the server reuses the cached prefix
         when the stage's profile shares the main turn's. ``cut`` None forks
-        from the whole window.
+        from the whole window. With ``snapshot`` (#628) the prompt is rendered
+        from that copy of the window, as it stood when it was taken, instead
+        of the live window (compaction's consolidation forks after the turn).
 
         The request goes to ``stage``'s profile (``llm.stages``, else the
         default chat profile): its endpoint, model and ``extra_body``. A
@@ -1697,9 +1701,14 @@ class Agent(CorvidaePlugin):
             ForkRefused: the model answered with tool calls, structured or
                 written out as text.
         """
-        conv = channel.conversation
+        # The window to render: a snapshot's copy, else the live window.
+        conv = snapshot.conv if snapshot is not None else channel.conversation
         if conv is None:
             raise ForkUnavailable(f"no live window on {channel.id} for stage {stage}")
+        pending = (
+            snapshot.pending_ids if snapshot is not None
+            else frozenset(channel.pending_tool_call_ids)
+        )
 
         # The stage's client and profile settings, read from LLMPlugin now.
         llm = self.pm.get_plugin("llm")
@@ -1715,7 +1724,7 @@ class Agent(CorvidaePlugin):
             conv,
             cut,
             instruction,
-            frozenset(channel.pending_tool_call_ids),
+            pending,
             self._mid_conversation_system_role,
         )
         # The profile beats the overrides; the stage's body and tool_choice

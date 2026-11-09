@@ -121,16 +121,17 @@ idle triggers share one in-flight set: while a channel has a turn or idle
 task running (or an idle firing is still setting one up), neither trigger
 starts another for it, so at most one turn-or-idle consolidation runs per
 channel. Compaction is never skipped, so it doesn't consult the set;
-instead it waits (#621), so neither reply is thrown away. The inline fork
-in `before_compaction` is on the response path, so it waits only for an
-in-flight turn task (at most one fork; a compacting turn can take as long
-as the rest of it), then forks only what lies past the watermark that task
-left. With an idle task in flight (which may be a catch-up of several view
-calls) it doesn't fork at all, and the `on_compaction` task, off the
-response path, waits for the idle or turn task and then consolidates the
-rest. A failed or cancelled in-flight task just means compaction
-consolidates the whole range, and cancelling compaction's wait doesn't
-cancel the task it waits on. An idle firing that has claimed the channel but not yet spawned its
+instead it waits (#621), so neither reply is thrown away, and it waits off
+the response path (#628). `before_compaction` copies the window as it
+stands (`snapshot_window`, before `replace_with_summary` drops the prefix)
+and spawns a task that forks that copy, so the turn doesn't wait for the
+fork. That task first waits for an in-flight turn or idle task, then
+forks only what lies past the watermark it left; the `on_compaction`
+task waits the same way, then awaits the fork task's record (or makes the
+view call on a miss). A failed or cancelled in-flight task just means
+compaction consolidates the whole range, and cancelling compaction's fork
+task doesn't cancel the task it waits on. The copy holds the whole window
+(each message copied) until the fork is done. An idle firing that has claimed the channel but not yet spawned its
 task has nothing to wait for; that overlap, like any other, is settled by
 the watermark compare-and-set below. The task
 reads the per-channel **consolidation watermark**, fetches the working

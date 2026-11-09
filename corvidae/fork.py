@@ -30,9 +30,9 @@ to :func:`fork_agent` and a name nobody uses simply matches nothing.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
-
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -158,6 +158,30 @@ def parse_forks_config(agent_config: dict) -> ForksConfig:
         enabled=enabled,
         stages=frozenset(stages_raw) if stages_raw is not None else None,
     )
+
+
+@dataclass(frozen=True)
+class WindowSnapshot:
+    """A copy of a channel's window to fork later (#628).
+
+    ``conv`` is never the channel's live window: compaction can replace that
+    before the fork runs. It holds the whole message list, not just a
+    prefix, because :func:`build_fork_prompt` looks past the cut to tell
+    which calls were pending at it.
+    """
+
+    conv: ContextWindow
+    pending_ids: frozenset
+
+
+def snapshot_window(conv: ContextWindow, pending_ids: frozenset) -> WindowSnapshot:
+    """Copy ``conv`` (each message deep-copied, so later in-place edits to the
+    live window don't leak in) with what rendering it needs."""
+    copy_conv = ContextWindow(conv.channel_id, chars_per_token=conv.chars_per_token)
+    copy_conv.system_prompt = conv.system_prompt
+    copy_conv.fence_key = conv.fence_key
+    copy_conv.messages = copy.deepcopy(conv.messages)
+    return WindowSnapshot(copy_conv, frozenset(pending_ids))
 
 
 def build_fork_prompt(

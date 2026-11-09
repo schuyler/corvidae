@@ -431,12 +431,12 @@ Not designed here; listed so the change can be judged:
 
 ## Deferred
 
-- **Compaction's fork off the response path**, by forking against a
-  snapshot of the pre-compaction window in a background task. Needs the
-  fork API to accept a rendered message list.
+- ~~**Compaction's fork off the response path**~~ Done in #628: a
+  snapshot of the pre-compaction window (`snapshot_window`) forked in a
+  background task, through `Agent.fork(snapshot=...)`.
 - ~~**Compaction waiting for an in-flight turn task**~~ Done in #621:
-  `before_compaction` waits for an in-flight turn task and forks only the
-  rest; the `on_compaction` task waits for an in-flight turn or idle task.
+  compaction's background fork task (#628) and the `on_compaction` task
+  wait for an in-flight turn or idle task and take only the rest.
   Left open: an idle firing that has claimed the channel but not yet
   spawned its task, and a turn or idle task started while compaction's
   task runs, are still settled by the compare-and-set (one reply kept).
