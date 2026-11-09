@@ -12,8 +12,11 @@ This module owns the memory schema:
     Each row is stamped with how it was made (issue #299): ``prompt_hash``
     (sha256 of the consolidation instruction text), ``mode`` (``fork`` |
     ``standalone`` | ``direct``) and ``model`` (the model the call was sent
-    with). All NULL means the row predates stamping ("unknown"); ``direct``
-    rows (goal retirement) were written by no consolidation call.
+    with), plus ``trigger`` (issue #633: ``compaction`` | ``idle`` |
+    ``eval``, what started the consolidation; NULL for direct rows and rows
+    from before the column). All NULL means the row predates stamping
+    ("unknown"); ``direct`` rows (goal retirement) were written by no
+    consolidation call.
   - ``memory_prompt``: ``hash`` -> instruction text, stored once per hash.
   - ``consolidation_watermark``: per-channel last-consolidated
     ``message_log`` id; what makes the compaction/idle trigger overlap safe.
@@ -57,6 +60,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import dataclasses
 import hashlib
 import json
 import logging
@@ -133,6 +137,23 @@ FTS_SIMILARITY_PROXY = 0.6
 # Vec KNN over-fetch factor: candidates are filtered by channel scope and
 # indexed/redacted flags after the KNN scan, so fetch more than k.
 VEC_OVERFETCH = 4
+
+
+def _exclude_clause(
+    exclude: tuple[str, int] | None,
+) -> tuple[str, tuple]:
+    """The window-exclusion SQL fragment for a candidate query (#634).
+
+    Leaves out records of ``exclude``'s channel whose range starts at or past
+    its ``min_msg_id``. Both conditions: message_log ids are global, so an id
+    test alone would also hide other channels' records. Keyed on
+    ``msg_id_start`` so a record straddling the window's oldest id stays.
+    Returns ``("", ())`` when there is nothing to exclude.
+    """
+    if exclude is None:
+        return "", ()
+    return " AND NOT (m.channel_id = ? AND m.msg_id_start >= ?)", exclude
+
 
 # How long (ms) the dedicated memory write connection waits for SQLite's
 # write lock before failing the write (the range is then retried).
@@ -725,7 +746,8 @@ CREATE TABLE IF NOT EXISTS memory (
     embedded INTEGER NOT NULL DEFAULT 0,-- 0 = embedding pending/failed (backfillable)
     prompt_hash TEXT,                   -- sha256 of the instruction text; NULL = unknown/direct
     mode TEXT,                          -- fork | standalone | direct; NULL = unknown (pre-stamp)
-    model TEXT                          -- model the consolidation call was sent with
+    model TEXT,                         -- model the consolidation call was sent with
+    trigger TEXT                        -- compaction | idle | eval; NULL = direct/pre-#633
 )
 """
 
@@ -755,6 +777,9 @@ class RecordStamp:
     prompt: str | None
     mode: str
     model: str | None
+    # What started the consolidation (compaction | idle | eval); set by
+    # _commit, None for direct records (#633).
+    trigger: str | None = None
 
     @property
     def hash(self) -> str | None:
@@ -1649,6 +1674,8 @@ class MemoryPlugin(CorvidaePlugin):
                     "memory embedding failed; storing record with "
                     "embedded=0 for backfill", exc_info=True,
                 )
+            if embedding is not None:
+                embedding = self._check_embedding_width(embedding)
 
         # Atomic commit section: insert, vec row, near-dup merge and
         # watermark advance are one transaction on the write connection,
@@ -1682,7 +1709,10 @@ class MemoryPlugin(CorvidaePlugin):
                 msg_id_start=rows[0][0],
                 msg_id_end=rows[-1][0],
                 embedding=embedding,
-                stamp=record["stamp"],
+                # Every consolidation record passes through here, so this is
+                # where the stamp learns its trigger; catch-up keeps the one
+                # that fell through to it (#633).
+                stamp=dataclasses.replace(record["stamp"], trigger=trigger),
             )
             await self._set_watermark(wdb, channel_id, new_wm)
         logger.info(
@@ -1720,8 +1750,8 @@ class MemoryPlugin(CorvidaePlugin):
         cursor = await db.execute(
             "INSERT INTO memory (channel_id, created_at, summary, "
             "importance, valence, topic_tags, participants, "
-            "msg_id_start, msg_id_end, embedded, prompt_hash, mode, model) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "msg_id_start, msg_id_end, embedded, prompt_hash, mode, model, trigger) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 channel_id,
                 created_at,
@@ -1736,6 +1766,7 @@ class MemoryPlugin(CorvidaePlugin):
                 stamp.hash,
                 stamp.mode,
                 stamp.model,
+                stamp.trigger,
             ),
         )
         memory_id = cursor.lastrowid
@@ -1870,6 +1901,8 @@ class MemoryPlugin(CorvidaePlugin):
                     "memory embedding failed; storing record with "
                     "embedded=0 for backfill", exc_info=True,
                 )
+            if embedding is not None:
+                embedding = self._check_embedding_width(embedding)
         async with self._db_lock, self._write_txn() as wdb:
             memory_id = await self._insert_record(
                 wdb, channel_id=channel_id, summary=summary,
@@ -2051,7 +2084,12 @@ class MemoryPlugin(CorvidaePlugin):
                 for m in unanswered_user_messages(conv.messages)
                 if isinstance(m.get("content"), str)
             )
-            candidates, degraded = await self.retrieve(query)
+            # Leave out this channel's records whose whole range is still in
+            # the window (#634): they would only echo what the model can see.
+            # A window with no message_log ids applies no exclusion.
+            window_ids = window_db_ids(conv.messages)
+            exclude = (channel.id, min(window_ids)) if window_ids else None
+            candidates, degraded = await self.retrieve(query, exclude=exclude)
 
             # Drop weak-banded candidates unless nothing else matched.
             non_weak = [c for c in candidates if c["band"] != "weak"]
@@ -2141,13 +2179,19 @@ class MemoryPlugin(CorvidaePlugin):
             )
 
     async def retrieve(
-        self, text: str, k: int | None = None
+        self, text: str, k: int | None = None,
+        exclude: tuple[str, int] | None = None,
     ) -> tuple[list[dict], bool]:
         """Score memory candidates for a query text.
 
         Vector KNN over memory_vec when available; FTS5 keyword search
         otherwise or when the encoder fails (trap #10). Candidates come from
         the agent's whole memory, every channel's (PRD principle 14).
+
+        ``exclude``: optional ``(channel_id, min_msg_id)``. Records of that
+        channel whose ``msg_id_start`` is at or past ``min_msg_id`` (their
+        whole range still in the live window) are left out before the cut
+        to k (#634). Passive retrieval passes it; this is not a scope.
 
         Returns:
             (candidates sorted by score descending, degraded_to_fts).
@@ -2166,7 +2210,7 @@ class MemoryPlugin(CorvidaePlugin):
             try:
                 client = self._llm().get_client("embedding")
                 query_vector = (await client.embed([text], kind="query"))[0]
-                rows = await self._vec_candidates(db, query_vector, k)
+                rows = await self._vec_candidates(db, query_vector, k, exclude)
             except Exception:
                 logger.warning(
                     "retrieval embedding failed; degrading to FTS5",
@@ -2177,7 +2221,7 @@ class MemoryPlugin(CorvidaePlugin):
             degraded = True
 
         if degraded:
-            rows = await self._fts_candidates(db, text, k)
+            rows = await self._fts_candidates(db, text, k, exclude)
 
         candidates = []
         for memory_id, summary, created_at, last_retrieved_at, similarity in rows:
@@ -2242,25 +2286,39 @@ class MemoryPlugin(CorvidaePlugin):
 
     async def _vec_candidates(
         self, db: aiosqlite.Connection, query_vector: list[float], k: int,
+        exclude: tuple[str, int] | None = None,
     ) -> list[tuple]:
         """Exact-KNN candidates:
         (id, summary, created_at, last_retrieved_at, cosine_similarity).
 
         sqlite-vec is brute-force exact KNN (no ANN index), so the KNN scan
         costs the same regardless of k; we over-fetch and filter by status
-        flags in the join.
+        flags (and the window exclusion, see ``retrieve``) in the join.
         """
         import sqlite_vec
+        knn_k = k * VEC_OVERFETCH
+        exclude_sql, exclude_params = _exclude_clause(exclude)
+        if exclude is not None:
+            # The KNN cut happens before the join's filters, so fetch one
+            # extra row per excluded record or in-window records could fill
+            # every slot. The count ignores status flags: an upper bound.
+            async with db.execute(
+                "SELECT COUNT(*) FROM memory WHERE channel_id = ? AND msg_id_start >= ?",
+                exclude,
+            ) as cursor:
+                (excluded_count,) = await cursor.fetchone()
+            knn_k += excluded_count
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at, v.distance "
             "FROM (SELECT memory_id, distance FROM memory_vec "
             "      WHERE embedding MATCH ? AND k = ?) AS v "
             "JOIN memory m ON m.id = v.memory_id "
-            "WHERE m.indexed = 1 AND m.redacted = 0 "
+            "WHERE m.indexed = 1 AND m.redacted = 0" + exclude_sql + " "
             "ORDER BY v.distance",
             (
                 sqlite_vec.serialize_float32(query_vector),
-                k * VEC_OVERFETCH,
+                knn_k,
+                *exclude_params,
             ),
         ) as cursor:
             rows = await cursor.fetchall()
@@ -2271,19 +2329,24 @@ class MemoryPlugin(CorvidaePlugin):
         ]
 
     async def _fts_candidates(
-        self, db: aiosqlite.Connection, text: str, k: int
+        self, db: aiosqlite.Connection, text: str, k: int,
+        exclude: tuple[str, int] | None = None,
     ) -> list[tuple]:
         """FTS5 keyword candidates with a fixed similarity proxy:
-        (id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY)."""
+        (id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY).
+
+        The window exclusion (see ``retrieve``) sits in WHERE, ahead of the
+        LIMIT, so it applies before the cut to k."""
         match = _fts_match_query(text)
         if match is None:
             return []
+        exclude_sql, exclude_params = _exclude_clause(exclude)
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at "
             "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
-            "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 "
-            "ORDER BY rank LIMIT ?",
-            (match, k),
+            "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0"
+            + exclude_sql + " ORDER BY rank LIMIT ?",
+            (match, *exclude_params, k),
         ) as cursor:
             rows = await cursor.fetchall()
         return [
@@ -2459,6 +2522,26 @@ class MemoryPlugin(CorvidaePlugin):
         dimensions = self._embedding_cfg.get("dimensions")
         return int(dimensions) if dimensions is not None else None
 
+    def _check_embedding_width(self, embedding: list[float]) -> list[float] | None:
+        """A wrong-width vector is an embed failure.
+
+        vec0 rejects a wrong-width insert; letting one reach the vec INSERT
+        inside a write transaction rolls the whole transaction back — on the
+        consolidation path that is record, vec row and watermark, and every
+        later trigger re-summarizes the same range and fails the same way,
+        stalling the channel. Returning None routes the row through the
+        existing embedded=0 backfill handling (degrade, never block).
+        """
+        declared = self._embedding_dimensions()
+        if declared is not None and len(embedding) != declared:
+            logger.warning(
+                "memory embedding width mismatch (%d vs declared %d); "
+                "storing record with embedded=0 for backfill",
+                len(embedding), declared,
+            )
+            return None
+        return embedding
+
     async def _load_vec_extension(self, db: aiosqlite.Connection) -> bool:
         """Load the sqlite-vec extension into the connection.
 
@@ -2506,6 +2589,8 @@ class MemoryPlugin(CorvidaePlugin):
         await add_column_if_missing(db, "memory", "prompt_hash", "TEXT")
         await add_column_if_missing(db, "memory", "mode", "TEXT")
         await add_column_if_missing(db, "memory", "model", "TEXT")
+        # Trigger column (#633), likewise nullable; old rows read NULL.
+        await add_column_if_missing(db, "memory", "trigger", "TEXT")
         await db.execute(MEMORY_PROMPT_DDL)
         await db.execute(WATERMARK_DDL)
         await db.execute(EMBEDDING_META_DDL)

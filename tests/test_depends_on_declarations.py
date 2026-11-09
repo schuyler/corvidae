@@ -212,7 +212,9 @@ def test_subagent_plugin_depends_on_includes_tools():
 _REGISTERED_PLUGIN_CLASSES = [
     "corvidae.persistence.PersistencePlugin",
     "corvidae.jsonl_log.JsonlLogPlugin",
-    "corvidae.tools.CoreToolsPlugin",
+    "corvidae.tools.ShellToolPlugin",
+    "corvidae.tools.FileToolsPlugin",
+    "corvidae.tools.WebToolsPlugin",
     "corvidae.channels.cli.CLIPlugin",
     "corvidae.channels.irc.IRCPlugin",
     "corvidae.task.TaskPlugin",

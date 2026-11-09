@@ -58,11 +58,11 @@ channels:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `plugins.disabled` | list of strings | `[]` | Entry-point plugin names to block from loading. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before entry points are loaded; blocked plugins are never instantiated. Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml` (e.g. `memory`, `funnel`, `appraisal`, `critique`, `outcome_log`, `memory_tools`, `goals`, `silence`, `skills`, `subagent`, `mcp`, `cli`). Only entry-point plugins can be disabled this way — manually registered plugins cannot be blocked via config. A null `plugins:` or `disabled:` means nothing is disabled; any other non-list value (a bare string, say) or a non-string entry fails startup with a `Config error` naming the key and value. |
+| `plugins.disabled` | list of strings | `[]` | Entry-point plugin names to block from loading. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before entry points are loaded; blocked plugins are never instantiated. Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml` (e.g. `memory`, `funnel`, `appraisal`, `critique`, `outcome_log`, `memory_tools`, `goals`, `silence`, `skills`, `subagent`, `mcp`, `cli`). Only entry-point plugins can be disabled this way — manually registered plugins cannot be blocked via config. A name that matches no installed plugin (a typo, the retired `core_tools`, or a cognition plugin on a kernel-only install) blocks nothing and logs one `WARNING` at startup naming the value and the installed plugin names. A null `plugins:` or `disabled:` means nothing is disabled; any other non-list value (a bare string, say) or a non-string entry fails startup with a `Config error` naming the key and value. |
 
 `agent.minimal.yaml.example` disables `memory`, `memory_tools`, `funnel`, `appraisal`, `critique`, `outcome_log`, `gates`, `silence`, `heartbeat` and `goals` — the cognition plugin set — leaving the core agent loop, multi-turn tool calling, compaction, and persistence/restart recovery intact. See the [Plugin Guide](plugin-guide.md#plugin-disable) for the hook-level mechanics.
 
-A misspelled entry is not an error — `pm.set_blocked` on a name that matches nothing simply blocks nothing, and the daemon starts normally with the plugin still loaded. To confirm a disable took effect, check the `"plugins loaded"` line the daemon logs at startup: it carries `loaded` (the plugins that actually registered) and `blocked` (this list, verbatim). A name present in `blocked` but still showing up in `loaded` is a typo.
+A misspelled entry is not an error: it blocks nothing, the daemon starts normally with the plugin still loaded, and a `WARNING` names the entry and the installed plugin names (see the table above). To confirm a disable took effect, check the `"plugins loaded"` line the daemon logs at startup: it carries `loaded` (the plugins that actually registered) and `blocked` (this list, verbatim). A plugin you meant to disable that still shows up under `loaded` was not blocked.
 
 ---
 
@@ -176,8 +176,9 @@ Keeping a fork's cached prefix is the operator's job. A stage mapped to another 
 | `daemon.session_db` | string | `sessions.db` | Path to the SQLite database file for conversation history. Relative paths are resolved from the working directory. |
 | `daemon.max_task_workers` | integer | `4` | Number of concurrent background task workers in `TaskQueue`. |
 | `daemon.completed_task_buffer` | integer | `100` | Number of completed task records retained in memory for `task_status` output. |
+| `daemon.task_results_path` | string | — | Path of the task-results JSONL file. When set, `TaskQueue` appends one JSON line (`{"ts", "task_id", "channel", "description", "result"}`) per completion (success or failure), and the `task_result` tool retrieves a stored result by task id — results survive deque eviction and daemon restarts. Relative paths are resolved against `_base_dir`. Omit to disable persistence (deque-only, the historical behavior). |
 | `daemon.sqlite_journal_mode` | string | `wal` | SQLite journal mode for the session database. Allowed values: `delete`, `truncate`, `persist`, `memory`, `wal`, `off`. Read by `PersistencePlugin`. |
-| `daemon.jsonl_log_dir` | string | — | Directory for per-channel JSONL conversation logs. When set, `JsonlLogPlugin` appends one JSON line per conversation event to `<dir>/<channel_id>.jsonl`. Relative paths are resolved against `_base_dir`. Omit to disable JSONL logging. |
+| `daemon.jsonl_log_dir` | string | — | Directory for per-channel JSONL conversation logs. When set, `JsonlLogPlugin` appends one JSON line per conversation event to `<dir>/<channel_id>.jsonl`. Relative paths are resolved against `_base_dir`. Omit to disable JSONL logging. Each file is capped by `logging.jsonl.*`. |
 | `daemon.metrics_jsonl` | string | — | Path of the metrics event log. When set, `MetricsJsonlPlugin` appends one JSON line (`{"ts", "name", "value", "tags"}`) per `on_metrics` event. Relative paths are resolved against `_base_dir`. Omit to disable the metrics JSONL sink. |
 | `daemon.config_poll_interval` | float | `2.0` | Seconds between `agent.yaml` mtime checks by `ConfigWatcherPlugin`. |
 | `daemon.notification_spill_dir` | string | `state/notification-spill` | Directory where the full text of a cut notification is written, one file per notification, mode 0600. Relative paths are resolved against `_base_dir`. Startup fails, naming the key, if the resolved path contains characters a notification header would not render verbatim (brackets, `<`, `>`, `;`, control characters, doubled or edge whitespace, or anything NFKC normalisation changes). Restart to apply. |
@@ -553,7 +554,7 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 
 ## `tools` — built-in tool settings
 
-Configured by `CoreToolsPlugin`. `tools.max_result_chars` is read by `ToolCollectionPlugin`.
+The built-in tool keys are read by the plugin that owns the tool: `shell_timeout` by `ShellToolPlugin` (entry point `shell_tools`), `max_file_read_bytes` by `FileToolsPlugin` (`file_tools`), and the `web_*` keys by `WebToolsPlugin` (`web_tools`). These three replaced `CoreToolsPlugin` (`core_tools`); a config that still lists `core_tools` under `plugins.disabled` disables nothing and logs a WARNING, so list the plugins you meant instead (`shell_tools` also removes `task_pipeline`). `tools.max_result_chars` and the other dispatch keys are read by `ToolCollectionPlugin`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -561,7 +562,7 @@ Configured by `CoreToolsPlugin`. `tools.max_result_chars` is read by `ToolCollec
 | `tools.shell_timeout` | integer | `30` | Seconds before a `shell` command is killed. |
 | `tools.web_fetch_timeout` | integer | `15` | Seconds before a `web_fetch` HTTP request is aborted. |
 | `tools.web_max_response_bytes` | integer | `50000` | Maximum bytes of HTTP response body returned by `web_fetch`. Content beyond this limit is truncated with `[truncated]`. This limit is independent of `tools.max_result_chars`. |
-| `tools.max_file_read_bytes` | integer | `1048576` | Maximum file size in bytes that an unranged `read_file` will return. Files larger than this limit return an error string telling the agent to pass `offset` and `length`; a ranged read is not bounded by it. Default is 1 MB (1,048,576 bytes). |
+| `tools.max_file_read_bytes` | integer | `1048576` | Maximum file size in bytes that an unranged `read_file` will return. Files larger than this limit return an error string telling the agent to pass `offset` and `length`; a ranged read (character or line range) is not bounded by it. Default is 1 MB (1,048,576 bytes). |
 | `tools.web_search_max_results` | integer | `8` | Maximum number of DuckDuckGo results returned by the `web_search` tool. |
 | `tools.call_timeout` | number or null | `600` | Seconds a single tool call may run before dispatch cancels it and returns `Error: tool '<name>' timed out after <n>s` to the model, so the turn continues and the task worker is freed. `0` or `null` disables the bound. Read by `ToolCollectionPlugin`; covers every dispatch path (Agent, subagent loop, ACP backend). Skipped for a tool whose own timeout is not longer: `shell` (`tools.shell_timeout`), `web_fetch` (`tools.web_fetch_timeout`) and MCP tools (`timeout_seconds`) report their own timeout error instead. A negative, non-numeric or non-finite value is rejected at startup. |
 | `tools.timeouts` | mapping of tool name to number or null | `{}` | Per-tool override of `tools.call_timeout`; `0` or `null` unbounds that tool only. Example: `timeouts: {subagent: 3600, task_pipeline: 3600}`. `subagent` returns a task id at once, so in practice only `task_pipeline` (120 s per step) needs a longer bound; neither is a default. An entry naming no registered tool logs one `WARNING` and is kept (an MCP tool registers when its server connects). A bad entry is rejected at startup. |
@@ -599,7 +600,8 @@ corvidae talks JSON-RPC to a `signal-cli daemon` that is already running; it doe
 | `signal.allow` | list of strings | `[]` | Senders permitted to drive the agent. Each entry is either an E.164 number or an ACI (the account UUID). Default-deny: an empty or absent list refuses everyone, silently — no reply, no typing indicator, no read receipt. |
 | `signal.message_chunk_size` | integer | `2000` | Maximum UTF-8 bytes per outbound Signal message. Longer replies are split paragraphs → sentences → words and sent as several messages; nothing is truncated. Must be at least 6; a smaller value raises `ValueError` the first time a reply is split. |
 | `signal.attachment_dir` | string | `state/signal-attachments` | Directory where downloaded attachments are written. Created on first download. Files are not pruned automatically — retention is the operator's responsibility. |
-| `signal.max_attachment_size` | integer | `10485760` (10 MB) | Maximum bytes for a single downloaded attachment. Must be a positive integer; the value also sizes the StreamReader buffer limit for the signal-cli connection (the cap in base64 terms, 4/3, plus 64 KiB for JSON framing; a response that trips the limit fails its in-flight RPC immediately). Larger payloads are rejected with `[<type>: download failed]`. |
+| `signal.max_attachment_size` | integer | `10485760` (10 MB) | Largest single file, in bytes, in either direction. A larger inbound attachment is rejected with `[<type>: download failed]`; a larger file passed to `send_signal_attachment` is refused with an error naming this setting. Must be a positive integer. The value also sizes the StreamReader buffer limit for the signal-cli connection (the cap in base64 terms, 4/3, plus 64 KiB for JSON framing; a response that trips the limit fails its in-flight RPC immediately), so raising it for larger outbound files raises that inbound limit too. |
+| `signal.send_attachment_root` | string | `state` | The only directory tree the `send_signal_attachment` tool may read from. A relative path is read under this root, and anything resolving outside it is refused with an error naming the root. Must be a non-empty string; an empty value, a number, or an explicit `null` raises `ValueError` at startup. It is defence in depth, not a security boundary: `shell` and `read_file` are unjailed already, so widen it only as far as the agent needs. |
 
 ```yaml
 signal:
@@ -662,6 +664,47 @@ User ids are the long numeric snowflakes you get from Discord's Developer Mode, 
 **Discord content is stored in plaintext on this host, and Discord has it too.** Discord messages are not end-to-end encrypted; Discord (the company) can read them in transit and at rest. On this side they are written to `sessions.db`, to the JSONL conversation log (`<daemon.jsonl_log_dir>/discord_<channel_id>.jsonl`, or `discord_dm_<user_id>.jsonl` for a DM, when that is enabled), and into consolidated memory records, all as ordinary text. Messages from senders who are not allowlisted are refused before they are persisted. In a server channel, though, the stored history is whatever allowlisted users said there, and the model's replies to it. File permissions and whatever disk encryption the host has are all that protect the local copies.
 
 To remove a conversation's stored content, use `corvidae redact` as described for Signal above, with `channel_id = 'discord:<channel_id>'` or `'discord:dm:<user_id>'`.
+
+---
+
+## `zulip` — Zulip transport
+
+The transport needs no SDK and no extra: it talks to Zulip's REST API over aiohttp, which corvidae already depends on. The server must be Zulip 9.0 (feature level 248) or newer; an older one is refused at startup with an ERROR naming the server and its level.
+
+The `zulip` section is optional. If absent, `ZulipPlugin` loads but stays inert: no session, no tasks, nothing logged above `DEBUG`. If present, it must be well-formed — a missing `site`, `email` or `api_key` (the last two may come from the environment), a `site` that is not a bare `http(s)://host[:port]` URL, an `allow` that is not a list of user ids, a `message_chunk_size` outside 100 to 10000, a non-boolean `require_mention`, an empty or over-long `default_topic`, or a `channels` entry keyed on anything but a numeric stream id, or with an unknown key, raises at startup naming the field and the remedy.
+
+corvidae logs in as a Zulip bot user (a **Generic bot**); creating it, subscribing it and finding ids are in [zulip-ops.md](zulip-ops.md). In 1:1 DMs every message from an allowed user reaches the agent. In channels and group DMs only a message that mentions the bot does, directly or through a user group it belongs to (Zulip's `mentioned` flag; a wildcard such as `@**all**` doesn't count), unless `zulip.require_mention` is `false`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `zulip.site` | string | required | The organisation's URL, `scheme://host[:port]` with no path. Plain `http://` to anything but loopback logs a WARNING, because the API key and every message cross the network unencrypted. |
+| `zulip.email` | string | `$ZULIP_EMAIL` | The bot's email. If the key is absent, null or empty the environment variable is used; if neither is set, startup fails. |
+| `zulip.api_key` | string | `$ZULIP_API_KEY` | The bot's API key, resolved the same way. Prefer the environment variable if `agent.yaml` is readable by anyone else: the key is the bot. It is never logged. |
+| `zulip.allow` | list of user ids | `[]` | Zulip user ids permitted to drive the agent, as YAML ints or quoted digit strings (compared as strings). Default-deny: an empty or absent list refuses everyone, silently. An email or a name is rejected at startup, naming the entry, because neither is stable. |
+| `zulip.require_mention` | boolean | `true` | The default for every channel and group DM. With `true` only a mention of the bot (directly, or through a user group it belongs to) reaches the agent. With `false` every message from an allowlisted user the bot can see reaches the agent, which may still decline to reply; the bot's own mention token, if present, is still stripped. 1:1 DMs never need a mention. Read at startup only. |
+| `zulip.channels` | mapping | `{}` | Per-channel overrides, keyed by Zulip **stream id** (digits, no prefix, no leading zeros). Each entry's only key is `require_mention`. A name, a `zulip:` prefix or an unknown key fails startup rather than matching nothing. Read at startup only. |
+| `zulip.message_chunk_size` | integer | `10000` | Maximum UTF-8 bytes per outbound message, 100 to 10000. The server's own `max_message_length` is used instead when it is smaller. Longer replies are split and sent as several messages; nothing is truncated. The limit is bytes while Zulip's is code points, so multi-byte text splits earlier than strictly needed. |
+| `zulip.default_topic` | string | `corvidae` | The topic a reply goes to when nothing is remembered for the channel: the first turn after a restart, or a channel no allowed message has reached yet. Otherwise a reply, a reminder or a cross-channel send goes to the topic of the latest allowed message that reached the agent there. 1 to 60 characters, so it fits every Zulip server. |
+
+```yaml
+zulip:
+  site: https://chat.example.org
+  email: corvidae-bot@chat.example.org   # or leave out and set ZULIP_EMAIL
+  api_key: "..."                          # or leave out and set ZULIP_API_KEY
+  allow:
+    - 123
+  # require_mention: false                # answer allowed users without an @-mention
+  channels:
+    "7":                                  # the stream id, as in `zulip:7` in the logs
+      require_mention: false
+  default_topic: corvidae
+```
+
+**Scopes and topics.** A channel is `zulip:<stream_id>`; a topic is a name anyone can rename, so it is never part of an id (PRD principle 10). Every topic in a channel shares one history. A reply goes to the topic of the newest allowed message, which is held in memory only. The model sees the channel as `#general > plans`.
+
+**Replies can't ping.** Zulip has no allowed-mentions switch, so a notifying mention in a reply (`@**all**`, `@**Name**`, `@*group*`) is broken with a zero-width space after the `@`. Silent mentions (`@_**Name**`) pass through.
+
+**Zulip content is stored in plaintext on this host, and your Zulip server has it too.** Messages land in `sessions.db`, the JSONL conversation log and consolidated memory as ordinary text; messages from senders who are not allowlisted are refused before they are persisted. To remove a conversation, use `corvidae redact` as described for Signal above, with `channel_id = 'zulip:<stream_id>'` or `'zulip:dm:<user ids>'`.
 
 ---
 
@@ -780,7 +823,7 @@ Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`), or t
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `register_prompt` | string or list of strings | `agent.register_prompt`, else the transport's shipped default | This channel's register, appended after `agent.system_prompt`. Replaces the shipped default; `""` or `[]` means no register. On a conversational transport (IRC, Discord, Signal) the `silence` plugin still appends its instruction to a custom register, or to `""`; see [Registers](#registers). Same format as `agent.system_prompt`. |
+| `register_prompt` | string or list of strings | `agent.register_prompt`, else the transport's shipped default | This channel's register, appended after `agent.system_prompt`. Replaces the shipped default; `""` or `[]` means no register. On a conversational transport (IRC, Discord, Signal, Zulip) the `silence` plugin still appends its instruction to a custom register, or to `""`; see [Registers](#registers). Same format as `agent.system_prompt`. |
 | `max_context_tokens` | integer | `agent.max_context_tokens` | Token budget for this channel's conversation history. A hard ceiling: a window still over it after compaction loses its oldest rows from memory (the log keeps them). Also the budget for this channel's catch-up consolidation views. |
 | `max_turns` | integer | `agent.max_turns` | Maximum consecutive tool-calling turns for this channel. Must be an integer; a wrong type is rejected when the file is parsed (a `Config error` at startup, a logged reload error on reload), not at turn time. |
 | `reasoning_history` | `drop` \| `exchange` \| `keep` | `agent.reasoning_history` | Controls `reasoning_content` retention for this channel. |
@@ -805,7 +848,7 @@ channels:
 
 Every channel's system prompt is the agent's identity (`agent.system_prompt`) followed by a blank line and the channel's register, if it has one. The register resolves like any channel setting: the exact entry, then transport-wide entries from most to least specific, then `agent.register_prompt`, then the default the channel's transport ships, then none. Each layer replaces the ones below it; nothing is merged. An explicit `""` or `[]` at any layer means no register, which is how to switch a shipped default off.
 
-Signal, Discord and IRC ship defaults (texting-length turns and only the formatting the transport shows; see [prompt-guide.md](prompt-guide.md#chat-register-fragments)). Web, CLI and ACP ship none. A `register_prompt` replaces the whole default. While the `silence` plugin is loaded, a conversational transport's system prompt then gets one more paragraph after the register, which lets the agent reply `NO_REPLY` to send nothing ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy) has the text). It is added whatever the register's source, so a custom register and `register_prompt: ""` still get it; to opt a channel out, disable the plugin (`plugins.disabled: [silence]`). A register file that can't be read logs a WARNING naming the channel and the path, and the conversation starts on the identity alone. Like the identity, the register is fixed when a conversation starts.
+Signal, Discord, Zulip and IRC ship defaults (texting-length turns and only the formatting the transport shows; see [prompt-guide.md](prompt-guide.md#chat-register-fragments)). Web, CLI and ACP ship none. A `register_prompt` replaces the whole default. While the `silence` plugin is loaded, a conversational transport's system prompt then gets one more paragraph after the register, which lets the agent reply `NO_REPLY` to send nothing ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy) has the text). It is added whatever the register's source, so a custom register and `register_prompt: ""` still get it; to opt a channel out, disable the plugin (`plugins.disabled: [silence]`). A register file that can't be read logs a WARNING naming the channel and the path, and the conversation starts on the identity alone. Like the identity, the register is fixed when a conversation starts.
 
 ### Transport-wide entries
 
@@ -859,6 +902,8 @@ Hiding a tool isn't access control. A model can still call a tool it saw earlier
 - Removing a channel's whole exact entry from `channels:` keeps its last list until restart. To re-enable everything on a running channel, set `disabled: []`. Removing a transport-wide entry takes effect live.
 
 Discord channels are keyed on numeric ids: `discord:<channel_id>` for a server channel, `discord:<thread_id>` for a thread (a thread has its own id and its own history, so it does not inherit its parent channel's override), and `discord:dm:<user_id>` for a DM. Names are not accepted, because they change and the id is the persistence key.
+
+Zulip channels are keyed the same way: `zulip:<stream_id>` for a channel (every topic in it shares the entry, because a topic is a name people can rename), `zulip:dm:<user_id>` for a 1:1 DM, and `zulip:dm:<id>,<id>` for a group DM, with the ids ascending and the bot's own left out.
 
 Signal channels accept either form of key. `signal:<aci>` is the real channel id and matches directly. `signal:+15551234567` is an alias: its overrides are copied onto the ACI-keyed channel the first time that person writes, once the number has resolved. The alias entry itself never becomes a live channel, and an alias naming someone absent from `signal.allow` is simply inert — an unauthorized sender never gets a turn for the overrides to apply to.
 
@@ -957,6 +1002,16 @@ No restart is required for the changes listed below. Changes that require restar
 
 ### What requires restart
 
+A restart-only key that a reload changes is named in a warning, one line per
+key: `config reload: <key> changed; restart-only, takes effect on restart`.
+The comparison is against the config the running daemon is using, so editing a
+key back to its running value draws no warning — the file and the process agree
+and a restart would change nothing. A key that stays pending is reported once,
+when its pending value first appears or changes, and not again on later reloads
+that leave it alone; to see a still-pending key, read the reload that
+introduced it. Reverting the key clears that record, so a later edit is reported
+again.
+
 | Setting | Reason |
 |---------|--------|
 | `irc.host`, `irc.port`, `irc.nick` | IRC transport is connected at startup; changing connection parameters requires reconnection. |
@@ -999,6 +1054,10 @@ The `logging` section is optional. Omitting it applies defaults (INFO level; fil
 |-----|------|---------|-------------|
 | `logging.level` | string | `INFO` | Minimum log level. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. Case-insensitive. |
 | `logging.file` | string | none (CLI: `corvidae.log`) | Path to a rotating log file (10 MB, 5 backups). When set, logs go to this file. When absent, logs go to stderr. In CLI mode, defaults to `corvidae.log`. |
+| `logging.jsonl.max_bytes` | integer | `10485760` | Size cap, in bytes, for each JSONL file: every per-channel transcript under `daemon.jsonl_log_dir` and the metrics log `daemon.metrics_jsonl`. A write that would pass it first rotates the file to `<name>.1` (the previous `.1` becomes `.2`, and so on). `0` never rotates. Restart-only. |
+| `logging.jsonl.backup_count` | integer | `5` | How many rotated files each JSONL sink keeps; the oldest is deleted. `0` keeps none, so the live file simply starts over. Restart-only. |
+
+The JSONL files are a debugging aid; `message_log` in `sessions.db` is the durable record. Rotation is in-process, so no external `logrotate` is needed; a file already over the cap when the daemon starts rotates on its first write. Each file is capped separately, so the worst case on disk is the number of channels times `(1 + backup_count) * max_bytes`, plus the metrics log. If a rotation fails (a read-only directory, a full disk), the daemon logs one warning naming the file and keeps appending past the cap until rotation works again, rather than dropping records. A value that is not an integer of 0 or greater is a startup config error naming the key.
 
 When `logging.file` is set in YAML, logs go to that rotating file regardless of mode. When `logging.file` is absent, logs go to stderr — except in CLI mode, where the default is `corvidae.log` to avoid polluting the chat interface.
 

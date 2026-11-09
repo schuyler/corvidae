@@ -19,7 +19,7 @@ Three layers:
    dispatch: one LLM call per queue item, tool calls dispatched as
    background tasks, results arrive as notifications.
 
-3. **Transport plugins** — CLI, IRC, Signal, Discord, web, ACP (stdio). Each
+3. **Transport plugins** — CLI, IRC, Signal, Discord, Zulip, web, ACP (stdio). Each
    transport converts platform-specific messages to/from a common Channel
    abstraction.
 
@@ -189,7 +189,7 @@ owner's plugin name after the prefix.
 | `send` | broadcast (imperative) | outbound delivery. `Agent` sends `OutboundMessage` (replies, error text), `OutboundThinking` (when the LLM response carries `reasoning_content`), `OutboundProgress` (intermediate text alongside tool calls) and `OutboundToolStatus` (tool call dispatched); `TaskPlugin` sends `OutboundToolStatus` on completion. Transports receive it through `TransportPlugin.send`, which filters by `owns(channel)` and dispatches by event type |
 | `register_tools` | broadcast (sync) | startup tool collection |
 | `register_llm_stages` | broadcast (sync, imperative) | `LLMPlugin.on_start`, once, before it creates clients: plugins add `stages[name] = kind` (`chat` or `embedding`) for each model-calling stage they own |
-| `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines |
+| `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, Zulip, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
 | `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes an exact `NO_REPLY` final of any origin (cognition extra); a raising implementation fails open (logged, sent); no kernel implementation, so with none registered everything is sent |
@@ -204,8 +204,8 @@ owner's plugin name after the prefix.
 | `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before the reply is sent; return transformed text or None to leave unchanged |
 | `transform_system_prompt` | firstresult=True wrapper chain | `Agent.channel_system_prompt`, when the identity and register are composed: a new conversation, a restart, a compaction boundary, and the background views that share it. Return the transformed prompt or None to leave unchanged. A raising wrapper is logged at WARNING with the channel and the untransformed prompt is used. A transform that modifies the identity+register prefix is rejected with a WARNING; the untransformed prompt is used. Appending is the expected use. `SilencePlugin` appends its instruction on conversational channels |
 | `resolve_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
-| `resolve_register_prompt` | firstresult=True | `Agent`, when a conversation starts on a channel with no `register_prompt` configured at any layer; the owning transport returns its default register text, others return None. `SignalPlugin`, `DiscordPlugin` and `IRCPlugin` implement it, from fragments shipped in `corvidae/channels/registers/`. ACP, web and CLI return nothing. No answer means no register |
-| `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it. A transport may also return None for an id it owns but cannot build yet (Signal before its first alias resolution). For an id whose prefix names a transport that implements the hook, the scheduler retries; for other ids, callers fall back to `registry.get_or_create` from the split id |
+| `resolve_register_prompt` | firstresult=True | `Agent`, when a conversation starts on a channel with no `register_prompt` configured at any layer; the owning transport returns its default register text, others return None. `SignalPlugin`, `DiscordPlugin`, `ZulipPlugin` and `IRCPlugin` implement it, from fragments shipped in `corvidae/channels/registers/`. ACP, web and CLI return nothing. No answer means no register |
+| `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin`, `DiscordPlugin` and `ZulipPlugin` implement it. A transport may also return None for an id it owns but cannot build yet (Signal before its first alias resolution). For an id whose prefix names a transport that implements the hook, the scheduler retries; for other ids, callers fall back to `registry.get_or_create` from the split id |
 | `persist_message` | broadcast (imperative) | `_process_queue_item` after every `conv.append()`, and `FunnelPlugin` for the CONTEXT it persists; every implementation runs (persistence, JSONL logging). `PersistencePlugin` returns the `message_log` rowid and the caller resolves the list with `resolve_single_result` into `_db_id` |
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
@@ -302,16 +302,20 @@ conversation's system prompt is set once, when its `ContextWindow` is
 created (compaction and forks keep it), so a prompt edit at any layer
 reaches only conversations that start after the reload.
 
-**Live versus restart-only (#408).** Each plugin declares the config-key
+**Live versus restart-only (#408, #473).** Each plugin declares the config-key
 prefixes its `on_config_reload` re-reads, as `reloadable_keys` on
 `CorvidaePlugin`. Before dispatching the reload, `ConfigWatcherPlugin`
-diffs the old and new config and logs one WARNING per changed key that no
-plugin declares, naming the key and saying a restart applies it. Anything
-not declared is restart-only by default, so a plugin that forgets to
-declare a key produces a spurious warning rather than a silent pending
-change. A test in `tests/test_config_watcher.py` reads each reload hook's
-source and fails if it reads a key its class does not declare, so the
-registry cannot drift from the code.
+compares the new config against the one the running daemon is using — not
+against the previous reload — and logs one WARNING per changed key that no
+plugin declares, naming the key and saying a restart applies it. The running
+config is the baseline because the warning claims what a restart would change:
+a key edited back to its running value changes nothing on restart and is not
+reported. A key is reported when its pending value first appears or changes,
+not on every poll. Anything not declared is restart-only by default, so a
+plugin that forgets to declare a key produces a spurious warning rather than a
+silent pending change. A test in `tests/test_config_watcher.py` reads each
+reload hook's source and fails if it reads a key its class does not declare, so
+the registry cannot drift from the code.
 
 **System prompt layers (#316).** A conversation's system prompt is the
 identity (`agent.system_prompt`, never set per channel; a channel-level
@@ -331,8 +335,8 @@ default, a custom `register_prompt`, or none). The seed on `_SeedHooksPlugin`
 returns the text unchanged; a wrapper that raises is logged at WARNING
 naming the channel and the untransformed prompt is used. The result is fixed
 when the conversation starts or restarts and is not rebuilt at compaction.
-`TransportPlugin.conversational` (default False; IRC, Discord and Signal
-set True) is the neutral fact a plugin reads to tell a chat transport from
+`TransportPlugin.conversational` (default False; IRC, Discord, Signal and
+Zulip set True) is the neutral fact a plugin reads to tell a chat transport from
 one that always answers. `SilencePlugin` is the one implementation: it
 appends the `NO_REPLY` instruction on conversational channels
 ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)).
@@ -1536,7 +1540,7 @@ The age is the only policy: nothing bounds the directory's total size, so its
 worst case is the cap times the notification rate times the age.
 
 **Reading it back.** `read_file` takes any path, so the agent pages through a
-spill file with `offset` and `length`. `read_file` asks the service first: a
+spill file with `offset` and `length` (or `start_line` and `end_line`). `read_file` asks the service first: a
 missing path inside the spill directory (a file the sweep deleted, or a name
 that never existed) returns an error saying it was a spill file, that spill
 files are deleted after the configured days, and which key sets that. The
@@ -1769,9 +1773,25 @@ a JSON line with `type: "summary"`.
 
 ### File handles
 
-Per-channel file handles are opened lazily in `_get_handle` and held
-open for the plugin lifetime. Channel IDs are sanitized (`/` and `:` →
-`_`) for filenames. All handles are flushed and closed in `on_stop`.
+Per-channel files are opened lazily in `_get_handle` as `RotatingAppender`s
+(`jsonl_rotate.py`) and held open for the plugin lifetime. Channel IDs are
+sanitized (`/` and `:` → `_`) for filenames. All are flushed and closed in
+`on_stop`.
+
+### Rotation (#404)
+
+`MetricsJsonlPlugin` writes through the same class. Before a write that would
+pass `logging.jsonl.max_bytes` (default 10 MiB; `0` disables), the appender
+closes the file, shifts `x.jsonl` → `.1` → … → `.N` (`backup_count`, default
+5, the oldest dropped) and reopens in append mode, logging the rotation at INFO
+with the file's path. The size is read from the open file, so a file already
+over the cap rotates on its first write and an external `copytruncate` still
+works. A lock serialises writers, since one appender can be written from
+several worker threads at once. A rotation that fails (a read-only directory)
+is logged once per streak at WARNING, naming the file, and the file keeps
+growing past the cap until rotation works again. `parse_rotation` validates
+the two keys in `on_init`; a bad value is a config error. Nothing reads a
+rotated segment; `message_log` is the durable record (principle 4).
 
 ## Clock and idle tracker (`clock.py`, `idle.py`)
 
@@ -2324,10 +2344,25 @@ Tracks active tasks and completed results (bounded deque, last 100).
 and no tasks are currently executing.
 
 **TaskPlugin** — hookimpl that owns the TaskQueue. Reads
-`daemon.max_task_workers` from config (default 4) to set concurrency, and
+`daemon.max_task_workers` from config (default 4) to set concurrency,
 `daemon.completed_task_buffer` (default 100) to set the completed-result
-history bound. Starts/stops the worker on lifecycle hooks. Registers the
-`task_status` tool. On task completion, fires `on_notify`.
+history bound, and `daemon.task_results_path` (unset by default) to enable
+JSONL result persistence. Starts/stops the worker on lifecycle hooks.
+Registers the `task_status` and `task_result` tools. On task completion,
+persists a JSONL record (when enabled) and fires `on_notify`.
+
+Results are kept in two places: an in-memory bounded deque (last
+`completed_task_buffer` entries, serving `task_status` and the fast path of
+`task_result`) and, when `daemon.task_results_path` is set, a JSONL audit
+file — one record per completion, `{"ts", "task_id", "channel",
+"description", "result"}` — that outlives the deque and a daemon restart.
+`TaskQueue.get_result(task_id)` serves the fast path from the deque and
+falls back to a file scan; the `task_result` tool runs the deque leg on the
+event-loop thread and the file leg off it, because the worker appends to (and
+evicts from) the deque on the loop thread and CPython's deque iterator raises
+if it is mutated during iteration. The file has no rotation or cap; operators
+own rotating it (an index by `task_id`, e.g. SQLite, is the longer-term
+option for lookups that outgrow a full re-scan).
 
 ## LLMPlugin
 
@@ -2809,8 +2844,16 @@ exception from the teardown, which is the real failure
 exception, and the server is skipped and queued like any failed connect
 (#385). As a backstop, `on_start` and `_retry_round` treat a `CancelledError`
 that arrives while their own task isn't being cancelled as a connect failure,
-and re-raise a real cancel. The connect-failure warnings name the server, its
-endpoint (URL or command) and the unwrapped exception type.
+and re-raise a real cancel. The same test covers a `BaseExceptionGroup`
+(`_is_connect_failure`, #596): a group is not an `Exception` when a member is
+a `CancelledError`, so it is judged by its leaves. A group of failures and
+uncancelled cancels is a failed connect, skipped and queued like any other; a
+group around a real cancel propagates, and `on_start` still stops the owners
+already started; a group holding `KeyboardInterrupt` or `SystemExit` always
+propagates. The connect-failure warnings name the server, its endpoint (URL or
+command) and the unwrapped exception types, and say the background retry will
+try again. A line-boundary character in that endpoint (a URL, or a stdio command) is
+percent-encoded, so one warning is one log line (#588).
 
 ### Tool naming
 
@@ -2953,12 +2996,31 @@ tool is not registered. The plugin declares no `depends_on`.
 
 ## Tools
 
-Registered via `CoreToolsPlugin` in `tools/__init__.py`:
+Registered by three plugins in `tools/__init__.py`, each with its own entry
+point and its own `tools.*` keys, so each can be dropped by name in
+`plugins.disabled` (#16):
+
+- `ShellToolPlugin` (`shell_tools`): `shell` and `task_pipeline`. The two go
+  together because `task_pipeline` runs each step through the shell (PRD
+  §3.5.3). Without it the agent cannot run commands (an MCP server can
+  still offer its own).
+- `FileToolsPlugin` (`file_tools`): `read_file` and `write_file`. Without it
+  the agent has no dedicated file tools; `shell`, if enabled, can still
+  read and write any file the daemon user can. A notification too long for the
+  window still gets a spill file and a pointer while `shell` is enabled
+  (another spill reader); with neither, it is cut and no file is written.
+- `WebToolsPlugin` (`web_tools`): `web_fetch` and `web_search`; owns the
+  `aiohttp.ClientSession` that `web_fetch` reuses. Without it the agent
+  has no dedicated web tools; `shell` (`curl`) or an MCP server can still
+  reach the network. To take a capability away entirely, disable every
+  plugin that provides it (see [threat-model.md](threat-model.md)).
+
+They replaced the combined `CoreToolsPlugin` (`core_tools`), with no alias.
 
 | Tool | File | Purpose |
 |------|------|---------|
 | `shell(command)` | `tools/shell.py` | Execute shell command (declares `reads_spill_files`), 30s timeout (configurable). On cancellation (the call bound, shutdown) it kills and reaps its `/bin/sh` process, then re-raises; `task_pipeline` inherits this. Grandchildren of the shell are not killed. Its companion `run_shell` returns the exit code beside the output, for callers that must know whether the command succeeded (#105). |
-| `read_file(path, offset, length)` | `tools/files.py` | Read file (declares `reads_spill_files`; a missing path in the spill directory gets the stale-spill error; 1MB limit, configurable), or a character range of any size behind a header naming the range, total and next offset; a range is clamped to `tools.max_result_chars` |
+| `read_file(path, offset, length, start_line, end_line)` | `tools/files.py` | Read file (declares `reads_spill_files`; a missing path in the spill directory gets the stale-spill error; 1MB limit, configurable), or a character range (`offset`, `length`) or a line range (`start_line`, `end_line`, 1-based, inclusive) of any size behind a header naming the range, total and next position; the two kinds cannot be combined; a range is clamped to `tools.max_result_chars`, a line range backing up to the last whole line (a first line longer than a page is cut, and the header gives the character offset to continue from and the start line where line paging resumes) |
 | `write_file(path, content)` | `tools/files.py` | Write file, creates parent dirs |
 | `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation (configurable) |
 | `web_search(query, max_results)` | `tools/web.py` | Search via DuckDuckGo, default 8 results (configurable) |
@@ -2971,6 +3033,7 @@ registers `task_status` as tool closures during `on_start`.
 |------|------|---------|
 | `subagent(instructions, description)` | `tools/subagent.py` | Launch background subagent using shared LLM client |
 | `task_status()` | `task.py` | Report task queue status |
+| `task_result(task_id)` | `task.py` | Return a completed task's stored result by id (in-memory deque, then the JSONL file when persistence is enabled) |
 
 `SchedulerPlugin` registers three tools scoped to the calling channel
 (see [SchedulerPlugin](#schedulerplugin)):
@@ -2983,10 +3046,10 @@ registers `task_status` as tool closures during `on_start`.
 
 ## Transports
 
-Every transport (CLI, IRC, Signal, Discord, web, ACP) subclasses
+Every transport (CLI, IRC, Signal, Discord, Zulip, web, ACP) subclasses
 `TransportPlugin` (`hooks.py`) and sets `transport` to the name its
 channel ids start with. A chat transport also sets
-`conversational = True` (IRC, Discord and Signal do; the default is False),
+`conversational = True` (IRC, Discord, Signal and Zulip do; the default is False),
 which a `transform_system_prompt` wrapper can read to tailor the prompt to chats. The base class implements the outbound `send`
 hook once: it drops events for channels the transport does not own
 (`owns(channel)`, by default `channel.matches_transport(self.transport)`;
@@ -3190,6 +3253,40 @@ envelope whose send timestamp is more than five minutes old gets a
 `[sent YYYY-MM-DD HH:MM UTC]` prefix prepended, so backlog delivered after
 a reconnect reads as backlog rather than as current.
 
+**Outbound files.** `register_tools` offers `send_signal_attachment` when a
+`signal:` block is present. It takes a `signal:<aci>` channel the registry
+knows, a path and an optional caption, and sends one `send` RPC with the
+file as a data URI (`data:<type>;filename=<name>;base64,<payload>`; the type is
+guessed from the file name, falling back to `application/octet-stream`, and
+`filename=` is the file's name; read and encoded in one thread call) under
+`attachments` and the caption as `message`
+(signal-cli's JSON-RPC takes a multi-value option as an array: v0.14.7
+`signal-cli-jsonrpc(5)`). The path is resolved and refused if it lands
+outside `signal.send_attachment_root` (default `state`), and the file is refused
+above `signal.max_attachment_size`; the jail runs before any existence
+check, so a missing path outside the root gets the root error. The
+caption splits like any reply, the first piece riding with the file; the rest go
+out through `_send_rpc`, not `_deliver`, because `_deliver` logs and swallows a
+failure and the tool must not report success for a lost caption. A failure
+returns a "Could not send:" string that says how far the send got: the file
+unreadable ("cannot read ... check the path and its permissions"), nothing
+delivered (retry), signal-cli not
+connected, or the file delivered with caption part *i* of *n* failed (do not
+resend the file). The name differs from Discord's `send_attachment` because the
+tool registry keeps the last of two tools sharing a name while still advertising
+both schemas. Known limits: a `send` result that reports a per-recipient
+failure without a JSON-RPC error is not inspected, for files or text alike;
+a file send is not recorded in the contact's history; and the file send has
+been run against a live signal-cli 0.14.7 daemon only with a tiny plain-named
+file, so large files and unusual file names (`;`, `,` are not escaped) are
+unverified; `tests/test_signal_send_attachment.py` pins the wire shape. The target gate is
+registry membership, as for Discord's tool and PRD §3.5.9 (nothing gates which
+channel a turn may speak on): a channel is in the registry, for example, when an
+allowlisted sender has written since the last start, when it is listed under
+`channels:` (including a `signal:+E164` alias, which then receives the
+file at the E.164 address, bypassing `resolve_channel`), or when a reminder or
+scheduler job (or any other caller that resolves a persisted id) has resolved it since the start.
+
 **Authorization.** `should_process_message` is a default-deny gate: the
 sender's ACI must appear in `allow:` directly, or be what a configured
 E.164 `allow` entry resolved to. A refusal is logged at INFO naming the
@@ -3274,7 +3371,8 @@ monitored.
 text is never truncated, and chunks go out verbatim, without the newline
 stripping IRC needs. `send_progress` uses the same delivery path but skips
 the outstanding-count bookkeeping: it is mid-turn liveness, not the reply.
-Outbound is text only.
+Replies and progress are text; a file goes out through the separate
+`send_signal_attachment` tool (**Outbound files**, above).
 
 Signal delivers a reply to a turn of any origin on a channel it owns. A
 reminder firing on a `signal:` channel injects through `on_notify`, and
@@ -3366,6 +3464,20 @@ refused sender's file is named and never fetched.
 with the caption split like any other reply. The path is resolved and refused
 if it lands outside that root, and the file is refused above
 `discord.max_attachment_size`.
+
+**Starting a thread.** The `start_thread` tool creates one and returns its
+`discord:<thread_id>` scope (#593). Given `from_message_id` it hangs a thread
+off that message; without one it starts a standalone thread on the channel, so
+a DM — which has no threads — is refused, a forum is refused because it takes
+posts rather than plain threads, and so is any other channel with no threads of
+its own. Discord's 1–100 character name rule is enforced in the tool, and
+an optional first message is posted into the thread rather than into the parent,
+split like any reply and sent with `allowed_mentions` none. The new thread is
+registered in the channel registry, because a thread is a channel in its own
+right: a later send to that scope has to find it, and an inbound message would
+have registered it had someone typed in the thread first. A permission refusal
+is reported as the permission Discord wanted (Create Public Threads), not as an
+SDK exception.
 
 **Ordering.** discord.py runs every gateway event as its own task, so
 handling a message inside `on_message` would let two quick messages
@@ -3485,6 +3597,41 @@ empty, plus a budget); see the scheduler's "Not in phase one: a
 Out of scope: voice, slash commands, embeds, and reactions. Attachments are in
 scope in both directions — see **Attachments** above for the inbound rules and
 `send_attachment` for the outbound one.
+
+### Zulip (`channels/zulip.py`)
+
+`ZulipPlugin` — Zulip transport over Zulip's REST event-queue API. It logs in as a bot user and talks in 1:1 DMs, group DMs and channels. There is no SDK and no extra: five endpoints over aiohttp (`GET /users/me`, `POST /register`, `GET /events`, `POST /messages`, `POST /typing`). Creating the bot and finding ids are in [zulip-ops.md](zulip-ops.md); the keys are in [configuration.md](configuration.md#zulip--zulip-transport). It lives in the kernel next to the other transports, by the owner's decision on #640, not as a package.
+
+The requirements live in [`corvidae/channels/zulip-requirements.md`](../corvidae/channels/zulip-requirements.md), not in the PRD: Zulip is exempt from PRD updates by the owner's decision on #640.
+
+With no `zulip:` block the plugin loads, resolves its registry dependency and does nothing else: no session, no tasks, nothing logged above DEBUG. A malformed block raises in `on_init` naming the field (`zulip.<key>`) and what is accepted. All validation runs before anything is stored, so a failed init leaves the plugin inert and not half-configured.
+
+**Connection.** `_connection_loop` registers a queue and long-polls it. `/register` is sent with `event_types=["message"]` (edits and deletes are other event types and are never delivered, which is how the append-only log is kept), `apply_markdown=false` (raw Markdown for the model), `client_capabilities={"empty_topic_name": true}` and `fetch_event_types=["realm"]`. The last one matters: `max_message_length`, `max_topic_length` and the empty-topic label are returned only if `realm` is in `fetch_event_types`, which otherwise defaults to `event_types`. The response's `zulip_feature_level` must be at least 248 (Zulip 9.0, the first release with `channel` as a message and typing type), or the loop ends with one ERROR naming the site, the level and the remedy. Every call sorts its outcome into one of five signals: `_Fatal` (401 or a deactivated user or organisation: one ERROR, loop ends, not retried), `_QueueLost` (`BAD_EVENT_QUEUE_ID`: WARNING, re-register at once), `_RateLimited` (429: wait the server's `retry-after`, capped at 60 s), `_Transient` (network error, timeout, 5xx, a reply that is not Zulip's JSON: retry the same queue on the shared ladder, 10 s doubling to 300 s, reset on success) and `_Rejected` (a 4xx the server meant). Events are processed in id order and acknowledged by the next poll's `last_event_id`, after handling. A malformed message event is skipped with a WARNING naming the event and message ids, and does not stop the loop.
+
+**A lost queue is not replayed (#640 D4).** The server drops an idle queue, and a restart starts a new one. Messages sent in the gap are not fetched; the WARNING says so, naming the site and the bot. Catching up (persist the last admitted id per channel, `GET /messages` from it on re-register, deduplicate by id) is a follow-up.
+
+**Identity.** A channel's scope is built from ids only (PRD principle 10): `zulip:<stream_id>`; `zulip:dm:<user_id>` for a 1:1 DM, keyed on the other person; `zulip:dm:<id>,<id>` for a group DM, ids ascending, the bot's own left out. A Zulip *topic* has no stable id (the API pages for register, events, messages, topics and update-message expose none) and users can rename or move topics, so a topic-keyed scope would orphan its history on a rename. It is therefore a label and reply routing, never a key: `channel.name` is `#general > plans` (the empty topic shows as the realm's `realm_empty_topic_display_name`), and the topic of the newest *allowed* message is kept in `_topics[channel.id]`, in memory only. This is the same rule Discord applies to threads, which have their own immutable id; Zulip topics don't. The sender passed to `on_message` is the sender's user id, with the display name in `channel.sender_names`.
+
+**The empty topic.** From Zulip 10 a channel message may have `""` as its topic. Without the `empty_topic_name` capability the server rewrites it to its display label in events; with it, the transport receives `""`, replies with the same `""`, and shows the label only to the model. The reply therefore lands where the question was asked on every server version.
+
+**`resolve_channel`.** For a `zulip:<scope>` id the registry does not hold, the plugin returns the registry's channel. It returns None for other transports, for scopes that are not a stream id or `dm:` and ascending user ids, and before `on_start`. A reply needs no connection to be addressed: the destination is built from the scope.
+
+**Authorization.** `should_process_message` is default-deny: the sender's user id must be in `allow`. A refusal is one INFO line naming the id, and nothing is sent. The allowlist is checked before the channel is resolved, so a refused sender never creates a registry entry (a transient `Channel("zulip", <scope>)` is gated instead), and only an allowed sender's message sets the channel's label, the sender-name cache or the reply topic: a stranger's topic must not steer where the agent answers.
+
+**Addressing.** A message in a channel or group DM is admitted only when `flags` contains `mentioned` (Zulip sets it for a direct mention and for a mention through a user group the bot belongs to; the group's token is not the bot's own, so it stays in the text); `stream_wildcard_mentioned` and `topic_wildcard_mentioned` do not count, as `@everyone` does not for Discord. A 1:1 DM needs none. `channel.addressed` is set before every `on_message`, `None` for a 1:1 DM. The bot's own mention token (`@**Name**`, `@**Name|id**`, silent `@_**Name**`, or any name with the bot's id) is stripped from the text; other people's mentions stay. The bot's own messages come back through its queue and are dropped by sender id, which is the only thing between the agent and answering itself if its id is ever put on the allowlist with `require_mention: false`.
+
+**Liveness.** Typing only; Zulip bots have no read receipts. The first outstanding message on a channel sends `POST /typing` `op=start` (for a channel, `type=channel` with `stream_id` and `topic`; for a DM, `type=direct` with the user ids) and starts a refresh loop re-sending every 8 s while the count stays positive. Unlike Discord, Zulip has a stop frame, so a final (`send_message`), a withheld final (`on_agent_response` with `final_was_unsent`) or a message the gate never admitted sends `op=stop` once the last slot is released. On the withheld-final path (`on_agent_response`) the ownership check, `final_was_unsent` and the release happen before the first `await`, as for Discord and Signal; a sent final releases after it has delivered, so a message that arrives mid-delivery has its slot released with the rest. A failed typing call is a WARNING, never a lost reply. Only an allowed sender ever takes a slot.
+
+**Outbound.** `_deliver` defuses mentions, splits with `split_message` at the smaller of `message_chunk_size` and the server's `max_message_length` (bytes, conservatively, since the server counts code points), skips whitespace-only chunks, and posts each in order through a bounded queue (50 chunks): a transient failure leaves it queued with a WARNING and the connection loop flushes it after the next successful poll (PRD §3.2 item 8); past the bound the oldest is dropped and the count logged; a refusal drops the rest of that reply and logs the channel, the topic and the server's own explanation. A 429 on a send waits `retry-after` up to twice. Two properties apply to every send:
+
+- *Mentions are defused.* Zulip has no allowed-mentions switch, so `@` followed by `*` (`@**all**`, `@**Name**`, `@*group*`) gets a zero-width space between them before splitting, and the chunks concatenate to the defused text. Silent mentions (`@_**Name**`) notify no one and pass through.
+- *Replies go to the topic they answer.* The topic of the newest allowed message, else `default_topic`; a DM goes to its user ids.
+
+`send_thinking` and `send_tool_status` are not overridden, so reasoning and tool traffic never reach Zulip.
+
+**Testing.** There is no local Zulip server to run in `harness/`, so this transport has no end-to-end harness test (PRD §3.2 item 9). `tests/test_zulip_plugin.py` runs the real client against an aiohttp server on loopback that implements the five endpoints, with scripted failures, so request encoding, Basic auth, 429 and `BAD_EVENT_QUEUE_ID` are exercised for real. What it cannot show is a real server's behaviour. Everything taken from Zulip's API documentation and not observed is listed in [`zulip-requirements.md`](../corvidae/channels/zulip-requirements.md#taken-from-the-documentation-not-observed).
+
+**Known limits.** No attachments (an upload is the link Zulip put in the text), no edits or deletes, one organisation per block, no catch-up after a lost queue, and a plain split that can cut a Markdown code fence across two messages (`shortcut:` upgrade to a fence-aware split, as Discord has, if seen).
 
 ### Web (`channels/web.py`)
 
@@ -3911,7 +4058,8 @@ fixed hand-written order:
    never instantiated.
 
 The kernel's entry points (`[project.entry-points.corvidae]` in the root
-`pyproject.toml`): `persistence`, `jsonl_log`, `core_tools`, `cli`, `irc`,
+`pyproject.toml`): `persistence`, `jsonl_log`, `shell_tools`, `file_tools`,
+`web_tools`, `cli`, `irc`,
 `signal`, `discord`, `web`, `webhook`, `acp`, `task`, `subagent`, `mcp`, `llm`,
 `compaction`, `thinking`, `runtime_settings`, `tools`, `metrics`,
 `usage_log`, `metrics_jsonl`, `scheduler`, `agent`,
@@ -3933,10 +4081,16 @@ Immediately after entry points load, `Runtime.start()` logs `"plugins
 loaded"` with `loaded` (the sorted names `pm.list_name_plugin()` returns
 with a plugin object; pluggy keeps each blocked name as `(name, None)`, and
 those are left out) and `blocked` (the configured `plugins.disabled` list, verbatim
-— not narrowed to names that matched a real plugin). A misspelled disable
-entry shows up under `blocked` while the plugin it was meant to block
-still shows up under `loaded`; that mismatch is the operator-visible
-signal of the typo. It is not an error and does not stop the daemon.
+— not narrowed to names that matched a real plugin). A disable entry that
+names no plugin (a typo, a retired name, a plugin whose distribution is
+not installed) also gets one `WARNING` per distinct name, naming
+`plugins.disabled`, the value, and the installed entry-point names
+(`_warn_unknown_disabled`). A name counts as known when it is a
+`corvidae` entry point of any installed distribution or was registered
+directly before step 7b; that snapshot is taken before blocking, because
+`set_blocked` unregisters a plugin already registered under the name. Only
+entry-point names are offered as choices. It is not an error and does not
+stop the daemon.
 
 Next, `install_plugin_hookspecs(pm)` installs the hookspecs plugins
 declare ([Plugin-declared hookspecs](#plugin-declared-hookspecs)), and
@@ -3976,7 +4130,9 @@ WARNING for an impl of a hook owned by an absent optional dependency.
 ```
 Agent               → "registry", "task", "llm", "tools"
 NotificationSpill   → "clock", "tools"  (kernel object, registered as "spill")
-CoreToolsPlugin     → "tools", "spill"
+ShellToolPlugin     → (none)
+FileToolsPlugin     → "tools", "spill"
+WebToolsPlugin      → (none)
 WebhookNotifyPlugin → "registry", "spill"; soft-uses "webhook"
 CLIPlugin           → "registry"    (ChannelRegistry)
 IRCPlugin           → "registry"    (ChannelRegistry)
@@ -4052,7 +4208,7 @@ corvidae/
 ├── commands/
 │   └── redact.py         # corvidae redact CLI (operator-only)
 └── tools/
-    ├── __init__.py       # CoreToolsPlugin
+    ├── __init__.py       # ShellToolPlugin, FileToolsPlugin, WebToolsPlugin
     ├── shell.py
     ├── files.py
     ├── web.py            # web_fetch, web_search
@@ -4126,4 +4282,4 @@ seamlessly. Not implemented; current compaction is stop-the-world.
 ### Additional transports
 
 BlueSky and other transports are future work. The hook system supports
-them; the implemented transports are CLI, IRC, Signal, Discord, and Web.
+them; the implemented transports are CLI, IRC, Signal, Discord, Zulip, and Web.

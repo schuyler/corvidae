@@ -37,10 +37,14 @@ class _Content:
     def __init__(self, body: bytes, chunks: int = 4) -> None:
         self._body = body
         self._chunks = max(1, chunks)
+        # How many chunks the client pulled, so a test can tell a download
+        # that stopped at the cap from one that read the whole body.
+        self.consumed = 0
 
     async def iter_chunked(self, n: int):
         size = max(1, len(self._body) // self._chunks)
         for start in range(0, len(self._body), size):
+            self.consumed += 1
             yield self._body[start:start + size]
 
 
@@ -167,16 +171,22 @@ class TestInbound:
         finally:
             await h.plugin.on_stop()
 
-    async def test_traversal_filename_stays_inside(self, tmp_path, fetches):
+    async def test_traversal_filename_contributes_only_its_extension(self, tmp_path, fetches):
+        # With no content type the suffix falls back to the remote filename, so
+        # this is the one path where that name reaches save_attachment. Only
+        # its extension may land in the path: a name used whole would put the
+        # file in a subdirectory of the attachment dir (or outside it).
         h = await _start_plugin(discord_overrides={"attachment_dir": str(tmp_path / "att")})
         try:
-            await h.plugin._handle_message(
-                make_dm("", attachments=[_att(filename="../../etc/passwd.png")]), BOT_ID,
-            )
+            msg = make_dm("", attachments=[_att(filename="../../etc/passwd.png", content_type="")])
+            await h.plugin._handle_message(msg, BOT_ID)
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
+            assert text.startswith("[image: "), text
             path = Path(text.split("[image: ")[1].rstrip("]"))
-            assert path.parent == tmp_path / "att"
-            assert path.suffix == ".png"
+            # The name is ours (<message id>-<index>) plus the extension, and
+            # nothing else from the remote name.
+            assert path == (tmp_path / "att").resolve() / f"{msg.id}-0.png"
+            assert path.read_bytes() == PNG
         finally:
             await h.plugin.on_stop()
 
@@ -292,7 +302,13 @@ class TestSharedHelper:
         assert safe_suffix("a/b/photo.JPG") == ".jpg"
         assert safe_suffix("no-extension") == ""
         assert safe_suffix("evil.py/../../x") == ""
+        # A valid extension followed by more must not pass on its prefix.
+        assert safe_suffix("a.png/x") == ""
         assert safe_suffix(None) == ""
+
+    async def test_data_over_max_bytes_is_not_written(self, tmp_path):
+        assert await save_attachment(b"x" * 9, tmp_path, "big", max_bytes=8) is None
+        assert list(tmp_path.iterdir()) == []
 
     async def test_stem_with_a_separator_is_refused(self, tmp_path):
         assert await save_attachment(PNG, tmp_path, "../escape") is None
@@ -373,7 +389,8 @@ class TestTruncation:
 
     async def test_a_body_that_grows_past_the_cap_is_refused(self, tmp_path, fetches):
         big = b"\x00" * 5000
-        fetches.set(_Resp(body=big, chunks=10))
+        resp = _Resp(body=big, chunks=10)
+        fetches.set(resp)
         h = await _start_plugin(
             discord_overrides={"attachment_dir": str(tmp_path), "max_attachment_size": 1000},
         )
@@ -383,6 +400,9 @@ class TestTruncation:
             text = h.pm.ahook.on_message.await_args.kwargs["text"]
             assert text == "[image: download failed]"
             assert list(tmp_path.iterdir()) == []
+            # The cap is enforced while streaming: 500-byte chunks against a
+            # 1000-byte cap stop at the third, not after all ten were buffered.
+            assert resp.content.consumed == 3
         finally:
             await h.plugin.on_stop()
 

@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import logging
+import mimetypes
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,7 +69,6 @@ _MIME_TO_EXT = {
     "image/avif": ".avif",
     "text/plain": ".txt",
     "text/csv": ".csv",
-    "text/html": ".html",
     "text/markdown": ".md",
     "text/xml": ".xml",
     "audio/mpeg": ".mp3",
@@ -86,6 +86,14 @@ _MIME_TO_EXT = {
 # Sanitize a sender-controlled subtype for use in agent-visible notes.
 # Restrict to [a-z0-9.+-], cap length, fallback to "attachment" if empty.
 _SAFE_SUBTYPE = re.compile(r"[^a-z0-9.+-]")
+
+
+def _file_data_uri(path: Path) -> str:
+    # signal-cli needs a media type in the data URI; guess it from the name,
+    # as it once did from the file, so images do not arrive as generic files.
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    payload = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};filename={path.name};base64,{payload}"
 
 
 def _mime_base(content_type: str) -> str:
@@ -201,6 +209,8 @@ class SignalPlugin(TransportPlugin):
         self._message_chunk_size: int = 2000
         self._attachment_dir: Path = Path("state/signal-attachments")
         self._max_attachment_size: int = 10 * 1024 * 1024
+        # The only directory tree send_signal_attachment may read from (#544).
+        self._send_attachment_root: Path = Path("state")
 
         # Connection state.
         self._connect_task: Optional[asyncio.Task] = None
@@ -290,6 +300,16 @@ class SignalPlugin(TransportPlugin):
                 f"got {max_size!r}"
             )
         self._max_attachment_size = max_size
+        # The send root must be a non-empty string. An explicit null is a
+        # stated value, not an omission, so it is rejected rather than read
+        # as "use the default" (an absent key does mean the default).
+        send_root = signal_config.get("send_attachment_root", "state")
+        if not isinstance(send_root, str) or not send_root:
+            raise ValueError(
+                f"signal: send_attachment_root must be a non-empty string, "
+                f"got {send_root!r}"
+            )
+        self._send_attachment_root = Path(send_root)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -707,7 +727,7 @@ class SignalPlugin(TransportPlugin):
             logger.warning("signal: getAttachment response has no data")
             return None
 
-        # Decode off the event loop: base64 on a ~14 MB line would
+        # Decode off the event loop: base64 on a line up to max_attachment_size * 4/3 would
         # block other channels.
         try:
             raw = await asyncio.to_thread(
@@ -717,26 +737,18 @@ class SignalPlugin(TransportPlugin):
             logger.exception("signal: attachment data is not valid base64")
             return None
 
-        if len(raw) > self._max_attachment_size:
-            logger.warning(
-                "signal: attachment %s is %d bytes, exceeds cap %d; refusing",
-                safe_id, len(raw), self._max_attachment_size,
-            )
-            return None
-
-        # Extension: MIME map first, else safe filename/id extension.
+        # Extension: MIME map first, else the filename's safe extension. An
+        # id that already ends in an extension keeps it through the stem.
         # The MIME type is sender-controlled — a labelling convenience,
         # not a security boundary. No content sniffing is done.
-        suffix = _MIME_TO_EXT.get(mime_base, "")
-        if not suffix:
-            suffix = safe_suffix(attachment.get("filename") or "")
-        if not suffix:
-            suffix = safe_suffix(safe_id)
+        suffix = _MIME_TO_EXT.get(mime_base) or safe_suffix(attachment.get("filename"))
 
         ts = envelope.get("timestamp", 0)
         att_type = attachment.get("type", 0)
         filename = f"{ts}-{att_type}-{safe_id}"
 
+        # save_attachment enforces the size cap and keeps the path inside
+        # the attachment dir.
         path = await save_attachment(
             raw,
             self._attachment_dir,
@@ -1251,3 +1263,169 @@ class SignalPlugin(TransportPlugin):
         liveness (unlike raw tool traces), fires mid-turn, and does not
         close out the outstanding count."""
         await self._deliver(channel, event.text)
+
+    # -----------------------------------------------------------------
+    # Outbound files (#544)
+    # -----------------------------------------------------------------
+
+    @hookimpl
+    def register_tools(self, tool_registry: list) -> None:
+        """Offer the agent one way to send a file to a Signal contact.
+
+        Only when a ``signal:`` block configured the transport: an inert
+        plugin has no daemon to send through. The tool is named
+        ``send_signal_attachment`` because the tool registry keeps the last of
+        any two tools sharing a name, and Discord's tool already holds
+        ``send_attachment``.
+        """
+        if self._socket_path is not None:
+            tool_registry.append(self.send_signal_attachment)
+
+    async def send_signal_attachment(
+        self, channel_id: str, path: str, caption: str = "",
+    ) -> str:
+        """Send a file under signal.send_attachment_root to a Signal contact, with an optional caption.
+
+        Args:
+            channel_id: The target contact in "signal:<id>" form. Only a
+                contact who has messaged this account since it started is
+                known.
+            path: The file to send, relative to signal.send_attachment_root
+                (or an absolute path inside it). Paths outside that root are
+                refused.
+            caption: Optional text to send with the file. Pass "" for none.
+
+        Returns:
+            A confirmation naming the file and channel, or an error saying
+            what was wrong and what to do next.
+        """
+        # Check the arguments first, as the Discord tool does: a model can
+        # pass anything, and each refusal names the argument.
+        if not isinstance(channel_id, str) or not channel_id:
+            return "Could not send: channel_id must be a non-empty string."
+        if not isinstance(path, str) or not path.strip():
+            return "Could not send: path must be a non-empty string."
+        if caption is None:
+            caption = ""
+        if not isinstance(caption, str):
+            return "Could not send: caption must be a string."
+        if self._registry is None:
+            return (
+                f"Could not send: the channel registry is not available for "
+                f"{channel_id!r}; retry once corvidae has finished starting."
+            )
+
+        # Refuse a foreign id by its transport prefix before any registry
+        # lookup, so an id that is not in the registry still gets this error.
+        if channel_id.partition(":")[0] != self.transport:
+            return (
+                f"Could not send: {channel_id!r} is not a Signal channel; "
+                f"the target must be 'signal:<id>'."
+            )
+        channel = self._registry.get(channel_id)
+        if channel is None:
+            return (
+                f"Could not send: {channel_id!r} is not a known Signal "
+                f"channel; an allowlisted contact becomes known when they "
+                f"message this account (see signal.allow)."
+            )
+
+        # Resolve the path under the root, jail it, and read its size. The
+        # jail runs before any existence check so a missing path outside the
+        # root gets the root error. A path that cannot be resolved or stat'ed
+        # (a NUL byte, a permission error) is the same kind of failure.
+        try:
+            root = self._send_attachment_root.resolve()
+            raw = Path(path)
+            target = (raw if raw.is_absolute() else root / raw).resolve()
+            if not target.is_relative_to(root):
+                return (
+                    f"Could not send: {path!r} is outside the allowed root "
+                    f"{root}; put the file there or set "
+                    f"signal.send_attachment_root."
+                )
+            if not target.is_file():
+                return (
+                    f"Could not send: {target} is not a file; check it "
+                    f"exists under {root}."
+                )
+            size = target.stat().st_size
+            # The inbound size cap bounds outbound files too (R3): one
+            # setting, both directions. A file exactly at the cap is sent.
+            if size > self._max_attachment_size:
+                return (
+                    f"Could not send: {target.name} is {size} bytes, over the "
+                    f"{self._max_attachment_size} byte limit "
+                    f"(signal.max_attachment_size)."
+                )
+            # The daemon gets the bytes as a data URI, not a path it would
+            # have to read itself. Read and encode off the loop: the string
+            # can be megabytes.
+            uri = await asyncio.to_thread(_file_data_uri, target)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "signal: cannot read %r for send_signal_attachment (%s)",
+                path, type(exc).__name__, exc_info=True,
+            )
+            return (
+                f"Could not send: cannot read {path!r} ({type(exc).__name__}); "
+                f"check the path and its permissions."
+            )
+
+        # The caption rides with the file; one longer than a message is split
+        # so nothing is cut, and blank pieces are never sent.
+        chunks = [
+            c for c in split_message(caption, max_len=self._message_chunk_size)
+            if c.strip()
+        ]
+
+        # The file frame carries the first chunk as its message. Later chunks
+        # follow as text frames through _send_rpc, not _deliver, which would
+        # swallow a failure and let this report success for a lost caption.
+        params: dict[str, Any] = {
+            "recipient": channel.scope, "attachments": [uri],
+        }
+        if chunks:
+            params["message"] = chunks[0]
+        # file_sent tells the handler how far the send got; part counts the
+        # caption chunk in flight, 1 being the one riding with the file (it is
+        # bound here so the handler can always read it).
+        file_sent = False
+        part = 1
+        # The reply's per-recipient "results" is not inspected (#608): every
+        # send here names one recipient, and signal-cli (SendMessageResultUtils
+        # .outputResult, v0.14.7) answers a send with no successful recipient
+        # with a JSON-RPC error, which _send_rpc raises. A result whose
+        # entries mix success and failure needs several recipients, i.e. a
+        # group, which this transport does not send to.
+        try:
+            await self._send_rpc("send", params)
+            file_sent = True
+            for part, chunk in enumerate(chunks[1:], start=2):
+                await self._send_rpc(
+                    "send", {"recipient": channel.scope, "message": chunk},
+                )
+        except Exception as exc:
+            logger.warning(
+                "signal: send_signal_attachment failed for %s to %s (%s)",
+                target.name, channel_id, type(exc).__name__, exc_info=True,
+            )
+            # Say how far the send got, so the remedy is the right one: a
+            # failure after the file went must not invite sending it again.
+            if file_sent:
+                return (
+                    f"Could not send: {target.name} reached {channel_id} but "
+                    f"caption part {part} of {len(chunks)} failed "
+                    f"({type(exc).__name__}); do not resend the file, send "
+                    f"the rest of the caption as a message."
+                )
+            if isinstance(exc, ConnectionError):
+                return (
+                    f"Could not send: signal-cli is not connected "
+                    f"({target.name} to {channel_id}); retry once it is."
+                )
+            return (
+                f"Could not send: {target.name} to {channel_id} failed "
+                f"({type(exc).__name__}); nothing was delivered, retry."
+            )
+        return f"Sent {target.name} to {channel_id}."

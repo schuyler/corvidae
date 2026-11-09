@@ -36,7 +36,7 @@ from corvidae.outbound import OutboundMessage
 from corvidae.persistence import PersistencePlugin
 from corvidae.task import TaskPlugin
 from corvidae.thinking import ThinkingPlugin
-from corvidae.tools import CoreToolsPlugin
+from corvidae.tools import FileToolsPlugin, ShellToolPlugin, WebToolsPlugin
 from corvidae.tools.subagent import SubagentPlugin
 
 from helpers import stub_llm_config
@@ -204,8 +204,10 @@ async def _build_harness(config: dict) -> IntegrationHarness:
     persistence_plugin = PersistencePlugin(pm)
     pm.register(persistence_plugin, name="persistence")
 
-    core_tools = CoreToolsPlugin(pm)
-    pm.register(core_tools, name="core_tools")
+    # The built-in tool plugins, under their entry-point names.
+    pm.register(ShellToolPlugin(pm), name="shell_tools")
+    pm.register(FileToolsPlugin(pm), name="file_tools")
+    pm.register(WebToolsPlugin(pm), name="web_tools")
 
     # The kernel's notification spill service, which read_file depends on.
     from corvidae.spill import NotificationSpill
@@ -291,8 +293,10 @@ class TestGroupALifecycle:
         persistence_plugin = PersistencePlugin(pm)
         pm.register(persistence_plugin, name="persistence")
 
-        core_tools = CoreToolsPlugin(pm)
-        pm.register(core_tools, name="core_tools")
+        # The built-in tool plugins, under their entry-point names.
+        pm.register(ShellToolPlugin(pm), name="shell_tools")
+        pm.register(FileToolsPlugin(pm), name="file_tools")
+        pm.register(WebToolsPlugin(pm), name="web_tools")
 
         # The kernel's notification spill service, which read_file depends on.
         from corvidae.spill import NotificationSpill
@@ -335,12 +339,12 @@ class TestGroupALifecycle:
         """A2. After on_start, verify agent tools, schemas, client, task queue, worker."""
         agent = harness.agent
 
-        # Tool set matches CoreToolsPlugin + SubagentPlugin + TaskPlugin
-        expected_tools = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status", "task_pipeline"}
+        # Tool set matches the shell, file and web tool plugins + SubagentPlugin + TaskPlugin
+        expected_tools = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status", "task_result", "task_pipeline"}
         assert set(agent.tools.keys()) == expected_tools
 
-        # 8 schemas, each with type="function"
-        assert len(agent.tool_schemas) == 8
+        # 9 schemas, each with type="function"
+        assert len(agent.tool_schemas) == 9
         for schema in agent.tool_schemas:
             assert schema["type"] == "function"
 
@@ -1354,8 +1358,10 @@ class TestGroupEErrorHandling:
         persistence_plugin = PersistencePlugin(pm)
         pm.register(persistence_plugin, name="persistence")
 
-        core_tools = CoreToolsPlugin(pm)
-        pm.register(core_tools, name="core_tools")
+        # The built-in tool plugins, under their entry-point names.
+        pm.register(ShellToolPlugin(pm), name="shell_tools")
+        pm.register(FileToolsPlugin(pm), name="file_tools")
+        pm.register(WebToolsPlugin(pm), name="web_tools")
 
         fake_transport = FakeTransportPlugin(pm)
         pm.register(fake_transport, name="fake_transport")
@@ -1440,7 +1446,7 @@ class TestGroupFToolCollection:
 
     async def test_f1_all_expected_tools_registered(self, harness):
         """F1. After on_start with full plugin graph, expected tool set is exact."""
-        expected = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status", "task_pipeline"}
+        expected = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status", "task_result", "task_pipeline"}
         assert set(harness.agent.tools.keys()) == expected
 
     async def test_f2_tool_schemas_structurally_valid(self, harness):

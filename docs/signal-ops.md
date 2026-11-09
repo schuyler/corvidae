@@ -274,19 +274,68 @@ Other things worth knowing when it misbehaves:
   while the daemon is up will fail, and can leave the store in a bad state.
   `systemctl stop signal-cli` first.
 
+## Sending files
+
+The agent has one tool for sending a file to a Signal contact:
+`send_signal_attachment(channel_id, path, caption)`. It exists whenever the
+`signal:` block is configured. (Discord's tool is `send_attachment`; the names
+differ so both transports can run in one agent.)
+
+- **Where it reads from.** `signal.send_attachment_root`, default `state`,
+  relative to the directory corvidae runs in. A relative `path` is read
+  under that root, and a path that lands outside it is refused.
+- **How big.** `signal.max_attachment_size` caps a file in both directions;
+  a larger one is refused before anything is sent.
+- **To whom.** A `signal:<id>` channel corvidae holds in its registry. That
+  is, for example, an allowlisted sender who has written since corvidae started, a channel
+  you list under `channels:` in `agent.yaml`, or one a reminder or scheduled
+  job has fired on since the start. The registry is rebuilt at every start,
+  so a contact who has not written since a restart (and has no reminder or
+  job) is refused until they do. The tool does not check `signal.allow`
+  itself: membership in the registry is the whole gate, as it is for the
+  Discord tool.
+- **The caption** goes in the same message as the file. One longer than
+  `signal.message_chunk_size` is split: the first part rides with the file
+  and the rest follow as text. If a later part fails, the tool says the file
+  already went and not to send it again. The tool's schema marks `caption`
+  required, so the model passes an empty string for none.
+- **When it fails**, the tool's answer names the file and channel and the
+  exception type; signal-cli's own error text is in corvidae's log (a
+  `signal: send_signal_attachment failed ...` warning with the traceback),
+  not in the answer.
+
+**corvidae reads the file; the daemon never sees the path.** The tool reads
+the file, base64-encodes it and sends it as a `data:` URI
+(`data:<type>;filename=<name>;base64,<payload>`) in the `send` RPC. The type
+is guessed from the file name, falling back to `application/octet-stream`.
+The daemon needs no access to the send root, so the unit's sandbox does not
+affect it, and corvidae and signal-cli need not share a filesystem view (a
+container and its host, say), though the socket must still be reachable as a
+local path. A file that corvidae cannot read is answered `cannot read <path> (<ExcName>); check
+the path and its permissions`. Sizes are bounded by `signal.max_attachment_size`;
+base64 inflates the frame by about a third.
+
 ## What corvidae ignores
 
 Behavior that looks like a bug and isn't:
 
 - **Group messages** are dropped. Signal support is DM-only.
-- **Attachments** are dropped, logged at DEBUG. Text sent alongside an
-  attachment is still processed normally.
+- **Attachments** from an allowlisted sender are downloaded when their type
+  passes the download gate, and named in the message text (`[image:
+  /abs/path]`); a message from a sender the allowlist refuses is dropped
+  before anything is fetched. Text sent alongside an attachment is processed
+  normally.
 - **Reactions, quotes, edits, and delete-for-everyone** are ignored. None of
   them carry message text, so they fall out of the same filter.
-- **Outbound is text only.** The agent cannot send attachments.
-- **The bot can't message a different channel on its own.** A
+- **Outbound files go one per send**, through the `send_signal_attachment`
+  tool (see [Sending files](#sending-files)). There is no way to attach
+  several files to one message.
+- **Messaging a different channel is not the Signal transport's job.** A
   reminder or other agent-started turn on a Signal channel is delivered
-  there, but a send to a different channel isn't implemented.
+  there. With the optional `cross-channel-send` package the agent can send
+  an instruction to another channel's context; `send_signal_attachment`
+  sends a file straight to any Signal contact corvidae knows, with or
+  without that package.
 - **Disappearing messages are stored like any other message**, with no
   privacy flag and no expiry. If a conversation has a disappearing-message
   timer, it applies on the phones, not to corvidae's copy.

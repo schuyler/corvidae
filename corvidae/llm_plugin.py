@@ -207,6 +207,23 @@ def merge_profile(base: dict, child: dict) -> dict:
     return merged
 
 
+def _require_string_key(key: object, path: str, label: str) -> None:
+    """Raise unless ``key`` is a string, naming it and the accepted form.
+
+    Keys under the ``llm:`` section are profile names, kind names and stage
+    names, and every one of them reaches an error message built with
+    ``sorted()`` over the key set. YAML turns an unquoted ``2:`` into an int,
+    and ``sorted()`` on mixed types raises ``TypeError`` — so the config error
+    for some *other* problem would crash while building its own message, and
+    escape the reload path, which catches ``ValueError`` only (#471).
+    """
+    if not isinstance(key, str):
+        raise ValueError(
+            f"{path}: {label} {key!r} must be a string; quote it in agent.yaml "
+            f"({path} keys are names, so they must be strings)"
+        )
+
+
 def _section(section: Mapping, key: str) -> dict:
     """llm.<key> as a dict (an absent or null block is empty); anything but a
     mapping is a config error."""
@@ -286,6 +303,11 @@ def parse_llm_config(section: dict | None) -> LLMConfig:
     # Every key except the reserved ones is a profile; a null block is absent.
     blocks: dict[str, dict] = {}
     for name, block in section.items():
+        # A key that is not a string is a config error here, at the boundary,
+        # rather than a TypeError later: every error path lists the defined
+        # profiles with sorted(), which raises on mixed-type keys and turns a
+        # malformed section into a crash inside its own message (#471).
+        _require_string_key(name, "llm", "profile name")
         if name in RESERVED or block is None:
             continue
         if not isinstance(block, dict):
@@ -314,6 +336,9 @@ def parse_llm_config(section: dict | None) -> LLMConfig:
 
     # Each kind's default: configured, else the fallback name if it exists.
     configured = _section(section, "defaults")
+    # A non-string kind key would reach sorted() in the unknown-kind error.
+    for key in configured:
+        _require_string_key(key, "llm.defaults", "kind")
     unknown_kinds = set(configured) - KINDS
     if unknown_kinds:
         raise ValueError(
@@ -347,6 +372,9 @@ def parse_llm_config(section: dict | None) -> LLMConfig:
     # The stage map: every entry must name a defined profile.
     stages = dict(_section(section, "stages"))
     for stage, name in stages.items():
+        # A non-string stage key reaches sorted() where the stage map is
+        # reported, in the startup summary and in check_stage_map's warning.
+        _require_string_key(stage, "llm.stages", "stage name")
         _profile_name(f"stages.{stage}", name, profiles)
     return LLMConfig(profiles=profiles, defaults=defaults, stages=stages)
 

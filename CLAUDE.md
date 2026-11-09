@@ -67,6 +67,13 @@ connection left open by the last test to fail would hang pytest at exit
 `aiosqlite.connect` at teardown (#64). Prefer `async with` or the `db`
 fixture anyway; the guard is a backstop.
 
+Plugins default their output to relative paths under `state/` (attachments,
+spill files), so a test that doesn't point that config at `tmp_path` writes
+into the checkout. `tests/state_dir_guard.py`, also imported by
+`tests/conftest.py`, fails any test that adds files under the working
+directory's `state/`, naming the files. Run the daemon from another directory
+while the suite runs, or its own writes there will trip it.
+
 ## Architecture pointers
 
 Three layers: an apluggy plugin system, the agent loop, and transport plugins.

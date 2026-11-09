@@ -2,7 +2,6 @@
 
 This document explains how the system prompt is assembled before each LLM call. Understanding this pipeline helps you configure prompts correctly, write plugins that inject context, and reason about what the LLM actually sees.
 
-
 ---
 
 ## Overview
@@ -194,11 +193,13 @@ Chat apps have their own social norms: short turns, one thought at a time, and n
 |-----------|------------------|--------------|
 | Signal | `chat.md` + `signal_dm.md` | Texting norms (match the other person's length, answer first, no headers or bold, gist before detail, example exchanges); plain text only, since Signal shows Markdown as literal asterisks and pound signs. |
 | Discord DMs (`discord:dm:*`) | `chat.md` | Texting norms. |
-| Discord server channels | `chat.md` + `discord_group.md` | Texting norms; group manners, short turns so the bot doesn't take over the channel; code blocks are fine; user mentions use <@user_id> syntax but do not notify users because pings are disabled.|
+| Discord server channels | `chat.md` + `discord_group.md` | Texting norms; group manners, short turns so the bot doesn't take over the channel; code blocks are fine; user mentions use `<@user_id>` syntax but do not notify users because pings are disabled. |
+| Zulip DMs (`zulip:dm:<one id>`) | `chat.md` | Texting norms. |
+| Zulip channels and group DMs | `chat.md` + `zulip_group.md` | Texting norms; group manners; stay on the topic you were answered in; Markdown code blocks are fine; an @-mention you write won't notify anyone. |
 | IRC | `chat.md` + `irc.md` | Texting norms; plain, line-based text, shorter in channels than in private messages. |
 | Web, CLI, ACP | none | Longer answers are the point there. |
 
-While the `silence` plugin is loaded, the system prompt of Signal, Discord and IRC channels also ends with a paragraph telling the model it may reply `NO_REPLY` to send nothing ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy) has the text). It is added after the register, not part of it, so a `register_prompt` anywhere in config (see [Per-channel registers](#per-channel-registers)), even an empty one, doesn't remove it; disable the plugin to do that. The examples in `chat.md` avoid any reference to earlier conversation, because a model that copies that habit starts inventing shared history. In group channels the model can't yet see who is speaking (#204), so `discord_group.md` doesn't ask it to address people by name.
+While the `silence` plugin is loaded, the system prompt of Signal, Discord, Zulip and IRC channels also ends with a paragraph telling the model it may reply `NO_REPLY` to send nothing ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy) has the text). It is added after the register, not part of it, so a `register_prompt` anywhere in config (see [Per-channel registers](#per-channel-registers)), even an empty one, doesn't remove it; disable the plugin to do that. The examples in `chat.md` avoid any reference to earlier conversation, because a model that copies that habit starts inventing shared history. In group channels the model can't yet see who is speaking (#204), so `discord_group.md` and `zulip_group.md` don't ask it to address people by name.
 
 ## Memory calibration fragment
 
@@ -227,3 +228,4 @@ Retrieval quality depends on `llm.embedding.document_prefix` and `llm.embedding.
 | `ThinkingPlugin` | `corvidae/thinking.py` | Strips `reasoning_content` from in-memory history |
 
 For full configuration details, see [configuration.md](configuration.md).
+

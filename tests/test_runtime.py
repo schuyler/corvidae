@@ -1665,7 +1665,7 @@ def test_cognition_entry_points_come_from_the_cognition_package() -> None:
 # the config watcher, MCP and the cognition set. The scheduler's own chain
 # (persistence, task, llm, tools, agent) stays loaded.
 _SCHEDULER_TEST_DISABLED = [
-    "cli", "irc", "signal", "discord", "web", "acp", "mcp",
+    "cli", "irc", "signal", "discord", "zulip", "web", "acp", "mcp",
     "metrics", "usage_log", "metrics_jsonl", "config_watcher", "jsonl_log",
     "memory", "memory_tools", "funnel", "outcome_log", "appraisal",
     "critique", "gates", "goals",

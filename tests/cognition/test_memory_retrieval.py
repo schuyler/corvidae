@@ -239,7 +239,8 @@ class TestWholeMemory:
         await db.close()
 
     async def test_retrieve_takes_no_channel(self):
-        # retrieve(text, k) is the whole signature: nothing to scope by.
+        # retrieve() takes no channel to scope by; its only channel input is
+        # the optional window exclusion (#634), which is not a scope.
         memory, embedder, channel, conv, db = await build_retrieval_env()
         await seed_memory(db, "irc:#garden", "the rain gauge is on the north fence")
         candidates, degraded = await memory.retrieve("where is the rain gauge?")

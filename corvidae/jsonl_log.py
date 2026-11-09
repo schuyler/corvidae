@@ -14,9 +14,9 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import IO
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.jsonl_rotate import RotatingAppender, parse_rotation
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,8 @@ class JsonlLogPlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self._log_dir: Path | None = None
-        self._handles: dict[str, IO] = {}  # channel_id -> open file handle
+        self._handles: dict[str, RotatingAppender] = {}  # channel_id -> its capped file
+        self._max_bytes, self._backup_count = parse_rotation({})
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -47,6 +48,9 @@ class JsonlLogPlugin(CorvidaePlugin):
             return
         base_dir = config.get("_base_dir", Path("."))
         self._log_dir = Path(base_dir) / log_dir
+        # logging.jsonl caps each transcript file (#404); a bad value is a
+        # ValueError, which the runtime reports as a config error.
+        self._max_bytes, self._backup_count = parse_rotation(config)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -100,8 +104,7 @@ class JsonlLogPlugin(CorvidaePlugin):
         fh = None
         try:
             fh = self._get_handle(channel_id)
-            fh.write(json.dumps(record) + "\n")
-            fh.flush()
+            fh.write_line(json.dumps(record))
         except Exception:
             logger.warning(
                 "JSONL log write failed for channel %s at %s",
@@ -125,18 +128,19 @@ class JsonlLogPlugin(CorvidaePlugin):
     def _close_all_handles(self) -> None:
         """Flush and close all open file handles (sync, for use with to_thread)."""
         for fh in self._handles.values():
-            fh.flush()
             fh.close()
         self._handles.clear()
 
     def _sanitize_channel_id(self, channel_id: str) -> str:
         return channel_id.replace("/", "_").replace(":", "_")
 
-    def _get_handle(self, channel_id: str) -> IO:
+    def _get_handle(self, channel_id: str) -> RotatingAppender:
         if channel_id not in self._handles:
             sanitized = self._sanitize_channel_id(channel_id)
             path = self._log_dir / f"{sanitized}.jsonl"
-            self._handles[channel_id] = open(path, "a")
+            self._handles[channel_id] = RotatingAppender(
+                path, self._max_bytes, self._backup_count
+            )
         return self._handles[channel_id]
 
     @hookimpl

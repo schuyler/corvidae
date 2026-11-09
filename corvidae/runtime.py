@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import sys
+from importlib.metadata import entry_points
 from pathlib import Path
 
 import yaml
@@ -61,6 +62,30 @@ def check_entry_point_duplicates(group: str = "corvidae") -> None:
             f"{', '.join(dists) if dists else 'unknown distributions'}; "
             f"uninstall one of them"
         )
+
+
+def _warn_unknown_disabled(disabled: list[str], registered: set[str]) -> None:
+    """Warn once for each plugins.disabled entry that names no plugin.
+
+    Such an entry blocks nothing (a typo, a retired name such as the old
+    combined tools plugin, or a plugin whose distribution is not installed),
+    so it gets a WARNING naming the key, the value and the plugin names it
+    could have meant, beyond the INFO "plugins loaded" line. Known names are
+    every ``corvidae`` entry point from every installed distribution plus the
+    plugins registered directly before blocking; only the entry-point names
+    are offered as choices, since the kernel objects are not meant to be
+    disabled.
+    """
+    entry_point_names = {ep.name for ep in entry_points(group="corvidae")}
+    known = entry_point_names | registered
+    # dict.fromkeys dedupes while keeping the operator's order.
+    for name in dict.fromkeys(disabled):
+        if name not in known:
+            logger.warning(
+                'plugins.disabled names "%s", which is no installed plugin; '
+                "it blocks nothing. Installed plugins: %s",
+                name, ", ".join(sorted(entry_point_names)),
+            )
 
 
 def disabled_plugins_from(config: dict) -> list[str]:
@@ -249,6 +274,12 @@ class Runtime:
 
         # 7b. Block disabled plugins before loading entry points so they are
         #     never instantiated. Must precede load_setuptools_entrypoints.
+        #     Snapshot the directly registered names first: set_blocked
+        #     unregisters a plugin already registered under the name, and
+        #     step 8a must still count it as a real plugin name.
+        registered_before_blocking = {
+            name for name, plugin in self.pm.list_name_plugin() if plugin is not None
+        }
         for name in disabled_plugins:
             self.pm.set_blocked(name)
 
@@ -276,6 +307,7 @@ class Runtime:
             "plugins loaded",
             extra={"loaded": loaded_names, "blocked": disabled_plugins},
         )
+        _warn_unknown_disabled(disabled_plugins, registered_before_blocking)
 
         # 8b. Install the hookspecs plugins declare (#229). Every plugin is
         #     registered by now, and specs must exist before the guard
@@ -328,7 +360,7 @@ class Runtime:
             config["plugins"]["disabled"]. Must precede step 8 so blocked
             plugins are never instantiated by the entry-point loader.
         8.  Load entry-point plugins (corvidae group).
-        8a. Log the effective plugin set.
+        8a. Log the effective plugin set, and warn for each disabled name that names no plugin.
         8b. Install plugin-declared hookspecs (install_plugin_hookspecs), so
             every spec exists before the guard below and before on_init.
         8c. Run the hook arg-binding guard over the full plugin set.

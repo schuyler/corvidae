@@ -22,8 +22,11 @@ Two admission paths:
 Behavior, in order:
   1. Dedupe: drop any entry whose exact text already appears inside a
      CONTEXT message in the window.
-  2. Budget: token-count entries and admit greedily, in given order, until
-     the budget is exhausted; the drop count is logged, never silent.
+  2. Budget: token-count entries and admit them in given order, skipping
+     any entry that would overrun what is left of the budget; the drop
+     count is logged, never silent. In the deferred drain, an entry larger
+     than its source's whole budget is dropped with a warning rather than
+     re-queued, since it can never fit.
   3. Frame: wrap admitted entries in explicit data-not-instructions
      framing with a source label (injection defense — everything the
      funnel admits is data that arrived, not instructions).
@@ -237,7 +240,8 @@ class FunnelPlugin(CorvidaePlugin):
 
         Returns ``payloads`` unchanged when the channel has no conversation
         window. A payload whose admission raises is kept whole; entries the
-        budget dropped are kept as leftovers.
+        budget dropped are kept as leftovers, except any larger than the
+        source's whole budget, which are dropped with a warning.
         """
         conv = getattr(channel, "conversation", None)
         if conv is None:
@@ -275,9 +279,37 @@ class FunnelPlugin(CorvidaePlugin):
                 if entry not in admitted
                 and not any(entry in existing for existing in window_context)
             ]
+            # An entry larger than the source's whole budget can never be
+            # admitted, so drop it now with a warning instead of re-queueing
+            # it on every drain forever (#623).
+            leftover = self._drop_unadmittable(channel.id, source, leftover)
             if leftover:
                 remaining.append((source, leftover))
         return remaining
+
+    def _drop_unadmittable(
+        self, channel_id: str, source: str, entries: list[str]
+    ) -> list[str]:
+        """Return ``entries`` minus any larger than the source's whole budget.
+
+        Each dropped entry is logged at warning level with the channel, the
+        source, its token count, the budget and the config key that fixes it.
+        """
+        budget = self._budgets.get(source, self._default_budget)
+        kept: list[str] = []
+        for entry in entries:
+            entry_tokens = count_tokens(entry)
+            if entry_tokens > budget:
+                logger.warning(
+                    "funnel dropped a deferred %s entry for %s: %d tokens "
+                    "exceeds the whole %d-token budget, so it can never be "
+                    "admitted; raise funnel.budgets.%s to admit entries this size",
+                    source, channel_id, entry_tokens, budget, source,
+                    extra={"channel_id": channel_id, "source": source},
+                )
+                continue
+            kept.append(entry)
+        return kept
 
     async def admit(
         self,
@@ -326,13 +358,15 @@ class FunnelPlugin(CorvidaePlugin):
                 extra={"channel_id": conv.channel_id, "source": source},
             )
 
-        # 2. Budget: greedy admission in given order — no silent truncation.
+        # 2. Budget: admit in given order, skipping any entry that would
+        # overrun what's left, so one large entry never blocks smaller ones
+        # after it (#603 design §6). Drops are logged, never silent.
         admitted: list[str] = []
         spent = 0
         for entry in fresh:
             entry_tokens = count_tokens(entry)
             if spent + entry_tokens > budget_tokens:
-                break
+                continue
             spent += entry_tokens
             admitted.append(entry)
         dropped = len(fresh) - len(admitted)

@@ -189,7 +189,11 @@ ranges fold only within one channel: `message_log` ids are global, and
 `recall_raw` and `/redact` read a record's range on its own channel, so on
 a cross-channel merge each record keeps its own range and the superseded
 record still leads to its channel's source dialog. Overlapping triggers on the same
-range discard the loser's record — no duplicates. Embedding failure
+range discard the loser's record — no duplicates. Embedding failure —
+including a wrong-width vector, which is refused before the write
+transaction (vec0 rejects it on insert, and the resulting
+`OperationalError` would roll back the whole consolidation: record,
+vec row and watermark, stalling the channel on every later trigger) —
 stores the record with `embedded=0` for later backfill; the summary text
 is canonical and vectors are a rebuildable cache. All consolidation LLM
 calls carry `stage="consolidation"` attribution, along with the `trigger`
@@ -212,6 +216,9 @@ after a redact run on a database you suspect is damaged.
 
 #### Retrieval (read path)
 
+Why retrieved memories come back vague, and what we propose to do about
+it, is written up in [memory-retrieval-fidelity.md](memory-retrieval-fidelity.md).
+
 `before_agent_turn` runs when the window tail is a plain user MESSAGE
 (notification-triggered turns skip retrieval entirely). The query is every
 unanswered user message in the window (`unanswered_user_messages`), joined
@@ -220,8 +227,28 @@ one message is just itself. The query is embedded and matched against `memory_ve
 (sqlite-vec exact KNN, cosine distance); candidates are filtered to
 `indexed=1 AND redacted=0`. There is no per-channel scope: records from
 every channel are candidates (PRD principle 14, #168), and
-[threat-model.md](threat-model.md) finding 15 records what that costs. Scores are
-`cosine_similarity × exp(-age_days / memory.half_life_days)`, where
+[threat-model.md](threat-model.md) finding 15 records what that costs.
+
+**Window exclusion (#634):** records that only echo the live window are
+left out. A record is excluded when it belongs to the current channel
+*and* its `msg_id_start` is at or past the oldest `message_log` id in the
+window (`min(window_db_ids(conv.messages))`), that is, its whole range is
+still in view. Both conditions matter: `message_log` ids are global, so an
+id test alone would hide other channels' recent records too. A record that
+straddles the window's oldest id is still admitted, so the part of it that
+compaction dropped stays recallable; a window with no ids excludes nothing.
+The exclusion is a `retrieve(..., exclude=(channel_id, min_msg_id))`
+argument applied in the candidate queries' `WHERE`, before the cut to k:
+the FTS5 path filters ahead of its `LIMIT`, and the KNN fetches `k × 4`
+plus a `COUNT(*)` of the excluded records, so in-window records can't take
+every slot. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
+and `search_memory` see everything. It is not a scope: other channels'
+records, and this channel's once their rows leave the window, are
+retrieved normally. Known limit: the bound assumes the window is a
+contiguous id suffix of the channel's log, which rows imported with old
+timestamps can break (#638).
+
+Scores are `cosine_similarity × exp(-age_days / memory.half_life_days)`, where
 `age_days` runs from `created_at`, or from `max(created_at,
 last_retrieved_at)` under `memory.retrieval.recency_from: last_used`.
 Candidates rank by score and are annotated into relevance bands (strong
@@ -272,7 +299,7 @@ the record is its private memory, not a message to anyone on the channel.
 `memory.consolidation_prompt` is removed: a config that still sets it logs a
 startup warning naming `memory.consolidation_fork_prompt`.
 
-Every record says how it was made (#299, PRD §3.7 Memory 2), in three
+Every record says how it was made (#299, #633, PRD §3.7 Memory 2), in four
 nullable `memory` columns:
 
 - `prompt_hash`: sha256 of the UTF-8 instruction text the call used. The
@@ -286,6 +313,13 @@ nullable `memory` columns:
   `ForkResult.model` from `LLMClient.request_model`, so it is NULL only for a
   row written without a model (a pre-stamp row, or a `ForkResult` built
   without one).
+- `trigger`: what started the consolidation, the value `_consolidate_range`
+  was called with: `compaction`, `idle`, or `eval` (`scripts/eval_memory.py`).
+  Catch-up is a path, not a trigger: a compaction or idle trigger that falls
+  through to the view call stores its own trigger, and its
+  `mode = standalone` already marks the view. `_commit` sets it, so every
+  consolidation path gets it. NULL for `direct` records and for rows
+  written before the column existed (#633).
 
 What each path stamps:
 
@@ -294,7 +328,7 @@ What each path stamps:
 | Fork of the live window (compaction or idle) | `fork` | `memory.consolidation_fork_prompt` | `ForkResult.model` |
 | Catch-up: the rebuilt view on the `consolidation` stage's profile | `standalone` | `memory.consolidation_fork_prompt` | `LLMClient.request_model` of that profile's client |
 | Raw-transcript fallback after two unusable replies | `standalone` | `memory.consolidation_fork_prompt` | as above (the call was sent; only its reply was unusable) |
-| `write_record` (goal retirement) | `direct` | none: `prompt_hash` NULL, no `memory_prompt` row | NULL |
+| `write_record` (goal retirement) | `direct` | none: `prompt_hash` NULL, no `memory_prompt` row | NULL (`trigger` NULL too) |
 
 Catch-up records written before the view was introduced carry the removed
 `memory.consolidation_prompt` as their stamp; they are not migrated, so the
@@ -309,8 +343,9 @@ agent's system prompt and window that frame a fork.
 A `direct` record was written by no consolidation call, so it has nothing
 to stamp but its mode; it lists apart from the unknown rows.
 
-Rows written before stamping have all three columns NULL, meaning
-"unknown". Opening an older database adds the columns in place
+Rows written before stamping have all the stamp columns NULL, meaning
+"unknown"; rows written between #299 and #633 read `trigger` NULL.
+Opening an older database adds the columns in place
 (`add_column_if_missing`) without rewriting any row; nothing backfills
 them.
 
@@ -349,8 +384,8 @@ FROM memory WHERE prompt_hash LIKE 'abcdef123456%';
 #### Schema
 
 `memory` (records, with `indexed`, `superseded_by`, `redacted`, and
-`embedded` columns, and the stamp columns `prompt_hash`, `mode` and
-`model`), `memory_prompt` (`hash`, `text`: each distinct instruction text
+`embedded` columns, and the stamp columns `prompt_hash`, `mode`,
+`model` and `trigger`), `memory_prompt` (`hash`, `text`: each distinct instruction text
 once), `consolidation_watermark`, `embedding_meta`,
 `memory_fts` (external-content FTS5 with insert/update sync triggers; no
 delete trigger — memory rows are never deleted), `memory_vec` (vec0,
@@ -373,8 +408,10 @@ point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
 
 1. **Dedupe** against CONTEXT already in the window.
 2. **Budget** per source (`funnel.default_budget`, default 512 tokens;
-   `funnel.budgets.<source>` overrides), greedy in given order, drops
-   logged rather than silent.
+   `funnel.budgets.<source>` overrides), in given order, skipping any
+   entry that would overrun what is left of the budget, so one large
+   entry never blocks smaller ones after it; drops logged rather than
+   silent.
 3. **Frame** every admitted batch in explicit data-not-instructions
    wrapping with a source label (injection defense, written once here).
 4. **Append + persist** one CONTEXT message at the tail through
@@ -386,7 +423,10 @@ funnel also owns deferred registration: non-tool-call notification
 payloads queue per `(channel, origin)` via `register_and_wake()`, one
 stub notification wakes the channel per pending pair, and the drain in
 `before_agent_turn` admits everything queued for the triggering
-exchange's origin. `register()` queues without a stub: those payloads wake
+exchange's origin. Entries the budget dropped stay queued for the next
+drain, except an entry larger than its source's whole budget: it can
+never fit, so the drain drops it with a warning that names the channel,
+the source and `funnel.budgets.<source>`. `register()` queues without a stub: those payloads wake
 nothing and are admitted at the channel's next turn, whatever its origin
 (user turns included), before the origin-matched drain.
 
@@ -413,7 +453,8 @@ Implements five hooks and two kernel timers:
   `compacted_ids` range above the per-channel watermark, using the stashed
   fork record when there is one for that range and watermark, else catch-up
   (after the drop the range has left the window).
-- `before_agent_turn` — embeds the inbound user text, scores candidates
+- `before_agent_turn` — embeds the inbound user text, leaves out this
+  channel's records still wholly in its window, scores candidates
   (`similarity × exp(-age_days / half_life)`, with age from `created_at` or,
   under `memory.retrieval.recency_from: last_used`, from the last
   retrieval), bands them (strong/moderate/weak, on the score or, under
@@ -485,7 +526,8 @@ Implements one hook:
 **Whole memory:** both tools span every channel's records, as passive
 retrieval does (PRD principle 14, #168); neither takes the calling channel
 into account, so neither declares `_ctx`. They reach further than passive
-retrieval in *status* (demoted, superseded, and redacted-tombstone records).
+retrieval in *status* (demoted, superseded, and redacted-tombstone records),
+and they don't apply passive retrieval's window exclusion (#634).
 `search_memory`'s optional `channel=` argument narrows to one channel's
 records by equality and is never treated as a pattern; an id nothing was
 written on simply matches nothing. `recall_raw` replays a record's raw range
@@ -910,7 +952,7 @@ SilencePlugin lets the agent end a turn without saying anything, on any channel,
 
 The test for staying quiet is Grice's: does the agent have anything true, relevant and worth saying to add? "thanks, night!" and "lol ok" fail it; a question passes. The decision is the model's, made in the turn, and it is driven by the system prompt rather than by a score: a channel only gets the option if its prompt says so.
 
-**The instruction.** The plugin wraps the kernel's `transform_system_prompt` hook. Once a channel's identity and register are composed, it adds a blank line and the paragraph below to the end, but only when the transport that owns the channel is conversational (`TransportPlugin.conversational`, true for IRC, Discord and Signal). ACP, web and the CLI are not, so they never hear about `NO_REPLY` and always answer; that is deliberate, because a request addressed to the agent in a task session should never go unanswered. (A model can still end a turn with an empty reply anywhere. The kernel leaves that unsent too, and it is recorded the same way.) The built-in text is `REGISTER_FRAGMENT` in `silence.py`; `silence.instruction` replaces it (inline, a file, or a list of files; read at startup, see [configuration.md](configuration.md#silence--the-right-to-silence)):
+**The instruction.** The plugin wraps the kernel's `transform_system_prompt` hook. Once a channel's identity and register are composed, it adds a blank line and the paragraph below to the end, but only when the transport that owns the channel is conversational (`TransportPlugin.conversational`, true for IRC, Discord, Signal and Zulip). ACP, web and the CLI are not, so they never hear about `NO_REPLY` and always answer; that is deliberate, because a request addressed to the agent in a task session should never go unanswered. (A model can still end a turn with an empty reply anywhere. The kernel leaves that unsent too, and it is recorded the same way.) The built-in text is `REGISTER_FRAGMENT` in `silence.py`; `silence.instruction` replaces it (inline, a file, or a list of files; read at startup, see [configuration.md](configuration.md#silence--the-right-to-silence)):
 
 ```
 You don't have to answer every message. Before replying, ask whether you have anything true, relevant and worth saying to add. When a conversation has wound down (thanks, goodnight, "lol ok", an acknowledgement that needs nothing back), stay silent: reply with exactly NO_REPLY and nothing else, and nothing is sent. If they wanted more, they'll say so. A question or request addressed to you still gets a real answer.

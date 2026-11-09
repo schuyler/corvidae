@@ -53,6 +53,7 @@ daemon:
   session_db: sessions.db           # SQLite path for conversation history
   # max_task_workers: 4             # concurrent background task workers
   # completed_task_buffer: 100      # completed tasks retained in memory
+  # task_results_path: task-results.jsonl  # persist results to JSONL (off by default; survives deque eviction + restart)
   # idle_cooldown_seconds, idle_poll_interval: removed; either one is a config
   # error. Idle work runs on the kernel clock, per plugin.
   # notification_spill_dir: state/notification-spill   # full text of cut notifications, mode 0600
@@ -178,6 +179,10 @@ agent:
 #   allow:                             # ACIs or E.164; default-deny
 #     - "+15551234567"
 #   message_chunk_size: 2000           # max UTF-8 bytes per outbound message
+#   attachment_dir: state/signal-attachments  # where inbound attachments are saved
+#   max_attachment_size: 10485760      # bytes, per file, in either direction
+#   send_attachment_root: state        # send_signal_attachment may only read under here;
+#                                      # signal-cli must be able to read it (docs/signal-ops.md)
 
 # Discord transport (optional — omit to disable Discord; see
 # docs/discord-ops.md for creating the bot and finding ids). In servers the
@@ -196,6 +201,23 @@ agent:
 #   attachment_dir: state/discord-attachments   # where inbound images are saved
 #   max_attachment_size: 10485760      # bytes, per file, in either direction
 #   send_attachment_root: state        # send_attachment may only read under here
+
+# Zulip transport (optional — omit to disable Zulip; see docs/zulip-ops.md for
+# creating the bot and finding ids). Needs Zulip 9.0+, no extra install. In
+# channels and group DMs the bot only answers a message that mentions it; 1:1 DMs
+# always reach it. Replies go to the topic of the latest allowed message that reached the agent.
+# zulip:
+#   site: https://chat.example.org     # scheme://host[:port], no path
+#   email: corvidae-bot@chat.example.org   # or set ZULIP_EMAIL
+#   api_key: "..."                     # or set ZULIP_API_KEY
+#   allow:                             # Zulip user ids (numeric); default-deny
+#     - 123
+#   require_mention: true              # false: answer allowed users without an @-mention
+#   channels:                          # per-channel override; the key is the
+#     "7":                             # stream id alone (digits, quoted or not)
+#       require_mention: false
+#   message_chunk_size: 10000          # max UTF-8 bytes per message, 100-10000
+#   default_topic: corvidae            # where a reply goes when no topic is known
 
 # Web transport: a browser chat UI (optional — omit to disable). Log in at
 # http://127.0.0.1:8765/?token=<token>. The token is shell access to this
@@ -279,6 +301,9 @@ agent:
 # logging:
 #   level: INFO                # DEBUG | INFO | WARNING | ERROR | CRITICAL
 #   file: corvidae.log         # log to file; omit for stderr (CLI defaults to file)
+#   jsonl:                     # caps for daemon.jsonl_log_dir transcripts and daemon.metrics_jsonl
+#     max_bytes: 10485760      # per file; 0 = never rotate
+#     backup_count: 5          # rotated files kept (x.jsonl.1 ... .N); 0 = keep none
 
 # MCP servers (optional) — tools from external Model Context Protocol servers
 # mcp:
@@ -306,7 +331,7 @@ agent:
 #
 # A channel's register_prompt (string, or list of file paths) is appended
 # after agent.system_prompt; no channel setting replaces the identity.
-# Signal, Discord and IRC ship default registers (chat-app norms); a
+# Signal, Discord, Zulip and IRC ship default registers (chat-app norms); a
 # register_prompt here replaces the default, and "" or [] switches it off.
 # agent.register_prompt, if set, replaces the defaults everywhere.
 channels:

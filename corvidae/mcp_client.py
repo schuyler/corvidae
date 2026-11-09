@@ -28,8 +28,10 @@ import asyncio
 import inspect
 import logging
 import math
+import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from corvidae.clock import Clock
 from corvidae.envref import EnvRefError, expand_env_refs
@@ -55,14 +57,254 @@ def _exc_type_names(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _leaf_exceptions(exc: BaseException) -> list[BaseException]:
+    """The exceptions at the bottom of a (possibly nested) exception group."""
+    if isinstance(exc, BaseExceptionGroup):
+        return [leaf for member in exc.exceptions for leaf in _leaf_exceptions(member)]
+    return [exc]
+
+
+def _is_connect_failure(exc: BaseException) -> bool:
+    """True when ``exc`` from a connect is a failed connect to skip and retry.
+
+    False means it must propagate. One rule serves ``on_start`` and
+    ``_retry_round`` so the two cannot drift apart (#596):
+
+    - An ``Exception`` is a failed connect.
+    - A ``CancelledError`` is a failed connect only when nobody is cancelling
+      this task; a cancel of the task itself is a shutdown (#385).
+    - A ``BaseExceptionGroup`` follows its leaves: any leaf that is neither an
+      ``Exception`` nor a ``CancelledError`` (``KeyboardInterrupt``,
+      ``SystemExit``) propagates, and a group of cancels is judged as a bare
+      cancel is. A group is not an ``Exception`` when a member is a
+      ``BaseException``, which is how it slipped past the old handlers.
+    """
+    if isinstance(exc, Exception):
+        return True
+    leaves = _leaf_exceptions(exc)
+    if any(not isinstance(leaf, (Exception, asyncio.CancelledError)) for leaf in leaves):
+        return False
+    task = asyncio.current_task()
+    return not (task is not None and task.cancelling())
+
+
+def _failure_log_parts(exc: BaseException, cfg: dict) -> tuple[str, bool]:
+    """How a connect-failure warning reports ``exc``: (message suffix, exc_info).
+
+    A server whose configured URL carries credentials (a userinfo or a query
+    string) gets no traceback: the HTTP client quotes the URL in its errors --
+    httpx2's ``HTTPStatusError`` reads ``Client error '401 …' for url
+    '<url>'`` -- so the rendered record would carry the secret (#386). The
+    warning instead ends with the exception's own text, every URL in it
+    redacted like the endpoint, which keeps the status the operator needs.
+
+    Any other server keeps its full traceback and no suffix. Never raises.
+    """
+    url = cfg.get("url")
+    credentialed = (
+        cfg.get("transport") != "stdio"
+        and isinstance(url, str)
+        and ("@" in url or "?" in url)
+    )
+    if not credentialed:
+        return "", True
+    return (
+        f": {_redact_urls_in_text(_exc_text(exc))} "
+        "(traceback omitted: the configured URL carries credentials)",
+        False,
+    )
+
+
+def _exc_text(exc: BaseException) -> str:
+    """An exception's message on one line, reading through exception groups
+    to the errors inside them, since a group's own text names none.
+
+    Never raises: it runs inside failure logging.
+    """
+    try:
+        if isinstance(exc, BaseExceptionGroup):
+            return "; ".join(_exc_text(e) for e in exc.exceptions)
+        return " ".join(str(exc).split())
+    except Exception:
+        # A __str__ that raises, or a pathologically deep group. The type is
+        # already in the warning, so a placeholder loses little.
+        logger.warning(
+            "could not read the text of %s for the MCP failure log",
+            type(exc).__name__,
+        )
+        return "(message unavailable)"
+
+
+def _redact_urls_in_text(text: str) -> str:
+    """``text`` with every URL in it reduced as ``_describe_string`` would.
+
+    This catches the configured URL in whatever form a library reports it --
+    httpx2 percent-encodes the URL it puts in an error, so ``token=SEC RET1``
+    arrives as ``token=SEC%20RET1`` and an exact-substring match would miss
+    it (#386 review). A URL that cannot be read is replaced entirely. Every
+    match contains "://", so ``_describe_string`` always redacts it rather
+    than echoing it.
+    """
+    return _URL_IN_TEXT.sub(lambda m: _describe_string(m.group(0)), text)
+
+
+# Every character ``str.splitlines`` treats as a line boundary, mapped to its
+# percent-encoded UTF-8 form. A logged URL must not carry one: a log viewer or
+# `grep` that splits on it would read one warning as two lines (#588).
+_LINE_BOUNDARY_ENCODING = {
+    ord(char): "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
+    for char in "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+}
+
+
+def _one_line(text: str) -> str:
+    """``text`` with every line-boundary character percent-encoded.
+
+    Encoded rather than dropped, so the operator can still see that the
+    configured value held an odd character. Never raises.
+    """
+    return text.translate(_LINE_BOUNDARY_ENCODING)
+
+
 def _server_endpoint(cfg: dict) -> str:
     """The server's command (stdio) or url (sse, streamable_http), for logs.
 
     Called from failure logging, so it must not raise: a retry-round config
     that fails validation may lack the key, and then the endpoint is "?".
+
+    An HTTP endpoint is logged without its credentials (#386). A server may
+    carry a token in its query string or a password in its userinfo, and this
+    runs on every failed connect and every retry, so logging the URL whole
+    would write that secret to the daemon log repeatedly. Scheme, host, port
+    and path survive, which is what tells an operator which endpoint failed;
+    a configured query is shown as "?…" so its presence is still visible.
     """
     key = "command" if cfg.get("transport") == "stdio" else "url"
-    return str(cfg.get(key, "?"))
+    if key == "command":
+        return _one_line(str(cfg.get(key, "?")))
+    # A config that failed validation may lack the key entirely; keep the
+    # historical "?" so the log still says the endpoint was unreadable.
+    if key not in cfg:
+        return "?"
+    value = cfg[key]
+    # A string with no credential marker (a schemeless `localhost:8080`) has
+    # no position a credential could occupy, and is the typo the operator
+    # must see, so it is shown as configured.
+    if isinstance(value, str) and value and not any(
+        marker in value for marker in _CREDENTIAL_MARKERS
+    ):
+        # Shown as configured, except for a line-boundary character (#588).
+        return _one_line(value)
+    return _redact_url(value)
+
+
+def _redact_url(value: object) -> str:
+    """A URL safe to log: scheme, host, port and path only.
+
+    Never raises. Redaction runs inside failure logging, so a value it cannot
+    parse becomes a constant rather than an exception that would replace the
+    failure being reported. Both call sites evaluate this *inside* an except
+    handler, so a raise here would escalate a failed connect into a startup
+    failure (#386 review).
+
+    Returns ``_UNPARSEABLE`` for anything that is not a URL the client could
+    use, which is also how callers tell a URL from other config values.
+    """
+    try:
+        parts = urlsplit(str(value))
+        # `hostname` and `port` raise ValueError on a malformed authority
+        # (`host:abc`, an out-of-range port), so they are read inside the try.
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return _UNPARSEABLE
+    # A value with no scheme is not a URL the client can use; logging it whole
+    # would put whatever it is into the log unredacted.
+    if not parts.scheme or not parts.netloc or not host:
+        return _UNPARSEABLE
+    # Drop userinfo by rebuilding netloc from host and port alone. An IPv6
+    # literal keeps its brackets, or the colons read as a port separator.
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    # A separator in the path or host must not put a second line in the log (#588).
+    return _one_line(
+        f"{parts.scheme}://{netloc}{parts.path}{'?…' if parts.query else ''}"
+    )
+
+
+def _describe_config_value(
+    value: object, secret_bearing: bool = False, _depth: int = 0
+) -> str:
+    """A rejected config value, in a form safe to put in a log line.
+
+    The invariant, rather than a list of shapes:
+
+        No string containing ``@``, ``?`` or ``://`` is echoed into a message.
+
+    Those three markers are userinfo, query and scheme -- the positions a
+    credential can occupy. A string without them holds nothing secret, and is
+    echoed because a wrong value is what tells the operator what to fix.
+
+    An earlier version enumerated shapes instead, and four review rounds each
+    found one it missed: a list, a bare string, a URL inside a container, and
+    a URL ``urlsplit`` rejects. The marker test is total, so a new shape
+    cannot defeat it (#386 review).
+
+    Containers are described element-wise, so the invariant holds wherever a
+    URL is nested, including as a dict key. ``secret_bearing`` marks the key
+    whose whole value is a credential by definition -- ``headers`` -- which is
+    summarised by type and size whatever shape it arrived in.
+
+    Never raises and never recurses without bound: this runs inside
+    config-error handling, so it must not replace the error it describes.
+    """
+    if _depth >= _MAX_DESCRIBE_DEPTH:
+        return f"{type(value).__name__} (nested too deeply to show)"
+    if secret_bearing and not isinstance(value, (int, float, bool, type(None))):
+        if isinstance(value, str):
+            return f"str of length {len(value)}"
+        return f"{type(value).__name__}"
+    if isinstance(value, str):
+        return _describe_string(value)
+    if isinstance(value, dict):
+        # A nested `headers` value is a credential wherever it sits -- a
+        # list-shaped server entry or `servers` block reaches it here rather
+        # than through the caller's own secret_bearing flag (#386 review).
+        inner = ", ".join(
+            f"{_describe_config_value(k, _depth=_depth + 1)}: "
+            f"{_describe_config_value(v, secret_bearing=k == 'headers', _depth=_depth + 1)}"
+            for k, v in list(value.items())[:4]
+        )
+        more = ", …" if len(value) > 4 else ""
+        return "{" + inner + more + "}"
+    if isinstance(value, (list, tuple)):
+        inner = ", ".join(
+            _describe_config_value(v, _depth=_depth + 1)
+            for v in list(value)[:4]
+        )
+        more = ", …" if len(value) > 4 else ""
+        return "[" + inner + more + "]"
+    # Anything else is described by type: a repr can hold a credential, and
+    # the key in the message is the actionable part.
+    if isinstance(value, (int, float, bool, type(None))):
+        return repr(value)
+    return type(value).__name__
+
+
+def _describe_string(value: str) -> str:
+    """A string for a log line: redacted if it could hold a credential.
+
+    See ``_describe_config_value`` for the invariant. A string with none of
+    the credential markers is returned as its repr, which is the diagnostic.
+    """
+    if not any(marker in value for marker in _CREDENTIAL_MARKERS):
+        return repr(value)
+    # It could hold a credential. A URL we can read keeps the parts that
+    # identify the endpoint; anything else is replaced entirely, because we
+    # cannot tell which part was the secret.
+    redacted = _redact_url(value)
+    return redacted if redacted != _UNPARSEABLE else "(credentials removed)"
 
 
 def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
@@ -84,13 +326,13 @@ def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
         except EnvRefError as exc:
             if exc.reason == "multiline":
                 raise McpHeaderEnvError(
-                    f"MCP server {name!r}: header {header!r} references "
+                    f"MCP server {name!r}: header {_describe_config_value(header)} references "
                     f"${{{exc.var}}}, whose value contains a newline or NUL "
                     f"(often a trailing newline); fix {exc.var} in the daemon's "
                     "environment and restart. Server skipped."
                 ) from None
             raise McpHeaderEnvError(
-                f"MCP server {name!r}: header {header!r} references "
+                f"MCP server {name!r}: header {_describe_config_value(header)} references "
                 f"${{{exc.var}}}, which is not set in the daemon's environment; "
                 f"set {exc.var} in the environment corvidae runs in and restart. "
                 "Server skipped."
@@ -107,6 +349,22 @@ _CANCEL_GRACE_SECONDS = 0.3
 
 # Transports a server config may name.
 _TRANSPORTS = ("stdio", "sse", "streamable_http")
+# What _redact_url returns for a value it cannot read as a URL. Also how
+# callers tell a URL-shaped config value from any other kind.
+_UNPARSEABLE = "(unparseable endpoint)"
+# How deep _describe_config_value will descend before summarising. Config
+# nesting is shallow; the bound exists so a pathological value cannot raise
+# RecursionError inside config-error handling.
+_MAX_DESCRIBE_DEPTH = 8
+# The positions a credential can occupy in a string: userinfo, query, scheme.
+# A string with none of these is safe to echo.
+_CREDENTIAL_MARKERS = ("@", "?", "://")
+# A URL inside free text such as an exception message: a scheme, "://", and
+# everything up to whitespace or a quote/bracket that commonly delimits it.
+# The lookbehind starts a match only at the start of a scheme-character run;
+# without it a long run with no "://" backtracks quadratically (100k chars
+# took ~7 s on the event loop).
+_URL_IN_TEXT = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
 # Reconnect backoff ladder for servers that failed at startup; the same
 # 10 s doubling to 300 s as the IRC, Signal and Discord transports.
 _INITIAL_BACKOFF = 10
@@ -136,12 +394,14 @@ def _as_seconds(name: str, cfg: dict, key: str) -> float:
         seconds = float(value)
     except (TypeError, ValueError):
         raise ValueError(
-            f"mcp.servers.{name}.{key} must be a number, got {value!r}"
+            f"mcp.servers.{name}.{key} must be a number, got "
+            f"{_describe_config_value(value)}"
         ) from None
     # A non-finite number would never time out or always fail.
     if not math.isfinite(seconds):
         raise ValueError(
-            f"mcp.servers.{name}.{key} must be a finite number, got {value!r}"
+            f"mcp.servers.{name}.{key} must be a finite number, got "
+            f"{_describe_config_value(value)}"
         )
     return seconds
 
@@ -161,7 +421,8 @@ def validate_mcp_config(config: dict) -> dict:
         return {}
     if not isinstance(block, dict):
         raise ValueError(
-            f"mcp must be a mapping with a servers key, got {block!r}"
+            "mcp must be a mapping with a servers key, got "
+            f"{_describe_config_value(block)}"
         )
     # servers: null configures nothing; otherwise a mapping of name to entry.
     servers = block.get("servers")
@@ -170,7 +431,7 @@ def validate_mcp_config(config: dict) -> dict:
     if not isinstance(servers, dict):
         raise ValueError(
             f"mcp.servers must be a mapping of server names to settings, "
-            f"got {servers!r}"
+            f"got {_describe_config_value(servers)}"
         )
     return servers
 
@@ -188,14 +449,16 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
     # A non-mapping server entry (e.g. `a: null`) has no keys to read.
     if not isinstance(cfg, dict):
         raise ValueError(
-            f"mcp.servers.{name} must be a mapping, got {cfg!r}; "
+            f"mcp.servers.{name} must be a mapping, got "
+            f"{_describe_config_value(cfg)}; "
             f"give it transport and command/url keys"
         )
     transport = cfg["transport"]
     # An unknown transport can never connect.
     if transport not in _TRANSPORTS:
         raise ValueError(
-            f"unknown transport {transport!r} for MCP server {name!r}; "
+            f"unknown transport {_describe_config_value(transport)} "
+            f"for MCP server {name!r}; "
             f"set mcp.servers.{name}.transport to one of {', '.join(_TRANSPORTS)}"
         )
     # Each transport needs its endpoint key (KeyError names it), as a string.
@@ -204,7 +467,7 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
     if not isinstance(endpoint, str) or not endpoint:
         raise ValueError(
             f"mcp.servers.{name}.{endpoint_key} must be a non-empty string, "
-            f"got {endpoint!r}"
+            f"got {_describe_config_value(endpoint)}"
         )
     # args is a list of strings and env a mapping; the SDK rejects anything
     # else at connect time, which would be retried forever.
@@ -213,13 +476,14 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
         not isinstance(args, list) or not all(isinstance(a, str) for a in args)
     ):
         raise ValueError(
-            f"mcp.servers.{name}.args must be a list of strings, got {args!r}"
+            f"mcp.servers.{name}.args must be a list of strings, got "
+            f"{_describe_config_value(args)}"
         )
     env = cfg.get("env")
     if env is not None and not isinstance(env, dict):
         raise ValueError(
             f"mcp.servers.{name}.env must be a mapping of variable names "
-            f"to values, got {env!r}"
+            f"to values, got {_describe_config_value(env)}"
         )
     prefix = cfg.get("tool_prefix", name)
     timeout = _as_seconds(name, cfg, "timeout_seconds")
@@ -235,7 +499,7 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
     if raw_headers is not None and not isinstance(raw_headers, dict):
         raise ValueError(
             f"mcp.servers.{name}.headers must be a mapping of header names "
-            f"to values, got {raw_headers!r}"
+            f"to values, got {_describe_config_value(raw_headers, secret_bearing=True)}"
         )
     # Resolve ${VAR} references: a missing variable raises McpHeaderEnvError.
     headers = _resolve_headers(name, cfg.get("headers"))
@@ -367,31 +631,32 @@ class McpClientPlugin(CorvidaePlugin):
                     continue
                 try:
                     await self._connect_server(server_name, server_cfg)
-                except (Exception, asyncio.CancelledError) as exc:
-                    # A real cancel (shutdown) goes to the outer handler. A
-                    # cancel with no one cancelling this task is a failed
-                    # connect that surfaced as CancelledError (#385).
-                    if (
-                        isinstance(exc, asyncio.CancelledError)
-                        and asyncio.current_task().cancelling()
-                    ):
+                except BaseException as exc:
+                    # A real cancel (shutdown), bare or wrapped in a group,
+                    # goes to the outer handler. A cancel with no one
+                    # cancelling this task is a failed connect that surfaced
+                    # as CancelledError (#385), alone or in a group (#596).
+                    if not _is_connect_failure(exc):
                         raise
+                    detail, with_traceback = _failure_log_parts(exc, server_cfg)
                     logger.warning(
-                        "MCP server %r (%s) failed to connect (%s), skipping",
+                        "MCP server %r (%s) failed to connect (%s), skipping%s; "
+                        "the background retry will try again",
                         server_name, _server_endpoint(server_cfg),
-                        _exc_type_names(exc),
+                        _exc_type_names(exc), detail,
                         extra={"server": server_name},
-                        exc_info=True,
+                        exc_info=with_traceback,
                     )
                 # A server that did not register (exception or timeout) is
                 # kept for the retry loop rather than skipped for the
                 # process lifetime.
                 if not any(server.name == server_name for server in self._servers):
                     self._pending_servers[server_name] = server_cfg
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, BaseExceptionGroup):
             # Interrupted mid-connect: the servers already connected have
             # owner tasks that nothing else will stop, so close them before
-            # the cancellation continues.
+            # the cancellation continues. A group reaches here only when the
+            # inner handler decided it must propagate (#596).
             await self._stop_owners()
             raise
 
@@ -551,25 +816,25 @@ class McpClientPlugin(CorvidaePlugin):
                 continue
             try:
                 await self._connect_server(name, cfg)
-            except (Exception, asyncio.CancelledError) as exc:
+            except BaseException as exc:
                 # A real cancel propagates; a cancel with no one cancelling
                 # this task is a failed connect surfacing as CancelledError
-                # (#385) and is handled like any other connect failure.
-                if (
-                    isinstance(exc, asyncio.CancelledError)
-                    and asyncio.current_task().cancelling()
-                ):
+                # (#385), alone or in a group (#596), and is handled like any
+                # other connect failure.
+                if not _is_connect_failure(exc):
                     raise
                 # The loop knows its next delay; a tool-call retry does not.
                 when = (
                     f"retrying in {self._next_delay:g}s" if from_loop
                     else "the background retry will try again"
                 )
+                detail, with_traceback = _failure_log_parts(exc, cfg)
                 logger.warning(
-                    "MCP server %r (%s) reconnect failed (%s); %s",
-                    name, _server_endpoint(cfg), _exc_type_names(exc), when,
+                    "MCP server %r (%s) reconnect failed (%s)%s; %s",
+                    name, _server_endpoint(cfg), _exc_type_names(exc), detail,
+                    when,
                     extra={"server": name},
-                    exc_info=True,
+                    exc_info=with_traceback,
                 )
                 continue
             if any(server.name == name for server in self._servers):

@@ -42,30 +42,73 @@ from corvidae.tool_collection import parse_tool_timeouts
 
 logger = logging.getLogger(__name__)
 
-def _changed_leaf_keys(old: dict, new: dict, prefix: str = "") -> set[str]:
-    """Dotted leaf keys whose value differs between two config dicts.
+#: A key absent from a config. Distinct from a stored None, and distinct from
+#: `_UNREPORTED` below: conflating the two silently suppressed the warning for
+#: any key that was deleted, because an absent value compared equal to the
+#: "never reported" default (#473).
+_ABSENT = object()
 
-    A whole subtree appearing or disappearing reports each leaf under it
-    rather than the subtree name, so the warning names something the operator
-    can act on.
+#: No value has been reported for this key yet.
+_UNREPORTED = object()
+
+
+def _leaf_value(config: object, path: tuple[object, ...]) -> object:
+    """The value at ``path`` (key names, outermost first), or ``_ABSENT``.
+
+    The path is walked by key name rather than by re-splitting a dotted
+    string: a key name may itself contain a dot (`llm.qwen3.6.model`), and
+    splitting turned such a key into a path that never resolved, so its
+    changes were never reported (#473).
     """
-    changed: set[str] = set()
+    current: object = config
+    for part in path:
+        if not isinstance(current, dict) or part not in current:
+            return _ABSENT
+        current = current[part]
+    return current
+
+
+def _dotted(path: tuple[object, ...]) -> str:
+    """A key path as the dotted name the warning names.
+
+    Path tuples keep the keys as they were written, which may include a type
+    YAML chose (`1`, `true`); the message needs a string, and sorting needs a
+    key that compares across types.
+    """
+    return ".".join(str(part) for part in path)
+
+
+def _changed_leaf_keys(
+    old: dict, new: dict, prefix: tuple[object, ...] = ()
+) -> set[tuple[object, ...]]:
+    """Leaf key paths whose value differs between two config dicts.
+
+    Paths are tuples of the keys themselves, so a dotted key name survives
+    intact and a key YAML typed as a non-string still resolves. Stringifying
+    here turned such a key into a name the lookup could never find, so every
+    later comparison read `_ABSENT` and the change was suppressed (review). A
+    whole subtree appearing or disappearing reports each leaf under it rather
+    than the subtree name, so the warning names something the operator can act
+    on.
+    """
+    changed: set[tuple[object, ...]] = set()
     for key in set(old) | set(new):
-        dotted = f"{prefix}.{key}" if prefix else str(key)
+        path = (*prefix, key)
         in_old, in_new = key in old, key in new
         if in_old and in_new:
             a, b = old[key], new[key]
             if isinstance(a, dict) and isinstance(b, dict):
-                changed |= _changed_leaf_keys(a, b, dotted)
+                changed |= _changed_leaf_keys(a, b, path)
             elif a != b:
-                changed.add(dotted)
+                changed.add(path)
         else:
             value = new[key] if in_new else old[key]
             if isinstance(value, dict):
-                changed |= _changed_leaf_keys({} if in_new else value,
-                                              value if in_new else {}, dotted)
+                changed |= _changed_leaf_keys(
+                    {} if in_new else value, value if in_new else {}, path
+                )
             else:
-                changed.add(dotted)
+                changed.add(path)
     return changed
 
 
@@ -314,27 +357,49 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         Without this a restart-only edit is silent: the reload reports the
         plugins it did update, and the operator learns the change was pending
         only by noticing behaviour never changed (#408).
-        """
-        # Compare against the last config this watcher saw, not against the
-        # startup config: otherwise reload N re-reports every key reload 1
-        # changed, forever. `self.config` is set once in on_init and never
-        # advances, so it is only the seed for this.
-        live = self._reloadable_prefixes()
-        previous = getattr(self, "_last_config", None)
-        if not isinstance(previous, dict):
-            previous = self.config if isinstance(getattr(self, "config", None), dict) else {}
-        self._last_config = new_config
 
-        for key in sorted(_changed_leaf_keys(previous, new_config)):
-            if key.startswith("_") or any(
-                key == p or key.startswith(p + ".") for p in live
+        The comparison is against the config the running daemon is using
+        (`self.config`, set once in on_init and never advanced), because the
+        warning claims what a restart would change. Diffing against the
+        previous reload reported a key edited back to its running value as
+        pending, when the file and the process already agreed (#473).
+
+        A key whose pending value is unchanged from the last report is not
+        reported again, so a parked file does not warn on every poll. The
+        record is rebuilt each pass, so a key that reverts is forgotten and a
+        later edit to it is news again.
+        """
+        # Each declared prefix as its own key segments. A changed key is
+        # matched on its path, never on a re-joined dotted string: a key whose
+        # *name* contains a dot ("agent.forks") joins to the same string as a
+        # nested path and was mistaken for it (#591).
+        live = [tuple(prefix.split(".")) for prefix in self._reloadable_prefixes()]
+        running = self.config if isinstance(getattr(self, "config", None), dict) else {}
+        reported = getattr(self, "_reported_pending", None)
+        if not isinstance(reported, dict):
+            reported = {}
+        still_pending: dict[tuple[object, ...], object] = {}
+
+        for path in sorted(_changed_leaf_keys(running, new_config), key=_dotted):
+            dotted = _dotted(path)
+            if dotted.startswith("_") or any(
+                tuple(map(str, path[: len(prefix)])) == prefix for prefix in live
             ):
                 continue
-            logger.warning(
-                "config reload: %s changed; restart-only, takes effect on restart",
-                key,
-                extra={"key": key},
-            )
+            # `_ABSENT` here means the key was deleted; `_UNREPORTED` means
+            # nothing was reported for it yet. They must differ, or a deletion
+            # compares equal to the default and is silently never reported.
+            value = _leaf_value(new_config, path)
+            if reported.get(path, _UNREPORTED) != value:
+                logger.warning(
+                    "config reload: %s changed; restart-only, takes effect "
+                    "on restart",
+                    dotted,
+                    extra={"key": dotted},
+                )
+            still_pending[path] = value
+
+        self._reported_pending = still_pending
 
     async def _dispatch_config_reload(self, config: dict) -> None:
         """Dispatch on_config_reload to each plugin with per-plugin error isolation.

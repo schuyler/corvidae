@@ -13,8 +13,8 @@ says so. Within that model it does several things right: Signal is
 default-deny with silent refusal, retrieved context is framed as data, tool
 `_ctx` is hidden from the model, SQL is parameterized, signal-cli is pinned
 and signature-verified, and the docs are candid about plaintext at rest.
-The Discord transport follows Signal's model: default-deny, silent refusal,
-and outbound mentions disabled. The web transport binds loopback by
+The Discord and Zulip transports follow Signal's model: default-deny, silent
+refusal, and outbound mentions disabled. The web transport binds loopback by
 default, needs a token that can't be turned off, and renders model output
 through DOMPurify under a strict CSP.
 
@@ -39,6 +39,9 @@ them:
   a channel other people can read (with `discord.require_mention: false`,
   or a `discord.channels` entry setting it false for that channel, every
   message that user posts there),
+  every Zulip message that mentions the bot from an allowlisted
+  user in a channel other people can read (with `zulip.require_mention:
+  false`, or a `zulip.channels` entry, every message that user posts there),
   every webhook payload,
   every web page `web_fetch` returns, every DuckDuckGo snippet, every MCP
   tool description and result, and every memory distilled from any of the
@@ -74,16 +77,31 @@ Assets, roughly in order of how bad it is to lose them:
    Developer Portal), which the Signal identity is not. The web token
    (`web.token` or `CORVIDAE_WEB_TOKEN`, or the generated one in the
    daemon log) and its session cookie are a third: whoever holds either
-   one drives the agent, tools and all. Changing the token revokes it.
+   one drives the agent, tools and all. Changing the token revokes it. The
+   Zulip bot's API key (`zulip.api_key` or `ZULIP_API_KEY`) is the same
+   kind of asset as the Discord token: whoever holds it is the bot, it sits
+   where `read_file` and `shell` can reach it, and it is revocable (regenerate
+   it on the bot's Zulip settings page). It is never logged.
    An MCP server's bearer token, passed through `${VAR}` in
    `mcp.servers.<name>.headers`, is a fourth: it lives in the daemon's
    environment, which `shell` can read (`env`, `/proc/self/environ`), and
-   grants whatever that server grants.
+   grants whatever that server grants. A credential embedded in a server's
+   `url` instead — a query-string token or a `user:pass@` userinfo — stays
+   out of the MCP connect-failure and retry warnings and the MCP
+   config-error messages: the two warnings name only the endpoint's scheme,
+   host, port and path, and for such a server they carry the exception's
+   text with every URL in it reduced the same way instead of its traceback
+   (an HTTP client quotes the URL in its errors); a config-error skip
+   describes a rejected value likewise (#386). Library loggers — the MCP
+   SDK's `mcp.*` and the HTTP client's `httpx2` — are not filtered and can
+   write the URL whole (at the default WARNING level only `mcp.*` errors
+   do), so prefer a `${VAR}` header to a credential in the URL.
 2. The host account corvidae runs as, and anything it can read or run.
 3. `sessions.db`, the JSONL logs, and the memory tables: plaintext copies
    of every conversation, including end-to-end-encrypted Signal ones.
    Discord conversations are not end-to-end encrypted to begin with:
-   Discord the company can read them whatever corvidae does.
+   Discord the company can read them whatever corvidae does, and so can the
+   Zulip server's operator.
    The daemon log belongs here too: an anomalous model response (a reply
    cut off mid-reasoning, or one that reopens reasoning after its answer)
    can be logged at warning level with its text, and that text can carry
@@ -110,6 +128,18 @@ Adversaries:
   misconfigured allowlist from a quiet channel. The prompt's `addressed: yes`
   comes from Discord's structured mention list, not the message text, so typing
   "@corvidae" cannot set it; the mention token is still stripped from the text.
+- **Anyone in a Zulip organisation the bot belongs to**, who can @-mention it
+  in a channel it is subscribed to, and anyone Zulip lets DM it. The allowlist
+  refuses them silently, as for Discord. A message that does not mention the
+  bot in a mention-only channel is dropped before the kernel sees it, and the
+  DEBUG line recording the drop names the sender's user id. The prompt's
+  `addressed: yes` comes from the server's `mentioned` flag, not the message
+  text (the flag is also set by a user-group mention, so a group the bot is in
+  can address it). Several strings an attacker chooses reach the prompt header
+  as transport-supplied names, never as instructions: the **topic** (anyone who
+  can post can title it), the **channel name**, the sender's display name and,
+  for a group DM, the other members' names. All are framed as data like every
+  other name (PRD §3.3.11).
 - **Anyone who can reach the web listener**, if it's bound beyond
   loopback, and anyone who gets the token or cookie; also any web page
   open in the operator's browser, which can try cross-site requests. See
@@ -120,7 +150,7 @@ Adversaries:
   reads.
 - **An MCP server**, via its tool descriptions and results.
 - **Anyone who can read a room the bot speaks in** without being
-  allowlisted: a Discord guild channel, a public IRC channel. They can't
+  allowlisted: a Discord guild channel, a public Zulip channel, a public IRC channel. They can't
   drive the agent, but they read its replies, and with one identity
   across channels those replies can carry what it knows from elsewhere
   (finding 15).
@@ -405,8 +435,8 @@ someone's nick is not enough. Residual risks:
 - **Upgrade.** A deployment that used IRC goes silent until `irc.allow` is
   set; startup logs a WARNING saying so.
 
-IRC, Signal and Discord all check the allowlist before resolving the
-channel, so a refused sender leaves no registry entry (#77, #103, #274).
+IRC, Signal, Discord and Zulip all check the allowlist before resolving the
+channel, so a refused sender leaves no registry entry (#77, #103, #274, #640).
 
 Partial mitigation (#149): `channels.<id>.tools.disabled` takes the
 dangerous tools off an IRC channel the operator configures, for example
@@ -453,6 +483,34 @@ Three more things to know:
   transport can ever be made to see, though it is a Discord-side limit
   and not a corvidae one. `discord.require_mention: false` requests the
   intent and removes it.
+
+Zulip is built like Discord. The transport's `should_process_message` is a
+default-deny allowlist of numeric user ids (never emails or names, which
+change); an empty list refuses everyone, and a refusal is one INFO line with no
+reply and no typing notice. A public channel's readers can all @-mention the
+bot, and what stops them is only that allowlist. Four more things to know:
+
+- **Allowed users in a shared channel are an injection path**, for the reason
+  given for Discord: the channel's history is one conversation, and what an
+  allowed user pastes in is untrusted content. In Zulip that history spans
+  every topic of the channel, because a topic is a name people can rename and
+  so is not part of the channel's id (PRD principle 10): text from one topic
+  is in the window while the agent answers another. The agent answers only when
+  mentioned (directly, or through a user group it belongs to) and records only
+  those messages; with `zulip.require_mention: false`, globally or in a
+  `zulip.channels` entry, it records all of an allowed user's messages there.
+- **Outbound mentions are defused.** Zulip has no allowed-mentions switch. A
+  reply containing `@**all**` would page the whole channel, so every send puts
+  a zero-width space between `@` and `*`, which stops Zulip parsing a mention.
+  This closes the ping, not the content: the reply is still visible to
+  everyone who can read the channel, including anything the model was tricked
+  into leaking. Silent mentions (`@_**Name**`) pass through because they
+  notify no one.
+- **The reply topic comes only from allowed senders.** Where the agent answers
+  is the topic of the newest allowed message, so a stranger who posts under
+  another topic cannot move the reply or relabel the channel to the model.
+- **Plain `http://`** to a non-loopback `zulip.site` sends the API key and every
+  message in the clear; startup logs a WARNING naming the site.
 
 ### 6. MCP servers are trusted peers
 
@@ -535,20 +593,45 @@ prompt is framed as the operator's. It is hot-reloaded, so it joins the
 just at the next restart. The mitigation is the one finding 4 already
 gives: keep `agent.yaml` unwritable by the daemon user.
 
-`discord.send_attachment` (issue #521) is the first tool that sends to a
-channel the model chooses: `channel_id` is an argument, and the file comes
-from anywhere under `discord.send_attachment_root`, which defaults to the
-working directory — `agent.yaml` and its tokens included. Text from a fetched
-page or an MCP result can therefore turn into a file upload on any channel
-already in the registry, and the file's contents never appear in the
-transcript. Two soft mitigations today: the root is configurable, and the
-upload names the file. Neither is a boundary, because `shell` and `read_file`
-are unjailed already; the meaningful control is the allowlist of who can
-reach a turn at all. Narrowing the default root, or taking the calling
-channel unless a turn explicitly overrides it, is the structural fix and is
-not done.
+`discord.send_attachment` (issue #521) and `send_signal_attachment` (issue
+#544) are the first tools that send a *file* to a channel the model chooses
+(the cross-channel `send_message` of #234 also takes a model-chosen channel,
+but it hands an instruction to the agent's own context, not a message to the
+person): `channel_id` is an argument, and the file comes from under
+`discord.send_attachment_root` or `signal.send_attachment_root`, each `state`
+by default, relative to the working directory. `state/` holds what corvidae
+writes there, among other things downloaded attachments and spilled
+notification content; an operator who widens a root to the working directory
+puts `agent.yaml` and its tokens in reach. Text from a fetched page or an MCP
+result can therefore turn into a file upload on any channel already in the
+registry, and the file's contents never appear in the transcript. Neither tool
+checks the inbound allowlist: registry membership is the whole gate. For
+Signal a channel is in the registry, for example, when an allowlisted sender has written
+since the last start, when it is listed under `channels:`, or when a reminder
+or scheduler job has resolved it since the start, so the reach is the contacts
+the operator or the allowlist has already put there, and (as PRD §3.5.9 says)
+nothing narrows it further. The Signal tool reads the file itself and sends signal-cli
+its bytes as a data URI, so the daemon never sees the path. Two soft mitigations today: the root is
+configurable, and the upload names the file. Neither is a boundary, because
+`shell` and `read_file` are unjailed already; the meaningful control is the
+allowlist of who can reach a turn at all. Taking the calling channel unless a
+turn explicitly overrides it is the structural fix and is not done.
 
-No tool sends a *message* to another channel yet. PRD §3.5.9 now requires one, with no
+`discord.start_thread` (#593) is the first transport tool that creates the
+place a message will land in rather than choosing one: it starts a public
+thread on a channel already in the registry, registers the new thread as a
+channel, and may post the thread's first message. The reach is the same as
+`discord.send_attachment` — registry membership, no inbound-allowlist check —
+with one addition worth naming: a thread is a new scope, so it is a new
+`transport:scope` key in `sessions.db`, the jsonl logs and memory. Text from a
+fetched page can therefore make the agent create conversation contexts, not
+only messages, and each one persists a history. The thread is public and its
+name is generated text, so it also appears in the channel's thread list to
+everyone who can read the channel. Deleting a thread is not offered, so an
+agent that creates them in a loop leaves them; Discord archives them instead.
+
+No tool sends a *message* to the person on another channel yet (the
+cross-channel `send_message` of #234 queues a turn there instead). PRD §3.5.9 now requires one, with no
 allowlist of target channels: any turn may speak on any channel (#234).
 Finding 15 is its entry. PRD §3.9.7 also lets the agent set recurring
 reminders, which the tree doesn't yet: a recurring reminder set because of
@@ -1027,6 +1110,18 @@ decision (2026-11-01), and these are its costs.
   **Without it, this gap is accepted:**
   keep the agent out of rooms where people you haven't allowed can read it,
   or accept that anything it knows can surface there.
+- **Background task results are channel-blind.** `task_status` already shows
+  every channel's active, pending and completed tasks, and `task_result`
+  (PR #594) returns any channel's persisted result *body* by task id — with
+  no channel check — and, when `daemon.task_results_path` is set, across a
+  restart (the JSONL audit file outlives the 100-entry in-memory deque). A
+  task started on a private channel (a Signal contact's request) leaves a
+  result that a turn on a public channel can read by id and surface. This is
+  the first bullet's gap (what the agent knows can surface anywhere) applied
+  to the task side channel, plus a persistence leg. The operator control is
+  the same as the first bullet: keep the agent out of rooms where disallowed
+  readers can read it, or leave `daemon.task_results_path` unset so results
+  are gone with the deque.
 - **Text from one channel can steer action on every other.** A web page,
   an MCP result or a distilled memory read on one channel can make the
   model message any contact, send another channel's context a note, or
@@ -1164,7 +1259,7 @@ it.
 - `read_file` has a stat-then-read race and follows symlinks. Irrelevant
   while finding 4 stands.
 - `tools.max_file_read_bytes` bounds only an unranged `read_file`; a read
-  with `offset` or `length` reaches any part of a file of any size, a page
+  with `offset`, `length`, `start_line` or `end_line` reaches any part of a file of any size, a page
   at a time. It is a context-size guard, not an access control.
 - Tool arguments are not validated against the generated schema. Wrong
   types produce a generic "tool failed". Robustness, not security.
@@ -1344,9 +1439,11 @@ embedded scripts and the agent has no safe renderer for them.
 The attachment id is restricted to `[A-Za-z0-9._-]` before use in a filename;
 ids with any other character refuse the download. The file extension comes
 from a MIME-to-extension map first, then from `safe_suffix()` (fullmatch,
-lowercased, 1–10 chars) on the sender-supplied filename or id. The extension
-is passed to `save_attachment` as a separate parameter, not embedded in the
-stem.
+lowercased, 1–10 chars) on the sender-supplied filename; an id that already
+ends in an extension keeps it through the file name. The extension is passed
+to `save_attachment` as a separate parameter, not embedded in the stem.
+`save_attachment` enforces `max_attachment_size` and refuses a path that
+resolves outside the attachment directory.
 
 The MIME type is sender-controlled and treated as a labelling convenience,
 not a security boundary. No content sniffing is performed. A sender can label

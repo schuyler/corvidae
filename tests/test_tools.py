@@ -1,6 +1,5 @@
-"""Tests for corvidae.tools — CoreToolsPlugin and its four tool functions.
-
-All tests are expected to FAIL until corvidae/tools.py is implemented.
+"""Tests for corvidae.tools — the built-in tool plugins (ShellToolPlugin,
+FileToolsPlugin, WebToolsPlugin) and their tool functions.
 """
 
 import asyncio
@@ -10,8 +9,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# The import under test — will raise ImportError until the file exists.
-from corvidae.tools import CoreToolsPlugin, read_file, shell, web_fetch, write_file, web_search
+# The plugins and raw tool functions under test.
+from corvidae.tools import (
+    FileToolsPlugin,
+    ShellToolPlugin,
+    WebToolsPlugin,
+    read_file,
+    shell,
+    web_fetch,
+    web_search,
+    write_file,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +101,7 @@ async def _ranged_read_file(tools_config: dict | None = None, daemon: dict | Non
     Ranged calls look up the "tools" plugin for max_result_chars, and every
     call looks up the "spill" service for the stale-pointer check, so this
     builds a real plugin manager with the tools, the spill service on a
-    FakeClock, and CoreToolsPlugin registered, and the tool registry built.
+    FakeClock, and FileToolsPlugin registered, and the tool registry built.
     ``daemon`` is the config's daemon section (the spill keys).
     """
     from corvidae.hooks import create_plugin_manager
@@ -110,11 +118,11 @@ async def _ranged_read_file(tools_config: dict | None = None, daemon: dict | Non
     pm.register(spill, name="spill")
     await collection.on_init(pm=pm, config=config)
     await spill.on_init(pm=pm, config=config)
-    core = CoreToolsPlugin(pm)
-    pm.register(core, name="core_tools")
-    await core.on_init(pm=pm, config=config)
+    files = FileToolsPlugin(pm)
+    pm.register(files, name="file_tools")
+    await files.on_init(pm=pm, config=config)
     await collection.rebuild_registry()
-    return _tool_fns(core)["read_file"], collection
+    return _tool_fns(files)["read_file"], collection
 
 
 class TestReadFileRange:
@@ -130,7 +138,7 @@ class TestReadFileRange:
         """R1: the schema lists offset and length as nullable integers."""
         from corvidae.tool import Tool
         registry: list = []
-        CoreToolsPlugin(None).register_tools(tool_registry=registry)
+        FileToolsPlugin(None).register_tools(tool_registry=registry)
         tool = next(t for t in registry if isinstance(t, Tool) and t.name == "read_file")
         props = tool.schema["function"]["parameters"]["properties"]
         nullable_int = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
@@ -227,6 +235,112 @@ class TestReadFileRange:
 
 
 # ---------------------------------------------------------------------------
+# TestReadFileLines — line range on read_file (#573)
+# ---------------------------------------------------------------------------
+
+# A line-ranged header: first, last, total lines, then the next start line or EOF.
+_LINE_HEADER = re.compile(
+    r"^\[lines (\d+)-(\d+) of (\d+) in (.+?); (?:next start_line (\d+)|end of file)\]\n"
+)
+
+
+class TestReadFileLines:
+    def test_schema_exposes_nullable_start_line_and_end_line(self):
+        from corvidae.tool import Tool
+        registry: list = []
+        FileToolsPlugin(None).register_tools(tool_registry=registry)
+        tool = next(t for t in registry if isinstance(t, Tool) and t.name == "read_file")
+        props = tool.schema["function"]["parameters"]["properties"]
+        nullable_int = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+        assert props["start_line"] == props["end_line"] == nullable_int
+
+    async def test_ranges_are_one_based_inclusive_and_name_lines_total_and_next(self, tmp_path):
+        f = tmp_path / "four.txt"
+        f.write_text("a\nb\nc\nd\n")
+        fn, _ = await _ranged_read_file()
+        assert await fn(str(f), start_line=2, end_line=3) == (
+            f"[lines 2-3 of 4 in {f}; next start_line 4]\nb\nc\n"
+        )
+        # An open end reads to the last line; an end past the file is clamped to it.
+        assert await fn(str(f), start_line=3) == f"[lines 3-4 of 4 in {f}; end of file]\nc\nd\n"
+        assert await fn(str(f), start_line=4, end_line=99) == f"[lines 4-4 of 4 in {f}; end of file]\nd\n"
+        # An open start begins at line 1.
+        assert await fn(str(f), end_line=1) == f"[lines 1-1 of 4 in {f}; next start_line 2]\na\n"
+
+    async def test_an_unterminated_last_line_counts_as_a_line(self, tmp_path):
+        f = tmp_path / "tail.txt"
+        f.write_text("a\nb")
+        fn, _ = await _ranged_read_file()
+        assert await fn(str(f), start_line=2) == f"[lines 2-2 of 2 in {f}; end of file]\nb"
+
+    async def test_a_line_range_cannot_be_combined_with_a_character_range(self, tmp_path):
+        f = tmp_path / "x.txt"
+        f.write_text("a\nb\n")
+        fn, _ = await _ranged_read_file()
+        result = await fn(str(f), start_line=1, offset=0)
+        assert result.startswith("Error:") and str(f) in result and "not both" in result
+        assert all(name in result for name in ("start_line", "end_line", "offset", "length"))
+
+    @pytest.mark.parametrize("kwargs, expected", [
+        ({"start_line": 0}, "start_line is 0 for {f}; use 1 or greater"),
+        ({"end_line": -2}, "end_line is -2 for {f}; use 1 or greater"),
+        ({"start_line": 3, "end_line": 2},
+         "end_line 2 is before start_line 3 for {f}; use an end_line of 3 or greater"),
+        ({"start_line": 4}, "start_line 4 is past the end of {f}, which has 3 lines; "
+                            "use a start_line of 3 or less"),
+    ])
+    async def test_bad_ranges_name_the_parameter_value_and_accepted_values(
+        self, tmp_path, kwargs, expected
+    ):
+        f = tmp_path / "three.txt"
+        f.write_text("a\nb\nc\n")
+        fn, _ = await _ranged_read_file()
+        assert await fn(str(f), **kwargs) == "Error: " + expected.format(f=f)
+
+    async def test_a_line_range_is_not_refused_for_file_size(self, tmp_path):
+        f = tmp_path / "over.txt"
+        f.write_text("".join(f"line {i}\n" for i in range(1000)))
+        fn, _ = await _ranged_read_file({"max_file_read_bytes": 100})
+        assert await fn(str(f), start_line=500, end_line=500) == (
+            f"[lines 500-500 of 1000 in {f}; next start_line 501]\nline 499\n"
+        )
+
+    async def test_paging_by_line_reconstructs_the_file_within_the_cap(self, tmp_path):
+        """The clamp backs up to whole lines, so each next start_line resumes cleanly."""
+        content = "".join(f"row {i} " + "x" * (i % 37) + "\n" for i in range(3000))
+        f = tmp_path / "rows.log"
+        f.write_text(content)
+        cap = 2_000
+        fn, _ = await _ranged_read_file({"max_result_chars": cap})
+
+        pieces, start = [], 1
+        while True:
+            result = await fn(str(f), start_line=start)
+            match = _LINE_HEADER.match(result)
+            assert len(result) <= cap and match and int(match.group(1)) == start, result[:200]
+            pieces.append(result[match.end():])
+            if match.group(5) is None:
+                break
+            start = int(match.group(5))
+        assert "".join(pieces) == content
+
+    async def test_a_line_longer_than_a_page_is_cut_with_a_continuing_offset(self, tmp_path):
+        long_line = "".join(chr(ord("a") + i % 26) for i in range(5000))
+        f = tmp_path / "wide.txt"
+        f.write_text("first\n" + long_line + "\nlast\n")
+        fn, _ = await _ranged_read_file({"max_result_chars": 1_000})
+
+        header, _, body = (await fn(str(f), start_line=2)).partition("\n")
+
+        assert "line 2 cut after" in header and "of 3 in" in header
+        assert header.endswith(", then next start_line 3]")
+        offset = int(re.search(r"continue with offset (\d+)", header).group(1))
+        assert offset == len("first\n") + len(body)
+        rest = await fn(str(f), offset=offset, length=50)  # the character read resumes the line
+        assert rest.partition("\n")[2] == long_line[len(body):len(body) + 50]
+
+
+# ---------------------------------------------------------------------------
 # Notification spill files (#558): read_file and shell can read them, and a
 # removed one fails naming the path and the age policy.
 # ---------------------------------------------------------------------------
@@ -236,7 +350,7 @@ def test_read_file_and_shell_declare_spill_reading():
     """The read_file and shell tools declare, statically, that they read spill files."""
     from corvidae.tool import declares_spill_reader
 
-    fns = _tool_fns(CoreToolsPlugin(None))
+    fns = _tool_fns(FileToolsPlugin(None)) | _tool_fns(ShellToolPlugin(None))
     assert declares_spill_reader(fns["read_file"])
     assert declares_spill_reader(fns["shell"])
 
@@ -551,30 +665,16 @@ class TestWebFetchStreaming:
 
 
 # ---------------------------------------------------------------------------
-# TestCoreToolsPlugin
+# TestWebToolsPlugin (which plugin registers which tool: tests/test_tool_plugins.py)
 # ---------------------------------------------------------------------------
 
 
-class TestCoreToolsPlugin:
-    def test_register_tools_adds_six_tools(self):
-        plugin = CoreToolsPlugin(None)
-        registry = []
-        plugin.register_tools(tool_registry=registry)
-        assert len(registry) == 6
-
-    def test_registered_tool_names(self):
-        from corvidae.tool import Tool
-        plugin = CoreToolsPlugin(None)
-        registry = []
-        plugin.register_tools(tool_registry=registry)
-        names = {item.name if isinstance(item, Tool) else item.__name__ for item in registry}
-        assert names == {"task_pipeline", "shell", "read_file", "write_file", "web_fetch", "web_search"}
-
+class TestWebToolsPlugin:
     def test_web_search_max_results_config(self):
-        plugin = CoreToolsPlugin(None)
+        plugin = WebToolsPlugin(None)
         assert plugin._web_search_max_results == 8
 
-        plugin2 = CoreToolsPlugin(None)
+        plugin2 = WebToolsPlugin(None)
         import asyncio
         from unittest.mock import MagicMock
         config = {"tools": {"web_search_max_results": 15}}
@@ -592,29 +692,29 @@ class TestCoreToolsPlugin:
 
 
 class TestWebFetchSessionReuse:
-    def test_core_tools_plugin_has_on_start(self):
-        plugin = CoreToolsPlugin(None)
-        assert hasattr(plugin, "on_start"), "CoreToolsPlugin must have an on_start method"
+    def test_web_tools_plugin_has_on_start(self):
+        plugin = WebToolsPlugin(None)
+        assert hasattr(plugin, "on_start"), "WebToolsPlugin must have an on_start method"
         assert callable(plugin.on_start)
 
-    def test_core_tools_plugin_has_on_stop(self):
-        plugin = CoreToolsPlugin(None)
-        assert hasattr(plugin, "on_stop"), "CoreToolsPlugin must have an on_stop method"
+    def test_web_tools_plugin_has_on_stop(self):
+        plugin = WebToolsPlugin(None)
+        assert hasattr(plugin, "on_stop"), "WebToolsPlugin must have an on_stop method"
         assert callable(plugin.on_stop)
 
     async def test_session_created_on_start(self):
         import aiohttp
-        plugin = CoreToolsPlugin(None)
+        plugin = WebToolsPlugin(None)
         await plugin.on_start(config={})
         try:
-            assert hasattr(plugin, "_session"), "CoreToolsPlugin must have a _session attribute after on_start"
+            assert hasattr(plugin, "_session"), "WebToolsPlugin must have a _session attribute after on_start"
             assert isinstance(plugin._session, aiohttp.ClientSession)
         finally:
             if hasattr(plugin, "_session") and plugin._session is not None:
                 await plugin._session.close()
 
     async def test_session_closed_on_stop(self):
-        plugin = CoreToolsPlugin(None)
+        plugin = WebToolsPlugin(None)
         await plugin.on_start(config={})
         session = plugin._session
         await plugin.on_stop()
@@ -803,24 +903,24 @@ async def test_shell_and_web_fetch_declare_live_own_timeout():
     """R4: shell/web_fetch declare own_timeout, read live from the plugin."""
     from corvidae.tool import resolve_own_timeout
 
-    plugin = CoreToolsPlugin(None)
-    await plugin.on_init(
-        pm=MagicMock(),
-        config={"tools": {"shell_timeout": 7, "web_fetch_timeout": 9}},
-    )
+    config = {"tools": {"shell_timeout": 7, "web_fetch_timeout": 9}}
+    shell_plugin = ShellToolPlugin(None)
+    web_plugin = WebToolsPlugin(None)
+    await shell_plugin.on_init(pm=MagicMock(), config=config)
+    await web_plugin.on_init(pm=MagicMock(), config=config)
     try:
-        fns = _tool_fns(plugin)
+        fns = _tool_fns(shell_plugin) | _tool_fns(web_plugin)
         assert resolve_own_timeout(fns["shell"]) == 7
         assert resolve_own_timeout(fns["web_fetch"]) == 9
 
         # Read at call time: changing the plugin attribute changes the answer.
-        plugin._shell_timeout = 3
+        shell_plugin._shell_timeout = 3
         assert resolve_own_timeout(fns["shell"]) == 3
-        plugin._web_fetch_timeout = 2
+        web_plugin._web_fetch_timeout = 2
         assert resolve_own_timeout(fns["web_fetch"]) == 2
     finally:
-        # Close the HTTP session on_init opened.
-        await plugin.on_stop()
+        # on_stop closes a session only if on_start opened one.
+        await web_plugin.on_stop()
 
 
 def _pid_alive(pid: int) -> bool:
@@ -844,7 +944,7 @@ async def test_shell_cancelled_by_call_timeout_kills_process(tmp_path):
 
     from corvidae.tool import ToolTimeouts, dispatch_tool_call
 
-    plugin = CoreToolsPlugin(None)
+    plugin = ShellToolPlugin(None)
     await plugin.on_init(pm=MagicMock(), config={"tools": {"shell_timeout": 30}})
     shell_fn = _tool_fns(plugin)["shell"]
 
@@ -880,8 +980,6 @@ async def test_shell_cancelled_by_call_timeout_kills_process(tmp_path):
                 os.kill(int(pidfile.read_text().strip()), signal.SIGKILL)
             except (ProcessLookupError, ValueError):
                 pass
-        # Close the HTTP session on_init opened.
-        await plugin.on_stop()
 
 
 async def test_shell_cancel_before_spawn_reraises():
@@ -921,9 +1019,9 @@ def test_declares_untrusted_output_is_true_only_for_the_literal_true():
 
 
 def test_read_file_web_fetch_and_web_search_declare_untrusted_output():
-    """R5/R6: the core tools that return outside text declare it."""
+    """R5/R6: the built-in tools that return outside text declare it."""
     from corvidae.tool import declares_untrusted_output
 
-    fns = _tool_fns(CoreToolsPlugin(None))
+    fns = _tool_fns(FileToolsPlugin(None)) | _tool_fns(WebToolsPlugin(None))
     for name in ("read_file", "web_fetch", "web_search"):
         assert declares_untrusted_output(fns[name]), f"{name} must declare returns_untrusted"

@@ -3,7 +3,7 @@
 import pytest
 
 from corvidae.llm_plugin import LLMPlugin
-from helpers import CORE_LLM_STAGES
+from helpers import KERNEL_LLM_STAGES
 
 #: Stages the memory plugin registers through register_llm_stages.
 COGNITION_LLM_STAGES = {
@@ -23,6 +23,6 @@ def llm_stages_registered(monkeypatch):
 
     def init(self, *args, **kwargs):
         original(self, *args, **kwargs)
-        self._stages = {**CORE_LLM_STAGES, **COGNITION_LLM_STAGES}
+        self._stages = {**KERNEL_LLM_STAGES, **COGNITION_LLM_STAGES}
 
     monkeypatch.setattr(LLMPlugin, "__init__", init)

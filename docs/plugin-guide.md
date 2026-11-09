@@ -1078,7 +1078,7 @@ class MyTransport(TransportPlugin):
         await self.client.post(channel.scope, event.text)
 ```
 
-`conversational` is a plain fact about the transport, default `False`. Plugins that tailor the system prompt to chats read it: with the `silence` plugin loaded, a conversational transport's channels get the `NO_REPLY` instruction, and a transport left at `False`, third-party ones included, never does. IRC, Discord and Signal set it; ACP, web and the CLI don't.
+`conversational` is a plain fact about the transport, default `False`. Plugins that tailor the system prompt to chats read it: with the `silence` plugin loaded, a conversational transport's channels get the `NO_REPLY` instruction, and a transport left at `False`, third-party ones included, never does. IRC, Discord, Signal and Zulip set it; ACP, web and the CLI don't.
 
 The filter is `owns(channel)`, which by default is `channel.matches_transport(self.transport)`. Override it only to narrow it: `WebPlugin` also requires that it is enabled. Inbound hooks are not filtered for you; open each inbound hookimpl with `if not self.owns(channel): return`.
 
@@ -1162,7 +1162,9 @@ Plugins are loaded via `pm.load_setuptools_entrypoints("corvidae")`. The entry p
 registry          (ChannelRegistry)     — explicit, before entry points load
 persistence       (PersistencePlugin)   — entry point
 jsonl_log         (JsonlLogPlugin)      — entry point
-core_tools        (CoreToolsPlugin)     — entry point
+shell_tools       (ShellToolPlugin)     — entry point
+file_tools        (FileToolsPlugin)     — entry point
+web_tools         (WebToolsPlugin)      — entry point
 cli               (CLIPlugin)           — entry point
 irc               (IRCPlugin)           — entry point
 signal            (SignalPlugin)        — entry point
@@ -1215,10 +1217,10 @@ Right after entry points load, `Runtime.start()` logs a `"plugins loaded"`
 line with `loaded` (the sorted names that actually registered, not the
 blocked ones) and
 `blocked` (the `plugins.disabled` list from config, verbatim). Compare the
-two to confirm a disable took effect: a misspelled name lands in
-`blocked` while the plugin it was meant to block still appears in
-`loaded` — `pm.set_blocked` on a name that matches nothing is silent
-otherwise.
+two to confirm a disable took effect. A name that matches no installed
+plugin (a typo, a retired name, a plugin from an extra that isn't
+installed) blocks nothing, and `Runtime.start()` logs one `WARNING` for it
+naming `plugins.disabled`, the value, and the installed entry-point names.
 
 ## Hook exception safety
 
@@ -1303,20 +1305,29 @@ tools:
 
 The legacy key `agent.max_tool_result_chars` is still accepted but deprecated; a warning is logged at startup when it is present.
 
-### CoreToolsPlugin tools
+### Built-in tool plugins
 
-Registered by `CoreToolsPlugin` (entry point name: `core_tools`).
+Three plugins register the built-in tools, each from its own entry point:
+
+| Plugin | Entry point | Tools |
+|--------|-------------|-------|
+| `ShellToolPlugin` | `shell_tools` | `shell`, `task_pipeline` (one capability: PRD §3.5.3) |
+| `FileToolsPlugin` | `file_tools` | `read_file`, `write_file` |
+| `WebToolsPlugin` | `web_tools` | `web_fetch`, `web_search` |
+
+Each can be disabled by name in `plugins.disabled` and the others keep
+working. They replaced `CoreToolsPlugin` (`core_tools`), with no alias.
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
 | `shell` | `command: str` | Runs a shell command and returns combined stdout/stderr. Times out after `tools.shell_timeout` seconds (default 30). Returns `"(no output)"` if the command produces none. Non-zero exit codes are appended to the output. |
-| `read_file` | `path: str`, `offset: int \| None`, `length: int \| None` | Reads a file and returns its text content. With `offset` or `length` (counted in characters) it returns that range behind a header naming the range, the file's total length and the next offset, e.g. `[characters 0-99932 of 300000 in /path/f.json; next offset 99932]`; the range is clamped so the result fits `tools.max_result_chars`. Returns an error string for missing files, directories, unreadable files, an offset at or past the end, a negative offset or non-positive length, or an unranged read of a file larger than `tools.max_file_read_bytes` bytes (default 1 MB). |
+| `read_file` | `path: str`, `offset: int \| None`, `length: int \| None`, `start_line: int \| None`, `end_line: int \| None` | Reads a file and returns its text content. With `offset` or `length` (counted in characters) it returns that range behind a header naming the range, the file's total length and the next offset, e.g. `[characters 0-99932 of 300000 in /path/f.json; next offset 99932]`. With `start_line` or `end_line` (1-based, inclusive) it returns those lines behind a header naming them, the file's line count and the next start line, e.g. `[lines 10-40 of 900 in /path/f.log; next start_line 41]`; one call takes one kind of range, never both. Either range is clamped so the result fits `tools.max_result_chars`; a line range backs up to the last whole line, and only a first line longer than a page is cut, with the header giving the character offset to continue from and the start line where line paging resumes. Returns an error string for missing files, directories, unreadable files, an offset at or past the end, a `start_line` past the last line, a negative offset, non-positive length or line number, an `end_line` before `start_line`, or an unranged read of a file larger than `tools.max_file_read_bytes` bytes (default 1 MB). |
 | `write_file` | `path: str`, `content: str` | Writes `content` to `path`, creating parent directories as needed. Returns a confirmation with the byte count, or an error string on failure. |
 | `web_fetch` | `url: str` | Fetches a URL via HTTP GET and returns the response body as text. Times out after `tools.web_fetch_timeout` seconds (default 15). Truncates responses at `tools.web_max_response_bytes` characters (default 50,000, independent of `MAX_TOOL_RESULT_CHARS`). A network failure names the URL and the failure class. |
 | `web_search` | `query: str`, `max_results: int` (optional) | Searches the web via DuckDuckGo and returns formatted results with titles, URLs, and snippets. Defaults to 8 results per page. |
 | `task_pipeline` | `definition: str` | Executes a task graph defined in YAML or JSON. The definition must contain a `tasks` key with a list of objects, each having `name`, `command`, and optionally `depends_on`. Tasks run in topological order; failed tasks block their dependents. Returns a status summary; a task failure names the task and the command. The whole pipeline is cut at `tools.call_timeout` (600 s by default); set `tools.timeouts.task_pipeline` for longer runs. |
 
-**CoreToolsPlugin config:**
+**`tools` config** (the three tool plugins each read only their own keys; `call_timeout` and `timeouts` are read by `ToolCollectionPlugin`):
 
 ```yaml
 tools:
@@ -1523,7 +1534,10 @@ Implements three hooks:
   summary dict.
 
 File names are derived from the channel ID with `/` and `:` replaced by `_`.
-File handles are opened in append mode and kept open until `on_stop`.
+Files are opened in append mode and kept open until `on_stop`. Each is capped
+by `logging.jsonl.max_bytes` and `backup_count` (default 10 MiB x 5, as for
+`logging.file`): a write that would pass the cap first rotates the file to
+`<name>.1` and shifts older ones up (`corvidae/jsonl_rotate.py`).
 
 **Config:**
 ```yaml
@@ -1564,7 +1578,8 @@ logged with a traceback and never breaks an LLM call.
 - **`MetricsJsonlPlugin`** (entry point `"metrics_jsonl"`) — consumes
   `on_metrics` and appends one JSON line per event
   (`{"ts", "name", "value", "tags"}`) to the file named by
-  `daemon.metrics_jsonl`. A complete no-op when the key is unset.
+  `daemon.metrics_jsonl`, rotated by the same `logging.jsonl.*` caps as the
+  transcripts. A complete no-op when the key is unset.
 
 **Config:**
 ```yaml
