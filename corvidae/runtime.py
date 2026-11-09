@@ -360,7 +360,7 @@ class Runtime:
             config["plugins"]["disabled"]. Must precede step 8 so blocked
             plugins are never instantiated by the entry-point loader.
         8.  Load entry-point plugins (corvidae group).
-        8a. Log the effective plugin set.
+        8a. Log the effective plugin set, and warn for each disabled name that names no plugin.
         8b. Install plugin-declared hookspecs (install_plugin_hookspecs), so
             every spec exists before the guard below and before on_init.
         8c. Run the hook arg-binding guard over the full plugin set.

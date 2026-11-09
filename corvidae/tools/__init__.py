@@ -46,6 +46,7 @@ class ShellToolPlugin(CorvidaePlugin):
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
+        # The tool closures read this plugin's settings live, at call time.
         plugin = self
 
         async def shell(command: str) -> str:
@@ -88,6 +89,7 @@ class FileToolsPlugin(CorvidaePlugin):
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
+        # The tool closures read this plugin's settings live, at call time.
         plugin = self
 
         async def read_file(
@@ -162,6 +164,7 @@ class WebToolsPlugin(CorvidaePlugin):
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
+        # The tool closures read this plugin's settings live, at call time.
         plugin = self
 
         async def web_fetch(url: str) -> str:
