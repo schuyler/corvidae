@@ -442,7 +442,8 @@ Not designed here; listed so the change can be judged:
   range (now out of the window) wait for the next idle or compaction.
   The same race exists between idle and compaction today; the turn
   trigger makes it more frequent.
-- **Exclusion after a cross-channel merge.** A cross-channel near-dup
+- ~~**Exclusion after a cross-channel merge.**~~ Done in #627: the
+  survivor is marked `merged_foreign` and never window-excluded. Originally: A cross-channel near-dup
   merge replaces the other channel's older record with one in the current
   channel whose range is in the window, so the older content is excluded
   until those rows leave. Rare; small fix.
@@ -455,8 +456,8 @@ Not designed here; listed so the change can be judged:
 - **Dedupe on summary text, not the whole line**, so a record isn't
   re-admitted when its age string changes (existing behaviour, more
   frequent with many recent records).
-- **`redact memory --dry-run` reports one affected memory** while the real
-  run cascades to siblings (existing behaviour).
+- ~~**`redact memory --dry-run` reports one affected memory**~~ Done in
+  #625: the dry run counts the same cascade the real run tombstones.
 - **A default memory budget derived from the window** (say 1.5% of
   `max_context_tokens`) instead of a fixed 512.
 - **Per-entry message ranges**, if reconsolidation or `recall_raw` turns

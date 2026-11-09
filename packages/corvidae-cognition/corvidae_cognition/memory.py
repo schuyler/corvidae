@@ -189,13 +189,15 @@ def _exclude_clause(
     its ``min_msg_id``. Both conditions: message_log ids are global, so an id
     test alone would also hide other channels' records. Keyed on
     ``msg_id_start`` so a record straddling the window's oldest id stays.
+    A record that holds another channel's content through a near-dup merge
+    (``merged_foreign``, #627) is never excluded: the window doesn't hold it.
     Returns the bare in-window condition and its parameters, or
     ``("0", ())`` (never true) when there is nothing to exclude. Callers
     negate it in WHERE or select it as a flag (#407).
     """
     if exclude is None:
         return "0", ()
-    return "(m.channel_id = ? AND m.msg_id_start >= ?)", exclude
+    return "(m.channel_id = ? AND m.msg_id_start >= ? AND m.merged_foreign = 0)", exclude
 
 
 # One scored-pool input row from a candidate search:
@@ -438,9 +440,9 @@ def _string_tuple(value: object, key: str) -> tuple[str, ...]:
     """Read ``value`` (absent, None, a string or a list) as a tuple of strings.
 
     A lone string reads as a one-item list (a small model's "participants":
-    "kestrel"). Raises ValueError naming ``key`` for anything else, so a
-    wrong-typed array makes the reply unusable rather than escaping as a
-    TypeError.
+    "kestrel"). Raises ValueError naming ``key`` for anything else, rather
+    than escaping as a TypeError; the caller decides what that costs (a
+    malformed entry is dropped, a malformed participants reads as none).
     """
     # Absent and null both mean "none given".
     if value is None:
@@ -457,10 +459,13 @@ def _string_tuple(value: object, key: str) -> tuple[str, ...]:
 
 
 def _coerce_importance(value: object) -> float | None:
-    """The reply's importance as a finite float, else None (absent).
+    """The reply's importance as a finite float in [0, 1], else None (absent).
 
-    A bool is not a number here (``true`` would become 1.0), and a
-    non-finite value is dropped (``nan`` would clamp to maximum).
+    A bool is not a number here (``true`` would become 1.0), a non-finite
+    value is dropped (``nan`` would clamp to maximum), and so is one outside
+    [0, 1] (#655): a rating on another scale (``7`` out of 10, ``"1e3"``)
+    would otherwise clamp to 1.0 and exempt the record from retention
+    demotion, so the rubric rates it instead.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
@@ -469,7 +474,7 @@ def _coerce_importance(value: object) -> float | None:
     except (ValueError, OverflowError):
         # Unparseable text, or an integer too large for a float.
         return None
-    return number if math.isfinite(number) else None
+    return number if math.isfinite(number) and 0.0 <= number <= 1.0 else None
 
 
 def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
@@ -477,9 +482,9 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
 
     ``entries`` items with a non-blank string ``narrative`` become entries;
     any other item is dropped. Without an ``entries`` key, a legacy
-    ``summary`` reads as the one entry. Raises ValueError on unusable output
-    (no JSON, no usable entries, a wrong-typed ``participants``), which each
-    caller already handles.
+    ``summary`` reads as the one entry. A wrong-typed ``participants`` reads
+    as none, with a warning (#655). Raises ValueError on unusable output (no
+    JSON, no usable entries), which each caller already handles.
     """
     data = _parse_json_block(text)
     entries: list[ConsolidationEntry] = []
@@ -503,8 +508,6 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
             if isinstance(summary, str) and summary.strip():
                 tags = _string_tuple(data.get("topic_tags"), "topic_tags")
                 entries.append(ConsolidationEntry(summary.strip(), tags))
-        # Participants are shared by every entry of the consolidation.
-        participants = _string_tuple(data.get("participants"), "participants")
     except ValueError as exc:
         raise ValueError(f"consolidation output is malformed: {exc}") from exc
     if not entries:
@@ -512,6 +515,16 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
             "consolidation output has no usable entries "
             "(each needs a non-empty narrative)"
         )
+    # Participants are shared by every entry of the consolidation. A
+    # wrong-typed value loses only itself, not the entries (#655).
+    try:
+        participants = _string_tuple(data.get("participants"), "participants")
+    except ValueError as exc:
+        logger.warning(
+            "consolidation reply's participants is unusable (%s); storing the "
+            "entries with no participants", exc,
+        )
+        participants = ()
     return Consolidation(
         entries=tuple(entries),
         participants=participants,
@@ -1087,7 +1100,8 @@ CREATE TABLE IF NOT EXISTS memory (
     prompt_hash TEXT,                   -- sha256 of the instruction text; NULL = unknown/direct
     mode TEXT,                          -- fork | standalone | raw | direct; NULL = unknown (pre-stamp)
     model TEXT,                         -- model the consolidation call was sent with
-    trigger TEXT                        -- compaction | idle | turn | eval; NULL = direct/pre-#633
+    trigger TEXT,                       -- compaction | idle | turn | eval; NULL = direct/pre-#633
+    merged_foreign INTEGER NOT NULL DEFAULT 0 -- 1 = holds another channel's record via near-dup merge (#627)
 )
 """
 
@@ -1200,7 +1214,8 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
 
 # One row per logged candidate of a passive retrieval (#407). Holds ids and
 # numbers only, never text. outcome is one of: admitted, dropped_weak,
-# dropped_budget, dropped_dup, cut, excluded_in_window.
+# dropped_budget, dropped_dup, cut, excluded_in_window, not_admitted (no
+# funnel registered, #654).
 RETRIEVAL_CANDIDATE_DDL = """
 CREATE TABLE IF NOT EXISTS retrieval_candidate (
     retrieval_id INTEGER NOT NULL,   -- retrieval_log.id
@@ -1387,6 +1402,8 @@ class MemoryPlugin(CorvidaePlugin):
         self._idle: IdleTracker | None = None
         self._retention_interval: float = DEFAULT_RETENTION_INTERVAL
         self._retention_max_delay: float = DEFAULT_RETENTION_MAX_DELAY
+        # Days after which retention prunes retrieval logs; None is off (#654).
+        self._retrieval_log_max_age_days: float | None = None
         # Per-channel consolidation watch.
         self._idle_watch: IdleWatch | None = None
         # Timer for the next retention due time (or the read-failure re-arm).
@@ -1465,6 +1482,24 @@ class MemoryPlugin(CorvidaePlugin):
         )
         self._retention_max_delay = float(
             retention_cfg.get("max_delay", DEFAULT_RETENTION_MAX_DELAY)
+        )
+        # Retrieval-log pruning age (#654): absent or null is off; anything
+        # else must be a positive finite number of days. Fail at startup
+        # naming the key; bool is an int subclass (YAML ``true``).
+        raw_age = retention_cfg.get("retrieval_log_max_age_days")
+        if raw_age is not None and (
+            isinstance(raw_age, bool)
+            or not isinstance(raw_age, (int, float))
+            or not math.isfinite(raw_age)
+            or raw_age <= 0
+        ):
+            raise ValueError(
+                f"memory.retention.retrieval_log_max_age_days: got {raw_age!r}; "
+                "expected a positive number of days, or leave it unset to keep "
+                "every retrieval_log row — check agent.yaml"
+            )
+        self._retrieval_log_max_age_days = (
+            float(raw_age) if raw_age is not None else None
         )
         # A non-str prompt is refused here (startup fails loudly).
         self._consolidation_fork_prompt = resolve_consolidation_fork_prompt(config)
@@ -2206,21 +2241,16 @@ class MemoryPlugin(CorvidaePlugin):
         # otherwise be dated at import time (issue #52).
         created_at = await source_timestamp(db, rows[-1][0])
 
-        # Embed every entry's narrative in one call; failure stores
+        # Embed every entry's narrative (in halves if the server caps the
+        # batch, #655); failure stores
         # embedded=0 for later backfill (trap #10 — degrade, never block).
         embeddings: list[list[float] | None] = [None] * len(record.entries)
         if self._embedding_enabled():
             try:
                 client = self._llm().get_client("embedding")
-                vectors = await client.embed(
-                    [e.narrative for e in record.entries], kind="document"
+                embeddings = await self._embed_in_chunks(
+                    client, [e.narrative for e in record.entries], channel_id
                 )
-                if len(vectors) != len(record.entries):
-                    raise ValueError(
-                        f"embedding returned {len(vectors)} vectors "
-                        f"for {len(record.entries)} entries"
-                    )
-                embeddings = list(vectors)
             except Exception:
                 logger.warning(
                     "memory embedding failed for channel %s (%d entries); "
@@ -2291,6 +2321,39 @@ class MemoryPlugin(CorvidaePlugin):
             },
         )
         return True
+
+    async def _embed_in_chunks(
+        self, client: Any, texts: list[str], channel_id: str,
+    ) -> list[list[float] | None]:
+        """Embed ``texts`` as documents, halving a batch the server rejects (#655).
+
+        A server with a per-request cap rejects a large batch; the two halves
+        are retried, recursively, so depth is bounded by log2 of the count.
+        A single text that fails means the encoder itself is failing, not a
+        cap: that raises, and the caller stores everything unembedded, as it
+        did before the retry existed.
+        """
+        try:
+            vectors = await client.embed(texts, kind="document")
+            if len(vectors) != len(texts):
+                raise ValueError(
+                    f"embedding returned {len(vectors)} vectors for {len(texts)} texts"
+                )
+            return list(vectors)
+        except Exception as exc:
+            if len(texts) == 1:
+                raise
+            logger.warning(
+                "memory embedding of %d entries failed for channel %s (%s); "
+                "retrying in two smaller batches, in case the server caps the "
+                "batch size",
+                len(texts), channel_id, type(exc).__name__,
+            )
+        mid = len(texts) // 2
+        return (
+            await self._embed_in_chunks(client, texts[:mid], channel_id)
+            + await self._embed_in_chunks(client, texts[mid:], channel_id)
+        )
 
     async def _insert_record(
         self, db: aiosqlite.Connection, *, channel_id: str, summary: str,
@@ -2393,14 +2456,17 @@ class MemoryPlugin(CorvidaePlugin):
         if dup_old_id is not None:
             async with db.execute(
                 "SELECT retrieval_count, last_retrieved_at, importance, "
-                "msg_id_start, msg_id_end, created_at "
+                "msg_id_start, msg_id_end, created_at, merged_foreign "
                 "FROM memory WHERE id = ?",
                 (dup_old_id,),
             ) as old_cursor:
                 old_row = await old_cursor.fetchone()
             if old_row is not None:
                 (old_rc, old_lra, old_importance,
-                 old_start, old_end, old_created) = old_row
+                 old_start, old_end, old_created, old_foreign) = old_row
+                # The survivor holds another channel's content if this merge
+                # crosses channels or the old record already did (#627).
+                merged_foreign = 1 if (dup_cross_channel or old_foreign) else 0
                 # Fold stats into the new record
                 inherited_rc = (old_rc or 0)  # old record's count to fold in
                 new_importance = max(importance, old_importance or 0.0)
@@ -2427,11 +2493,12 @@ class MemoryPlugin(CorvidaePlugin):
                     "  WHEN ? IS NULL THEN last_retrieved_at "
                     "  ELSE MAX(last_retrieved_at, ?) "
                     "END, "
-                    "msg_id_start = ?, msg_id_end = ?, created_at = ? "
+                    "msg_id_start = ?, msg_id_end = ?, created_at = ?, "
+                    "merged_foreign = ? "
                     "WHERE id = ?",
                     (inherited_rc, new_importance,
                      new_lra, new_lra, new_lra,
-                     new_start, new_end, new_created, memory_id),
+                     new_start, new_end, new_created, merged_foreign, memory_id),
                 )
                 # Supersede the old record
                 await db.execute(
@@ -2712,8 +2779,12 @@ class MemoryPlugin(CorvidaePlugin):
             # (trap #8); the funnel dedupes against the window and budgets.
             admitted_ids: list[int] = []
             admission = Admission(admitted=[], duplicate=[])
+            # No funnel means nothing could be admitted (#654: logged as
+            # not_admitted, not as a budget drop).
+            no_funnel = False
             if lines:
                 funnel = self.pm.get_plugin("funnel")
+                no_funnel = funnel is None
                 if funnel is None:
                     logger.warning(
                         "funnel plugin not registered; memory retrieval "
@@ -2784,6 +2855,8 @@ class MemoryPlugin(CorvidaePlugin):
                             outcome = "admitted"
                         elif line in admission.duplicate:
                             outcome = "dropped_dup"
+                        elif no_funnel:
+                            outcome = "not_admitted"
                         else:
                             outcome = "dropped_budget"
                     rows.append((retrieval_id, c["id"], c["similarity"],
@@ -2794,11 +2867,16 @@ class MemoryPlugin(CorvidaePlugin):
                     rows.append((retrieval_id, c["id"], c["similarity"],
                                  c["score"], c["band"], would_be_rank,
                                  "excluded_in_window", c["source"]))
+                # A memory the redact CLI flagged after it was scored gets no
+                # row (#654): the flag check is part of the insert itself, so
+                # either the flag is visible here or the scrubber, which runs
+                # after the flag commits, deletes the row.
                 await db.executemany(
                     "INSERT INTO retrieval_candidate (retrieval_id, memory_id, "
                     "similarity, score, band, rank, outcome, source) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    rows,
+                    "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
+                    "WHERE (SELECT redacted FROM memory WHERE id = ?) = 0",
+                    [(*row, row[1]) for row in rows],
                 )
             except Exception:
                 logger.warning(
@@ -2848,7 +2926,9 @@ class MemoryPlugin(CorvidaePlugin):
         ``exclude``: optional ``(channel_id, min_msg_id)``. Records of that
         channel whose ``msg_id_start`` is at or past ``min_msg_id`` (their
         whole range still in the live window) are left out before the cut
-        to k (#634). Passive retrieval passes it; this is not a scope.
+        to k (#634), unless they hold another channel's record through a
+        near-dup merge (#627). Passive retrieval passes it; this is not a
+        scope.
 
         Returns:
             (candidates best first: by fused rank on the hybrid path, by
@@ -3452,6 +3532,11 @@ class MemoryPlugin(CorvidaePlugin):
         await add_column_if_missing(db, "memory", "model", "TEXT")
         # Trigger column (#633), likewise nullable; old rows read NULL.
         await add_column_if_missing(db, "memory", "trigger", "TEXT")
+        # Foreign-merge flag (#627); old rows read 0 (no backfill: exclusion
+        # only applies while a range is in the live window).
+        await add_column_if_missing(
+            db, "memory", "merged_foreign", "INTEGER NOT NULL DEFAULT 0"
+        )
         await db.execute(MEMORY_PROMPT_DDL)
         await db.execute(WATERMARK_DDL)
         await db.execute(EMBEDDING_META_DDL)

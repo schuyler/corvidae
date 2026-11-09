@@ -157,10 +157,14 @@ that ignore `response_format` still get the prompt's JSON instruction:
 - A reply with no `entries` key but a `summary` (the old shape) is read as
   one entry, with its top-level `topic_tags`.
 - A lone string where a list belongs (`"participants": "kestrel"`) reads as
-  a one-item list. Any other non-list `participants`, or legacy
-  `topic_tags`, makes the reply unusable, and the error names the key.
+  a one-item list. Any other non-list `participants` reads as no
+  participants, with a warning naming the key, and the entries are kept
+  (#655); a non-list legacy `topic_tags` makes the reply unusable, and the
+  error names the key.
 - `importance` is a number, or a string `float()` accepts (`"0.7"`), if it
-  is finite. A bool, a non-number or `nan` counts as absent.
+  is finite and within [0, 1]. A bool, a non-number, `nan`, or a value
+  outside [0, 1] (a rating on another scale, such as `7` or `"1e3"`) counts
+  as absent, so the rubric rates the range instead (#655).
 
 The task then scores an importance prior through the pluggable
 `MemoryPlugin.importance_prior`, once for the whole range, passing the
@@ -217,7 +221,9 @@ the watermark hasn't moved, so the next trigger stores exactly one
 record. A failed rollback and a write blocked past the busy timeout (the
 WARNING names the database path and the timeout) are logged too.
 `write_record` (goal retirement) uses the same transaction, as do retention's
-three passes (demotion, re-promotion, vec backfill): each batch commits whole
+passes (demotion, re-promotion, retrieval-log pruning when
+`memory.retention.retrieval_log_max_age_days` is set (#654), vec backfill;
+a pruning failure is logged and leaves backfill to run): each batch commits whole
 or rolls back whole, and the backfill's embeddings are computed before the
 transaction opens. Each pass selects its candidates before its transaction,
 so every write re-checks the selection: demotion skips a row redacted,
@@ -255,16 +261,21 @@ higher importance, and the later of the two records' dates. Message
 ranges fold only within one channel: `message_log` ids are global, and
 `recall_raw` and `/redact` read a record's range on its own channel, so on
 a cross-channel merge each record keeps its own range and the superseded
-record still leads to its channel's source dialog. Overlapping triggers on the same
+record still leads to its channel's source dialog. The survivor of a
+cross-channel merge, or of a merge with a record that already was one, is
+marked `merged_foreign = 1` so window exclusion never hides it (#627). Overlapping triggers on the same
 range discard the loser's record — no duplicates. Embedding failure —
 including a wrong-width vector, which is refused before the write
 transaction (vec0 rejects it on insert, and the resulting
 `OperationalError` would roll back the whole consolidation: record,
 vec row and watermark, stalling the channel on every later trigger) —
 stores the entry with `embedded=0` for later backfill. The embedding call covers all
-of a consolidation's entries at once, so if it fails or returns the wrong
-number of vectors every entry is stored `embedded=0`; a wrong-width vector
-costs only its own entry. The narrative text
+of a consolidation's entries at once. If that batch fails, it is retried
+as two halves, recursively, with a warning, so a server that caps the
+batch size still embeds every entry (#655); if a single-entry request
+fails or returns the wrong number of vectors (the encoder is failing, not
+capping), every entry is stored `embedded=0`. A
+wrong-width vector costs only its own entry. The narrative text
 is canonical and vectors are a rebuildable cache. All consolidation LLM
 calls carry `stage="consolidation"` attribution, along with the `trigger`
 that started the run (`"compaction"`, `"idle"` or `"turn"`; `"eval"` from
@@ -342,6 +353,13 @@ still in view. Both conditions matter: `message_log` ids are global, so an
 id test alone would hide other channels' recent records too. A record that
 straddles the window's oldest id is still admitted, so the part of it that
 compaction dropped stays recallable; a window with no ids excludes nothing.
+A record marked `merged_foreign` (it superseded another channel's record
+through a near-duplicate merge, directly or through a chain of merges) is
+never excluded, since the window doesn't hold that channel's content
+(#627). A same-channel merge needs no mark: it folds the old record's range
+in, so an older record pulls the survivor's start out of the window. Rows
+from before the column read 0 (no backfill; exclusion only applies while a
+range is still in the window).
 The exclusion is a `retrieve(..., exclude=(channel_id, min_msg_id))`
 argument applied before the cut to k: the degraded FTS5 path filters it in
 `WHERE` ahead of its `LIMIT`, and the vector path selects it as a flag (#407)
@@ -403,9 +421,9 @@ per-record lookups cheap. A candidate's `outcome` is one of:
 - `dropped_weak`: banded weak while some other returned candidate was not
   weak, so it was never offered to the funnel.
 - `dropped_budget`: offered to the funnel, but the `memory` source's token
-  budget had no room for it. (This is the remainder: with the funnel
-  plugin disabled nothing is admitted and selected candidates also read
-  `dropped_budget`.)
+  budget had no room for it.
+- `not_admitted`: selected, but no funnel plugin is registered, so nothing
+  could be admitted (#654).
 - `dropped_dup`: offered, but the window's CONTEXT already contained that
   line (the funnel's dedupe is a substring test).
 - `cut`: scored but ranked below k, so never returned.
@@ -431,7 +449,7 @@ may share a would-be rank, and an excluded record that would not have made
 the top k gets no row.
 
 `retrieval_log.excluded_in_window` counts the in-window records the search
-matched; it is NULL when no exclusion applied (a window with no ids) and on
+matched (a `merged_foreign` record is not in-window by this rule); it is NULL when no exclusion applied (a window with no ids) and on
 rows from before #407. The two paths count differently. On the vector path
 it is the in-window rows inside the KNN (and the hybrid FTS side). On the FTS path it is every
 in-window record the keyword query matches, found with one extra
@@ -752,8 +770,9 @@ FROM memory WHERE prompt_hash LIKE 'abcdef123456%';
 #### Schema
 
 `memory` (records, with `indexed`, `superseded_by`, `redacted`, and
-`embedded` columns, and the stamp columns `prompt_hash`, `mode`,
-`model` and `trigger`), `memory_prompt` (`hash`, `text`: each distinct instruction text
+`embedded` columns, the stamp columns `prompt_hash`, `mode`,
+`model` and `trigger`, and `merged_foreign`, set on a near-dup survivor that
+holds another channel's record, #627), `memory_prompt` (`hash`, `text`: each distinct instruction text
 once), `consolidation_watermark`, `embedding_meta`,
 `memory_fts` (external-content FTS5 with insert/update sync triggers; no
 delete trigger — memory rows are never deleted), `memory_vec` (vec0,

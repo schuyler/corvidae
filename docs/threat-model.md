@@ -666,7 +666,9 @@ What bounds it:
 - Fork output is parsed, not executed: JSON for consolidation, appraisal
   and critique, plain text for the summary.
 - The consolidation reply's own `importance` rating (#635) becomes the
-  importance prior of each record it writes, clamped to [0, 1], wherever appraisal doesn't
+  importance prior of each record it writes, if it is within [0, 1] (a
+  value outside that, a rating on another scale, counts as absent and the
+  rubric rates the range, #655), wherever appraisal doesn't
   cover the range; the separate `rubric` call is then skipped. The rubric
   call read the same dialog, so no new text reaches the prior, but the
   number now comes from the fork that read the whole window. A window that
@@ -1344,7 +1346,11 @@ it.
   and registers no scrubber is not reached. `retrieval_candidate` (#407)
   copies no text, only memory ids and scores, but a row naming a redacted
   memory still records that it was retrieved, so its scrubber deletes
-  those rows, including ones from retrievals on other channels. For
+  those rows, including ones from retrievals on other channels. A
+  retrieval that scored the memory just before the flag landed writes no
+  row for it (#654: the insert checks the flag itself), but the funnel may
+  already have admitted its summary into that turn's prompt and bumped its
+  access count; the window copy ages out with compaction like any CONTEXT. For
   `exchange_log`, the owning exchange's claims are tombstoned with their counts kept, and
   every snapshot in the channel from the redacted message on is
   dropped. What `redact` still doesn't reach: exchanges whose
