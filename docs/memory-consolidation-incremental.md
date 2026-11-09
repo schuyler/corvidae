@@ -446,7 +446,7 @@ Not designed here; listed so the change can be judged:
   merge replaces the other channel's older record with one in the current
   channel whose range is in the window, so the older content is excluded
   until those rows leave. Rare; small fix.
-- **Forking with a `cut` just past `range_end`** for turn and idle, so a
+- ~~**Forking with a `cut` just past `range_end`**~~ Done in #622. For turn and idle, so a
   message processed between the hook and the fork's render isn't
   narrated too and then again by the next consolidation. Idle has the
   same window today; near-dup merge is the backstop.
