@@ -1,11 +1,5 @@
-"""Turn trigger for consolidation (GitHub issue #636, D1-D10).
-
-At a turn boundary (``on_agent_response``: a final reply with no tool calls
-pending) a channel whose un-consolidated window tokens reach
-``memory.consolidate_after_tokens`` gets one consolidation fork, stamped
-``trigger='turn'``. One test per criterion; the design is
-``.claude/plans/636-turn-trigger.md``.
-"""
+"""Turn trigger for consolidation (issue #636, D1-D10): at a turn boundary, a window
+reaching ``memory.consolidate_after_tokens`` gets one fork stamped ``trigger='turn'``."""
 
 import asyncio
 import copy
@@ -24,14 +18,7 @@ from .test_memory_consolidation import (
     EMBED_CONFIG, build_consolidation_env, entries_reply, fetch_stamped_memories,
     fetch_watermark, seed_dialog,
 )
-
-#: Four dialog rows; the first fork sees all of them.
-DIALOG = [
-    ("user", "my weather station keeps dropping wifi"),
-    ("assistant", "Does it happen when the heater kicks on?"),
-    ("user", "yes, every time"),
-    ("assistant", "That's the brownout detector resetting the radio."),
-]
+from .test_memory_fork import DIALOG, _Registry
 
 #: A one-entry reply (the embed stub returns one fixed vector; see the
 #: design's Traps list).
@@ -42,18 +29,6 @@ def tokens_of(rows: list[tuple[str, str]]) -> int:
     """Window-token sum of dialog rows, as the turn task counts them
     (``message_tokens`` ignores the ``_`` tags the window adds)."""
     return sum(message_tokens({"role": r, "content": c}) for r, c in rows)
-
-
-class _Registry:
-    """Registry stub returning the one channel by id."""
-
-    def __init__(self, channel: Any) -> None:
-        # The one channel this stub knows about.
-        self.channel = channel
-
-    def get(self, channel_id: str) -> Any:
-        # Return the channel for its own id, None for any other id.
-        return self.channel if channel_id == self.channel.id else None
 
 
 class GatedForkAgent(FakeForkAgent):
@@ -95,10 +70,7 @@ async def seed_window_bounds(env: SimpleNamespace) -> None:
 
 @pytest.fixture
 async def make_env() -> Any:
-    """Factory: (memory, stub, channel, db, ids, agent) with four dialog rows
-    persisted, a live window over ``window_ids`` (default: all four), a
-    registry stub, and ``memory.consolidate_after_tokens`` = ``n``.
-    Background tasks from on_start are drained before it returns."""
+    """Factory for a consolidation env with DIALOG persisted, windowed over ``window_ids``, threshold ``n``."""
     dbs = []
 
     async def build(
@@ -134,11 +106,9 @@ async def make_env() -> Any:
 
 async def test_turn_at_threshold_forks_once_with_trigger_turn(make_env):
     """D1: N equal to the window sum forks once; every stored row and the
-    attribution carry trigger='turn'; the watermark moves to range_end.
-    The window holds rows at or below the watermark and CONTEXT, SUMMARY and
-    UNSENT rows above it; N is the sum of the MESSAGE rows above it only."""
+    attribution carry trigger='turn'; the watermark moves to range_end."""
     env = await make_env(tokens_of(DIALOG[2:]))
-    # Watermark at ids[1]; three non-MESSAGE rows above it.
+    # Window bounds and non-MESSAGE rows, as seed_window_bounds describes.
     await seed_window_bounds(env)
     range_end = max(m["_db_id"] for m in env.channel.conversation.messages)
 
@@ -151,7 +121,6 @@ async def test_turn_at_threshold_forks_once_with_trigger_turn(make_env):
     assert env.agent.calls[0]["attribution"]["trigger"] == "turn"
     # Every stored record is stamped turn and the watermark covers the range.
     rows = await fetch_stamped_memories(env.db)
-    assert rows
     assert {r["trigger"] for r in rows} == {"turn"}
     # The range starts just above the old watermark and ends at the window's top.
     assert {r["msg_id_start"] for r in rows} == {env.ids[2]}
@@ -162,7 +131,7 @@ async def test_turn_below_threshold_does_not_fork(make_env):
     """D2: N one past the window sum forks nothing and stores nothing; the
     sum has the same bounds and type filter as D1."""
     env = await make_env(tokens_of(DIALOG[2:]) + 1)
-    # Same setup as D1: a sum that ignored the bounds or types would reach N.
+    # Same bounds and type filter as D1.
     await seed_window_bounds(env)
 
     # Hook then task: the task sums, finds less than N, and ends.
@@ -216,8 +185,7 @@ async def test_one_consolidation_in_flight_across_turn_and_idle(make_env):
     env = await make_env(tokens_of(DIALOG), agent=agent)
     memory, cid = env.memory, env.channel.id
 
-    # Part 1: the first hook spawns a task that blocks on the fork gate and
-    # marks the channel in flight.
+    # Part 1: the first hook spawns a task blocked on the gate, channel in flight.
     tasks_before = set(memory._tasks)
     await memory.on_agent_response(channel=env.channel)
     assert len(set(memory._tasks) - tasks_before) == 1
@@ -251,8 +219,7 @@ async def test_one_consolidation_in_flight_across_turn_and_idle(make_env):
         return run()
 
     memory._consolidate_range = gated
-    # Part 1 committed through the last row; persist one more dialog row so
-    # idle has something past the watermark to consolidate.
+    # Persist one more row so idle has something past the watermark.
     new_id = await env.persistence.persist_message(
         channel=env.channel, message={"role": "user", "content": "and another thing"},
         message_type=MessageType.MESSAGE,
@@ -278,10 +245,8 @@ async def test_turn_range_end_is_read_in_the_hook(make_env):
     # A turn task exists and is blocked on the fork gate.
     assert set(env.memory._tasks) - tasks_before
 
-    # Right after the hook: the next message enters the window with the next
-    # rowid (the append happens before any yield), then is persisted
-    # (persist_message may yield, so the task may run from here on; the
-    # range it uses was fixed in the hook).
+    # A late message enters the window with the next rowid, then is persisted;
+    # the task's range was already fixed in the hook.
     late_id = env.ids[-1] + 1
     env.channel.conversation.messages.append({
         "role": "user", "content": "one more thing", "_db_id": late_id,
@@ -297,7 +262,6 @@ async def test_turn_range_end_is_read_in_the_hook(make_env):
     agent.gate.set()
     await env.memory.wait_for_background_tasks()
     rows = await fetch_stamped_memories(env.db)
-    assert rows
     assert {r["msg_id_end"] for r in rows} == {env.ids[-1]}
     assert await fetch_watermark(env.db, env.channel.id) == env.ids[-1]
 
@@ -357,14 +321,10 @@ async def test_turn_range_outside_window_skips_at_debug(make_env, caplog):
     assert await fetch_watermark(env.db, env.channel.id) is None
 
 
-@pytest.mark.parametrize("trigger", [
-    "turn",
-    # Expected to pass before the change: the text hardcodes "idle" today.
-    "idle",
-])
+@pytest.mark.parametrize("trigger", ["turn", "idle"])
 async def test_skip_names_its_trigger(make_env, caplog, trigger):
     """D9: a failing fork is one WARNING skip that names the trigger that
-    will retry; the watermark stays."""
+    will retry; the watermark stays. ("idle" passes before the change: the text hardcodes it.)"""
     agent = FakeForkAgent({"consolidation"}, error=RuntimeError("down"))
     env = await make_env(tokens_of(DIALOG), agent=agent)
     caplog.set_level(logging.DEBUG)
@@ -388,8 +348,7 @@ async def test_turn_hook_returns_while_fork_is_blocked(make_env):
     env = await make_env(tokens_of(DIALOG), agent=agent)
     tasks_before = set(env.memory._tasks)
 
-    # One send(None): StopIteration means the coroutine finished without
-    # suspending on any await.
+    # One send(None): StopIteration means it finished without suspending.
     hook = env.memory.on_agent_response(channel=env.channel)
     try:
         with pytest.raises(StopIteration):
