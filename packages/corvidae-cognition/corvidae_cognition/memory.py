@@ -2173,7 +2173,8 @@ class MemoryPlugin(CorvidaePlugin):
         # otherwise be dated at import time (issue #52).
         created_at = await source_timestamp(db, rows[-1][0])
 
-        # Embed every entry's narrative in one call; failure stores
+        # Embed every entry's narrative (in halves if the server caps the
+        # batch, #655); failure stores
         # embedded=0 for later backfill (trap #10 — degrade, never block).
         embeddings: list[list[float] | None] = [None] * len(record.entries)
         if self._embedding_enabled():
