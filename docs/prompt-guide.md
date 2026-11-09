@@ -193,7 +193,7 @@ Chat apps have their own social norms: short turns, one thought at a time, and n
 |-----------|------------------|--------------|
 | Signal | `chat.md` + `signal_dm.md` | Texting norms (match the other person's length, answer first, no headers or bold, gist before detail, example exchanges); plain text only, since Signal shows Markdown as literal asterisks and pound signs. |
 | Discord DMs (`discord:dm:*`) | `chat.md` | Texting norms. |
-| Discord server channels | `chat.md` + `discord_group.md` | Texting norms; group manners, short turns so the bot doesn't take over the channel; code blocks are fine. |
+| Discord server channels | `chat.md` + `discord_group.md` | Texting norms; group manners, short turns so the bot doesn't take over the channel; code blocks are fine; user mentions use `<@user_id>` syntax but do not notify users because pings are disabled. |
 | Zulip DMs (`zulip:dm:<one id>`) | `chat.md` | Texting norms. |
 | Zulip channels and group DMs | `chat.md` + `zulip_group.md` | Texting norms; group manners; stay on the topic you were answered in; Markdown code blocks are fine; an @-mention you write won't notify anyone. |
 | IRC | `chat.md` + `irc.md` | Texting norms; plain, line-based text, shorter in channels than in private messages. |
@@ -228,3 +228,4 @@ Retrieval quality depends on `llm.embedding.document_prefix` and `llm.embedding.
 | `ThinkingPlugin` | `corvidae/thinking.py` | Strips `reasoning_content` from in-memory history |
 
 For full configuration details, see [configuration.md](configuration.md).
+
