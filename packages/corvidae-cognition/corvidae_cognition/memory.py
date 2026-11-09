@@ -2656,9 +2656,10 @@ class MemoryPlugin(CorvidaePlugin):
                 )
 
             # Persist the retrieval profile (§3.7's day-one raw stream).
-            # Both values describe the top-ranked candidate: the decayed
-            # score it was ranked by, and the raw similarity that
-            # band_on: similarity compares against the band thresholds.
+            # Both values describe the top-ranked candidate (by fused rank
+            # on the hybrid path, by score otherwise): its decayed score,
+            # and the raw similarity that band_on: similarity compares
+            # against the band thresholds.
             top_score = candidates[0]["score"] if candidates else None
             top_similarity = candidates[0]["similarity"] if candidates else None
             hit_count = len(candidates)
@@ -2764,9 +2765,9 @@ class MemoryPlugin(CorvidaePlugin):
         to k (#634). Passive retrieval passes it; this is not a scope.
 
         Returns:
-            (candidates sorted by score descending, degraded_to_fts).
-            Each candidate: {id, summary, created_at, similarity, score,
-            band, age_seconds}.
+            (candidates best first: by fused rank on the hybrid path, by
+            score otherwise; degraded_to_fts). Each candidate: {id, summary,
+            created_at, similarity, score, band, age_seconds, source}.
         """
         pool = await self._retrieve_pool(text, k, exclude)
         return pool.ranked[: pool.k], pool.degraded
@@ -2987,8 +2988,9 @@ class MemoryPlugin(CorvidaePlugin):
         VEC_OVERFETCH``, in-window rows flagged, not filtered), measures the
         real cosine of every FTS hit the KNN didn't return from its stored
         vector, and falls back to ``FTS_SIMILARITY_PROXY`` for a hit with no
-        vector (one not yet embedded; demoted records aren't candidates). Returns (the union of rows, FTS
-        ids in bm25 order, ids with a measured cosine). A failing FTS side
+        vector (one not yet embedded; demoted records aren't candidates).
+        Returns (the union of rows, FTS ids in bm25 order, ids with a
+        measured cosine). A failing FTS side
         is logged and leaves the vec rows alone: the vec pool is the rescue.
         """
         measured = {row[0] for row in vec_rows}

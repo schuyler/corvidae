@@ -200,7 +200,7 @@ class TestBandingFloor:
         assert hit["band"] == "weak"
         await db.close()
 
-    async def test_vec_only_candidates_are_banded_as_before(self):
+    async def test_vec_only_candidates_keep_measured_scores(self):
         memory, _e, channel, _conv, db = await build_retrieval_env(config(k=8))
         await seed_named_and_distractors(db, channel.id)
 
