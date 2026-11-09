@@ -440,21 +440,23 @@ Not designed here; listed so the change can be judged:
   Left open: an idle firing that has claimed the channel but not yet
   spawned its task, and a turn or idle task started while compaction's
   task runs, are still settled by the compare-and-set (one reply kept).
-- **Exclusion after a cross-channel merge.** A cross-channel near-dup
+- ~~**Exclusion after a cross-channel merge.**~~ Done in #627: the
+  survivor is marked `merged_foreign` and never window-excluded. Originally: A cross-channel near-dup
   merge replaces the other channel's older record with one in the current
   channel whose range is in the window, so the older content is excluded
   until those rows leave. Rare; small fix.
-- **Forking with a `cut` just past `range_end`** for turn and idle, so a
-  message processed between the hook and the fork's render isn't
-  narrated too and then again by the next consolidation. Idle has the
-  same window today; near-dup merge is the backstop.
-- **Backoff for a fork that keeps failing.** Each turn past N re-forks a
-  growing range with a warning until compaction takes it to catch-up.
+- ~~**Forking with a `cut` just past `range_end`**~~ Done in #622: turn
+  and idle fork with the cut just past `range_end`, so a message processed
+  between the hook and the fork's render is narrated once, by the next
+  consolidation.
+- ~~**Backoff for a fork that keeps failing.**~~ Done in #620: three
+  consecutive failed turn forks back the turn trigger off until the
+  watermark moves or `memory.idle_consolidate_after` passes.
 - **Dedupe on summary text, not the whole line**, so a record isn't
   re-admitted when its age string changes (existing behaviour, more
   frequent with many recent records).
-- **`redact memory --dry-run` reports one affected memory** while the real
-  run cascades to siblings (existing behaviour).
+- ~~**`redact memory --dry-run` reports one affected memory**~~ Done in
+  #625: the dry run counts the same cascade the real run tombstones.
 - **A default memory budget derived from the window** (say 1.5% of
   `max_context_tokens`) instead of a fixed 512.
 - **Per-entry message ranges**, if reconsolidation or `recall_raw` turns
@@ -468,7 +470,8 @@ Not designed here; listed so the change can be judged:
   agent.yaml, added the log level" is fine for now.
 - **Catch-up segment budget** decoupled from `max_context_tokens`. Belongs
   with reconsolidation.
-- **The catch-up raw-transcript fallback.** After two unusable replies,
+- ~~**The catch-up raw-transcript fallback.**~~ Done in #626: split to the
+  memory budget, stamped `mode = raw`. Originally: After two unusable replies,
   `_view_record` stores the raw transcript as one record of up to a
   segment's size. A known degradation, rare; splitting it is small.
 - **Funnel entries larger than the whole budget** are re-queued by the
