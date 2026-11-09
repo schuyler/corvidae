@@ -11,6 +11,8 @@ Usage:
     python scripts/eval_memory.py [--fixture tests/fixtures/memory_retrieval_basic.json]
                                   [--retriever pkg.module:callable] [--k 5]
                                   [--judge] [--base-url URL] [--model MODEL] [--api-key KEY]
+    python scripts/eval_memory.py --snapshot SESSIONS_DB --labels LABELS_JSON
+                                  --config AGENT_YAML --pool-out POOL_JSON [--k N]
 
 The retriever callable receives (query_text: str, memories: list[dict])
 and returns a ranked list of memory ids (best first). It may be sync or
@@ -19,14 +21,59 @@ then, pass any callable via --retriever to exercise the harness.
 
 --judge reserves the summary-fidelity judging mode (LLM scores whether
 retrieved summaries faithfully answer the query). It is a stub in Phase 0.
+
+--snapshot (#658) scores a deployment's real memory. It copies SESSIONS_DB
+with the sqlite backup API from a read-only connection (the original is never
+opened for write, even while the daemon has it open in WAL mode), runs the real
+MemoryPlugin retrieval path over the copy with the embedding profile and
+memory.* settings of --config (loaded as the daemon loads agent.yaml), and
+reports Recall@k and MRR per labelled query and as means. Retrieval only: no
+chat request is made and no document is embedded. The copy lives in a 0700
+temporary directory and is deleted at exit; it needs that much free space in
+the system temp directory, and a SIGKILL mid-run leaves it there.
+
+The config must still define a chat profile (the daemon refuses one without),
+and that profile's api_key environment variable must be set, because the
+daemon's client setup expands every profile's key; no request is sent to it.
+--k defaults to memory.retrieval.k from --config in this mode (5 otherwise).
+Scores decay against the wall clock of the run, which is recorded as run_at.
+Without sqlite-vec, or when the config's encoder differs from the snapshot's,
+retrieval degrades to FTS5; the run says so per query and in the summary (on an
+install without sqlite-vec memory logs a load warning with a traceback).
+
+LABELS_JSON (queries, and the snapshot's integer memory ids they should find;
+an empty "relevant" list is a negative probe: its pool is written but it is
+not scored; "description" and "note" are free text and unused):
+    {"queries": [{"text": "what did we decide about the battery?",
+                  "relevant": [412, 415]}]}
+
+POOL_JSON is written once after all queries: run_at, k, one entry per query
+(index, text, relevant, unscorable ids with their status absent / redacted /
+superseded / not_indexed, degraded, recall_at_k, mrr, and every scored
+candidate as id, rank, similarity, score, band) and a summary. It holds no
+memory text; look the ids up in the source.
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
 import importlib
 import json
+import logging
+import sqlite3
 import sys
+import tempfile
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, NoReturn
+
+if TYPE_CHECKING:
+    import aiosqlite
+    from corvidae_cognition.memory import RetrievalPool
+
+logger = logging.getLogger("eval_memory")
 
 # The deterministic metric functions live in tests/evals; make them
 # importable when running from the repo root without installing tests.
@@ -75,14 +122,13 @@ async def run_live_evaluation(args) -> None:
     and reports the deterministic metrics plus per-stage token cost from
     usage_log ("recall at a fixed token budget" — bootstrap-mapping §6).
     """
-    import tempfile
 
     import aiosqlite
-
     from corvidae_cognition.funnel import FunnelPlugin
+    from corvidae_cognition.memory import MemoryPlugin
+
     from corvidae.hooks import create_plugin_manager
     from corvidae.llm_plugin import LLMPlugin
-    from corvidae_cognition.memory import MemoryPlugin
     from corvidae.metrics import UsageLogPlugin
     from corvidae.persistence import PersistencePlugin, init_db
 
@@ -304,7 +350,339 @@ async def run_evaluation(args) -> None:
         print("\n⚠️  --judge is a stub in Phase 0; summary-fidelity judging lands with Phase 1b.")
 
 
-def main() -> None:
+# Snapshot-mode flags that are only meaningful together, with the remedy text
+# naming what each one takes.
+SNAPSHOT_REQUIRED_FLAGS: tuple[tuple[str, str, str], ...] = (
+    ("--labels", "labels",
+     "PATH (a JSON file of queries and relevant memory ids; see the module docstring)"),
+    ("--config", "config", "PATH (the deployment's agent.yaml)"),
+    ("--pool-out", "pool_out", "PATH (where to write the candidate pool JSON)"),
+)
+
+
+@dataclass(frozen=True)
+class LabelQuery:
+    """One labelled query: its text and the snapshot memory ids it should find."""
+
+    index: int
+    text: str
+    relevant: list[int]
+
+
+def load_labels(path: Path) -> list[LabelQuery]:
+    """Read and validate a labels file; raise ValueError naming the problem."""
+    resolved = path.resolve()
+
+    def bad(detail: str) -> ValueError:
+        """Build the one-line labels error: file, detail, remedy."""
+        return ValueError(f"labels {resolved}: {detail}; fix the labels file.")
+
+    # Read and decode the JSON, naming an unreadable file or a syntax error.
+    try:
+        data = json.loads(resolved.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise bad(f"cannot read file ({exc.strerror or exc})") from exc
+    except json.JSONDecodeError as exc:
+        raise bad(f"invalid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})") from exc
+
+    # The top level must be an object holding a list under "queries".
+    if not isinstance(data, dict) or "queries" not in data:
+        raise bad("missing key 'queries'; expected {\"queries\": [...]}")
+    raw_queries = data["queries"]
+    if not isinstance(raw_queries, list):
+        raise bad(f"queries: got {json.dumps(raw_queries)}; expected a list of queries")
+
+    # Each query needs a non-empty text and a list of integer ids (bool is not one).
+    queries: list[LabelQuery] = []
+    for index, raw in enumerate(raw_queries):
+        if not isinstance(raw, dict):
+            raise bad(f"queries[{index}]: got {json.dumps(raw)}; expected an object")
+        text = raw.get("text")
+        if not isinstance(text, str) or not text:
+            raise bad(f"queries[{index}].text: got {text!r}; expected a non-empty string")
+        relevant = raw.get("relevant")
+        if not isinstance(relevant, list) or not all(
+            isinstance(i, int) and not isinstance(i, bool) for i in relevant
+        ):
+            raise bad(
+                f"queries[{index}].relevant: got {json.dumps(relevant)}; "
+                "expected a list of integer memory ids"
+            )
+        queries.append(LabelQuery(index=index, text=text, relevant=relevant))
+    return queries
+
+
+def copy_snapshot(source: Path, dest: Path) -> None:
+    """Copy a database with the backup API from a read-only connection.
+
+    The source is opened only through a ``mode=ro`` URI, so it is never
+    written or checkpointed; the backup is one consistent snapshot even
+    while a daemon writes to the source in WAL mode. Raises ValueError with
+    the operator-facing text when the open or the backup fails.
+    """
+    resolved = source.resolve()
+    uri = f"{resolved.as_uri()}?mode=ro"
+    try:
+        src = sqlite3.connect(uri, uri=True)
+        try:
+            dst = sqlite3.connect(dest)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+    except sqlite3.Error as exc:
+        raise ValueError(
+            f"cannot open snapshot {resolved} read-only ({exc}); check the "
+            "--snapshot path and that the file is readable (for a database "
+            "in WAL mode its directory must also be writable, for the -shm file)."
+        ) from exc
+
+
+async def label_status(db: aiosqlite.Connection, ids: set[int]) -> dict[int, str]:
+    """Map each unreachable memory id to why; reachable ids are omitted.
+
+    Reachable means the row exists with indexed=1 and redacted=0, the filter
+    both candidate searches apply.
+    """
+    if not ids:
+        return {}
+    ordered = sorted(ids)
+    marks = ",".join("?" for _ in ordered)
+    async with db.execute(
+        "SELECT id, indexed, superseded_by, redacted FROM memory "
+        f"WHERE id IN ({marks})",
+        ordered,
+    ) as cursor:
+        rows = {row[0]: row for row in await cursor.fetchall()}
+
+    # Checked in order: a superseded row also has indexed=0.
+    status: dict[int, str] = {}
+    for ident in ordered:
+        row = rows.get(ident)
+        if row is None:
+            status[ident] = "absent"
+        elif row[3]:
+            status[ident] = "redacted"
+        elif row[2] is not None:
+            status[ident] = "superseded"
+        elif not row[1]:
+            status[ident] = "not_indexed"
+    return status
+
+
+def candidate_entries(pool: RetrievalPool) -> list[dict]:
+    """The pool's whole ranked list as the pool JSON's ``candidates``."""
+    return [
+        {
+            "id": cand["id"],
+            "rank": rank,
+            "similarity": cand["similarity"],
+            "score": cand["score"],
+            "band": cand["band"],
+        }
+        for rank, cand in enumerate(pool.ranked, start=1)
+    ]
+
+
+def fail(message: str) -> NoReturn:
+    """Print a one-line operator error to stderr and exit 1."""
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def fmt_metric(value: float | None) -> str:
+    """Format a metric for stdout; None (not scored) prints as n/a."""
+    return "n/a" if value is None else f"{value:.2f}"
+
+
+def mean(values: list[float]) -> float | None:
+    """Mean of the values, or None when there are none."""
+    return sum(values) / len(values) if values else None
+
+
+async def run_snapshot_evaluation(
+    source: Path, labels_path: Path, config_path: Path,
+    pool_out: Path, k: int | None, work_dir: Path,
+) -> None:
+    """Copy the snapshot, score the labelled queries, print and write the pool."""
+    import aiosqlite
+    from corvidae_cognition.memory import MemoryPlugin
+
+    from corvidae.hooks import create_plugin_manager
+    from corvidae.llm_plugin import LLMPlugin
+    from corvidae.persistence import PersistencePlugin
+    from corvidae.runtime import Runtime
+
+    run_at = time.time()
+
+    # Labels are validated before the copy so a typo costs no disk or time.
+    try:
+        queries = load_labels(labels_path)
+    except ValueError as exc:
+        fail(f"eval_memory: {exc}")
+
+    # The copy: the only thing ever opened on the source path.
+    snapshot_db = work_dir / "snapshot.db"
+    try:
+        copy_snapshot(source, snapshot_db)
+    except ValueError as exc:
+        fail(f"eval_memory: {exc}")
+
+    db: aiosqlite.Connection | None = None
+    llm: LLMPlugin | None = None
+    llm_start_reached = False
+    try:
+        # The daemon's own YAML load (exits 1 with its Config error line).
+        config = Runtime(config_path=str(config_path)).load_config()
+
+        # Plugin setup on the copy; a ValueError here is a config problem.
+        try:
+            db = await aiosqlite.connect(str(snapshot_db))
+            pm = create_plugin_manager()
+            persistence = PersistencePlugin()
+            persistence.db = db
+            pm.register(persistence, name="persistence")
+
+            # Memory goes before the LLM plugin so register_llm_stages reaches
+            # it; its on_start is deliberately not run (no retention/backfill).
+            memory = MemoryPlugin()
+            pm.register(memory, name="memory")
+            await memory.on_init(pm=pm, config=config)
+
+            llm = LLMPlugin()
+            pm.register(llm, name="llm")
+            await llm.on_init(pm=pm, config=config)
+            llm_start_reached = True
+            await llm.on_start(config=config)
+        except ValueError as exc:
+            fail(f"Config error: {exc} — check {config_path}")
+
+        # Unreachable labelled ids, over every query, from one lookup.
+        all_ids = {ident for q in queries for ident in q.relevant}
+        statuses = await label_status(db, all_ids)
+
+        effective_k = k if k is not None else memory._retrieval_k
+        results: list[dict] = []
+        print(f"📖 Snapshot: {source}")
+        print(f"   {len(queries)} queries, k={effective_k}")
+        for query in queries:
+            reachable = [i for i in query.relevant if i not in statuses]
+            unscorable = [
+                {"id": i, "status": statuses[i]} for i in query.relevant if i in statuses
+            ]
+            pool = await memory._retrieve_pool(query.text, k=k, exclude=None)
+            # Top k is the expression retrieve() returns.
+            top_ids = [c["id"] for c in pool.ranked[: pool.k]]
+            scored = bool(reachable)
+            recall = recall_at_k(top_ids, reachable, pool.k) if scored else None
+            reciprocal = mrr(top_ids, reachable) if scored else None
+            results.append({
+                "index": query.index,
+                "text": query.text,
+                "relevant": query.relevant,
+                "unscorable": unscorable,
+                "degraded": pool.degraded,
+                "recall_at_k": recall,
+                "mrr": reciprocal,
+                "candidates": candidate_entries(pool),
+            })
+            print(f"\nQ: {query.text}")
+            print(
+                f"   recall@{pool.k}={fmt_metric(recall)}  mrr={fmt_metric(reciprocal)}  "
+                f"degraded={pool.degraded}  ranked={top_ids}"
+            )
+            if unscorable:
+                named = ", ".join(f"{u['id']} ({u['status']})" for u in unscorable)
+                print(f"   unscorable: {named}")
+            if not scored:
+                print("   not scored: no reachable relevant id")
+
+        # Summary over the scored queries; FTS5 fallback counted separately.
+        recalls = [r["recall_at_k"] for r in results if r["recall_at_k"] is not None]
+        mrrs = [r["mrr"] for r in results if r["mrr"] is not None]
+        degraded = sum(1 for r in results if r["degraded"])
+        summary = {
+            "queries": len(results),
+            "scored": len(recalls),
+            "degraded": degraded,
+            "mean_recall_at_k": mean(recalls),
+            "mean_mrr": mean(mrrs),
+        }
+        print(f"\n📊 Mean recall@{effective_k}: {fmt_metric(summary['mean_recall_at_k'])} "
+              f"(over {len(recalls)} of {len(results)} queries)")
+        print(f"📊 Mean MRR:        {fmt_metric(summary['mean_mrr'])} "
+              f"(over {len(recalls)} of {len(results)} queries)")
+        if degraded:
+            print(f"⚠️  FTS5 fallback on {degraded} of {len(results)} queries")
+
+        pool_out.write_text(json.dumps(
+            {"run_at": run_at, "k": effective_k, "queries": results, "summary": summary},
+            indent=2,
+        ), encoding="utf-8")
+        print(f"\nPool written to {pool_out}")
+    finally:
+        # Release everything before main's temp dir deletes the copy; a
+        # failure here is logged and must not mask the original exception.
+        if llm is not None and llm_start_reached:
+            try:
+                await llm.on_stop()
+            except Exception:
+                logger.warning("eval_memory: stopping LLM clients failed", exc_info=True)
+        if db is not None:
+            try:
+                await db.close()
+            except Exception:
+                logger.warning(
+                    "eval_memory: closing the snapshot copy %s failed", snapshot_db,
+                    exc_info=True,
+                )
+
+
+def snapshot_arg_error(args: argparse.Namespace) -> str | None:
+    """The flag-combination rules; None when valid, else the error text."""
+    # Without --snapshot, the snapshot-only flags have nothing to attach to.
+    if args.snapshot is None:
+        for flag, attr, _hint in SNAPSHOT_REQUIRED_FLAGS:
+            if getattr(args, attr) is not None:
+                return f"{flag} is only used with --snapshot; add --snapshot PATH or drop {flag}."
+        return None
+
+    # With --snapshot, each of the three paths is required.
+    for flag, attr, hint in SNAPSHOT_REQUIRED_FLAGS:
+        if getattr(args, attr) is None:
+            return f"--snapshot needs {flag} {hint}."
+
+    # A rank cutoff below 1 would silently fall back to the config's k (0)
+    # or drop candidates (negative).
+    if args.k is not None and args.k <= 0:
+        return (
+            f"--k must be a positive integer, got {args.k}; pass --k 1 or "
+            "more, or omit it to use memory.retrieval.k."
+        )
+
+    # The pool file must not be the source (or its WAL/shm files), the
+    # labels or the config it reads (S1).
+    target = args.pool_out.resolve()
+    source = args.snapshot.resolve()
+    protected = (
+        ("--snapshot", source),
+        ("--snapshot's WAL file", source.with_name(source.name + "-wal")),
+        ("--snapshot's shared-memory file", source.with_name(source.name + "-shm")),
+        ("--labels", args.labels.resolve()),
+        ("--config", args.config.resolve()),
+    )
+    for flag, other in protected:
+        if target == other:
+            return (
+                f"--pool-out {target} is the same file as {flag}; choose a "
+                "different --pool-out path so that file is not overwritten."
+            )
+    return None
+
+
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Evaluate memory retrieval quality")
     parser.add_argument(
         "--fixture", default=str(DEFAULT_FIXTURE),
@@ -314,16 +692,33 @@ def main() -> None:
         "--retriever", default=None,
         help="Retriever callable as 'pkg.module:callable' (wired to MemoryPlugin in Phase 1b)",
     )
-    parser.add_argument("--k", type=int, default=5, help="Rank cutoff for recall@k (default: 5)")
+    parser.add_argument(
+        "--k", type=int, default=None,
+        help="Rank cutoff for recall@k (default: 5; snapshot mode: memory.retrieval.k)",
+    )
     parser.add_argument(
         "--judge", action="store_true",
         help="Also run LLM-judge summary-fidelity scoring (stub in Phase 0)",
     )
-    parser.add_argument(
+    # --live and --snapshot select different modes, so argparse enforces
+    # that at most one is given.
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--live", action="store_true",
         help="Run against the real MemoryPlugin stack with a scratch DB and "
              "a real llama-server (requires --base-url and --model)",
     )
+    mode.add_argument(
+        "--snapshot", type=Path, default=None, metavar="SESSIONS_DB",
+        help="Score a copy of this sessions.db with the real retrieval path "
+             "(requires --labels, --config and --pool-out)",
+    )
+    parser.add_argument("--labels", type=Path, default=None,
+                        help="Snapshot mode: labels JSON of queries and relevant memory ids")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="Snapshot mode: the deployment's agent.yaml")
+    parser.add_argument("--pool-out", type=Path, default=None,
+                        help="Snapshot mode: where to write the candidate pool JSON")
     # LLM connection flags; mirrors scripts/eval_compaction.py.
     parser.add_argument("--base-url", default=None, help="LLM API base URL")
     parser.add_argument("--model", default=None, help="LLM model name")
@@ -334,7 +729,25 @@ def main() -> None:
                         help="Embedding model name (--live; defaults to --model)")
     parser.add_argument("--embedding-dimensions", type=int, default=768,
                         help="Embedding dimensions (--live; default 768)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    # Combination rules are checked before any I/O.
+    error = snapshot_arg_error(args)
+    if error is not None:
+        parser.error(error)
+
+    if args.snapshot is not None:
+        # The copy lives in a 0700 temp dir that is deleted when the run ends.
+        with tempfile.TemporaryDirectory() as work:
+            asyncio.run(run_snapshot_evaluation(
+                args.snapshot, args.labels, args.config, args.pool_out,
+                args.k, Path(work),
+            ))
+        return
+
+    # Fixture and --live modes keep their historical default cutoff.
+    if args.k is None:
+        args.k = 5
 
     if args.live:
         asyncio.run(run_live_evaluation(args))
