@@ -18,14 +18,15 @@ and list_channels tools), which `tests/test_cross_channel_send/` imports, and th
 sub-extra; leave it out to exercise the FTS5-only path (`docs/cognition.md`),
 which is what CI's `cognition-fts` job does. That is CI's `full`
 job. The kernel alone is `--extra dev --extra acp`; CI's `kernel` job runs
-everything outside `tests/cognition/` and `tests/test_cross_channel_send/`
-and `tests/test_webhook_notify/` that way, so a kernel module must never import `corvidae_cognition`
+everything outside `tests/cognition/`, `tests/test_cross_channel_send/`,
+`tests/test_webhook_notify/` and `tests/corvidae_restart/` (which needs the
+`restart` extra) that way, so a kernel module must never import `corvidae_cognition`
 (`tests/test_kernel_boundary.py`).
 
 ```sh
 uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra restart  # everything
 uv run pytest                    # full suite
-uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify  # the kernel suite
+uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/corvidae_restart  # the kernel suite
 uv run pytest tests/test_foo.py  # one file
 uv run pytest --run-eval         # include live-LLM eval tests (deselected by default)
 uv run ruff check .              # lint
@@ -50,8 +51,8 @@ run `uv lock`; CI syncs with `--locked` and fails on a stale lock.
 
 CI (`.github/workflows/tests.yml`) runs three jobs on every push to `main` and
 every PR: `kernel` (`--extra dev --extra acp`; checks that sqlite-vec, the
-Discord SDK and `corvidae_cognition` are absent, then runs everything outside
-`tests/cognition/`) and `full` (every extra; checks sqlite-vec and the Discord
+Discord SDK and `corvidae_cognition` are absent, then runs the kernel suite
+above) and `full` (every extra; checks sqlite-vec and the Discord
 SDK load, then runs the whole suite), plus `web-smoke` (kernel install plus a
 pinned Playwright and Chromium; runs `tests/test_web_render_smoke.py` and fails
 if it skips). It doesn't run the harness or `--run-eval`.
@@ -128,4 +129,5 @@ that means one or more of:
 
 The container is ephemeral and the repo is cloned fresh, so nothing survives
 unless it is committed and pushed. There is no `gh` CLI — use the GitHub MCP
-tools. Don't open a pull request unless asked.
+tools. Always open a pull request when work is complete, so it can be
+reviewed and merged even if the session goes idle before that happens.
