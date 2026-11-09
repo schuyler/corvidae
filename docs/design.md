@@ -917,7 +917,7 @@ persistence connection (`PersistencePlugin.db`). The others:
 
 | Connection | Opened by | Writes |
 |---|---|---|
-| persistence (`PersistencePlugin.db`) | persistence `on_start` | `message_log`, and every other plugin's tables (scheduler, usage_log, retrieval_log, goals, ...) |
+| persistence (`PersistencePlugin.db`) | persistence `on_start` | `message_log`, and every other plugin's tables (scheduler, usage_log, retrieval_log, retrieval_candidate, goals, ...) |
 | memory write (`MemoryPlugin._write_db`) | memory `on_start`, after its schema exists | memory records only: consolidation (`memory`, `memory_vec`, `memory_fts` via trigger, `memory_prompt`, `consolidation_watermark`) and `write_record`, each one `BEGIN IMMEDIATE` transaction |
 | appraisal probe, critique probe | each plugin's `on_start` | read only (`message_fts` probes) |
 
@@ -1730,7 +1730,15 @@ creates schema; schema is daemon-owned.
   reached. The CLI prints `<N> <name> rows` per scrubber, here
   `<N> exchange_log rows` (distinct exchanges changed; a re-run that
   changes nothing counts zero), and the result dict carries the counts
-  as `scrubbed: {name: N}`.
+  as `scrubbed: {name: N}`. The cognition extra also registers
+  `retrieval_candidate` (`corvidae_cognition.memory:redact_retrieval_candidates`,
+  #407): the per-candidate retrieval log holds ids and numbers only, so it
+  has no text to tombstone, and the scrubber deletes every row whose
+  `memory_id` is a redacted memory (already flagged, or whose range
+  contains a redacted message id), whichever channel's retrieval wrote it.
+  The CLI prints `<N> retrieval_candidate rows` (counted, not deleted, under
+  `--dry-run`). Schema and outcomes: "Retrieval (read path)" in
+  [cognition.md](cognition.md).
 
 **Verification pass.** After each cascade, the CLI extracts a sample token
 from the original content (before tombstoning) and runs FTS `MATCH` queries
