@@ -688,8 +688,10 @@ nullable `memory` columns:
 - `prompt_hash`: sha256 of the UTF-8 instruction text the call used. The
   text itself is stored once per hash in `memory_prompt`, however many
   records share it. An empty prompt is still a prompt and is stored as `''`.
-- `mode`: `fork`, `standalone` (the view call on the `consolidation` stage's profile) or
-  `direct`.
+- `mode`: `fork`, `standalone` (the view call on the `consolidation` stage's profile),
+  `raw` (a catch-up range stored as its transcript after both view-call
+  replies were unusable, #626; the prompt hash, model and trigger are the
+  failed call's) or `direct`.
 - `model`: the model the call was sent with, after any
   `llm.<profile>.extra_body.model` override, so a record says what actually
   ran rather than what `llm.<profile>.model` names. `Agent.fork` always sets
@@ -918,8 +920,17 @@ is not open.
 compaction remains plain lossy summarization.
 
 A malformed consolidation reply is retried once; if the retry is also
-unusable, the range is stored as one record holding its raw transcript as the summary rather
-than being dropped (the LLM call has already been paid for).
+unusable, the range is stored as its raw transcript rather than being
+dropped (the LLM call has already been paid for). The transcript is split
+on message lines (a message longer than a piece is cut by characters) into
+records that each fit the memory admission budget as a retrieved memory
+line (`funnel.budgets.memory`, else `funnel.default_budget`, else 512,
+read at startup; each piece leaves room for the longest `[band] (age) `
+prefix), so a raw record can actually be admitted (#626). The pieces are
+records of one consolidation (shared range, importance and stamp) stamped
+`mode = raw`. A budget too small for any memory line keeps the transcript
+as one record, with a warning naming the key. One raw piece can fill the
+whole memory budget for a turn.
 
 ### MemoryToolsPlugin (`packages/corvidae-cognition/corvidae_cognition/memory_tools.py`)
 

@@ -471,7 +471,8 @@ Not designed here; listed so the change can be judged:
   agent.yaml, added the log level" is fine for now.
 - **Catch-up segment budget** decoupled from `max_context_tokens`. Belongs
   with reconsolidation.
-- **The catch-up raw-transcript fallback.** After two unusable replies,
+- ~~**The catch-up raw-transcript fallback.**~~ Done in #626: split to the
+  memory budget, stamped `mode = raw`. Originally: After two unusable replies,
   `_view_record` stores the raw transcript as one record of up to a
   segment's size. A known degradation, rare; splitting it is small.
 - **Funnel entries larger than the whole budget** are re-queued by the

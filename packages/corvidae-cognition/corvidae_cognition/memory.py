@@ -11,7 +11,9 @@ This module owns the memory schema:
     deleted — demotion/redaction (Phase 1b) mutate columns.
     Each row is stamped with how it was made (issue #299): ``prompt_hash``
     (sha256 of the consolidation instruction text), ``mode`` (``fork`` |
-    ``standalone`` | ``direct``) and ``model`` (the model the call was sent
+    ``standalone`` | ``raw`` | ``direct``; ``raw`` is a range stored as its
+    transcript after the consolidation replies were unusable, #626) and
+    ``model`` (the model the call was sent
     with), plus ``trigger`` (issue #633: ``compaction`` | ``idle`` |
     ``turn`` | ``eval``, what started the consolidation; NULL for direct
     rows and rows from before the column). All NULL means the row predates stamping
@@ -99,7 +101,7 @@ from corvidae.fork import (
 )
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm_plugin import parse_llm_config
-from corvidae_cognition.funnel import Admission
+from corvidae_cognition.funnel import DEFAULT_BUDGET_TOKENS, Admission
 from corvidae.persistence import (
     add_column_if_missing,
     decode_message_row,
@@ -368,6 +370,52 @@ def _dialog_transcript(messages: list[dict]) -> str:
     return "\n".join(
         f"{m.get('role', '?')}: {m.get('content', '')}" for m in messages
     )
+
+
+# The longest prefix a retrieved memory line gets before its summary
+# ("[band] (age) "): the longest band name and a 5-digit day count. A raw
+# fallback piece leaves room for it so the whole line fits the budget (#626).
+WORST_MEMORY_LINE_PREFIX = "[moderate] (99999d) "
+
+
+def _split_transcript(messages: list[dict], max_tokens: int) -> list[str]:
+    """Split ``messages``' transcript into pieces of at most ``max_tokens``
+    (#626), in order, so that joining them reproduces the transcript (with
+    a line break dropped between pieces split at a line boundary).
+
+    Greedy over ``role: content`` lines; a line longer than the size alone
+    is cut by characters, shrinking each cut until it fits. Sizes are
+    measured with ``count_tokens`` on the piece itself, never summed, since
+    tiktoken counts aren't additive. ``max_tokens`` must be at least 1.
+    """
+    lines = [f"{m.get('role', '?')}: {m.get('content', '')}" for m in messages]
+    pieces: list[str] = []
+    current = ""
+    for line in lines:
+        # Join the line to the current piece if the result still fits.
+        candidate = f"{current}\n{line}" if current else line
+        if count_tokens(candidate) <= max_tokens:
+            current = candidate
+            continue
+        if current:
+            pieces.append(current)
+            current = ""
+        # A line that fits alone starts the next piece.
+        if count_tokens(line) <= max_tokens:
+            current = line
+            continue
+        # An over-size line: cut it into the largest prefixes that fit, never
+        # below one character so the loop always advances.
+        rest = line
+        while rest:
+            cut = min(len(rest), max_tokens * 8)
+            while cut > 1 and count_tokens(rest[:cut]) > max_tokens:
+                cut = max(1, cut * 3 // 4)
+            pieces.append(rest[:cut])
+            rest = rest[cut:]
+    if current:
+        pieces.append(current)
+    return pieces
 
 
 @dataclass(frozen=True)
@@ -1050,7 +1098,7 @@ CREATE TABLE IF NOT EXISTS memory (
     redacted INTEGER NOT NULL DEFAULT 0,-- redact tombstone flag (Phase 1b)
     embedded INTEGER NOT NULL DEFAULT 0,-- 0 = embedding pending/failed (backfillable)
     prompt_hash TEXT,                   -- sha256 of the instruction text; NULL = unknown/direct
-    mode TEXT,                          -- fork | standalone | direct; NULL = unknown (pre-stamp)
+    mode TEXT,                          -- fork | standalone | raw | direct; NULL = unknown (pre-stamp)
     model TEXT,                         -- model the consolidation call was sent with
     trigger TEXT,                       -- compaction | idle | turn | eval; NULL = direct/pre-#633
     merged_foreign INTEGER NOT NULL DEFAULT 0 -- 1 = holds another channel's record via near-dup merge (#627)
@@ -1337,6 +1385,9 @@ class MemoryPlugin(CorvidaePlugin):
         self._recency_from: str = RECENCY_FROM_CHOICES[0]
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold: float = 0.95
+        # Memory admission budget for raw-fallback pieces (#626; on_init sets).
+        self._memory_budget: int = DEFAULT_BUDGET_TOKENS
+        self._memory_budget_key: str = "funnel.budgets.memory"
         # Tracked background tasks (consolidation) — plugin-owned
         # asyncio.create_task, never the TaskQueue: every TaskQueue
         # completion triggers a full main-model turn (§2.3, trap #5).
@@ -1485,6 +1536,20 @@ class MemoryPlugin(CorvidaePlugin):
         )
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold = float(self._memory_cfg.get("dup_threshold", 0.95))
+        # The memory admission budget, which raw-fallback pieces must fit
+        # (#626): the funnel's memory budget, else its default, else the
+        # funnel's built-in default. The key is kept for the warning.
+        funnel_cfg = config.get("funnel", {}) or {}
+        funnel_budgets = funnel_cfg.get("budgets", {}) or {}
+        if "memory" in funnel_budgets:
+            self._memory_budget = funnel_budgets["memory"]
+            self._memory_budget_key = "funnel.budgets.memory"
+        elif "default_budget" in funnel_cfg:
+            self._memory_budget = funnel_cfg["default_budget"]
+            self._memory_budget_key = "funnel.default_budget"
+        else:
+            self._memory_budget = DEFAULT_BUDGET_TOKENS
+            self._memory_budget_key = "funnel.budgets.memory (unset; the funnel default)"
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -2619,17 +2684,38 @@ class MemoryPlugin(CorvidaePlugin):
                     "(attempt %d/2): %s",
                     channel_id, span, attempt + 1, exc,
                 )
-        # The calls are already paid for; keep the range as its raw transcript.
-        logger.warning(
-            "consolidation of channel %s, message ids %s: both replies unusable; "
-            "storing the raw transcript as the record",
-            channel_id, span,
+        # The calls are already paid for; keep the range as its raw
+        # transcript, split into pieces each admissible as a memory line, and
+        # stamped raw: no call wrote this text (#626).
+        raw_stamp = dataclasses.replace(stamp, mode="raw")
+        max_tokens = (
+            self._memory_budget - count_tokens(WORST_MEMORY_LINE_PREFIX) - 1
         )
+        if max_tokens < 1:
+            # No memory line can fit this budget: splitting would only make
+            # crumbs, so keep the one record, as before #626.
+            logger.warning(
+                "consolidation of channel %s, message ids %s: both replies "
+                "unusable; storing the raw transcript as one record, since "
+                "the memory budget (%s = %s tokens) is too small for any "
+                "memory line; raise it to make raw records admissible",
+                channel_id, span, self._memory_budget_key, self._memory_budget,
+            )
+            pieces = [_dialog_transcript(seg_dialog)]
+        else:
+            pieces = _split_transcript(seg_dialog, max_tokens)
+            logger.warning(
+                "consolidation of channel %s, message ids %s: both replies "
+                "unusable; storing the raw transcript as %d record(s) sized "
+                "to the memory budget (%s = %s tokens)",
+                channel_id, span, len(pieces),
+                self._memory_budget_key, self._memory_budget,
+            )
         return Consolidation(
-            entries=(ConsolidationEntry(_dialog_transcript(seg_dialog), ()),),
+            entries=tuple(ConsolidationEntry(p, ()) for p in pieces),
             participants=(),
             importance=None,
-            stamp=stamp,
+            stamp=raw_stamp,
         )
 
     # ------------------------------------------------------------------
