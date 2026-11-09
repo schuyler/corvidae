@@ -2489,7 +2489,8 @@ class MemoryPlugin(CorvidaePlugin):
 
         sqlite-vec is brute-force exact KNN (no ANN index), so the KNN scan
         costs the same regardless of k; we over-fetch and filter by status
-        flags (and the window exclusion, see ``retrieve``) in the join.
+        flags in the join, and select the window exclusion (see
+        ``retrieve``) as the ``in_window`` flag.
         """
         import sqlite_vec
         knn_k = k * VEC_OVERFETCH

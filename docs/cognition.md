@@ -238,10 +238,10 @@ id test alone would hide other channels' recent records too. A record that
 straddles the window's oldest id is still admitted, so the part of it that
 compaction dropped stays recallable; a window with no ids excludes nothing.
 The exclusion is a `retrieve(..., exclude=(channel_id, min_msg_id))`
-argument applied in the candidate queries' `WHERE`, before the cut to k:
-the FTS5 path filters ahead of its `LIMIT`, and the KNN fetches `k × 4`
-plus a `COUNT(*)` of the excluded records, so in-window records can't take
-every slot. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
+argument applied before the cut to k: the FTS5 path filters it in `WHERE`
+ahead of its `LIMIT`, and the vector path selects it as a flag (#407) over
+a KNN that fetches `k × 4` plus a `COUNT(*)` of the excluded records, then
+sets the flagged rows aside, so in-window records can't take every slot. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
 and `search_memory` see everything. It is not a scope: other channels'
 records, and this channel's once their rows leave the window, are
 retrieved normally. Known limit: the bound assumes the window is a
@@ -263,7 +263,7 @@ bumped (`retrieval_count`, `last_retrieved_at` — the write half of
 reconsolidation), and every retrieval writes a `retrieval_log` row
 (the top-ranked candidate's decayed score and raw similarity,
 hit/admitted counts, degradation flag) and one `retrieval_candidate` row
-per candidate it scored (#407, below).
+per logged candidate (#407, below).
 
 **The candidate log (#407).** `retrieval_log` says what a retrieval
 returned; `retrieval_candidate` says what it considered and what happened
@@ -298,9 +298,10 @@ per-record lookups cheap. A candidate's `outcome` is one of:
   would have placed it in the top k.
 
 The log keeps the whole scored pool, not just the k returned. On the
-vector path that is the KNN's `k × 4` rows (the in-window ones included,
-see below), so a right record that recency decay pushed past k shows up as
-`cut` with its score. The FTS pool is the k rows the query's `LIMIT`
+vector path that is every not-excluded row of the KNN (which fetches
+`k × 4` plus the count of in-window records), so a right record pushed
+past k, by lower similarity or by recency decay, shows up as `cut` with its
+score. The FTS pool is the k rows the query's `LIMIT`
 returns, so FTS retrievals never log `cut` rows. The window exclusion no
 longer filters in the vector query's `WHERE`; the query selects it as a
 flag, so in-window rows come back from the same KNN with their real
@@ -341,9 +342,11 @@ WHERE c.memory_id = 123
 ORDER BY l.ts DESC;
 ```
 
-No row means the record was never in the pool for that retrieval: below the
-KNN's `k × 4` cut, not indexed, or redacted. `cut` and `dropped_weak` mean
-it ranked but lost to recency decay or banding. `corvidae redact` deletes
+No row means the record was not logged for that retrieval: outside the
+KNN's reach, not indexed, or redacted; in the window and not good enough to
+make the top k; or, on an FTS-degraded retrieval, not matched by the
+keyword query or past its `LIMIT`. `cut` and `dropped_weak` mean it ranked
+but lost on score (similarity times recency decay) or banding. `corvidae redact` deletes
 rows that reference a redacted memory (below).
 
 **Graceful degradation:** encoder down → FTS5 keyword retrieval over
@@ -582,8 +585,9 @@ exchanges (message ids are global), logging a failed lookup and falling back to
 the rubric prior and NULL valence. Configuration is documented in
 [configuration.md](configuration.md) (`memory.*`, `llm.embedding`).
 
-MemoryPlugin also registers the `retrieval_candidate` scrubber
-(`redact_retrieval_candidates`) under `corvidae.redact`. The rows hold no
+The cognition distribution registers the `retrieval_candidate` scrubber
+(`corvidae_cognition.memory:redact_retrieval_candidates`) under the
+`corvidae.redact` entry-point group. The rows hold no
 text, but a row for a redacted memory still records that it was retrieved,
 so `corvidae redact` deletes every `retrieval_candidate` row whose memory
 is already flagged redacted or whose range contains a redacted message id,

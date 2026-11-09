@@ -120,7 +120,8 @@ records from one end to the other; it says nothing about how bge-m3 or
 nomic behave. `retrieval_log` records only the top candidate's score and
 similarity ([#407](https://github.com/schuyler/corvidae/issues/407) asks
 for every candidate), so when the right record loses in production there
-is no row saying what it scored. The band thresholds have been tuned
+is no row saying what it scored. (Since #407, `retrieval_candidate` logs
+every candidate; see `docs/cognition.md`.) The band thresholds have been tuned
 blind against a non-calibrated quantity, and that is why tuning them has
 not converged.
 
