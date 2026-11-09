@@ -747,7 +747,7 @@ CREATE TABLE IF NOT EXISTS memory (
     prompt_hash TEXT,                   -- sha256 of the instruction text; NULL = unknown/direct
     mode TEXT,                          -- fork | standalone | direct; NULL = unknown (pre-stamp)
     model TEXT,                         -- model the consolidation call was sent with
-    trigger TEXT                        -- compaction | idle | eval (| turn); NULL = direct/pre-#633
+    trigger TEXT                        -- compaction | idle | eval; NULL = direct/pre-#633
 )
 """
 
