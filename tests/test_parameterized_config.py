@@ -195,12 +195,10 @@ class TestReadFileMaxSize:
         )
 
 
-class TestCoreToolsReadsConfig:
-    async def test_core_tools_reads_config(self):
-        """CoreToolsPlugin.on_start reads tools config section."""
-        from corvidae.tools import CoreToolsPlugin
-
-        plugin = CoreToolsPlugin(None)
+class TestToolPluginsReadConfig:
+    async def test_tool_plugins_read_their_config(self):
+        """Each built-in tool plugin's on_init reads its keys from the tools section."""
+        from corvidae.tools import FileToolsPlugin, ShellToolPlugin, WebToolsPlugin
 
         config = {
             "tools": {
@@ -210,29 +208,24 @@ class TestCoreToolsReadsConfig:
                 "max_file_read_bytes": 512,
             }
         }
+        shell_plugin = ShellToolPlugin(None)
+        file_plugin = FileToolsPlugin(None)
+        web_plugin = WebToolsPlugin(None)
+        for plugin in (shell_plugin, file_plugin, web_plugin):
+            await plugin.on_init(pm=MagicMock(), config=config)
 
-        await plugin.on_init(pm=MagicMock(), config=config)
-        # Patch aiohttp.ClientSession to avoid a real HTTP connection.
-        mock_session = MagicMock()
-        mock_session.close = AsyncMock()
-        with patch("aiohttp.ClientSession", return_value=mock_session):
-            await plugin.on_start(config=config)
-
-        assert plugin._shell_timeout == 99, (
-            f"Expected _shell_timeout=99 from config, got {plugin._shell_timeout!r}"
+        assert shell_plugin._shell_timeout == 99, (
+            f"Expected _shell_timeout=99 from config, got {shell_plugin._shell_timeout!r}"
         )
-        assert plugin._web_fetch_timeout == 5, (
-            f"Expected _web_fetch_timeout=5 from config, got {plugin._web_fetch_timeout!r}"
+        assert web_plugin._web_fetch_timeout == 5, (
+            f"Expected _web_fetch_timeout=5 from config, got {web_plugin._web_fetch_timeout!r}"
         )
-        assert plugin._web_max_response_bytes == 1234, (
-            f"Expected _web_max_response_bytes=1234 from config, got {plugin._web_max_response_bytes!r}"
+        assert web_plugin._web_max_response_bytes == 1234, (
+            f"Expected _web_max_response_bytes=1234 from config, got {web_plugin._web_max_response_bytes!r}"
         )
-        assert plugin._max_file_read_bytes == 512, (
-            f"Expected _max_file_read_bytes=512 from config, got {plugin._max_file_read_bytes!r}"
+        assert file_plugin._max_file_read_bytes == 512, (
+            f"Expected _max_file_read_bytes=512 from config, got {file_plugin._max_file_read_bytes!r}"
         )
-
-        # Cleanup.
-        await plugin.on_stop()
 
 
 # ===========================================================================

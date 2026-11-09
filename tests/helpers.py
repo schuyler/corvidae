@@ -232,7 +232,7 @@ class RecordingClient:
 
 #: Stages the kernel plugins register (compaction, subagent), for fixtures that
 #: build an LLMPlugin without on_start and so never run register_llm_stages.
-CORE_LLM_STAGES = {"compaction": "chat", "subagent": "chat"}
+KERNEL_LLM_STAGES = {"compaction": "chat", "subagent": "chat"}
 
 
 #: A minimal llm: section: one chat profile, no embedding profile.
@@ -287,7 +287,7 @@ def recording_llm_plugin(main, background=None):
             return super().get_client(stage)
 
     plugin = _RecordingLLMPlugin()
-    plugin._stages = dict(CORE_LLM_STAGES)
+    plugin._stages = dict(KERNEL_LLM_STAGES)
     plugin._clients["main"] = main
     llm_section = dict(STUB_LLM_SECTION)
     if background is not None:
