@@ -13,8 +13,8 @@ This module owns the memory schema:
     (sha256 of the consolidation instruction text), ``mode`` (``fork`` |
     ``standalone`` | ``direct``) and ``model`` (the model the call was sent
     with), plus ``trigger`` (issue #633: ``compaction`` | ``idle`` |
-    ``eval``, what started the consolidation; NULL for direct rows and rows
-    from before the column). All NULL means the row predates stamping
+    ``turn`` | ``eval``, what started the consolidation; NULL for direct
+    rows and rows from before the column). All NULL means the row predates stamping
     ("unknown"); ``direct`` rows (goal retirement) were written by no
     consolidation call.
   - ``memory_prompt``: ``hash`` -> instruction text, stored once per hash.
@@ -35,6 +35,9 @@ Config:
                                      # queued or in-flight work) before its
                                      # tail is consolidated; repeats at this
                                      # period while the quiet lasts
+      consolidate_after_tokens: 4000 # window tokens of un-consolidated
+                                     # conversation that start a turn
+                                     # consolidation (forks only; positive int)
       retention:
         interval: 21600              # seconds between retention runs (clock
                                      # timer; last_run survives restarts)
@@ -51,8 +54,10 @@ Config:
       consolidation_fork_prompt: ... # instruction for forked consolidation
                                      # (agent.forks, #51); static config
 
-Changes to ``idle_consolidate_after`` and ``retention.*`` take effect at
-restart: the idle watch and retention timer are set when the plugin starts.
+Changes to ``idle_consolidate_after``, ``consolidate_after_tokens`` and
+``retention.*`` take effect at restart: the idle watch and retention timer
+are set when the plugin starts, and ``consolidate_after_tokens`` is read
+once at startup.
 A channel that never goes quiet is consolidated through compaction.
 """
 
@@ -110,6 +115,9 @@ logger = logging.getLogger("corvidae.memory")
 # Seconds a channel must be inactive before the idle trigger consolidates
 # its un-consolidated tail.
 DEFAULT_IDLE_CONSOLIDATE_AFTER = 1800.0
+
+# Window tokens of un-consolidated conversation that start a turn consolidation.
+DEFAULT_CONSOLIDATE_AFTER_TOKENS: int = 4000
 
 # Seconds between retention runs, and the longest a due run waits for the
 # system to go quiet before running regardless.
@@ -897,7 +905,7 @@ CREATE TABLE IF NOT EXISTS memory (
     prompt_hash TEXT,                   -- sha256 of the instruction text; NULL = unknown/direct
     mode TEXT,                          -- fork | standalone | direct; NULL = unknown (pre-stamp)
     model TEXT,                         -- model the consolidation call was sent with
-    trigger TEXT                        -- compaction | idle | eval; NULL = direct/pre-#633
+    trigger TEXT                        -- compaction | idle | turn | eval; NULL = direct/pre-#633
 )
 """
 
@@ -927,7 +935,7 @@ class RecordStamp:
     prompt: str | None
     mode: str
     model: str | None
-    # What started the consolidation (compaction | idle | eval); set by
+    # What started the consolidation (compaction | idle | turn | eval); set by
     # _commit, None for direct records (#633).
     trigger: str | None = None
 
@@ -1183,8 +1191,10 @@ class MemoryPlugin(CorvidaePlugin):
         # asyncio.create_task, never the TaskQueue: every TaskQueue
         # completion triggers a full main-model turn (§2.3, trap #5).
         self._tasks: set[asyncio.Task] = set()
-        # Channels with an idle consolidation in flight; a repeat firing
-        # for one of them is skipped.
+        # Window tokens that start a turn consolidation (on_init overrides).
+        self._consolidate_after_tokens: int = DEFAULT_CONSOLIDATE_AFTER_TOKENS
+        # Channels with a turn or idle consolidation task in flight; a repeat
+        # trigger (turn or idle) for one of them is skipped.
         self._idle_inflight: set[str] = set()
         # Kernel clock and idle tracker; both set in on_start, or both None.
         self._clock: Clock | None = None
@@ -1247,6 +1257,22 @@ class MemoryPlugin(CorvidaePlugin):
                 f"memory.idle_consolidate_after: got {raw_after!r}; expected "
                 "a positive finite number of seconds — check agent.yaml"
             )
+        # Fail at startup, naming the key; bool is an int subclass (YAML
+        # ``true``), so it is rejected explicitly.
+        raw_tokens = self._memory_cfg.get(
+            "consolidate_after_tokens", DEFAULT_CONSOLIDATE_AFTER_TOKENS
+        )
+        if (
+            isinstance(raw_tokens, bool)
+            or not isinstance(raw_tokens, int)
+            or raw_tokens <= 0
+        ):
+            raise ValueError(
+                f"memory.consolidate_after_tokens: got {raw_tokens!r}; expected "
+                "a positive integer number of window tokens "
+                f"(default {DEFAULT_CONSOLIDATE_AFTER_TOKENS}) — check agent.yaml"
+            )
+        self._consolidate_after_tokens = raw_tokens
         retention_cfg = self._memory_cfg.get("retention", {}) or {}
         self._retention_interval = float(
             retention_cfg.get("interval", DEFAULT_RETENTION_INTERVAL)
@@ -1498,34 +1524,102 @@ class MemoryPlugin(CorvidaePlugin):
         ``idle_consolidate_after`` seconds, and again each period while the
         quiet lasts. Never enqueues anything: the work is a plugin-owned task.
         """
-        # A consolidation from an earlier firing is still running.
+        # A consolidation (turn or idle) is already running or being set up.
         if channel_id in self._idle_inflight:
             return
+        # Claim the channel before the first await so an overlapping firing
+        # sees it; released below unless a task takes ownership of the claim.
+        self._idle_inflight.add(channel_id)
+        spawned = False
+        try:
+            try:
+                db = await self._ensure_schema()
+                if db is None:
+                    # The next repeat retries.
+                    return
+                async with db.execute(
+                    "SELECT MAX(id) FROM message_log WHERE channel_id = ?",
+                    (channel_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                max_id = row[0] if row is not None else None
+                if max_id is None:
+                    return
+                watermark = await self._get_watermark(db, channel_id)
+            except Exception:
+                logger.warning(
+                    "idle consolidation scan failed for %s", channel_id, exc_info=True
+                )
+                return
+            if max_id <= watermark:
+                return
+            task = self._spawn(self._consolidate_range(channel_id, max_id, "idle"))
+            spawned = True
+            # The task's end frees the channel, however it ends.
+            task.add_done_callback(lambda _t: self._idle_inflight.discard(channel_id))
+        finally:
+            # Every exit that spawned no task (including cancellation) releases
+            # the claim.
+            if not spawned:
+                self._idle_inflight.discard(channel_id)
+
+    @hookimpl
+    async def on_agent_response(self, channel) -> None:
+        """Trigger C: a final reply may have pushed the window past N tokens.
+
+        Runs before the reply is sent, so it awaits nothing: in-memory checks
+        and one spawn. The token sum needs the watermark (a DB read), so it
+        lives in the spawned task; this only fixes ``range_end`` now.
+        """
+        # Forks off: nothing to do, and nothing to log (PRD §3.8.5).
+        if fork_agent(self.pm, "consolidation") is None:
+            return
+        # Tool calls outstanding: this reply is not a turn boundary.
+        if channel.pending_tool_call_ids:
+            return
+        # A consolidation is already in flight for this channel.
+        if channel.id in self._idle_inflight:
+            return
+        # range_end is the newest rowid in the window right now.
+        ids = window_db_ids(channel.conversation.messages)
+        if not ids:
+            return
+        task = self._spawn(self._turn_consolidation(channel, max(ids)))
+        # Claim the channel right after the spawn (no await between); the
+        # task's end frees it, however it ends.
+        self._idle_inflight.add(channel.id)
+        task.add_done_callback(lambda _t: self._idle_inflight.discard(channel.id))
+
+    async def _turn_consolidation(self, channel, range_end: int) -> None:
+        """Fork-consolidate ``(watermark, range_end]`` once the window tokens
+        of un-consolidated conversation in it reach N; otherwise do nothing."""
         try:
             db = await self._ensure_schema()
+            # No database: the next turn retries, as _consolidate_range does.
             if db is None:
-                # The next repeat retries.
                 return
-            async with db.execute(
-                "SELECT MAX(id) FROM message_log WHERE channel_id = ?",
-                (channel_id,),
-            ) as cursor:
-                row = await cursor.fetchone()
-            max_id = row[0] if row is not None else None
-            if max_id is None:
-                return
-            watermark = await self._get_watermark(db, channel_id)
+            watermark = await self._get_watermark(db, channel.id)
         except Exception:
             logger.warning(
-                "idle consolidation scan failed for %s", channel_id, exc_info=True
+                "turn consolidation watermark read failed for channel %s; "
+                "the next turn trigger retries", channel.id, exc_info=True,
             )
             return
-        if max_id <= watermark:
-            return
-        self._idle_inflight.add(channel_id)
-        task = self._spawn(self._consolidate_range(channel_id, max_id, "idle"))
-        # Free the channel for the next firing however the task ends.
-        task.add_done_callback(lambda _t: self._idle_inflight.discard(channel_id))
+        # Sum new conversation tokens, stopping once N is reached.
+        total = 0
+        for m in channel.conversation.messages:
+            db_id = m.get("_db_id")
+            if not isinstance(db_id, int) or not watermark < db_id <= range_end:
+                continue
+            # Admitted memories, summaries and unsent replies are not new dialog.
+            if m.get("_message_type") in (
+                MessageType.CONTEXT, MessageType.SUMMARY, MessageType.UNSENT
+            ):
+                continue
+            total += message_tokens(m)
+            if total >= self._consolidate_after_tokens:
+                await self._consolidate_range(channel.id, range_end, "turn")
+                return
 
     # ------------------------------------------------------------------
     # Background task tracking (§2.3 — silent, never the TaskQueue)
@@ -1740,7 +1834,7 @@ class MemoryPlugin(CorvidaePlugin):
         and wherever a segment would exceed the channel's budget); each
         segment commits and moves the watermark by itself.
 
-        Overlap safety (trap #6): both triggers WILL race to the same
+        Overlap safety (trap #6): the triggers (compaction, idle, turn) WILL race to the same
         range. The watermark is read optimistically before the LLM work,
         then re-checked under the DB lock in the same atomic section as the
         insert + watermark advance; any concurrent advance discards this
@@ -1775,7 +1869,7 @@ class MemoryPlugin(CorvidaePlugin):
                 return
 
             # The first-person record: a fork of the live window for a range
-            # in it (stashed at compaction, or run now for idle), a skip when
+            # in it (stashed at compaction, or run now for idle and turn), a skip when
             # that fork misses, else the rebuilt view on the stage's client.
             outcome, record = await self._live_record(
                 channel_id, rows, watermark, range_end, trigger
@@ -2178,15 +2272,16 @@ class MemoryPlugin(CorvidaePlugin):
         return memory_id
 
     def _skip_consolidation(
-        self, channel_id: str, rows: list[tuple], watermark: int, reason: str, **kwargs
+        self, channel_id: str, rows: list[tuple], watermark: int, reason: str,
+        trigger: str, **kwargs,
     ) -> None:
         """Log that an in-window range was skipped: channel, message range and
         what was missing (consolidation has no trace id). The watermark is
-        untouched, so the next idle trigger retries."""
+        untouched, so the next ``trigger`` (idle or turn) trigger retries."""
         logger.warning(
             "consolidation skipped for channel %s, messages %d-%d: %s; "
-            "the watermark stays at %d and the next idle trigger retries",
-            channel_id, rows[0][0], rows[-1][0], reason, watermark,
+            "the watermark stays at %d and the next %s trigger retries",
+            channel_id, rows[0][0], rows[-1][0], reason, watermark, trigger,
             extra={"channel_id": channel_id}, **kwargs,
         )
 
@@ -2198,17 +2293,19 @@ class MemoryPlugin(CorvidaePlugin):
 
         Compaction trigger: the record before_compaction stashed, if it was
         built against this same watermark (otherwise it covers a different
-        range and is dropped); no stash means ``catch_up``. Idle trigger: a
-        range wholly in the channel's live window forks it, and a miss
-        (forks off, fork failed, unusable reply) is a ``skip`` with a warning
-        (PRD §3.8.5, #320). A range not wholly in the window (no channel, no
-        window, rows that left it) is ``catch_up``: the rebuilt view.
+        range and is dropped); no stash means ``catch_up``. Idle and turn
+        triggers: a range wholly in the channel's live window forks it, and a
+        miss (forks off, fork failed, unusable reply) is a ``skip`` with a
+        warning (PRD §3.8.5, #320). A range not wholly in the window (no
+        channel, no window, rows that left it) is ``catch_up``: the rebuilt
+        view, for idle; for turn it is a ``skip`` with one DEBUG line (idle or
+        compaction consolidates it).
         """
         if trigger == "compaction":
             stashed = self._fork_stash.pop((channel_id, range_end), None)
             if stashed is not None and stashed[0] == watermark:
                 return "record", stashed[1]
-        elif trigger == "idle":
+        elif trigger in ("idle", "turn"):
             registry = self.pm.get_plugin("registry")
             channel = registry.get(channel_id) if registry is not None else None
             conv = getattr(channel, "conversation", None)
@@ -2221,6 +2318,7 @@ class MemoryPlugin(CorvidaePlugin):
                         channel_id, rows, watermark,
                         "forks are not enabled for consolidation "
                         "(agent.forks.enabled / agent.forks.stages)",
+                        trigger,
                     )
                     return "skip", None
                 # No await between the containment check and the render.
@@ -2230,9 +2328,20 @@ class MemoryPlugin(CorvidaePlugin):
                     self._skip_consolidation(
                         channel_id, rows, watermark,
                         f"the fork failed or its reply was unusable ({type(exc).__name__})",
-                        exc_info=True,
+                        trigger, exc_info=True,
                     )
                     return "skip", None
+            if trigger == "turn":
+                # Not in the window: idle or compaction consolidates it, so
+                # this recurs each turn; DEBUG, never the catch-up view.
+                logger.debug(
+                    "turn consolidation skipped for channel %s, messages %d-%d: "
+                    "the range is not wholly in the live window; idle or "
+                    "compaction consolidates it; the watermark stays at %d",
+                    channel_id, rows[0][0], rows[-1][0], watermark,
+                    extra={"channel_id": channel_id},
+                )
+                return "skip", None
         return "catch_up", None
 
     async def _catch_up(
