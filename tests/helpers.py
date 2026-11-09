@@ -183,13 +183,14 @@ class FakeForkAgent:
             b"k" * 32,
         )
 
-    async def fork(self, channel, instruction, *, stage, cut=None, extra_body=None):
+    async def fork(self, channel, instruction, *, stage, cut=None, extra_body=None,
+                   snapshot=None):
         from corvidae.attribution import get_attribution
         from corvidae.fork import ForkResult
 
         self.calls.append({
             "instruction": instruction, "stage": stage, "cut": cut, "extra_body": extra_body,
-            "attribution": dict(get_attribution()),
+            "attribution": dict(get_attribution()), "snapshot": snapshot,
         })
         if self.error is not None and (self.fail_marker is None or self.fail_marker in instruction):
             raise self.error
