@@ -2470,13 +2470,14 @@ class MemoryPlugin(CorvidaePlugin):
 
     def _note_turn_fork_failure(
         self, channel_id: str, rows: list[tuple], watermark: int
-    ) -> None:
+    ) -> bool:
         """Count a failed turn fork; at the limit, start the backoff (#620).
 
         The count restarts when the watermark has moved since the last
         failure (some consolidation succeeded). Reaching the limit, or failing
         the one retry after a backoff ran out, logs one warning and backs the
-        turn trigger off for ``idle_consolidate_after`` seconds.
+        turn trigger off for ``idle_consolidate_after`` seconds. Returns True
+        when this failure started a backoff.
         """
         failures = self._turn_failures.get(channel_id)
         if failures is None or failures.watermark != watermark:
@@ -2484,7 +2485,7 @@ class MemoryPlugin(CorvidaePlugin):
             self._turn_failures[channel_id] = failures
         failures.count += 1
         if failures.count < TURN_FORK_FAILURE_LIMIT:
-            return
+            return False
         failures.backoff_until = self._now() + self._idle_consolidate_after
         logger.warning(
             "turn consolidation for channel %s backing off after %d consecutive "
@@ -2496,6 +2497,7 @@ class MemoryPlugin(CorvidaePlugin):
             channel_id, failures.count, rows[0][0], rows[-1][0], watermark,
             self._idle_consolidate_after, extra={"channel_id": channel_id},
         )
+        return True
 
     async def _live_record(
         self, channel_id: str, rows: list[tuple], watermark: int, range_end: int,
@@ -2539,13 +2541,18 @@ class MemoryPlugin(CorvidaePlugin):
                 try:
                     return "record", await self._fork_record(agent, channel, contained, None)
                 except Exception as exc:
+                    # A turn failure that starts the backoff (#620) is retried
+                    # by idle or compaction, not the next turn: say so.
+                    retried_by = trigger
+                    if trigger == "turn" and self._note_turn_fork_failure(
+                        channel_id, rows, watermark
+                    ):
+                        retried_by = "idle or compaction"
                     self._skip_consolidation(
                         channel_id, rows, watermark,
                         f"the fork failed or its reply was unusable ({type(exc).__name__})",
-                        trigger, exc_info=True,
+                        retried_by, exc_info=True,
                     )
-                    if trigger == "turn":
-                        self._note_turn_fork_failure(channel_id, rows, watermark)
                     return "skip", None
             if trigger == "turn":
                 # Not in the window: idle or compaction consolidates it, so

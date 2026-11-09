@@ -55,6 +55,14 @@ async def test_turns_stop_forking_after_n_failures_with_one_warning(make_env, ca
     assert f"{TURN_FORK_FAILURE_LIMIT} consecutive" in msg
     assert "llm.stages.consolidation" in msg
     assert "idle and compaction" in msg
+    # The skip that started the backoff doesn't promise a turn retry.
+    skips = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING and "consolidation skipped" in r.getMessage()
+    ]
+    assert len(skips) == TURN_FORK_FAILURE_LIMIT
+    assert all("the next turn trigger retries" in m for m in skips[:-1])
+    assert "the next idle or compaction trigger retries" in skips[-1]
     # The watermark never moved.
     assert await fetch_watermark(env.db, env.channel.id) is None
 
@@ -135,3 +143,22 @@ async def test_a_success_resets_the_count(make_env):  # noqa: F811 (make_env fix
         await run_turn(env)
 
     assert len(env.agent.calls) == forks_so_far + TURN_FORK_FAILURE_LIMIT
+
+
+async def test_failure_after_a_watermark_move_restarts_the_count(make_env):  # noqa: F811 (make_env fixture)
+    """The race the turn task's own reset can't see: the watermark moves
+    after the task read it but before the next failure is recorded (a
+    compaction committed meanwhile). The failure is counted against the new
+    watermark, as the first of a fresh run, not the Nth of the old one."""
+    env = await failing_env(make_env)
+    rows = [(env.ids[0],), (env.ids[-1],)]
+    # N-1 failures against watermark 0.
+    for _ in range(TURN_FORK_FAILURE_LIMIT - 1):
+        env.memory._note_turn_fork_failure(env.channel.id, rows, 0)
+    # The next failure is read against a moved watermark.
+    env.memory._note_turn_fork_failure(env.channel.id, rows, env.ids[0])
+
+    failures = env.memory._turn_failures[env.channel.id]
+    assert (failures.count, failures.watermark, failures.backoff_until) == (
+        1, env.ids[0], None,
+    )
