@@ -2200,7 +2200,7 @@ entries, each its own record), and one commit
 that is a compare-and-set on the previous segment's end; a lost
 compare-and-set discards the rest, and a failure leaves earlier segments
 committed and the failure log says through which id. An unusable reply is
-retried once, then degrades to the raw transcript, as before. A segment
+retried once, then degrades to the raw transcript, split into records that fit the memory admission budget and stamped `mode = raw` (#626). A segment
 with no dialog that is followed by another segment folds its id span into
 the next segment's record (no record or commit of its own); a no-dialog
 last segment advances the watermark without a record. Records are
