@@ -1155,7 +1155,8 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
 
 # One row per logged candidate of a passive retrieval (#407). Holds ids and
 # numbers only, never text. outcome is one of: admitted, dropped_weak,
-# dropped_budget, dropped_dup, cut, excluded_in_window.
+# dropped_budget, dropped_dup, cut, excluded_in_window, not_admitted (no
+# funnel registered, #654).
 RETRIEVAL_CANDIDATE_DDL = """
 CREATE TABLE IF NOT EXISTS retrieval_candidate (
     retrieval_id INTEGER NOT NULL,   -- retrieval_log.id
@@ -1339,6 +1340,8 @@ class MemoryPlugin(CorvidaePlugin):
         self._idle: IdleTracker | None = None
         self._retention_interval: float = DEFAULT_RETENTION_INTERVAL
         self._retention_max_delay: float = DEFAULT_RETENTION_MAX_DELAY
+        # Days after which retention prunes retrieval logs; None is off (#654).
+        self._retrieval_log_max_age_days: float | None = None
         # Per-channel consolidation watch.
         self._idle_watch: IdleWatch | None = None
         # Timer for the next retention due time (or the read-failure re-arm).
@@ -1417,6 +1420,24 @@ class MemoryPlugin(CorvidaePlugin):
         )
         self._retention_max_delay = float(
             retention_cfg.get("max_delay", DEFAULT_RETENTION_MAX_DELAY)
+        )
+        # Retrieval-log pruning age (#654): absent or null is off; anything
+        # else must be a positive finite number of days. Fail at startup
+        # naming the key; bool is an int subclass (YAML ``true``).
+        raw_age = retention_cfg.get("retrieval_log_max_age_days")
+        if raw_age is not None and (
+            isinstance(raw_age, bool)
+            or not isinstance(raw_age, (int, float))
+            or not math.isfinite(raw_age)
+            or raw_age <= 0
+        ):
+            raise ValueError(
+                f"memory.retention.retrieval_log_max_age_days: got {raw_age!r}; "
+                "expected a positive number of days, or leave it unset to keep "
+                "every retrieval_log row — check agent.yaml"
+            )
+        self._retrieval_log_max_age_days = (
+            float(raw_age) if raw_age is not None else None
         )
         # A non-str prompt is refused here (startup fails loudly).
         self._consolidation_fork_prompt = resolve_consolidation_fork_prompt(config)
@@ -2633,8 +2654,12 @@ class MemoryPlugin(CorvidaePlugin):
             # (trap #8); the funnel dedupes against the window and budgets.
             admitted_ids: list[int] = []
             admission = Admission(admitted=[], duplicate=[])
+            # No funnel means nothing could be admitted (#654: logged as
+            # not_admitted, not as a budget drop).
+            no_funnel = False
             if lines:
                 funnel = self.pm.get_plugin("funnel")
+                no_funnel = funnel is None
                 if funnel is None:
                     logger.warning(
                         "funnel plugin not registered; memory retrieval "
@@ -2705,6 +2730,8 @@ class MemoryPlugin(CorvidaePlugin):
                             outcome = "admitted"
                         elif line in admission.duplicate:
                             outcome = "dropped_dup"
+                        elif no_funnel:
+                            outcome = "not_admitted"
                         else:
                             outcome = "dropped_budget"
                     rows.append((retrieval_id, c["id"], c["similarity"],
@@ -2715,11 +2742,16 @@ class MemoryPlugin(CorvidaePlugin):
                     rows.append((retrieval_id, c["id"], c["similarity"],
                                  c["score"], c["band"], would_be_rank,
                                  "excluded_in_window", c["source"]))
+                # A memory the redact CLI flagged after it was scored gets no
+                # row (#654): the flag check is part of the insert itself, so
+                # either the flag is visible here or the scrubber, which runs
+                # after the flag commits, deletes the row.
                 await db.executemany(
                     "INSERT INTO retrieval_candidate (retrieval_id, memory_id, "
                     "similarity, score, band, rank, outcome, source) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    rows,
+                    "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
+                    "WHERE (SELECT redacted FROM memory WHERE id = ?) = 0",
+                    [(*row, row[1]) for row in rows],
                 )
             except Exception:
                 logger.warning(
