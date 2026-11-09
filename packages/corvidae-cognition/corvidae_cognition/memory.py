@@ -1566,7 +1566,8 @@ class MemoryPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_agent_response(self, channel) -> None:
-        """Trigger C: a final reply may have pushed the window past N tokens.
+        """Turn trigger: a final reply may have left N window tokens of
+        un-consolidated conversation above the watermark.
 
         Runs before the reply is sent, so it awaits nothing: in-memory checks
         and one spawn. The token sum needs the watermark (a DB read), so it
@@ -1824,7 +1825,7 @@ class MemoryPlugin(CorvidaePlugin):
         await self._arm_retention()
 
     # ------------------------------------------------------------------
-    # The consolidation task (single code path for both triggers)
+    # The consolidation task (single code path for all three triggers: compaction, idle, turn)
     # ------------------------------------------------------------------
 
     async def _consolidate_range(self, channel_id: str, range_end: int, trigger: str) -> None:
@@ -2322,7 +2323,9 @@ class MemoryPlugin(CorvidaePlugin):
                         channel_id, rows, watermark,
                         "forks are not enabled for consolidation "
                         "(agent.forks.enabled / agent.forks.stages)",
-                        trigger,
+                        # With forks off the turn hook never fires again, so
+                        # idle or compaction is what retries a turn range.
+                        trigger if trigger == "idle" else "idle or compaction",
                     )
                     return "skip", None
                 # No await between the containment check and the render.

@@ -1085,9 +1085,10 @@ forks on for `consolidation`, a final reply that leaves
 conversation above the watermark forks a consolidation, so how often that
 fork runs is set by how much new text enters the window, not by the
 operator: what anyone on the channel says, and also tool results (a
-fetched page, an MCP result, a file read), whose content an outsider may
-control. A chatty group, one sender pasting long messages, or one large
-fetched page buys a fork at the next turn end. Each fork is the cached window prefix plus the
+fetched page, an MCP result, a file read) and the agent's own replies
+to them, whose content an outsider may control. A chatty group, one
+sender pasting long messages, or one large fetched page buys a fork at
+the next turn end. Each fork is the cached window prefix plus the
 instruction prefill and the consolidation profile's decode, which on a
 local server is slot time the main turn waits behind and on a metered
 endpoint is cached-input and output tokens. What bounds it: the trigger

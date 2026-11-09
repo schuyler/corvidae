@@ -29,7 +29,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 
 | Plugin | Entry point | What it does |
 |---|---|---|
-| `MemoryPlugin` | `memory` | Consolidates compacted conversation into durable memories and retrieves them into context; owns `sqlite-vec` |
+| `MemoryPlugin` | `memory` | Consolidates conversation (at turn ends, on idle, and at compaction) into durable memories and retrieves them into context; owns `sqlite-vec` |
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
@@ -593,7 +593,7 @@ nothing and are admitted at the channel's next turn, whatever its origin
 
 ### MemoryPlugin (`packages/corvidae-cognition/corvidae_cognition/memory.py`)
 
-Autobiographical memory: consolidates compacted dialog into first-person
+Autobiographical memory: consolidates dialog (at turn ends, on idle, and at compaction) into first-person
 memory records (SQLite + sqlite-vec + FTS5) and retrieves them into the
 prompt through the admission funnel. Entry point name: `"memory"`;
 `depends_on = {"persistence", "llm", "clock", "idle"}`. Absorbs the removed `DreamPlugin`.
