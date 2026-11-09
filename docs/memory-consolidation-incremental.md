@@ -442,7 +442,8 @@ Not designed here; listed so the change can be judged:
   range (now out of the window) wait for the next idle or compaction.
   The same race exists between idle and compaction today; the turn
   trigger makes it more frequent.
-- **Exclusion after a cross-channel merge.** A cross-channel near-dup
+- ~~**Exclusion after a cross-channel merge.**~~ Done in #627: the
+  survivor is marked `merged_foreign` and never window-excluded. Originally: A cross-channel near-dup
   merge replaces the other channel's older record with one in the current
   channel whose range is in the window, so the older content is excluded
   until those rows leave. Rare; small fix.
