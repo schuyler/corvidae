@@ -107,7 +107,9 @@ other tenants.
 | Plugin | Purpose |
 |--------|---------|
 | PersistencePlugin | SQLite database lifecycle and per-channel conversation initialization |
-| CoreToolsPlugin | Registers the built-in tools (shell, read_file, write_file, web_fetch) |
+| ShellToolPlugin | Registers `shell` and `task_pipeline` |
+| FileToolsPlugin | Registers `read_file` and `write_file` |
+| WebToolsPlugin | Registers `web_fetch` and `web_search` |
 | CLIPlugin | stdin/stdout transport (routes to `cli:local`) |
 | IRCPlugin | IRC transport via pydle with reconnect backoff |
 | TaskPlugin | Async task queue for tool call dispatch, configurable concurrency |

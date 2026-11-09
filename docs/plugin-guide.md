@@ -1162,7 +1162,9 @@ Plugins are loaded via `pm.load_setuptools_entrypoints("corvidae")`. The entry p
 registry          (ChannelRegistry)     — explicit, before entry points load
 persistence       (PersistencePlugin)   — entry point
 jsonl_log         (JsonlLogPlugin)      — entry point
-core_tools        (CoreToolsPlugin)     — entry point
+shell_tools       (ShellToolPlugin)     — entry point
+file_tools        (FileToolsPlugin)     — entry point
+web_tools         (WebToolsPlugin)      — entry point
 cli               (CLIPlugin)           — entry point
 irc               (IRCPlugin)           — entry point
 signal            (SignalPlugin)        — entry point
@@ -1303,9 +1305,18 @@ tools:
 
 The legacy key `agent.max_tool_result_chars` is still accepted but deprecated; a warning is logged at startup when it is present.
 
-### CoreToolsPlugin tools
+### Built-in tool plugins
 
-Registered by `CoreToolsPlugin` (entry point name: `core_tools`).
+Three plugins register the built-in tools, each from its own entry point:
+
+| Plugin | Entry point | Tools |
+|--------|-------------|-------|
+| `ShellToolPlugin` | `shell_tools` | `shell`, `task_pipeline` (one capability: PRD §3.5.3) |
+| `FileToolsPlugin` | `file_tools` | `read_file`, `write_file` |
+| `WebToolsPlugin` | `web_tools` | `web_fetch`, `web_search` |
+
+Each can be disabled by name in `plugins.disabled` and the others keep
+working. They replaced `CoreToolsPlugin` (`core_tools`), with no alias.
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
@@ -1316,7 +1327,7 @@ Registered by `CoreToolsPlugin` (entry point name: `core_tools`).
 | `web_search` | `query: str`, `max_results: int` (optional) | Searches the web via DuckDuckGo and returns formatted results with titles, URLs, and snippets. Defaults to 8 results per page. |
 | `task_pipeline` | `definition: str` | Executes a task graph defined in YAML or JSON. The definition must contain a `tasks` key with a list of objects, each having `name`, `command`, and optionally `depends_on`. Tasks run in topological order; failed tasks block their dependents. Returns a status summary; a task failure names the task and the command. The whole pipeline is cut at `tools.call_timeout` (600 s by default); set `tools.timeouts.task_pipeline` for longer runs. |
 
-**CoreToolsPlugin config:**
+**Built-in tool plugin config** (each plugin reads only its own keys):
 
 ```yaml
 tools:
