@@ -390,6 +390,31 @@ async def redact_messages(
     }
 
 
+async def _cascade_memory_ids(
+    db: aiosqlite.Connection, channel_id: str, msg_ids: list[int], exclude_id: int,
+) -> list[int]:
+    """The memory records a ``redact memory`` run cascades to (#625).
+
+    Distinct unredacted records on ``channel_id`` whose range covers any of
+    ``msg_ids``, other than ``exclude_id``. Read-only, so the dry run and
+    the real run count the same set. Only the record's own channel: message
+    ids are global, and a foreign record's numeric range can contain them.
+    """
+    found: list[int] = []
+    # One query per id keeps clear of SQLite's bound-variable limit.
+    for msg_id in msg_ids:
+        async with db.execute(
+            "SELECT id FROM memory "
+            "WHERE channel_id = ? AND msg_id_start <= ? AND msg_id_end >= ? "
+            "AND redacted = 0 AND id != ?",
+            (channel_id, msg_id, msg_id, exclude_id),
+        ) as cursor:
+            for (other_id,) in await cursor.fetchall():
+                if other_id not in found:
+                    found.append(other_id)
+    return found
+
+
 async def redact_memory_id(
     db: aiosqlite.Connection,
     memory_id: int,
@@ -431,9 +456,11 @@ async def redact_memory_id(
             (channel_id, msg_id_start, msg_id_end),
         ) as cursor:
             dry_ids = [row[0] for row in await cursor.fetchall()]
+        # The record itself plus the cascade the real run would tombstone.
+        cascade = await _cascade_memory_ids(db, channel_id, dry_ids, memory_id)
         return {
             "affected_messages": len(dry_ids),
-            "affected_memories": 1,
+            "affected_memories": 1 + len(cascade),
             "scrubbed": await _run_scrubbers(
                 db, {channel_id: dry_ids}, True, iso_date, None
             ),
@@ -474,26 +501,21 @@ async def redact_memory_id(
     affected_memories = 1
     redacted_msg_ids = [row_id for row_id, _ in msg_rows]
     if redacted_msg_ids:
-        for msg_id in redacted_msg_ids:
-            async with db.execute(
-                "SELECT id FROM memory "
-                "WHERE channel_id = ? AND msg_id_start <= ? AND msg_id_end >= ? "
-                "AND redacted = 0 AND id != ?",
-                (channel_id, msg_id, msg_id, memory_id),
-            ) as cursor:
-                other_mems = await cursor.fetchall()
-            for (other_id,) in other_mems:
+        # The same set the dry run counts (#625).
+        for other_id in await _cascade_memory_ids(
+            db, channel_id, redacted_msg_ids, memory_id
+        ):
+            await db.execute(
+                "UPDATE memory SET "
+                "summary = ?, redacted = 1, indexed = 0, embedded = 0 "
+                "WHERE id = ?",
+                (_MEMORY_TOMBSTONE, other_id),
+            )
+            if has_memory_vec:
                 await db.execute(
-                    "UPDATE memory SET "
-                    "summary = ?, redacted = 1, indexed = 0, embedded = 0 "
-                    "WHERE id = ?",
-                    (_MEMORY_TOMBSTONE, other_id),
+                    "DELETE FROM memory_vec WHERE memory_id = ?", (other_id,)
                 )
-                if has_memory_vec:
-                    await db.execute(
-                        "DELETE FROM memory_vec WHERE memory_id = ?", (other_id,)
-                    )
-                affected_memories += 1
+            affected_memories += 1
         await db.commit()
 
     # Step 3: let registered scrubbers clear text derived from the range.
