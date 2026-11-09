@@ -280,8 +280,8 @@ async def test_forks_send_the_record_schema(env):
     assert len(agent.calls) == 2
     for call in agent.calls:
         schema = call["extra_body"]["response_format"]["json_schema"]["schema"]
-        assert schema["required"] == ["summary"]
-        assert set(schema["properties"]) == {"summary", "topic_tags", "participants"}
+        assert schema["required"] == ["entries", "importance"]
+        assert set(schema["properties"]) == {"entries", "participants", "importance"}
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +317,17 @@ async def test_fork_reply_with_three_entries_stores_three_rows(env):
     assert [r["summary"] for r in rows] == [n for n, _ in THREE_ENTRIES]
     assert [json.loads(r["topic_tags"]) for r in rows] == [t for _, t in THREE_ENTRIES]
     assert [r["embedded"] for r in rows] == [1, 1, 1]
+    # Each row's stored vector is the one its own narrative was embedded to
+    # (C1); only checkable when the vec table exists.
+    if memory._vec_available:
+        import struct
+        expected = [(1.0, 0, 0, 0), (0, 1.0, 0, 0), (0, 0, 1.0, 0)]
+        for row, vec in zip(rows, expected):
+            async with db.execute(
+                "SELECT embedding FROM memory_vec WHERE memory_id = ?", (row["id"],)
+            ) as cursor:
+                blob = (await cursor.fetchone())[0]
+            assert struct.unpack("4f", blob) == vec
 
 
 async def test_idle_fork_with_only_blank_entries_skips(env, caplog):

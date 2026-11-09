@@ -239,8 +239,7 @@ async def run_replay(
                 record: dict = {"index": i, "latency_s": latency_s, "raw_output": text}
                 try:
                     data = _parse_json_block(text)
-                    record["summary"] = data.get("summary")
-                    record["topic_tags"] = data.get("topic_tags")
+                    record["entries"] = data.get("entries")
                     record["participants"] = data.get("participants")
                 except Exception as e:
                     record["error"] = str(e)

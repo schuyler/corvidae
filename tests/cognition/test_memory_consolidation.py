@@ -396,11 +396,14 @@ class TestResponseFormat:
         assert fmt["type"] == "json_schema"
         schema = fmt["json_schema"]["schema"]
         assert schema["type"] == "object"
-        assert schema["required"] == ["summary"]
+        assert schema["required"] == ["entries", "importance"]
         props = schema["properties"]
-        assert props["summary"]["type"] == "string"
-        for name in ("topic_tags", "participants"):
-            assert props[name] == {"type": "array", "items": {"type": "string"}}
+        assert props["importance"]["type"] == "number"
+        assert props["participants"] == {"type": "array", "items": {"type": "string"}}
+        item = props["entries"]["items"]
+        assert item["required"] == ["narrative"]
+        assert item["properties"]["narrative"]["type"] == "string"
+        assert item["properties"]["topic_tags"] == {"type": "array", "items": {"type": "string"}}
         await db.close()
 
     async def test_rubric_sends_importance_schema(self):
@@ -798,9 +801,12 @@ class TestEntriesParsing:
         """C4: a numeric-string importance reaches the prior as hint=0.7; a
         non-numeric one reaches it as hint=None."""
         memory, persistence, stub, channel, db = await build_consolidation_env()
-        stub.chat_text = entries_reply(THREE_ENTRIES[:1], importance=importance)
+        stub.embed_result = [[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0]]
+        stub.chat_text = entries_reply(THREE_ENTRIES, importance=importance)
         await drive_compaction_consolidation(memory, persistence, channel)
 
+        # Importance is scored once per consolidation, not once per entry (D4).
+        assert memory.importance_prior.score.await_count == 1
         kwargs = memory.importance_prior.score.await_args.kwargs
         assert "hint" in kwargs
         assert kwargs["hint"] == expected

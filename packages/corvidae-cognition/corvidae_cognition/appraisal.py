@@ -460,7 +460,10 @@ class AppraisalPrior:
         self._appraisal = appraisal
         self._fallback = fallback
 
-    async def score(self, messages, msg_id_range=None, channel=None) -> float:
+    async def score(
+        self, messages, msg_id_range=None, channel=None, *,
+        hint: float | None = None,
+    ) -> float:
         if msg_id_range is not None:
             try:
                 covered = await self._appraisal.importance_over_range(
@@ -475,7 +478,7 @@ class AppraisalPrior:
             if covered is not None:
                 return covered
         return await self._fallback.score(
-            messages, msg_id_range=msg_id_range, channel=channel
+            messages, msg_id_range=msg_id_range, channel=channel, hint=hint
         )
 
 
