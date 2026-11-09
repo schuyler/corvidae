@@ -217,7 +217,9 @@ the watermark hasn't moved, so the next trigger stores exactly one
 record. A failed rollback and a write blocked past the busy timeout (the
 WARNING names the database path and the timeout) are logged too.
 `write_record` (goal retirement) uses the same transaction, as do retention's
-three passes (demotion, re-promotion, vec backfill): each batch commits whole
+passes (demotion, re-promotion, retrieval-log pruning when
+`memory.retention.retrieval_log_max_age_days` is set (#654), vec backfill;
+a pruning failure is logged and leaves backfill to run): each batch commits whole
 or rolls back whole, and the backfill's embeddings are computed before the
 transaction opens. Each pass selects its candidates before its transaction,
 so every write re-checks the selection: demotion skips a row redacted,
@@ -403,9 +405,9 @@ per-record lookups cheap. A candidate's `outcome` is one of:
 - `dropped_weak`: banded weak while some other returned candidate was not
   weak, so it was never offered to the funnel.
 - `dropped_budget`: offered to the funnel, but the `memory` source's token
-  budget had no room for it. (This is the remainder: with the funnel
-  plugin disabled nothing is admitted and selected candidates also read
-  `dropped_budget`.)
+  budget had no room for it.
+- `not_admitted`: selected, but no funnel plugin is registered, so nothing
+  could be admitted (#654).
 - `dropped_dup`: offered, but the window's CONTEXT already contained that
   line (the funnel's dedupe is a substring test).
 - `cut`: scored but ranked below k, so never returned.
