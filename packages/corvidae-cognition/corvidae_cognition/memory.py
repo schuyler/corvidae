@@ -509,8 +509,8 @@ def _cut_after(messages: list[dict], range_end: int) -> int:
     """The fork cut just past ``range_end`` (#622): one past the last window
     message whose ``_db_id`` is at or below it, or 0 when none is.
 
-    Rows without a ``_db_id`` before that point (a live summary) stay in
-    view; anything after it, persisted or not, is cut. No tool-boundary
+    Rows without a ``_db_id`` before that point (one whose persist failed
+    or hasn't resolved yet) stay in view; anything after it, persisted or not, is cut. No tool-boundary
     snap: ``build_fork_prompt`` renders calls straddling the cut as pending.
     """
     cut = 0
@@ -1619,8 +1619,8 @@ class MemoryPlugin(CorvidaePlugin):
         window the fork would see (``messages[:cut]``), else None.
 
         The record must be about rows the model can read. Summary rows are
-        skipped (summaries are never consolidated, and a live window's
-        summary has no rowid). Pure: no await, so a caller can check and
+        skipped (summaries are never consolidated, and a summary may have
+        no rowid in the window). Pure: no await, so a caller can check and
         render with the window unchanged between them.
         """
         prefix = conv.messages if cut is None else conv.messages[:cut]

@@ -2273,7 +2273,7 @@ differently.
 **Fork by default (#180, #320).** Every background call that has a live
 window forks it: compaction from the dropped prefix; compaction-time
 consolidation from the same prefix in `before_compaction`, while the
-window is whole; idle and turn consolidation from the full window; stage-2
+window is whole; idle and turn consolidation from the window up to `range_end` (#622); stage-2
 appraisal and each critique lens from the full window at run time;
 provenance from the prefix ending at the exchange's final reply. Each forks
 only while the rows it needs are still in the window. A miss skips the
