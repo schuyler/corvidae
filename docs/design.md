@@ -2169,8 +2169,8 @@ Stage names are opaque to core (it never names cognition plugins).
 |---|---|---|---|
 | `compaction` | dropped prefix | inline in `resolve_compaction` | standalone view call on the same prefix (the `compaction` stage's profile, no tools), then the over-budget fallback (#308); on a connection-class failure the view is skipped and compaction defers to the turn's retry loop (#400) |
 | `consolidation` (compaction trigger) | dropped prefix of a copy of the window taken in `before_compaction` (#628) | in a background task `before_compaction` spawns (it returns at once), after waiting for the channel's in-flight turn or idle consolidation task (#621); the task is stashed and the `on_compaction` task, which waits the same way, awaits its record | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view, sent as the `consolidation` stage |
-| `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: catch-up (rebuilt view, sent as the `consolidation` stage) |
-| `consolidation` (turn trigger) | full window | in the task `on_agent_response` spawns, once the new window tokens in `(watermark, range_end]` reach `memory.consolidate_after_tokens`; never attempted with forks off for `consolidation` (silent) | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next turn trigger; no registered channel or window, or a range row not in the window: skip at DEBUG, never catch-up (idle or compaction consolidates it) |
+| `consolidation` (idle trigger) | window up to `range_end` (cut just past it, #622) | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: catch-up (rebuilt view, sent as the `consolidation` stage) |
+| `consolidation` (turn trigger) | window up to `range_end` (cut just past it, #622) | in the task `on_agent_response` spawns, once the new window tokens in `(watermark, range_end]` reach `memory.consolidate_after_tokens`; never attempted with forks off for `consolidation` (silent) | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next turn trigger, until three consecutive failures back the trigger off for the channel (one warning) until the watermark moves or `memory.idle_consolidate_after` passes (#620); no registered channel or window, or a range row not in the window: skip at DEBUG, never catch-up (idle or compaction consolidates it) |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
 | `critique` (each stylistic lens) | full window at run time | silent TaskQueue task | same as appraisal; a lens whose fork misses is skipped alone; if no lens ran, no outcome is recorded |
 | `critique` (provenance) | prefix ending at the exchange's final reply | silent TaskQueue task | skip with a warning (forks off, no live window, reply not recorded or not in the window, a compaction since the reply, or a failed fork) |
@@ -2205,7 +2205,7 @@ entries, each its own record), and one commit
 that is a compare-and-set on the previous segment's end; a lost
 compare-and-set discards the rest, and a failure leaves earlier segments
 committed and the failure log says through which id. An unusable reply is
-retried once, then degrades to the raw transcript, as before. A segment
+retried once, then degrades to the raw transcript, split into records that fit the memory admission budget and stamped `mode = raw` (#626). A segment
 with no dialog that is followed by another segment folds its id span into
 the next segment's record (no record or commit of its own); a no-dialog
 last segment advances the watermark without a record. Records are
@@ -2278,7 +2278,7 @@ differently.
 **Fork by default (#180, #320).** Every background call that has a live
 window forks it: compaction from the dropped prefix; compaction-time
 consolidation from the same prefix of a copy taken in `before_compaction`,
-while the window is whole, forked in the background (#628); idle and turn consolidation from the full window; stage-2
+while the window is whole, forked in the background (#628); idle and turn consolidation from the window up to `range_end` (#622); stage-2
 appraisal and each critique lens from the full window at run time;
 provenance from the prefix ending at the exchange's final reply. Each forks
 only while the rows it needs are still in the window. A miss skips the

@@ -178,9 +178,10 @@ async def test_idle_fork_record_stamped(fork_env):
     assert await prompt_text(db, prompt_hash) == "PROMPT-F"
 
 
-async def test_raw_transcript_fallback_is_stamped_standalone(tmp_path):
-    """R1: the degraded raw-transcript record is still stamped as the view
-    call: the fork instruction, mode standalone and the main profile's model."""
+async def test_raw_transcript_fallback_is_stamped_raw(tmp_path):
+    """R1, as changed by #626: the degraded raw-transcript record keeps the
+    failed view call's fork instruction and model, with mode raw (no call
+    wrote the text)."""
     config = config_with(EMBED_CONFIG, consolidation_fork_prompt="PROMPT-F")
     memory, persistence, stub, channel, db = await build_consolidation_env(
         config, db_path=str(tmp_path / "s.db")
@@ -194,7 +195,7 @@ async def test_raw_transcript_fallback_is_stamped_standalone(tmp_path):
         await drive_compaction_consolidation(memory, persistence, channel)
 
         [(_, prompt_hash, mode, model)] = await stamps_of(db)
-        assert (mode, model) == ("standalone", "main-x")
+        assert (mode, model) == ("raw", "main-x")
         assert prompt_hash == sha("PROMPT-F")
     finally:
         await db.close()

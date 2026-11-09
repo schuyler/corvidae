@@ -165,7 +165,9 @@ async def test_idle_trigger_forks_the_full_window(env, live_window, error, forke
         channel.conversation = None
     await memory._consolidate_range(channel.id, ids[-1], "idle")
     if live_window:
-        assert (agent.calls[0]["cut"], agent.calls[0]["attribution"]["trigger"]) == (None, "idle")
+        # The cut sits just past range_end (#622); range_end is the window's
+        # last row here, so the fork still renders the full window.
+        assert (agent.calls[0]["cut"], agent.calls[0]["attribution"]["trigger"]) == (len(ids), "idle")
     assert len(_view_requests(stub)) == view
     assert len(await fetch_memories(db)) == (1 if (forked or view) else 0)
 

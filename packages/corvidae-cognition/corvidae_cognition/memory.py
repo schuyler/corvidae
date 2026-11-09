@@ -11,7 +11,9 @@ This module owns the memory schema:
     deleted — demotion/redaction (Phase 1b) mutate columns.
     Each row is stamped with how it was made (issue #299): ``prompt_hash``
     (sha256 of the consolidation instruction text), ``mode`` (``fork`` |
-    ``standalone`` | ``direct``) and ``model`` (the model the call was sent
+    ``standalone`` | ``raw`` | ``direct``; ``raw`` is a range stored as its
+    transcript after the consolidation replies were unusable, #626) and
+    ``model`` (the model the call was sent
     with), plus ``trigger`` (issue #633: ``compaction`` | ``idle`` |
     ``turn`` | ``eval``, what started the consolidation; NULL for direct
     rows and rows from before the column). All NULL means the row predates stamping
@@ -101,7 +103,7 @@ from corvidae.fork import (
 )
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm_plugin import parse_llm_config
-from corvidae_cognition.funnel import Admission
+from corvidae_cognition.funnel import DEFAULT_BUDGET_TOKENS, Admission
 from corvidae.persistence import (
     add_column_if_missing,
     decode_message_row,
@@ -122,6 +124,13 @@ DEFAULT_IDLE_CONSOLIDATE_AFTER = 1800.0
 
 # Window tokens of un-consolidated conversation that start a turn consolidation.
 DEFAULT_CONSOLIDATE_AFTER_TOKENS: int = 4000
+
+# Consecutive failed turn-trigger forks on a channel after which the turn
+# trigger backs off (#620): it stops forking until the channel's watermark
+# moves or memory.idle_consolidate_after seconds pass.
+# shortcut: a module constant, not an agent.yaml key; make it config if a
+# deployment's backend fails transiently often enough that 3 is too few.
+TURN_FORK_FAILURE_LIMIT = 3
 
 # Seconds between retention runs, and the longest a due run waits for the
 # system to go quiet before running regardless.
@@ -189,13 +198,15 @@ def _exclude_clause(
     its ``min_msg_id``. Both conditions: message_log ids are global, so an id
     test alone would also hide other channels' records. Keyed on
     ``msg_id_start`` so a record straddling the window's oldest id stays.
+    A record that holds another channel's content through a near-dup merge
+    (``merged_foreign``, #627) is never excluded: the window doesn't hold it.
     Returns the bare in-window condition and its parameters, or
     ``("0", ())`` (never true) when there is nothing to exclude. Callers
     negate it in WHERE or select it as a flag (#407).
     """
     if exclude is None:
         return "0", ()
-    return "(m.channel_id = ? AND m.msg_id_start >= ?)", exclude
+    return "(m.channel_id = ? AND m.msg_id_start >= ? AND m.merged_foreign = 0)", exclude
 
 
 # One scored-pool input row from a candidate search:
@@ -307,6 +318,15 @@ DEFAULT_CONSOLIDATION_FORK_PROMPT = (
 # How a consolidation range gets its record (MemoryPlugin._live_record).
 LiveOutcome = Literal["record", "skip", "catch_up"]
 
+
+@dataclass
+class _TurnFailures:
+    """Consecutive failed turn-trigger forks on one channel (#620)."""
+
+    count: int            # failures since the watermark last moved
+    watermark: int        # the watermark the failures were read against
+    backoff_until: float | None = None  # set once count reaches the limit
+
 # Bound on fork records waiting for their on_compaction task (keyed by
 # (channel_id, range end)). An entry is consumed by the task that follows
 # its compaction; the bound only matters if that task never runs.
@@ -370,6 +390,52 @@ def _dialog_transcript(messages: list[dict]) -> str:
     )
 
 
+# The longest prefix a retrieved memory line gets before its summary
+# ("[band] (age) "): the longest band name and a 5-digit day count. A raw
+# fallback piece leaves room for it so the whole line fits the budget (#626).
+WORST_MEMORY_LINE_PREFIX = "[moderate] (99999d) "
+
+
+def _split_transcript(messages: list[dict], max_tokens: int) -> list[str]:
+    """Split ``messages``' transcript into pieces of at most ``max_tokens``
+    (#626), in order, so that joining them reproduces the transcript (with
+    a line break dropped between pieces split at a line boundary).
+
+    Greedy over ``role: content`` lines; a line longer than the size alone
+    is cut by characters, shrinking each cut until it fits. Sizes are
+    measured with ``count_tokens`` on the piece itself, never summed, since
+    tiktoken counts aren't additive. ``max_tokens`` must be at least 1.
+    """
+    lines = [f"{m.get('role', '?')}: {m.get('content', '')}" for m in messages]
+    pieces: list[str] = []
+    current = ""
+    for line in lines:
+        # Join the line to the current piece if the result still fits.
+        candidate = f"{current}\n{line}" if current else line
+        if count_tokens(candidate) <= max_tokens:
+            current = candidate
+            continue
+        if current:
+            pieces.append(current)
+            current = ""
+        # A line that fits alone starts the next piece.
+        if count_tokens(line) <= max_tokens:
+            current = line
+            continue
+        # An over-size line: cut it into the largest prefixes that fit, never
+        # below one character so the loop always advances.
+        rest = line
+        while rest:
+            cut = min(len(rest), max_tokens * 8)
+            while cut > 1 and count_tokens(rest[:cut]) > max_tokens:
+                cut = max(1, cut * 3 // 4)
+            pieces.append(rest[:cut])
+            rest = rest[cut:]
+    if current:
+        pieces.append(current)
+    return pieces
+
+
 @dataclass(frozen=True)
 class ConsolidationEntry:
     """One narrative entry: becomes one memory row."""
@@ -392,9 +458,9 @@ def _string_tuple(value: object, key: str) -> tuple[str, ...]:
     """Read ``value`` (absent, None, a string or a list) as a tuple of strings.
 
     A lone string reads as a one-item list (a small model's "participants":
-    "kestrel"). Raises ValueError naming ``key`` for anything else, so a
-    wrong-typed array makes the reply unusable rather than escaping as a
-    TypeError.
+    "kestrel"). Raises ValueError naming ``key`` for anything else, rather
+    than escaping as a TypeError; the caller decides what that costs (a
+    malformed entry is dropped, a malformed participants reads as none).
     """
     # Absent and null both mean "none given".
     if value is None:
@@ -411,10 +477,13 @@ def _string_tuple(value: object, key: str) -> tuple[str, ...]:
 
 
 def _coerce_importance(value: object) -> float | None:
-    """The reply's importance as a finite float, else None (absent).
+    """The reply's importance as a finite float in [0, 1], else None (absent).
 
-    A bool is not a number here (``true`` would become 1.0), and a
-    non-finite value is dropped (``nan`` would clamp to maximum).
+    A bool is not a number here (``true`` would become 1.0), a non-finite
+    value is dropped (``nan`` would clamp to maximum), and so is one outside
+    [0, 1] (#655): a rating on another scale (``7`` out of 10, ``"1e3"``)
+    would otherwise clamp to 1.0 and exempt the record from retention
+    demotion, so the rubric rates it instead.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
@@ -423,7 +492,7 @@ def _coerce_importance(value: object) -> float | None:
     except (ValueError, OverflowError):
         # Unparseable text, or an integer too large for a float.
         return None
-    return number if math.isfinite(number) else None
+    return number if math.isfinite(number) and 0.0 <= number <= 1.0 else None
 
 
 def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
@@ -431,9 +500,9 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
 
     ``entries`` items with a non-blank string ``narrative`` become entries;
     any other item is dropped. Without an ``entries`` key, a legacy
-    ``summary`` reads as the one entry. Raises ValueError on unusable output
-    (no JSON, no usable entries, a wrong-typed ``participants``), which each
-    caller already handles.
+    ``summary`` reads as the one entry. A wrong-typed ``participants`` reads
+    as none, with a warning (#655). Raises ValueError on unusable output (no
+    JSON, no usable entries), which each caller already handles.
     """
     data = _parse_json_block(text)
     entries: list[ConsolidationEntry] = []
@@ -457,8 +526,6 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
             if isinstance(summary, str) and summary.strip():
                 tags = _string_tuple(data.get("topic_tags"), "topic_tags")
                 entries.append(ConsolidationEntry(summary.strip(), tags))
-        # Participants are shared by every entry of the consolidation.
-        participants = _string_tuple(data.get("participants"), "participants")
     except ValueError as exc:
         raise ValueError(f"consolidation output is malformed: {exc}") from exc
     if not entries:
@@ -466,6 +533,16 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
             "consolidation output has no usable entries "
             "(each needs a non-empty narrative)"
         )
+    # Participants are shared by every entry of the consolidation. A
+    # wrong-typed value loses only itself, not the entries (#655).
+    try:
+        participants = _string_tuple(data.get("participants"), "participants")
+    except ValueError as exc:
+        logger.warning(
+            "consolidation reply's participants is unusable (%s); storing the "
+            "entries with no participants", exc,
+        )
+        participants = ()
     return Consolidation(
         entries=tuple(entries),
         participants=participants,
@@ -505,6 +582,22 @@ def _fork_range_sentence(prefix: list[dict], dialog_ids: set[int]) -> str:
         f"«{quote(opener.get('content'))}» onward. Earlier messages are "
         "already in your memory; do not restate them."
     )
+
+
+def _cut_after(messages: list[dict], range_end: int) -> int:
+    """The fork cut just past ``range_end`` (#622): one past the last window
+    message whose ``_db_id`` is at or below it, or 0 when none is.
+
+    Rows without a ``_db_id`` before that point (one whose persist failed
+    or hasn't resolved yet) stay in view; anything after it, persisted or not, is cut. No tool-boundary
+    snap: ``build_fork_prompt`` renders calls straddling the cut as pending.
+    """
+    cut = 0
+    for i, m in enumerate(messages):
+        db_id = m.get("_db_id")
+        if isinstance(db_id, int) and db_id <= range_end:
+            cut = i + 1
+    return cut
 
 
 async def fetch_range_rows(
@@ -1039,9 +1132,10 @@ CREATE TABLE IF NOT EXISTS memory (
     redacted INTEGER NOT NULL DEFAULT 0,-- redact tombstone flag (Phase 1b)
     embedded INTEGER NOT NULL DEFAULT 0,-- 0 = embedding pending/failed (backfillable)
     prompt_hash TEXT,                   -- sha256 of the instruction text; NULL = unknown/direct
-    mode TEXT,                          -- fork | standalone | direct; NULL = unknown (pre-stamp)
+    mode TEXT,                          -- fork | standalone | raw | direct; NULL = unknown (pre-stamp)
     model TEXT,                         -- model the consolidation call was sent with
-    trigger TEXT                        -- compaction | idle | turn | eval; NULL = direct/pre-#633
+    trigger TEXT,                       -- compaction | idle | turn | eval; NULL = direct/pre-#633
+    merged_foreign INTEGER NOT NULL DEFAULT 0 -- 1 = holds another channel's record via near-dup merge (#627)
 )
 """
 
@@ -1154,7 +1248,8 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
 
 # One row per logged candidate of a passive retrieval (#407). Holds ids and
 # numbers only, never text. outcome is one of: admitted, dropped_weak,
-# dropped_budget, dropped_dup, cut, excluded_in_window.
+# dropped_budget, dropped_dup, cut, excluded_in_window, not_admitted (no
+# funnel registered, #654).
 RETRIEVAL_CANDIDATE_DDL = """
 CREATE TABLE IF NOT EXISTS retrieval_candidate (
     retrieval_id INTEGER NOT NULL,   -- retrieval_log.id
@@ -1325,6 +1420,9 @@ class MemoryPlugin(CorvidaePlugin):
         self._recency_from: str = RECENCY_FROM_CHOICES[0]
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold: float = 0.95
+        # Memory admission budget for raw-fallback pieces (#626; on_init sets).
+        self._memory_budget: int = DEFAULT_BUDGET_TOKENS
+        self._memory_budget_key: str = "funnel.budgets.memory"
         # Tracked background tasks (consolidation) — plugin-owned
         # asyncio.create_task, never the TaskQueue: every TaskQueue
         # completion triggers a full main-model turn (§2.3, trap #5).
@@ -1338,11 +1436,15 @@ class MemoryPlugin(CorvidaePlugin):
         # trigger, so compaction can wait for it instead of forking the range
         # again (#621).
         self._inflight_tasks: dict[str, tuple[asyncio.Task, str]] = {}
+        # Consecutive turn-fork failures per channel, for the backoff (#620).
+        self._turn_failures: dict[str, _TurnFailures] = {}
         # Kernel clock and idle tracker; both set in on_start, or both None.
         self._clock: Clock | None = None
         self._idle: IdleTracker | None = None
         self._retention_interval: float = DEFAULT_RETENTION_INTERVAL
         self._retention_max_delay: float = DEFAULT_RETENTION_MAX_DELAY
+        # Days after which retention prunes retrieval logs; None is off (#654).
+        self._retrieval_log_max_age_days: float | None = None
         # Per-channel consolidation watch.
         self._idle_watch: IdleWatch | None = None
         # Timer for the next retention due time (or the read-failure re-arm).
@@ -1422,6 +1524,24 @@ class MemoryPlugin(CorvidaePlugin):
         self._retention_max_delay = float(
             retention_cfg.get("max_delay", DEFAULT_RETENTION_MAX_DELAY)
         )
+        # Retrieval-log pruning age (#654): absent or null is off; anything
+        # else must be a positive finite number of days. Fail at startup
+        # naming the key; bool is an int subclass (YAML ``true``).
+        raw_age = retention_cfg.get("retrieval_log_max_age_days")
+        if raw_age is not None and (
+            isinstance(raw_age, bool)
+            or not isinstance(raw_age, (int, float))
+            or not math.isfinite(raw_age)
+            or raw_age <= 0
+        ):
+            raise ValueError(
+                f"memory.retention.retrieval_log_max_age_days: got {raw_age!r}; "
+                "expected a positive number of days, or leave it unset to keep "
+                "every retrieval_log row — check agent.yaml"
+            )
+        self._retrieval_log_max_age_days = (
+            float(raw_age) if raw_age is not None else None
+        )
         # A non-str prompt is refused here (startup fails loudly).
         self._consolidation_fork_prompt = resolve_consolidation_fork_prompt(config)
         self._rubric_prompt = resolve_prompt(config, "memory.rubric_prompt", RUBRIC_PROMPT)
@@ -1457,6 +1577,20 @@ class MemoryPlugin(CorvidaePlugin):
         )
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold = float(self._memory_cfg.get("dup_threshold", 0.95))
+        # The memory admission budget, which raw-fallback pieces must fit
+        # (#626): the funnel's memory budget, else its default, else the
+        # funnel's built-in default. The key is kept for the warning.
+        funnel_cfg = config.get("funnel", {}) or {}
+        funnel_budgets = funnel_cfg.get("budgets", {}) or {}
+        if "memory" in funnel_budgets:
+            self._memory_budget = funnel_budgets["memory"]
+            self._memory_budget_key = "funnel.budgets.memory"
+        elif "default_budget" in funnel_cfg:
+            self._memory_budget = funnel_cfg["default_budget"]
+            self._memory_budget_key = "funnel.default_budget"
+        else:
+            self._memory_budget = DEFAULT_BUDGET_TOKENS
+            self._memory_budget_key = "funnel.budgets.memory (unset; the funnel default)"
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -1668,8 +1802,8 @@ class MemoryPlugin(CorvidaePlugin):
         window the fork would see (``messages[:cut]``), else None.
 
         The record must be about rows the model can read. Summary rows are
-        skipped (summaries are never consolidated, and a live window's
-        summary has no rowid). Pure: no await, so a caller can check and
+        skipped (summaries are never consolidated, and a summary may have
+        no rowid in the window). Pure: no await, so a caller can check and
         render with the window unchanged between them.
         """
         prefix = conv.messages if cut is None else conv.messages[:cut]
@@ -1819,6 +1953,23 @@ class MemoryPlugin(CorvidaePlugin):
                 "turn consolidation could not read the watermark for channel %s "
                 "(schema setup or watermark query failed); "
                 "the next turn trigger retries", channel.id, exc_info=True,
+            )
+            return
+        # Backoff after repeated fork failures (#620): any consolidation that
+        # moved the watermark since the last failure ends it; otherwise the
+        # turn trigger stays off until the interval passes.
+        failures = self._turn_failures.get(channel.id)
+        if failures is not None and failures.watermark != watermark:
+            del self._turn_failures[channel.id]
+        elif (
+            failures is not None
+            and failures.backoff_until is not None
+            and self._now() < failures.backoff_until
+        ):
+            logger.debug(
+                "turn consolidation for channel %s is backing off after %d "
+                "consecutive fork failures; not forking",
+                channel.id, failures.count, extra={"channel_id": channel.id},
             )
             return
         # Sum new conversation tokens, stopping once N is reached.
@@ -2216,21 +2367,16 @@ class MemoryPlugin(CorvidaePlugin):
         # otherwise be dated at import time (issue #52).
         created_at = await source_timestamp(db, rows[-1][0])
 
-        # Embed every entry's narrative in one call; failure stores
+        # Embed every entry's narrative (in halves if the server caps the
+        # batch, #655); failure stores
         # embedded=0 for later backfill (trap #10 — degrade, never block).
         embeddings: list[list[float] | None] = [None] * len(record.entries)
         if self._embedding_enabled():
             try:
                 client = self._llm().get_client("embedding")
-                vectors = await client.embed(
-                    [e.narrative for e in record.entries], kind="document"
+                embeddings = await self._embed_in_chunks(
+                    client, [e.narrative for e in record.entries], channel_id
                 )
-                if len(vectors) != len(record.entries):
-                    raise ValueError(
-                        f"embedding returned {len(vectors)} vectors "
-                        f"for {len(record.entries)} entries"
-                    )
-                embeddings = list(vectors)
             except Exception:
                 logger.warning(
                     "memory embedding failed for channel %s (%d entries); "
@@ -2301,6 +2447,39 @@ class MemoryPlugin(CorvidaePlugin):
             },
         )
         return True
+
+    async def _embed_in_chunks(
+        self, client: Any, texts: list[str], channel_id: str,
+    ) -> list[list[float] | None]:
+        """Embed ``texts`` as documents, halving a batch the server rejects (#655).
+
+        A server with a per-request cap rejects a large batch; the two halves
+        are retried, recursively, so depth is bounded by log2 of the count.
+        A single text that fails means the encoder itself is failing, not a
+        cap: that raises, and the caller stores everything unembedded, as it
+        did before the retry existed.
+        """
+        try:
+            vectors = await client.embed(texts, kind="document")
+            if len(vectors) != len(texts):
+                raise ValueError(
+                    f"embedding returned {len(vectors)} vectors for {len(texts)} texts"
+                )
+            return list(vectors)
+        except Exception as exc:
+            if len(texts) == 1:
+                raise
+            logger.warning(
+                "memory embedding of %d entries failed for channel %s (%s); "
+                "retrying in two smaller batches, in case the server caps the "
+                "batch size",
+                len(texts), channel_id, type(exc).__name__,
+            )
+        mid = len(texts) // 2
+        return (
+            await self._embed_in_chunks(client, texts[:mid], channel_id)
+            + await self._embed_in_chunks(client, texts[mid:], channel_id)
+        )
 
     async def _insert_record(
         self, db: aiosqlite.Connection, *, channel_id: str, summary: str,
@@ -2403,14 +2582,17 @@ class MemoryPlugin(CorvidaePlugin):
         if dup_old_id is not None:
             async with db.execute(
                 "SELECT retrieval_count, last_retrieved_at, importance, "
-                "msg_id_start, msg_id_end, created_at "
+                "msg_id_start, msg_id_end, created_at, merged_foreign "
                 "FROM memory WHERE id = ?",
                 (dup_old_id,),
             ) as old_cursor:
                 old_row = await old_cursor.fetchone()
             if old_row is not None:
                 (old_rc, old_lra, old_importance,
-                 old_start, old_end, old_created) = old_row
+                 old_start, old_end, old_created, old_foreign) = old_row
+                # The survivor holds another channel's content if this merge
+                # crosses channels or the old record already did (#627).
+                merged_foreign = 1 if (dup_cross_channel or old_foreign) else 0
                 # Fold stats into the new record
                 inherited_rc = (old_rc or 0)  # old record's count to fold in
                 new_importance = max(importance, old_importance or 0.0)
@@ -2437,11 +2619,12 @@ class MemoryPlugin(CorvidaePlugin):
                     "  WHEN ? IS NULL THEN last_retrieved_at "
                     "  ELSE MAX(last_retrieved_at, ?) "
                     "END, "
-                    "msg_id_start = ?, msg_id_end = ?, created_at = ? "
+                    "msg_id_start = ?, msg_id_end = ?, created_at = ?, "
+                    "merged_foreign = ? "
                     "WHERE id = ?",
                     (inherited_rc, new_importance,
                      new_lra, new_lra, new_lra,
-                     new_start, new_end, new_created, memory_id),
+                     new_start, new_end, new_created, merged_foreign, memory_id),
                 )
                 # Supersede the old record
                 await db.execute(
@@ -2508,6 +2691,37 @@ class MemoryPlugin(CorvidaePlugin):
             extra={"channel_id": channel_id}, **kwargs,
         )
 
+    def _note_turn_fork_failure(
+        self, channel_id: str, rows: list[tuple], watermark: int
+    ) -> bool:
+        """Count a failed turn fork; at the limit, start the backoff (#620).
+
+        The count restarts when the watermark has moved since the last
+        failure (some consolidation succeeded). Reaching the limit, or failing
+        the one retry after a backoff ran out, logs one warning and backs the
+        turn trigger off for ``idle_consolidate_after`` seconds. Returns True
+        when this failure started a backoff.
+        """
+        failures = self._turn_failures.get(channel_id)
+        if failures is None or failures.watermark != watermark:
+            failures = _TurnFailures(count=0, watermark=watermark)
+            self._turn_failures[channel_id] = failures
+        failures.count += 1
+        if failures.count < TURN_FORK_FAILURE_LIMIT:
+            return False
+        failures.backoff_until = self._now() + self._idle_consolidate_after
+        logger.warning(
+            "turn consolidation for channel %s backing off after %d consecutive "
+            "fork failures (messages %d-%d): the turn trigger stops forking until "
+            "a consolidation moves the watermark (now %d) or %.0f s pass; idle "
+            "and compaction still consolidate the range. Check the consolidation "
+            "stage's profile and backend (llm.stages.consolidation) and the "
+            "warnings above for the cause",
+            channel_id, failures.count, rows[0][0], rows[-1][0], watermark,
+            self._idle_consolidate_after, extra={"channel_id": channel_id},
+        )
+        return True
+
     async def _live_record(
         self, channel_id: str, rows: list[tuple], watermark: int, range_end: int,
         trigger: str,
@@ -2535,7 +2749,11 @@ class MemoryPlugin(CorvidaePlugin):
             registry = self.pm.get_plugin("registry")
             channel = registry.get(channel_id) if registry is not None else None
             conv = getattr(channel, "conversation", None)
-            contained = self._range_in_window(conv, rows, None) if conv is not None else None
+            # Fork only what the record is stamped with: a message that
+            # reached the window after range_end was fixed lies past the cut,
+            # so the next consolidation narrates it, not this one too (#622).
+            cut = _cut_after(conv.messages, range_end) if conv is not None else None
+            contained = self._range_in_window(conv, rows, cut) if conv is not None else None
             if contained is not None:
                 # Live-window work: fork or skip, never the rebuilt view (PRD §3.8.5).
                 agent = fork_agent(self.pm, "consolidation")
@@ -2551,12 +2769,20 @@ class MemoryPlugin(CorvidaePlugin):
                     return "skip", None
                 # No await between the containment check and the render.
                 try:
-                    return "record", await self._fork_record(agent, channel, contained, None)
+                    return "record", await self._fork_record(agent, channel, contained, cut)
                 except Exception as exc:
+                    # A turn failure that starts the backoff (#620) is retried
+                    # by idle or compaction, or by the turn trigger only once
+                    # the backoff ends: say so.
+                    retried_by = trigger
+                    if trigger == "turn" and self._note_turn_fork_failure(
+                        channel_id, rows, watermark
+                    ):
+                        retried_by = "idle or compaction (or, after the backoff, turn)"
                     self._skip_consolidation(
                         channel_id, rows, watermark,
                         f"the fork failed or its reply was unusable ({type(exc).__name__})",
-                        trigger, exc_info=True,
+                        retried_by, exc_info=True,
                     )
                     return "skip", None
             if trigger == "turn":
@@ -2630,17 +2856,38 @@ class MemoryPlugin(CorvidaePlugin):
                     "(attempt %d/2): %s",
                     channel_id, span, attempt + 1, exc,
                 )
-        # The calls are already paid for; keep the range as its raw transcript.
-        logger.warning(
-            "consolidation of channel %s, message ids %s: both replies unusable; "
-            "storing the raw transcript as the record",
-            channel_id, span,
+        # The calls are already paid for; keep the range as its raw
+        # transcript, split into pieces each admissible as a memory line, and
+        # stamped raw: no call wrote this text (#626).
+        raw_stamp = dataclasses.replace(stamp, mode="raw")
+        max_tokens = (
+            self._memory_budget - count_tokens(WORST_MEMORY_LINE_PREFIX) - 1
         )
+        if max_tokens < 1:
+            # No memory line can fit this budget: splitting would only make
+            # crumbs, so keep the one record, as before #626.
+            logger.warning(
+                "consolidation of channel %s, message ids %s: both replies "
+                "unusable; storing the raw transcript as one record, since "
+                "the memory budget (%s = %s tokens) is too small for any "
+                "memory line; raise it to make raw records admissible",
+                channel_id, span, self._memory_budget_key, self._memory_budget,
+            )
+            pieces = [_dialog_transcript(seg_dialog)]
+        else:
+            pieces = _split_transcript(seg_dialog, max_tokens)
+            logger.warning(
+                "consolidation of channel %s, message ids %s: both replies "
+                "unusable; storing the raw transcript as %d record(s) sized "
+                "to the memory budget (%s = %s tokens)",
+                channel_id, span, len(pieces),
+                self._memory_budget_key, self._memory_budget,
+            )
         return Consolidation(
-            entries=(ConsolidationEntry(_dialog_transcript(seg_dialog), ()),),
+            entries=tuple(ConsolidationEntry(p, ()) for p in pieces),
             participants=(),
             importance=None,
-            stamp=stamp,
+            stamp=raw_stamp,
         )
 
     # ------------------------------------------------------------------
@@ -2704,8 +2951,12 @@ class MemoryPlugin(CorvidaePlugin):
             # (trap #8); the funnel dedupes against the window and budgets.
             admitted_ids: list[int] = []
             admission = Admission(admitted=[], duplicate=[])
+            # No funnel means nothing could be admitted (#654: logged as
+            # not_admitted, not as a budget drop).
+            no_funnel = False
             if lines:
                 funnel = self.pm.get_plugin("funnel")
+                no_funnel = funnel is None
                 if funnel is None:
                     logger.warning(
                         "funnel plugin not registered; memory retrieval "
@@ -2776,6 +3027,8 @@ class MemoryPlugin(CorvidaePlugin):
                             outcome = "admitted"
                         elif line in admission.duplicate:
                             outcome = "dropped_dup"
+                        elif no_funnel:
+                            outcome = "not_admitted"
                         else:
                             outcome = "dropped_budget"
                     rows.append((retrieval_id, c["id"], c["similarity"],
@@ -2786,11 +3039,16 @@ class MemoryPlugin(CorvidaePlugin):
                     rows.append((retrieval_id, c["id"], c["similarity"],
                                  c["score"], c["band"], would_be_rank,
                                  "excluded_in_window", c["source"]))
+                # A memory the redact CLI flagged after it was scored gets no
+                # row (#654): the flag check is part of the insert itself, so
+                # either the flag is visible here or the scrubber, which runs
+                # after the flag commits, deletes the row.
                 await db.executemany(
                     "INSERT INTO retrieval_candidate (retrieval_id, memory_id, "
                     "similarity, score, band, rank, outcome, source) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    rows,
+                    "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
+                    "WHERE (SELECT redacted FROM memory WHERE id = ?) = 0",
+                    [(*row, row[1]) for row in rows],
                 )
             except Exception:
                 logger.warning(
@@ -2840,7 +3098,9 @@ class MemoryPlugin(CorvidaePlugin):
         ``exclude``: optional ``(channel_id, min_msg_id)``. Records of that
         channel whose ``msg_id_start`` is at or past ``min_msg_id`` (their
         whole range still in the live window) are left out before the cut
-        to k (#634). Passive retrieval passes it; this is not a scope.
+        to k (#634), unless they hold another channel's record through a
+        near-dup merge (#627). Passive retrieval passes it; this is not a
+        scope.
 
         Returns:
             (candidates best first: by fused rank on the hybrid path, by
@@ -3444,6 +3704,11 @@ class MemoryPlugin(CorvidaePlugin):
         await add_column_if_missing(db, "memory", "model", "TEXT")
         # Trigger column (#633), likewise nullable; old rows read NULL.
         await add_column_if_missing(db, "memory", "trigger", "TEXT")
+        # Foreign-merge flag (#627); old rows read 0 (no backfill: exclusion
+        # only applies while a range is in the live window).
+        await add_column_if_missing(
+            db, "memory", "merged_foreign", "INTEGER NOT NULL DEFAULT 0"
+        )
         await db.execute(MEMORY_PROMPT_DDL)
         await db.execute(WATERMARK_DDL)
         await db.execute(EMBEDDING_META_DDL)

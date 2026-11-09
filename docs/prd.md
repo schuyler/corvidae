@@ -992,9 +992,10 @@ only through the funnel.
    conversation happened, embedded, and linked to its consolidation's
    `message_log` id range. The records of one consolidation share that
    range, its importance and its stamp: the instructions, mode (`fork |
-   standalone`, the latter being the view call, not the windowless
-   standalone work of §3.8 item 5), model and trigger of the call that
-   produced it, so the records a given prompt or trigger wrote can be
+   standalone | raw`, `standalone` being the view call, not the windowless
+   standalone work of §3.8 item 5, and `raw` a range stored as its
+   transcript after the consolidation replies were unusable), model and
+   trigger of the call that produced it, so the records a given prompt or trigger wrote can be
    found; a record no consolidation call produced is marked as such.
    It is scored by a pluggable importance prior (the consolidation's own
    rating when it gave one, else a cheap-model rubric, by default; the
