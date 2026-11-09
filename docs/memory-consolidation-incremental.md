@@ -7,9 +7,10 @@ a few sentences. Each entry is its own memory record. Retrieval stops
 admitting records of conversation the agent can still see, and the funnel
 stops letting one oversized entry block the rest.
 
-This is a design. Status: §1, §2 and §4 (#635), §5 (#634), §6's funnel
-change (#631) and §7 (#633) are implemented; the turn trigger (§3, #636)
-is not built yet. It answers the analysis in
+This is a design. Status: §1, §2 and §4 (#635), §3, the turn trigger
+(#636), §5 (#634), §6's funnel change (#631) and §7 (#633) are
+implemented; [cognition.md](cognition.md#consolidation-write-path)
+describes the code as built. It answers the analysis in
 [memory-retrieval-fidelity.md](memory-retrieval-fidelity.md), with the
 corrections listed at the end of this doc.
 

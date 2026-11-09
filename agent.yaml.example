@@ -107,6 +107,8 @@ agent:
 
 # Autobiographical memory (optional; see docs/configuration.md)
 # memory:
+#   consolidate_after_tokens: 4000    # new window tokens that start a consolidation fork at the end of a
+#                                     # turn (agent.forks on for consolidation; positive integer; restart)
 #   half_life_days: 30                # retrieval recency decay (e-folding time, days)
 #   rubric_prompt: "Rate importance"  # or a file path; the importance rubric
 #   retrieval:
