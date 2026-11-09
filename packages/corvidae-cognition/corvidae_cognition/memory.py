@@ -146,6 +146,30 @@ RECENCY_FROM_CHOICES = ("created", "last_used")
 # (#665): the agent's previous reply (variant A), or nothing (the pre-#665
 # query). The first entry is the default.
 QUERY_CONTEXT_CHOICES = ("previous_reply", "none")
+# Where passive retrieval's candidates come from on the vector path (#666):
+# vec KNN and FTS5 fused by reciprocal rank, or vec KNN alone. The first
+# entry is the default.
+CANDIDATES_CHOICES = ("hybrid", "vector")
+# Reciprocal rank fusion constant: a candidate earns 1 / (RRF_C + rank) from
+# each list it is ranked in. 60 is the value from the original RRF paper;
+# it flattens the head so one list's #1 can't outweigh agreement.
+# shortcut: a constant with equal list weights; make it (or per-list
+# weights) a memory.retrieval key if the labelled set shows a need.
+RRF_C = 60
+# Common words the hybrid side's FTS query leaves out (#666), so a chatty
+# message can't buy fusion rank on "what" or "the". Matched lowercased.
+# shortcut: a small English list; a deployment conversing in another
+# language gets no stopwording, so extend it if one shows up.
+FTS_STOPWORDS = frozenset("""
+a about above after again all also am an and any are as at be because been
+before being both but by can could did do does doing done for from had has
+have having he her here hers him his how i if in into is it its just me
+more most my no not now of off on once only or other our ours out over own
+same she should so some such than that the their theirs them then there
+these they this those through to too under until up us very was we were
+what when where which while who whom why will with would yes you your yours
+ok okay oh hi hey thanks thank please
+""".split())
 # Honest similarity stand-in for FTS5-degraded retrieval, where cosine
 # similarity cannot be measured: keyword hits enter at the moderate band.
 FTS_SIMILARITY_PROXY = 0.6
@@ -848,11 +872,13 @@ def _format_age(seconds: float) -> str:
     return f"{int(seconds // 86400)}d"
 
 
-def _fts_match_query(text: str) -> str | None:
+def _fts_match_query(text: str, stopwords: bool = False) -> str | None:
     """Build a safe FTS5 MATCH expression from free text.
 
     Raw user text can be FTS5 syntax-invalid; quote each word token and OR
-    them. Returns None when the text has no word tokens.
+    them. Returns None when the text has no word tokens. With ``stopwords``
+    (the hybrid side, #666), words in ``FTS_STOPWORDS`` are left out before
+    the cap, so the cap counts content words.
 
     The 20-token cap applies per blank-line-separated paragraph, so a
     coalesced burst (messages joined by blank lines, #398) keeps each
@@ -864,10 +890,64 @@ def _fts_match_query(text: str) -> str | None:
     # Cap each paragraph's tokens separately, then pool them all.
     tokens: list[str] = []
     for paragraph in re.split(r"\n\s*\n", text):
-        tokens.extend(re.findall(r"\w+", paragraph)[:20])
+        words = re.findall(r"\w+", paragraph)
+        if stopwords:
+            words = [w for w in words if w.lower() not in FTS_STOPWORDS]
+        tokens.extend(words[:20])
     if not tokens:
         return None
     return " OR ".join(f'"{token}"' for token in tokens)
+
+
+def _fused_keys(
+    pool_rows: list[dict], in_window_rows: list[dict],
+    vec_keys: dict[int, float], fts_order: list[int],
+) -> dict[int, tuple[float, float]]:
+    """Reciprocal-rank-fusion sort keys for a hybrid pool (#666).
+
+    Two ranked lists: every candidate with a measured cosine, by decayed
+    cosine (so recency stays in the ranking, as before fusion), and every
+    FTS-matched candidate, in bm25 order. A candidate earns
+    ``1 / (RRF_C + rank)`` from each list it is in; missing from a list, it
+    earns nothing there. The key is (fused, score), so the decayed score
+    breaks ties. Pool ranks are counted among the pool alone; an in-window
+    row gets the rank it would have had among them (one more than the pool
+    rows ahead of it), so its would-be rank is judged as if it stood alone.
+    """
+    pool_ids = {c["id"] for c in pool_rows}
+    # The vec list, best first, over the pool's measured candidates.
+    vec_list = sorted(
+        (i for i in pool_ids if i in vec_keys), key=lambda i: vec_keys[i], reverse=True,
+    )
+    vec_rank = {i: n for n, i in enumerate(vec_list, start=1)}
+    # The FTS list keeps bm25 order, pool rows only.
+    fts_list = [i for i in fts_order if i in pool_ids]
+    fts_rank = {i: n for n, i in enumerate(fts_list, start=1)}
+
+    def fused(vec_r: int | None, fts_r: int | None) -> float:
+        """Sum of the reciprocal-rank terms the candidate earns."""
+        total = 0.0
+        if vec_r is not None:
+            total += 1.0 / (RRF_C + vec_r)
+        if fts_r is not None:
+            total += 1.0 / (RRF_C + fts_r)
+        return total
+
+    keys: dict[int, tuple[float, float]] = {
+        c["id"]: (fused(vec_rank.get(c["id"]), fts_rank.get(c["id"])), c["score"])
+        for c in pool_rows
+    }
+    # An in-window row's hypothetical ranks among the pool rows.
+    fts_position = {i: n for n, i in enumerate(fts_order)}
+    for e in in_window_rows:
+        vec_r = None
+        if e["id"] in vec_keys:
+            vec_r = 1 + sum(1 for i in vec_list if vec_keys[i] >= vec_keys[e["id"]])
+        fts_r = None
+        if e["id"] in fts_position:
+            fts_r = 1 + sum(1 for i in fts_list if fts_position[i] < fts_position[e["id"]])
+        keys[e["id"]] = (fused(vec_r, fts_r), e["score"])
+    return keys
 
 
 class ImportancePrior(Protocol):
@@ -1077,11 +1157,12 @@ RETRIEVAL_CANDIDATE_DDL = """
 CREATE TABLE IF NOT EXISTS retrieval_candidate (
     retrieval_id INTEGER NOT NULL,   -- retrieval_log.id
     memory_id    INTEGER NOT NULL,   -- memory.id
-    similarity   REAL NOT NULL,      -- cosine similarity, or FTS_SIMILARITY_PROXY when degraded
-    score        REAL NOT NULL,      -- recency-decayed score retrieve() ranked by
+    similarity   REAL NOT NULL,      -- cosine similarity, or FTS_SIMILARITY_PROXY when not measurable
+    score        REAL NOT NULL,      -- recency-decayed score (banding input; the vec-only rank key)
     band         TEXT NOT NULL,      -- strong | moderate | weak
     rank         INTEGER NOT NULL,   -- 1-based; would-be rank for excluded_in_window rows
     outcome      TEXT NOT NULL,
+    source       TEXT,               -- vec | fts | both (#666); NULL on rows from before it
     PRIMARY KEY (retrieval_id, memory_id)
 ) WITHOUT ROWID
 """
@@ -1362,6 +1443,10 @@ class MemoryPlugin(CorvidaePlugin):
         # What the passive query holds besides the user's words (#665).
         self._query_context = _retrieval_choice(
             retrieval_cfg, "query_context", QUERY_CONTEXT_CHOICES
+        )
+        # Where vector-path candidates come from (#666).
+        self._candidates = _retrieval_choice(
+            retrieval_cfg, "candidates", CANDIDATES_CHOICES
         )
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold = float(self._memory_cfg.get("dup_threshold", 0.95))
@@ -2615,16 +2700,17 @@ class MemoryPlugin(CorvidaePlugin):
                         else:
                             outcome = "dropped_budget"
                     rows.append((retrieval_id, c["id"], c["similarity"],
-                                 c["score"], c["band"], i + 1, outcome))
+                                 c["score"], c["band"], i + 1, outcome,
+                                 c["source"]))
                 # Excluded in-window records carry their would-be rank.
                 for would_be_rank, c in pool.excluded:
                     rows.append((retrieval_id, c["id"], c["similarity"],
                                  c["score"], c["band"], would_be_rank,
-                                 "excluded_in_window"))
+                                 "excluded_in_window", c["source"]))
                 await db.executemany(
                     "INSERT INTO retrieval_candidate (retrieval_id, memory_id, "
-                    "similarity, score, band, rank, outcome) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "similarity, score, band, rank, outcome, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     rows,
                 )
             except Exception:
@@ -2704,6 +2790,12 @@ class MemoryPlugin(CorvidaePlugin):
 
         rows: list[CandidateRow] = []
         degraded = False
+        # Hybrid bookkeeping (#666): FTS-matched ids in bm25 order, and the
+        # ids that have a measured cosine (vec hits plus FTS hits with a
+        # stored vector). Both stay empty on the vec-only and degraded paths.
+        fts_order: list[int] = []
+        measured: set[int] = set()
+        vec_ids: set[int] = set()
         if self._vec_available and self._embedding_enabled():
             try:
                 client = self._llm().get_client("embedding")
@@ -2715,14 +2807,24 @@ class MemoryPlugin(CorvidaePlugin):
                     exc_info=True,
                 )
                 degraded = True
+            else:
+                vec_ids = {row[0] for row in rows}
+                measured = set(vec_ids)
+                if self._candidates == "hybrid":
+                    rows, fts_order, measured = await self._hybrid_rows(
+                        db, text, query_vector, k, exclude, rows,
+                    )
         else:
             degraded = True
 
         if degraded:
             rows = await self._fts_candidates(db, text, k, exclude)
 
+        fts_ids = set(fts_order)
         candidates = []
         in_window_flags: list[bool] = []
+        # Per-candidate ranking inputs for fusion: the decayed raw cosine.
+        vec_keys: dict[int, float] = {}
         for (
             memory_id, summary, created_at, last_retrieved_at, similarity, in_window,
         ) in rows:
@@ -2736,20 +2838,37 @@ class MemoryPlugin(CorvidaePlugin):
             else:
                 last_activity = created_at
             ranking_age = max(0.0, now - last_activity)
+            decay = math.exp(-(ranking_age / 86400.0) / self._half_life_days)
+            if memory_id in measured:
+                vec_keys[memory_id] = similarity * decay
             # Relevance × recency decay.
-            score = similarity * math.exp(
-                -(ranking_age / 86400.0) / self._half_life_days
-            )
+            score = similarity * decay
             # The band says how relevant a memory is: from the decayed
             # score (default) or, with band_on: similarity, from relevance
             # alone so an old, apt memory is not presented as a guess.
             band_value = similarity if self._band_on == "similarity" else score
+            # A keyword match the vector search missed bands at no less than
+            # the FTS proxy (#666), so a name the embedding doesn't place near
+            # the query is not dropped as weak. Floored on the band value
+            # itself (flooring similarity would still decay below the proxy),
+            # and only for FTS-only hits: records the KNN also returned keep
+            # their measured, decayed band. ``similarity`` and ``score`` stay
+            # measured either way.
+            if memory_id in fts_ids and memory_id not in vec_ids:
+                band_value = max(band_value, FTS_SIMILARITY_PROXY)
             if band_value >= self._band_strong:
                 band = "strong"
             elif band_value >= self._band_moderate:
                 band = "moderate"
             else:
                 band = "weak"
+            # Which search found it: the degraded path is FTS by definition.
+            if degraded:
+                source = "fts"
+            elif memory_id in vec_ids:
+                source = "both" if memory_id in fts_ids else "vec"
+            else:
+                source = "fts"
             candidates.append({
                 "id": memory_id,
                 "summary": summary,
@@ -2758,17 +2877,22 @@ class MemoryPlugin(CorvidaePlugin):
                 "score": score,
                 "band": band,
                 "age_seconds": age_seconds,
+                "source": source,
             })
         # Split off the in-window rows; the rest is the ranked pool.
-        ranked = sorted(
-            (c for c, w in zip(candidates, in_window_flags) if not w),
-            key=lambda c: c["score"], reverse=True,
-        )
+        pool_rows = [c for c, w in zip(candidates, in_window_flags) if not w]
         in_window_rows = [c for c, w in zip(candidates, in_window_flags) if w]
+        if fts_order:
+            # Hybrid: rank by reciprocal rank fusion, score breaking ties.
+            keys = _fused_keys(pool_rows, in_window_rows, vec_keys, fts_order)
+        else:
+            # Vec-only or degraded: rank by the decayed score, as before #666.
+            keys = {c["id"]: (c["score"],) for c in candidates}
+        ranked = sorted(pool_rows, key=lambda c: keys[c["id"]], reverse=True)
         # Each in-window record is judged alone: would it have made top k?
         excluded: list[tuple[int, dict]] = []
         for e in in_window_rows:
-            would_be_rank = 1 + sum(1 for c in ranked if c["score"] >= e["score"])
+            would_be_rank = 1 + sum(1 for c in ranked if keys[c["id"]] >= keys[e["id"]])
             if would_be_rank <= k:
                 excluded.append((would_be_rank, e))
         # The exclusion count: flagged rows (vec) or one COUNT query (FTS).
@@ -2853,20 +2977,121 @@ class MemoryPlugin(CorvidaePlugin):
             in rows
         ]
 
+    async def _hybrid_rows(
+        self, db: aiosqlite.Connection, text: str, query_vector: list[float],
+        k: int, exclude: tuple[str, int] | None, vec_rows: list[CandidateRow],
+    ) -> tuple[list[CandidateRow], list[int], set[int]]:
+        """Add the FTS side to vec candidates for fusion (#666).
+
+        Runs the stopworded FTS search over the same records (``k ×
+        VEC_OVERFETCH``, in-window rows flagged, not filtered), measures the
+        real cosine of every FTS hit the KNN didn't return from its stored
+        vector, and falls back to ``FTS_SIMILARITY_PROXY`` for a hit with no
+        vector (unembedded, or demoted). Returns (the union of rows, FTS
+        ids in bm25 order, ids with a measured cosine). A failing FTS side
+        is logged and leaves the vec rows alone: the vec pool is the rescue.
+        """
+        measured = {row[0] for row in vec_rows}
+        try:
+            fts_rows = await self._fts_candidates(
+                db, text, k * VEC_OVERFETCH, exclude,
+                flag_window=True, stopwords=True,
+            )
+            known = {row[0] for row in vec_rows}
+            extra = [row for row in fts_rows if row[0] not in known]
+            cosines = await self._vec_similarities(
+                db, query_vector, [row[0] for row in extra],
+            )
+        except Exception:
+            logger.warning(
+                "hybrid retrieval: the FTS5 side failed; ranking the vector "
+                "candidates alone for this query",
+                exc_info=True,
+            )
+            return vec_rows, [], measured
+        # FTS-only rows take their measured cosine, or the proxy.
+        merged = list(vec_rows)
+        for memory_id, summary, created_at, last_retrieved_at, _proxy, in_window in extra:
+            similarity = cosines.get(memory_id)
+            if similarity is None:
+                similarity = FTS_SIMILARITY_PROXY
+            else:
+                measured.add(memory_id)
+            merged.append(
+                (memory_id, summary, created_at, last_retrieved_at, similarity, in_window)
+            )
+        return merged, [row[0] for row in fts_rows], measured
+
+    async def _vec_similarities(
+        self, db: aiosqlite.Connection, query_vector: list[float], ids: list[int],
+    ) -> dict[int, float]:
+        """Cosine similarity to the query of each id's stored vector (#666).
+
+        One point lookup per id in ``memory_vec``; ids with no vector are
+        absent from the result.
+        """
+        if not ids:
+            return {}
+        import sqlite_vec
+        serialized = sqlite_vec.serialize_float32(query_vector)
+        result: dict[int, float] = {}
+        # One id per query keeps clear of SQLite's bound-variable limit.
+        for memory_id in ids:
+            async with db.execute(
+                "SELECT vec_distance_cosine(embedding, ?) FROM memory_vec "
+                "WHERE memory_id = ?",
+                (serialized, memory_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is not None and row[0] is not None:
+                # Cosine distance = 1 - cosine similarity.
+                result[memory_id] = 1.0 - row[0]
+        return result
+
     async def _fts_candidates(
         self, db: aiosqlite.Connection, text: str, k: int,
         exclude: tuple[str, int] | None = None,
+        *, flag_window: bool = False, stopwords: bool = False,
     ) -> list[CandidateRow]:
         """FTS5 keyword candidates with a fixed similarity proxy:
         (id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY,
         False).
 
         The window exclusion (see ``retrieve``) sits in WHERE, ahead of the
-        LIMIT, so it applies before the cut to k."""
-        match = _fts_match_query(text)
+        LIMIT, so it applies before the cut to k. With ``flag_window`` (the
+        hybrid side, #666) in-window rows are returned flagged instead, as
+        the vec path does, with the LIMIT raised by their count so they
+        can't take every slot; ``stopwords`` drops common words from the
+        MATCH. Rows come back in bm25 order."""
+        match = _fts_match_query(text, stopwords=stopwords)
         if match is None:
             return []
         exclude_sql, exclude_params = _exclude_clause(exclude)
+        if flag_window:
+            # Fetch past the in-window rows (an upper bound, as for vec).
+            limit = k
+            if exclude is not None:
+                async with db.execute(
+                    "SELECT COUNT(*) FROM memory WHERE channel_id = ? AND msg_id_start >= ?",
+                    exclude,
+                ) as cursor:
+                    (excluded_count,) = await cursor.fetchone()
+                limit += excluded_count
+            async with db.execute(
+                "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at, "
+                + exclude_sql + " AS in_window "
+                "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
+                "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 "
+                "ORDER BY rank LIMIT ?",
+                (*exclude_params, match, limit),
+            ) as cursor:
+                flagged = await cursor.fetchall()
+            return [
+                (memory_id, summary, created_at, last_retrieved_at,
+                 FTS_SIMILARITY_PROXY, bool(in_window))
+                for memory_id, summary, created_at, last_retrieved_at, in_window
+                in flagged
+            ]
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at "
             "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
@@ -3164,6 +3389,8 @@ class MemoryPlugin(CorvidaePlugin):
         # #407: the exclusion count and the per-candidate child table.
         await add_column_if_missing(db, "retrieval_log", "excluded_in_window", "INTEGER")
         await db.execute(RETRIEVAL_CANDIDATE_DDL)
+        # #666: which search found each candidate; old rows read NULL.
+        await add_column_if_missing(db, "retrieval_candidate", "source", "TEXT")
         await db.execute(RETRIEVAL_CANDIDATE_INDEX_DDL)
         # Phase 1b: message_fts and retention_meta
         await db.execute(MESSAGE_FTS_DDL)

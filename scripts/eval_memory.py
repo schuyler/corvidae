@@ -51,14 +51,16 @@ A query may also carry "context", the agent reply it followed (#665), and
 the daemon builds it (memory.retrieval.query_context; previous_reply puts the
 context before the text), and the summary reports means per subset.
 --query-context previous_reply|none overrides the config's value, so variant
-A and the user-message-only baseline score against one snapshot.
+A and the user-message-only baseline score against one snapshot, and
+--candidates hybrid|vector overrides memory.retrieval.candidates (#666) to score
+the fused pool against vec KNN alone.
 
 POOL_JSON is written once after all queries: run_at, k, one entry per query
 (index, text, context, subset, query (the text actually retrieved with),
 relevant, unscorable ids with their status absent / redacted /
 superseded / not_indexed, degraded, recall_at_k, mrr, and every scored
-candidate as id, rank, similarity, score, band) and a summary (with
-query_context and per-subset means). It holds no memory text beyond the
+candidate as id, rank, similarity, score, band, source) and a summary (with
+query_context, candidates and per-subset means). It holds no memory text beyond the
 labels' own; look the ids up in the source.
 """
 
@@ -372,6 +374,7 @@ SNAPSHOT_REQUIRED_FLAGS: tuple[tuple[str, str, str], ...] = (
 # (flag, args attribute).
 SNAPSHOT_VARIANT_FLAGS: tuple[tuple[str, str], ...] = (
     ("--query-context", "query_context"),
+    ("--candidates", "candidates"),
 )
 
 
@@ -513,6 +516,7 @@ def candidate_entries(pool: RetrievalPool) -> list[dict]:
             "similarity": cand["similarity"],
             "score": cand["score"],
             "band": cand["band"],
+            "source": cand["source"],
         }
         for rank, cand in enumerate(pool.ranked, start=1)
     ]
@@ -576,6 +580,7 @@ async def run_snapshot_evaluation(
     source: Path, labels_path: Path, config_path: Path,
     pool_out: Path, k: int | None, work_dir: Path,
     query_context: str | None = None,
+    candidates: str | None = None,
 ) -> None:
     """Copy the snapshot, score the labelled queries, print and write the pool."""
     import aiosqlite
@@ -638,11 +643,15 @@ async def run_snapshot_evaluation(
         # snapshot scores variant A and the baseline from the same config.
         if query_context is not None:
             memory._query_context = query_context
+        # Likewise --candidates (#666): fused vs vec-only on one snapshot.
+        if candidates is not None:
+            memory._candidates = candidates
         effective_k = k if k is not None else memory._retrieval_k
         results: list[dict] = []
         print(f"📖 Snapshot: {source}")
         print(f"   {len(queries)} queries, k={effective_k}, "
-              f"query_context={memory._query_context}")
+              f"query_context={memory._query_context}, "
+              f"candidates={memory._candidates}")
         for query in queries:
             reachable = [i for i in query.relevant if i not in statuses]
             unscorable = [
@@ -690,6 +699,7 @@ async def run_snapshot_evaluation(
             "mean_recall_at_k": mean(recalls),
             "mean_mrr": mean(mrrs),
             "query_context": memory._query_context,
+            "candidates": memory._candidates,
             "subsets": subset_summary(results),
         }
         print(f"\n📊 Mean recall@{effective_k}: {fmt_metric(summary['mean_recall_at_k'])} "
@@ -815,6 +825,9 @@ def main(argv: list[str] | None = None) -> None:
                         choices=("previous_reply", "none"),
                         help="Snapshot mode: override memory.retrieval.query_context "
                              "(previous_reply puts each probe's context before its text)")
+    parser.add_argument("--candidates", default=None, choices=("hybrid", "vector"),
+                        help="Snapshot mode: override memory.retrieval.candidates "
+                             "(hybrid fuses vec KNN with FTS5; vector is KNN alone)")
     # LLM connection flags; mirrors scripts/eval_compaction.py.
     parser.add_argument("--base-url", default=None, help="LLM API base URL")
     parser.add_argument("--model", default=None, help="LLM model name")
@@ -838,6 +851,7 @@ def main(argv: list[str] | None = None) -> None:
             asyncio.run(run_snapshot_evaluation(
                 args.snapshot, args.labels, args.config, args.pool_out,
                 args.k, Path(work), query_context=args.query_context,
+                candidates=args.candidates,
             ))
         return
 

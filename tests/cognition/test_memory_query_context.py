@@ -8,11 +8,12 @@ one?") retrieves records about the turn it refers to.
 
 import logging
 
-from corvidae.context import MessageType
 from corvidae_cognition.memory import (
     QUERY_CONTEXT_CHOICES,
     retrieval_query,
 )
+
+from corvidae.context import MessageType
 
 from .test_memory_retrieval import (
     EMBED_CONFIG,

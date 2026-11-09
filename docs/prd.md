@@ -1008,7 +1008,9 @@ only through the funnel.
    one consolidation's records.
 4. Retrieval runs before each user-originated turn: embed the inbound
    text, preceded by the agent's previous reply when the window holds one
-   (so a follow-up retrieves for the turn it refers to), exact KNN over `memory_vec`, filter to indexed and unredacted
+   (so a follow-up retrieves for the turn it refers to), exact KNN over
+   `memory_vec` and FTS5 over `memory_fts`, fused by reciprocal rank (so a
+   name or identifier the embedding misses is still found), filter to indexed and unredacted
    records from every channel (and, where the operator applies the
    sensitivity capability, to records whose sensitivity fits who is
    present; with
@@ -1018,7 +1020,8 @@ only through the funnel.
    k; this keeps admission from echoing what the window already holds and
    is not a retrieval scope), score by similarity times recency decay
    (`half_life_days`, from creation or last use), band strong/moderate/
-   weak on score or raw similarity, drop weak unless nothing else matched,
+   weak on score or raw similarity (a record only the keyword search found
+   bands at no less than the FTS proxy), drop weak unless nothing else matched,
    annotate conflicts between records with opposed claims and prefer the
    later one, and admit through the funnel as `[band] (age) summary`
    lines. Admitted records get their access statistics bumped; every
