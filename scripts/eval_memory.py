@@ -46,12 +46,22 @@ an empty "relevant" list is a negative probe: its pool is written but it is
 not scored; "description" and "note" are free text and unused):
     {"queries": [{"text": "what did we decide about the battery?",
                   "relevant": [412, 415]}]}
+A query may also carry "context", the agent reply it followed (#665), and
+"subset", a tag such as "deictic" or "self-contained". The query is built as
+the daemon builds it (memory.retrieval.query_context; previous_reply puts the
+context before the text), and the summary reports means per subset.
+--query-context previous_reply|none overrides the config's value, so variant
+A and the user-message-only baseline score against one snapshot, and
+--candidates hybrid|vector overrides memory.retrieval.candidates (#666) to score
+the fused pool against vec KNN alone.
 
 POOL_JSON is written once after all queries: run_at, k, one entry per query
-(index, text, relevant, unscorable ids with their status absent / redacted /
+(index, text, context, subset, query (the text actually retrieved with),
+relevant, unscorable ids with their status absent / redacted /
 superseded / not_indexed, degraded, recall_at_k, mrr, and every scored
-candidate as id, rank, similarity, score, band) and a summary. It holds no
-memory text; look the ids up in the source.
+candidate as id, rank, similarity, score, band, source) and a summary (with
+query_context, candidates and per-subset means). It holds no memory text beyond the
+labels' own; look the ids up in the source.
 """
 
 from __future__ import annotations
@@ -360,6 +370,14 @@ SNAPSHOT_REQUIRED_FLAGS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# Snapshot-only flags that pick a retrieval variant over the config's value:
+# (flag, args attribute).
+SNAPSHOT_VARIANT_FLAGS: tuple[tuple[str, str], ...] = (
+    ("--query-context", "query_context"),
+    ("--candidates", "candidates"),
+)
+
+
 @dataclass(frozen=True)
 class LabelQuery:
     """One labelled query: its text and the snapshot memory ids it should find."""
@@ -367,6 +385,11 @@ class LabelQuery:
     index: int
     text: str
     relevant: list[int]
+    # The agent reply the probe followed (#665), or None for a probe that
+    # opens a conversation; becomes the query's previous_reply context.
+    context: str | None = None
+    # Free tag grouping probes in the summary (e.g. deictic, self-contained).
+    subset: str | None = None
 
 
 def load_labels(path: Path) -> list[LabelQuery]:
@@ -408,7 +431,19 @@ def load_labels(path: Path) -> list[LabelQuery]:
                 f"queries[{index}].relevant: got {json.dumps(relevant)}; "
                 "expected a list of integer memory ids"
             )
-        queries.append(LabelQuery(index=index, text=text, relevant=relevant))
+        # Optional: the previous reply the probe followed, and its subset tag.
+        context = raw.get("context")
+        if context is not None and not isinstance(context, str):
+            raise bad(f"queries[{index}].context: got {json.dumps(context)}; expected a string")
+        subset = raw.get("subset")
+        if subset is not None and (not isinstance(subset, str) or not subset):
+            raise bad(
+                f"queries[{index}].subset: got {json.dumps(subset)}; "
+                "expected a non-empty string"
+            )
+        queries.append(LabelQuery(
+            index=index, text=text, relevant=relevant, context=context, subset=subset,
+        ))
     return queries
 
 
@@ -481,9 +516,48 @@ def candidate_entries(pool: RetrievalPool) -> list[dict]:
             "similarity": cand["similarity"],
             "score": cand["score"],
             "band": cand["band"],
+            "source": cand["source"],
         }
         for rank, cand in enumerate(pool.ranked, start=1)
     ]
+
+
+def probe_query(query: LabelQuery, query_context: str) -> str:
+    """The retrieval query for one probe, built the way the daemon builds it.
+
+    The probe becomes a two-row window (its context as the previous reply,
+    then its text as the unanswered user message) and goes through
+    ``retrieval_query``, so the eval cannot drift from ``before_agent_turn``.
+    """
+    from corvidae_cognition.memory import retrieval_query
+
+    messages: list[dict] = []
+    if query.context:
+        messages.append({"role": "assistant", "content": query.context})
+    messages.append({"role": "user", "content": query.text})
+    return retrieval_query(messages, query_context)
+
+
+# The summary group for probes with no subset tag.
+UNTAGGED = "(untagged)"
+
+
+def subset_summary(results: list[dict]) -> dict[str, dict]:
+    """Scored count and mean Recall@k / MRR per subset tag, untagged grouped."""
+    groups: dict[str, list[dict]] = {}
+    for result in results:
+        groups.setdefault(result["subset"] or UNTAGGED, []).append(result)
+    summary: dict[str, dict] = {}
+    for name, members in groups.items():
+        scored_recalls = [r["recall_at_k"] for r in members if r["recall_at_k"] is not None]
+        scored_mrrs = [r["mrr"] for r in members if r["mrr"] is not None]
+        summary[name] = {
+            "queries": len(members),
+            "scored": len(scored_recalls),
+            "mean_recall_at_k": mean(scored_recalls),
+            "mean_mrr": mean(scored_mrrs),
+        }
+    return summary
 
 
 def fail(message: str) -> NoReturn:
@@ -505,6 +579,8 @@ def mean(values: list[float]) -> float | None:
 async def run_snapshot_evaluation(
     source: Path, labels_path: Path, config_path: Path,
     pool_out: Path, k: int | None, work_dir: Path,
+    query_context: str | None = None,
+    candidates: str | None = None,
 ) -> None:
     """Copy the snapshot, score the labelled queries, print and write the pool."""
     import aiosqlite
@@ -563,16 +639,26 @@ async def run_snapshot_evaluation(
         all_ids = {ident for q in queries for ident in q.relevant}
         statuses = await label_status(db, all_ids)
 
+        # A --query-context flag overrides the config's value (#665), so one
+        # snapshot scores variant A and the baseline from the same config.
+        if query_context is not None:
+            memory._query_context = query_context
+        # Likewise --candidates (#666): fused vs vec-only on one snapshot.
+        if candidates is not None:
+            memory._candidates = candidates
         effective_k = k if k is not None else memory._retrieval_k
         results: list[dict] = []
         print(f"📖 Snapshot: {source}")
-        print(f"   {len(queries)} queries, k={effective_k}")
+        print(f"   {len(queries)} queries, k={effective_k}, "
+              f"query_context={memory._query_context}, "
+              f"candidates={memory._candidates}")
         for query in queries:
             reachable = [i for i in query.relevant if i not in statuses]
             unscorable = [
                 {"id": i, "status": statuses[i]} for i in query.relevant if i in statuses
             ]
-            pool = await memory._retrieve_pool(query.text, k=k, exclude=None)
+            text = probe_query(query, memory._query_context)
+            pool = await memory._retrieve_pool(text, k=k, exclude=None)
             # Top k is the expression retrieve() returns.
             top_ids = [c["id"] for c in pool.ranked[: pool.k]]
             scored = bool(reachable)
@@ -581,6 +667,9 @@ async def run_snapshot_evaluation(
             results.append({
                 "index": query.index,
                 "text": query.text,
+                "context": query.context,
+                "subset": query.subset,
+                "query": text,
                 "relevant": query.relevant,
                 "unscorable": unscorable,
                 "degraded": pool.degraded,
@@ -609,11 +698,21 @@ async def run_snapshot_evaluation(
             "degraded": degraded,
             "mean_recall_at_k": mean(recalls),
             "mean_mrr": mean(mrrs),
+            "query_context": memory._query_context,
+            "candidates": memory._candidates,
+            "subsets": subset_summary(results),
         }
         print(f"\n📊 Mean recall@{effective_k}: {fmt_metric(summary['mean_recall_at_k'])} "
               f"(over {len(recalls)} of {len(results)} queries)")
         print(f"📊 Mean MRR:        {fmt_metric(summary['mean_mrr'])} "
               f"(over {len(recalls)} of {len(results)} queries)")
+        # Per-subset means, only worth printing when the probes are tagged.
+        if any(r["subset"] for r in results):
+            for name, group in summary["subsets"].items():
+                print(f"   {name}: recall@{effective_k}="
+                      f"{fmt_metric(group['mean_recall_at_k'])}  "
+                      f"mrr={fmt_metric(group['mean_mrr'])}  "
+                      f"(over {group['scored']} of {group['queries']} queries)")
         if degraded:
             print(f"⚠️  FTS5 fallback on {degraded} of {len(results)} queries")
 
@@ -644,7 +743,10 @@ def snapshot_arg_error(args: argparse.Namespace) -> str | None:
     """The flag-combination rules; None when valid, else the error text."""
     # Without --snapshot, the snapshot-only flags have nothing to attach to.
     if args.snapshot is None:
-        for flag, attr, _hint in SNAPSHOT_REQUIRED_FLAGS:
+        for flag, attr in (
+            *((f, a) for f, a, _hint in SNAPSHOT_REQUIRED_FLAGS),
+            *SNAPSHOT_VARIANT_FLAGS,
+        ):
             if getattr(args, attr) is not None:
                 return f"{flag} is only used with --snapshot; add --snapshot PATH or drop {flag}."
         return None
@@ -719,6 +821,13 @@ def main(argv: list[str] | None = None) -> None:
                         help="Snapshot mode: the deployment's agent.yaml")
     parser.add_argument("--pool-out", type=Path, default=None,
                         help="Snapshot mode: where to write the candidate pool JSON")
+    parser.add_argument("--query-context", default=None,
+                        choices=("previous_reply", "none"),
+                        help="Snapshot mode: override memory.retrieval.query_context "
+                             "(previous_reply puts each probe's context before its text)")
+    parser.add_argument("--candidates", default=None, choices=("hybrid", "vector"),
+                        help="Snapshot mode: override memory.retrieval.candidates "
+                             "(hybrid fuses vec KNN with FTS5; vector is KNN alone)")
     # LLM connection flags; mirrors scripts/eval_compaction.py.
     parser.add_argument("--base-url", default=None, help="LLM API base URL")
     parser.add_argument("--model", default=None, help="LLM model name")
@@ -741,7 +850,8 @@ def main(argv: list[str] | None = None) -> None:
         with tempfile.TemporaryDirectory() as work:
             asyncio.run(run_snapshot_evaluation(
                 args.snapshot, args.labels, args.config, args.pool_out,
-                args.k, Path(work),
+                args.k, Path(work), query_context=args.query_context,
+                candidates=args.candidates,
             ))
         return
 

@@ -1268,6 +1268,22 @@ it.
 
 ### Smaller things
 
+- Passive retrieval joins the vector search with a keyword search (#666),
+  so a record that names a person, project or identifier surfaces whenever
+  a query names it. A record that only the keyword search found bands at
+  least `[moderate]` however poorly its embedding matches. The set of
+  reachable records is unchanged (the same `indexed`, `redacted` and trust
+  filters apply); what changes is which ones rank. The new edge: someone
+  whose words get consolidated into a record can attach that record to a
+  name, and it is offered whenever the name comes up. Long, name-stuffed
+  records gain little, since bm25 normalises for length and fusion takes
+  only one rank from the keyword list. Set
+  `memory.retrieval.candidates: vector` to go back to embedding-only
+  candidates. `search_memory` now searches by meaning as well as keywords
+  (#667). It reaches the same records it always did, filters and demoted
+  records included, but a paraphrase now finds what only a shared word found
+  before.
+
 - Untrusted text in a chat channel can talk the agent into silence. Where
   `SilencePlugin` is loaded, the system prompt of every IRC, Discord and
   Signal channel tells the model it may answer `NO_REPLY` to send nothing, and

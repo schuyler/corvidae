@@ -114,6 +114,9 @@ agent:
 #   retrieval:
 #     band_on: score                  # score | similarity: what strong/moderate/weak is applied to
 #     recency_from: created           # created | last_used: where ranking age is measured from
+#     query_context: previous_reply   # previous_reply | none: put the agent's last reply before the
+#                                     # user's words in the retrieval query
+#     candidates: hybrid              # hybrid | vector: fuse the KNN with FTS5 keyword hits by rank
 #   consolidation_fork_prompt: "..."  # instruction for consolidation, forked or sent to the consolidation stage over the
 #                                     # agent's rebuilt view; replaces the removed consolidation_prompt
 #                                     # (still set: startup warning, ignored)

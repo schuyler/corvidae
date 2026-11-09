@@ -295,11 +295,44 @@ it, is written up in [memory-retrieval-fidelity.md](memory-retrieval-fidelity.md
 (notification-triggered turns skip retrieval entirely). The query is every
 unanswered user message in the window (`unanswered_user_messages`), joined
 by blank lines: a coalesced burst (#398) is retrieved for as a whole, and
-one message is just itself. The query is embedded and matched against `memory_vec`
+one message is just itself. Ahead of them, as its own paragraph, goes the
+agent's previous reply (#665): the window's last assistant MESSAGE row with
+text. Tool-call-only rows have no text to refer back to, and an UNSENT reply
+never reached the person, so neither counts. A follow-up such as "thanks,
+that worked" or "what about the other one?" has no referent of its own, so
+it is retrieved for together with the reply it answers. The reply is used
+whole. If labelled self-contained probes show a long reply diluting a short
+question, trimming or capping it is the first adjustment.
+`memory.retrieval.query_context: none` restores the user-message-only query.
+`retrieval_query(messages, query_context)` builds the text, and
+`scripts/eval_memory.py` builds its queries with the same function. The query is embedded and matched against `memory_vec`
 (sqlite-vec exact KNN, cosine distance); candidates are filtered to
 `indexed=1 AND redacted=0`. There is no per-channel scope: records from
 every channel are candidates (PRD principle 14, #168), and
 [threat-model.md](threat-model.md) finding 15 records what that costs.
+
+**Hybrid candidates (#666).** Dense embeddings handle rare tokens poorly
+(people's and project names, hostnames, ticket numbers), so on the vector
+path the KNN is joined by an FTS5 search over `memory_fts` with the same
+query and filters, `k × 4` rows in bm25 order. Its MATCH leaves out a short
+English stopword list (`FTS_STOPWORDS`) before the per-paragraph cap, so
+"what", "the" and "thanks" can't buy rank. The two are ranked together
+by reciprocal rank fusion. Each candidate earns `1 / (60 + rank)` from each
+of two lists:
+
+- every candidate with a measured cosine, ordered by decayed cosine, so
+  recency still counts;
+- every FTS match, in bm25 order.
+
+The sum orders the pool, with the decayed score breaking ties. An FTS hit
+the KNN didn't return gets its real cosine from its stored vector (one
+`vec_distance_cosine` point lookup), so it is ranked in the first list as
+well. A hit with no vector (a record not yet embedded) carries the 0.6 proxy
+and is ranked by FTS alone. A query with no lexical match ranks exactly as
+the KNN alone would. If the FTS side fails, a warning is logged and the
+KNN rows are ranked alone. `memory.retrieval.candidates: vector` turns
+fusion off. The FTS-degraded path below is unchanged: it has no cosine to
+fuse with.
 
 **Window exclusion (#634):** records that only echo the live window are
 left out. A record is excluded when it belongs to the current channel
@@ -310,10 +343,11 @@ id test alone would hide other channels' recent records too. A record that
 straddles the window's oldest id is still admitted, so the part of it that
 compaction dropped stays recallable; a window with no ids excludes nothing.
 The exclusion is a `retrieve(..., exclude=(channel_id, min_msg_id))`
-argument applied before the cut to k: the FTS5 path filters it in `WHERE`
-ahead of its `LIMIT`, and the vector path selects it as a flag (#407) over
-a KNN that fetches `k × 4` plus a `COUNT(*)` of the excluded records, then
-sets the flagged rows aside, so in-window records can't take every slot. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
+argument applied before the cut to k: the degraded FTS5 path filters it in
+`WHERE` ahead of its `LIMIT`, and the vector path selects it as a flag (#407)
+over a KNN that fetches `k × 4` plus a `COUNT(*)` of the excluded records,
+then sets the flagged rows aside, so in-window records can't take every
+slot. The hybrid FTS side does the same over its own `k × 4` rows. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
 and `search_memory` see everything. It is not a scope: other channels'
 records, and this channel's once their rows leave the window, are
 retrieved normally. Known limit: the bound assumes the window is a
@@ -323,11 +357,19 @@ timestamps can break (#638).
 Scores are `cosine_similarity × exp(-age_days / memory.half_life_days)`, where
 `age_days` runs from `created_at`, or from `max(created_at,
 last_retrieved_at)` under `memory.retrieval.recency_from: last_used`.
-Candidates rank by score and are annotated into relevance bands (strong
-≥ 0.75, moderate ≥ 0.60, else weak; weak drops unless nothing else
-matched). The bands apply to the score by default, or to raw similarity
-under `memory.retrieval.band_on: similarity`, so an old but apt memory is
-not presented as a guess. The `(age)` shown always runs from
+Candidates rank by score (by fused rank on the hybrid path, above) and are
+annotated into relevance bands (strong ≥ 0.75, moderate ≥ 0.60, else weak;
+weak drops unless nothing else matched). The bands apply to the score by
+default, or to raw similarity under `memory.retrieval.band_on: similarity`,
+so an old but apt memory is not presented as a guess. A candidate that only
+the hybrid FTS side found bands at no less than the 0.6 proxy, whatever its
+cosine or age (#666). Without that floor, the name the embedding missed would
+read weak and be dropped beside anything non-weak. The floor goes on the band
+value, after decay (0.6 × decay always lands below 0.60). Records the KNN
+also returned keep their measured band, and `similarity` and `score` stay
+measured. shortcut: in a memory of at most `k × 4` records (32 with the
+defaults) the KNN covers everything, so the floor never fires there; band
+on the fused rank instead if small memories show the problem. The `(age)` shown always runs from
 `created_at`. Winners enter the window as
 `[band] (age) summary` lines through the admission funnel — never by
 direct CONTEXT append. Admitted memories get their access statistics
@@ -347,11 +389,12 @@ and numbers, never text:
 |---|---|
 | `retrieval_id` | `retrieval_log.id` |
 | `memory_id` | `memory.id` |
-| `similarity` | cosine similarity, or the fixed FTS proxy when the retrieval degraded to FTS |
-| `score` | the recency-decayed score the candidate ranked by |
-| `band` | `strong`, `moderate` or `weak` |
-| `rank` | 1-based position by score among the not-excluded candidates (excluded rows: see below) |
+| `similarity` | cosine similarity, or the fixed FTS proxy when it can't be measured (a degraded retrieval, or an FTS hit with no vector) |
+| `score` | the recency-decayed score (`similarity × decay`); the rank key on the vector-only and degraded paths, the tie-break under fusion |
+| `band` | `strong`, `moderate` or `weak` (an FTS-only hit's is floored at the proxy, above) |
+| `rank` | 1-based position among the not-excluded candidates, by fused rank on the hybrid path and by score otherwise (excluded rows: see below) |
 | `outcome` | one of the values below |
+| `source` | `vec` (KNN only), `fts` (FTS only, or any degraded candidate) or `both` (#666); NULL on rows from before it |
 
 `(retrieval_id, memory_id)` is the key, and an index on `memory_id` makes
 per-record lookups cheap. A candidate's `outcome` is one of:
@@ -371,16 +414,17 @@ per-record lookups cheap. A candidate's `outcome` is one of:
 
 The log keeps the whole scored pool, not just the k returned. On the
 vector path that is every not-excluded row of the KNN (which fetches
-`k × 4` plus the count of in-window records), so a right record pushed
-past k, by lower similarity or by recency decay, shows up as `cut` with its
-score. The FTS pool is the k rows the query's `LIMIT`
+`k × 4` plus the count of in-window records) and, under fusion, of the FTS
+side, so a right record pushed past k, by lower similarity or by recency
+decay, shows up as `cut` with its score. The FTS pool is the k rows the query's `LIMIT`
 returns, so FTS retrievals never log `cut` rows. The window exclusion no
 longer filters in the vector query's `WHERE`; the query selects it as a
 flag, so in-window rows come back from the same KNN with their real
 similarity and the rows returned are unchanged.
 
 `excluded_in_window` rows carry a would-be rank: one plus the number of
-not-excluded candidates scoring at least as high. It can therefore equal a
+not-excluded candidates ranking at least as high (under fusion, its
+fused value is computed from the ranks it would have had in each list). It can therefore equal a
 returned row's rank. Each excluded record is judged alone against the
 ranked pool, not against the other excluded records, so two excluded rows
 may share a would-be rank, and an excluded record that would not have made
@@ -389,7 +433,7 @@ the top k gets no row.
 `retrieval_log.excluded_in_window` counts the in-window records the search
 matched; it is NULL when no exclusion applied (a window with no ids) and on
 rows from before #407. The two paths count differently. On the vector path
-it is the in-window rows inside the KNN. On the FTS path it is every
+it is the in-window rows inside the KNN (and the hybrid FTS side). On the FTS path it is every
 in-window record the keyword query matches, found with one extra
 `COUNT(*)`: FTS has no scores for rows it dropped, so that path logs the
 count but no `excluded_in_window` rows, and the count is not limited to
@@ -465,6 +509,9 @@ What it does:
   queries. Both are computed on the top k, so MRR is MRR@k. `--k` defaults
   to `memory.retrieval.k` from `--config` and must be at least 1; the vector
   path fetches `k × 4` candidates, so a different k changes the pool too.
+  `--candidates hybrid|vector` overrides `memory.retrieval.candidates`
+  (#666), so the fused pool can be scored against the KNN alone; each pool
+  candidate records its `source`.
 - **Names labelled ids it can't reach.** A labelled id is reachable when its
   row exists with `indexed = 1` and `redacted = 0`, the filter both searches
   apply. Anything else is listed by id with its status, checked in this
@@ -484,12 +531,28 @@ integers (it may be empty). `description` and `note` are free text the
 script ignores, and so are unknown keys. A malformed file is rejected
 before the copy, with the key, the value and what was expected.
 
+Two optional keys support comparing query variants (#665):
+
+- `context` is the agent reply the probe followed. The query is built the
+  way the daemon builds it, with `retrieval_query`: under
+  `memory.retrieval.query_context: previous_reply` the context goes first,
+  as its own paragraph, and under `none` it is left out.
+  `--query-context previous_reply|none` overrides the config, so variant A
+  and the user-message-only baseline can be scored against one snapshot.
+  The query actually used is written to the pool as `query`.
+- `subset` is a non-empty tag such as `deictic` or `self-contained`. The
+  summary reports `queries`, `scored` and the two means for each tag, with
+  untagged probes grouped as `(untagged)`, and prints them when any probe
+  is tagged.
+
 ```json
 {
   "description": "optional",
   "queries": [
     {"text": "what did we decide about the battery?", "relevant": [412, 415],
-     "note": "optional"}
+     "note": "optional"},
+    {"text": "and the other one?", "context": "The porch ESP32 was the one dropping off wifi.",
+     "subset": "deictic", "relevant": [398]}
   ]
 }
 ```
@@ -504,19 +567,27 @@ The pool file is written once, after the last query:
     {
       "index": 0,
       "text": "what did we decide about the battery?",
+      "context": null,
+      "subset": null,
+      "query": "what did we decide about the battery?",
       "relevant": [412, 415],
       "unscorable": [{"id": 415, "status": "superseded"}],
       "degraded": false,
       "recall_at_k": 1.0,
       "mrr": 0.5,
       "candidates": [
-        {"id": 398, "rank": 1, "similarity": 0.81, "score": 0.77, "band": "strong"},
-        {"id": 412, "rank": 2, "similarity": 0.79, "score": 0.74, "band": "moderate"}
+        {"id": 398, "rank": 1, "similarity": 0.81, "score": 0.77, "band": "strong",
+         "source": "both"},
+        {"id": 412, "rank": 2, "similarity": 0.79, "score": 0.74, "band": "moderate",
+         "source": "vec"}
       ]
     }
   ],
   "summary": {"queries": 1, "scored": 1, "degraded": 0,
-              "mean_recall_at_k": 1.0, "mean_mrr": 0.5}
+              "mean_recall_at_k": 1.0, "mean_mrr": 0.5,
+              "query_context": "previous_reply", "candidates": "hybrid",
+              "subsets": {"(untagged)": {"queries": 1, "scored": 1,
+                                         "mean_recall_at_k": 1.0, "mean_mrr": 0.5}}}
 }
 ```
 
@@ -524,7 +595,8 @@ The pool file is written once, after the last query:
 `rank <= k` are `retrieve()`'s top k, what passive retrieval would hand on
 before it drops weak-band entries (unless all are weak) and the funnel
 admits them, with no window exclusion. It holds ids and scores but
-no memory text; look the ids up in the source. `run_at` is the wall-clock
+no memory text beyond the labels' own `text`, `context` and `query`; look the
+ids up in the source. `run_at` is the wall-clock
 time the run started. The means are `null` when no query was scored.
 
 Operator notes:
@@ -689,7 +761,7 @@ created only when the extension loads), `retrieval_log`,
 (one-row table persisting `last_run` for the retention job interval), and
 `message_fts` (regular FTS5 table over `message_log` content, maintained by
 `message_log_ai`/`message_log_au` triggers; queried and cleared by `corvidae
-redact` — not by `search_memory`, which queries `memory_fts`). All on the persistence connection in
+redact` — not by `search_memory`, which queries `memory_fts` and `memory_vec`). All on the persistence connection in
 `sessions.db`; `message_log` stays append-only except for the
 operator-only redaction tombstone.
 
@@ -749,7 +821,9 @@ Implements six hooks and two kernel timers:
   `compacted_ids` range above the per-channel watermark, using the stashed
   fork record when there is one for that range and watermark, else catch-up
   (after the drop the range has left the window).
-- `before_agent_turn` — embeds the inbound user text, leaves out this
+- `before_agent_turn` — embeds the inbound user text, preceded by the
+  agent's previous reply (`memory.retrieval.query_context`), fuses the KNN
+  with an FTS5 search (`memory.retrieval.candidates`), leaves out this
   channel's records still wholly in its window, scores candidates
   (`similarity × exp(-age_days / half_life)`, with age from `created_at` or,
   under `memory.retrieval.recency_from: last_used`, from the last
@@ -852,15 +926,45 @@ from the record's own channel: `message_log` ids are global, so the range
 holds other channels' interleaved rows and the `channel_id` predicate keeps
 them out.
 
+**Search by meaning (#667).** With the vector path up, `search_memory`
+embeds the query (`kind="query"`) and ranks two lists over the same filters
+by reciprocal rank fusion, as passive retrieval does (#666):
+
+- an exact cosine scan of the filtered records that have a vector
+  (`memory JOIN memory_vec`, filtered in `WHERE`, `LIMIT 50`). A KNN would
+  cut before the filters and could leave a `channel=` or date-filtered
+  search with no vector hits;
+- the FTS5 keyword search, with common words left out.
+
+So a paraphrase ("what did we decide about the deploy schedule?") finds a
+record that shares no words with it ("agreed to ship on Thursdays"), and a
+name still finds the record that names it. Unlike passive retrieval, it
+ranks by raw cosine with no recency decay: a deliberate search wants the best
+answer, and the age is on every line. A keyword hit the scan didn't reach
+gets its cosine from its stored vector. Demoted and superseded records have
+no vector (retention and the near-duplicate merge delete it), so with
+`include_demoted=True` they are found by keyword only and show `kw` as their
+score. If the FTS query fails, a warning is logged and the cosine results
+stand alone; if the cosine scan itself fails, the tool falls back to the
+keyword search below.
+
+**Keyword fallback.** With no embedding profile, sqlite-vec not loaded, a
+stored encoder that differs from the configured one, or the query encoder
+failing, `search_memory` logs a warning naming itself and the cause and runs
+the keyword search alone. Its first output line is then
+`(keyword search only: semantic search unavailable)`, so the agent knows a
+paraphrase may have been missed. If that FTS5 query fails as well, it falls
+back to a `LIKE` scan over record summaries instead of returning an internal
+error. Tool searches write no `retrieval_log` rows.
+
 Both tools retry briefly when the memory schema is still being created by
-another task. If `search_memory`'s FTS5 query fails, it falls back to a
-`LIKE` scan over record summaries instead of returning an internal error.
+another task.
 
 **Tools:**
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
-| `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | FTS5 keyword search over `memory_fts`. Returns a numbered list `id. score (age)[flags] summary` sorted by FTS relevance, capped at approximately `max_tokens`. `channel` narrows to one channel's records by exact id; a channel with no records matches nothing. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
+| `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | Search by meaning and keywords (above). Returns a list `id. score (age)[flags] summary`, led by each memory id (for `recall_raw`), best match first, capped at approximately `max_tokens`. The score is the cosine similarity to the query (two decimals), or `kw` for a keyword hit with no vector. In keyword-only fallback the first line says so, results are in FTS order, and the score is the negated bm25 rank. `channel` narrows to one channel's records by exact id; a channel with no records matches nothing. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
 | `recall_raw` | `memory_id: int`, `max_tokens: int` (default `1000`) | Replays the raw `message_log` dialog for the record's `[msg_id_start, msg_id_end]` range using `WHERE channel_id = record.channel_id AND id BETWEEN ...` — the channel predicate is load-bearing because the `message_log` id sequence is global across all channels. Returns a participants header (`[memory N: messages S–E, participants: {...}]`) followed by verbatim `role: content` lines, truncated at `max_tokens` with an explicit marker. Works on demoted, superseded, and tombstoned records. Reaches any channel's record. **Bumps `retrieval_count` and `last_retrieved_at`** on the record — the bump is what makes the record eligible for re-promotion by the next retention job run. |
 
 **Recall-stat semantics:** `recall_raw` bumps the record's access stats;

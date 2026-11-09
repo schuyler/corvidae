@@ -587,7 +587,8 @@ class TestToolsSpanWholeMemory:
             "solar MQTT", channel="signal:*"
         )
 
-        assert result == "No memories found matching your query.", result
+        # Ends with the message: without sqlite-vec a keyword-only note leads (#667).
+        assert result.endswith("No memories found matching your query."), result
         await db.close()
 
     async def test_search_memory_unknown_channel_arg_finds_nothing(self):
@@ -606,7 +607,8 @@ class TestToolsSpanWholeMemory:
             "solar MQTT", channel="irc:#nowhere"
         )
 
-        assert result == "No memories found matching your query.", result
+        # Ends with the message: without sqlite-vec a keyword-only note leads (#667).
+        assert result.endswith("No memories found matching your query."), result
         await db.close()
 
 

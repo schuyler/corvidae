@@ -520,12 +520,12 @@ def test_snapshot_pool_json_holds_whole_pool(
         "--pool-out", str(pool_out), "--k", "1",
     ])
 
-    # All three candidates, ranked 1..3, each with the five documented fields.
+    # All three candidates, ranked 1..3, each with the six documented fields.
     candidates = read_pool(pool_out)["queries"][0]["candidates"]
     assert [c["rank"] for c in candidates] == [1, 2, 3]
     assert [c["id"] for c in candidates] == ids
     for cand in candidates:
-        assert set(cand) == {"id", "rank", "similarity", "score", "band"}
+        assert set(cand) == {"id", "rank", "similarity", "score", "band", "source"}
         assert cand["band"] in {"strong", "moderate", "weak"}
     scores = [c["score"] for c in candidates]
     assert scores == sorted(scores, reverse=True)
@@ -589,3 +589,186 @@ def test_snapshot_not_a_database_reports_open_error(
     assert lines[0].startswith(f"eval_memory: cannot open snapshot {bogus.resolve()} read-only (")
     assert "check the --snapshot path" in lines[0]
     assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
+# Retrieval variants (#665 query context, #666 candidate sources): a probe can
+# carry the reply it followed ("context") and a "subset" tag; --query-context
+# and --candidates override the config so variants score against one snapshot.
+# ---------------------------------------------------------------------------
+
+
+def run(script: ModuleType, tmp_path: Path, labels: Path, *extra: str) -> dict:
+    """Run snapshot mode over tmp_path/sessions.db and return the pool JSON."""
+    pool_out = tmp_path / "pool.json"
+    script.main([
+        "--snapshot", str(tmp_path / "sessions.db"), "--labels", str(labels),
+        "--config", str(tmp_path / "agent.yaml"), "--pool-out", str(pool_out),
+        *extra,
+    ])
+    return read_pool(pool_out)
+
+
+@needs_vec
+def test_context_precedes_the_probe_text_in_the_query(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+) -> None:
+    """With the default query_context the embedded query is context + text."""
+    build_source(tmp_path / "sessions.db", [TEXT_A])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": "thanks, that worked", "context": TEXT_A, "relevant": [1]},
+    ])
+
+    pool = run(script, tmp_path, labels)
+
+    assert stub_calls.embeds[-1] == ([f"{TEXT_A}\n\nthanks, that worked"], "query")
+    query = pool["queries"][0]
+    assert query["query"] == f"{TEXT_A}\n\nthanks, that worked"
+    assert query["context"] == TEXT_A
+    assert pool["summary"]["query_context"] == "previous_reply"
+
+
+@needs_vec
+def test_query_context_none_flag_scores_the_baseline(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+) -> None:
+    """--query-context none overrides the config: the context is not sent."""
+    build_source(tmp_path / "sessions.db", [TEXT_A])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": "thanks, that worked", "context": TEXT_A, "relevant": [1]},
+    ])
+
+    pool = run(script, tmp_path, labels, "--query-context", "none")
+
+    assert stub_calls.embeds[-1] == (["thanks, that worked"], "query")
+    assert pool["summary"]["query_context"] == "none"
+
+
+@needs_vec
+def test_follow_up_probe_recalls_only_with_context(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+) -> None:
+    """A follow-up probe finds its record with the reply as context, not without.
+
+    Alone, "eta theta" ranks C first; with "beta gamma delta" before it, A
+    (three shared words) outranks C (two)."""
+    id_a, _id_b, _id_c = build_source(tmp_path / "sessions.db", [TEXT_A, TEXT_B, TEXT_C])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": "eta theta", "context": "beta gamma delta", "relevant": [id_a],
+         "subset": "deictic"},
+    ])
+
+    with_context = run(script, tmp_path, labels, "--k", "1")
+    baseline = run(script, tmp_path, labels, "--k", "1", "--query-context", "none")
+
+    assert with_context["queries"][0]["recall_at_k"] == pytest.approx(1.0)
+    assert baseline["queries"][0]["recall_at_k"] == pytest.approx(0.0)
+
+
+@needs_vec
+def test_summary_breaks_metrics_down_per_subset(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Each subset tag gets its own scored count and means; untagged probes
+    are reported as their own group."""
+    id_a, id_b, id_c = build_source(tmp_path / "sessions.db", [TEXT_A, TEXT_B, TEXT_C])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [id_a], "subset": "self-contained"},
+        {"text": TEXT_A, "relevant": [id_c], "subset": "self-contained"},
+        {"text": TEXT_C, "relevant": [id_c], "subset": "deictic"},
+        {"text": TEXT_B, "relevant": [id_b]},
+    ])
+
+    pool = run(script, tmp_path, labels, "--k", "1")
+
+    subsets = pool["summary"]["subsets"]
+    assert set(subsets) == {"self-contained", "deictic", "(untagged)"}
+    assert subsets["self-contained"]["scored"] == 2
+    assert subsets["self-contained"]["mean_recall_at_k"] == pytest.approx(0.5)
+    assert subsets["deictic"]["mean_mrr"] == pytest.approx(1.0)
+    assert subsets["(untagged)"]["scored"] == 1
+    assert pool["queries"][0]["subset"] == "self-contained"
+    out = capsys.readouterr().out
+    assert "self-contained" in out and "deictic" in out
+
+
+@pytest.mark.parametrize("field, value, expected", [
+    ("context", 7, "queries[0].context: got 7; expected a string"),
+    ("subset", ["a"], 'queries[0].subset: got ["a"]; expected a non-empty string'),
+    ("subset", "", 'queries[0].subset: got ""; expected a non-empty string'),
+])
+def test_bad_context_or_subset_is_named(
+    script: ModuleType, tmp_path: Path, field: str, value: object, expected: str,
+) -> None:
+    """A malformed optional field names the query, the value and the fix."""
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": "q", "relevant": [1], field: value},
+    ])
+    with pytest.raises(ValueError) as excinfo:
+        script.load_labels(labels)
+    message = str(excinfo.value)
+    assert expected in message
+    assert "fix the labels file" in message
+
+
+def test_query_context_flag_needs_snapshot_and_a_known_value(
+    script: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--query-context outside snapshot mode, or with an unknown value, is refused."""
+    with pytest.raises(SystemExit) as excinfo:
+        script.main(["--query-context", "none"])
+    assert excinfo.value.code == 2
+    assert "--query-context is only used with --snapshot" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as excinfo:
+        script.main([
+            "--snapshot", str(tmp_path / "s.db"), "--labels", str(tmp_path / "l.json"),
+            "--config", str(tmp_path / "a.yaml"), "--pool-out", str(tmp_path / "p.json"),
+            "--query-context", "everything",
+        ])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "everything" in err and "previous_reply" in err
+
+
+# #666: --candidates hybrid|vector scores fused vs vec-only on one snapshot.
+NAMED = "Yoz prefers shipping releases on Thursdays"
+DISTRACTORS = ["what about that one", "what about this", "what about it then",
+               "and what about those", "so what about them"]
+
+
+@needs_vec
+def test_candidates_flag_scores_fused_against_vector_only(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+) -> None:
+    """A name probe the vector search misses at k=1 is found by the fused pool;
+    each run records its candidate mode, and every candidate its source."""
+    ids = build_source(tmp_path / "sessions.db", [*DISTRACTORS, NAMED])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": "what about Yoz", "relevant": [ids[-1]], "subset": "proper-noun"},
+    ])
+
+    fused = run(script, tmp_path, labels, "--k", "1")
+    vector = run(script, tmp_path, labels, "--k", "1", "--candidates", "vector")
+
+    assert fused["summary"]["candidates"] == "hybrid"
+    assert vector["summary"]["candidates"] == "vector"
+    assert fused["queries"][0]["recall_at_k"] == pytest.approx(1.0)
+    assert vector["queries"][0]["recall_at_k"] == pytest.approx(0.0)
+    assert fused["queries"][0]["candidates"][0]["source"] == "fts"
+    assert {c["source"] for c in vector["queries"][0]["candidates"]} == {"vec"}
+
+
+def test_candidates_flag_needs_snapshot(
+    script: ModuleType, capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        script.main(["--candidates", "vector"])
+    assert excinfo.value.code == 2
+    assert "--candidates is only used with --snapshot" in capsys.readouterr().err
