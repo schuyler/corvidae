@@ -825,9 +825,11 @@ Implements six hooks and two kernel timers:
   runs the retention check, then registers the two clock-driven pieces
   below. Without the kernel clock and idle tracker it logs a warning and
   skips them.
-- `before_compaction` — with `agent.forks` on for `consolidation`, forks
-  the memory record from the prefix about to be dropped (when every
-  dialog row of the range is in it) and stashes it for the task below.
+- `before_compaction` — with `agent.forks` on for `consolidation`, copies
+  the window and spawns a background task that forks the memory record
+  from the prefix about to be dropped (when every dialog row of the range
+  is in it), and stashes the task for the one below to await (#628); the
+  hook itself awaits nothing.
 - `on_compaction` — spawns a tracked background task consolidating the
   `compacted_ids` range above the per-channel watermark, using the stashed
   fork record when there is one for that range and watermark, else catch-up

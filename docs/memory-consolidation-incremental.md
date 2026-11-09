@@ -53,8 +53,9 @@ context), *inferred* (approved assumption).
    near N tokens, N configurable. *(stated, amended)*
 4. **Small records don't cost extra prefill or slot switches.** The record
    is written by a fork of the live window; the turn trigger fires at a
-   turn boundary, never inside a tool loop. Compaction's existing inline
-   fork can still run mid-loop. *(stated; amended 2026-11-08 to scope
+   turn boundary, never inside a tool loop. Compaction's fork can still
+   be triggered mid-loop (since #628 it runs in the background on a copy
+   of the window, not on the response path). *(stated; amended 2026-11-08 to scope
    "never inside a tool loop" to the turn trigger)*
 5. **No recall gap at compaction**: compaction consolidates only the rows
    past the watermark, normally few. *(memory)*
@@ -242,8 +243,9 @@ the decode. A deployment that wants fewer forks raises
 
 What happens to the other triggers falls out of the watermark:
 
-- **Compaction** still forks once in `before_compaction`, inline, over
-  `(watermark, range_end]`. With the turn trigger running, the watermark
+- **Compaction** still forks once over `(watermark, range_end]`, from a
+  copy of the window taken in `before_compaction` and forked in the
+  background since #628. With the turn trigger running, the watermark
   is usually within N of the window's end and compaction keeps far more
   than N, so the range is usually empty and `before_compaction` returns
   early. It is large when compaction fires in
@@ -251,7 +253,7 @@ What happens to the other triggers falls out of the watermark:
   inside the loop;
   then one fork writes several entries over it. The entries are small
   whatever the range's size, which is what requirement 3 asks; the decode
-  is on the response path, as the compaction fork's always has been.
+  was on the response path until #628 moved it off.
 - **Idle** is unchanged except for the in-flight ordering. It picks up
   whatever backlog is left when a channel goes quiet, one fork, several
   entries.
