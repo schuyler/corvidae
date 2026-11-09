@@ -311,10 +311,11 @@ nullable `memory` columns:
   without one).
 - `trigger`: what started the consolidation, the value `_consolidate_range`
   was called with: `compaction`, `idle`, or `eval` (`scripts/eval_memory.py`).
-  Catch-up is a path, not a trigger: a compaction that falls through to the
-  view call stores `compaction`, and its `mode = standalone` already marks
-  the view. `_commit` sets it, so every consolidation path gets it. NULL for
-  `direct` records and for rows written before the column existed (#633).
+  Catch-up is a path, not a trigger: a compaction or idle trigger that falls
+  through to the view call stores its own trigger, and its
+  `mode = standalone` already marks the view. `_commit` sets it, so every
+  consolidation path gets it. NULL for `direct` records and for rows
+  written before the column existed (#633).
 
 What each path stamps:
 
@@ -339,7 +340,7 @@ A `direct` record was written by no consolidation call, so it has nothing
 to stamp but its mode; it lists apart from the unknown rows.
 
 Rows written before stamping have all the stamp columns NULL, meaning
-"unknown"; rows written between #299 and #633 have `trigger` NULL only.
+"unknown"; rows written between #299 and #633 read `trigger` NULL.
 Opening an older database adds the columns in place
 (`add_column_if_missing`) without rewriting any row; nothing backfills
 them.
