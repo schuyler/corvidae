@@ -49,11 +49,13 @@ commit the lock change: `uv lock --upgrade-package apluggy` for one package,
 `uv lock --upgrade` for all. After editing dependencies in `pyproject.toml`,
 run `uv lock`; CI syncs with `--locked` and fails on a stale lock.
 
-CI (`.github/workflows/tests.yml`) runs three jobs on every push to `main` and
+CI (`.github/workflows/tests.yml`) runs four jobs on every push to `main` and
 every PR: `kernel` (`--extra dev --extra acp`; checks that sqlite-vec, the
 Discord SDK and `corvidae_cognition` are absent, then runs the kernel suite
-above) and `full` (every extra; checks sqlite-vec and the Discord
-SDK load, then runs the whole suite), plus `web-smoke` (kernel install plus a
+above), `full` (every extra; checks sqlite-vec and the Discord
+SDK load, then runs the whole suite), `cognition-fts` (the kernel install plus
+`packages/corvidae-cognition` without sqlite-vec; checks it is absent, then runs `tests/cognition/` on the
+FTS5 path), and `web-smoke` (kernel install plus a
 pinned Playwright and Chromium; runs `tests/test_web_render_smoke.py` and fails
 if it skips). It doesn't run the harness or `--run-eval`.
 
