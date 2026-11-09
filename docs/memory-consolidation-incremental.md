@@ -455,8 +455,8 @@ Not designed here; listed so the change can be judged:
 - **Dedupe on summary text, not the whole line**, so a record isn't
   re-admitted when its age string changes (existing behaviour, more
   frequent with many recent records).
-- **`redact memory --dry-run` reports one affected memory** while the real
-  run cascades to siblings (existing behaviour).
+- ~~**`redact memory --dry-run` reports one affected memory**~~ Done in
+  #625: the dry run counts the same cascade the real run tombstones.
 - **A default memory budget derived from the window** (say 1.5% of
   `max_context_tokens`) instead of a fixed 512.
 - **Per-entry message ranges**, if reconsolidation or `recall_raw` turns
