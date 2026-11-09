@@ -14,6 +14,8 @@ import copy
 import hashlib
 import importlib.util
 import json
+import math
+import re
 import shutil
 import sqlite3
 import sys
@@ -251,23 +253,26 @@ def test_snapshot_copy_leaves_source_bytes_and_includes_wal_rows(
         ])
     err = capsys.readouterr().err
     assert excinfo.value.code == 2
-    assert "--pool-out" in err and str(image_db) in err
+    assert "--pool-out" in err and str(image_db.resolve()) in err
     assert (sha256(image_db), sha256(image_wal)) == before
 
 
 @needs_vec
 def test_snapshot_scores_known_ranking(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """S2: per-query and mean Recall@k / MRR equal the hand-computed values."""
     source = tmp_path / "sessions.db"
     id_a, id_b, id_c = build_source(source, [TEXT_A, TEXT_B, TEXT_C])
     config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
-    # Query 1 ranks A, B, C; query 2 ranks C first.
+    # Query 1 ranks A, B, C (cosine 1.0, 0.5, 0.25); query 2 ranks C first,
+    # then A and B tie at 0.25 and B (seeded later, so newer) wins the tie;
+    # query 3's only relevant id (C) ranks third, below k=2.
     labels = write_labels(tmp_path / "labels.json", [
         {"text": TEXT_A, "relevant": [id_b, id_c]},
         {"text": TEXT_C, "relevant": [id_c]},
+        {"text": TEXT_A, "relevant": [id_c]},
     ])
     pool_out = tmp_path / "pool.json"
 
@@ -279,17 +284,24 @@ def test_snapshot_scores_known_ranking(
     # Expected values come from the shared metric functions on the known order.
     exp1_r = recall_at_k([id_a, id_b], [id_b, id_c], 2)
     exp1_m = mrr([id_a, id_b], [id_b, id_c])
-    exp2_r = recall_at_k([id_c, id_a], [id_c], 2)
-    exp2_m = mrr([id_c, id_a], [id_c])
+    exp2_r = recall_at_k([id_c, id_b], [id_c], 2)
+    exp2_m = mrr([id_c, id_b], [id_c])
+    exp3_r = recall_at_k([id_a, id_b], [id_c], 2)
+    exp3_m = mrr([id_a, id_b], [id_c])
     pool = read_pool(pool_out)
-    q1, q2 = pool["queries"]
+    q1, q2, q3 = pool["queries"]
     assert q1["recall_at_k"] == pytest.approx(exp1_r) == pytest.approx(0.5)
     assert q1["mrr"] == pytest.approx(exp1_m) == pytest.approx(0.5)
     assert q2["recall_at_k"] == pytest.approx(exp2_r) == pytest.approx(1.0)
     assert q2["mrr"] == pytest.approx(exp2_m) == pytest.approx(1.0)
-    assert pool["summary"]["mean_recall_at_k"] == pytest.approx((exp1_r + exp2_r) / 2)
-    assert pool["summary"]["mean_mrr"] == pytest.approx((exp1_m + exp2_m) / 2)
-    assert pool["summary"]["scored"] == 2
+    # Below the cutoff: recall 0 and MRR@k 0.
+    assert q3["recall_at_k"] == pytest.approx(exp3_r) == pytest.approx(0.0)
+    assert q3["mrr"] == pytest.approx(exp3_m) == pytest.approx(0.0)
+    assert pool["summary"]["mean_recall_at_k"] == pytest.approx(
+        (exp1_r + exp2_r + exp3_r) / 3
+    )
+    assert pool["summary"]["mean_mrr"] == pytest.approx((exp1_m + exp2_m + exp3_m) / 3)
+    assert pool["summary"]["scored"] == 3
 
 
 def test_snapshot_reports_fts_fallback_on_encoder_mismatch(
@@ -375,15 +387,18 @@ def test_snapshot_names_unreachable_label_ids(
     assert pool["summary"]["scored"] == 1
     # Stdout names every unreachable id.
     out = capsys.readouterr().out
+    unscorable_lines = [ln for ln in out.splitlines() if "unscorable" in ln]
+    assert unscorable_lines
     for ident in (absent, states["redacted"], states["superseded"], states["not_indexed"]):
-        assert str(ident) in out
+        # Word-boundary match so id 1 is not satisfied by id 10 or 9999.
+        assert any(re.search(rf"\b{ident}\b", ln) for ln in unscorable_lines)
     for status in ("absent", "redacted", "superseded", "not_indexed"):
         assert status in out
 
 
 def test_snapshot_never_calls_chat_or_embeds_documents(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """S5: retrieval only: no chat call, no document embed, no retention."""
 
@@ -454,7 +469,11 @@ def test_fixture_mode_unchanged_and_flag_conflicts_named(
 
     # --snapshot without --labels: exit 2, naming the flag and the remedy.
     with pytest.raises(SystemExit) as excinfo:
-        script.main(["--snapshot", str(tmp_path / "sessions.db")])
+        script.main([
+            "--snapshot", str(tmp_path / "sessions.db"),
+            "--config", str(tmp_path / "agent.yaml"),
+            "--pool-out", str(tmp_path / "pool.json"),
+        ])
     err = capsys.readouterr().err
     assert excinfo.value.code == 2
     assert "--labels" in err
@@ -464,7 +483,7 @@ def test_fixture_mode_unchanged_and_flag_conflicts_named(
 @needs_vec
 def test_snapshot_pool_json_holds_whole_pool(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """S7: with k=1 the pool JSON still lists every scored candidate."""
     source = tmp_path / "sessions.db"
@@ -491,7 +510,7 @@ def test_snapshot_pool_json_holds_whole_pool(
 
 def test_config_half_life_days_changes_scores(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """S8: memory.half_life_days from --config reaches the scorer."""
     # FTS-path source (no embedding profile) with a ten-day-old row.
@@ -519,8 +538,6 @@ def test_config_half_life_days_changes_scores(
         scores[half_life] = candidates[0]["score"]
 
     # score = 0.6 (FTS similarity proxy) * exp(-10 / half_life_days).
-    import math
-
     for half_life, score in scores.items():
         assert score == pytest.approx(0.6 * math.exp(-10 / half_life), rel=1e-3)
 
