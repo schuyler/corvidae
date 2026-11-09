@@ -291,8 +291,8 @@ per-record lookups cheap. A candidate's `outcome` is one of:
   budget had no room for it. (This is the remainder: with the funnel
   plugin disabled nothing is admitted and selected candidates also read
   `dropped_budget`.)
-- `dropped_dup`: offered, but the window's CONTEXT already carried that
-  exact line.
+- `dropped_dup`: offered, but the window's CONTEXT already contained that
+  line (the funnel's dedupe is a substring test).
 - `cut`: scored but ranked below k, so never returned.
 - `excluded_in_window`: left out by the window exclusion, but its score
   would have placed it in the top k.

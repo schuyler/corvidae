@@ -2306,8 +2306,9 @@ class MemoryPlugin(CorvidaePlugin):
             except Exception:
                 logger.warning(
                     "retrieval candidate log failed for channel %s "
-                    "(retrieval_log id %s); this retrieval's candidates are "
-                    "not logged, the retrieval and its profile are",
+                    "(retrieval_log id %s); some or all of this retrieval's "
+                    "candidate rows are missing, the retrieval and its "
+                    "profile are logged",
                     channel.id, retrieval_id,
                     exc_info=True, extra={"channel_id": channel.id},
                 )
