@@ -23,12 +23,14 @@ from corvidae.commands.redact import (
 from cognition.test_redact_cascade import insert_memory, insert_message, make_full_db
 
 
-async def _add_candidates(db, memory_ids: list[int]) -> None:
-    """One retrieval_log row with one retrieval_candidate row per memory."""
+async def _add_candidates(
+    db, memory_ids: list[int], channel_id: str = "irc:#a",
+) -> None:
+    """One retrieval_log row (on channel_id) with a candidate row per memory."""
     cursor = await db.execute(
         "INSERT INTO retrieval_log (ts, channel_id, hit_count, admitted_count) "
         "VALUES (?, ?, ?, ?)",
-        (time.time(), "irc:#a", len(memory_ids), 0),
+        (time.time(), channel_id, len(memory_ids), 0),
     )
     retrieval_id = cursor.lastrowid
     for rank, memory_id in enumerate(memory_ids, start=1):
@@ -66,6 +68,9 @@ async def _db_with_candidates(path: str | None = None):
     await _add_candidates(
         db, [ids["m_target"], ids["m_overlap"], ids["m_other"], ids["m_chan_b"]],
     )
+    # A retrieval on another channel that also scored the memories the
+    # forms redact: its rows reference a redacted memory too (L5), so they go.
+    await _add_candidates(db, [ids["m_target"], ids["m_overlap"]], "irc:#b")
     return db, ids
 
 
@@ -102,7 +107,7 @@ class TestRedactForms:
 
     def test_dry_run_cli_reports_count_and_deletes_nothing(self, tmp_path):
         # L5 dry-run: the CLI reports how many retrieval_candidate rows a
-        # real run would delete (m_target's and m_overlap's: 2) and the
+        # real run would delete (m_target's and m_overlap's, on both retrievals: 4) and the
         # table is unchanged afterwards.
         path = str(tmp_path / "s.db")
 
@@ -124,5 +129,5 @@ class TestRedactForms:
             redact_command, ["--db", path, "--dry-run", "message", str(u1)]
         )
         assert result.exit_code == 0, result.output
-        assert "2 retrieval_candidate rows" in result.output, result.output
-        assert asyncio.run(count_rows()) == 4
+        assert "4 retrieval_candidate rows" in result.output, result.output
+        assert asyncio.run(count_rows()) == 6

@@ -142,7 +142,9 @@ class TestOutcomes:
         # L2 dropped_dup: the second identical retrieval selects a line the
         # window's CONTEXT already holds, so the funnel dedupes it.
         memory, embedder, channel, conv, db = await build_retrieval_env()
-        mem = await seed(db, channel.id, QUERY, 1, 2)
+        # Range below the first CONTEXT rowid (1): once that CONTEXT is in
+        # the window, #634's exclusion would otherwise hide the record.
+        mem = await seed(db, channel.id, QUERY, 0, 0)
         await ask_plain(memory, channel, conv, QUERY)
         await ask_plain(memory, channel, conv, QUERY)
         first, second = await retrieval_ids(db)
@@ -295,7 +297,8 @@ class TestFailSoft:
             def guarded(sql, *args, **kwargs):
                 # Sync on purpose: aiosqlite's execute() returns an object
                 # usable with both await and async with.
-                if "INSERT INTO retrieval_candidate" in sql:
+                lowered = sql.lower()
+                if "retrieval_candidate" in lowered and "insert" in lowered:
                     raise sqlite3.OperationalError("disk I/O error (test)")
                 return original(sql, *args, **kwargs)
             return guarded
@@ -306,6 +309,8 @@ class TestFailSoft:
             await ask_plain(memory, channel, conv, QUERY)
 
         assert len(context_messages(conv)) == 1
+        # The retrieval_log row was committed, not left in an open transaction.
+        assert not db.in_transaction
         ids = await retrieval_ids(db)
         assert len(ids) == 1
         async with db.execute(
