@@ -41,7 +41,8 @@ def retention_score(
 
 
 async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) -> None:
-    """Three-pass retention job: demote → re-promote → backfill.
+    """Retention job: demote → re-promote → prune the retrieval logs (when
+    ``memory.retention.retrieval_log_max_age_days`` is set, #654) → backfill.
 
     Pass ordering is intentional: re-promoted records (indexed=1, embedded=0)
     are eligible for the same run's backfill pass, providing prompt vector
@@ -167,6 +168,39 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
                 repromoted_count += cursor.rowcount == 1
         if repromoted_count:
             logger.info("retention: re-promoted %d records", repromoted_count)
+
+    # ------------------------------------------------------------------
+    # Pass 2b: prune the retrieval logs (#654), when an age is configured.
+    # Runs before backfill, which returns early when embedding is off. A
+    # failure rolls back, is logged, and leaves backfill to run.
+    # ------------------------------------------------------------------
+    max_age_days = memory._retrieval_log_max_age_days
+    if max_age_days is not None:
+        cutoff = now - max_age_days * 86400.0
+        try:
+            async with memory._db_lock, memory._write_txn() as wdb:
+                # Children first, then the parents they belong to.
+                cand_cursor = await wdb.execute(
+                    "DELETE FROM retrieval_candidate WHERE retrieval_id IN "
+                    "(SELECT id FROM retrieval_log WHERE ts < ?)",
+                    (cutoff,),
+                )
+                log_cursor = await wdb.execute(
+                    "DELETE FROM retrieval_log WHERE ts < ?", (cutoff,)
+                )
+            if log_cursor.rowcount:
+                logger.info(
+                    "retention: pruned %d retrieval_log rows and %d "
+                    "retrieval_candidate rows older than %g days",
+                    log_cursor.rowcount, cand_cursor.rowcount, max_age_days,
+                )
+        except Exception as exc:
+            logger.warning(
+                "retention: pruning retrieval_log rows older than %g days "
+                "(memory.retention.retrieval_log_max_age_days) failed and was "
+                "rolled back (%s); the next retention run retries",
+                max_age_days, type(exc).__name__, exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Pass 3: Backfill
