@@ -3002,14 +3002,18 @@ point and its own `tools.*` keys, so each can be dropped by name in
 
 - `ShellToolPlugin` (`shell_tools`): `shell` and `task_pipeline`. The two go
   together because `task_pipeline` runs each step through the shell (PRD
-  §3.5.3). Without it the agent cannot run commands.
+  §3.5.3). Without it the agent cannot run commands (an MCP server can
+  still offer its own).
 - `FileToolsPlugin` (`file_tools`): `read_file` and `write_file`. Without it
-  the agent cannot read or write files. A notification too long for the
+  the agent has no dedicated file tools; `shell`, if enabled, can still
+  read and write any file the daemon user can. A notification too long for the
   window still gets a spill file and a pointer while `shell` is enabled
   (another spill reader); with neither, it is cut and no file is written.
 - `WebToolsPlugin` (`web_tools`): `web_fetch` and `web_search`; owns the
   `aiohttp.ClientSession` that `web_fetch` reuses. Without it the agent
-  has no web access of its own.
+  has no dedicated web tools; `shell` (`curl`) or an MCP server can still
+  reach the network. To take a capability away entirely, disable every
+  plugin that provides it (see [threat-model.md](threat-model.md)).
 
 They replaced the combined `CoreToolsPlugin` (`core_tools`), with no alias.
 
@@ -4077,10 +4081,16 @@ Immediately after entry points load, `Runtime.start()` logs `"plugins
 loaded"` with `loaded` (the sorted names `pm.list_name_plugin()` returns
 with a plugin object; pluggy keeps each blocked name as `(name, None)`, and
 those are left out) and `blocked` (the configured `plugins.disabled` list, verbatim
-— not narrowed to names that matched a real plugin). A misspelled disable
-entry shows up under `blocked` while the plugin it was meant to block
-still shows up under `loaded`; that mismatch is the operator-visible
-signal of the typo. It is not an error and does not stop the daemon.
+— not narrowed to names that matched a real plugin). A disable entry that
+names no plugin (a typo, a retired name, a plugin whose distribution is
+not installed) also gets one `WARNING` per distinct name, naming
+`plugins.disabled`, the value, and the installed entry-point names
+(`_warn_unknown_disabled`). A name counts as known when it is a
+`corvidae` entry point of any installed distribution or was registered
+directly before step 7b; that snapshot is taken before blocking, because
+`set_blocked` unregisters a plugin already registered under the name. Only
+entry-point names are offered as choices. It is not an error and does not
+stop the daemon.
 
 Next, `install_plugin_hookspecs(pm)` installs the hookspecs plugins
 declare ([Plugin-declared hookspecs](#plugin-declared-hookspecs)), and
