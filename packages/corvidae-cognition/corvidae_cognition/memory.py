@@ -12,8 +12,11 @@ This module owns the memory schema:
     Each row is stamped with how it was made (issue #299): ``prompt_hash``
     (sha256 of the consolidation instruction text), ``mode`` (``fork`` |
     ``standalone`` | ``direct``) and ``model`` (the model the call was sent
-    with). All NULL means the row predates stamping ("unknown"); ``direct``
-    rows (goal retirement) were written by no consolidation call.
+    with), plus ``trigger`` (issue #633: ``compaction`` | ``idle`` |
+    ``eval``, what started the consolidation; NULL for direct rows and rows
+    from before the column). All NULL means the row predates stamping
+    ("unknown"); ``direct`` rows (goal retirement) were written by no
+    consolidation call.
   - ``memory_prompt``: ``hash`` -> instruction text, stored once per hash.
   - ``consolidation_watermark``: per-channel last-consolidated
     ``message_log`` id; what makes the compaction/idle trigger overlap safe.
@@ -57,6 +60,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import dataclasses
 import hashlib
 import json
 import logging
@@ -742,7 +746,8 @@ CREATE TABLE IF NOT EXISTS memory (
     embedded INTEGER NOT NULL DEFAULT 0,-- 0 = embedding pending/failed (backfillable)
     prompt_hash TEXT,                   -- sha256 of the instruction text; NULL = unknown/direct
     mode TEXT,                          -- fork | standalone | direct; NULL = unknown (pre-stamp)
-    model TEXT                          -- model the consolidation call was sent with
+    model TEXT,                         -- model the consolidation call was sent with
+    trigger TEXT                        -- compaction | idle | eval; NULL = direct/pre-#633
 )
 """
 
@@ -772,6 +777,9 @@ class RecordStamp:
     prompt: str | None
     mode: str
     model: str | None
+    # What started the consolidation (compaction | idle | eval); set by
+    # _commit, None for direct records (#633).
+    trigger: str | None = None
 
     @property
     def hash(self) -> str | None:
@@ -1701,7 +1709,10 @@ class MemoryPlugin(CorvidaePlugin):
                 msg_id_start=rows[0][0],
                 msg_id_end=rows[-1][0],
                 embedding=embedding,
-                stamp=record["stamp"],
+                # Every consolidation record passes through here, so this is
+                # where the stamp learns its trigger; catch-up keeps the one
+                # that fell through to it (#633).
+                stamp=dataclasses.replace(record["stamp"], trigger=trigger),
             )
             await self._set_watermark(wdb, channel_id, new_wm)
         logger.info(
@@ -1739,8 +1750,8 @@ class MemoryPlugin(CorvidaePlugin):
         cursor = await db.execute(
             "INSERT INTO memory (channel_id, created_at, summary, "
             "importance, valence, topic_tags, participants, "
-            "msg_id_start, msg_id_end, embedded, prompt_hash, mode, model) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "msg_id_start, msg_id_end, embedded, prompt_hash, mode, model, trigger) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 channel_id,
                 created_at,
@@ -1755,6 +1766,7 @@ class MemoryPlugin(CorvidaePlugin):
                 stamp.hash,
                 stamp.mode,
                 stamp.model,
+                stamp.trigger,
             ),
         )
         memory_id = cursor.lastrowid
@@ -2577,6 +2589,8 @@ class MemoryPlugin(CorvidaePlugin):
         await add_column_if_missing(db, "memory", "prompt_hash", "TEXT")
         await add_column_if_missing(db, "memory", "mode", "TEXT")
         await add_column_if_missing(db, "memory", "model", "TEXT")
+        # Trigger column (#633), likewise nullable; old rows read NULL.
+        await add_column_if_missing(db, "memory", "trigger", "TEXT")
         await db.execute(MEMORY_PROMPT_DDL)
         await db.execute(WATERMARK_DDL)
         await db.execute(EMBEDDING_META_DDL)

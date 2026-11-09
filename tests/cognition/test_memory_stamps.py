@@ -377,3 +377,89 @@ async def test_pre_change_db_gains_columns_without_rewriting_rows(tmp_path):
         await memory.on_stop()
         await db.close()
 
+
+# ---------------------------------------------------------------------------
+# #633: each record stores the trigger that started its consolidation
+# ---------------------------------------------------------------------------
+
+# The memory table as #299 left it: stamp columns, but no trigger column.
+STAMPED_MEMORY_DDL = PRE_CHANGE_MEMORY_DDL.replace(
+    "embedded INTEGER NOT NULL DEFAULT 0\n",
+    "embedded INTEGER NOT NULL DEFAULT 0,\n"
+    "    prompt_hash TEXT,\n    mode TEXT,\n    model TEXT\n",
+)
+
+
+async def triggers_of(db) -> list[tuple]:
+    """(mode, trigger) of every memory row, oldest first."""
+    async with db.execute("SELECT mode, trigger FROM memory ORDER BY id") as cursor:
+        return await cursor.fetchall()
+
+
+async def test_fork_records_store_idle_and_compaction_triggers(tmp_path):
+    """#633: an idle fork's record stores 'idle'; a compaction fork's, 'compaction'."""
+    # A fresh environment with the same live-window fixture per trigger.
+    for trigger in ("idle", "compaction"):
+        config = config_with(EMBED_CONFIG, consolidation_fork_prompt="PROMPT-F")
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            config, db_path=str(tmp_path / f"{trigger}.db")
+        )
+        try:
+            memory.pm.register(_Registry(channel), name="registry")
+            ids = await seed_dialog(persistence, channel, DIALOG)
+            channel.conversation = window_of(
+                channel.id, ids, contents=[c for _, c in DIALOG]
+            )
+            _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON, model="m"))
+            # Both take the fork path, so only the trigger differs.
+            if trigger == "idle":
+                await memory._consolidate_range(channel.id, ids[-1], "idle")
+            else:
+                await _compaction(memory, channel, ids[:3], cut=3)
+            assert await triggers_of(db) == [("fork", trigger)]
+        finally:
+            await db.close()
+
+
+async def test_compaction_falling_through_to_catchup_stores_compaction(tmp_path):
+    """#633: catch-up is a path, not a trigger: a compaction with no stashed
+    fork record is written by the view call and still stores 'compaction'."""
+    memory, persistence, stub, channel, db = await build_consolidation_env(
+        EMBED_CONFIG, db_path=str(tmp_path / "s.db")
+    )
+    try:
+        # No before_compaction, so nothing is stashed and catch-up runs.
+        await drive_compaction_consolidation(memory, persistence, channel)
+        assert await triggers_of(db) == [("standalone", "compaction")]
+    finally:
+        await db.close()
+
+
+async def test_db_before_trigger_column_gains_it_old_rows_null(tmp_path):
+    """#633: a stamped database from before the trigger column gains it on
+    start; its existing rows keep their stamps and read trigger NULL."""
+    path = str(tmp_path / "s.db")
+    # A #299-era database by hand: stamp columns, no trigger, one stamped row.
+    async with aiosqlite.connect(path) as raw:
+        await raw.execute("PRAGMA journal_mode=wal")
+        await raw.execute(STAMPED_MEMORY_DDL)
+        # A current retention run, so on_start's retention job leaves the row alone.
+        await raw.execute("CREATE TABLE retention_meta (last_run REAL NOT NULL DEFAULT 0)")
+        await raw.execute("INSERT INTO retention_meta (last_run) VALUES (?)", (time.time(),))
+        await raw.execute(
+            "INSERT INTO memory (channel_id, created_at, summary, importance, "
+            "msg_id_start, msg_id_end, prompt_hash, mode, model) "
+            "VALUES ('irc:#c', 101.0, 'old summary', 0.5, 1, 2, 'h', 'fork', 'm')",
+        )
+        await raw.commit()
+
+    # on_start (inside build_consolidation_env) runs the migration.
+    memory, persistence, stub, channel, db = await build_consolidation_env(db_path=path)
+    try:
+        async with db.execute(
+            "SELECT prompt_hash, mode, model, trigger FROM memory"
+        ) as cursor:
+            assert await cursor.fetchall() == [("h", "fork", "m", None)]
+    finally:
+        await memory.on_stop()
+        await db.close()

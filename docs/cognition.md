@@ -299,7 +299,7 @@ the record is its private memory, not a message to anyone on the channel.
 `memory.consolidation_prompt` is removed: a config that still sets it logs a
 startup warning naming `memory.consolidation_fork_prompt`.
 
-Every record says how it was made (#299, PRD §3.7 Memory 2), in three
+Every record says how it was made (#299, #633, PRD §3.7 Memory 2), in four
 nullable `memory` columns:
 
 - `prompt_hash`: sha256 of the UTF-8 instruction text the call used. The
@@ -313,6 +313,13 @@ nullable `memory` columns:
   `ForkResult.model` from `LLMClient.request_model`, so it is NULL only for a
   row written without a model (a pre-stamp row, or a `ForkResult` built
   without one).
+- `trigger`: what started the consolidation, the value `_consolidate_range`
+  was called with: `compaction`, `idle`, or `eval` (`scripts/eval_memory.py`).
+  Catch-up is a path, not a trigger: a compaction or idle trigger that falls
+  through to the view call stores its own trigger, and its
+  `mode = standalone` already marks the view. `_commit` sets it, so every
+  consolidation path gets it. NULL for `direct` records and for rows
+  written before the column existed (#633).
 
 What each path stamps:
 
@@ -321,7 +328,7 @@ What each path stamps:
 | Fork of the live window (compaction or idle) | `fork` | `memory.consolidation_fork_prompt` | `ForkResult.model` |
 | Catch-up: the rebuilt view on the `consolidation` stage's profile | `standalone` | `memory.consolidation_fork_prompt` | `LLMClient.request_model` of that profile's client |
 | Raw-transcript fallback after two unusable replies | `standalone` | `memory.consolidation_fork_prompt` | as above (the call was sent; only its reply was unusable) |
-| `write_record` (goal retirement) | `direct` | none: `prompt_hash` NULL, no `memory_prompt` row | NULL |
+| `write_record` (goal retirement) | `direct` | none: `prompt_hash` NULL, no `memory_prompt` row | NULL (`trigger` NULL too) |
 
 Catch-up records written before the view was introduced carry the removed
 `memory.consolidation_prompt` as their stamp; they are not migrated, so the
@@ -336,8 +343,9 @@ agent's system prompt and window that frame a fork.
 A `direct` record was written by no consolidation call, so it has nothing
 to stamp but its mode; it lists apart from the unknown rows.
 
-Rows written before stamping have all three columns NULL, meaning
-"unknown". Opening an older database adds the columns in place
+Rows written before stamping have all the stamp columns NULL, meaning
+"unknown"; rows written between #299 and #633 read `trigger` NULL.
+Opening an older database adds the columns in place
 (`add_column_if_missing`) without rewriting any row; nothing backfills
 them.
 
@@ -376,8 +384,8 @@ FROM memory WHERE prompt_hash LIKE 'abcdef123456%';
 #### Schema
 
 `memory` (records, with `indexed`, `superseded_by`, `redacted`, and
-`embedded` columns, and the stamp columns `prompt_hash`, `mode` and
-`model`), `memory_prompt` (`hash`, `text`: each distinct instruction text
+`embedded` columns, and the stamp columns `prompt_hash`, `mode`,
+`model` and `trigger`), `memory_prompt` (`hash`, `text`: each distinct instruction text
 once), `consolidation_watermark`, `embedding_meta`,
 `memory_fts` (external-content FTS5 with insert/update sync triggers; no
 delete trigger — memory rows are never deleted), `memory_vec` (vec0,
