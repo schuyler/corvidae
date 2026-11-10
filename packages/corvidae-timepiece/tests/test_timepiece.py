@@ -242,6 +242,29 @@ class TestConfig:
         assert "timepiece.timezone" in str(exc.value)
 
 
+    async def test_oversized_interval_rejected(self):
+        pm = create_plugin_manager()
+        plugin = TimepiecePlugin()
+        pm.register(plugin, name="timepiece")
+        import pytest
+        with pytest.raises(ValueError) as exc:
+            await pm.ahook.on_init(
+                pm=pm, config={"timepiece": {"interval_minutes": 10**30}}
+            )
+        assert "timepiece.interval_minutes" in str(exc.value)
+
+    async def test_non_string_format_rejected(self):
+        pm = create_plugin_manager()
+        plugin = TimepiecePlugin()
+        pm.register(plugin, name="timepiece")
+        import pytest
+        with pytest.raises(ValueError) as exc:
+            await pm.ahook.on_init(
+                pm=pm, config={"timepiece": {"format": 123}}
+            )
+        assert "timepiece.format" in str(exc.value)
+
+
 class TestCustomFormat:
     async def test_custom_strftime_format(self):
         plugin = await make_plugin(
