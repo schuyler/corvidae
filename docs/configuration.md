@@ -1202,7 +1202,8 @@ The `Dockerfile` at the repo root builds the kernel (the agent loop, persistence
 docker build -t corvidae .
 mkdir -p ~/corvidae-data && cp agent.yaml ~/corvidae-data/
 sudo chown 1000:1000 ~/corvidae-data
-sudo chown root:root ~/corvidae-data/agent.yaml
+sudo chown root:1000 ~/corvidae-data/agent.yaml
+sudo chmod 640 ~/corvidae-data/agent.yaml
 ```
 
 ```sh
@@ -1215,14 +1216,14 @@ docker logs -f corvidae
 
 **`/data` is the working directory.** Everything corvidae writes by default lands there, next to `agent.yaml`: `sessions.db`, `provenance.key`, log files, `state/`. Relative paths in the config resolve against it. Back that directory up and you've backed up the bot, and keep `provenance.key` with it, since fences only stay stable across restarts if the key does (see the top of this file).
 
-**The daemon runs as uid 1000, not root.** The shell tool runs as the daemon's user (see [threat-model.md](threat-model.md), finding 4), so the image doesn't hand it root. The cost: the mounted directory has to be writable by uid 1000, hence the first `chown`. (The second leaves `agent.yaml` itself owned by root, which matters for the config lock below, and means you edit it with `sudo`.) If the directory isn't writable by uid 1000, corvidae dies at startup with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory. Fix the ownership, or run with `--user $(id -u):$(id -g)` and a directory you own.
+**The daemon runs as uid 1000, not root.** The shell tool runs as the daemon's user (see [threat-model.md](threat-model.md), finding 4), so the image doesn't hand it root. The cost: the mounted directory has to be writable by uid 1000, hence the first `chown`. (The last two leave `agent.yaml` owned by root, readable by the daemon's group and by nobody else on the host, which matters for the config lock below and means you edit it with `sudo`. At mode 600 the daemon couldn't read it at all.) If the directory isn't writable by uid 1000, corvidae dies at startup with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory. Fix the ownership, or run with `--user $(id -u):$(id -g)` and a directory you own.
 
-**The second `-v` and the root-owned file lock the config.** `agent.yaml` mounted read-only and owned by root means `write_file` can't edit the agent's own configuration, which is the lock [prd.md](prd.md) §3.11.11 describes. Leave both out if you want the agent to be able to change its own config, and know what that costs: a writable config plus hot reload lets it lift every other lock. The lock has two limits:
+**The second `-v` and the file's ownership lock the config.** With `agent.yaml` mounted read-only, and owned by root, the daemon can't write it, rename a new file over it, or delete it, which is the lock [prd.md](prd.md) §3.11.11 describes. Leave both out if you want the agent to be able to change its own config, and know what that costs: a writable config plus hot reload lets it lift every other lock. The lock has one gap:
 
-- **A host edit that replaces the file detaches the read-only mount.** `sed -i` and most editors write a new file and rename it over the old one, and the running container's mount of the old file disappears. `/data/agent.yaml` then resolves through the writable `/data` mount: your edit still reloads, but the read-only protection is gone until you `docker restart corvidae`, which restores it. Restart the container after every config edit.
-- **The daemon owns the directory.** A root-owned file it can't write is one it can still rename a new file over, because `/data` is its to write to. A lock that survives that needs `agent.yaml` in a directory the daemon can't write at all. That moves where relative paths resolve (see the top of this file), so the writable paths would need to be absolute, and I haven't built or tested that layout.
+- **A host edit that replaces the file detaches the read-only mount.** `sed -i` and most editors write a new file and rename it over the old one, and the running container's mount of the old file disappears. `/data/agent.yaml` then resolves through the writable `/data` mount. Your edit still reloads, and root ownership still stops `write_file` from appending to the file, but the daemon owns `/data`, so `shell` can `mv` a new file over it. `docker restart corvidae` restores the mount, and with it the whole lock, so restart the container after every config edit.
+- Closing the gap without a restart needs `agent.yaml` in a directory the daemon can't write at all. That moves where relative paths resolve (see the top of this file), so the writable paths would need to be absolute, and I haven't built or tested that layout.
 
-The same rule covers prompt files: mount any you keep outside `/data` read-only too, or the agent can edit its own prompts.
+The same rule covers prompt files, wherever they live, including inside `/data`: mount each one read-only and keep it root-owned like `agent.yaml`, or the agent can edit its own prompts.
 
 **Nothing is exposed.** The image has no `EXPOSE`. If you configure [`web:`](#web--browser-chat-ui), the transport has to listen on a wildcard address inside the container, and you publish the port yourself. Publish it on loopback, so only the Docker host can reach it, and put TLS or a tunnel in front of that:
 

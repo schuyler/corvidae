@@ -111,7 +111,10 @@ def test_extras_are_a_build_arg_defaulting_to_the_kernel(dockerfile):
     for arg in args:
         default = arg.partition("=")[2].strip("\"'")
         assert default == "", f"EXTRAS defaults to {default!r}, not the kernel alone"
-    assert any("--extra" in ln for ln in _instructions(dockerfile, "RUN"))
+    # The step that turns EXTRAS into `--extra` flags has to actually read it.
+    assert any("--extra" in ln and "$EXTRAS" in ln for ln in _instructions(dockerfile, "RUN")), (
+        "no RUN turns $EXTRAS into --extra flags"
+    )
 
 
 @pytest.mark.parametrize("pattern", [".git", ".venv", "agent.yaml", "state", "*.db"])
@@ -132,8 +135,14 @@ def test_tiktoken_encoding_is_baked_into_the_image(dockerfile, runtime):
     estimate. The build fetches it once, where the network is, and fails loudly if it can't."""
     # The builder's ENV doesn't reach the shipped image, so read the final stage.
     env = " ".join(_instructions(runtime, "ENV"))
-    assert "TIKTOKEN_CACHE_DIR=" in env, "the runtime stage does not point tiktoken at a cache"
+    found = re.search(r"TIKTOKEN_CACHE_DIR=(\S+)", env)
+    assert found, "the runtime stage does not point tiktoken at a cache"
+    cache_dir = found.group(1)
     runs = " ".join(_instructions(dockerfile, "RUN"))
     assert "get_encoding" in runs and "cl100k_base" in runs, "the build never warms the cache"
-    copies = " ".join(_instructions(runtime, "COPY"))
-    assert "--from=builder" in copies and "tiktoken" in copies, "the warmed cache is not copied"
+    # The cache has to be copied to exactly where the ENV points, or tiktoken looks in an
+    # empty directory and downloads again.
+    copies = _instructions(runtime, "COPY")
+    assert any(c.startswith("--from=builder") and c.split()[-1] == cache_dir for c in copies), (
+        f"nothing is copied from the builder to {cache_dir}"
+    )
