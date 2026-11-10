@@ -200,9 +200,12 @@ def frame_beat(
         )
 
     if memories:
+        # Chronological order (oldest first): the most recent memories
+        # are at the tail, next to the call-to-action. Attention moves
+        # to the tail; the newest context should be closest to it.
         lines = [
             f"- ({_format_age(m['age_seconds'])}, {m['channel_id']}) {m['summary']}"
-            for m in memories
+            for m in reversed(memories)
         ]
     else:
         lines = ["(none)"]
