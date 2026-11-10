@@ -1315,6 +1315,28 @@ it.
 
 ### Smaller things
 
+- The funnel's `ponder` tool lets the model wait, at most 5 s
+  (`PONDER_TIMEOUT_SECONDS`, not configurable), for recall already in flight. It is
+  a tool call like any other: while it waits it occupies one worker of the shared
+  task queue (`daemon.max_task_workers`, default 4), which also carries other
+  channels' tool calls, subagents, appraisal and critique; it holds its channel
+  busy so idle work (heartbeat, retention, consolidation) stays off; and the
+  turn it holds costs an LLM call. It returns at once when no recall is in flight, so
+  the hold needs a pending recall to exist, and none does in-tree today (no
+  recall source ships yet, and memory retrieves before the model call). The edge,
+  once a source exists: nothing caps how many `ponder` calls one assistant
+  message makes, so K calls hold K workers until the same recall settles or 5 s
+  pass, at most about ceil(K/4) x 5 s of wall time with the workers held, per message (less once a
+  recall settles or times out, which the mixin's own timeout bounds), repeated up to
+  `max_turns` times per exchange, and untrusted text can talk the agent into it.
+  It reads only the funnel's pending promises and writes nothing, and its result
+  is fixed sentences plus a duration, built in code. A guard (a second concurrent ponder on a channel returns at once)
+  is proposed, not built. Remove the tool with `tools.disabled: [ponder]`, or on
+  one channel with `channels.<id>.tools.disabled: [ponder]`.
+  `plugins.disabled: [funnel]` also removes it, but fails startup on a stock
+  cognition install because goals depends on the funnel; use it only with goals
+  disabled too, as `agent.minimal.yaml.example` does.
+
 - Passive retrieval joins the vector search with a keyword search (#666),
   so a record that names a person, project or identifier surfaces whenever
   a query names it. Since #409 a record the keyword search found is gated

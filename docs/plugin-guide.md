@@ -268,7 +268,10 @@ The funnel (cognition extra) owns `on_funnel_ingest`, the hook a source uses
 to hand it entries ahead of a turn. Use it when your entries are not ready
 when the funnel asks: you submit a promise, and the entries are admitted
 once it resolves, through the same dedupe, budget and framing as `admit()`.
-If you have the entries now, call `admit()` or `ingest()` instead. The full
+If you have the entries now, call `admit()` or `ingest()` instead. The funnel's `ponder` tool waits for
+the channel's in-flight promises, up to 5 s, so a slow recall can land before
+the model answers; a promise that resolves to `None` or no entries counts as
+finished with nothing. The full
 contract is under `FunnelPlugin` in
 [cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy).
 
@@ -871,7 +874,7 @@ line in this guide.
 | `corvidae.channels.web` | `Panel` (see [Adding a web console panel](#adding-a-web-console-panel)) |
 | `corvidae.context` | `MessageType`, `ContextWindow`, `count_tokens`, `message_tokens` |
 | `corvidae.task` | `Task` |
-| `corvidae.tool` | `Tool`, `tool_to_schema` |
+| `corvidae.tool` | `Tool`, `ToolContext`, `tool_to_schema` |
 | `corvidae.persistence` | `PersistencePlugin`, `add_column_if_missing`, `view_rows`, `decodable_summaries` |
 | `corvidae.llm_plugin` | `LLMPlugin` |
 | `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |
