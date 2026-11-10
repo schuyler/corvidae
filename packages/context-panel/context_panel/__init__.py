@@ -217,6 +217,8 @@ class ContextPanelPlugin(CorvidaePlugin):
                 "channels": [
                     {
                         "id": c.id,
+                        # Present only when the transport named the channel.
+                        **({"name": c.name} if c.name else {}),
                         "messages": len(c.conversation.messages),
                         "tokens": c.conversation.token_estimate(),
                         "budget": registry.resolve_config(c)["max_context_tokens"],

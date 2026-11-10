@@ -265,7 +265,7 @@ async function loadChannels() {
     if (failed(res)) return;
     select.replaceChildren(el("option", { value: "", textContent: "choose a channel" }),
       ...res.body.channels.map((c) => el("option", { value: c.id,
-        textContent: `${c.id} — ${c.messages} msgs, ${c.tokens} / ${c.budget} tokens` })));
+        textContent: `${c.name ? `${c.name} (${c.id})` : c.id} — ${c.messages} msgs, ${c.tokens} / ${c.budget} tokens` })));
     select.value = state.channel;
   } catch (err) {
     console.warn("context panel: channel list failed", err);

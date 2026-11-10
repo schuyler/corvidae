@@ -267,3 +267,23 @@ async def test_tail_and_resync_in_page(make_env):
 
     assert "cat-inserted" in by_text(entries, "compacted-text")["cls"]
     assert "thinking-text" not in {e["text"] for e in entries}
+
+
+@pytest.mark.timeout(60)
+async def test_dropdown_shows_channel_name_before_id(make_env):
+    """N1: a named channel's option leads with the name; an unnamed one shows its id."""
+    env, _ = await seeded_env(make_env, lambda w: None)
+    home = env.registry.get_or_create("web", "home")
+    home.name = "#home"
+    home.conversation = ContextWindow(home.id)
+    async with async_playwright() as pw:
+        browser = await _launch(pw)
+        try:
+            page = await open_panel(browser, env)
+            opts = await page.eval_on_selector_all("#panel select option", "os => os.map(o => o.textContent)")
+        finally:
+            await browser.close()
+
+    named = next(o for o in opts if home.id in o)
+    assert "#home" in named
+    assert next(o for o in opts if o.startswith(CID)).startswith(f"{CID} — ")
