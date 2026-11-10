@@ -200,8 +200,9 @@ these they this those through to too under until up us very was we were
 what when where which while who whom why will with would yes you your yours
 ok okay oh hi hey thanks thank please
 """.split())
-# Honest similarity stand-in for FTS5-degraded retrieval, where cosine
-# similarity cannot be measured: keyword hits enter at the moderate band.
+# Honest similarity stand-in for a keyword hit whose cosine cannot be
+# measured (FTS5-degraded retrieval, or a hit with no stored vector). It is
+# logged as the similarity; it no longer sets the band (#409).
 FTS_SIMILARITY_PROXY = 0.6
 # Vec KNN over-fetch factor: candidates are filtered by channel scope and
 # indexed/redacted flags after the KNN scan, so fetch more than k.

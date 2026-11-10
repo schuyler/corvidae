@@ -538,7 +538,9 @@ keeps its own 20 and a single message is capped at 20 as before); sqlite-vec unl
 with one clear startup warning; no embedding profile (the `embedding` stage isn't mapped under `llm.stages` and there is no default embedding profile: no `llm.embedding` and no `llm.defaults.embedding`) → records stored
 with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
 config → ERROR and embeddings disabled rather than silently mixing
-encoders. Nothing in the memory path raises into the turn loop.
+encoders; fewer than 50 embedded records (or no spread) under `band_on:
+relative` → bands on raw similarity, logged once. Nothing in the memory path
+raises into the turn loop.
 
 #### Measuring retrieval on a real database (`scripts/eval_memory.py --snapshot`)
 

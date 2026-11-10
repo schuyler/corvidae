@@ -325,17 +325,21 @@ class TestDedupeAndStats:
         lines returned by FunnelPlugin.admit, so only exact matches count."""
         from corvidae.context import count_tokens
 
-        # Both memories use band "strong" (thresholds lowered so scoring
-        # differences don't affect band labels).  B's formatted line is
-        # "[strong] (now) wifi router fixed the issue"; A's is
-        # "[strong] (now) wifi router" — a strict prefix of B's line.
-        line_b_formatted = "[strong] (now) wifi router fixed the issue"
+        # Both memories band strong (band_on: similarity with thresholds at
+        # 0.0, so scoring differences don't affect the label), so both lines
+        # are bare (#409). B's formatted line is
+        # "(now) wifi router fixed the issue"; A's is "(now) wifi router" —
+        # a strict prefix of B's line.
+        line_b_formatted = "(now) wifi router fixed the issue"
         # Budget: admits B exactly; budget-drops A (A would add 8 more tokens).
         budget = count_tokens(line_b_formatted)
 
         config = {
             **EMBED_CONFIG,
-            "memory": {"retrieval": {"bands": {"strong": 0.0, "moderate": 0.0}}},
+            "memory": {"retrieval": {
+                "band_on": "similarity",
+                "bands": {"strong": 0.0, "moderate": 0.0},
+            }},
             "funnel": {"budgets": {"memory": budget}},
         }
         memory, embedder, channel, conv, db = await build_retrieval_env(config)

@@ -8,7 +8,7 @@ else ``funnel.default_budget``), stamped ``mode = 'raw'``.
 import copy
 
 import pytest
-from corvidae_cognition.memory import prompt_hash
+from corvidae_cognition.memory import WORST_MEMORY_LINE_PREFIX, prompt_hash
 
 from corvidae.context import count_tokens
 
@@ -32,7 +32,7 @@ LONG_DIALOG = [
 ]
 
 #: The longest line prefix a memory line gets before its summary.
-WORST_PREFIX = "[moderate] (99999d) "
+WORST_PREFIX = WORST_MEMORY_LINE_PREFIX
 
 
 def config_with(funnel: dict) -> dict:

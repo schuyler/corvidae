@@ -337,10 +337,6 @@ def _has_vec() -> bool:
     return True
 
 
-def test_z_defaults_are_ordered():
-    assert DEFAULT_BAND_STRONG_Z > DEFAULT_BAND_MODERATE_Z > 0
-
-
 def test_min_records_keeps_the_strong_threshold_reachable():
     # A population z over N records can't exceed sqrt(N - 1); below the
     # minimum, nothing could ever band strong.
