@@ -927,9 +927,9 @@ class MemoryPlugin(CorvidaePlugin):
             )
 ```
 
-`MessageType.CONTEXT` entries survive compaction — compaction only summarizes `MESSAGE` entries.
+Compaction summarizes only `MESSAGE` entries, but a `MessageType.CONTEXT` row in the range it drops leaves the window with it; CONTEXT in the retained tail stays.
 
-Prefer routing CONTEXT through the admission funnel instead of appending directly: `pm.get_plugin("funnel").admit(channel, conv, "<source>", entries)` gives you window dedupe, per-source token budgets (`admit_detailed(...)` takes the same arguments and also reports which entries were dropped as duplicates), and the mandatory data-not-instructions framing for free (see [FunnelPlugin](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy) in cognition.md; the funnel is part of the cognition extra, so check that `pm.get_plugin("funnel")` is not None). Direct appends bypass all three.
+Prefer routing CONTEXT through the admission funnel instead of appending directly: `pm.get_plugin("funnel").admit(channel, conv, "<source>", entries)` gives you window dedupe, per-source token budgets (`admit_detailed(...)` takes the same arguments and also reports which entries were dropped as duplicates), and the mandatory data-not-instructions framing for free (see [FunnelPlugin](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy) in cognition.md; the funnel is part of the cognition extra, so check that `pm.get_plugin("funnel")` is not None). Direct appends bypass all three. Dedupe matches each entry's whole text against every CONTEXT row by default; if your lines carry something that changes from turn to turn (an age, a score), pass `keys=[...]`, one stable string per entry, and an entry is a duplicate when its key appears in a CONTEXT row framed for your source. Memory passes `memory <id>)`. Choose keys that can't occur inside one another, which is why memory's ends in a paren, and pass exactly one per entry: a length mismatch raises `ValueError`. Operators can also cap what your source holds in a window with `funnel.window_budgets.<source>` (see [configuration.md](configuration.md#funnel--context-admission-funnel)); entries the cap drops come back like budget drops, in neither `admitted` nor `duplicate`.
 
 ## Forking the window
 

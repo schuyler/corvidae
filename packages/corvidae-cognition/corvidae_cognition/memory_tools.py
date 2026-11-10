@@ -376,7 +376,7 @@ class MemoryToolsPlugin(CorvidaePlugin):
             memory_id: int,
             max_tokens: int = 1000,
         ) -> str:
-            """Replay the raw dialog messages for a memory record (remember harder).
+            """Replay the raw dialog messages for a memory record (remember harder); memory ids appear on recalled memory lines as "(age, memory <id>)" and as the leading number in search_memory results.
             Returns a participants header followed by verbatim role:content lines.
             Works on demoted, superseded, and tombstoned records. Updates access stats."""
             memory = plugin._memory()

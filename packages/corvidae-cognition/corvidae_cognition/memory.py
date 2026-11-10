@@ -411,9 +411,10 @@ def _dialog_transcript(messages: list[dict]) -> str:
 
 
 # The longest prefix a retrieved memory line gets before its summary
-# ("[marginal] (age) "): the label and a 5-digit day count. A raw fallback
-# piece leaves room for it so the whole line fits the budget (#626).
-WORST_MEMORY_LINE_PREFIX = f"{MARGINAL_LABEL} (99999d) "
+# ("[marginal] (age, memory <id>) "): the label, a 5-digit day count and a
+# 12-digit record id. A raw fallback piece leaves room for it so the whole
+# line fits the budget (#626, #632).
+WORST_MEMORY_LINE_PREFIX = f"{MARGINAL_LABEL} (99999d, memory 999999999999) "
 
 
 def _split_transcript(messages: list[dict], max_tokens: int) -> list[str]:
@@ -916,15 +917,27 @@ async def build_catchup_segments(
 
 
 def _memory_line(candidate: dict) -> str:
-    """Render one admitted memory as a CONTEXT line (#409).
+    """Render one admitted memory as a CONTEXT line (#409, #632).
 
-    ``(age) summary`` for a strong record, ``[marginal] (age) summary`` for a
-    moderate one. Weak records are never rendered: the gate drops them.
+    ``(age, memory <id>) summary`` for a strong record, with ``[marginal] ``
+    in front for a moderate one. The id is what the model passes to
+    ``recall_raw``. Weak records are never rendered: the gate drops them.
     """
     age = _format_age(candidate["age_seconds"])
+    line = f"({age}, memory {candidate['id']}) {candidate['summary']}"
     if candidate["band"] == "strong":
-        return f"({age}) {candidate['summary']}"
-    return f"{MARGINAL_LABEL} ({age}) {candidate['summary']}"
+        return line
+    return f"{MARGINAL_LABEL} {line}"
+
+
+def _memory_key(candidate: dict) -> str:
+    """The funnel dedupe key for a memory line: ``memory <id>)`` (#624).
+
+    It is the part of the line that names the record and never changes, so a
+    record already in the window dedupes whatever its age or band reads now.
+    The closing paren keeps ``memory 12`` from matching ``memory 123``.
+    """
+    return f"memory {candidate['id']})"
 
 
 def _retrieval_choice(retrieval_cfg: dict, key: str, choices: tuple[str, ...]) -> str:
@@ -3005,9 +3018,11 @@ class MemoryPlugin(CorvidaePlugin):
             else:
                 selected = [c for c in candidates if c["band"] != "weak"]
 
-            # One line per memory: "(age) summary", marked "[marginal]" when
-            # the record banded moderate.
+            # One line per memory: "(age, memory <id>) summary", marked
+            # "[marginal]" when the record banded moderate; each keyed on its
+            # record id for the funnel's dedupe.
             lines = [_memory_line(c) for c in selected]
+            keys = [_memory_key(c) for c in selected]
 
             # Admit through the funnel — never append CONTEXT directly
             # (trap #8); the funnel dedupes against the window and budgets.
@@ -3026,7 +3041,7 @@ class MemoryPlugin(CorvidaePlugin):
                     )
                 else:
                     admission = await funnel.admit_detailed(
-                        channel, conv, "memory", lines
+                        channel, conv, "memory", lines, keys=keys
                     )
                     admitted_lines = admission.admitted
                     if admitted_lines:

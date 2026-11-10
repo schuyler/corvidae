@@ -84,7 +84,7 @@ Every entry in `ContextWindow.messages` carries a `_message_type` that controls 
 |------|---------|
 | `MESSAGE` | Ordinary user or assistant turn |
 | `SUMMARY` | Compaction summary replacing older messages |
-| `CONTEXT` | Plugin-injected context; survives compaction |
+| `CONTEXT` | Plugin-injected context; leaves the window with a compacted range, stays in the retained tail |
 
 ### Compaction
 
@@ -120,7 +120,7 @@ class MemoryPlugin(CorvidaePlugin):
             )
 ```
 
-`CONTEXT` entries survive compaction — `CompactionPlugin` only summarizes `MESSAGE` entries.
+`CONTEXT` entries are never summarized — `CompactionPlugin` only summarizes `MESSAGE` entries — but a CONTEXT row in the range a compaction drops leaves the window with it.
 
 Each message injected during `before_agent_turn` is individually persisted by `Agent` via `persist_message`, in a loop that runs after the hook completes (`Agent._process_queue_item_attributed`).
 

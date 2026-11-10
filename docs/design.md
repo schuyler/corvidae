@@ -882,7 +882,9 @@ class MessageType(str, enum.Enum):
 
 `message_type` is a persistence category, orthogonal to conversational role
 (`user`, `assistant`, `tool`, `system`). `CompactionPlugin` only summarizes `MESSAGE`
-entries; `SUMMARY` and `CONTEXT` rows survive compaction. `UNSENT` rows are
+entries; `SUMMARY` and `CONTEXT` rows are never summarized, but a CONTEXT row
+in the range a compaction drops leaves the window with it (the retained tail
+keeps its CONTEXT). `UNSENT` rows are
 in the window and reload into it, but no transport sees them, including
 history replay. Memory consolidation's dialog (what a record's range sentence and degraded
 transcript are built from) reads `MESSAGE` rows only, so it never counts an
@@ -4163,6 +4165,8 @@ funnel:
   default_budget: 512           # tokens per admission-funnel call
   budgets:
     memory: 512                 # optional per-source overrides
+  # window_budgets:             # optional cap on one source's CONTEXT per window
+  #   memory: 4096
 
 channels:
   "irc:#channel":

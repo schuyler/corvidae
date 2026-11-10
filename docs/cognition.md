@@ -433,9 +433,15 @@ gate on, so the top `k` keyword hits are admitted, every one marked
 `retrieval_candidate` row carries the record's `z` (NULL when none was
 computed), which is what the z thresholds are refitted from; the starting
 values rest on six probes. The `(age)` shown always runs from
-`created_at`. Winners enter the window as `(age) summary` lines, or
-`[marginal] (age) summary` for a moderate record, through the admission
-funnel — never by direct CONTEXT append. Admitted memories get their access statistics
+`created_at`. Winners enter the window as `(age, memory <id>) summary`
+lines, or `[marginal] (age, memory <id>) summary` for a moderate record,
+through the admission funnel — never by direct CONTEXT append. The id is
+the record's `memory.id`, the one `recall_raw` takes; its tool description
+says where ids appear, so a model shown a memory can replay its dialog
+(#632). Each line goes to the funnel keyed on `memory <id>)`, so a record
+already in the window is not admitted again when its age or band reads
+differently now (#624); the closing paren keeps `memory 12` from matching
+`memory 123`. Admitted memories get their access statistics
 bumped (`retrieval_count`, `last_retrieved_at` — the write half of
 reconsolidation), and every retrieval writes a `retrieval_log` row
 (the top-ranked candidate's decayed score and raw similarity,
@@ -468,11 +474,15 @@ per-record lookups cheap. A candidate's `outcome` is one of:
   #409 this holds even when every candidate is weak: that retrieval admits
   nothing.
 - `dropped_budget`: offered to the funnel, but the `memory` source's token
-  budget had no room for it.
+  budget, or what was left under its window cap
+  (`funnel.window_budgets.memory`), had no room for it. The funnel's log
+  line says which limit bound.
 - `not_admitted`: selected, but no funnel plugin is registered, so nothing
   could be admitted (#654).
-- `dropped_dup`: offered, but the window's CONTEXT already contained that
-  line (the funnel's dedupe is a substring test).
+- `dropped_dup`: offered, but the window's memory CONTEXT already held that
+  record (its `memory <id>)` key, #624), whatever its age or band read then.
+  A record whose own range is still in this channel's window is
+  `excluded_in_window` first and never reaches this test.
 - `cut`: scored but ranked below k, so never returned.
 - `excluded_in_window`: left out by the window exclusion, but its score
   would have placed it in the top k.
@@ -846,12 +856,26 @@ architecture.
 `funnel.py` — the context-admission funnel. Entry
 point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
 
-1. **Dedupe** against CONTEXT already in the window.
+1. **Dedupe** against CONTEXT already in the window. By default an entry
+   is a duplicate when its exact text appears in any CONTEXT row. A caller
+   can pass `keys=`, one per entry (memory passes `memory <id>)`); then an
+   entry is a duplicate when its key appears in a CONTEXT row framed for
+   the same source, so a stable identity dedupes even when the rendered
+   line changes, and another source quoting the line suppresses nothing
+   (#624).
 2. **Budget** per source (`funnel.default_budget`, default 512 tokens;
    `funnel.budgets.<source>` overrides), in given order, skipping any
    entry that would overrun what is left of the budget, so one large
    entry never blocks smaller ones after it; drops logged rather than
-   silent.
+   silent. An optional window cap (`funnel.window_budgets.<source>`,
+   unset by default) further limits the budget to what is left after that
+   source's CONTEXT already in the window, frames included, so admission
+   can't crowd the window between compactions. Compaction frees the rows
+   it drops; rows in the retained tail still count. A drop the cap caused
+   is logged at info with the channel, the tokens held, the cap and the
+   key. shortcut: new entries are charged without their frame, so the
+   window can pass the cap by one frame; charge it if caps under ~200
+   tokens matter.
 3. **Frame** every admitted batch in explicit data-not-instructions
    wrapping with a source label (injection defense, written once here).
 4. **Append + persist** one CONTEXT message at the tail through
@@ -864,9 +888,10 @@ payloads queue per `(channel, origin)` via `register_and_wake()`, one
 stub notification wakes the channel per pending pair, and the drain in
 `before_agent_turn` admits everything queued for the triggering
 exchange's origin. Entries the budget dropped stay queued for the next
-drain, except an entry larger than its source's whole budget: it can
-never fit, so the drain drops it with a warning that names the channel,
-the source and `funnel.budgets.<source>`. `register()` queues without a stub: those payloads wake
+drain (as do entries the window cap held back), except an entry larger
+than its source's whole budget or window cap: it can never fit, so the drain drops it with a warning that names
+the channel, the source and `funnel.budgets.<source>` or
+`funnel.window_budgets.<source>`. `register()` queues without a stub: those payloads wake
 nothing and are admitted at the channel's next turn, whatever its origin
 (user turns included), before the origin-matched drain.
 
@@ -980,8 +1005,9 @@ dropped (the LLM call has already been paid for). The transcript is split
 on message lines (a message longer than a piece is cut by characters) into
 records that each fit the memory admission budget as a retrieved memory
 line (`funnel.budgets.memory`, else `funnel.default_budget`, else 512,
-read at startup; each piece leaves room for the longest `[marginal] (age) `
-prefix), so a raw record can actually be admitted (#626). The pieces are
+read at startup; each piece leaves room for the longest
+`[marginal] (age, memory <id>) ` prefix, a five-digit day count and a
+twelve-digit id), so a raw record can actually be admitted (#626). The pieces are
 records of one consolidation (shared range, importance and stamp) stamped
 `mode = raw`. A budget too small for any memory line keeps the transcript
 as one record, with a warning naming the key. One raw piece can fill the
@@ -1068,17 +1094,22 @@ by `MemoryPlugin`; only the agent's active access surface is absent.
 
 The context-admission funnel — the single chokepoint for tail CONTEXT
 admission. Entry point name: `"funnel"`. Exposes
-`admit(channel, conv, source, entries, budget_tokens=None) -> list[str]`
+`admit(channel, conv, source, entries, budget_tokens=None, keys=None) -> list[str]`
 (the admitted entries; empty when nothing was appended):
-dedupes against CONTEXT already in the window, budgets tokens per source
-(drops are logged, never silent), wraps everything in explicit
+dedupes against CONTEXT already in the window (on each entry's whole text
+against every CONTEXT row, or, with `keys`, one per entry, on its key
+against rows framed for the same source; a length mismatch raises
+`ValueError`), budgets tokens per source and, when
+`funnel.window_budgets.<source>` is set, to what is left under that
+source's window cap (drops are logged, never silent), wraps everything in explicit
 data-not-instructions framing with a source label, appends one CONTEXT
 message at the tail, and persists it with the rowid attached.
 
 `admit_detailed(...)` takes the same arguments and returns an `Admission`
 (frozen dataclass): `admitted` (the entries appended, in input order) and
 `duplicate` (the entries dropped because the window's CONTEXT already
-carried them). An entry in neither list was dropped by the budget.
+carried them). An entry in neither list was dropped by the budget or the
+window cap.
 `admit()` is `admit_detailed(...).admitted`. Memory retrieval uses the
 detailed form to label `dropped_dup` versus `dropped_budget` in the
 candidate log.

@@ -1,7 +1,8 @@
 
 Your long-term memory works by retrieval: recollections relevant to the
 current message appear in [CONTEXT from memory] blocks, one per line with
-its age, and only when they clearly match what is being discussed.
+its age and memory id, and only when they clearly match what is being
+discussed.
 
 Calibrate what you assert to that evidence:
 
