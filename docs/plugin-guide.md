@@ -268,7 +268,10 @@ The funnel (cognition extra) owns `on_funnel_ingest`, the hook a source uses
 to hand it entries ahead of a turn. Use it when your entries are not ready
 when the funnel asks: you submit a promise, and the entries are admitted
 once it resolves, through the same dedupe, budget and framing as `admit()`.
-If you have the entries now, call `admit()` or `ingest()` instead. The full
+If you have the entries now, call `admit()` or `ingest()` instead. A promise
+that resolves to entries, like `ingest()` and `ingest_and_wake()`, ends any
+`ponder` the agent has outstanding on that channel, so a slow recall can be
+waited on for a few seconds (a `None` or empty result does not). The full
 contract is under `FunnelPlugin` in
 [cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy).
 

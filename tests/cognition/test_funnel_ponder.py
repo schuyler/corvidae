@@ -183,12 +183,16 @@ class TestCapAndInput:
         result = await ponder_tool(env)(bad, _ctx=ctx_for(env))
         # Names the argument, the rejected value and the accepted range.
         assert result.startswith("Error:")
-        assert "seconds" in result and repr(bad) in result and "5" in result
+        assert "seconds" in result and repr(bad) in result
+        # Accepted range and the remedy.
+        assert "above 0 and at most 5" in result and "call ponder again" in result
 
     async def test_missing_channel_context_is_an_error(self, build):
         env = await build()
         result = await ponder_tool(env)(1.0, _ctx=None)
+        # Names the cause and tells the model what to do instead.
         assert result.startswith("Error:") and "channel" in result
+        assert "do not call ponder" in result
 
 
 class TestCleanup:
@@ -223,3 +227,121 @@ class TestCleanup:
         env.funnel.ingest(env.channel, "critique", ["x"])
         await asyncio.wait_for(asyncio.gather(a, b), 1.0)
         assert env.channel.id not in env.funnel._ponderers
+
+
+class TestEmptyPromiseResults:
+    """A promise that admits nothing is not an arrival (reviewer finding 1)."""
+
+    @pytest.mark.parametrize("result", [None, "empty"])
+    async def test_nothing_to_admit_does_not_wake_it(self, build, result):
+        env = await build()
+        future = pending()
+        env.provider.offer(env.channel.id, "memory", future)
+        await turn(env)
+        task = asyncio.create_task(ponder_tool(env)(0.3, _ctx=ctx_for(env)))
+        await settle()
+        future.set_result(None if result is None else funnel_mod.Ingest(entries=[]))
+        out = await task
+        assert "woke" not in out.lower()
+
+    @pytest.mark.parametrize("result", [None, "empty"])
+    async def test_done_but_empty_promise_is_not_already_waiting(self, build, result):
+        env = await build()
+        future = pending()
+        env.provider.offer(env.channel.id, "memory", future)
+        await turn(env)
+        future.set_result(None if result is None else funnel_mod.Ingest(entries=[]))
+        start = time.monotonic()
+        out = await ponder_tool(env)(0.2, _ctx=ctx_for(env))
+        assert time.monotonic() - start >= 0.15
+        assert "woke" not in out.lower()
+
+    async def test_done_promise_with_entries_is_already_waiting(self, build):
+        env = await build()
+        future = pending()
+        env.provider.offer(env.channel.id, "memory", future)
+        await turn(env)
+        future.set_result(funnel_mod.Ingest(entries=["late"]))
+        start = time.monotonic()
+        out = await ponder_tool(env)(5.0, _ctx=ctx_for(env))
+        assert time.monotonic() - start < 0.5 and "woke" in out.lower()
+
+
+class TestAlreadyWaitingBranches:
+
+    async def test_origin_keyed_payload_counts_as_waiting(self, build):
+        env = await build()
+        await env.funnel.ingest_and_wake(env.channel, "critique", "critique", ["x"])
+        start = time.monotonic()
+        out = await ponder_tool(env)(5.0, _ctx=ctx_for(env))
+        assert time.monotonic() - start < 0.5 and "woke" in out.lower()
+
+    async def test_other_channels_origin_payload_does_not_count(self, build):
+        env = await build()
+        other = SimpleNamespace(id="test:other", conversation=None)
+        await env.funnel.ingest_and_wake(other, "critique", "critique", ["x"])
+        out = await ponder_tool(env)(0.2, _ctx=ctx_for(env))
+        assert "woke" not in out.lower()
+
+
+class TestMixedFlags:
+
+    async def test_stale_empty_list_does_not_orphan_a_waiter(self, build):
+        env = await build()
+        ponder = ponder_tool(env)
+        # A (no early wake, long) and B (no early wake, short) leave the key unregistered;
+        # C registers; A finishing must not unregister C.
+        a = asyncio.create_task(ponder(0.4, until_context=False, _ctx=ctx_for(env)))
+        b = asyncio.create_task(ponder(0.05, until_context=False, _ctx=ctx_for(env)))
+        await settle()
+        await b
+        c = asyncio.create_task(ponder(5.0, _ctx=ctx_for(env)))
+        await settle()
+        await a
+        env.funnel.ingest(env.channel, "critique", ["x"])
+        out = await asyncio.wait_for(c, 1.0)
+        assert "woke" in out.lower()
+
+
+class TestInputValidation:
+
+    @pytest.mark.parametrize("bad", ["3", True, None])
+    async def test_non_numbers_are_refused_not_crashed(self, build, bad):
+        env = await build()
+        out = await ponder_tool(env)(bad, _ctx=ctx_for(env))
+        assert out.startswith("Error:") and "seconds" in out and repr(bad) in out
+
+
+class TestModelVisibleDescription:
+    """The model sees only the first docstring line, so the guidance lives there."""
+
+    async def test_description_says_when_to_use_it_and_the_limits(self, build):
+        env = await build()
+        registry: list = []
+        env.pm.hook.register_tools(tool_registry=registry)
+        tool = next(t for t in registry if t.name == "ponder")
+        desc = tool.schema["function"]["description"].lower()
+        # Waiting on background recall is the point of the tool.
+        assert "memory" in desc and "recall" in desc
+        # The cap and the early exit are what the model can rely on.
+        assert "5 seconds" in desc and "ends early" in desc
+        # One line, as the schema builder keeps only the first.
+        assert "\n" not in desc
+
+
+class TestWakeOrder:
+
+    async def test_ponderers_wake_after_the_stub_is_queued(self, build):
+        env = await build()
+        task = asyncio.create_task(ponder_tool(env)(5.0, _ctx=ctx_for(env)))
+        await settle()
+        seen: list[bool] = []
+
+        async def on_notify(**kwargs):
+            # At stub-enqueue time no ponder may have been woken yet.
+            seen.append(any(e.is_set() for e in env.funnel._ponderers[env.channel.id]))
+
+        env.pm.ahook.on_notify = on_notify
+        await env.funnel.ingest_and_wake(env.channel, "user", "critique", ["x"])
+        await asyncio.wait_for(task, 1.0)
+        assert seen == [False]

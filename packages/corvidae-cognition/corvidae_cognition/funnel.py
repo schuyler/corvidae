@@ -76,7 +76,7 @@ from dataclasses import dataclass, replace
 
 from corvidae.context import ContextWindow, MessageType, count_tokens
 from corvidae.hooks import CorvidaePlugin, hookimpl, hookspec, resolve_single_result
-from corvidae.tool import Tool, tool_to_schema
+from corvidae.tool import Tool, ToolContext, tool_to_schema
 
 logger = logging.getLogger("corvidae.funnel")
 
@@ -151,6 +151,22 @@ def _read_ingest_ttl(raw: object) -> float | None:
         )
         return None
     return float(raw)
+
+
+def _has_entries(promise: asyncio.Future) -> bool:
+    """True when ``promise`` finished with an ``Ingest`` that has entries to admit.
+
+    A cancelled or failed promise, a ``None`` result and an ``Ingest`` with no
+    entries all admit nothing, so none of them counts as context arriving.
+    """
+    # Unfinished or cancelled: nothing to read (result() would raise on a cancel).
+    if not promise.done() or promise.cancelled():
+        return False
+    # Failed: _discard logs the error when the promise is swept.
+    if promise.exception() is not None:
+        return False
+    result = promise.result()
+    return result is not None and bool(result.entries)
 
 
 def _source_rows(conv: ContextWindow, source: str) -> list[str]:
@@ -355,11 +371,10 @@ class FunnelPlugin(CorvidaePlugin):
         self._deferred.setdefault(pair, []).append(
             _Payload(source, list(entries), self._now())
         )
-        # Something arrived: end any ponder on this channel.
-        self._wake_ponderers(channel.id)
-
-        # A stub is already pending for this pair: the payload just queues.
+        # A stub is already pending for this pair: the payload just queues, and
+        # that stub is already in the channel's queue, so wake ponders now.
         if pair in self._stub_pending:
+            self._wake_ponderers(channel.id)
             return
         # Count queued entries across payloads for the stub text; stale by
         # design once later registrations coalesce behind this stub.
@@ -384,6 +399,9 @@ class FunnelPlugin(CorvidaePlugin):
                 "deferred-registration stub failed", exc_info=True,
                 extra={"channel_id": channel.id, "origin": origin, "source": source},
             )
+        # Wake ponders only after the stub is queued, so the stub's turn (which
+        # drains this payload) comes before the ponder result's turn.
+        self._wake_ponderers(channel.id)
 
     @hookimpl
     async def before_agent_turn(self, channel, trace_id, annotations) -> None:
@@ -537,9 +555,8 @@ class FunnelPlugin(CorvidaePlugin):
             self._pending.setdefault(cid, {})[source] = _Pending(promise, self._now())
 
             def resolved(done: asyncio.Future) -> None:
-                # A promise that produced a result ends any ponder; a cancelled
-                # or failed one has nothing to admit.
-                if not done.cancelled() and done.exception() is None:
+                # Only a promise with entries to admit ends a ponder.
+                if _has_entries(done):
                     self._wake_ponderers(cid)
 
             promise.add_done_callback(resolved)
@@ -614,19 +631,18 @@ class FunnelPlugin(CorvidaePlugin):
     def _has_waiting(self, channel_id: str) -> bool:
         """True when the funnel already holds something for ``channel_id``.
 
-        Items queued, or a pull promise that finished with a result, since the
+        Items queued, or a pull promise that finished with entries, since the
         turn that called ponder drained: waiting for them would be pointless.
+        An origin-keyed payload counts too, though it drains only on a turn of
+        its own origin, so a stuck one makes ponder return at once (deferred).
         """
         # Stub-less payloads, then origin-keyed ones, for this channel.
         if self._next_turn.get(channel_id):
             return True
         if any(cid == channel_id and queued for (cid, _), queued in self._deferred.items()):
             return True
-        # A promise that is done and neither cancelled nor failed.
-        return any(
-            p.promise.done() and not p.promise.cancelled() and p.promise.exception() is None
-            for p in self._pending.get(channel_id, {}).values()
-        )
+        # A promise that is done with entries to admit.
+        return any(_has_entries(p.promise) for p in self._pending.get(channel_id, {}).values())
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
@@ -636,11 +652,12 @@ class FunnelPlugin(CorvidaePlugin):
         async def ponder(
             seconds: float = DEFAULT_PONDER_SECONDS,
             until_context: bool = True,
-            _ctx=None,
+            _ctx: ToolContext | None = None,
         ) -> str:
-            """Pause briefly before your next turn, like clearing your throat. The pause
-            ends early when new context arrives for this channel. Use it to give pending
-            context a moment to land, not to wait on people or jobs.
+            """Pause up to 5 seconds before your next turn, like clearing your throat, so background context such as a memory or wiki recall that is still running can land; ends early when new context arrives.
+
+            Use it to give pending context a moment, not to wait on people or long jobs.
+            The model sees only the line above: the schema builder keeps one line.
 
             Args:
                 seconds: How long to pause, in seconds, above 0 and at most 5.
@@ -651,11 +668,16 @@ class FunnelPlugin(CorvidaePlugin):
         # Same wrapping goals uses, so the schema skips the injected _ctx.
         tool_registry.append(Tool(name=ponder.__name__, fn=ponder, schema=tool_to_schema(ponder)))
 
-    async def _ponder(self, seconds: object, until_context: bool, ctx) -> str:
+    async def _ponder(
+        self, seconds: object, until_context: bool, ctx: ToolContext | None
+    ) -> str:
         """Run one ponder call: validate, clamp, then wait for the time or an arrival."""
         # The channel is what arrivals are matched against.
         if ctx is None or getattr(ctx, "channel", None) is None:
-            return "Error: ponder has no channel context; it can only run inside a channel turn"
+            return (
+                "Error: ponder has no channel context; it can only run inside a "
+                "channel turn, so do not call ponder here"
+            )
         channel_id = ctx.channel.id
         limit = MAX_PONDER_SECONDS
         # bool is an int subclass, but True is not a number of seconds.
@@ -687,9 +709,12 @@ class FunnelPlugin(CorvidaePlugin):
         if until_context and self._has_waiting(channel_id):
             return "Woke at once: new context is already waiting."
 
-        # Register a wake event for this call, wait, and always unregister.
+        # Register a wake event for this call (only when arrivals should end it),
+        # wait, and always unregister.
         event = asyncio.Event()
-        waiters = self._ponderers.setdefault(channel_id, [])
+        waiters: list[asyncio.Event] = (
+            self._ponderers.setdefault(channel_id, []) if until_context else []
+        )
         if until_context:
             waiters.append(event)
         try:
@@ -701,8 +726,9 @@ class FunnelPlugin(CorvidaePlugin):
         finally:
             if event in waiters:
                 waiters.remove(event)
-            if not waiters:
-                self._ponderers.pop(channel_id, None)
+            # Drop the channel's entry only if it is still our (now empty) list.
+            if not waiters and self._ponderers.get(channel_id) is waiters:
+                del self._ponderers[channel_id]
 
         elapsed = time.monotonic() - start
         if woke:

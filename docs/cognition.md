@@ -31,7 +31,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 |---|---|---|
 | `MemoryPlugin` | `memory` | Consolidates conversation (at turn ends, on idle, and at compaction) into durable memories and retrieves them into context; owns `sqlite-vec` |
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
-| `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget |
+| `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a pause of at most 5 s for background context |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
 | `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss) and the provenance check |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
@@ -876,8 +876,6 @@ point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
    key. shortcut: new entries are charged without their frame, so the
    window can pass the cap by one frame; charge it if caps under ~200
    tokens matter.
-   (The funnel also gives the agent a `ponder` tool, a pause of at most 5 s
-   that ends early when context arrives; see below.)
 3. **Frame** every admitted batch in explicit data-not-instructions
    wrapping with a source label (injection defense, written once here).
 4. **Append + persist** one CONTEXT message at the tail through
@@ -1126,7 +1124,7 @@ window cap.
 detailed form to label `dropped_dup` versus `dropped_budget` in the
 candidate log.
 
-**Without this plugin:** sources that route through the funnel (memory
+**Without this plugin:** the agent has no `ponder` tool, and sources that route through the funnel (memory
 retrieval) log a warning and admit nothing.
 
 `ingest_and_wake(channel, origin, source, entries)` is the deferred
@@ -1179,17 +1177,26 @@ sweep is superseded, and its entries lost, if its provider submits again
 in that same turn's collect. The funnel does not admit such a result on
 re-submit yet.
 
-**`ponder` tool.** The funnel registers one tool, `ponder(seconds=2,
-until_context=true)`: the agent clearing its throat. The call stays
-outstanding for up to `seconds` and returns early when the funnel gets
-something for that channel: `ingest`, `ingest_and_wake`, or a pull promise
-resolving to a result. Nothing else wakes it, and other channels' arrivals
-are ignored. Content already waiting when it is called returns at once. With
+**`ponder` tool.** The funnel registers one tool, `ponder(seconds, until_context)`
+(the code defaults are 2 and true, but the schema marks both required): the
+agent clearing its throat. The call stays outstanding for up to `seconds` and
+returns early when the funnel gets something for that channel: `ingest`,
+`ingest_and_wake`, or a pull promise resolving to entries. Only those producers
+end it early (shutdown releases it too), and other channels' arrivals are
+ignored. Content already waiting when it is called returns at once. With
 `until_context=false` it always waits the full time.
 
+The model sees only the first docstring line (`tool_to_schema` keeps one line),
+so that line carries the guidance: pause up to 5 seconds so background context,
+such as a memory or wiki recall that is still running, can land. That is the
+pull path's use: a recall provider (see [plugin-guide.md](plugin-guide.md))
+submits a promise for a background search, and ponder gives it a moment to
+resolve before the model answers. Memory's own retrieval does not need it, since
+it runs before the model call.
+
 - **The cap is 5 s** (`MAX_PONDER_SECONDS`, a constant, not config). A longer
-  request is clamped, logged at WARNING and reported in the result, naming the
-  value asked for and the limit. A value that is not a finite number above 0
+  request is clamped and logged at WARNING; when the pause then runs its full
+  length the result names the value asked for and the limit. A value that is not a finite number above 0
   is refused with an error naming the value and the accepted range. Anything
   that needs a longer wait belongs to the scheduler.
 - **It waits on arrival, never on a drain.** The drain runs inside
@@ -1199,16 +1206,21 @@ are ignored. Content already waiting when it is called returns at once. With
   pending: the kernel holds the next assistant turn until the result lands,
   and the channel counts as busy, so idle work (heartbeat, consolidation)
   stays off while it runs. That is intended. A message that arrives during a
-  ponder still gets a turn, as it does during any tool call.
+  ponder still gets a turn, as it does during any tool call. It also occupies a
+  worker of the shared task queue while it waits (see the threat model).
 - **Two turns on an `ingest_and_wake` arrival.** Its stub notification starts
   a turn of its own, which drains the content; the ponder result then starts
   another. The extra turn is accepted, so as not to hold stub turns in the
   kernel for a filler tool.
 - **The result admits nothing.** It says how long the pause lasted and whether
   context woke it. The content reaches the window through the normal drain.
-- On shutdown, `on_stop` releases every waiting ponder.
+- On shutdown, `on_stop` releases every ponder that is waiting on context. One
+  started with `until_context=false` waits out its time (5 s at most).
 
-`plugins.disabled: [funnel]` removes the tool along with the rest of the funnel.
+Remove the tool with `tools.disabled: [ponder]`, or per channel with
+`channels.<id>.tools.disabled: [ponder]`. `plugins.disabled: [funnel]` removes it
+too but aborts startup unless `goals` is disabled as well, since goals depends
+on the funnel.
 
 ### GoalsPlugin (`packages/corvidae-cognition/corvidae_cognition/goals.py`)
 
