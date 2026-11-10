@@ -463,3 +463,51 @@ class TestHeartbeatDiffMode:
         instr_pos = text.index(GOALS_INSTRUCTION)
         assert mem_pos < instr_pos
         assert goal_pos < instr_pos
+
+    def test_post_compaction_goals_full_memories_diff(self):
+        """After compaction: goals are full (reset), memories are diff (kept)."""
+        # Simulate: last beat sent memories 1,2 and goals 10,11
+        plugin = HeartbeatPlugin()
+        plugin._last_memory_ids = {1, 2}
+        plugin._last_goal_ids = {10, 11}
+
+        # Compaction resets only goal IDs
+        plugin._last_goal_ids = set()
+
+        # Next beat: memories 1,2,3 (3 is new), goals 10,11,12 (all "new" because reset)
+        memories = [
+            {"id": 1, "age_seconds": 300, "channel_id": "c1", "summary": "old_mem1"},
+            {"id": 2, "age_seconds": 200, "channel_id": "c2", "summary": "old_mem2"},
+            {"id": 3, "age_seconds": 100, "channel_id": "c3", "summary": "new_mem3"},
+        ]
+        retired = [
+            {"id": 10, "age_seconds": 500, "summary": "old_goal10"},
+            {"id": 11, "age_seconds": 400, "summary": "old_goal11"},
+            {"id": 12, "age_seconds": 300, "summary": "new_goal12"},
+        ]
+
+        # Diff for memories: only 3 is new
+        new_memories = [m for m in memories if m["id"] not in plugin._last_memory_ids]
+        assert [m["id"] for m in new_memories] == [3]
+
+        # Goals are full (reset): all 10, 11, 12
+        goals_full = retired is not None and not plugin._last_goal_ids
+        assert goals_full is True
+
+        # frame_beat gets: new memories only, all goals
+        text = frame_beat(
+            new_memories,
+            retired,  # full goals
+            diff=True,
+        )
+        # New memory present
+        assert "new_mem3" in text
+        # Old memories NOT present (diff)
+        assert "old_mem1" not in text
+        assert "old_mem2" not in text
+        # All goals present (full after compaction)
+        assert "old_goal10" in text
+        assert "old_goal11" in text
+        assert "new_goal12" in text
+        # Call-to-action at tail
+        assert text.strip().endswith(GOALS_INSTRUCTION.strip())

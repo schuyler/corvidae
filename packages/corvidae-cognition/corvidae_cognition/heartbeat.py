@@ -299,17 +299,16 @@ class HeartbeatPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_compaction(self, channel, summary_msg, retain_count, compacted_ids) -> None:
-        """Reset diff state when the heartbeat channel is compacted.
+        """Reset goal diff state on compaction; keep memory diff state.
 
-        The compacted window no longer has the previous beat's content,
-        so the next beat must be full mode, not diff. Without this reset,
-        the diff state is stale and the next beat sends only new items
-        into a window that's missing the old ones.
+        Goals are structured data the compaction summary may not preserve
+        well — seed them all after a compaction. Memories are narrative the
+        summary already carries — keep the diff, send only what's new.
         """
         if channel.id == HEARTBEAT_CHANNEL:
-            self._last_memory_ids = set()
             self._last_goal_ids = set()
-            logger.info("heartbeat: diff state reset after compaction")
+            logger.info("heartbeat: goal diff state reset after compaction")
+
 
     async def _beat(self) -> None:
         """The system watch callback: read memory (and retired goals), re-check
@@ -347,6 +346,11 @@ class HeartbeatPlugin(CorvidaePlugin):
         )
         # Diff mode: only send what's new since the last beat (#716).
         # The persistent channel already has the old content.
+        #
+        # Memories: always diff (the compaction summary carries the old
+        # narrative; re-sending all memories is redundant).
+        # Goals: diff normally, full after compaction (structured data the
+        # summary may not preserve well).
         new_memories = [
             m for m in memories
             if m.get("id") not in self._last_memory_ids
@@ -358,17 +362,24 @@ class HeartbeatPlugin(CorvidaePlugin):
                 if g.get("id") not in self._last_goal_ids
             ]
 
-        # First beat (no prior state) or after compaction: full mode.
+        # First beat: no prior state at all → full mode for both.
         is_first = not self._last_memory_ids and not self._last_goal_ids
-        diff = not is_first
-
-        text = frame_beat(
-            new_memories if diff else memories,
-            new_retired if diff else retired,
-            self._prompt,
-            self._goals_instruction,
-            diff=diff,
-        )
+        if is_first:
+            text = frame_beat(
+                memories, retired,
+                self._prompt, self._goals_instruction,
+                diff=False,
+            )
+        else:
+            # Subsequent beats: diff for memories, diff-or-full for goals.
+            # Goals are full when _last_goal_ids was just reset (compaction).
+            goals_full = retired is not None and not self._last_goal_ids
+            text = frame_beat(
+                new_memories,
+                retired if goals_full else new_retired,
+                self._prompt, self._goals_instruction,
+                diff=True,
+            )
 
         # Update the diff state for the next beat.
         self._last_memory_ids = {m.get("id") for m in memories if m.get("id") is not None}
