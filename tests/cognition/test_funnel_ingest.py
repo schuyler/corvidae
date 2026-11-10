@@ -25,7 +25,7 @@ from corvidae.hooks import (
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae_cognition.funnel import Admission, FunnelPlugin
 
-# Ten tokens each: under a 12-token budget only one fits per drain.
+# ALPHA and BRAVO are 10 tokens each (count_tokens): under a 12-token budget only one fits per drain.
 ALPHA = ("alpha " * 10).strip()
 BRAVO = ("bravo " * 5).strip()
 
@@ -121,11 +121,12 @@ async def make(config: dict | None = None, clock: Clock | None = None) -> Simple
     )
 
 
-async def turn(env: SimpleNamespace, channel=None, origin: str = "user") -> None:
-    # One agent turn; the funnel must collect the provider on it.
+async def turn(env: SimpleNamespace, channel=None, origin: str = "user", annotations=None) -> None:
+    # One agent turn the funnel must collect on; ``annotations`` overrides the origin.
     channel = channel or env.channel
     before = env.provider.calls
-    await env.funnel.before_agent_turn(channel=channel, trace_id="t", annotations={"origin": origin})
+    notes = {"origin": origin} if annotations is None else annotations
+    await env.funnel.before_agent_turn(channel=channel, trace_id="t", annotations=notes)
     assert env.provider.calls == before + 1, "on_funnel_ingest was not called on this turn"
 
 
@@ -154,16 +155,7 @@ class TestRename:
 
 class TestPromiseAdmission:
 
-    async def test_ready_promise_is_admitted_at_the_sweep_that_finds_it(self, build):
-        env = await build()
-        future = pending()
-        env.provider.offer(env.channel.id, "memory", future)
-        await turn(env)
-        future.set_result(funnel_mod.Ingest(entries=["ready entry"]))
-        await turn(env, origin="task")
-        assert "ready entry" in text_of(env.conv)
-
-    async def test_promise_resolved_later_is_admitted_at_a_later_turn_of_any_origin(self, build):
+    async def test_promise_is_admitted_framed_at_the_first_turn_after_it_resolves(self, build):
         env = await build()
         future = pending()
         env.provider.offer(env.channel.id, "memory", future)
@@ -171,8 +163,9 @@ class TestPromiseAdmission:
         await turn(env, origin="user")
         assert not future.done() and "late entry" not in text_of(env.conv)
         future.set_result(funnel_mod.Ingest(entries=["late entry"]))
-        await turn(env, origin="reminder")
-        assert "late entry" in text_of(env.conv)
+        # A turn with no origin annotation still sweeps and admits the ready result.
+        await turn(env, annotations={})
+        assert funnel_mod.FRAME_HEADER.format(source="memory") in text_of(env.conv) and "late entry" in text_of(env.conv)
 
     async def test_none_result_admits_nothing(self, build):
         env = await build()
@@ -183,20 +176,20 @@ class TestPromiseAdmission:
         await turn(env)
         assert text_of(env.conv) == ""
 
-    async def test_raising_promise_is_logged_with_source_and_channel_and_dropped(self, build, caplog):
-        env = await build()
+    @pytest.mark.parametrize("how", ["swept", "expired"])
+    async def test_raising_promise_is_logged_with_source_and_channel_and_dropped(self, build, caplog, how):
+        env = await build(config={"funnel": {"ingest_ttl": 10}})
         future = pending()
         env.provider.offer(env.channel.id, "memory", future)
         await turn(env)
         future.set_exception(RuntimeError("provider exploded"))
+        if how == "expired":
+            env.clock.t = 20.0
         with caplog.at_level(logging.WARNING, logger="corvidae.funnel"):
             await turn(env)
         assert text_of(env.conv) == ""
-        warned = [
-            r for r in caplog.records if r.levelno == logging.WARNING
-            and "memory" in r.getMessage() and env.channel.id in r.getMessage()
-        ]
-        assert warned and warned[0].exc_info is not None
+        warned = [r for r in caplog.records if r.levelno == logging.WARNING and "memory" in r.getMessage() and env.channel.id in r.getMessage()]
+        assert warned and warned[0].exc_info and warned[0].exc_info[0] is RuntimeError
 
     async def test_a_raising_implementation_does_not_lose_a_sibling_submission(self, build, caplog):
         env = await build()
@@ -235,8 +228,11 @@ class TestPromiseAdmission:
 
     async def test_raising_callback_is_logged_and_the_drain_and_collect_go_on(self, build, caplog):
         env = await build()
+        calls: list[Admission] = []
 
         def boom(admission) -> None:
+            # Record each invocation, then fail.
+            calls.append(admission)
             raise RuntimeError("callback exploded")
 
         env.provider.offer(env.channel.id, "memory", resolved("entry one", on_admitted=boom))
@@ -245,8 +241,8 @@ class TestPromiseAdmission:
         with caplog.at_level(logging.WARNING, logger="corvidae.funnel"):
             await turn(env)
         await turn(env)
-        text = text_of(env.conv)
-        assert "entry two" in text and text.count("entry one") == 1
+        # Both entries admitted; the callback ran once, so the payload was not re-drained.
+        assert "entry one" in text_of(env.conv) and "entry two" in text_of(env.conv) and len(calls) == 1
         assert any(env.channel.id in m and "memory" in m for m in logged(caplog))
 
 
@@ -318,31 +314,32 @@ class TestIngestTtl:
     async def test_unset_ttl_expires_nothing(self, build):
         env = await build()
         waiting = pending()
-        env.funnel.ingest(env.channel, "memory", ["queued entry"])
         env.provider.offer(env.channel.id, "grounding", waiting)
+        await turn(env)
+        env.funnel.ingest(env.channel, "memory", ["queued entry"])
         env.clock.t = 1_000_000.0
         await turn(env)
-        assert "queued entry" in text_of(env.conv) and not waiting.cancelled()
+        assert "queued entry" in text_of(env.conv) and not waiting.done()
 
     async def test_expired_queued_and_pending_entries_are_dropped_and_logged_with_age(self, build, caplog):
-        # Slow (submitted at t=0) and stale (queued at t=0) expire at t=17.5; fresh (queued at t=15) stays.
+        # Slow (submitted at t=0) and stale (queued at t=0) expire at t=17; fresh (queued at t=15) stays.
         env = await build(config={"funnel": {"ingest_ttl": 10}})
         slow = pending()
-        env.provider.offer(env.channel.id, "memory", slow)
+        env.provider.offer(env.channel.id, "grounding", slow)
         await turn(env)
         env.funnel.ingest(env.channel, "memory", ["stale entry"])
         env.clock.t = 15.0
         env.funnel.ingest(env.channel, "memory", ["fresh entry"])
-        env.clock.t = 17.5
+        env.clock.t = 17.0
         with caplog.at_level(logging.INFO, logger="corvidae.funnel"):
             await turn(env)
         text = text_of(env.conv)
-        assert "stale entry" not in text and "fresh entry" in text
-        assert slow.cancelled()
-        assert any(
-            env.channel.id in m and "memory" in m and "17.5" in m
-            for m in logged(caplog, logging.INFO)
-        )
+        assert "stale entry" not in text and "fresh entry" in text and slow.cancelled()
+        # One expiry line per dropped item, each naming its own source, the channel, the age and the key.
+        expiry = [m for m in logged(caplog, logging.INFO) if "funnel.ingest_ttl" in m]
+        assert len(expiry) == 2, expiry
+        for source in ("memory", "grounding"):
+            assert sum(source in m and env.channel.id in m and re.search(r"\b17(\.\d+)?\b", m) is not None for m in expiry) == 1, expiry
 
     async def test_promise_finished_while_idle_past_ttl_is_dropped_not_admitted(self, build):
         # Submitted at t=0, resolved at t=5, swept at t=12: age from submit is 12.
