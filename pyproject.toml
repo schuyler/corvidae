@@ -54,6 +54,9 @@ restart = [
 timepiece = [
     "corvidae-timepiece",
 ]
+inotify = [
+    "corvidae-inotify",
+]
 
 [project.scripts]
 corvidae = "corvidae.main:corvidae"
