@@ -278,8 +278,9 @@ async def test_rejects_an_after_that_would_beat_back_to_back(make_env, bad):
 
 async def test_beat_carries_prompt_and_recent_memory(make_env):
     """H2: the beat holds the heartbeat prompt and the newest memories of the
-    whole memory, every channel's and its own included, newest first. Redacted
-    records stay out. No configuration is needed to reach any channel."""
+    whole memory, every channel's and its own included, in chronological
+    order (oldest first, newest at the tail). Redacted records stay out.
+    No configuration is needed to reach any channel."""
     env = await make_env({"heartbeat": {"after": AFTER}})
     now = env.clock.now()
     await env.seed_memory("irc:#lex", "I promised kestrel a wiring diagram.", now - 7200)
@@ -292,13 +293,15 @@ async def test_beat_carries_prompt_and_recent_memory(make_env):
     assert len(env.beats) == 1
     text = env.beats[0]["text"]
     assert DEFAULT_HEARTBEAT_PROMPT in text
-    newest_first = [
-        text.index("I reviewed my memories."),
-        text.index("Alice's plans for Friday."),
-        text.index("kestrel said the station reboots at noon."),
+    # Chronological order (oldest first): the most recent memories are
+    # at the tail, next to the call-to-action.
+    chronological = [
         text.index("I promised kestrel a wiring diagram."),
+        text.index("kestrel said the station reboots at noon."),
+        text.index("Alice's plans for Friday."),
+        text.index("I reviewed my memories."),
     ]
-    assert newest_first == sorted(newest_first)
+    assert chronological == sorted(chronological)
     assert "A redacted thing." not in text
 
 
