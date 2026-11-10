@@ -53,8 +53,10 @@ async def seeded_env(make_env, build) -> tuple:
     return env, win
 
 
-async def open_panel(browser, env):
-    """Log in, open the panel and pick web:main in the channel list."""
+async def open_panel(browser, env, live: str | None = None):
+    """Log in, open the panel, pick web:main in the channel list, and wait
+    for the live event whose text is ``live``, if given (it arrives on the poll
+    after the open)."""
     page = await browser.new_page()
     await page.goto(f"{env.base}/?token={TOKEN}")
     await page.wait_for_url(f"{env.base}/")
@@ -62,6 +64,10 @@ async def open_panel(browser, env):
     try:
         await page.select_option("#panel select", value=CID, timeout=5000)
         await page.wait_for_selector("#panel details.entry", timeout=5000)
+        if live is not None:
+            await page.wait_for_function(
+                "(t) => [...document.querySelectorAll('#panel pre.body')].some(p => p.textContent === t)",
+                arg=live, timeout=5000)
     except PlaywrightError as exc:
         pytest.fail(f"panel never showed {CID}'s entries: {exc}")
     return page
@@ -111,7 +117,7 @@ async def test_hostile_content_renders_as_text(make_env):
     async with async_playwright() as pw:
         browser = await _launch(pw)
         try:
-            page = await open_panel(browser, env)
+            page = await open_panel(browser, env, live_markup)
             entries = await page.evaluate(ENTRIES_JS)
             found = await page.evaluate("""() => ({
               bad: document.querySelectorAll("#panel script, #panel img, #panel style").length,
@@ -134,7 +140,7 @@ async def test_category_classes(make_env):
     async with async_playwright() as pw:
         browser = await _launch(pw)
         try:
-            page = await open_panel(browser, env)
+            page = await open_panel(browser, env, "live-text")
             entries = await page.evaluate(ENTRIES_JS)
         finally:
             await browser.close()
@@ -170,7 +176,7 @@ async def test_default_open_state_and_toggle(make_env):
     async with async_playwright() as pw:
         browser = await _launch(pw)
         try:
-            page = await open_panel(browser, env)
+            page = await open_panel(browser, env, "live-text")
             entries = await page.evaluate(ENTRIES_JS)
             live_open = await page.evaluate(
                 "() => [...document.querySelectorAll('#panel details')]"
