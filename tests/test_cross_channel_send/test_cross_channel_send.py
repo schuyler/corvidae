@@ -86,7 +86,7 @@ def _reset_attribution():
     _attribution.reset(token)
 
 
-class TestSendMessageDelivery:
+class TestNotifyDelivery:
     """notify_other_channel calls on_notify with the right parameters."""
 
     async def test_calls_on_notify_with_correct_params(self):

@@ -1,4 +1,4 @@
-"""Cross-channel send: the agent can message any channel from any context (#234).
+"""Cross-channel send: the agent can notify another channel's context from any turn (#234).
 
 The notify_other_channel tool lets any turn notify a different channel
 context. The message is delivered as a system-role notification (via
