@@ -1,24 +1,19 @@
-[project]
-name = "corvidae-timepiece"
-version = "0.1.0"
-requires-python = ">=3.13"
-dependencies = [
-    "corvidae>=0.1",
-    "tzdata; platform_system == 'Windows'",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=8",
-    "pytest-asyncio>=0.23",
-]
-
-[project.entry-points.corvidae]
-timepiece = "timepiece:TimepiecePlugin"
-
 [build-system]
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
+[project]
+name = "corvidae-timepiece"
+version = "0.1.0"
+description = "Timepiece plugin for corvidae: ambient wall-clock stamps"
+requires-python = ">=3.13"
+dependencies = [
+    "corvidae",
+    "tzdata; platform_system == 'Windows'",
+]
+
+[tool.uv.sources]
+corvidae = { workspace = true }
+
+[project.entry-points.corvidae]
+timepiece = "corvidae_timepiece:TimepiecePlugin"

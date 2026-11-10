@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import create_plugin_manager
 
-from timepiece import TimepiecePlugin
+from corvidae_timepiece import TimepiecePlugin
 
 STAMP_RE = re.compile(r"^The current date and time are now [A-Za-z]+ \d{4}-\d{2}-\d{2} at \d{2}:\d{2} [A-Z]+$")
 FIXED_TZ = ZoneInfo("UTC")
