@@ -61,6 +61,12 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)  # stores self.pm and self.config
         self._pm = pm
+        # Inert when the operator has not configured a markdown_recall block:
+        # no index, no reconcile, no search. The plugin is loaded by entry
+        # point in every cognition install; the config block is the opt-in.
+        if config_value(config, "markdown_recall", None) is None:
+            logger.debug("markdown_recall: no config block; plugin is inert")
+            return
         # The recall gate (cooldown/timeout) reads my config block.
         self.init_recall(config)
         self._root = Path(config_value(config, "markdown_recall.root", DEFAULT_ROOT))

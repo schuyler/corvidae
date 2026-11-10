@@ -40,8 +40,17 @@ def write_folder(root: Path, files: dict[str, str]) -> None:
         (root / name).write_text(content)
 
 
-async def make(config: dict, root: Path) -> SimpleNamespace:
-    """A funnel and the markdown-recall source on a real plugin manager."""
+async def make(config: dict, root: Path, tmp_path: Path) -> SimpleNamespace:
+    """A funnel and the markdown-recall source on a real plugin manager.
+
+    ``db_path`` is always overridden to ``tmp_path`` so no test can write
+    into the checkout's ``state/`` (the ``state_dir_guard`` autouse fixture
+    fails on that).
+    """
+    config = dict(config)
+    block = dict(config.get("markdown_recall", {}))
+    block["db_path"] = str(tmp_path / "index.db")
+    config["markdown_recall"] = block
     db = await aiosqlite.connect(":memory:")
     await init_db(db)
     pm = create_plugin_manager()
@@ -65,11 +74,11 @@ async def make(config: dict, root: Path) -> SimpleNamespace:
 
 
 @pytest.fixture
-async def build():
+async def build(tmp_path):
     opened: list[aiosqlite.Connection] = []
 
     async def _make(config: dict, root: Path):
-        env = await make(config, root)
+        env = await make(config, root, tmp_path)
         opened.append(env.db)
         return env
 
@@ -164,7 +173,7 @@ async def test_config_validation_names_the_key(build, tmp_path):
         "max_hits": "five",  # malformed
     }}
     with pytest.raises(ValueError) as exc:
-        await make(config, root)
+        await make(config, root, tmp_path)
     msg = str(exc.value)
     assert "max_hits" in msg
     assert "five" in msg
