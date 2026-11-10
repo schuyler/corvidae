@@ -496,18 +496,18 @@ class TestExecution:
                                    chat_text=OBJECTION_VERDICT, with_funnel=True)
         notify = AsyncMock()
         env.pm.ahook.on_notify = notify
-        # Spy on both funnel entry points; register keeps its real behaviour.
-        register = Mock(wraps=env.funnel.register)
-        env.funnel.register = register
-        env.funnel.register_and_wake = AsyncMock()
+        # Spy on both funnel entry points; ingest keeps its real behaviour.
+        ingest = Mock(wraps=env.funnel.ingest)
+        env.funnel.ingest = ingest
+        env.funnel.ingest_and_wake = AsyncMock()
         await _fire(env, "kfull", origin="user")
         await _run_next_task(env.task)
         outcomes = await _read_outcomes(env.db, "kfull")
         assert outcomes["critique"]["objections"] == 1
         # Registered without a stub: no wake of any kind.
-        register.assert_called_once()
-        assert "no record says Friday" in "\n".join(register.call_args.kwargs["entries"])
-        env.funnel.register_and_wake.assert_not_awaited()
+        ingest.assert_called_once()
+        assert "no record says Friday" in "\n".join(ingest.call_args.kwargs["entries"])
+        env.funnel.ingest_and_wake.assert_not_awaited()
         notify.assert_not_awaited()
         # A turn with no origin (a user turn) admits the verdict as framed CONTEXT.
         await env.funnel.before_agent_turn(env.channel, trace_id="kfull", annotations={})
@@ -966,13 +966,13 @@ class TestProvenanceCritic:
         from corvidae_cognition.critique import PROVENANCE_NOTE
 
         env = await _provenance_env(tmp_path, with_funnel=True)
-        env.funnel.register_and_wake = AsyncMock()
+        env.funnel.ingest_and_wake = AsyncMock()
         agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
         try:
             await _provenance_exchange(env, agent, trace_id="kf")
             await _run_provenance(env, "kf")
-            env.funnel.register_and_wake.assert_awaited_once()
-            kwargs = env.funnel.register_and_wake.await_args.kwargs
+            env.funnel.ingest_and_wake.assert_awaited_once()
+            kwargs = env.funnel.ingest_and_wake.await_args.kwargs
             assert kwargs["origin"] == "critique"
             assert kwargs["entries"][0].startswith("[provenance]")
             assert kwargs["stub_text"] == PROVENANCE_NOTE
