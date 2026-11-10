@@ -1181,7 +1181,8 @@ re-submit yet.
 arguments: a bounded wait for recall already in flight. Every
 `on_funnel_ingest` submission for a turn is made in that turn's
 `before_agent_turn`, before the model call, so when the agent can call a tool
-the channel's pending promises are final. `ponder` waits for those:
+the channel's pending promises are the recall in flight for it. `ponder` waits for
+those, as they stood when it was called:
 
 - **Nothing in flight: it returns at once.** "Nothing is being recalled for
   this channel", since waiting cannot bring more. If a promise already finished
@@ -1204,10 +1205,12 @@ the channel's pending promises are final. `ponder` waits for those:
   pending: the kernel holds the next assistant turn until the result lands,
   and the channel counts as busy, so idle work (heartbeat, consolidation)
   stays off while it runs. That is intended. A message that arrives during a
-  ponder still gets a turn, as it does during any tool call. A waiting ponder
+  ponder still gets a turn, as it does during any tool call, and that turn can
+  submit or supersede promises, which the waiting ponder does not follow. A waiting ponder
   also occupies a worker of the shared task queue (see the threat model).
 - **The tool admits nothing.** Its result says what happened; the next turn's
-  sweep and drain admit whatever landed.
+  sweep and drain admit whatever landed, within the source's budget and the
+  funnel's dedupe and TTL.
 - On shutdown, `on_stop` cancels every pending promise, so a waiting ponder
   returns.
 

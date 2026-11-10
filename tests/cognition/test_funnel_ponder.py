@@ -2,7 +2,7 @@
 
 Every ``on_funnel_ingest`` submission for a turn is made inside that turn's
 ``before_agent_turn``, before the model call, so when the agent can call
-``ponder`` the channel's pending promises are final. ``ponder`` waits for those
+``ponder`` the channel's pending promises are the recall in flight. ``ponder`` waits for those
 promises to land, bounded by one timeout so a slow source cannot stall the
 agent. With none in flight there is nothing to wait for and it returns at once.
 It admits nothing itself: the next turn's sweep does that.
@@ -225,6 +225,54 @@ class TestWaitingOnRecall:
         assert "still waiting" in out.lower()
 
 
+class TestWaitBounds:
+
+    async def test_returns_at_the_first_recall_with_entries_while_another_still_runs(self, build):
+        env = await build()
+        first = await submit_promise(env, "memory")
+        await submit_promise(env, "wiki")
+        task = asyncio.create_task(ponder_tool(env)(_ctx=ctx_for(env)))
+        await settle()
+        start = time.monotonic()
+        # One lands with entries while the other is still running: no waiting for it.
+        first.set_result(entries("memory hit"))
+        out = await asyncio.wait_for(task, 1.0)
+        assert time.monotonic() - start < 0.5
+        assert "landed" in out.lower()
+
+    async def test_total_wait_stays_within_one_timeout_across_promises(self, build, monkeypatch):
+        env = await build()
+        monkeypatch.setattr(funnel_mod, "PONDER_TIMEOUT_SECONDS", 0.4)
+        first = await submit_promise(env, "memory")
+        await submit_promise(env, "wiki")
+        task = asyncio.create_task(ponder_tool(env)(_ctx=ctx_for(env)))
+        start = time.monotonic()
+        await asyncio.sleep(0.25)
+        # One recall settles empty partway; the other never does. The timeout is
+        # for the whole call, not restarted by each settle.
+        first.set_result(None)
+        out = await task
+        elapsed = time.monotonic() - start
+        assert 0.35 <= elapsed < 0.6
+        assert "still waiting" in out.lower()
+
+    async def test_a_failed_recall_counts_as_settled_mid_wait(self, build):
+        env = await build()
+        future = await submit_promise(env)
+        task = asyncio.create_task(ponder_tool(env)(_ctx=ctx_for(env)))
+        await settle()
+        future.set_exception(RuntimeError("recall exploded"))
+        out = await asyncio.wait_for(task, 1.0)
+        assert "nothing to add" in out.lower()
+
+    async def test_a_failed_recall_is_not_in_flight_before_the_call(self, build):
+        env = await build()
+        future = await submit_promise(env)
+        future.set_exception(RuntimeError("recall exploded"))
+        out = await ponder_tool(env)(_ctx=ctx_for(env))
+        assert "nothing is being recalled" in out.lower()
+
+
 class TestTimeoutAndCancel:
 
     async def test_times_out_and_leaves_the_recall_running(self, build, monkeypatch):
@@ -261,9 +309,11 @@ class TestTimeoutAndCancel:
 
 class TestMissingChannel:
 
-    async def test_missing_channel_context_is_an_error(self, build):
+    @pytest.mark.parametrize("ctx", [None, SimpleNamespace(channel=None)])
+    async def test_missing_channel_context_is_an_error(self, build, ctx):
         env = await build()
-        out = await ponder_tool(env)(_ctx=None)
+        # None is a direct call; channel=None is what dispatch gives a sub-agent loop.
+        out = await ponder_tool(env)(_ctx=ctx)
         # Names the cause and tells the model what to do instead.
         assert out.startswith("Error:") and "channel" in out
         assert "do not call ponder" in out

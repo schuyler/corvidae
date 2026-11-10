@@ -51,12 +51,14 @@ Behavior, in order:
 Ponder: the funnel also gives the agent a ``ponder`` tool: a wait of at most
 ``PONDER_TIMEOUT_SECONDS`` for recall already in flight. Every
 ``on_funnel_ingest`` submission for a turn is made before that turn's model
-call, so the channel's pending promises are final when the agent can call
-the tool. It waits for them to land (it returns at the first with entries, or
-once all have settled empty) and returns at once when none is running. It
-waits on the promises themselves, never on a drain and never on ``ingest`` or
-``ingest_and_wake`` arrivals, which start their own turn. The call stays
-outstanding, so the kernel holds the next assistant turn and counts the
+call, so the promises the channel holds when the agent calls a tool are the
+recall that is in flight for it. The tool waits for those (it returns at the
+first with entries, or once all have settled empty) and returns at once when
+none is running. It waits on the promises it found when called, never on a
+drain and never on ``ingest`` or ``ingest_and_wake`` arrivals, which start
+their own turn. A message that arrives during the wait gets its own turn, which
+can submit or supersede promises; the tool does not follow those. The call
+stays outstanding, so the kernel holds the next assistant turn and counts the
 channel busy until it returns.
 
 Config:
@@ -154,7 +156,7 @@ def _read_ingest_ttl(raw: object) -> float | None:
     return float(raw)
 
 
-def _has_entries(promise: asyncio.Future) -> bool:
+def _has_entries(promise: asyncio.Future[Ingest | None]) -> bool:
     """True when ``promise`` finished with an ``Ingest`` that has entries to admit.
 
     A cancelled or failed promise, a ``None`` result and an ``Ingest`` with no
@@ -166,6 +168,7 @@ def _has_entries(promise: asyncio.Future) -> bool:
     # Failed: _discard logs the error when the promise is swept.
     if promise.exception() is not None:
         return False
+    # Finished with a result: it counts only when it carries entries to admit.
     result = promise.result()
     return result is not None and bool(result.entries)
 
@@ -367,6 +370,7 @@ class FunnelPlugin(CorvidaePlugin):
         self._deferred.setdefault(pair, []).append(
             _Payload(source, list(entries), self._now())
         )
+
         # A stub is already pending for this pair: the payload just queues.
         if pair in self._stub_pending:
             return
@@ -622,14 +626,14 @@ class FunnelPlugin(CorvidaePlugin):
         """Wait for this channel's in-flight pull promises, up to the timeout.
 
         Every submission for the turn was made before its model call, so the
-        channel's ``_pending`` promises are final here. Returns at once when one
+        channel's ``_pending`` promises are the recall in flight when this is called. Returns at once when one
         already landed with entries or none is still running; otherwise waits for
         the first promise with entries, or for all to settle empty. The promises
         belong to their providers and the funnel: waiting never cancels them, and
         nothing is admitted here, since the next turn's sweep does that.
         """
         # The channel decides whose promises to wait on.
-        if ctx is None or getattr(ctx, "channel", None) is None:
+        if ctx is None or ctx.channel is None:
             return (
                 "Error: ponder has no channel context; it can only run inside a "
                 "channel turn, so do not call ponder here"
@@ -638,7 +642,7 @@ class FunnelPlugin(CorvidaePlugin):
 
         # A recall already landed with entries: the next turn's sweep admits it.
         if any(_has_entries(promise) for promise in promises):
-            return "Recall already landed: its context is admitted on your next turn."
+            return "Recall already landed: the funnel admits it on your next turn, within its budget."
         # Only an unfinished promise can still bring something.
         running = [promise for promise in promises if not promise.done()]
         if not running:
@@ -648,19 +652,18 @@ class FunnelPlugin(CorvidaePlugin):
         start = time.monotonic()
         # asyncio.wait, never wait_for: wait_for would cancel the recall on timeout.
         while running:
+            # The timeout bounds the whole call, so it is not restarted by each settle.
             remaining = timeout - (time.monotonic() - start)
-            if remaining <= 0:
-                break
             done, still_running = await asyncio.wait(
                 running, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
             )
-            # Nothing finished within the timeout.
+            # Nothing finished within what was left of the timeout.
             if not done:
                 break
             elapsed = time.monotonic() - start
             # A finished promise with entries ends the wait; the others can follow.
             if any(_has_entries(promise) for promise in done):
-                return f"Recall landed after {elapsed:.1f}s: its context is admitted on your next turn."
+                return f"Recall landed after {elapsed:.1f}s: the funnel admits it on your next turn, within its budget."
             # Finished empty, failed or cancelled: keep waiting on the rest.
             running = list(still_running)
 
