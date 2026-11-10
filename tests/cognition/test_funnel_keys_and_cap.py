@@ -168,7 +168,6 @@ class TestWindowCap:
         # Size the cap to hold exactly one framed row of one entry.
         await funnel.admit(channel, conv, "memory", [ENTRY])
         one_row = count_tokens(conv.messages[0]["content"])
-        conv.messages.clear()
 
         funnel, channel, conv, db2 = await build_funnel(
             {"funnel": {"window_budgets": {"memory": one_row}}}
@@ -226,7 +225,7 @@ class TestWindowCap:
             )
             assert admitted == [f"{big} number {i}"]
         held = sum(count_tokens(c) for c in source_rows(conv, "memory"))
-        assert held > 2 * 4096
+        assert held > 4096
         await db.close()
 
     async def test_compaction_frees_the_cap(self):

@@ -323,7 +323,7 @@ class TestDedupeAndStats:
         assert isinstance(last, float)
         await db.close()
 
-    async def test_admitted_ids_no_substring_collision(self):
+    async def test_budget_dropped_record_is_not_credited(self):
         """Bug I-1 regression: when A's formatted line is a substring of B's
         formatted line, and only B is admitted (A is budget-dropped), the old
         substring-search code (`line_A in appended`) falsely credits A via the
