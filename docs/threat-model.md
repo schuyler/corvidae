@@ -738,6 +738,17 @@ What it doesn't protect against, so you know:
   but not injected HTML that spoofs the console or exfiltrates through
   links.
 
+- **The context panel shows everything the model sees.** When
+  `context_panel` is configured, anyone holding the console token can read
+  the context window of every loaded channel: system prompt, retrieved
+  memory, tool output, reasoning and other people's messages from every
+  transport, not only the web channels. It also shows the latest turn's
+  live reasoning, which can include reasoning that `reasoning_history:
+  drop` keeps out of the window. It is off by default, its routes are
+  read-only GETs behind the console's checks, and it renders everything as
+  text. The console token is therefore as sensitive as every channel's
+  content.
+
 - **Cookies aren't port-scoped.** Any other service on the same loopback
   host name (another dev server on `localhost:3000`) receives the
   `corvidae_web` cookie with every request the browser sends it, so a

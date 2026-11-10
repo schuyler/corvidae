@@ -1100,6 +1100,18 @@ A malformed block fails startup naming the key and the value; an absent block le
 
 ---
 
+## `context_panel` — live context window view
+
+Requires the context-panel extra (`--extra context-panel` on your `uv sync` line) and the `web` block. Adds a read-only page at `/panel/context_panel/`, linked from the chat page's sidebar. It lists every channel whose context window is loaded, on any transport, and shows the selected one as the model sees it: system prompt, tool schemas and stored rows with their kinds, followed live for the latest turn. The panel shows the whole window to anyone holding the console token; see the threat model's finding 9.
+
+```yaml
+context_panel: {}
+```
+
+The block has no keys. `context_panel: {}` or an empty `context_panel:` enables the panel; without the block it is off. Restart to apply a change. A block that is not a mapping fails startup naming `context_panel`.
+
+---
+
 ## `restart` — Daemon restart plugin
 
 Requires the restart extra (`--extra restart` on your `uv sync` line). Without it the `restart` tool does not exist.
