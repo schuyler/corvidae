@@ -6,7 +6,7 @@ to put retrieved/background content into the window routes through
 so dedupe, budgets, and injection framing are written once instead of
 per-plugin.
 
-Two admission paths:
+Three admission paths:
 
 - **Immediate** (Phase 1a): sources call ``admit()`` synchronously inside
   their own ``before_agent_turn`` (memory retrieval, date/time grounding).
@@ -195,7 +195,7 @@ class _Pending:
     """A submitted promise and the funnel-clock time it was submitted."""
 
     # Resolves to an Ingest, or to None when the provider has nothing to admit.
-    promise: asyncio.Future
+    promise: asyncio.Future[Ingest | None]
     # The funnel's clock when the provider submitted it (its TTL age starts here).
     created: float
 
@@ -209,7 +209,7 @@ class FunnelSpec:
         channel,
         trace_id: str,
         annotations: dict | None,
-        submit: Callable[[str, asyncio.Future], None],
+        submit: Callable[[str, asyncio.Future[Ingest | None]], None],
     ) -> None:
         """Submit promises: ``submit("<source>", future)``, the future resolving to an ``Ingest`` or ``None``.
 
@@ -489,6 +489,7 @@ class FunnelPlugin(CorvidaePlugin):
         if pair is None:
             return
         payloads = self._deferred.get(pair)
+        # Nothing queued for this origin: no drain to run.
         if not payloads:
             return
 
@@ -618,8 +619,8 @@ class FunnelPlugin(CorvidaePlugin):
                     payload.on_admitted(admission)
                 except Exception:
                     logger.warning(
-                        "on_admitted callback for %s on channel %s raised; its entries "
-                        "were admitted anyway, fix the callback in the source named here",
+                        "on_admitted callback for %s on channel %s raised; the admission "
+                        "stands, fix the callback in the source named here",
                         payload.source, channel.id, exc_info=True,
                         extra={"channel_id": channel.id, "source": payload.source},
                     )
