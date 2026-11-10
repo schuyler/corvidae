@@ -166,7 +166,7 @@ class GoalsPlugin(CorvidaePlugin):
         db = await self._require_db()
         now = self._now()
         async with db.execute(
-            "SELECT g.retired_at, m.summary FROM goals g "
+            "SELECT g.id, g.retired_at, m.summary FROM goals g "
             "JOIN memory m ON m.id = g.memory_id "
             "WHERE g.retired_at IS NOT NULL "
             "ORDER BY g.retired_at DESC, g.id DESC LIMIT ?",
@@ -174,8 +174,8 @@ class GoalsPlugin(CorvidaePlugin):
         ) as cursor:
             rows = await cursor.fetchall()
         return [
-            {"age_seconds": max(0.0, now - retired_at), "summary": summary}
-            for retired_at, summary in rows
+            {"id": gid, "age_seconds": max(0.0, now - retired_at), "summary": summary}
+            for gid, retired_at, summary in rows
         ]
 
     @hookimpl

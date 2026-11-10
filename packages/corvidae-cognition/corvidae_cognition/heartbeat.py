@@ -297,6 +297,20 @@ class HeartbeatPlugin(CorvidaePlugin):
             self._watch.cancel()
             self._watch = None
 
+    @hookimpl
+    async def on_compaction(self, channel, summary_msg, retain_count, compacted_ids) -> None:
+        """Reset diff state when the heartbeat channel is compacted.
+
+        The compacted window no longer has the previous beat's content,
+        so the next beat must be full mode, not diff. Without this reset,
+        the diff state is stale and the next beat sends only new items
+        into a window that's missing the old ones.
+        """
+        if channel.id == HEARTBEAT_CHANNEL:
+            self._last_memory_ids = set()
+            self._last_goal_ids = set()
+            logger.info("heartbeat: diff state reset after compaction")
+
     async def _beat(self) -> None:
         """The system watch callback: read memory (and retired goals), re-check
         quiet, notify.

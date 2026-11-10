@@ -3404,7 +3404,7 @@ class MemoryPlugin(CorvidaePlugin):
         if db is None:
             raise RuntimeError("memory DB is not open yet")
         async with db.execute(
-            "SELECT summary, channel_id, created_at FROM memory "
+            "SELECT id, summary, channel_id, created_at FROM memory "
             "WHERE indexed = 1 AND redacted = 0 "
             "ORDER BY created_at DESC, id DESC LIMIT ?",
             (limit,),
@@ -3412,8 +3412,8 @@ class MemoryPlugin(CorvidaePlugin):
             rows = await cursor.fetchall()
         now = self._now()
         return [
-            {"summary": summary, "channel_id": owner, "age_seconds": max(0.0, now - created_at)}
-            for summary, owner, created_at in rows
+            {"id": mid, "summary": summary, "channel_id": owner, "age_seconds": max(0.0, now - created_at)}
+            for mid, summary, owner, created_at in rows
         ]
 
     async def _vec_candidates(
