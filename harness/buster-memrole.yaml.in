@@ -38,9 +38,10 @@ memory:
   # No consolidation LLM calls during the run.
   idle_consolidate_after: 86400
   retrieval:
-    # Raw similarity: this harness seeds a handful of records, below the
-    # relative gate's 50-record minimum, so relative would fall back to
-    # similarity anyway; set it explicitly so the run doesn't depend on that.
+    # No effect in this profile: with no llm.embedding, retrieval runs
+    # FTS5-only (degraded), which bands every hit moderate and admits the
+    # top k as [marginal] whatever band_on says (#409). The setting predates
+    # #409 and is harmless here.
     band_on: similarity
 
 # memory and funnel on; the rest of the cognition set and the Buster

@@ -415,7 +415,8 @@ is `memory.retrieval.band_on`:
   question" from "this query's register runs high"; a z can. Recency plays
   no part in the band, so an old, apt memory isn't presented as a guess. With
   fewer than 50 embedded records, or no spread, the band falls back to raw
-  similarity on the cosine defaults (0.75 / 0.60), logged once per process.
+  similarity on the cosine defaults (0.75 / 0.60), logged once per process;
+  a failed spread scan falls back the same way, with a warning per query.
   The minimum is set by arithmetic: a z over N records can't exceed √(N − 1),
   so a smaller memory could never reach the strong threshold.
 - `similarity` bands raw cosine (strong ≥ 0.75, moderate ≥ 0.60).
@@ -457,7 +458,7 @@ and numbers, never text:
 | `rank` | 1-based position among the not-excluded candidates, by fused rank on the hybrid path and by score otherwise (excluded rows: see below) |
 | `outcome` | one of the values below |
 | `source` | `vec` (KNN only), `fts` (FTS only, or any degraded candidate) or `both` (#666); NULL on rows from before it |
-| `z` | under `band_on: relative`, the z-score the band came from (#409); NULL when none was computed (other modes, a small memory, a hit with no vector, degraded retrieval, rows from before it) |
+| `z` | under `band_on: relative`, the z-score the band came from (#409); NULL when none was computed (other modes, a small memory, no spread, a failed spread scan, a hit with no vector, degraded retrieval, rows from before it) |
 
 `(retrieval_id, memory_id)` is the key, and an index on `memory_id` makes
 per-record lookups cheap. A candidate's `outcome` is one of:
@@ -641,9 +642,9 @@ The pool file is written once, after the last query:
       "mrr": 0.5,
       "candidates": [
         {"id": 398, "rank": 1, "similarity": 0.81, "score": 0.77, "band": "strong",
-         "source": "both"},
+         "z": 5.2, "source": "both"},
         {"id": 412, "rank": 2, "similarity": 0.79, "score": 0.74, "band": "moderate",
-         "source": "vec"}
+         "z": 3.4, "source": "vec"}
       ]
     }
   ],
@@ -657,8 +658,11 @@ The pool file is written once, after the last query:
 
 `candidates` is the ranked pool, best score first; the entries with
 `rank <= k` are `retrieve()`'s top k, what passive retrieval would hand on
-before it drops weak-band entries (unless all are weak) and the funnel
-admits them, with no window exclusion. It holds ids and scores but
+before it drops weak-band entries (all of them, so an all-weak pool admits
+nothing, #409; a degraded pool keeps its top k) and the funnel admits them,
+with no window exclusion. Each candidate also carries `z`, the z-score its
+band came from under `band_on: relative` (`null` when none was computed),
+which is what the z thresholds are refitted from. It holds ids and scores but
 no memory text beyond the labels' own `text`, `context` and `query`; look the
 ids up in the source. `run_at` is the wall-clock
 time the run started. The means are `null` when no query was scored.
@@ -675,7 +679,8 @@ Operator notes:
   the wall clock at query time, not a time taken from the snapshot. Scoring
   the same snapshot a month later multiplies every score by the same
   factor, so the order, Recall@k and MRR are unchanged, but absolute
-  scores, and the bands taken from them, are lower. `run_at` records the
+  scores are lower, and so are bands under `band_on: score` (bands under
+  `relative` and `similarity` don't use decay). `run_at` records the
   date. shortcut: no pinned "now"; add one before comparing pool files
   scored on different days.
 - **An unreachable embedding server turns every query into FTS5.** Each
@@ -898,7 +903,8 @@ Implements six hooks and two kernel timers:
   under `memory.retrieval.recency_from: last_used`, from the last
   retrieval), bands them (strong/moderate/weak; by default on the z of the
   record's cosine against the whole memory, `memory.retrieval.band_on`),
-  drops weak ones, admits the rest through the funnel, bumps access
+  drops weak ones (on the FTS5-degraded path, where every hit is moderate,
+  it admits the top k), admits the rest through the funnel, bumps access
   stats for admitted records, and writes a `retrieval_log` row plus one
   `retrieval_candidate` row per logged candidate.
 - `on_agent_response` — the turn trigger: with `agent.forks` on for

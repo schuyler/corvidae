@@ -1029,8 +1029,8 @@ only through the funnel.
    weak (a query with nothing above weak admits nothing), annotate
    conflicts between records with opposed claims and prefer the later
    one, and admit through the funnel as `(age) summary` lines, marked
-   `[marginal] (age) summary` when moderate. Admitted records get their access statistics bumped; every
-   retrieval writes a `retrieval_log` row and the exchange's retrieval
+   `[marginal] (age) summary` when moderate. Admitted records get their
+   access statistics bumped; every retrieval writes a `retrieval_log` row and the exchange's retrieval
    profile. Retrieval spans the agent's whole memory; there is no
    per-channel scope to narrow it (principle 14), and
    `docs/threat-model.md` records what that costs.
