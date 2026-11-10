@@ -200,7 +200,8 @@ class TestGeneralRecallBenchmark:
             # (recall_at_k returns 1.0 for empty relevant, so we check manually.)
             if candidates:
                 # If the retriever surfaces anything, verify it's not a
-                # high-confidence match (score < strong band default 0.75).
+                # high-confidence match (score < the cosine-scale strong
+                # default 0.75, which band_on: score/similarity use).
                 for c in candidates:
                     assert c["score"] < 0.75, (
                         f"negative query {query['text']!r} returned high-score "

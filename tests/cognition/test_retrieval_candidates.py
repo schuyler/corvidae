@@ -115,8 +115,9 @@ class TestOutcomes:
         await db.close()
 
     async def test_weak_candidate_beside_non_weak_reads_dropped_weak(self):
-        # L2 dropped_weak: a weak-banded candidate is dropped when a
-        # non-weak one exists. Needs real cosine similarity to be weak.
+        # L2 dropped_weak: a weak-banded candidate is dropped (since #409
+        # always, not only beside a non-weak one). Needs real cosine
+        # similarity to be weak.
         needs_vec()
         memory, embedder, channel, conv, db = await build_retrieval_env()
         strong = await seed(db, channel.id, QUERY, 1, 2)

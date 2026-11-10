@@ -22,7 +22,7 @@ from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 
 from helpers import FakeForkAgent, stub_llm_config
-from .test_memory_retrieval import DIMS, StubEmbedClient, bow_embed
+from .test_memory_retrieval import DIMS, StubEmbedClient, bow_embed, gate_open
 
 
 CONSOLIDATION_JSON = json.dumps({
@@ -43,6 +43,9 @@ CONFIG = {
         },
     },
 }
+# This test is about recall across a restart, not the #409 gate: open it so
+# the stub embedder's crude cosine to a paraphrase still admits the record.
+CONFIG = gate_open(CONFIG)
 
 
 class StubChatEmbedClient(StubEmbedClient):

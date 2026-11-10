@@ -400,21 +400,42 @@ Scores are `cosine_similarity × exp(-age_days / memory.half_life_days)`, where
 `age_days` runs from `created_at`, or from `max(created_at,
 last_retrieved_at)` under `memory.retrieval.recency_from: last_used`.
 Candidates rank by score (by fused rank on the hybrid path, above) and are
-annotated into relevance bands (strong ≥ 0.75, moderate ≥ 0.60, else weak;
-weak drops unless nothing else matched). The bands apply to the score by
-default, or to raw similarity under `memory.retrieval.band_on: similarity`,
-so an old but apt memory is not presented as a guess. A candidate that only
-the hybrid FTS side found bands at no less than the 0.6 proxy, whatever its
-cosine or age (#666). Without that floor, the name the embedding missed would
-read weak and be dropped beside anything non-weak. The floor goes on the band
-value, after decay (0.6 × decay always lands below 0.60). Records the KNN
-also returned keep their measured band, and `similarity` and `score` stay
-measured. shortcut: in a memory of at most `k × 4` records (32 with the
-defaults) the KNN covers everything, so the floor never fires there; band
-on the fused rank instead if small memories show the problem. The `(age)` shown always runs from
-`created_at`. Winners enter the window as
-`[band] (age) summary` lines through the admission funnel — never by
-direct CONTEXT append. Admitted memories get their access statistics
+banded strong, moderate or weak. Weak records are dropped, with no fallback:
+a query with nothing above weak admits nothing (#409). What the bands compare
+is `memory.retrieval.band_on`:
+
+- `relative` (the default) bands on how far a record's raw cosine stands out
+  from the query's cosine distribution over the whole memory: `z = (cosine −
+  mean) / stdev`, where the mean and stdev come from one aggregate
+  `vec_distance_cosine` pass over every indexed, unredacted record with a
+  stored vector (about the cost of the KNN scan, with no `k` limit).
+  Thresholds are z values: strong ≥ 4.5, moderate ≥ 3.0. Cosine has no stable
+  scale across queries (#409 measured per-query medians from 0.28 to 0.45 on
+  one encoder), so a fixed cosine threshold can't tell "this answers the
+  question" from "this query's register runs high"; a z can. Recency plays
+  no part in the band, so an old, apt memory isn't presented as a guess. With
+  fewer than 50 embedded records, or no spread, the band falls back to raw
+  similarity on the cosine defaults (0.75 / 0.60), logged once per process;
+  a failed spread scan falls back the same way, with a warning per query.
+  The minimum is set by arithmetic: a z over N records can't exceed √(N − 1),
+  so a smaller memory could never reach the strong threshold.
+- `similarity` bands raw cosine (strong ≥ 0.75, moderate ≥ 0.60).
+- `score` bands the decayed score on the same thresholds, so with the default
+  half-life nothing older than about 9 days can be strong.
+
+A candidate only the hybrid FTS side found bands on its measured cosine like
+any other; one with no stored vector (not yet embedded) bands weak, so it
+isn't admitted passively, though `search_memory` still finds it. The
+keyword-only floor #666 introduced is gone: one shared word no longer carries
+a record into the window. On the FTS5-degraded path there is no similarity to
+gate on, so the top `k` keyword hits are admitted, every one marked
+`[marginal]`, and `retrieval_log.degraded_to_fts` flags it. Each
+`retrieval_candidate` row carries the record's `z` (NULL when none was
+computed), which is what the z thresholds are refitted from; the starting
+values rest on six probes. The `(age)` shown always runs from
+`created_at`. Winners enter the window as `(age) summary` lines, or
+`[marginal] (age) summary` for a moderate record, through the admission
+funnel — never by direct CONTEXT append. Admitted memories get their access statistics
 bumped (`retrieval_count`, `last_retrieved_at` — the write half of
 reconsolidation), and every retrieval writes a `retrieval_log` row
 (the top-ranked candidate's decayed score and raw similarity,
@@ -433,17 +454,19 @@ and numbers, never text:
 | `memory_id` | `memory.id` |
 | `similarity` | cosine similarity, or the fixed FTS proxy when it can't be measured (a degraded retrieval, or an FTS hit with no vector) |
 | `score` | the recency-decayed score (`similarity × decay`); the rank key on the vector-only and degraded paths, the tie-break under fusion |
-| `band` | `strong`, `moderate` or `weak` (an FTS-only hit's is floored at the proxy, above) |
+| `band` | `strong`, `moderate` or `weak` (above; a hit with no measured cosine is `weak`, and every degraded hit `moderate`) |
 | `rank` | 1-based position among the not-excluded candidates, by fused rank on the hybrid path and by score otherwise (excluded rows: see below) |
 | `outcome` | one of the values below |
 | `source` | `vec` (KNN only), `fts` (FTS only, or any degraded candidate) or `both` (#666); NULL on rows from before it |
+| `z` | under `band_on: relative`, the z-score the band came from (#409); NULL when none was computed (other modes, a small memory, no spread, a failed spread scan, a hit with no vector, degraded retrieval, rows from before it) |
 
 `(retrieval_id, memory_id)` is the key, and an index on `memory_id` makes
 per-record lookups cheap. A candidate's `outcome` is one of:
 
 - `admitted`: the funnel appended its line to the window.
-- `dropped_weak`: banded weak while some other returned candidate was not
-  weak, so it was never offered to the funnel.
+- `dropped_weak`: banded weak, so it was never offered to the funnel. Since
+  #409 this holds even when every candidate is weak: that retrieval admits
+  nothing.
 - `dropped_budget`: offered to the funnel, but the `memory` source's token
   budget had no room for it.
 - `not_admitted`: selected, but no funnel plugin is registered, so nothing
@@ -505,7 +528,7 @@ No row means the record was not logged for that retrieval: outside the
 KNN's reach, not indexed, or redacted; in the window and not good enough to
 make the top k; or, on an FTS-degraded retrieval, not matched by the
 keyword query or past its `LIMIT`. `cut` and `dropped_weak` mean it ranked
-but lost on score (similarity times recency decay) or banding. `corvidae redact` deletes
+but lost on rank or banding (by default the z of its cosine, `retrieval_candidate.z`). `corvidae redact` deletes
 rows that reference a redacted memory (below).
 
 **Graceful degradation:** encoder down → FTS5 keyword retrieval over
@@ -515,7 +538,9 @@ keeps its own 20 and a single message is capped at 20 as before); sqlite-vec unl
 with one clear startup warning; no embedding profile (the `embedding` stage isn't mapped under `llm.stages` and there is no default embedding profile: no `llm.embedding` and no `llm.defaults.embedding`) → records stored
 with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
 config → ERROR and embeddings disabled rather than silently mixing
-encoders. Nothing in the memory path raises into the turn loop.
+encoders; fewer than 50 embedded records (or no spread) under `band_on:
+relative` → bands on raw similarity, logged once. Nothing in the memory path
+raises into the turn loop.
 
 #### Measuring retrieval on a real database (`scripts/eval_memory.py --snapshot`)
 
@@ -635,8 +660,9 @@ The pool file is written once, after the last query:
 
 `candidates` is the ranked pool, best score first; the entries with
 `rank <= k` are `retrieve()`'s top k, what passive retrieval would hand on
-before it drops weak-band entries (unless all are weak) and the funnel
-admits them, with no window exclusion. It holds ids and scores but
+before it drops weak-band entries (all of them, so an all-weak pool admits
+nothing, #409; a degraded pool keeps its top k) and the funnel admits them,
+with no window exclusion. It holds ids and scores but
 no memory text beyond the labels' own `text`, `context` and `query`; look the
 ids up in the source. `run_at` is the wall-clock
 time the run started. The means are `null` when no query was scored.
@@ -653,7 +679,8 @@ Operator notes:
   the wall clock at query time, not a time taken from the snapshot. Scoring
   the same snapshot a month later multiplies every score by the same
   factor, so the order, Recall@k and MRR are unchanged, but absolute
-  scores, and the bands taken from them, are lower. `run_at` records the
+  scores are lower, and so are bands under `band_on: score` (bands under
+  `relative` and `similarity` don't use decay). `run_at` records the
   date. shortcut: no pinned "now"; add one before comparing pool files
   scored on different days.
 - **An unreachable embedding server turns every query into FTS5.** Each
@@ -874,8 +901,10 @@ Implements six hooks and two kernel timers:
   channel's records still wholly in its window, scores candidates
   (`similarity × exp(-age_days / half_life)`, with age from `created_at` or,
   under `memory.retrieval.recency_from: last_used`, from the last
-  retrieval), bands them (strong/moderate/weak, on the score or, under
-  `memory.retrieval.band_on: similarity`, on raw similarity), admits winners through the funnel, bumps access
+  retrieval), bands them (strong/moderate/weak; by default on the z of the
+  record's cosine against the whole memory, `memory.retrieval.band_on`),
+  drops weak ones (on the FTS5-degraded path, where every hit is moderate,
+  it admits the top k), admits the rest through the funnel, bumps access
   stats for admitted records, and writes a `retrieval_log` row plus one
   `retrieval_candidate` row per logged candidate.
 - `on_agent_response` — the turn trigger: with `agent.forks` on for
@@ -951,7 +980,7 @@ dropped (the LLM call has already been paid for). The transcript is split
 on message lines (a message longer than a piece is cut by characters) into
 records that each fit the memory admission budget as a retrieved memory
 line (`funnel.budgets.memory`, else `funnel.default_budget`, else 512,
-read at startup; each piece leaves room for the longest `[band] (age) `
+read at startup; each piece leaves room for the longest `[marginal] (age) `
 prefix), so a raw record can actually be admitted (#626). The pieces are
 records of one consolidation (shared range, importance and stamp) stamped
 `mode = raw`. A budget too small for any memory line keeps the transcript

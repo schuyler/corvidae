@@ -95,8 +95,10 @@ class TestProbeSequence:
 
         assert prompt[-2] == {"role": "user", "content": MEMROLE_QUERY}
         assert prompt[-1]["role"] == "user"
+        # The seeded fact is admitted. (This profile runs FTS5-only, so since
+        # #409 its line is marked [marginal]; there is no [weak] label left
+        # to check for.)
         assert MEMROLE_FACT in prompt[-1]["content"]
-        assert "[weak]" not in prompt[-1]["content"]
 
 
 class TestProfileTemplate:

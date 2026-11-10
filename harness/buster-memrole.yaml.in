@@ -38,8 +38,10 @@ memory:
   # No consolidation LLM calls during the run.
   idle_consolidate_after: 86400
   retrieval:
-    # FTS hits carry the 0.6 similarity proxy; banding the decayed score
-    # would put a fresh hit a hair under 0.60 and label it [weak].
+    # No effect in this profile: with no llm.embedding, retrieval runs
+    # FTS5-only (degraded), which bands every hit moderate and admits the
+    # top k as [marginal] whatever band_on says (#409). The setting predates
+    # #409 and is harmless here.
     band_on: similarity
 
 # memory and funnel on; the rest of the cognition set and the Buster

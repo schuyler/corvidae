@@ -4,9 +4,9 @@ On the vector path the candidate pool is the union of the vec KNN and an
 FTS5 search over the same records, ranked by reciprocal rank fusion, so a
 record naming a person or identifier is found even when the embedding
 doesn't place it near the query. ``memory.retrieval.candidates: vector``
-restores the vec-only pool. A candidate only FTS found bands at no less than
-``FTS_SIMILARITY_PROXY``; its ``similarity`` stays the real cosine, and each
-logged candidate records which search found it (``source``).
+restores the vec-only pool. A candidate only FTS found bands on its measured
+cosine like any other (#409 removed the keyword-only floor), and each logged
+candidate records which search found it (``source``).
 """
 
 import logging
@@ -160,36 +160,44 @@ class TestFusion:
         assert orders[0] == orders[1]
 
 
-class TestBandingFloor:
-    async def test_fts_hit_bands_at_least_moderate_and_is_admitted(self):
-        """The name hit's cosine is weak; the keyword floor keeps it from
-        being dropped as weak. k=1 keeps it outside the KNN's k x 4 rows,
-        so it is an FTS-only hit, the case the floor is for."""
+class TestNoKeywordFloor:
+    """#409: a keyword match is gated on its measured cosine like any other
+    record, so one shared word can't carry a record into the window."""
+
+    async def test_fts_only_hit_below_the_gate_is_not_admitted(self):
+        """The name hit's cosine is weak. k=1 keeps it outside the KNN's
+        k x 4 rows, so it is an FTS-only hit, the case the old floor
+        admitted; now it is dropped as weak."""
         assert cosine(QUERY, NAMED) < 0.6
-        memory, _e, channel, conv, db = await build_retrieval_env(config(k=1))
+        memory, _e, channel, conv, db = await build_retrieval_env(
+            config(k=1, band_on="similarity")
+        )
         await seed_named_and_distractors(db, channel.id)
 
         conv.append({"role": "user", "content": QUERY})
         await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
 
         recalled = " ".join(m["content"] for m in context_messages(conv))
-        assert f"[moderate] (now) {NAMED}" in recalled
+        assert NAMED not in recalled
         await db.close()
 
-    async def test_floor_raises_the_band_not_similarity_or_score(self):
-        memory, _e, channel, _conv, db = await build_retrieval_env(config())
+    async def test_fts_only_hit_bands_on_its_measured_cosine(self):
+        memory, _e, channel, _conv, db = await build_retrieval_env(
+            config(band_on="similarity")
+        )
         named = await seed_named_and_distractors(db, channel.id)
 
         pool = await memory._retrieve_pool(QUERY)
 
         hit = next(c for c in pool.ranked if c["id"] == named)
-        assert hit["band"] == "moderate"
-        assert hit["score"] < 0.6 and hit["similarity"] < 0.6
+        assert hit["source"] == "fts"
+        assert hit["similarity"] == pytest.approx(cosine(QUERY, NAMED), rel=1e-4)
+        assert hit["band"] == "weak"
         await db.close()
 
     async def test_record_found_by_both_keeps_its_measured_band(self):
-        """Only FTS-only hits are floored: once the KNN returns the record
-        too, its band is the measured one, as before #666."""
+        """Once the KNN returns the record too, its band is the measured one,
+        as for an FTS-only hit."""
         memory, _e, channel, _conv, db = await build_retrieval_env(config(k=8))
         named = await seed_named_and_distractors(db, channel.id)
 
@@ -260,6 +268,9 @@ class TestCandidateLog:
         await memory._ensure_schema()
         async with db.execute("SELECT source FROM retrieval_candidate") as cursor:
             assert await cursor.fetchall() == [(None,)]
+        # #409: the same upgrade adds the nullable z column.
+        async with db.execute("SELECT z FROM retrieval_candidate") as cursor:
+            assert await cursor.fetchall() == [(None,)]
         await db.close()
 
 
@@ -267,7 +278,10 @@ class TestWindowExclusion:
     async def test_in_window_fts_hit_is_excluded_before_the_cut(self):
         """An in-window record the FTS side matches doesn't take a slot, and
         is logged as excluded_in_window with its would-be rank."""
-        memory, _e, channel, conv, db = await build_retrieval_env(config(k=2))
+        # The gate is opened (#409): this is about exclusion, not admission.
+        memory, _e, channel, conv, db = await build_retrieval_env(
+            config(k=2, band_on="similarity", bands={"moderate": 0.0})
+        )
         for text in DISTRACTORS:
             await seed(db, channel.id, text, 1, 2)
         in_window = await seed(db, channel.id, NAMED, WINDOW_START, WINDOW_START + 1)

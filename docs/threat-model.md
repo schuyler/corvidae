@@ -1302,12 +1302,15 @@ it.
 
 - Passive retrieval joins the vector search with a keyword search (#666),
   so a record that names a person, project or identifier surfaces whenever
-  a query names it. A record that only the keyword search found bands at
-  least `[moderate]` however poorly its embedding matches. The set of
+  a query names it. Since #409 a record the keyword search found is gated
+  on its measured cosine like any other, so a shared name ranks it but
+  can't by itself admit it. The set of
   reachable records is unchanged (the same `indexed`, `redacted` and trust
   filters apply); what changes is which ones rank. The new edge: someone
   whose words get consolidated into a record can attach that record to a
-  name, and it is offered whenever the name comes up. Long, name-stuffed
+  name, so it ranks whenever the name comes up, and is admitted only when
+  its cosine also clears the gate (by default, stands out from the memory
+  for that query). Long, name-stuffed
   records gain little, since bm25 normalises for length and fusion takes
   only one rank from the keyword list. Set
   `memory.retrieval.candidates: vector` to go back to embedding-only
