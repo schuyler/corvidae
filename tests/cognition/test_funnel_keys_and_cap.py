@@ -138,8 +138,8 @@ class TestKeyDedupe:
         else:
             raise AssertionError("a keys/entries length mismatch must raise")
         # The message names both lengths and the source.
-        assert "1" in message and "2" in message and "memory" in message
-        assert "keys" in message and "entries" in message
+        assert "1 keys" in message and "2 entries" in message
+        assert "memory" in message
         # Nothing was appended.
         assert conv.messages == []
         await db.close()
@@ -216,12 +216,17 @@ class TestWindowCap:
         await db.close()
 
     async def test_unset_cap_means_no_ceiling(self):
+        """With no cap configured, the window holds well past any plausible
+        built-in default (the example's 4096 included)."""
         funnel, channel, conv, db = await build_funnel()
-        for i in range(30):
+        big = " ".join(["word"] * 400)
+        for i in range(15):
             admitted = await funnel.admit(
-                channel, conv, "memory", [f"{ENTRY} number {i}"],
+                channel, conv, "memory", [f"{big} number {i}"],
             )
-            assert admitted == [f"{ENTRY} number {i}"]
+            assert admitted == [f"{big} number {i}"]
+        held = sum(count_tokens(c) for c in source_rows(conv, "memory"))
+        assert held > 2 * 4096
         await db.close()
 
     async def test_compaction_frees_the_cap(self):
@@ -268,7 +273,7 @@ class TestWindowCapConfig:
     async def test_invalid_values_warn_and_are_ignored(self, caplog):
         """A non-integer, bool or negative cap warns naming the key, the value
         and what is accepted, and leaves that source uncapped."""
-        bad = {"memory": "lots", "goals": True, "critique": -1}
+        bad = {"memory": "lots", "goals": True, "critique": -1, "notes": 1.5}
         with caplog.at_level(logging.WARNING, logger="corvidae.funnel"):
             funnel, channel, conv, db = await build_funnel(
                 {"funnel": {"window_budgets": bad}}

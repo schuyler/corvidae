@@ -56,11 +56,23 @@ async def outcome_of(db, memory_id: int) -> str:
     """The latest retrieval_candidate outcome logged for ``memory_id``."""
     async with db.execute(
         "SELECT outcome FROM retrieval_candidate WHERE memory_id = ? "
-        "ORDER BY rowid DESC LIMIT 1",
+        "ORDER BY retrieval_id DESC LIMIT 1",
         (memory_id,),
     ) as cursor:
         row = await cursor.fetchone()
     return row[0]
+
+
+async def seed_before_window(db, channel_id: str, summary: str) -> int:
+    """Seed a record whose message range (0-0) lies before any row the test
+    puts in the window, so in-window exclusion (#634) never hides it from the
+    funnel's dedupe (see test_retrieval_candidates.py for the same trap)."""
+    rid = await seed_memory(db, channel_id, summary)
+    await db.execute(
+        "UPDATE memory SET msg_id_start = 0, msg_id_end = 0 WHERE id = ?", (rid,)
+    )
+    await db.commit()
+    return rid
 
 
 async def retrieval_count(db, memory_id: int) -> int:
@@ -103,7 +115,7 @@ class TestDedupeOnId:
         """A record already in the window under another age is a duplicate
         (#624): no new CONTEXT row, outcome dropped_dup, stats unmoved."""
         memory, _, channel, conv, db = await build_retrieval_env(STRONG)
-        rid = await seed_memory(db, channel.id, SUMMARY)
+        rid = await seed_before_window(db, channel.id, SUMMARY)
         funnel = memory.pm.get_plugin("funnel")
         # The record as an earlier turn admitted it, five hours ago.
         await funnel.admit(channel, conv, "memory", [f"(5h, memory {rid}) {SUMMARY}"])
@@ -118,7 +130,7 @@ class TestDedupeOnId:
     async def test_band_change_does_not_readmit(self):
         """Admitted as marginal earlier, strong now: still a duplicate."""
         memory, _, channel, conv, db = await build_retrieval_env(STRONG)
-        rid = await seed_memory(db, channel.id, SUMMARY)
+        rid = await seed_before_window(db, channel.id, SUMMARY)
         funnel = memory.pm.get_plugin("funnel")
         await funnel.admit(
             channel, conv, "memory", [f"[marginal] (3h, memory {rid}) {SUMMARY}"],
@@ -134,7 +146,7 @@ class TestDedupeOnId:
         """A window holding record <rid>0 doesn't make record <rid> look
         present: the key's closing paren anchors it."""
         memory, _, channel, conv, db = await build_retrieval_env(STRONG)
-        rid = await seed_memory(db, channel.id, SUMMARY)
+        rid = await seed_before_window(db, channel.id, SUMMARY)
         funnel = memory.pm.get_plugin("funnel")
         await funnel.admit(
             channel, conv, "memory", [f"(1h, memory {rid}0) something else"],
