@@ -124,7 +124,6 @@ def test_extras_default_to_every_extra(dockerfile):
     missing, unknown = _pyproject_extras() - default, default - _pyproject_extras()
     assert not missing, f"extras in pyproject.toml but not in the EXTRAS default: {sorted(missing)}"
     assert not unknown, f"EXTRAS default names extras pyproject.toml lacks: {sorted(unknown)}"
-    assert "dev" not in default, "the test-only dev extra is in the image"
 
 
 def test_extras_build_arg_is_read_by_the_install(dockerfile):

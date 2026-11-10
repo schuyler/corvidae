@@ -6,7 +6,8 @@
 #   docker build -t corvidae --build-arg EXTRAS="" .          # the bare kernel
 #
 # `/data` is the working directory: bind-mount a directory holding agent.yaml
-# there and sessions.db, logs and state/ land beside it. No port is exposed;
+# there and sessions.db and state/ land beside it (plus a log file, if you set
+# `logging.file`; otherwise logs go to `docker logs`). No port is exposed;
 # publish one yourself if you configure `web:`. signal-cli and llama-server
 # run outside the container. See docs/configuration.md, "Running in a container".
 
