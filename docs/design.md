@@ -142,7 +142,11 @@ plugin.
 The `webhook` plugin owns `on_webhook_subscribe(subscriptions)`, through which
 plugins register handlers for webhook endpoints; see "Webhook ingress" under
 Transports. The `web` plugin owns `on_web_console_init(panels)`, through which
-plugins add read-only console panels; see "Web" under Transports.
+plugins add read-only console panels; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path).
+
+### Funnel pull path
+
+Some sources cannot give their entries when asked, so they hand the funnel promises instead. An implementation of `on_funnel_ingest` calls `submit(source, future)` and returns; the future resolves to an `Ingest` or to `None`. Implementers submit rather than return because apluggy's `ahook` gathers implementations without `return_exceptions`: one raising implementation would lose every other one's return value. Each channel's `before_agent_turn` runs four steps in order, none of which returns early: expire (only when `funnel.ingest_ttl` is set), sweep finished promises into the channel's next-turn queue, drain the queues through the normal admission path, then collect by calling the hook. Collecting last means a promise submitted in a turn is first swept in the next. A submit for a `(channel, source)` that already has a pending promise cancels that promise, and `on_stop` cancels all of them. Expiry runs only at the channel's next turn, so an idle channel's pending promise runs until then or until shutdown. The contract and its limits are in [cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy).
 
 ### Broadcast dispatch and result resolution
 
@@ -4167,6 +4171,7 @@ funnel:
     memory: 512                 # optional per-source overrides
   # window_budgets:             # optional cap on one source's CONTEXT per window
   #   memory: 4096
+  # ingest_ttl: 600             # optional seconds before a queued or pending ingest is dropped
 
 channels:
   "irc:#channel":

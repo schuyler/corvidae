@@ -1077,13 +1077,7 @@ per-source ceiling on what one window holds
 (`funnel.window_budgets.<source>`), admitting in priority order,
 skipping entries that don't fit, drops logged; data-not-instructions
 framing of retrieved data, labelled with where it came from, written
-once here (everything else is framed by the kernel, §3.3.11); append and persist one CONTEXT row with its rowid attached. Non-
-tool-call notification payloads register with the funnel and are admitted
-at the turn their stub triggers, coalesced per `(channel, origin)`, so a
-critique verdict cannot ride a reminder's stub; payloads unregister at
-admission, and the pending flag clears when a drain is attempted. A payload
-can instead register without a stub; it is admitted at the channel's next
-turn, whatever that turn's origin, and wakes nothing. Salience
+once here (everything else is framed by the kernel, §3.3.11); append and persist one CONTEXT row with its rowid attached. Non-tool-call notification payloads are ingested by the funnel and admitted at the turn their stub triggers, coalesced per `(channel, origin)`, so a critique verdict cannot ride a reminder's stub; an ingested payload leaves the queue at admission, and the pending flag clears when a drain is attempted. A payload can instead be ingested without a stub; it is admitted at the channel's next turn, whatever that turn's origin, and wakes nothing. A source can also hand the funnel a promise of entries before a turn (`on_funnel_ingest`); the funnel admits it through the same path once it resolves. A stub-less payload or promise older than `funnel.ingest_ttl` is dropped. Salience
 arbitration across sources is a policy swap inside the funnel (a toggle,
 below),
 deciding only what to newly append and in what order.

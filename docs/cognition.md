@@ -884,16 +884,26 @@ point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
 
 Callers: memory retrieval (and optionally date/time grounding). The
 funnel also owns deferred registration: non-tool-call notification
-payloads queue per `(channel, origin)` via `register_and_wake()`, one
+payloads queue per `(channel, origin)` via `ingest_and_wake()`, one
 stub notification wakes the channel per pending pair, and the drain in
 `before_agent_turn` admits everything queued for the triggering
 exchange's origin. Entries the budget dropped stay queued for the next
 drain (as do entries the window cap held back), except an entry larger
 than its source's whole budget or window cap: it can never fit, so the drain drops it with a warning that names
 the channel, the source and `funnel.budgets.<source>` or
-`funnel.window_budgets.<source>`. `register()` queues without a stub: those payloads wake
+`funnel.window_budgets.<source>`. `ingest()` queues without a stub: those payloads wake
 nothing and are admitted at the channel's next turn, whatever its origin
 (user turns included), before the origin-matched drain.
+
+The funnel also takes pull-path promises (#717). A provider implements
+`on_funnel_ingest` and submits, per source, an `asyncio.Future` that
+resolves to an `Ingest` (entries, plus an optional callback) or to `None`.
+A promise that is done when the turn sweeps it is admitted that turn; one
+still pending is admitted at the channel's next turn after it resolves,
+whatever that turn's origin. `funnel.ingest_ttl` (unset by default, so
+nothing expires) bounds how long a stub-less payload or a pending promise
+may wait; see [configuration.md](configuration.md#funnel--context-admission-funnel).
+The hook's contract is under `FunnelPlugin` in the reference below.
 
 ## Plugin reference
 
@@ -1117,7 +1127,7 @@ candidate log.
 **Without this plugin:** sources that route through the funnel (memory
 retrieval) log a warning and admit nothing.
 
-`register_and_wake(channel, origin, source, entries)` is the deferred
+`ingest_and_wake(channel, origin, source, entries)` is the deferred
 admission path for notification producers without a `tool_call_id`:
 `origin` is stamped into the wake stub's `annotations["origin"]` (see
 [Traces](plugin-guide.md#traces)) so `before_agent_turn`'s drain, and any
@@ -1129,8 +1139,43 @@ concept. `'user'` is recognized by subscribing to `on_message_admitted`
 rather than by a value in `annotations`; `'task'` is the default OutcomeLogPlugin
 applies when `annotations["origin"]` is absent on a notification-born
 trace. `stub_text=` replaces the default "N pending … item(s)" stub text
-(the provenance check's use). `register(channel, source, entries)` is the
+(the provenance check's use). `ingest(channel, source, entries)` is the
 no-wake variant: no stub, no origin.
+
+`ingest` and `ingest_and_wake` are the push path. The pull path is the
+hook `on_funnel_ingest(channel, trace_id, annotations, submit)`, owned by
+the funnel (`FunnelSpec`) and called last in each `before_agent_turn`.
+Implementers call `submit(source, promise)`, where `promise` is an
+`asyncio.Future` resolving to `Ingest(entries, on_admitted=None)` or `None`:
+
+- Submit and return. The hook must be `async`, and it must not await a
+  promise. Implementers should list `funnel` in `optional_depends_on`, so
+  a disabled funnel is logged at DEBUG rather than WARNING. With the funnel
+  disabled, nothing calls the hook.
+- At most one pending promise per `(channel, source)`. A newer submit
+  cancels the older, so do not submit again while your previous promise
+  for the channel is still pending.
+- Each turn runs four steps in order, none of which returns early:
+  **expire** (only when `funnel.ingest_ttl` is set: queued stub-less payloads and
+  pending promises older than it are dropped, and unresolved promises are
+  cancelled); **sweep** (each finished promise leaves the pending set, and
+  an `Ingest` it resolved to joins the channel's next-turn queue carrying
+  the promise's submit time, so the TTL counts from submission); **drain**
+  (the stub-less queue, then the origin-keyed one, through the usual
+  dedupe, budget, framing and persist); **collect** (call the hook).
+- A promise that raised is logged at WARNING with its source and channel
+  and dropped. A promise its provider cancelled is dropped at DEBUG. `None`
+  admits nothing. `on_admitted(Admission)`, when given, runs after each admission
+  attempt that completes; a raise in it is logged and does not stop the drain.
+- On shutdown, `on_stop` cancels every pending promise. Queued payloads are
+  dropped with the process, as before.
+
+Two limits. Expiry runs at the channel's next turn, with no timer, so a
+pending promise on a channel that takes no further turn keeps running
+until then or until shutdown. And a promise that finishes after the turn's
+sweep is superseded, and its entries lost, if its provider submits again
+in that same turn's collect. The funnel does not admit such a result on
+re-submit yet.
 
 ### GoalsPlugin (`packages/corvidae-cognition/corvidae_cognition/goals.py`)
 
@@ -1368,7 +1413,7 @@ model makes both language judgments; the code only fetches evidence:
    fork: an empty or partial answer can't pass as "all supported". Each
    unsupported verdict becomes an objection quoting the claim from our
    list, with the judge's reason, and reaches the funnel tagged
-   `[provenance]`. Stylistic objections queue through `register` and wait for
+   `[provenance]`. Stylistic objections queue through `ingest` and wait for
 the channel's next turn. Provenance objections wake the channel with a
 stub whose text tells the agent the default is to send nothing: reply
 exactly `NO_REPLY`, and reply in the channel only if its earlier reply

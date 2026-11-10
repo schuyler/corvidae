@@ -325,7 +325,7 @@ class TestDeferredOverCap:
             {"funnel": {"window_budgets": {"critique": 60}}}
         )
         oversized = ("charlie " * 100).strip()
-        funnel.register(channel, source="critique",
+        funnel.ingest(channel, source="critique",
                               entries=[oversized, "small verdict"])
 
         with caplog.at_level(logging.WARNING, logger="corvidae.funnel"):

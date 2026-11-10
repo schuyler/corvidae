@@ -13,7 +13,7 @@ Covers the plan's red-test list:
   one drain admits all three.
 - Payloads of origin A do not drain on an origin-B turn or a user turn.
 - Admission failure (monkeypatched admit raising) → payloads still
-  registered; next register_and_wake fires a fresh stub.
+  registered; next ingest_and_wake fires a fresh stub.
 - Budget-dropped entries survive to the next drain.
 """
 
@@ -73,9 +73,9 @@ class TestStubCoalescing:
         funnel, channel, conv, db = await build_funnel()
         pm = funnel.pm
 
-        await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["verdict one"])
-        await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["verdict two"])
-        await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["verdict three"])
+        await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["verdict one"])
+        await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["verdict two"])
+        await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["verdict three"])
 
         # Exactly one stub for the pair — later registrations only queue.
         pm.ahook.on_notify.assert_awaited_once()
@@ -105,10 +105,10 @@ class TestStubCoalescing:
         funnel, channel, conv, db = await build_funnel()
         pm = funnel.pm
 
-        await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["first"])
+        await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["first"])
         await funnel.before_agent_turn(channel=channel, trace_id="k1", annotations={"origin": "critique"})
 
-        await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["second"])
+        await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["second"])
         assert pm.ahook.on_notify.await_count == 2
 
         await db.close()
@@ -117,7 +117,7 @@ class TestStubCoalescing:
         funnel, channel, conv, db = await build_funnel()
         pm = funnel.pm
 
-        await funnel.register_and_wake(
+        await funnel.ingest_and_wake(
             channel, origin="critique", source="critique", entries=["a", "b"]
         )
         text = pm.ahook.on_notify.await_args.kwargs["text"]
@@ -131,7 +131,7 @@ class TestStubCoalescing:
         funnel, channel, conv, db = await build_funnel()
         pm = funnel.pm
 
-        await funnel.register_and_wake(channel, origin="critique", source="critique", entries=[])
+        await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=[])
         pm.ahook.on_notify.assert_not_awaited()
 
         await funnel.before_agent_turn(channel=channel, trace_id="k1", annotations={"origin": "critique"})
@@ -146,7 +146,7 @@ class TestPerOriginIsolation:
         task-origin turn (§2.2 correctness point)."""
         funnel, channel, conv, db = await build_funnel()
 
-        await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["a verdict"])
+        await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["a verdict"])
 
         await funnel.before_agent_turn(channel=channel, trace_id="k1", annotations={"origin": "task"})
         assert "a verdict" not in _window_context_text(conv)
@@ -160,7 +160,7 @@ class TestPerOriginIsolation:
     async def test_origin_payloads_do_not_drain_on_user_turn(self):
         funnel, channel, conv, db = await build_funnel()
 
-        await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["a verdict"])
+        await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["a verdict"])
 
         await funnel.before_agent_turn(channel=channel, trace_id="k1", annotations={"origin": "user"})
         assert "a verdict" not in _window_context_text(conv)
@@ -175,7 +175,7 @@ class TestPerOriginIsolation:
         conv_b = ContextWindow(channel_b.id)
         channel_b.conversation = conv_b
 
-        await funnel.register_and_wake(channel_a, origin="critique", source="critique", entries=["a verdict"])
+        await funnel.ingest_and_wake(channel_a, origin="critique", source="critique", entries=["a verdict"])
 
         await funnel.before_agent_turn(channel=channel_b, trace_id="k1", annotations={"origin": "critique"})
         assert "a verdict" not in _window_context_text(conv_b)
@@ -194,20 +194,20 @@ class TestFailureAndBudget:
         funnel, channel, conv, db = await build_funnel()
         pm = funnel.pm
 
-        await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["kept verdict"])
+        await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["kept verdict"])
         assert pm.ahook.on_notify.await_count == 1
 
         async def boom(*args, **kwargs):
             raise RuntimeError("admission exploded")
 
-        monkeypatch.setattr(funnel, "admit", boom)
+        monkeypatch.setattr(funnel, "admit_detailed", boom)
         # Drain attempt fails inside admit — must not raise out of the hook,
         # and must not lose the payload.
         await funnel.before_agent_turn(channel=channel, trace_id="k1", annotations={"origin": "critique"})
         monkeypatch.undo()
 
         # A fresh registration fires a fresh stub (flag was cleared first).
-        await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["second verdict"])
+        await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["second verdict"])
         assert pm.ahook.on_notify.await_count == 2
 
         # The next successful drain admits BOTH the kept and the new payload.
@@ -230,7 +230,7 @@ class TestFailureAndBudget:
 
         long_a = "alpha " * 10
         long_b = "bravo " * 5
-        await funnel.register_and_wake(
+        await funnel.ingest_and_wake(
             channel, origin="critique", source="critique", entries=[long_a.strip(), long_b.strip()]
         )
 
@@ -257,7 +257,7 @@ class TestFailureAndBudget:
         )
 
         oversized = ("charlie " * 30).strip()
-        await funnel.register_and_wake(
+        await funnel.ingest_and_wake(
             channel, origin="critique", source="critique",
             entries=[oversized, "small verdict"],
         )
@@ -290,7 +290,7 @@ class TestMidDrainRegistrationWedge:
     (after the pending flag was discarded) is admitted by the in-progress
     drain, so its own stub's turn arrives with an empty registry. That turn
     must still clear the pending flag — otherwise the pair is wedged: every
-    later register_and_wake sees the stale flag and never fires a stub, and
+    later ingest_and_wake sees the stale flag and never fires a stub, and
     critique-origin turns only originate from stubs."""
 
     async def test_mid_drain_registration_does_not_wedge_the_pair(self):
@@ -305,7 +305,7 @@ class TestMidDrainRegistrationWedge:
         async def registering_event(**kwargs):
             if not fired["done"]:
                 fired["done"] = True
-                await funnel.register_and_wake(
+                await funnel.ingest_and_wake(
                     channel, origin="critique", source="critique", entries=["payload B"]
                 )
             return await orig_event(**kwargs)
@@ -313,7 +313,7 @@ class TestMidDrainRegistrationWedge:
         pm.ahook.persist_message = registering_event
 
         # Stub 1 fires for A.
-        await funnel.register_and_wake(
+        await funnel.ingest_and_wake(
             channel, origin="critique", source="critique", entries=["payload A"]
         )
         assert pm.ahook.on_notify.await_count == 1
@@ -334,7 +334,7 @@ class TestMidDrainRegistrationWedge:
 
         # A fresh registration must fire a fresh stub (count 3). Before the
         # fix this stayed at 2 and payload C sat undeliverable forever.
-        await funnel.register_and_wake(
+        await funnel.ingest_and_wake(
             channel, origin="critique", source="critique", entries=["payload C"]
         )
         assert pm.ahook.on_notify.await_count == 3
@@ -344,14 +344,14 @@ class TestMidDrainRegistrationWedge:
         await db.close()
 
 
-class TestRegisterWithoutStub:
-    """FunnelPlugin.register queues for the channel's next turn, whatever its origin."""
+class TestIngestWithoutStub:
+    """FunnelPlugin.ingest queues for the channel's next turn, whatever its origin."""
 
     @pytest.mark.parametrize("annotations", [{}, {"origin": "reminder"}])
     async def test_admitted_at_next_turn_of_any_origin(self, annotations):
         funnel, channel, conv, db = await build_funnel()
 
-        funnel.register(channel, source="critique", entries=["a style note"])
+        funnel.ingest(channel, source="critique", entries=["a style note"])
 
         await funnel.before_agent_turn(channel=channel, trace_id="k1", annotations=annotations)
         assert "a style note" in _window_context_text(conv)
@@ -361,7 +361,7 @@ class TestRegisterWithoutStub:
     async def test_admitted_only_once(self):
         funnel, channel, conv, db = await build_funnel()
 
-        funnel.register(channel, source="critique", entries=["a style note"])
+        funnel.ingest(channel, source="critique", entries=["a style note"])
         await funnel.before_agent_turn(channel=channel, trace_id="k1", annotations={})
         assert "a style note" in _window_context_text(conv)
 
@@ -374,7 +374,7 @@ class TestRegisterWithoutStub:
     async def test_fires_no_notify(self):
         funnel, channel, conv, db = await build_funnel()
 
-        funnel.register(channel, source="critique", entries=["a style note"])
+        funnel.ingest(channel, source="critique", entries=["a style note"])
         funnel.pm.ahook.on_notify.assert_not_awaited()
 
         await db.close()
@@ -384,7 +384,7 @@ class TestStubText:
     async def test_stub_text_replaces_the_count_text(self):
         funnel, channel, conv, db = await build_funnel()
 
-        await funnel.register_and_wake(
+        await funnel.ingest_and_wake(
             channel, origin="critique", source="critique",
             entries=["a verdict"], stub_text="custom stub words",
         )
