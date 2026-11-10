@@ -17,6 +17,7 @@ from tests.cognition.test_memory_retrieval import (
     bow_embed,
     build_retrieval_env,
     context_messages,
+    gate_open,
 )
 
 # The window under test holds message_log ids WINDOW_START .. WINDOW_START+4.
@@ -89,7 +90,7 @@ class TestWindowExclusion:
     async def test_in_window_record_excluded_other_channel_kept(self):
         # R1: same channel, range wholly in the window -> not admitted;
         # the same content on another channel -> admitted.
-        memory, embedder, channel, conv, db = await build_retrieval_env()
+        memory, embedder, channel, conv, db = await build_retrieval_env(gate_open())
         await seed(db, channel.id,
                    "the rain gauge is on the north fence by the shed",
                    WINDOW_START + 1, WINDOW_START + 3)
@@ -105,7 +106,7 @@ class TestWindowExclusion:
 
     async def test_record_straddling_window_start_admitted(self):
         # R2: msg_id_start below the window's oldest id, end inside it.
-        memory, embedder, channel, conv, db = await build_retrieval_env()
+        memory, embedder, channel, conv, db = await build_retrieval_env(gate_open())
         await seed(db, channel.id,
                    "the rain gauge is on the north fence by the shed",
                    WINDOW_START - 3, WINDOW_START + 2)
@@ -142,7 +143,7 @@ class TestWindowExclusion:
 
     async def test_window_without_ids_excludes_nothing(self):
         # R4: no _db_id anywhere in the window -> no exclusion.
-        memory, embedder, channel, conv, db = await build_retrieval_env()
+        memory, embedder, channel, conv, db = await build_retrieval_env(gate_open())
         await seed(db, channel.id,
                    "the rain gauge is on the north fence by the shed",
                    WINDOW_START + 1, WINDOW_START + 3)

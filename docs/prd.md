@@ -1024,11 +1024,12 @@ only through the funnel.
    k; this keeps admission from echoing what the window already holds and
    is not a retrieval scope), score by similarity times recency decay
    (`half_life_days`, from creation or last use), band strong/moderate/
-   weak on score or raw similarity (a record only the keyword search found
-   bands at no less than the FTS proxy), drop weak unless nothing else matched,
-   annotate conflicts between records with opposed claims and prefer the
-   later one, and admit through the funnel as `[band] (age) summary`
-   lines. Admitted records get their access statistics bumped; every
+   weak on similarity relative to the query's distribution over the
+   indexed records, or on score or raw similarity where configured, drop
+   weak (a query with nothing above weak admits nothing), annotate
+   conflicts between records with opposed claims and prefer the later
+   one, and admit through the funnel as `(age) summary` lines, marked
+   `[marginal] (age) summary` when moderate. Admitted records get their access statistics bumped; every
    retrieval writes a `retrieval_log` row and the exchange's retrieval
    profile. Retrieval spans the agent's whole memory; there is no
    per-channel scope to narrow it (principle 14), and
@@ -1036,7 +1037,9 @@ only through the funnel.
 5. Degradation: encoder down, FTS5 over `memory_fts`, flagged; sqlite-vec
    unloadable, FTS5 with one startup warning; no embedding profile, records
    stored unembedded for backfill; a stored encoder different from config,
-   ERROR and embeddings disabled rather than mixed. Nothing in the memory
+   ERROR and embeddings disabled rather than mixed; too few embedded
+   records for a stable spread, relative banding falls back to raw
+   similarity, logged once. Nothing in the memory
    path raises into the turn loop. Text is canonical; vectors are a
    rebuildable cache.
 6. Retention demotes, never deletes: a usage-weighted score with a grace
@@ -1540,7 +1543,7 @@ design, not requirement. The requirements are outcomes:
    All of them, the cache probes included, report shifts and regressions;
    they gate nothing.
 6. Persyn's §9 criteria run as an integration suite against a live daemon
-   with a scripted interlocutor: recalls across restart, hedges weak
+   with a scripted interlocutor: recalls across restart, hedges marginal
    memories, refuses to remember fabricated events, pushes back on flawed
    premises, declines a request it is capable of when it has a reason
    of its own (never as a quota, and never against §3.7's rule that a

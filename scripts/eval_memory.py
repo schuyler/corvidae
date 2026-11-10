@@ -59,7 +59,8 @@ POOL_JSON is written once after all queries: run_at, k, one entry per query
 (index, text, context, subset, query (the text actually retrieved with),
 relevant, unscorable ids with their status absent / redacted /
 superseded / not_indexed, degraded, recall_at_k, mrr, and every scored
-candidate as id, rank, similarity, score, band, source) and a summary (with
+candidate as id, rank, similarity, score, band, z (band_on: relative's
+z-score, null when none was computed, #409), source) and a summary (with
 query_context, candidates and per-subset means). It holds no memory text beyond the
 labels' own; look the ids up in the source.
 """
@@ -516,6 +517,7 @@ def candidate_entries(pool: RetrievalPool) -> list[dict]:
             "similarity": cand["similarity"],
             "score": cand["score"],
             "band": cand["band"],
+            "z": cand["z"],
             "source": cand["source"],
         }
         for rank, cand in enumerate(pool.ranked, start=1)

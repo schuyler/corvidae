@@ -48,6 +48,23 @@ EMBED_CONFIG = {
 }
 
 
+# Retrieval settings whose gate admits any record with a measured similarity
+# (#409). For tests of admission mechanics (dedupe, access stats, logging,
+# window exclusion), not of the gate: the stub embedder's hashed cosines put
+# most paraphrases below the default thresholds, and since #409 a weak record
+# is no longer admitted when nothing else matched.
+GATE_OPEN = {"band_on": "similarity", "bands": {"moderate": 0.0}}
+
+
+def gate_open(config: dict | None = None) -> dict:
+    """``config`` (default EMBED_CONFIG) with GATE_OPEN under memory.retrieval;
+    retrieval keys already in ``config`` win."""
+    config = config or EMBED_CONFIG
+    memory = dict(config.get("memory", {}))
+    memory["retrieval"] = {**GATE_OPEN, **memory.get("retrieval", {})}
+    return {**config, "memory": memory}
+
+
 def bow_embed(text: str) -> list[float]:
     """Deterministic hashed bag-of-words unit vector."""
     vec = [0.0] * DIMS
@@ -177,8 +194,9 @@ class TestRetrievalBasics:
         # Funnel framing wraps the entries.
         assert content.startswith("[CONTEXT from memory")
         assert content.rstrip().endswith("[end CONTEXT from memory]")
-        # Band annotation and age prefix each line.
-        assert re.search(r"\[(strong|moderate|weak)\] \(.+?\) .*wifi", content)
+        # An age prefixes each line, after a [marginal] label when the record
+        # banded moderate (#409); a strong record carries no label.
+        assert re.search(r"^(\[marginal\] )?\(.+?\) .*wifi", content, re.MULTILINE)
         # The relevant memory is the first entry line.
         lines = content.split("\n")[1:-1]
         assert "wifi" in lines[0]
@@ -260,7 +278,7 @@ class TestWholeMemory:
 
 class TestDedupeAndStats:
     async def test_reasking_does_not_duplicate_context(self):
-        memory, embedder, channel, conv, db = await build_retrieval_env()
+        memory, embedder, channel, conv, db = await build_retrieval_env(gate_open())
         await seed_memory(db, channel.id,
                           "kestrel moved the rain gauge to the north fence")
         await ask(memory, channel, conv, "where is the rain gauge?")
@@ -285,7 +303,7 @@ class TestDedupeAndStats:
         await db.close()
 
     async def test_access_stats_increment_for_admitted(self):
-        memory, embedder, channel, conv, db = await build_retrieval_env()
+        memory, embedder, channel, conv, db = await build_retrieval_env(gate_open())
         rowid = await seed_memory(
             db, channel.id, "kestrel moved the rain gauge to the north fence",
         )
@@ -363,7 +381,7 @@ class TestDegradation:
 
 class TestRetrievalLog:
     async def test_retrieval_log_row_per_retrieval(self):
-        memory, embedder, channel, conv, db = await build_retrieval_env()
+        memory, embedder, channel, conv, db = await build_retrieval_env(gate_open())
         await seed_memory(db, channel.id,
                           "kestrel moved the rain gauge to the north fence")
         await ask(memory, channel, conv, "where is the rain gauge?")

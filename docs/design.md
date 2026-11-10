@@ -4130,13 +4130,13 @@ memory:
   half_life_days: 30            # retrieval recency decay (e-folding time, days)
   retrieval:
     k: 8                        # KNN candidate count
-    band_on: score              # score | similarity — what the bands apply to
+    band_on: relative           # relative | score | similarity — what the bands apply to (#409)
     recency_from: created       # created | last_used — where ranking age runs from
     query_context: previous_reply  # previous_reply | none — the agent's last reply joins the query
     candidates: hybrid          # hybrid | vector — fuse KNN with FTS5 by reciprocal rank
     bands:
-      strong: 0.75              # assert confidently at or above this value (score or similarity, per band_on)
-      moderate: 0.60            # hedge at or above this value
+      strong: 4.5               # shown bare at or above this value (z under relative; 0.75 under score/similarity)
+      moderate: 3.0             # shown [marginal] at or above this value, else dropped (0.60 under score/similarity)
 
 scheduler:
   timezone: UTC                 # IANA name; resolves offset-less times (default UTC)

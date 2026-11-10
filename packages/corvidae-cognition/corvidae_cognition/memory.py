@@ -49,11 +49,16 @@ Config:
       half_life_days: 30             # retrieval recency decay (e-folding days)
       retrieval:
         k: 8                         # KNN candidate count
-        band_on: score               # score | similarity — what bands compare
+        band_on: relative            # relative | score | similarity — what
+                                     # bands compare (relative: z of cosine
+                                     # against the whole memory, #409)
         recency_from: created        # created | last_used — ranking age origin
         bands:
-          strong: 0.75               # value >= strong → asserted confidently
-          moderate: 0.60             # value >= moderate → hedged
+          strong: 4.5                # value >= strong → shown bare (z under
+                                     # relative; 0.75 under score/similarity)
+          moderate: 3.0              # value >= moderate → shown [marginal];
+                                     # below is weak, never admitted
+                                     # (0.60 under score/similarity)
       consolidation_fork_prompt: ... # instruction for forked consolidation
                                      # (agent.forks, #51); static config
 
@@ -149,9 +154,23 @@ DEFAULT_RETRIEVAL_K = 8
 DEFAULT_HALF_LIFE_DAYS = 30.0
 DEFAULT_BAND_STRONG = 0.75
 DEFAULT_BAND_MODERATE = 0.60
+# Band thresholds under band_on: relative (#409) are z-scores: how many
+# standard deviations a record's cosine to the query sits above the mean
+# cosine of the whole memory to that query. Starting values from #409's
+# bge-m3 probes; the retrieval_candidate.z column is how to refit them.
+DEFAULT_BAND_STRONG_Z = 4.5
+DEFAULT_BAND_MODERATE_Z = 3.0
+# Fewest embedded records band_on: relative needs before it trusts the
+# spread; below it, banding falls back to raw similarity (logged once). A z
+# over N records can't exceed sqrt(N - 1), so this must keep the strong
+# threshold reachable: sqrt(49) = 7 leaves room above 4.5.
+RELATIVE_MIN_RECORDS = 50
 # What the relevance band is computed from, and where ranking age is
 # measured from (GitHub issue #52). The first entry is the default.
-BAND_ON_CHOICES = ("score", "similarity")
+BAND_ON_CHOICES = ("relative", "score", "similarity")
+# The one label an admitted memory line can carry (#409): a moderate record
+# is shown as marginal, a strong one bare, and a weak one not at all.
+MARGINAL_LABEL = "[marginal]"
 RECENCY_FROM_CHOICES = ("created", "last_used")
 # What passive retrieval's query holds besides the unanswered user messages
 # (#665): the agent's previous reply (variant A), or nothing (the pre-#665
@@ -391,9 +410,9 @@ def _dialog_transcript(messages: list[dict]) -> str:
 
 
 # The longest prefix a retrieved memory line gets before its summary
-# ("[band] (age) "): the longest band name and a 5-digit day count. A raw
-# fallback piece leaves room for it so the whole line fits the budget (#626).
-WORST_MEMORY_LINE_PREFIX = "[moderate] (99999d) "
+# ("[marginal] (age) "): the label and a 5-digit day count. A raw fallback
+# piece leaves room for it so the whole line fits the budget (#626).
+WORST_MEMORY_LINE_PREFIX = f"{MARGINAL_LABEL} (99999d) "
 
 
 def _split_transcript(messages: list[dict], max_tokens: int) -> list[str]:
@@ -895,6 +914,18 @@ async def build_catchup_segments(
     return segments
 
 
+def _memory_line(candidate: dict) -> str:
+    """Render one admitted memory as a CONTEXT line (#409).
+
+    ``(age) summary`` for a strong record, ``[marginal] (age) summary`` for a
+    moderate one. Weak records are never rendered: the gate drops them.
+    """
+    age = _format_age(candidate["age_seconds"])
+    if candidate["band"] == "strong":
+        return f"({age}) {candidate['summary']}"
+    return f"{MARGINAL_LABEL} ({age}) {candidate['summary']}"
+
+
 def _retrieval_choice(retrieval_cfg: dict, key: str, choices: tuple[str, ...]) -> str:
     """Read an enum-valued memory.retrieval key, warning on and ignoring an
     unsupported value so a typo degrades to the default (choices[0])."""
@@ -1260,6 +1291,7 @@ CREATE TABLE IF NOT EXISTS retrieval_candidate (
     rank         INTEGER NOT NULL,   -- 1-based; would-be rank for excluded_in_window rows
     outcome      TEXT NOT NULL,
     source       TEXT,               -- vec | fts | both (#666); NULL on rows from before it
+    z            REAL,               -- band_on: relative z-score (#409); NULL when none was computed
     PRIMARY KEY (retrieval_id, memory_id)
 ) WITHOUT ROWID
 """
@@ -1413,10 +1445,11 @@ class MemoryPlugin(CorvidaePlugin):
             tuple[str, int], asyncio.Task[tuple[int, Consolidation] | None]
         ] = collections.OrderedDict()
         self._retrieval_k: int = DEFAULT_RETRIEVAL_K
-        self._band_strong: float = DEFAULT_BAND_STRONG
-        self._band_moderate: float = DEFAULT_BAND_MODERATE
+        self._band_strong: float = DEFAULT_BAND_STRONG_Z
+        self._band_moderate: float = DEFAULT_BAND_MODERATE_Z
         self._half_life_days: float = DEFAULT_HALF_LIFE_DAYS
         self._band_on: str = BAND_ON_CHOICES[0]
+        self._relative_fallback_warned: bool = False
         self._recency_from: str = RECENCY_FROM_CHOICES[0]
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold: float = 0.95
@@ -1558,12 +1591,35 @@ class MemoryPlugin(CorvidaePlugin):
         retrieval_cfg = self._memory_cfg.get("retrieval", {}) or {}
         self._retrieval_k = retrieval_cfg.get("k", DEFAULT_RETRIEVAL_K)
         bands = retrieval_cfg.get("bands", {}) or {}
-        self._band_strong = bands.get("strong", DEFAULT_BAND_STRONG)
-        self._band_moderate = bands.get("moderate", DEFAULT_BAND_MODERATE)
         self._half_life_days = self._memory_cfg.get(
             "half_life_days", DEFAULT_HALF_LIFE_DAYS
         )
         self._band_on = _retrieval_choice(retrieval_cfg, "band_on", BAND_ON_CHOICES)
+        # Thresholds default by mode: z-scores under relative, cosine-scale
+        # values under score and similarity.
+        if self._band_on == "relative":
+            default_strong, default_moderate = (
+                DEFAULT_BAND_STRONG_Z, DEFAULT_BAND_MODERATE_Z,
+            )
+        else:
+            default_strong, default_moderate = (
+                DEFAULT_BAND_STRONG, DEFAULT_BAND_MODERATE,
+            )
+        self._band_strong = bands.get("strong", default_strong)
+        self._band_moderate = bands.get("moderate", default_moderate)
+        # Thresholds tuned before relative became the default (#409) were
+        # cosine values; under the new default they would be read as z.
+        if bands and "band_on" not in retrieval_cfg:
+            logger.warning(
+                "memory.retrieval.bands is set but memory.retrieval.band_on "
+                "is not, so the default band_on: relative reads those "
+                "thresholds as z-scores (defaults strong %s, moderate %s). "
+                "If they are cosine values, set band_on: score (or "
+                "similarity) in agent.yaml to keep their meaning.",
+                DEFAULT_BAND_STRONG_Z, DEFAULT_BAND_MODERATE_Z,
+            )
+        # Warn once per process when the relative gate falls back (#409).
+        self._relative_fallback_warned = False
         self._recency_from = _retrieval_choice(
             retrieval_cfg, "recency_from", RECENCY_FROM_CHOICES
         )
@@ -2937,15 +2993,18 @@ class MemoryPlugin(CorvidaePlugin):
             degraded = pool.degraded
             candidates = pool.ranked[: pool.k]
 
-            # Drop weak-banded candidates unless nothing else matched.
-            non_weak = [c for c in candidates if c["band"] != "weak"]
-            selected = non_weak or candidates
+            # Drop weak-banded candidates, with no fallback (#409): a query
+            # with nothing above weak admits nothing. The FTS5-degraded path
+            # has no relevance to gate on, so it admits its top k (flagged in
+            # retrieval_log and marked marginal).
+            if degraded:
+                selected = list(candidates)
+            else:
+                selected = [c for c in candidates if c["band"] != "weak"]
 
-            # One line per memory: "[band] (age) summary".
-            lines = [
-                f"[{c['band']}] ({_format_age(c['age_seconds'])}) {c['summary']}"
-                for c in selected
-            ]
+            # One line per memory: "(age) summary", marked "[marginal]" when
+            # the record banded moderate.
+            lines = [_memory_line(c) for c in selected]
 
             # Admit through the funnel — never append CONTEXT directly
             # (trap #8); the funnel dedupes against the window and budgets.
@@ -3014,12 +3073,12 @@ class MemoryPlugin(CorvidaePlugin):
             # here must not lose the retrieval_log row or the exchange
             # profile, so it is caught and warned about on its own.
             try:
-                weak_dropped = bool(non_weak)
                 rows = []
+                selected_ids = {c["id"] for c in selected}
                 for i, c in enumerate(pool.ranked):
                     if i >= pool.k:
                         outcome = "cut"
-                    elif c["band"] == "weak" and weak_dropped:
+                    elif c["id"] not in selected_ids:
                         outcome = "dropped_weak"
                     else:
                         line = lines[selected.index(c)]
@@ -3033,20 +3092,20 @@ class MemoryPlugin(CorvidaePlugin):
                             outcome = "dropped_budget"
                     rows.append((retrieval_id, c["id"], c["similarity"],
                                  c["score"], c["band"], i + 1, outcome,
-                                 c["source"]))
+                                 c["source"], c["z"]))
                 # Excluded in-window records carry their would-be rank.
                 for would_be_rank, c in pool.excluded:
                     rows.append((retrieval_id, c["id"], c["similarity"],
                                  c["score"], c["band"], would_be_rank,
-                                 "excluded_in_window", c["source"]))
+                                 "excluded_in_window", c["source"], c["z"]))
                 # A memory the redact CLI flagged after it was scored gets no
                 # row (#654): the flag check is part of the insert itself, so
                 # either the flag is visible here or the scrubber, which runs
                 # after the flag commits, deletes the row.
                 await db.executemany(
                     "INSERT INTO retrieval_candidate (retrieval_id, memory_id, "
-                    "similarity, score, band, rank, outcome, source) "
-                    "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
+                    "similarity, score, band, rank, outcome, source, z) "
+                    "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? "
                     "WHERE (SELECT redacted FROM memory WHERE id = ?) = 0",
                     [(*row, row[1]) for row in rows],
                 )
@@ -3135,6 +3194,9 @@ class MemoryPlugin(CorvidaePlugin):
         fts_order: list[int] = []
         measured: set[int] = set()
         vec_ids: set[int] = set()
+        # The query's cosine mean and stdev over the whole memory, for
+        # band_on: relative (#409); None when not banding relatively.
+        spread: tuple[float, float] | None = None
         if self._vec_available and self._embedding_enabled():
             try:
                 client = self._llm().get_client("embedding")
@@ -3153,6 +3215,8 @@ class MemoryPlugin(CorvidaePlugin):
                     rows, fts_order, measured = await self._hybrid_rows(
                         db, text, query_vector, k, exclude, rows,
                     )
+                if self._band_on == "relative":
+                    spread = await self._relative_spread(db, query_vector)
         else:
             degraded = True
 
@@ -3182,25 +3246,48 @@ class MemoryPlugin(CorvidaePlugin):
                 vec_keys[memory_id] = similarity * decay
             # Relevance × recency decay.
             score = similarity * decay
-            # The band says how relevant a memory is: from the decayed
-            # score (default) or, with band_on: similarity, from relevance
-            # alone so an old, apt memory is not presented as a guess.
-            band_value = similarity if self._band_on == "similarity" else score
-            # A keyword match the vector search missed bands at no less than
-            # the FTS proxy (#666), so a name the embedding doesn't place near
-            # the query is not dropped as weak. Floored on the band value
-            # itself (flooring similarity would still decay below the proxy),
-            # and only for FTS-only hits: records the KNN also returned keep
-            # their measured, decayed band. ``similarity`` and ``score`` stay
-            # measured either way.
-            if memory_id in fts_ids and memory_id not in vec_ids:
-                band_value = max(band_value, FTS_SIMILARITY_PROXY)
-            if band_value >= self._band_strong:
-                band = "strong"
-            elif band_value >= self._band_moderate:
+            # The band says how relevant a memory is (#409).
+            z: float | None = None
+            if degraded:
+                # Keyword evidence alone: no similarity to band on, so every
+                # hit is hedged. The degraded path admits its top k flagged.
                 band = "moderate"
-            else:
+            elif memory_id not in measured:
+                # A keyword hit with no stored vector has no measured
+                # relevance, so it isn't admitted passively (search_memory
+                # still finds it). There is no keyword-only floor.
                 band = "weak"
+            else:
+                if spread is not None:
+                    # Relative: how far this record stands out from the
+                    # query's cosine distribution over the whole memory.
+                    mean, stdev = spread
+                    z = (similarity - mean) / stdev
+                    band_value, strong, moderate = (
+                        z, self._band_strong, self._band_moderate,
+                    )
+                elif self._band_on == "relative":
+                    # Relative with too small a memory to trust the spread:
+                    # raw similarity on the cosine defaults (warned once).
+                    band_value, strong, moderate = (
+                        similarity, DEFAULT_BAND_STRONG, DEFAULT_BAND_MODERATE,
+                    )
+                elif self._band_on == "similarity":
+                    # Relevance alone, so an old, apt memory isn't a guess.
+                    band_value, strong, moderate = (
+                        similarity, self._band_strong, self._band_moderate,
+                    )
+                else:
+                    # score: relevance with recency decay folded in.
+                    band_value, strong, moderate = (
+                        score, self._band_strong, self._band_moderate,
+                    )
+                if band_value >= strong:
+                    band = "strong"
+                elif band_value >= moderate:
+                    band = "moderate"
+                else:
+                    band = "weak"
             # Which search found it: the degraded path is FTS by definition.
             if degraded:
                 source = "fts"
@@ -3215,6 +3302,7 @@ class MemoryPlugin(CorvidaePlugin):
                 "similarity": similarity,
                 "score": score,
                 "band": band,
+                "z": z,
                 "age_seconds": age_seconds,
                 "source": source,
             })
@@ -3242,6 +3330,60 @@ class MemoryPlugin(CorvidaePlugin):
                 if degraded else len(in_window_rows)
             )
         return RetrievalPool(ranked, excluded, excluded_in_window, degraded, k)
+
+    async def _relative_spread(
+        self, db: aiosqlite.Connection, query_vector: list[float],
+    ) -> tuple[float, float] | None:
+        """The query's cosine mean and stdev over the whole memory (#409).
+
+        One aggregate pass over every indexed, unredacted record with a
+        stored vector (the same brute-force cost as the KNN scan, with no k
+        limit). Returns None, so banding falls back to raw similarity, when
+        there are fewer than ``RELATIVE_MIN_RECORDS`` such records, when they
+        have no spread, or when the scan fails; the first fallback of the
+        process is warned about.
+        """
+        import sqlite_vec
+        reason: str | None = None
+        try:
+            async with db.execute(
+                "SELECT COUNT(*), AVG(s), AVG(s * s) FROM ("
+                "  SELECT 1.0 - vec_distance_cosine(v.embedding, ?) AS s "
+                "  FROM memory_vec v JOIN memory m ON m.id = v.memory_id "
+                "  WHERE m.indexed = 1 AND m.redacted = 0)",
+                (sqlite_vec.serialize_float32(query_vector),),
+            ) as cursor:
+                count, mean, mean_sq = await cursor.fetchone()
+        except Exception:
+            logger.warning(
+                "relative banding: the similarity-spread scan over memory_vec "
+                "failed; banding this query on raw similarity instead",
+                exc_info=True,
+            )
+            return None
+        if count < RELATIVE_MIN_RECORDS:
+            reason = (
+                f"only {count} embedded records (band_on: relative needs at "
+                f"least {RELATIVE_MIN_RECORDS})"
+            )
+        else:
+            # Population variance from the two moments; clamp rounding noise.
+            stdev = math.sqrt(max(0.0, mean_sq - mean * mean))
+            if stdev <= 1e-9:
+                reason = f"no spread in similarity across {count} records"
+            else:
+                return mean, stdev
+        # Fallback: warn the first time, then stay quiet (it recurs per query
+        # until the memory grows).
+        if not self._relative_fallback_warned:
+            self._relative_fallback_warned = True
+            logger.warning(
+                "memory.retrieval.band_on: relative falls back to band_on: "
+                "similarity (strong %s, moderate %s): %s. This clears itself "
+                "as memory grows; logged once per process.",
+                DEFAULT_BAND_STRONG, DEFAULT_BAND_MODERATE, reason,
+            )
+        return None
 
     async def recent(self, limit: int) -> list[dict]:
         """The newest memories of the whole memory, every channel's.
@@ -3736,6 +3878,8 @@ class MemoryPlugin(CorvidaePlugin):
         await db.execute(RETRIEVAL_CANDIDATE_DDL)
         # #666: which search found each candidate; old rows read NULL.
         await add_column_if_missing(db, "retrieval_candidate", "source", "TEXT")
+        # #409: the relative gate's z-score; old rows read NULL.
+        await add_column_if_missing(db, "retrieval_candidate", "z", "REAL")
         await db.execute(RETRIEVAL_CANDIDATE_INDEX_DDL)
         # Phase 1b: message_fts and retention_meta
         await db.execute(MESSAGE_FTS_DDL)

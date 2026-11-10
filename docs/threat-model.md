@@ -1302,8 +1302,9 @@ it.
 
 - Passive retrieval joins the vector search with a keyword search (#666),
   so a record that names a person, project or identifier surfaces whenever
-  a query names it. A record that only the keyword search found bands at
-  least `[moderate]` however poorly its embedding matches. The set of
+  a query names it. Since #409 a record the keyword search found is gated
+  on its measured cosine like any other, so a shared name ranks it but
+  can't by itself admit it. The set of
   reachable records is unchanged (the same `indexed`, `redacted` and trust
   filters apply); what changes is which ones rank. The new edge: someone
   whose words get consolidated into a record can attach that record to a

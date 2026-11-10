@@ -38,8 +38,9 @@ memory:
   # No consolidation LLM calls during the run.
   idle_consolidate_after: 86400
   retrieval:
-    # FTS hits carry the 0.6 similarity proxy; banding the decayed score
-    # would put a fresh hit a hair under 0.60 and label it [weak].
+    # Raw similarity: this harness seeds a handful of records, below the
+    # relative gate's 50-record minimum, so relative would fall back to
+    # similarity anyway; set it explicitly so the run doesn't depend on that.
     band_on: similarity
 
 # memory and funnel on; the rest of the cognition set and the Buster

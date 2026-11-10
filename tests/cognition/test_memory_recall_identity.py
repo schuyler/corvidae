@@ -1,7 +1,8 @@
 """Tests for memory recall under a persistent identity (GitHub issue #52).
 
-- memory.retrieval.band_on: similarity|score — what the relevance band is
-  computed from. Ranking always uses the decayed score.
+- memory.retrieval.band_on: relative|similarity|score — what the relevance
+  band is computed from (relative is #409's default; see
+  test_memory_relative_gate.py). Ranking always uses the decayed score.
 - memory.retrieval.recency_from: created|last_used — where ranking age is
   measured from. Displayed age (age_seconds) always measures from created_at.
 - Consolidated records are dated from their source messages, not from the
@@ -58,9 +59,9 @@ async def _set_last_retrieved(db, memory_id: int, ts: float | None) -> None:
 
 
 class TestBandOn:
-    async def test_default_bands_on_decayed_score(self, env):
-        """Today's behavior: a 60-day-old exact match bands weak."""
-        memory, _, channel, _, db = await env()
+    async def test_score_bands_on_decayed_score(self, env):
+        """band_on: score: a 60-day-old exact match bands weak."""
+        memory, _, channel, _, db = await env(_config(band_on="score"))
         await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
         [c], _ = await memory.retrieve(SUMMARY)
         assert c["similarity"] == pytest.approx(1.0, abs=1e-4)
@@ -100,7 +101,9 @@ class TestBandOn:
         assert "band_on" in caplog.text
         await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
         [c], _ = await memory.retrieve(SUMMARY)
-        assert c["band"] == "weak"
+        # The default is relative (#409); with one record it bands on raw
+        # similarity, so the old exact match is strong, not decayed to weak.
+        assert c["band"] == "strong"
 
 
 # ---------------------------------------------------------------------------
