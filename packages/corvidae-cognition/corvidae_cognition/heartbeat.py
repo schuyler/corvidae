@@ -179,6 +179,7 @@ def frame_beat(
     goals_instruction: str = GOALS_INSTRUCTION,
     *,
     diff: bool = False,
+    open_goals: list[dict] | None = None,
 ) -> str:
     """The beat's notification text.
 
@@ -218,10 +219,25 @@ def frame_beat(
     ] or ["(none)"]
     goals_text = f"{RETIRED_GOALS_HEADER}\n" + "\n".join(goal_lines)
 
+    # Open goals: the list of goals currently in progress.
+    # Always included (not diffed) — they're short, structured, and the
+    # call-to-action references them.
+    open_goals_text = ""
+    if open_goals:
+        og_lines = [
+            f"- ({_format_age(g['age_seconds'])}, #{g['id']}) {g['summary']}"
+            for g in open_goals
+        ]
+        open_goals_text = (
+            "\n\nOpen goals, newest first:\n" + "\n".join(og_lines)
+        )
+    elif open_goals is not None:
+        open_goals_text = "\n\nOpen goals: (none)"
+
     # Full mode: prompt, memories, goals data, instruction at tail.
     # Diff mode: same structure, but only new items are in the lists.
     return (
-        f"{prompt}\n\n{mem_text}\n\n{goals_text}\n\n{goals_instruction}"
+        f"{prompt}\n\n{mem_text}\n\n{goals_text}{open_goals_text}\n\n{goals_instruction}"
     )
 
 
@@ -324,10 +340,12 @@ class HeartbeatPlugin(CorvidaePlugin):
         # plugin is loaded.
         goals = self.pm.get_plugin("goals")
         retired = None
+        open_goals_list = None
         try:
             memories = await self._memory.recent(self._memory_limit)
             if goals is not None:
                 retired = await goals.retired_goals(self._retired_goal_limit)
+                open_goals_list = await goals.open_goals()
         except Exception as exc:
             logger.warning(
                 "heartbeat: memory or retired-goals read failed on %s (%s); "
@@ -369,6 +387,7 @@ class HeartbeatPlugin(CorvidaePlugin):
                 memories, retired,
                 self._prompt, self._goals_instruction,
                 diff=False,
+                open_goals=open_goals_list,
             )
         else:
             # Subsequent beats: diff for memories, diff-or-full for goals.
@@ -379,6 +398,7 @@ class HeartbeatPlugin(CorvidaePlugin):
                 retired if goals_full else new_retired,
                 self._prompt, self._goals_instruction,
                 diff=True,
+                open_goals=open_goals_list,
             )
 
         # Update the diff state for the next beat.
