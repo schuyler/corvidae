@@ -51,6 +51,9 @@ cognition = [
 restart = [
     "corvidae-restart",
 ]
+timepiece = [
+    "corvidae-timepiece",
+]
 
 [project.scripts]
 corvidae = "corvidae.main:corvidae"
@@ -156,3 +159,4 @@ cross-channel-send = { workspace = true }
 context-panel = { workspace = true }
 webhook-notify = { workspace = true }
 corvidae-restart = { workspace = true }
+corvidae-timepiece = { workspace = true }
