@@ -61,7 +61,15 @@ async def _tables(db) -> set[str]:
         return {row[0] for row in await cursor.fetchall()}
 
 
-@pytest.mark.parametrize("identity,expect_vec", [(IDENTITY, True), (None, False)])
+def _vec_importable() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("sqlite_vec") is not None
+
+
+@pytest.mark.parametrize(
+    "identity,expect_vec",
+    [(IDENTITY, _vec_importable()), (None, False)],
+)
 async def test_schema_creates_the_tables(tmp_path, identity, expect_vec):
     index, _, _ = await make_index(tmp_path, {"a.md": "# A\n\nalpha content"}, identity)
     db = await index._ensure_schema()
