@@ -383,8 +383,8 @@ class FunnelPlugin(CorvidaePlugin):
 
         The pending flag is cleared FIRST, before the drains: a failure inside
         admission leaves payloads registered, and the next producer's stub
-        re-arms the channel rather than wedging it. Payloads unregister at
-        successful admission; entries the budget dropped stay registered
+        re-arms the channel rather than wedging it. Payloads leave the queue at
+        successful admission; entries the budget dropped stay queued
         for the next drain.
         """
         origin = (annotations or {}).get("origin")

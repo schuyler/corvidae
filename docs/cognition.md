@@ -1156,7 +1156,7 @@ Implementers call `submit(source, promise)`, where `promise` is an
   cancels the older, so do not submit again while your previous promise
   for the channel is still pending.
 - Each turn runs four steps in order, none of which returns early:
-  **expire** (only when `funnel.ingest_ttl` is set: queued payloads and
+  **expire** (only when `funnel.ingest_ttl` is set: queued stub-less payloads and
   pending promises older than it are dropped, and unresolved promises are
   cancelled); **sweep** (each finished promise leaves the pending set, and
   an `Ingest` it resolved to joins the channel's next-turn queue carrying
@@ -1165,8 +1165,8 @@ Implementers call `submit(source, promise)`, where `promise` is an
   dedupe, budget, framing and persist); **collect** (call the hook).
 - A promise that raised is logged at WARNING with its source and channel
   and dropped. A promise its provider cancelled is dropped at DEBUG. `None`
-  admits nothing. `on_admitted(Admission)`, when given, runs at each drain
-  attempt; a raise in it is logged and does not stop the drain.
+  admits nothing. `on_admitted(Admission)`, when given, runs after each admission
+  attempt that completes; a raise in it is logged and does not stop the drain.
 - On shutdown, `on_stop` cancels every pending promise. Queued payloads are
   dropped with the process, as before.
 

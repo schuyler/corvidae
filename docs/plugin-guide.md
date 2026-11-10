@@ -312,12 +312,12 @@ class RecallPlugin(CorvidaePlugin):
 - A promise that raised is logged with its source and channel and dropped.
   A promise its provider cancelled is dropped quietly. `None` admits nothing.
 - `on_admitted`, if given, is a sync callable. The funnel calls it with the
-  `Admission` (`admitted` and `duplicate` lists) at each drain attempt. A
-  raise is logged and does not stop the drain.
+  `Admission` (`admitted` and `duplicate` lists) after each admission attempt
+  that completes. A raise is logged and does not stop the drain.
 - A promise that is done when the turn starts is admitted that turn. One
   still pending is admitted at the channel's next turn after it resolves,
   whatever that turn's origin. Nothing wakes the channel for it.
-- `funnel.ingest_ttl`, when set, drops a queued payload or a pending promise
+- `funnel.ingest_ttl`, when set, drops a queued stub-less payload (`ingest`) or a pending promise
   older than it; an unresolved promise is cancelled, so your work should
   tolerate cancellation. Shutdown cancels pending promises.
 - A promise that finishes during a turn, after the funnel's sweep, is lost

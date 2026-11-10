@@ -1228,7 +1228,7 @@ async def ingest_and_wake(
    clear the pending flag FIRST (a failure inside admission leaves
    payloads registered; the next producer's stub re-arms the channel
    rather than wedging it), then `admit()` them under the producer's
-   source label. Payloads leave the queue at successful **admission**; entries
+   source label. Payloads unregister at successful **admission**; entries
    the budget dropped stay registered for the next stub (§2.2). The drain
    admits ONLY payloads matching the triggering exchange's origin — the
    origin comes from the enriched hook parameter, never parsed from stub
