@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import collections
 import json
+import re
 import logging
 import random
 from datetime import datetime, timezone
@@ -114,7 +115,6 @@ STYLISTIC_LENSES = ("predictive", "constrained", "adversarial")
 # Patterns that indicate a permission question about an action.
 # Matched against the agent's response text; a hit triggers the proactivity
 # check (fork) to determine whether the subject is owned by the agent.
-import re
 PERMISSION_QUESTION_PATTERNS = re.compile(
     r"(?:want me to|should i|do you want me to|shall i|would you like me to|"
     r"do you want|would you want me to|let me know if you want)"
@@ -1056,7 +1056,8 @@ class CritiquePlugin(CorvidaePlugin):
             if objections:
                 outcome["proactivity"]["detail"] = objections
             await self._record_and_register(
-                channel, trace_id, outcome, objections, wake=True
+                channel, trace_id, outcome, objections,
+                wake=bool(objections),
             )
         except Exception:
             logger.debug(
