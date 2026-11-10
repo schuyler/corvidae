@@ -24,6 +24,8 @@ from helpers import with_chat_llm
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae_cognition.heartbeat import (
     DEFAULT_HEARTBEAT_PROMPT,
+    GOALS_INSTRUCTION,
+    frame_beat,
     HEARTBEAT_CHANNEL,
     HeartbeatPlugin,
 )
@@ -386,3 +388,78 @@ async def test_beat_obeys_memory_limit(make_env):
     assert "newest: the third plan." in text
     assert "middle: the second plan." in text
     assert "oldest: the first plan." not in text
+
+
+# --- Diff-mode tests (#716) -------------------------------------------------
+
+class TestHeartbeatDiffMode:
+    """Diff-based heartbeat prompt: only new items, instruction at tail."""
+
+    def test_first_beat_is_full_mode(self):
+        """First beat (no prior state) sends all memories and goals."""
+        memories = [
+            {"id": 1, "age_seconds": 60, "channel_id": "c1", "summary": "mem1"},
+            {"id": 2, "age_seconds": 120, "channel_id": "c2", "summary": "mem2"},
+        ]
+        retired = [
+            {"id": 10, "age_seconds": 300, "summary": "goal1"},
+        ]
+        text = frame_beat(memories, retired, diff=False)
+        # Full mode: all items present
+        assert "mem1" in text
+        assert "mem2" in text
+        assert "goal1" in text
+        # Goals instruction at the tail (last line)
+        assert text.strip().endswith(GOALS_INSTRUCTION.strip())
+
+    def test_diff_mode_no_new_items_minimal(self):
+        """Diff mode with no new items sends a minimal one-liner."""
+        text = frame_beat([], [], diff=True)
+        assert "no new memories or goals" in text
+        assert "dream up new ones" in text
+        assert "You don't rest" in text
+        # Should be short (not the full prompt)
+        assert len(text) < 200
+
+    def test_diff_mode_only_new_items(self):
+        """Diff mode sends only new memories and goals."""
+        memories = [
+            {"id": 3, "age_seconds": 30, "channel_id": "c3", "summary": "new_mem"},
+        ]
+        retired = [
+            {"id": 11, "age_seconds": 60, "summary": "new_goal"},
+        ]
+        text = frame_beat(memories, retired, diff=True)
+        # New items present
+        assert "new_mem" in text
+        assert "new_goal" in text
+        # Goals instruction at the tail
+        assert text.strip().endswith(GOALS_INSTRUCTION.strip())
+
+    def test_diff_mode_no_goals_plugin(self):
+        """Diff mode with no goals plugin (retired=None)."""
+        memories = [
+            {"id": 3, "age_seconds": 30, "channel_id": "c3", "summary": "new_mem"},
+        ]
+        text = frame_beat(memories, None, diff=True)
+        assert "new_mem" in text
+        # No goals instruction (no goals plugin)
+        assert GOALS_INSTRUCTION not in text
+
+    def test_full_mode_goals_instruction_at_tail(self):
+        """Full mode also has goals instruction at the tail."""
+        memories = [
+            {"id": 1, "age_seconds": 60, "channel_id": "c1", "summary": "mem1"},
+        ]
+        retired = [
+            {"id": 10, "age_seconds": 300, "summary": "goal1"},
+        ]
+        text = frame_beat(memories, retired, diff=False)
+        # Goals instruction is the last thing
+        assert text.strip().endswith(GOALS_INSTRUCTION.strip())
+        # Memories and goals data come before the instruction
+        mem_pos = text.index("mem1")
+        goal_pos = text.index("goal1")
+        instr_pos = text.index(GOALS_INSTRUCTION)
+        assert mem_pos < instr_pos
+        assert goal_pos < instr_pos
