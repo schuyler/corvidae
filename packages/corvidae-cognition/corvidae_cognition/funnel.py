@@ -366,7 +366,7 @@ class FunnelPlugin(CorvidaePlugin):
     def _drop_unadmittable(
         self, channel_id: str, source: str, entries: list[str]
     ) -> list[str]:
-        """Return ``entries`` minus any larger than the source's whole budget.
+        """Return ``entries`` minus any larger than the source's budget or cap.
 
         Each dropped entry is logged at warning level with the channel, the
         source, its token count, the budget and the config key that fixes it.
