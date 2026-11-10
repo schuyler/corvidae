@@ -1448,6 +1448,15 @@ themselves and would need the same treatment. The systemd hardening in
 applies only to signal-cli; corvidae itself runs under `screen` with none
 of it.
 
+The container image (see [configuration.md](configuration.md#running-in-a-container))
+changes who the daemon runs as (uid 1000, not root) and what it can reach
+(what you mount and what the network allows). It is not this split: tools
+still run in the daemon's container, next to `sessions.db`, the web token
+and any mounted signal-cli socket. The default image installs every extra,
+so the tools they add (`notify_other_channel`, `restart` and the rest) are
+present unless `plugins.disabled` turns them off. Running tools somewhere
+narrower is [#532](https://github.com/schuyler/corvidae/issues/532).
+
 ## `transform_system_prompt` prefix guard (#136)
 
 A plugin wrapper on `transform_system_prompt` receives the composed

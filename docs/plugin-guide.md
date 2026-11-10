@@ -327,6 +327,87 @@ class RecallPlugin(CorvidaePlugin):
   if you submit again in that same turn. The funnel does not admit such a
   result on re-submit yet.
 
+### Writing a recall source
+
+If your plugin looks something up for each user turn (a wiki, a folder of
+notes) and wants the result in the window as CONTEXT, don't write the hook
+above yourself. `RecallSourceMixin` in `corvidae_cognition.recall` (cognition
+extra) already does the parts every such source repeats: it checks that the
+turn is a user turn, builds the query, keeps a cooldown and a single search
+in flight per channel, runs your search in the background under a timeout,
+catches and logs its failures, and submits the promise. You supply two methods.
+
+```python
+from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae_cognition.recall import RecallContext, RecallSourceMixin
+
+
+class NotesRecall(RecallSourceMixin, CorvidaePlugin):
+    # The funnel's frame label, and the key of funnel.budgets.<source_name>.
+    source_name = "notes"
+    # Your own agent.yaml block; the mixin reads cooldown and timeout from it.
+    config_key = "notes_recall"
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
+        # Raises ValueError on a malformed block, which aborts startup.
+        self.init_recall(config)
+
+    async def search(self, query: str, ctx: RecallContext) -> list[dict] | None:
+        # Hits in rank order, or None or [] for none. May raise.
+        return await lookup(query)  # your own lookup
+
+    def render(self, hit: dict) -> str:
+        # One line per hit; render it the same way every time (see below).
+        return f"{hit['title']}: {hit['text']}"
+```
+
+The mixin is a helper, not a plugin: it has no entry point. Your class does,
+and `plugins.disabled` switches your source off by that name. The rest of the
+contract:
+
+- **When it searches.** Only when the window ends in a plain user message
+  with text. CONTEXT rows below that message are looked through, because the
+  funnel runs this hook last, after it may have appended CONTEXT under the
+  user's words. A turn that a tool result or an agent reply ends is skipped. The
+  query is memory's `retrieval_query` with `previous_reply` context: the
+  unanswered user messages, preceded by the agent's last reply.
+- **Settings.** `<config_key>.cooldown` (seconds, 0 or more, default 5) and
+  `<config_key>.timeout` (seconds, greater than 0, default 10). Put your own
+  keys in the same block; the mixin ignores them. No block gives the defaults and
+  logs nothing. A bad value raises `ValueError` naming the key, the value and
+  what is accepted. A top-level `cooldown` is not read.
+- **Cooldown and single-flight.** At most one search is in flight per channel,
+  and a channel is not searched again until `cooldown` seconds after the
+  last search started. A search that failed or timed out still counts as one.
+  While a search is pending the mixin does not submit again, because a newer
+  submit would cancel it. A turn skipped by either rule is not retried: the
+  next turn asks again.
+- **Fail-soft.** A search that raises, or runs past `timeout`, is logged at
+  WARNING with your source name, the channel and the traceback, and the turn goes
+  on without it. The funnel cancelling a promise (`funnel.ingest_ttl`,
+  shutdown) is not a failure and logs nothing. A hit whose `render` raises is
+  dropped with a warning and the others stand. `search` must not swallow
+  `CancelledError`.
+- **Size and freshness.** The mixin has no `k`, no bands and no score
+  threshold. What fits is `funnel.budgets.<source_name>`, an entry bigger than
+  the whole budget is dropped with a warning, and `funnel.ingest_ttl` ages out
+  a result nobody collected. Whether a hit is relevant enough to show is not
+  decided here (#674).
+- **Render stably.** The funnel dedupes on a whole line for now (#725), so a
+  line that carries something that changes (an age, a rank) re-admits the same
+  hit every turn.
+- **Without the funnel** nothing calls the hook and the source does nothing.
+  The mixin lists `funnel` in `optional_depends_on`, so that is logged at DEBUG.
+- **One timing limit** (#726). A result is admitted at the turn after the one
+  that started its search, never the same turn. The mixin never submits while its
+  own search is pending, so the funnel's lost-on-resubmit case needs a search that
+  finishes between the funnel's sweep and its collect in a single turn.
+- **Tests.** Pass a fake clock as `init_recall(config, now=clock)`. See
+  `tests/cognition/test_recall_mixin.py` for a source on a real plugin
+  manager with the real funnel.
+
 ## Subscribing to webhooks
 
 The `webhook` plugin (`corvidae/channels/webhook.py`) owns `on_webhook_subscribe(subscriptions)`. Implement it to receive the JSON objects POSTed to `/hook/<endpoint>`; the listener, auth and endpoint names are the operator's `webhook:` config ([configuration.md](configuration.md#webhook--webhook-ingress)).
