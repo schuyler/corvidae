@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import collections
 import json
+import re
 import logging
 import random
 from datetime import datetime, timezone
@@ -81,6 +82,7 @@ LENS_NEG_VALENCE_DEFAULT = 0.3      # critique.lens.neg_valence ∧ disagreement
 LENS_DISAGREEMENT_DEFAULT = 0.6     # critique.lens.disagreement
 SAMPLE_BELOW_RATE_DEFAULT = 0.05    # critique.sample_below_rate (false-negative bound)
 PROVENANCE_ENABLED_DEFAULT = True   # critique.provenance.enabled
+PROACTIVITY_ENABLED_DEFAULT = True  # critique.proactivity.enabled
 
 # Evidence bounds for the provenance critic (#155). Constants, not
 # tunables: a lever that hid evidence would make the critic object to every
@@ -109,6 +111,16 @@ PROVENANCE_NOTE = (
 )
 
 STYLISTIC_LENSES = ("predictive", "constrained", "adversarial")
+
+# Patterns that indicate a permission question about an action.
+# Matched against the agent's response text; a hit triggers the proactivity
+# check (fork) to determine whether the subject is owned by the agent.
+PERMISSION_QUESTION_PATTERNS = re.compile(
+    r"(?:want me to|should i|do you want me to|shall i|would you like me to|"
+    r"do you want|would you want me to|let me know if you want)"
+    r"\s+\w+",
+    re.IGNORECASE,
+)
 
 # Bound on the admitted-trace-id LRU (CritiquePlugin._admitted): "user"
 # origin recognition is inferred from on_message_admitted subscription
@@ -334,11 +346,34 @@ _FORK_PROMPT_PROVENANCE = (
     '{"verdicts": [{"claim": 1, "reason": "...", "supported": true}, '
     '{"claim": 2, "reason": "...", "supported": false}]}'
 )
+_FORK_PROMPT_PROACTIVITY = (
+    "[Self-critique: proactivity] Pause the conversation here. Review the "
+    "response you gave in the exchange that began with the message quoted "
+    "below. Your response contains a permission question — you are asking "
+    "the user whether to do something. Your job is to check whether the "
+    "subject of that question is something you own or are responsible for. "
+    "Your system prompt (SOUL.md) contains an 'Ownership Boundary' section "
+    "that lists what is 'Mine' (you act without asking) versus 'the user's' (you "
+    "ask or route to the user).\n\n"
+    "Check:\n\n"
+    "- What is the specific thing you are asking permission to do?\n"
+    "- Does that thing fall under the 'Mine' list in your system prompt "
+    "(your skills, plugins, journal, wiki, worktrees, prompt files, review "
+    "loops, memory operations)?\n"
+    "- If it does, you should have acted without asking. The permission "
+    "question is the failure; the action is the default.\n"
+    "- If it falls under the user's list (their repos, core changes, "
+    "system-level, irreversible decisions), the question is appropriate.\n\n"
+    "Only object when the subject is clearly in the 'Mine' list and you "
+    "asked anyway. An empty objections list is a good outcome.\n\n" + _JSON_TAIL
+)
+
 DEFAULT_FORK_PROMPTS = {
     "predictive": _FORK_PROMPT_PREDICTIVE,
     "constrained": _FORK_PROMPT_CONSTRAINED,
     "adversarial": _FORK_PROMPT_ADVERSARIAL,
     "provenance": _FORK_PROMPT_PROVENANCE,
+    "proactivity": _FORK_PROMPT_PROACTIVITY,
 }
 
 
@@ -675,6 +710,32 @@ class CritiquePlugin(CorvidaePlugin):
             return  # critique/heartbeat/task/unadmitted exempt — the recursion brake
 
         self._record_reply(channel, trace_id)
+
+        # Proactivity check: independent of the stylistic lenses. Runs when
+        # the response contains a permission-question pattern. The fork
+        # determines whether the subject is in the agent's ownership
+        # boundary (SOUL.md 'Mine' list) — if so, the question is the
+        # failure and the action is the default.
+        if (
+            resolve_tunable(
+                channel, self.config, "critique.proactivity.enabled",
+                PROACTIVITY_ENABLED_DEFAULT,
+            )
+            and PERMISSION_QUESTION_PATTERNS.search(response_text)
+        ):
+            text_in_p = self._originating_text(trace_id, request_text)
+
+            async def _work_proactivity() -> str:
+                await self._run_proactivity(
+                    channel, trace_id, text_in_p, response_text
+                )
+                return ""
+
+            await self._enqueue(
+                channel, trace_id, annotations, "critique:proactivity",
+                _work_proactivity,
+            )
+
         appraisal = self.pm.get_plugin("appraisal")
         lenses: list[str] = []
         sampled = False
@@ -942,6 +1003,67 @@ class CritiquePlugin(CorvidaePlugin):
                 prov["detail"] = objections
             outcome = {"provenance": prov}
             await self._record_and_register(channel, trace_id, outcome, objections, wake=True)
+        finally:
+            reset_attribution(token)
+
+    # ------------------------------------------------------------------
+    # The proactivity check (ownership-boundary enforcement)
+    # ------------------------------------------------------------------
+
+    async def _run_proactivity(
+        self, channel, trace_id, originating_text, response_text
+    ) -> None:
+        """Fork the window and check whether a permission question in the
+        response is about something the agent owns.
+
+        The fork prompt instructs the forked agent to read its system
+        prompt's Ownership Boundary section and determine whether the
+        subject of the permission question falls under 'Mine' (act) or
+        'His' (ask). If 'Mine', the objection is: you own this, act.
+        """
+        prompt = self._fork_prompts.get("proactivity")
+        if prompt is None:
+            return
+        instruction = (
+            f"{prompt}\n\nThe exchange began with the message "
+            f"«{quote(originating_text)}», and the response you sent began "
+            f"«{quote(response_text)}»."
+        )
+        target = self._provenance_fork(channel, trace_id)
+        if isinstance(target, str):
+            logger.debug(
+                "proactivity check skipped for trace %s on channel %s: %s",
+                trace_id, channel.id, target,
+            )
+            return
+        agent, cut = target
+        token = set_attribution(
+            stage="critique", channel_id=channel.id, trace_id=trace_id
+        )
+        try:
+            result = await agent.fork(
+                channel, instruction, stage="critique", cut=cut,
+            )
+            parsed = _parse_json_block(result.text)
+            objections = parsed.get("objections") or []
+            # Filter: only keep objections with severity >= 0.5
+            objections = [o for o in objections if o.get("severity", 0) >= 0.5]
+            outcome = {
+                "proactivity": {
+                    "objections": len(objections),
+                }
+            }
+            if objections:
+                outcome["proactivity"]["detail"] = objections
+            await self._record_and_register(
+                channel, trace_id, outcome, objections,
+                wake=bool(objections),
+            )
+        except Exception:
+            logger.debug(
+                "proactivity fork failed for trace %s on channel %s",
+                trace_id, channel.id, exc_info=True,
+            )
         finally:
             reset_attribution(token)
 
