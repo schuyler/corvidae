@@ -1,0 +1,39 @@
+# Keep secrets, local state and bulk out of the build context. The build needs
+# only pyproject.toml, uv.lock, corvidae/ and packages/ -- never ignore those.
+
+# Version control and local environments
+.git
+.gitignore
+.venv
+.envrc
+.envrc.local
+.claude
+
+# Config holds API keys and tokens; it is bind-mounted at run time, not baked in
+agent.yaml
+*.local.md
+provenance.key
+
+# Runtime state and logs
+state
+*.db
+sessions.db*
+*.log
+*.jsonl
+**/*.db
+
+# Python build and cache debris
+__pycache__
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+.pytest_cache
+dist
+build
+
+# Not needed to run the daemon
+tests
+harness
+plans
+docs
+scripts
