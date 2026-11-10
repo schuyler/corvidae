@@ -327,16 +327,21 @@ class FunnelPlugin(CorvidaePlugin):
                 drain.
             stub_text: Text of the wake stub; None gives the count text.
         """
+        # Nothing to admit: queue nothing and wake nothing.
         if not entries:
             return
+        # Queue the payload under its (channel, origin) pair, stamped with its creation time.
         pair = (channel.id, origin)
-        self._deferred.setdefault(pair, []).append((source, list(entries)))
+        self._deferred.setdefault(pair, []).append(
+            _Payload(source, list(entries), self._now())
+        )
 
+        # A stub is already pending for this pair: the payload just queues.
         if pair in self._stub_pending:
             return
         # Count queued entries across payloads for the stub text; stale by
         # design once later registrations coalesce behind this stub.
-        pending_count = sum(len(e) for _, e in self._deferred[pair])
+        pending_count = sum(len(p.entries) for p in self._deferred[pair])
         self._stub_pending.add(pair)
         try:
             await self.pm.ahook.on_notify(
@@ -360,14 +365,23 @@ class FunnelPlugin(CorvidaePlugin):
 
     @hookimpl
     async def before_agent_turn(self, channel, trace_id, annotations) -> None:
-        """Drain stub-less payloads, then payloads matching the turn's origin.
+        """Expire, sweep, drain, then collect new promises on every turn.
 
-        The next-turn queue (``register``) drains on every turn of the
-        channel, whatever its origin. The origin-keyed queue
-        (``register_and_wake``) drains only on a turn whose
-        ``annotations["origin"]`` matches; the origin comes from ``annotations``, never
-        parsed from stub text (§2.2/§4.7 no-inference rule). The pending
-        flag is cleared FIRST, before either drain: a failure inside
+        Four steps, none of which returns early, so each runs on every turn
+        of the channel, including a turn with no origin:
+
+        1. Expire queued payloads and pending promises older than
+           ``funnel.ingest_ttl`` (only when a TTL is set).
+        2. Sweep finished promises into the next-turn queue.
+        3. Drain the next-turn queue (``ingest``), whatever its origin, then
+           the origin-keyed queue (``ingest_and_wake``), only on a turn whose
+           ``annotations["origin"]`` matches. The origin comes from
+           ``annotations``, never parsed from stub text (§2.2/§4.7
+           no-inference rule).
+        4. Collect promises from ``on_funnel_ingest``. Collection is last, so
+           a promise submitted this turn is first swept on the next turn.
+
+        The pending flag is cleared FIRST, before the drains: a failure inside
         admission leaves payloads registered, and the next producer's stub
         re-arms the channel rather than wedging it. Payloads unregister at
         successful admission; entries the budget dropped stay registered
@@ -381,13 +395,20 @@ class FunnelPlugin(CorvidaePlugin):
         # discarded) gets admitted by the in-progress drain, so its own
         # stub's turn arrives with an empty registry; returning without
         # clearing the flag here would leave it set forever, and every later
-        # register_and_wake would see it and never fire a stub — wedging the
+        # ingest_and_wake would see it and never fire a stub — wedging the
         # pair until restart. A spurious extra stub is harmless (this drain
         # early-returns); a missing stub is not.
         if pair is not None:
             self._stub_pending.discard(pair)
 
-        # Stub-less payloads: any turn on this channel admits them.
+        # Step 1: expire stale queued payloads and pending promises, when a TTL is set.
+        ttl = self._ttl
+        if ttl is not None:
+            self._expire(channel.id, self._now(), ttl)
+        # Step 2: move every finished promise's result into the next-turn queue.
+        self._sweep(channel.id)
+
+        # Step 3a: stub-less payloads drain on any turn of the channel.
         next_turn = self._next_turn.get(channel.id)
         if next_turn:
             remaining = await self._drain(channel, next_turn)
@@ -396,7 +417,75 @@ class FunnelPlugin(CorvidaePlugin):
             else:
                 del self._next_turn[channel.id]
 
-        # Origin-keyed payloads: only a turn with the matching origin.
+        # Step 3b: origin-keyed payloads drain only on a matching origin.
+        await self._drain_origin(channel, pair)
+
+        # Step 4: collect new promises last, so this turn's submissions are swept next turn.
+        await self._collect(channel, trace_id, annotations)
+
+    def _expire(self, channel_id: str, now: float, ttl: float) -> None:
+        """Drop this channel's queued payloads and pending promises older than ``ttl``.
+
+        Age counts from creation (a promise's from its submit), so a result
+        that finished while the channel was idle expires too. Each drop logs
+        at INFO naming the source, the channel, the age and the config key.
+        """
+        # Queued payloads: keep only those within the TTL, logging each drop.
+        kept: list[_Payload] = []
+        for payload in self._next_turn.get(channel_id, []):
+            age = now - payload.created
+            if age > ttl:
+                logger.info(
+                    "funnel dropped a queued %s payload for %s: %.1f s old, over "
+                    "funnel.ingest_ttl (%s s); raise funnel.ingest_ttl to keep "
+                    "queued payloads longer",
+                    payload.source, channel_id, age, ttl,
+                    extra={"channel_id": channel_id, "source": payload.source},
+                )
+            else:
+                kept.append(payload)
+        if kept:
+            self._next_turn[channel_id] = kept
+        else:
+            self._next_turn.pop(channel_id, None)
+
+        # Pending promises: discard those past the TTL (cancelling unresolved ones).
+        for source, pending in list(self._pending.get(channel_id, {}).items()):
+            age = now - pending.created
+            if age > ttl:
+                self._discard(channel_id, source, pending)
+                logger.info(
+                    "funnel dropped a pending %s promise for %s: %.1f s old, over "
+                    "funnel.ingest_ttl (%s s); raise funnel.ingest_ttl to keep "
+                    "promises longer",
+                    source, channel_id, age, ttl,
+                    extra={"channel_id": channel_id, "source": source},
+                )
+
+    def _sweep(self, channel_id: str) -> None:
+        """Move each finished promise's result into the channel's next-turn queue.
+
+        A promise not yet done stays pending. A finished one leaves
+        ``_pending`` through ``_discard``; an ``Ingest`` it resolved to is
+        queued carrying the promise's creation time, so the TTL counts from
+        submission rather than from this sweep.
+        """
+        for source, pending in list(self._pending.get(channel_id, {}).items()):
+            # Still running: leave it for a later turn.
+            if not pending.promise.done():
+                continue
+            # Finished: take its result (None when it admits nothing or failed).
+            result = self._discard(channel_id, source, pending)
+            if result is not None:
+                self._next_turn.setdefault(channel_id, []).append(
+                    _Payload(
+                        source, list(result.entries), pending.created, result.on_admitted,
+                    )
+                )
+
+    async def _drain_origin(self, channel, pair: tuple[str, str] | None) -> None:
+        """Drain the origin-keyed queue for ``pair``, if this turn's origin matches it."""
+        # No origin on this turn: nothing keyed to an origin can drain.
         if pair is None:
             return
         payloads = self._deferred.get(pair)
@@ -409,18 +498,93 @@ class FunnelPlugin(CorvidaePlugin):
         else:
             del self._deferred[pair]
 
+    async def _collect(self, channel, trace_id: str, annotations: dict | None) -> None:
+        """Call ``on_funnel_ingest`` so implementers submit promises for ``channel``."""
+        cid = channel.id
+
+        def submit(source: str, promise: asyncio.Future) -> None:
+            # Store the promise under (channel, source); an older pending one for the source is cancelled.
+            old = self._pending.get(cid, {}).get(source)
+            if old is not None:
+                logger.debug(
+                    "superseding the pending %s promise for %s: the newer submit cancels it",
+                    source, cid, extra={"channel_id": cid, "source": source},
+                )
+                self._discard(cid, source, old)
+            self._pending.setdefault(cid, {})[source] = _Pending(promise, self._now())
+
+        # Ask every implementer to submit; a raising one is logged, and the others' submissions stand.
+        try:
+            await self.pm.ahook.on_funnel_ingest(
+                channel=channel, trace_id=trace_id, annotations=annotations, submit=submit,
+            )
+        except Exception:
+            logger.warning(
+                "on_funnel_ingest raised for channel %s; promises already submitted "
+                "are kept; fix the on_funnel_ingest implementation named in the traceback",
+                cid, exc_info=True,
+                extra={"channel_id": cid, "trace_id": trace_id},
+            )
+
+    def _discard(self, channel_id: str, source: str, pending: _Pending) -> Ingest | None:
+        """Remove ``pending`` from ``_pending``; return its ``Ingest`` if it finished with one.
+
+        Unresolved: cancelled, nothing returned. Cancelled by its provider:
+        nothing to read (``result()`` would raise), so it logs at DEBUG. Raised:
+        the exception is logged at WARNING with its traceback. Expiry, supersede,
+        the sweep and shutdown all come through here, so this ordering is
+        written once.
+        """
+        # Remove the entry first, so nothing can see it after it is dropped.
+        self._pending.get(channel_id, {}).pop(source, None)
+        promise = pending.promise
+
+        # Still running: cancel it so its provider's work stops, and return nothing.
+        if not promise.done():
+            promise.cancel()
+            return None
+        # The provider cancelled it itself: nothing to read.
+        if promise.cancelled():
+            logger.debug(
+                "pending %s promise for %s was cancelled by its provider; dropped",
+                source, channel_id, extra={"channel_id": channel_id, "source": source},
+            )
+            return None
+        # The provider's promise raised: log the error with its traceback, then drop it.
+        exc = promise.exception()
+        if exc is not None:
+            logger.warning(
+                "pending %s promise for %s raised %s; dropped it, fix the "
+                "on_funnel_ingest implementation that submitted it",
+                source, channel_id, type(exc).__name__, exc_info=exc,
+                extra={"channel_id": channel_id, "source": source},
+            )
+            return None
+        # Finished with a result: hand it back (an Ingest, or None for nothing).
+        return promise.result()
+
+    @hookimpl
+    async def on_stop(self) -> None:
+        """Cancel every pending promise at shutdown; queued payloads are dropped with the process."""
+        # Discard each pending promise, cancelling the unresolved ones.
+        for channel_id, by_source in list(self._pending.items()):
+            for source, pending in list(by_source.items()):
+                self._discard(channel_id, source, pending)
+        self._pending.clear()
+
     async def _drain(
         self,
         channel,
-        payloads: list[tuple[str, list[str]]],
-    ) -> list[tuple[str, list[str]]]:
+        payloads: list[_Payload],
+    ) -> list[_Payload]:
         """Admit queued payloads; return those that must stay queued.
 
         Returns ``payloads`` unchanged when the channel has no conversation
         window. A payload whose admission raises is kept whole; entries the
         budget or window cap dropped are kept as leftovers, except any larger
         than the source's whole budget or cap, which are dropped with a
-        warning.
+        warning. A leftover keeps its original creation time, so the TTL
+        still counts from submission.
         """
         conv = getattr(channel, "conversation", None)
         if conv is None:
@@ -430,20 +594,35 @@ class FunnelPlugin(CorvidaePlugin):
             )
             return payloads
 
-        remaining: list[tuple[str, list[str]]] = []
-        for source, entries in payloads:
+        remaining: list[_Payload] = []
+        for payload in payloads:
             try:
-                admitted = await self.admit(channel, conv, source, entries)
+                admission = await self.admit_detailed(
+                    channel, conv, payload.source, payload.entries,
+                )
             except Exception:
                 # Admission failed — keep the whole payload registered for
                 # the next drain.
                 logger.warning(
                     "deferred admission failed; payload retained",
                     exc_info=True,
-                    extra={"channel_id": channel.id, "source": source},
+                    extra={"channel_id": channel.id, "source": payload.source},
                 )
-                remaining.append((source, entries))
+                remaining.append(payload)
                 continue
+            # Tell the source what happened to its entries, if it asked. A raising
+            # callback is logged and skipped: the entries stay admitted, and the
+            # payload is not left queued to raise again on every turn.
+            if payload.on_admitted is not None:
+                try:
+                    payload.on_admitted(admission)
+                except Exception:
+                    logger.warning(
+                        "on_admitted callback for %s on channel %s raised; its entries "
+                        "were admitted anyway, fix the callback in the source named here",
+                        payload.source, channel.id, exc_info=True,
+                        extra={"channel_id": channel.id, "source": payload.source},
+                    )
             # Entries neither admitted nor already present in the window
             # were dropped by the budget — they stay registered (§2.2).
             # Deduped entries ARE in the window, so this containment check
@@ -454,16 +633,17 @@ class FunnelPlugin(CorvidaePlugin):
                 if msg.get("_message_type") == MessageType.CONTEXT
             ]
             leftover = [
-                entry for entry in entries
-                if entry not in admitted
+                entry for entry in payload.entries
+                if entry not in admission.admitted
                 and not any(entry in existing for existing in window_context)
             ]
             # An entry larger than the source's whole budget can never be
             # admitted, so drop it now with a warning instead of re-queueing
             # it on every drain forever (#623).
-            leftover = self._drop_unadmittable(channel.id, source, leftover)
+            leftover = self._drop_unadmittable(channel.id, payload.source, leftover)
             if leftover:
-                remaining.append((source, leftover))
+                # Re-queue the leftovers under the original creation time and callback.
+                remaining.append(replace(payload, entries=leftover))
         return remaining
 
     def _drop_unadmittable(

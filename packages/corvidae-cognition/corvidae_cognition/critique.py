@@ -1263,12 +1263,12 @@ class CritiquePlugin(CorvidaePlugin):
             # Provenance wakes the channel with the no-reply note; stylistic
             # objections wait for the channel's next turn.
             if wake:
-                await funnel.register_and_wake(
+                await funnel.ingest_and_wake(
                     channel, origin="critique", source="critique",
                     entries=entries, stub_text=PROVENANCE_NOTE,
                 )
             else:
-                funnel.register(channel, source="critique", entries=entries)
+                funnel.ingest(channel, source="critique", entries=entries)
         except Exception:
             logger.warning(
                 "critique verdict registration failed", exc_info=True,

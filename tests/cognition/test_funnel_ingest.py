@@ -339,7 +339,7 @@ class TestIngestTtl:
         expiry = [m for m in logged(caplog, logging.INFO) if "funnel.ingest_ttl" in m]
         assert len(expiry) == 2, expiry
         for source in ("memory", "grounding"):
-            assert sum(source in m and env.channel.id in m and re.search(r"\b17(\.\d+)?\b", m) is not None for m in expiry) == 1, expiry
+            assert sum(source in m and env.channel.id in m and re.search(r"(?<![\d.])17(\.\d+)?(?!\d)", m) is not None for m in expiry) == 1, expiry
 
     async def test_promise_finished_while_idle_past_ttl_is_dropped_not_admitted(self, build):
         # Submitted at t=0, resolved at t=5, swept at t=12: age from submit is 12.
