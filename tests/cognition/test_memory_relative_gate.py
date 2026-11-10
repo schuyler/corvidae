@@ -115,10 +115,13 @@ def recalled(conv) -> str:
 async def candidate_rows(db) -> dict[int, dict]:
     """retrieval_candidate rows keyed by memory_id."""
     async with db.execute(
-        "SELECT memory_id, band, outcome, z FROM retrieval_candidate"
+        "SELECT memory_id, band, outcome, z, source FROM retrieval_candidate"
     ) as cursor:
         rows = await cursor.fetchall()
-    return {r[0]: {"band": r[1], "outcome": r[2], "z": r[3]} for r in rows}
+    return {
+        r[0]: {"band": r[1], "outcome": r[2], "z": r[3], "source": r[4]}
+        for r in rows
+    }
 
 
 class TestDefaults:
@@ -142,6 +145,14 @@ class TestDefaults:
         assert "memory.retrieval.bands" in caplog.text
         assert "band_on: score" in caplog.text
 
+    async def test_bands_with_an_invalid_band_on_also_warn(self, env, caplog):
+        # A misspelt band_on falls back to relative too, so the same rereading
+        # applies and the same warning is due.
+        with caplog.at_level(logging.WARNING):
+            await env(config(band_on="simlarity", bands={"strong": 0.75}))
+        assert "memory.retrieval.bands" in caplog.text
+        assert "band_on: score" in caplog.text
+
     async def test_bands_with_band_on_set_do_not_warn(self, env, caplog):
         with caplog.at_level(logging.WARNING):
             await env(config(band_on="score", bands={"strong": 0.75}))
@@ -159,6 +170,27 @@ class TestRelativeBanding:
         assert hit["z"] == pytest.approx(expected, rel=1e-3)
         assert expected >= DEFAULT_BAND_STRONG_Z
         assert hit["band"] == "strong"
+
+    async def test_spread_leaves_out_redacted_and_unindexed_records(self, env):
+        # R2: the distribution is over indexed, unredacted records only.
+        # Copies of TARGET that are redacted or demoted would drag the mean
+        # up and shrink TARGET's z if they were counted.
+        needs_vec()
+        memory, _, channel, _, db = await env()
+        target = await seed_corpus(db, channel.id)
+        for column in ("redacted", "indexed"):
+            for _ in range(5):
+                extra = await seed_memory(db, channel.id, TARGET)
+                value = 1 if column == "redacted" else 0
+                await db.execute(
+                    f"UPDATE memory SET {column} = ? WHERE id = ?", (value, extra),
+                )
+        await db.commit()
+        pool = await memory._retrieve_pool(TARGET)
+        hit = next(c for c in pool.ranked if c["id"] == target)
+        assert hit["z"] == pytest.approx(
+            z_of(TARGET, TARGET, [*FILLER, TARGET]), rel=1e-3,
+        )
 
     async def test_old_apt_record_bands_by_z_not_age(self, env):
         # Under band_on: score a 200-day-old exact match decays to weak; the
@@ -193,9 +225,11 @@ class TestRelativeBanding:
         assert rows
         assert {r["outcome"] for r in rows.values()} <= {"dropped_weak", "cut"}
 
-    async def test_keyword_only_hit_below_the_gate_is_dropped(self, env):
-        # "orchid" matches one filler record by keyword, but that one shared
-        # word doesn't make it stand out from the memory on cosine.
+    async def test_one_shared_keyword_does_not_clear_the_gate(self, env):
+        # "orchid" matches one filler record by keyword (the vector search
+        # returns it too), but that one shared word doesn't make it stand out
+        # from the memory on cosine. The FTS-only case is covered under
+        # band_on: similarity in test_memory_hybrid_retrieval.py.
         needs_vec()
         memory, _, channel, conv, db = await env(config(k=1))
         await seed_corpus(db, channel.id)
@@ -212,8 +246,12 @@ class TestRelativeBanding:
         memory, _, channel, conv, db = await env()
         await seed_corpus(db, channel.id)
         loose = "the gazebo latch is rusted"
-        await seed_memory(db, channel.id, loose, embedded=False)
+        loose_id = await seed_memory(db, channel.id, loose, embedded=False)
         await ask(memory, channel, conv, "is the gazebo latch fixed")
+        rows = await candidate_rows(db)
+        # The keyword search found it; it bands weak and is dropped.
+        assert rows[loose_id]["source"] == "fts"
+        assert rows[loose_id]["outcome"] == "dropped_weak"
         assert loose not in recalled(conv)
 
     async def test_z_is_logged_on_candidate_rows(self, env):
@@ -255,6 +293,18 @@ class TestNoWeakFallback:
 
 
 class TestLineFormat:
+    async def test_moderate_z_record_is_marked_marginal(self, env):
+        # R4 under the default relative mode: a record between the moderate
+        # and strong z thresholds is admitted as [marginal].
+        needs_vec()
+        memory, _, channel, conv, db = await env()
+        await seed_corpus(db, channel.id)
+        query = "kestrel's ESP32 weather station"
+        z = z_of(query, TARGET, [*FILLER, TARGET])
+        assert DEFAULT_BAND_MODERATE_Z <= z < DEFAULT_BAND_STRONG_Z
+        await ask(memory, channel, conv, query)
+        assert f"[marginal] (now) {TARGET}" in recalled(conv)
+
     async def test_moderate_record_is_marked_marginal(self, env):
         needs_vec()
         memory, _, channel, conv, db = await env(

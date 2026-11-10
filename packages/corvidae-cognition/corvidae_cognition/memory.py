@@ -1608,14 +1608,16 @@ class MemoryPlugin(CorvidaePlugin):
         self._band_strong = bands.get("strong", default_strong)
         self._band_moderate = bands.get("moderate", default_moderate)
         # Thresholds tuned before relative became the default (#409) were
-        # cosine values; under the new default they would be read as z.
-        if bands and "band_on" not in retrieval_cfg:
+        # cosine values; under the default (band_on unset, or a value that
+        # was rejected) they would be read as z.
+        if bands and retrieval_cfg.get("band_on") not in BAND_ON_CHOICES:
             logger.warning(
                 "memory.retrieval.bands is set but memory.retrieval.band_on "
-                "is not, so the default band_on: relative reads those "
-                "thresholds as z-scores (defaults strong %s, moderate %s). "
-                "If they are cosine values, set band_on: score (or "
-                "similarity) in agent.yaml to keep their meaning.",
+                "is not (or was rejected), so the default band_on: relative "
+                "reads those thresholds as z-scores (defaults strong %s, "
+                "moderate %s). If they are cosine values, set band_on: score "
+                "(or similarity) in agent.yaml to keep their meaning; if they "
+                "are z-scores, set band_on: relative to silence this.",
                 DEFAULT_BAND_STRONG_Z, DEFAULT_BAND_MODERATE_Z,
             )
         # Warn once per process when the relative gate falls back (#409).
@@ -3164,7 +3166,8 @@ class MemoryPlugin(CorvidaePlugin):
         Returns:
             (candidates best first: by fused rank on the hybrid path, by
             score otherwise; degraded_to_fts). Each candidate: {id, summary,
-            created_at, similarity, score, band, age_seconds, source}.
+            created_at, similarity, score, band, z, age_seconds, source}
+            (``z`` is the band_on: relative z-score, or None).
         """
         pool = await self._retrieve_pool(text, k, exclude)
         return pool.ranked[: pool.k], pool.degraded
@@ -3357,7 +3360,9 @@ class MemoryPlugin(CorvidaePlugin):
         except Exception:
             logger.warning(
                 "relative banding: the similarity-spread scan over memory_vec "
-                "failed; banding this query on raw similarity instead",
+                "failed; banding this query on raw similarity instead. Check "
+                "that the sqlite-vec extension loads and memory_vec is intact "
+                "(the next query retries)",
                 exc_info=True,
             )
             return None
@@ -3379,8 +3384,9 @@ class MemoryPlugin(CorvidaePlugin):
             self._relative_fallback_warned = True
             logger.warning(
                 "memory.retrieval.band_on: relative falls back to band_on: "
-                "similarity (strong %s, moderate %s): %s. This clears itself "
-                "as memory grows; logged once per process.",
+                "similarity (strong %s, moderate %s; configured bands are not "
+                "used until then): %s. This clears itself as memory grows; "
+                "logged once per process.",
                 DEFAULT_BAND_STRONG, DEFAULT_BAND_MODERATE, reason,
             )
         return None

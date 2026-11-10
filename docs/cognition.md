@@ -642,9 +642,9 @@ The pool file is written once, after the last query:
       "mrr": 0.5,
       "candidates": [
         {"id": 398, "rank": 1, "similarity": 0.81, "score": 0.77, "band": "strong",
-         "z": 5.2, "source": "both"},
+         "source": "both"},
         {"id": 412, "rank": 2, "similarity": 0.79, "score": 0.74, "band": "moderate",
-         "z": 3.4, "source": "vec"}
+         "source": "vec"}
       ]
     }
   ],
@@ -660,9 +660,7 @@ The pool file is written once, after the last query:
 `rank <= k` are `retrieve()`'s top k, what passive retrieval would hand on
 before it drops weak-band entries (all of them, so an all-weak pool admits
 nothing, #409; a degraded pool keeps its top k) and the funnel admits them,
-with no window exclusion. Each candidate also carries `z`, the z-score its
-band came from under `band_on: relative` (`null` when none was computed),
-which is what the z thresholds are refitted from. It holds ids and scores but
+with no window exclusion. It holds ids and scores but
 no memory text beyond the labels' own `text`, `context` and `query`; look the
 ids up in the source. `run_at` is the wall-clock
 time the run started. The means are `null` when no query was scored.

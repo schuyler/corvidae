@@ -520,15 +520,13 @@ def test_snapshot_pool_json_holds_whole_pool(
         "--pool-out", str(pool_out), "--k", "1",
     ])
 
-    # All three candidates, ranked 1..3, each with the seven documented fields.
+    # All three candidates, ranked 1..3, each with the six documented fields.
     candidates = read_pool(pool_out)["queries"][0]["candidates"]
     assert [c["rank"] for c in candidates] == [1, 2, 3]
     assert [c["id"] for c in candidates] == ids
     for cand in candidates:
-        assert set(cand) == {"id", "rank", "similarity", "score", "band", "z", "source"}
+        assert set(cand) == {"id", "rank", "similarity", "score", "band", "source"}
         assert cand["band"] in {"strong", "moderate", "weak"}
-        # Three records is below the relative gate's minimum: no z (#409).
-        assert cand["z"] is None
     scores = [c["score"] for c in candidates]
     assert scores == sorted(scores, reverse=True)
 
