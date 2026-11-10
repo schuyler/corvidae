@@ -1177,6 +1177,37 @@ sweep is superseded, and its entries lost, if its provider submits again
 in that same turn's collect. The funnel does not admit such a result on
 re-submit yet.
 
+### Recall sources (`packages/corvidae-cognition/corvidae_cognition/recall.py`)
+
+Not a plugin: a helper for plugins that recall something on each user turn
+and hand it to the funnel through the pull path (#718, part of #711). It has
+no entry point and no config of its own. `RecallSourceMixin` implements
+`on_funnel_ingest` so a source supplies only `search(query, ctx)` and
+`render(hit)`; the how-to is in
+[plugin-guide.md](plugin-guide.md#writing-a-recall-source).
+
+- **Gate.** A turn is searched for only when the window ends in a user
+  MESSAGE with text, looking through trailing CONTEXT rows (the funnel's drain
+  and other sources append there before this hook runs). The query is
+  `retrieval_query(messages, "previous_reply")` from `memory.py`, so a source
+  sees what memory sees. Memory's own copy of the tail test is untouched.
+- **`SearchGate`.** One cooldown and one in-flight slot per channel, on an
+  injectable clock. `try_start` records a start and `finish` releases the slot;
+  the cooldown runs from the start, so a failed or timed-out search counts.
+- **Settings.** `parse_recall_settings(config, key)` reads `cooldown`
+  (default 5 s, 0 allowed) and `timeout` (default 10 s) from the source's own
+  block and raises `ValueError` for anything else, naming the key, the rejected
+  value and the accepted range.
+- **Failure.** A search that raises or times out resolves its promise to
+  `None` and logs at WARNING (logger `corvidae.recall`) with the source, the
+  channel and the traceback. A promise the funnel cancels is not logged.
+
+Nothing here decides relevance (#674) or sizes the result: the funnel's
+per-source budget does. Threat model: the mixin adds no route for untrusted
+text, because everything it hands over is framed by the funnel; a source that
+reads from outside (an MCP tool, a folder) records its own entry in
+[threat-model.md](threat-model.md).
+
 ### GoalsPlugin (`packages/corvidae-cognition/corvidae_cognition/goals.py`)
 
 Keeps the agent's open goals in SQLite and shows them in the window. Entry
