@@ -3700,18 +3700,28 @@ and `[::1]` on the bound port) plus `web.allowed_origins`, all
 canonicalised the same way the incoming headers are. The `AppRunner` runs
 with `access_log=None`: aiohttp's access log would write `?token=` to disk.
 
-**Protocol.** Client → server: `list`, `subscribe {conversation}`,
-`send {conversation, text}`. Server → client: `conversations`,
-`history {conversation, items, working}`, `user {text, id}`, `message`,
-`thinking`, `progress`, `tool_status {tool, status, summary}`,
-`working {value}`, `rejected {text, id}`, `divider` (replay only), and
-`error {request, code, message}` with code `starting` (the agent hasn't
+**Protocol.** Client → server: `list`, `subscribe {conversation}`, `send
+{conversation, text, seq}`. Server → client: `conversations`, `history
+{conversation, items, working}`, `user {text, id}`, `message`, `thinking`,
+`progress`, `tool_status {tool, status, summary}`, `working {value}`,
+`rejected {text, id}`, `divider` (replay only), `sent {seq}`, and `error
+{request, seq, code, message}` with code `starting` (the agent hasn't
 started; the client retries) or `bad_request`. Each socket handles its
 frames one at a time, in order. Malformed input (invalid JSON, deep
 nesting, a non-object, a bad slug, non-string text, lone surrogates, an
 unknown type) gets `bad_request`, and the socket stays open; an exception
 out of `on_message` (a third-party gate raising) is logged with its
-traceback and answered the same way. Empty text is ignored.
+traceback and answered the same way. Text that is empty after `str.strip()`
+is acknowledged and otherwise ignored.
+
+Every `send` is answered once, on its own socket only: `sent` when the
+handler finishes, or `error` carrying the same `seq` when it fails, which
+includes an exception out of `on_message`. `seq` belongs to the tab: the
+page counts its sends from 1, and the server echoes the value without
+interpreting it, as null where the frame had none. `sent` carries no
+`conversation`, so the page's current-conversation filter can't drop it after
+a switch. A handler cancelled at shutdown answers nothing, and its socket
+closes.
 
 **Unsent messages.** A user message is shown from the moment it's sent,
 but its row reaches `message_log` only at dequeue. Between the two it's an
@@ -3815,10 +3825,18 @@ app's classes or ids); links get `target="_blank" rel="noopener noreferrer"`.
 Everything else uses `textContent`. Thinking and dividers render in closed
 `<details>`. The page reconnects with backoff (1 s → 30 s) and, after
 three failed connects, checks `/` for a 401 to detect an expired session.
-`tests/test_web_render_smoke.py` checks the sanitising in headless Chrome;
-it skips without Playwright, so the `web-smoke` CI job installs a pinned
-Playwright and Chromium and fails if the test is skipped. Run it locally with
+`tests/test_web_render_smoke.py` checks the sanitising and the
+unconfirmed-send restore in headless Chrome; it skips without Playwright,
+so the `web-smoke` CI job installs a pinned Playwright and Chromium and
+fails if the test is skipped. Run it locally with
 `uv run --with playwright pytest tests/test_web_render_smoke.py`.
+
+The page keeps a map of sends the server hasn't answered, keyed by `seq`,
+and clears the composer on send. `sent` removes the entry. An `error` for a
+pending send, or any socket close, moves the affected sends to an
+"unconfirmed" banner, each labelled with its conversation and shown with
+`textContent` only. The banner has a Dismiss control, the composer draft is
+never touched, and nothing is resent automatically.
 
 Known limitations:
 - a turn that ends in an exception without a `send_message` leaves the
@@ -3830,12 +3848,14 @@ Known limitations:
   replies at all;
 - a gate that's slow to decide holds up the socket's later frames, since
   frames are handled in order;
-- messages in a gate, admitted or queued at shutdown are lost, as with
-  every transport, and in the pane they simply disappear on reload;
-- a message sent into a socket that looks open but is dead (a phone waking
-  from sleep on a half-open connection) is lost: the composer clears and
-  the server never sees it, so it's missing after the reconnect. Fixing
-  that needs a per-send acknowledgement in the protocol.
+- messages admitted or queued at shutdown are lost after being
+  acknowledged, as with every transport, and in the pane they simply
+  disappear on reload; one still in a gate when its socket closes gets no
+  answer, so the page restores it;
+- a dead socket is only noticed when the browser closes it, and the page
+  restores unanswered sends then, not at send time;
+- a send whose socket closes after the agent took it but before `sent`
+  arrived is restored anyway, and may be sent twice.
 
 Out of scope for v1: paging back past 200 rows, token streaming, an
 inspector pane, and views of other transports' channels.
