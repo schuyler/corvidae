@@ -478,3 +478,92 @@ async def test_on_stop_cancels_pending_arm(tmp_path):
     # Agent never starts — on_stop should clean up the pending task
     await plugin.on_stop()
     assert plugin._fd is None
+
+
+
+class TestConfigReload:
+    async def test_enable_after_disabled_start(self, tmp_path):
+        """Init-disabled -> reload-enable arms watches."""
+        plugin, pm, f, cfg = make_plugin(tmp_path)
+        # Start disabled
+        await plugin.on_init(pm, {"inotify_ping": {"enabled": False}})
+        await plugin.on_start({})
+        assert plugin._fd is None
+        # Reload to enable
+        await plugin.on_config_reload({"inotify_ping": cfg})
+        await _wait_armed(plugin)
+        assert plugin._fd is not None
+        await plugin.on_stop()
+
+    async def test_disable_cancels_pending_settle(self, tmp_path):
+        """Enabled -> reload-disable cancels in-flight settle; no ping fires."""
+        plugin, pm, f, cfg = make_plugin(tmp_path, debounce_seconds=5.0)
+        await plugin.on_init(pm, {"inotify_ping": cfg})
+        await plugin.on_start({})
+        await _wait_armed(plugin)
+        # Trigger a settle
+        f.write_text("more data\n")
+        await asyncio.sleep(0.05)
+        # Disable while settle is in flight
+        await plugin.on_config_reload({"inotify_ping": {"enabled": False}})
+        assert plugin._enabled is False
+        assert len(plugin._settle_tasks) == 0
+        await asyncio.sleep(0.2)
+        await plugin.on_stop()
+
+    async def test_disable_then_reenable(self, tmp_path):
+        """Enable -> disable -> enable re-arms watches."""
+        plugin, pm, f, cfg = make_plugin(tmp_path)
+        await plugin.on_init(pm, {"inotify_ping": cfg})
+        await plugin.on_start({})
+        await _wait_armed(plugin)
+        fd1 = plugin._fd
+        assert fd1 is not None
+        # Disable
+        await plugin.on_config_reload({"inotify_ping": {"enabled": False}})
+        assert plugin._fd is None
+        # Re-enable
+        await plugin.on_config_reload({"inotify_ping": cfg})
+        await _wait_armed(plugin)
+        fd2 = plugin._fd
+        assert fd2 is not None
+        await plugin.on_stop()
+
+
+class TestWdCollision:
+    async def test_two_files_same_directory(self, tmp_path):
+        """Two missing files in the same dir both get watched (Bug A)."""
+        plugin, pm, f, cfg = make_plugin(tmp_path)
+        # Override with two missing files in the same directory
+        f1 = tmp_path / "job1.log"
+        f2 = tmp_path / "job2.log"
+        cfg2 = dict(cfg, paths=[str(f1), str(f2)])
+        await plugin.on_init(pm, {"inotify_ping": cfg2})
+        await plugin.on_start({})
+        await _wait_armed(plugin)
+        # Both targets should be in _wd_info (same wd, two entries)
+        all_targets = [t for entries in plugin._wd_info.values() for t in entries]
+        assert len(all_targets) == 2, f"expected 2 targets, got {all_targets}"
+        await plugin.on_stop()
+
+
+class TestFdLifecycle:
+    async def test_fd_closed_on_disable(self, tmp_path):
+        """The fd is actually closed (not leaked) when the plugin disables."""
+        import os as _os
+        plugin, pm, f, cfg = make_plugin(tmp_path)
+        await plugin.on_init(pm, {"inotify_ping": cfg})
+        await plugin.on_start({})
+        await _wait_armed(plugin)
+        old_fd = plugin._fd
+        assert old_fd is not None
+        # Disable
+        await plugin.on_config_reload({"inotify_ping": {"enabled": False}})
+        # The fd should be closed: fstat should raise OSError (EBADF)
+        try:
+            _os.fstat(old_fd)
+            _os.close(old_fd)  # clean up if still open
+            raise AssertionError(f"fd {old_fd} still open after disable (leak)")
+        except OSError:
+            pass  # expected: EBADF means the fd was closed
+        await plugin.on_stop()

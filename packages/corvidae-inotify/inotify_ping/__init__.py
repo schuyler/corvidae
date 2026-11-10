@@ -359,9 +359,15 @@ class InotifyPingPlugin(CorvidaePlugin):
                         asyncio.run_coroutine_threadsafe(
                             self._on_fs_event(target_path), self._loop
                         )
-        # Thread is exiting: clear the fd so a subsequent reload can re-arm.
+        # Thread is exiting: close the fd (the thread owns it for its
+        # lifetime) and clear it so a subsequent reload can re-arm.
         logger.warning("inotify_ping: watcher thread exiting")
-        self._fd = None
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
 
     async def _on_fs_event(self, path: str) -> None:
         """Coalesce: cancel any pending settle for this path, start a fresh one."""
@@ -434,11 +440,8 @@ class InotifyPingPlugin(CorvidaePlugin):
         self._stop.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2)
-        if self._fd is not None:
-            try:
-                os.close(self._fd)
-            except OSError:
-                pass
+        # The thread closes the fd on exit; if it was never started
+        # (fd is None), there is nothing to close.
         self._fd = None
         self._thread = None
         with self._wd_lock:
