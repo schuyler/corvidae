@@ -3922,6 +3922,53 @@ of other transports' channels.
 Behavior is pinned by `tests/test_web_plugin.py`, which drives a real
 listener with aiohttp's client and raw sockets.
 
+### Context panel (`context-panel` package)
+
+`ContextPanelPlugin` registers one panel when `context_panel` is in the
+config (a bare `context_panel:` counts) and otherwise nothing, deciding in
+`on_init`. It depends on `registry` and reads `channel.conversation` and
+the registry only, without an `await` between a read and the response, so
+every response is one consistent view. Three GET routes; `/window` and
+`/poll` are keyed by `?channel=`, and a channel that is unregistered or has
+no loaded window answers `{"loaded": false}`:
+
+- `/channels`: loaded channels with message count, token estimate and budget.
+- `/window`: system prompt, tool schemas and the newest 200 rows (all with
+  `all=1`), each row with its `_message_type` tag and its visible fields
+  (`_`-prefixed keys dropped), plus the cursor.
+- `/poll?count=&digest=`: the rows after the client's cursor, the new
+  cursor and the live events.
+
+**Cursor.** `{count, digest}`: the row count and a sha256 over the head
+(system prompt and tool schemas) followed by the first `count` rows. A poll
+recomputes the digest over the same prefix of the current window. A match
+means the client's rows are still the window's prefix, so the reply is the
+rows after `count`. A mismatch, or a `count` past the window, replies
+`resync: true` and the client reopens the window. Content is compared, not
+identity, because trims and reasoning stripping fire no hook:
+
+| Window change | Poll answer |
+|---|---|
+| rows appended | the new rows |
+| head trim, compaction (`replace_with_summary`), newest-row truncation | resync |
+| interior row rewritten (reasoning stripped under `drop` or `exchange`) | resync |
+| system prompt or tool view changed (late prompt refresh) | resync |
+
+**Live events.** `send` runs for every channel; while the panel is serving
+it buffers thinking, progress and tool-status events per channel, each with
+a global sequence number. The buffer is stamped with the window's mark, the
+row count and a digest of row 0, when its first event arrives. `/poll`
+returns the buffer only while the window's mark equals the stamp, so a
+landed row or a changed first row hides it; the channel's next event
+replaces it with a new buffer. The final reply is not buffered: it becomes
+a row. A tool that finishes between two polls hides its events before the
+client sees them.
+
+The client polls one second after each poll completes, and polls again
+immediately after a window opens, so two polls can be in flight. A response
+is dropped if the selection changed, the window was reopened, or the page's
+cursor is no longer the one the request carried.
+
 ### Webhook ingress (`channels/webhook.py`)
 
 `WebhookPlugin` is a `CorvidaePlugin`, not a transport: it owns no channels and

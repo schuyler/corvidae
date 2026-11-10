@@ -8,9 +8,11 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "context-panel",
     "corvidae",
     "corvidae-cognition",
     "corvidae-restart",
+    "corvidae-timepiece",
     "cross-channel-send",
     "webhook-notify",
 ]
@@ -503,6 +505,17 @@ wheels = [
 ]
 
 [[package]]
+name = "context-panel"
+version = "0.0.1"
+source = { editable = "packages/context-panel" }
+dependencies = [
+    { name = "corvidae" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "corvidae", editable = "." }]
+
+[[package]]
 name = "corvidae"
 version = "0.0.1"
 source = { editable = "." }
@@ -526,6 +539,9 @@ acp = [
 cognition = [
     { name = "corvidae-cognition", extra = ["vec"] },
 ]
+context-panel = [
+    { name = "context-panel" },
+]
 cross-channel-send = [
     { name = "cross-channel-send" },
 ]
@@ -539,6 +555,9 @@ discord = [
 ]
 restart = [
     { name = "corvidae-restart" },
+]
+timepiece = [
+    { name = "corvidae-timepiece" },
 ]
 webhook-notify = [
     { name = "webhook-notify" },
@@ -559,8 +578,10 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.19" },
     { name = "apluggy", git = "https://github.com/schuyler/apluggy.git?rev=main" },
     { name = "click", specifier = ">=8.0" },
+    { name = "context-panel", marker = "extra == 'context-panel'", editable = "packages/context-panel" },
     { name = "corvidae-cognition", extras = ["vec"], marker = "extra == 'cognition'", editable = "packages/corvidae-cognition" },
     { name = "corvidae-restart", marker = "extra == 'restart'", editable = "packages/corvidae-restart" },
+    { name = "corvidae-timepiece", marker = "extra == 'timepiece'", editable = "packages/corvidae-timepiece" },
     { name = "cross-channel-send", marker = "extra == 'cross-channel-send'", editable = "packages/cross-channel-send" },
     { name = "ddgs", specifier = ">=9.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.4" },
@@ -574,7 +595,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "webhook-notify", marker = "extra == 'webhook-notify'", editable = "packages/webhook-notify" },
 ]
-provides-extras = ["dev", "acp", "discord", "cross-channel-send", "webhook-notify", "cognition", "restart"]
+provides-extras = ["dev", "acp", "discord", "cross-channel-send", "context-panel", "webhook-notify", "cognition", "restart", "timepiece"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -614,6 +635,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "corvidae", editable = "." }]
+
+[[package]]
+name = "corvidae-timepiece"
+version = "0.1.0"
+source = { editable = "packages/corvidae-timepiece" }
+dependencies = [
+    { name = "corvidae" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "corvidae", editable = "." },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+]
 
 [[package]]
 name = "cross-channel-send"
@@ -1995,6 +2031,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a3/26/b09b8010994eccc3c09092e6b34058f36a460eea2d4c3e8b910c695975a0/typing_inspection-0.4.4.tar.gz", hash = "sha256:547274fa6b0a561ccf549cc9524b999a578e737d015d8709d021f9d0d13bea47", size = 76928, upload-time = "2026-08-12T12:37:25.997Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/67/81/4add07e5172b7ac40d8ed5ff580409a7801a4fe26d529bdd915401dabfbe/typing_inspection-0.4.4-py3-none-any.whl", hash = "sha256:65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147", size = 14750, upload-time = "2026-08-12T12:37:24.648Z" },
+]
+
+[[package]]
+name = "tzdata"
+version = "2026.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7a/29/6a1391d31cd00ff9e927215a224a880e1e84e826b64ba80a499e51c074d8/tzdata-2026.6.tar.gz", hash = "sha256:85d2cd9c09f81f0bb29db27759fc83af4f1e620efb814f8c5bf8b4cc4feece6d", size = 201017, upload-time = "2026-10-28T09:57:09.137Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0a/66/9a06c2227fedfd4919f0eaaa8b94377d9730882a7e4f95823c9a331ab5e1/tzdata-2026.6-py2.py3-none-any.whl", hash = "sha256:0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec", size = 348210, upload-time = "2026-10-28T09:57:07.276Z" },
 ]
 
 [[package]]
