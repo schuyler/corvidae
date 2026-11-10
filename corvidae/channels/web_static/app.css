@@ -92,3 +92,11 @@ details.item .body { white-space: pre-wrap; margin-top: 0.3rem; }
   #sidebar.open #side-body { display: flex; }
   #conversations { max-height: 30vh; }
 }
+
+/* Panel navigation (sidebar) and the shared panel shell. */
+.panels { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.5rem 1rem; }
+.panels a { color: var(--accent); }
+.panel-head { display: flex; gap: 1rem; align-items: baseline; padding: 0.75rem 1rem; background: var(--panel); border-bottom: 1px solid var(--border); }
+.panel-head .panels { flex-direction: row; padding: 0; }
+.panel-head a { color: var(--accent); }
+#panel { padding: 1rem; }
