@@ -160,7 +160,7 @@ agent:
 #     system_prompt: "You are..."  # or a file path; the subagent's system prompt
 
 # Cross-channel send (optional; cross-channel-send extra, see
-# docs/configuration.md). Registers send_message and list_channels.
+# docs/configuration.md). Registers notify_other_channel and list_channels.
 # cross_channel_send:
 #   max_hops: 3                     # refuse sends past this hop count (int >= 1)
 

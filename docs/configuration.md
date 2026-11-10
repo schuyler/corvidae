@@ -1071,13 +1071,13 @@ When `logging.file` is set in YAML, logs go to that rotating file regardless of 
 
 ## `cross_channel_send` — cross-channel send tools
 
-Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv sync` line). Without it the `send_message` and `list_channels` tools do not exist.
+Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv sync` line). Without it the `notify_other_channel` and `list_channels` tools do not exist.
 
-`CrossChannelSendPlugin` lets any turn send an instruction to another channel context. The message is delivered as a system-role notification via `on_notify` (the same mechanism the scheduler uses for reminders); the target mints its own trace and gets a fresh turn budget. Loop prevention is a `hop_count` in the notification annotations, refused when it exceeds `max_hops`.
+`CrossChannelSendPlugin` lets any turn send an instruction to another channel context. The message is delivered as a system-role notification via `on_notify` (the same mechanism the scheduler uses for reminders); the target mints its own trace and gets a fresh turn budget. Loop prevention is a `hop_count` in the notification annotations, refused when it exceeds `max_hops`. A call whose target is the current channel is refused, with a warning in the log (a self-send would queue a duplicate turn).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `cross_channel_send.max_hops` | integer | `3` | Maximum send hops before a `send_message` call is refused. A send from a context whose attribution carries `hop_count` n is refused when n + 1 exceeds this limit. Must be an integer ≥ 1 (bools and floats are rejected); a non-integer value fails startup naming the key and the value. A missing block keeps the default silently. |
+| `cross_channel_send.max_hops` | integer | `3` | Maximum send hops before a `notify_other_channel` call is refused. A send from a context whose attribution carries `hop_count` n is refused when n + 1 exceeds this limit. Must be an integer ≥ 1 (bools and floats are rejected); a non-integer value fails startup naming the key and the value. A missing block keeps the default silently. |
 
 ---
 

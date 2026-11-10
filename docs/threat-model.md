@@ -595,7 +595,7 @@ gives: keep `agent.yaml` unwritable by the daemon user.
 
 `discord.send_attachment` (issue #521) and `send_signal_attachment` (issue
 #544) are the first tools that send a *file* to a channel the model chooses
-(the cross-channel `send_message` of #234 also takes a model-chosen channel,
+(the cross-channel `notify_other_channel` of #234 also takes a model-chosen channel,
 but it hands an instruction to the agent's own context, not a message to the
 person): `channel_id` is an argument, and the file comes from under
 `discord.send_attachment_root` or `signal.send_attachment_root`, each `state`
@@ -631,7 +631,7 @@ everyone who can read the channel. Deleting a thread is not offered, so an
 agent that creates them in a loop leaves them; Discord archives them instead.
 
 No tool sends a *message* to the person on another channel yet (the
-cross-channel `send_message` of #234 queues a turn there instead). PRD §3.5.9 now requires one, with no
+cross-channel `notify_other_channel` of #234 queues a turn there instead). PRD §3.5.9 now requires one, with no
 allowlist of target channels: any turn may speak on any channel (#234).
 Finding 15 is its entry. PRD §3.9.7 also lets the agent set recurring
 reminders, which the tree doesn't yet: a recurring reminder set because of
