@@ -40,15 +40,18 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import aiohttp
+import pluggy
 import pytest
 from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings
 from aiohttp import web
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.hooks import (
+    CorvidaePlugin,
     _check_hook_arg_binding,
     create_plugin_manager,
     hookimpl,
+    install_plugin_hookspecs,
     resolve_reject_wins,
 )
 from corvidae.outbound import OutboundMessage, OutboundProgress, OutboundThinking, OutboundToolStatus
@@ -402,7 +405,8 @@ async def make_env(db):
 
     async def make(web_block=None, *, ready: bool = True, persistence: bool = True,
                    start: bool = True, token: str | None = TOKEN,
-                   use_db: bool = True, idle: bool = False) -> Env:
+                   use_db: bool = True, idle: bool = False,
+                   extra_plugins: dict | None = None) -> Env:
         env = Env()
         env.pm = create_plugin_manager()
         env.registry = ChannelRegistry()
@@ -415,8 +419,11 @@ async def make_env(db):
         env.agent = AgentStub(env.pm)
         env.agent.started = ready
         env.pm.register(env.agent, name="agent")
+        for name, extra in (extra_plugins or {}).items():
+            env.pm.register(extra, name=name)
         env.plugin = WebPlugin(env.pm)
         env.pm.register(env.plugin, name="web")
+        install_plugin_hookspecs(env.pm)
         # Optional kernel clock + idle tracker, as Runtime registers them.
         env.clock = env.idle = None
         if idle:
@@ -482,6 +489,8 @@ class TestConfig:
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(), name="registry")
         plugin = WebPlugin(pm)
+        pm.register(plugin, name="web")
+        install_plugin_hookspecs(pm)
         await plugin.on_init(pm=pm, config={"web": None})
         assert plugin._enabled is True
         assert plugin._host == "127.0.0.1"
@@ -519,6 +528,8 @@ class TestConfig:
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(), name="registry")
         other = WebPlugin(pm)
+        pm.register(other, name="web")
+        install_plugin_hookspecs(pm)
         cfg = {"web": {"host": "127.0.0.1", "port": env.port, "token": TOKEN}}
         await other.on_init(pm=pm, config=cfg)
         with pytest.raises(OSError):
@@ -1808,3 +1819,154 @@ class TestTransportMintedIds:
         assert rej["id"] == id_second
         # The earlier, admitted-and-unpersisted entry is still there.
         assert [e.text for e in env.plugin._unsent["web:main"]] == ["first"]
+
+
+# ===========================================================================
+# Issue #227: plugin-contributed read-only panels
+# ===========================================================================
+
+class PanelPlugin(CorvidaePlugin):
+    """Test plugin that contributes one panel through on_web_console_init."""
+
+    optional_depends_on = frozenset({"web"})
+
+    def __init__(self, title: str, static_dir: Path, routes: list) -> None:
+        self.title = title
+        self.static_dir = static_dir
+        self.routes = routes
+        self.calls = 0
+
+    @hookimpl
+    async def on_web_console_init(self, panels) -> None:
+        # Imported here so the module loads before Panel exists.
+        from corvidae.channels.web import Panel
+
+        self.calls += 1
+        panels.append(Panel(self, self.title, self.static_dir, self.routes))
+
+
+async def _panel_data(request):
+    return web.json_response({"answer": 42})
+
+
+async def _panel_stream(request):
+    # Prepares its own response and sets a CSP, as a hostile panel might.
+    resp = web.StreamResponse()
+    resp.headers["Content-Security-Policy"] = "default-src *"
+    await resp.prepare(request)
+    await resp.write(b"chunk")
+    await resp.write_eof()
+    return resp
+
+
+class TestPanels:
+
+    @pytest.fixture
+    def panel(self, tmp_path):
+        (tmp_path / "panel.js").write_text("window.panel = 1;\n")
+        (tmp_path / "panel.css").write_text("body { margin: 0; }\n")
+        return PanelPlugin(
+            "Test Panel", tmp_path,
+            [web.get("/data", _panel_data), web.get("/stream", _panel_stream)],
+        )
+
+    async def _env(self, make_env, panel):
+        return await make_env(extra_plugins={"testpanel": panel})
+
+    async def test_panel_page_assets_and_json_served(self, make_env, panel):
+        env = await self._env(make_env, panel)
+        async with env.http.get(f"{env.base}/panel/testpanel/",
+                                headers=env.cookie()) as r:
+            assert r.status == 200
+            assert r.content_type == "text/html"
+            assert "static/panel.js" in await r.text()
+        async with env.http.get(f"{env.base}/panel/testpanel/static/panel.js",
+                                headers=env.cookie()) as r:
+            assert r.status == 200
+            assert await r.text() == "window.panel = 1;\n"
+        async with env.http.get(f"{env.base}/panel/testpanel/static/panel.css",
+                                headers=env.cookie()) as r:
+            assert r.status == 200
+        async with env.http.get(f"{env.base}/panel/testpanel/data",
+                                headers=env.cookie()) as r:
+            assert r.status == 200
+            assert await r.json() == {"answer": 42}
+
+    async def test_panel_routes_need_cookie(self, make_env, panel):
+        env = await self._env(make_env, panel)
+        paths = ["/panel/testpanel/", "/panel/testpanel/static/panel.js",
+                 "/panel/testpanel/data"]
+        for path in paths:
+            # Control: the route exists for an authenticated client.
+            async with env.http.get(f"{env.base}{path}", headers=env.cookie()) as r:
+                assert r.status == 200, path
+            async with env.http.get(f"{env.base}{path}") as r:
+                assert r.status == 401, path
+
+    async def test_panel_routes_bad_host_4xx(self, make_env, panel):
+        env = await self._env(make_env, panel)
+        for path in ["/panel/testpanel/", "/panel/testpanel/data"]:
+            # Control: the route exists for a good Host.
+            async with env.http.get(f"{env.base}{path}", headers=env.cookie()) as r:
+                assert r.status == 200, path
+            async with env.http.get(f"{env.base}{path}",
+                                    headers={**env.cookie(), "Host": "evil.example"}) as r:
+                assert 400 <= r.status < 500, path
+
+    async def test_panel_responses_carry_csp(self, make_env, panel):
+        env = await self._env(make_env, panel)
+        expected = _expected_csp(
+            {f"ws://127.0.0.1:{env.port}", f"ws://localhost:{env.port}"})
+        paths = ["/panel/testpanel/", "/panel/testpanel/static/panel.js",
+                 "/panel/testpanel/data", "/panel/testpanel/stream"]
+        for path in paths:
+            async with env.http.get(f"{env.base}{path}", headers=env.cookie()) as r:
+                assert r.status == 200, path
+                assert _parse_csp(r.headers["Content-Security-Policy"]) == expected, path
+                assert r.headers["X-Content-Type-Options"] == "nosniff", path
+
+    async def test_non_get_route_fails_startup_naming_plugin(self, make_env, tmp_path):
+        async def change(request):
+            return web.json_response({})
+
+        bad = PanelPlugin("Bad", tmp_path, [web.post("/change", change)])
+        with pytest.raises(pluggy.PluginValidationError, match="badpanel"):
+            await make_env(extra_plugins={"badpanel": bad})
+
+    async def test_chat_page_links_each_panel(self, make_env, tmp_path):
+        first = PanelPlugin("First Panel", tmp_path, [])
+        second = PanelPlugin("Second Panel", tmp_path, [])
+        env = await make_env(extra_plugins={"first": first, "second": second})
+        async with env.http.get(f"{env.base}/", headers=env.cookie()) as r:
+            assert r.status == 200
+            body = await r.text()
+        assert "app.js" in body
+        assert '<a href="/panel/first/">First Panel</a>' in body
+        assert '<a href="/panel/second/">Second Panel</a>' in body
+
+    async def test_no_panels_renders_no_nav(self, make_env):
+        env = await make_env()
+        async with env.http.get(f"{env.base}/", headers=env.cookie()) as r:
+            assert r.status == 200
+            body = await r.text()
+        assert "app.js" in body
+        assert "<nav" not in body
+        assert "/panel/" not in body
+
+    async def test_panel_plugin_without_web_block_is_inert(self, tmp_path):
+        from corvidae.channels.web import Panel  # noqa: F401
+
+        pm = create_plugin_manager()
+        pm.register(ChannelRegistry(), name="registry")
+        panel = PanelPlugin("Idle", tmp_path, [])
+        pm.register(panel, name="idlepanel")
+        web_plugin = WebPlugin(pm)
+        pm.register(web_plugin, name="web")
+        install_plugin_hookspecs(pm)
+        await pm.ahook.on_init(pm=pm, config={})
+        await pm.ahook.on_start(config={})
+        try:
+            assert panel.calls == 0
+            assert web_plugin._runner is None
+        finally:
+            await pm.ahook.on_stop()
