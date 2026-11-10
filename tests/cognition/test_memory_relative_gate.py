@@ -249,8 +249,11 @@ class TestRelativeBanding:
         loose_id = await seed_memory(db, channel.id, loose, embedded=False)
         await ask(memory, channel, conv, "is the gazebo latch fixed")
         rows = await candidate_rows(db)
-        # The keyword search found it; it bands weak and is dropped.
+        # The keyword search found it; with no measured cosine it gets no z
+        # (it isn't banded on the stand-in similarity) and is dropped as weak.
         assert rows[loose_id]["source"] == "fts"
+        assert rows[loose_id]["z"] is None
+        assert rows[loose_id]["band"] == "weak"
         assert rows[loose_id]["outcome"] == "dropped_weak"
         assert loose not in recalled(conv)
 
