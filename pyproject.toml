@@ -46,6 +46,9 @@ cognition = [
 restart = [
     "corvidae-restart",
 ]
+timepiece = [
+    "corvidae-timepiece",
+]
 
 [project.scripts]
 corvidae = "corvidae.main:corvidae"
