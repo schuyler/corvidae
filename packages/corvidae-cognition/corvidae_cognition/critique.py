@@ -111,7 +111,7 @@ PROVENANCE_NOTE = (
     "the other party to take an incorrect action; then correct it briefly."
 )
 
-STYLISTIC_LENSES = ("predictive", "constrained", "adversarial", "retention")
+STYLISTIC_LENSES = ("predictive", "constrained", "adversarial")
 
 # Patterns that indicate a permission question about an action.
 # Matched against the agent's response text; a hit triggers the proactivity
