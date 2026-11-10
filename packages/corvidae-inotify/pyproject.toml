@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "corvidae-inotify"
+version = "0.1.0"
+description = "inotify plugin for corvidae: event-driven completion pings for background jobs"
+requires-python = ">=3.13"
+dependencies = ["corvidae"]
+
+[tool.uv.sources]
+corvidae = { workspace = true }
+
+[project.entry-points.corvidae]
+inotify_ping = "corvidae_inotify:InotifyPingPlugin"

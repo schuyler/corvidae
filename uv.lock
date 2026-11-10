@@ -11,6 +11,7 @@ members = [
     "context-panel",
     "corvidae",
     "corvidae-cognition",
+    "corvidae-inotify",
     "corvidae-restart",
     "corvidae-timepiece",
     "cross-channel-send",
@@ -553,6 +554,9 @@ dev = [
 discord = [
     { name = "discord-py" },
 ]
+inotify = [
+    { name = "corvidae-inotify" },
+]
 restart = [
     { name = "corvidae-restart" },
 ]
@@ -580,6 +584,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "context-panel", marker = "extra == 'context-panel'", editable = "packages/context-panel" },
     { name = "corvidae-cognition", extras = ["vec"], marker = "extra == 'cognition'", editable = "packages/corvidae-cognition" },
+    { name = "corvidae-inotify", marker = "extra == 'inotify'", editable = "packages/corvidae-inotify" },
     { name = "corvidae-restart", marker = "extra == 'restart'", editable = "packages/corvidae-restart" },
     { name = "corvidae-timepiece", marker = "extra == 'timepiece'", editable = "packages/corvidae-timepiece" },
     { name = "cross-channel-send", marker = "extra == 'cross-channel-send'", editable = "packages/cross-channel-send" },
@@ -595,7 +600,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "webhook-notify", marker = "extra == 'webhook-notify'", editable = "packages/webhook-notify" },
 ]
-provides-extras = ["dev", "acp", "discord", "cross-channel-send", "context-panel", "webhook-notify", "cognition", "restart", "timepiece"]
+provides-extras = ["dev", "acp", "discord", "cross-channel-send", "context-panel", "webhook-notify", "cognition", "restart", "timepiece", "inotify"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -624,6 +629,17 @@ requires-dist = [
     { name = "sqlite-vec", marker = "extra == 'vec'", specifier = ">=0.1.9" },
 ]
 provides-extras = ["vec"]
+
+[[package]]
+name = "corvidae-inotify"
+version = "0.1.0"
+source = { editable = "packages/corvidae-inotify" }
+dependencies = [
+    { name = "corvidae" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "corvidae", editable = "." }]
 
 [[package]]
 name = "corvidae-restart"
