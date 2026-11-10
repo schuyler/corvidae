@@ -117,7 +117,7 @@ agent:
 #                                     # memory, and weak memories are never admitted (#409)
 #     bands:                          # z-scores under relative (defaults below); cosine values under
 #       strong: 4.5                   # score/similarity (defaults 0.75 / 0.60). Setting bands without
-#       moderate: 3.0                 # band_on logs a warning.
+#       moderate: 3.0                 # a valid band_on logs a warning.
 #     recency_from: created           # created | last_used: where ranking age is measured from
 #     query_context: previous_reply   # previous_reply | none: put the agent's last reply before the
 #                                     # user's words in the retrieval query

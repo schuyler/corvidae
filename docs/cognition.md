@@ -528,7 +528,7 @@ No row means the record was not logged for that retrieval: outside the
 KNN's reach, not indexed, or redacted; in the window and not good enough to
 make the top k; or, on an FTS-degraded retrieval, not matched by the
 keyword query or past its `LIMIT`. `cut` and `dropped_weak` mean it ranked
-but lost on score (similarity times recency decay) or banding. `corvidae redact` deletes
+but lost on rank or banding (by default the z of its cosine, `retrieval_candidate.z`). `corvidae redact` deletes
 rows that reference a redacted memory (below).
 
 **Graceful degradation:** encoder down → FTS5 keyword retrieval over

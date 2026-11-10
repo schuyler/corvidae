@@ -268,6 +268,9 @@ class TestCandidateLog:
         await memory._ensure_schema()
         async with db.execute("SELECT source FROM retrieval_candidate") as cursor:
             assert await cursor.fetchall() == [(None,)]
+        # #409: the same upgrade adds the nullable z column.
+        async with db.execute("SELECT z FROM retrieval_candidate") as cursor:
+            assert await cursor.fetchall() == [(None,)]
         await db.close()
 
 

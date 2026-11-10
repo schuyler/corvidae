@@ -287,8 +287,10 @@ class TestDedupeAndStats:
         await db.close()
 
     async def test_access_stats_increment_only_for_admitted(self):
-        # A one-token budget admits nothing — stats must not move.
-        config = {**EMBED_CONFIG, "funnel": {"budgets": {"memory": 1}}}
+        # A one-token budget admits nothing — stats must not move. The gate
+        # is opened (#409) so the record reaches the funnel and is dropped
+        # for budget, not as weak before it.
+        config = gate_open({**EMBED_CONFIG, "funnel": {"budgets": {"memory": 1}}})
         memory, embedder, channel, conv, db = await build_retrieval_env(config)
         rowid = await seed_memory(
             db, channel.id, "kestrel moved the rain gauge to the north fence",
