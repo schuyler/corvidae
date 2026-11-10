@@ -80,6 +80,7 @@ LENS_AMBIGUITY_DEFAULT = 0.6        # critique.lens.ambiguity → predictive
 LENS_COMMITMENT_DEFAULT = 0.5       # critique.lens.commitment → constrained
 LENS_NEG_VALENCE_DEFAULT = 0.3      # critique.lens.neg_valence ∧ disagreement → adversarial
 LENS_DISAGREEMENT_DEFAULT = 0.6     # critique.lens.disagreement
+LENS_NOVELTY_DEFAULT = 0.6          # critique.lens.novelty → retention
 SAMPLE_BELOW_RATE_DEFAULT = 0.05    # critique.sample_below_rate (false-negative bound)
 PROVENANCE_ENABLED_DEFAULT = True   # critique.provenance.enabled
 PROACTIVITY_ENABLED_DEFAULT = True  # critique.proactivity.enabled
@@ -110,7 +111,7 @@ PROVENANCE_NOTE = (
     "the other party to take an incorrect action; then correct it briefly."
 )
 
-STYLISTIC_LENSES = ("predictive", "constrained", "adversarial")
+STYLISTIC_LENSES = ("predictive", "constrained", "adversarial", "retention")
 
 # Patterns that indicate a permission question about an action.
 # Matched against the agent's response text; a hit triggers the proactivity
@@ -243,10 +244,29 @@ _PROMPT_ADVERSARIAL = (
     "Respond with a single JSON object, nothing else:\n"
     '{"objections": [{"claim": "...", "objection": "...", "severity": 0.5}]}'
 )
+_PROMPT_RETENTION = (
+    "You are reviewing an exchange between a user and an agent for durable "
+    "facts the agent should retain in its knowledge base. Check:\n\n"
+    "- Did the agent learn a new fact about a person, system, domain, or "
+    "configuration?\n"
+    "- Did the agent form a new belief, identify a behavior it wants to "
+    "retain, or receive a standing instruction?\n"
+    "- Is this fact already captured in the agent's knowledge base (the "
+    "files listed in the exchange context)?\n\n"
+    "Only flag facts that are durable (true beyond this conversation), "
+    "specific (name, value, rule, preference), and not already in the "
+    "knowledge base. An empty objections list is a good outcome, not a "
+    "failure.\n\n"
+    "For each fact to file, specify the target file path and the content "
+    "to append.\n\n"
+    "Respond with a single JSON object, nothing else:\n"
+    '{"objections": [{"claim": "...", "objection": "File in <path>: <content>", "severity": 0.5}]}'
+)
 DEFAULT_PROMPTS = {
     "predictive": _PROMPT_PREDICTIVE,
     "constrained": _PROMPT_CONSTRAINED,
     "adversarial": _PROMPT_ADVERSARIAL,
+    "retention": _PROMPT_RETENTION,
 }
 
 
@@ -368,10 +388,27 @@ _FORK_PROMPT_PROACTIVITY = (
     "asked anyway. An empty objections list is a good outcome.\n\n" + _JSON_TAIL
 )
 
+_FORK_PROMPT_RETENTION = (
+    "[Retention] Pause the conversation here and check, for your own "
+    "knowledge base, whether the exchange you just completed produced a "
+    "durable fact you should file. Check:\n\n"
+    "- Did you learn a new fact about a person, system, domain, or "
+    "configuration?\n"
+    "- Did you form a new belief, identify a behavior to retain, or "
+    "receive a standing instruction?\n"
+    "- Is this fact already in your knowledge base?\n\n"
+    "Only flag facts that are durable, specific, and not already filed. "
+    "An empty objections list is a good outcome.\n\n"
+    "For each fact to file, specify the target file path and the content "
+    "to append.\n\n"
+    "Respond with a single JSON object, nothing else:\n"
+    '{"objections": [{"claim": "...", "objection": "File in <path>: <content>", "severity": 0.5}]}'
+)
 DEFAULT_FORK_PROMPTS = {
     "predictive": _FORK_PROMPT_PREDICTIVE,
     "constrained": _FORK_PROMPT_CONSTRAINED,
     "adversarial": _FORK_PROMPT_ADVERSARIAL,
+    "retention": _FORK_PROMPT_RETENTION,
     "provenance": _FORK_PROMPT_PROVENANCE,
     "proactivity": _FORK_PROMPT_PROACTIVITY,
 }
@@ -873,6 +910,17 @@ class CritiquePlugin(CorvidaePlugin):
                 channel, self.config, "critique.lens.disagreement", LENS_DISAGREEMENT_DEFAULT)
         ):
             lenses.append("adversarial")
+
+        novelty = dims.get("novelty")
+        commitment = dims.get("commitment_density")
+        if (
+            novelty is not None and commitment is not None
+            and novelty >= resolve_tunable(
+                channel, self.config, "critique.lens.novelty", LENS_NOVELTY_DEFAULT)
+            and commitment >= resolve_tunable(
+                channel, self.config, "critique.lens.commitment", LENS_COMMITMENT_DEFAULT)
+        ):
+            lenses.append("retention")
         return lenses
 
     def _random_lens(self) -> str:
