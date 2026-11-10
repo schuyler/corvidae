@@ -1077,7 +1077,7 @@ Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv 
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `cross_channel_send.max_hops` | integer | `3` | Maximum send hops before a `notify_other_channel` call is refused. A call whose target is the current channel is also refused (a self-send would queue a duplicate turn). A send from a context whose attribution carries `hop_count` n is refused when n + 1 exceeds this limit. Must be an integer ≥ 1 (bools and floats are rejected); a non-integer value fails startup naming the key and the value. A missing block keeps the default silently. |
+| `cross_channel_send.max_hops` | integer | `3` | Maximum send hops before a `notify_other_channel` call is refused. A call whose target is the current channel is also refused, with a warning in the log (a self-send would queue a duplicate turn). A send from a context whose attribution carries `hop_count` n is refused when n + 1 exceeds this limit. Must be an integer ≥ 1 (bools and floats are rejected); a non-integer value fails startup naming the key and the value. A missing block keeps the default silently. |
 
 ---
 

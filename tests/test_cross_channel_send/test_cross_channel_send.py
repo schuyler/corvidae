@@ -7,6 +7,7 @@ the real Agent.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
@@ -451,6 +452,34 @@ class TestSameChannelGuard:
         assert "same as the source" in result
         # the guard fires before delivery: no notification is queued
         assert notify.call_count == 0
+
+        await db.close()
+
+    async def test_same_channel_logs_warning(self, caplog):
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-123",
+                "annotations": {},
+            }
+        )
+
+        pm.ahook.on_notify = AsyncMock()
+
+        with caplog.at_level(logging.WARNING, logger="cross_channel_send"):
+            await plugin.notify_other_channel(ch_a.id, "hello self")
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert ch_a.id in warnings[0].getMessage()
 
         await db.close()
 

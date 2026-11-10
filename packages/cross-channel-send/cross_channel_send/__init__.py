@@ -125,6 +125,10 @@ class CrossChannelSendPlugin(CorvidaePlugin):
                     "use list_channels to see available targets."
                 )
             if source_channel == target.id:
+                logger.warning(
+                    "notify_other_channel refused: target %s is the source channel",
+                    target.id,
+                )
                 return (
                     f"Could not send: target {channel_id!r} is the same as the "
                     "source channel; reply directly instead of using "

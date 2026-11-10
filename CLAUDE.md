@@ -10,7 +10,7 @@ group (pytest-timeout), which the pytest config needs, the `acp` and `discord`
 extras, whose transport tests import the SDKs, the `cognition` extra
 (`packages/corvidae-cognition`: memory, appraisal, critique, funnel,
 outcome_log, goals), which `tests/cognition/` imports, and the
-`cross-channel-send` extra (`packages/cross-channel-send`: the send_message
+`cross-channel-send` extra (`packages/cross-channel-send`: the notify_other_channel
 and list_channels tools), which `tests/test_cross_channel_send/` imports, and the `webhook-notify` extra
 (`packages/webhook-notify`: webhook deliveries as notifications), which
 `tests/test_webhook_notify/` imports, and the `context-panel` extra
