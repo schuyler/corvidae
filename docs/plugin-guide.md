@@ -874,7 +874,7 @@ line in this guide.
 | `corvidae.channels.web` | `Panel` (see [Adding a web console panel](#adding-a-web-console-panel)) |
 | `corvidae.context` | `MessageType`, `ContextWindow`, `count_tokens`, `message_tokens` |
 | `corvidae.task` | `Task` |
-| `corvidae.tool` | `Tool`, `tool_to_schema` |
+| `corvidae.tool` | `Tool`, `ToolContext`, `tool_to_schema` |
 | `corvidae.persistence` | `PersistencePlugin`, `add_column_if_missing`, `view_rows`, `decodable_summaries` |
 | `corvidae.llm_plugin` | `LLMPlugin` |
 | `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |

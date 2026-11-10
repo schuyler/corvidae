@@ -1189,7 +1189,7 @@ those, as they stood when it was called:
   with entries and the next turn's sweep has not admitted it yet, it returns
   "Recall already landed".
 - **Otherwise it waits** for the first promise with entries ("Recall landed after
-  Xs") or until every one has settled without any ("Recall finished with nothing
+  Xs") or until every one has settled without any ("Recall finished after Xs with nothing
   to add"). The funnel knows because it holds the promises in `_pending`: a
   `None` result, an `Ingest` with no entries, a failure and a cancellation all
   count as a finished recall. It cannot tell "no hits" from a timeout or a

@@ -1326,7 +1326,7 @@ it.
   recall source ships yet, and memory retrieves before the model call). The edge,
   once a source exists: nothing caps how many `ponder` calls one assistant
   message makes, so K calls hold K workers until the same recall settles or 5 s
-  pass, at most about ceil(K/4) x 5 s of shared-worker time per message (less once a
+  pass, at most about ceil(K/4) x 5 s of wall time with the workers held, per message (less once a
   recall settles or times out, which the mixin's own timeout bounds), repeated up to
   `max_turns` times per exchange, and untrusted text can talk the agent into it.
   It reads only the funnel's pending promises and writes nothing, and its result

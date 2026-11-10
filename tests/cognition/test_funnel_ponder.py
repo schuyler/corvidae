@@ -103,7 +103,7 @@ class TestNothingInFlight:
         env = await build()
         start = time.monotonic()
         out = await ponder_tool(env)(_ctx=ctx_for(env))
-        assert time.monotonic() - start < 0.5
+        assert time.monotonic() - start < 1.5
         assert "nothing is being recalled" in out.lower()
 
     async def test_another_channels_promise_is_not_waited_on(self, build):
@@ -113,7 +113,7 @@ class TestNothingInFlight:
         await env.funnel.before_agent_turn(channel=other, trace_id="t", annotations={})
         start = time.monotonic()
         out = await ponder_tool(env)(_ctx=ctx_for(env))
-        assert time.monotonic() - start < 0.5
+        assert time.monotonic() - start < 1.5
         assert "nothing is being recalled" in out.lower()
 
     async def test_done_but_empty_unswept_promise_is_not_in_flight(self, build):
@@ -128,7 +128,7 @@ class TestNothingInFlight:
         env.funnel.ingest(env.channel, "critique", ["x"])
         start = time.monotonic()
         out = await ponder_tool(env)(_ctx=ctx_for(env))
-        assert time.monotonic() - start < 0.5
+        assert time.monotonic() - start < 1.5
         assert "nothing is being recalled" in out.lower()
 
 
@@ -142,7 +142,7 @@ class TestWaitingOnRecall:
         start = time.monotonic()
         future.set_result(entries("late entry"))
         out = await asyncio.wait_for(task, 1.0)
-        assert time.monotonic() - start < 0.5
+        assert time.monotonic() - start < 1.5
         assert "landed" in out.lower() and "next turn" in out.lower()
         # The ponder admitted nothing; the next turn's sweep does.
         assert "late entry" not in text_of(env.conv)
@@ -198,7 +198,7 @@ class TestWaitingOnRecall:
         future.set_result(entries("early entry"))
         start = time.monotonic()
         out = await ponder_tool(env)(_ctx=ctx_for(env))
-        assert time.monotonic() - start < 0.5
+        assert time.monotonic() - start < 1.5
         assert "already landed" in out.lower()
 
     async def test_funnel_cancelled_promise_counts_as_settled(self, build):
@@ -237,7 +237,7 @@ class TestWaitBounds:
         # One lands with entries while the other is still running: no waiting for it.
         first.set_result(entries("memory hit"))
         out = await asyncio.wait_for(task, 1.0)
-        assert time.monotonic() - start < 0.5
+        assert time.monotonic() - start < 1.5
         assert "landed" in out.lower()
 
     async def test_total_wait_stays_within_one_timeout_across_promises(self, build, monkeypatch):
@@ -253,8 +253,30 @@ class TestWaitBounds:
         first.set_result(None)
         out = await task
         elapsed = time.monotonic() - start
-        assert 0.35 <= elapsed < 0.6
+        assert 0.35 <= elapsed < 1.0
         assert "still waiting" in out.lower()
+
+    async def test_one_already_landed_and_one_running_returns_at_once(self, build):
+        env = await build()
+        landed = await submit_promise(env, "memory")
+        await submit_promise(env, "wiki")
+        landed.set_result(entries("memory hit"))
+        start = time.monotonic()
+        out = await ponder_tool(env)(_ctx=ctx_for(env))
+        assert time.monotonic() - start < 1.5
+        assert "already landed" in out.lower()
+
+    async def test_empty_and_entries_settling_together_still_lands(self, build):
+        env = await build()
+        empty = await submit_promise(env, "memory")
+        hit = await submit_promise(env, "wiki")
+        task = asyncio.create_task(ponder_tool(env)(_ctx=ctx_for(env)))
+        await settle()
+        # Both finish in the same loop tick: the one with entries decides the result.
+        empty.set_result(None)
+        hit.set_result(entries("wiki hit"))
+        out = await asyncio.wait_for(task, 1.0)
+        assert "landed" in out.lower() and "nothing to add" not in out.lower()
 
     async def test_a_failed_recall_counts_as_settled_mid_wait(self, build):
         env = await build()

@@ -55,8 +55,8 @@ call, so the promises the channel holds when the agent calls a tool are the
 recall that is in flight for it. The tool waits for those (it returns at the
 first with entries, or once all have settled empty) and returns at once when
 none is running. It waits on the promises it found when called, never on a
-drain and never on ``ingest`` or ``ingest_and_wake`` arrivals, which start
-their own turn. A message that arrives during the wait gets its own turn, which
+drain and never on ``ingest`` or ``ingest_and_wake`` arrivals (the second
+starts its own turn through its stub; the first wakes nothing). A message that arrives during the wait gets its own turn, which
 can submit or supersede promises; the tool does not follow those. The call
 stays outstanding, so the kernel holds the next assistant turn and counts the
 channel busy until it returns.
@@ -626,8 +626,9 @@ class FunnelPlugin(CorvidaePlugin):
         """Wait for this channel's in-flight pull promises, up to the timeout.
 
         Every submission for the turn was made before its model call, so the
-        channel's ``_pending`` promises are the recall in flight when this is called. Returns at once when one
-        already landed with entries or none is still running; otherwise waits for
+        channel's ``_pending`` promises are the recall in flight when this is
+        called. Returns at once when one already landed with entries or none is
+        still running; otherwise waits for
         the first promise with entries, or for all to settle empty. The promises
         belong to their providers and the funnel: waiting never cancels them, and
         nothing is admitted here, since the next turn's sweep does that.
@@ -642,7 +643,7 @@ class FunnelPlugin(CorvidaePlugin):
 
         # A recall already landed with entries: the next turn's sweep admits it.
         if any(_has_entries(promise) for promise in promises):
-            return "Recall already landed: the funnel admits it on your next turn, within its budget."
+            return "Recall already landed: it goes to the funnel's admission on your next turn (budget, dedupe and TTL still apply)."
         # Only an unfinished promise can still bring something.
         running = [promise for promise in promises if not promise.done()]
         if not running:
@@ -663,7 +664,7 @@ class FunnelPlugin(CorvidaePlugin):
             elapsed = time.monotonic() - start
             # A finished promise with entries ends the wait; the others can follow.
             if any(_has_entries(promise) for promise in done):
-                return f"Recall landed after {elapsed:.1f}s: the funnel admits it on your next turn, within its budget."
+                return f"Recall landed after {elapsed:.1f}s: it goes to the funnel's admission on your next turn (budget, dedupe and TTL still apply)."
             # Finished empty, failed or cancelled: keep waiting on the rest.
             running = list(still_running)
 
@@ -673,7 +674,7 @@ class FunnelPlugin(CorvidaePlugin):
         # Timed out: the recalls keep running and are admitted when they land.
         return (
             f"Still waiting on recall after {timeout:g}s; carry on, whatever it finds "
-            "is admitted on a later turn."
+            "goes to the funnel's admission on a later turn."
         )
 
     async def _drain(
