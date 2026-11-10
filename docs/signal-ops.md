@@ -180,8 +180,9 @@ owner on every boot, before `ExecStart` runs. systemd removes it again when
 the unit stops, which is harmless: corvidae's connection loop keeps retrying
 the path and reconnects when the socket reappears. (Not if corvidae runs in a
 container with that directory bind-mounted: the container keeps looking at the
-deleted one. Add `RuntimeDirectoryPreserve=yes`; see
-[Running in a container](configuration.md#running-in-a-container).)
+deleted one until you restart it, so add `RuntimeDirectoryPreserve=yes`. The
+container's user also needs write permission on the socket to connect, so run it
+with `--user <uid>:<gid>` of the user running signal-cli.)
 
 `--ignore-attachments` keeps signal-cli from downloading attachment blobs
 corvidae is going to discard anyway. `--ignore-stories`, `--ignore-stickers`,

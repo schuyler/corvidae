@@ -1196,68 +1196,53 @@ A malformed block fails startup naming the key and the value. The whole section 
 
 ## Running in a container
 
-The `Dockerfile` at the repo root builds the kernel (the agent loop, persistence, tools and transports) into a small image that runs `corvidae serve` against whatever `agent.yaml` you mount. Build it, give it a directory, and start it:
+The `Dockerfile` at the repo root builds the kernel (the agent loop, persistence, tools and transports) into an image that runs `corvidae serve` against an `agent.yaml` mounted at `/data`. The quickest useful setup is the browser chat page:
 
 ```sh
 docker build -t corvidae .
-mkdir -p ~/corvidae-data && cp agent.yaml ~/corvidae-data/
-sudo chown 1000:1000 ~/corvidae-data
-sudo chown root:1000 ~/corvidae-data/agent.yaml
-sudo chmod 640 ~/corvidae-data/agent.yaml
+mkdir -p ~/corvidae-data && sudo chown 1000:1000 ~/corvidae-data
 ```
 
-```sh
-docker run -d --name corvidae --restart unless-stopped \
-  -v ~/corvidae-data:/data \
-  -v ~/corvidae-data/agent.yaml:/data/agent.yaml:ro \
-  corvidae
-docker logs -f corvidae
-```
-
-**`/data` is the working directory.** Everything corvidae writes by default lands there, next to `agent.yaml`: `sessions.db`, `provenance.key`, log files, `state/`. Relative paths in the config resolve against it. Back that directory up and you've backed up the bot, and keep `provenance.key` with it, since fences only stay stable across restarts if the key does (see the top of this file).
-
-**The daemon runs as uid 1000, not root.** The shell tool runs as the daemon's user (see [threat-model.md](threat-model.md), finding 4), so the image doesn't hand it root. The cost: the mounted directory has to be writable by uid 1000, hence the first `chown`. (The last two leave `agent.yaml` owned by root, readable by the daemon's group and by nobody else on the host, which matters for the config lock below and means you edit it with `sudo`. At mode 600 the daemon couldn't read it at all.) If the directory isn't writable by uid 1000, corvidae dies at startup with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory. Fix the ownership, or run with `--user $(id -u):$(id -g)` and a directory you own.
-
-**The second `-v` and the file's ownership lock the config.** With `agent.yaml` mounted read-only, and owned by root, the daemon can't write it, rename a new file over it, or delete it, which is the lock [prd.md](prd.md) §3.11.11 describes. Leave both out if you want the agent to be able to change its own config, and know what that costs: a writable config plus hot reload lets it lift every other lock. The lock has one gap:
-
-- **A host edit that replaces the file detaches the read-only mount.** `sed -i` and most editors write a new file and rename it over the old one, and the running container's mount of the old file disappears. `/data/agent.yaml` then resolves through the writable `/data` mount. Your edit still reloads, and root ownership still stops `write_file` from appending to the file, but the daemon owns `/data`, so `shell` can `mv` a new file over it. `docker restart corvidae` restores the mount, and with it the whole lock, so restart the container after every config edit.
-- Closing the gap without a restart needs `agent.yaml` in a directory the daemon can't write at all. That moves where relative paths resolve (see the top of this file), so the writable paths would need to be absolute, and I haven't built or tested that layout.
-
-The same rule covers prompt files, wherever they live, including inside `/data`: mount each one read-only and keep it root-owned like `agent.yaml`, or the agent can edit its own prompts.
-
-**Nothing is exposed.** The image has no `EXPOSE`. If you configure [`web:`](#web--browser-chat-ui), the transport has to listen on a wildcard address inside the container, and you publish the port yourself. Publish it on loopback, so only the Docker host can reach it, and put TLS or a tunnel in front of that:
-
-```sh
-docker run -d --name corvidae --restart unless-stopped \
-  -p 127.0.0.1:8765:8765 \
-  -v ~/corvidae-data:/data \
-  -v ~/corvidae-data/agent.yaml:/data/agent.yaml:ro \
-  corvidae
-```
+Put this in `~/corvidae-data/agent.yaml`:
 
 ```yaml
+llm:
+  main:
+    base_url: http://host.docker.internal:8080/v1   # your model server, on the Docker host
+    model: llama3
+agent:
+  system_prompt: "You are a helpful assistant."
 web:
-  host: 0.0.0.0            # inside the container; the -p above keeps it on loopback
+  host: 0.0.0.0                  # inside the container; the -p below keeps it on loopback
   allowed_origins:
-    - http://127.0.0.1:8765   # the address you browse to, with the host-side port
+    - http://127.0.0.1:8765      # the address you browse to
 ```
 
-A wildcard bind derives no origins of its own, so the address you browse to has to be in `allowed_origins` or the page answers `403 bad host`. List `http://localhost:8765` too if you use that name, and list the TLS or tunnel origin if there's one in front. The login URL in the log is built from the first origin listed. The wildcard bind logs a `WARNING` at startup, as described in the web section.
+```sh
+TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+docker run -d --name corvidae --restart unless-stopped \
+  --add-host host.docker.internal:host-gateway \
+  -p 127.0.0.1:8765:8765 \
+  -e CORVIDAE_WEB_TOKEN=$TOKEN \
+  -v ~/corvidae-data:/data \
+  corvidae
+echo "http://127.0.0.1:8765/?token=$TOKEN"
+```
 
-**`localhost` is the container.** A model backend on the Docker host isn't at `http://localhost:8080/v1` from in here. On Linux, add `--add-host host.docker.internal:host-gateway` to `docker run` and set `llm.main.base_url` to `http://host.docker.internal:8080/v1`, or use the host's LAN address. The same goes for signal-cli: it runs outside the container, so mount the directory holding its socket and point `signal.socket` at the path as the container sees it. Two things about that:
+Open that URL. Why the config looks like this: inside a container the page has to listen on a wildcard address, and a wildcard bind derives no allowed origins of its own, so the address you browse to must be in `allowed_origins` or the page answers `403 bad host` (add `http://localhost:8765` if you use that name). The wildcard bind logs a `WARNING` at startup, as described in the [web section](#web--browser-chat-ui). The token comes from the environment so a restart doesn't log you out. It is shell access to the machine, so keep the port on loopback and put TLS or a tunnel in front of it for anything remote.
 
-- **The mount follows the directory, not the path.** The unit in [signal-ops.md](signal-ops.md) uses `RuntimeDirectory=corvidae`, which systemd deletes when signal-cli stops and creates afresh on start. The container keeps looking at the deleted directory, corvidae's reconnect loop retries forever, and Signal stays down until you restart the container. Add `RuntimeDirectoryPreserve=yes` to that unit, or put the socket in a directory systemd doesn't recreate.
-- **Connecting needs write permission on the socket**, not read. That unit runs as the same user as corvidae, so run the container as that user: `--user <uid>:<gid>`, with `/data` owned by the same uid. IRC, Discord and Zulip only need outbound network access.
-
-**Extras are chosen at build time.** The default image has none, which is `uv sync` with no `--extra`. Name what you want in `EXTRAS`, space separated, using the same names as the install line in the README:
+**Discord.** The bot only connects out, so there is nothing to publish, but the default image has no Discord SDK. A `discord:` block on it stops at startup with a message telling you to `uv sync --extra discord`; in a container that means rebuilding with the extra:
 
 ```sh
 docker build -t corvidae --build-arg EXTRAS="discord" .
-docker build -t corvidae-cognition --build-arg EXTRAS="cognition discord" .
 ```
 
-The `restart` tool needs the `restart` extra. It ends the daemon with SIGTERM and expects something to start it again, which in a container is `--restart unless-stopped`.
+Pass the bot token as `-e DISCORD_TOKEN=…` instead of writing it into `agent.yaml`, and list your user id under `discord.allow` (the default refuses everyone). Creating the application and inviting the bot are in [discord-ops.md](discord-ops.md). Two `voice will NOT be supported` warnings at startup are expected.
 
-**tiktoken's encoding is baked in.** The build downloads `cl100k_base` once, so a container recreated on a host with no outbound network still counts tokens properly instead of falling back to the character estimate. The build fails if it can't fetch it.
+**Everything lands in `/data`:** `sessions.db`, `provenance.key` (keep it with the directory), logs and `state/`. Back that directory up and you've backed up the bot. The daemon runs as uid 1000, not root, because the shell tool runs as the daemon's user ([threat-model.md](threat-model.md), finding 4), so the directory has to be writable by that uid. If it isn't, startup dies with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory. Fix the ownership, or run with `--user $(id -u):$(id -g)` and a directory you own.
 
-**A container is not a sandbox for the tools.** It limits the daemon and its tools to what you mounted and what the network lets them reach. It does not separate the tools from the daemon: `shell` still runs unsandboxed, as uid 1000 in the same container, next to `sessions.db`, the web token and the signal-cli socket. Running tools somewhere narrower than the daemon is a different feature, tracked in [#532](https://github.com/schuyler/corvidae/issues/532).
+**Locking the config (optional).** Add `-v ~/corvidae-data/agent.yaml:/data/agent.yaml:ro` to `docker run` and the agent can't edit its own configuration, which is what [prd.md](prd.md) §3.11.11 asks for. A host edit that replaces the file (`sed -i`, most editors) detaches the read-only mount until the container restarts, so run `docker restart corvidae` after each edit.
+
+**Extras are chosen at build time** with `EXTRAS`, space separated, using the names from the README install line: `--build-arg EXTRAS="cognition discord"`. The default is none. `corvidae acp` isn't a container use: your editor starts it against a local checkout, and it needs the ACP SDK. Signal needs signal-cli running outside the container, with its socket mounted in; see [signal-ops.md](signal-ops.md).
+
+**A container is not a sandbox for the tools.** It limits the daemon and its tools to what you mounted and what the network lets them reach. It does not separate the tools from the daemon: `shell` still runs unsandboxed, as the same user in the same container, next to `sessions.db` and the web token. Running tools somewhere narrower is a different feature, tracked in [#532](https://github.com/schuyler/corvidae/issues/532).
