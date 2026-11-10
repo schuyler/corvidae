@@ -10,7 +10,7 @@ import struct
 
 import pytest
 
-from inotify_ping import (
+from corvidae_inotify import (
     IN_CLOSE_WRITE,
     IN_DELETE,
     IN_MODIFY,
