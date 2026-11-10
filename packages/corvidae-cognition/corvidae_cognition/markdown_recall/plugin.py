@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from pathlib import Path
 from typing import Sequence
 
@@ -116,11 +117,14 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
 
     @hookimpl
     async def on_stop(self) -> None:
-        """Close the index connection so the aiosqlite worker thread
-        can exit. Without this, threading._shutdown blocks at interpreter
-        exit and the daemon hangs (#738)."""
-        if self._startup_task is not None and not self._startup_task.done():
-            self._startup_task.cancel()
+        """Cancel the startup task and close the index connection so the
+        aiosqlite worker thread can exit. Without this, threading._shutdown
+        blocks at interpreter exit and the daemon hangs (#738)."""
+        task = self._startup_task
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         if self._index is not None:
             await self._index.close()
 

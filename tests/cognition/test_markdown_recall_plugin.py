@@ -244,4 +244,23 @@ async def test_unconfigured_source_is_inert_in_funnel_ingest(tmp_path):
         if m.get("_message_type") == MessageType.CONTEXT
     ]
     assert ctx_lines == []
+    # on_stop on an inert plugin must not raise.
+    await source.on_stop()
     await db.close()
+
+
+async def test_on_stop_cancels_active_startup_task(build, tmp_path):
+    """#738 review: on_stop must cancel AND await the startup task before
+    closing the index. A cancel() without await leaves the task pending,
+    and the reconcile can hit a closed connection."""
+    root = tmp_path / "notes"
+    write_folder(root, {"a.md": "# A\n\nalpha content"})
+    config = {"markdown_recall": {"root": str(root), "db_path": str(tmp_path / "index.db")}}
+    env = await build(config, root)
+    # Start the plugin (creates the startup task).
+    await env.source.on_start(config)
+    assert env.source._startup_task is not None, "startup task should exist"
+    # on_stop must cancel and await it.
+    await env.source.on_stop()
+    assert env.source._startup_task.done(), "startup task should be done"
+    assert env.source._index._db is None, "connection should be closed"
