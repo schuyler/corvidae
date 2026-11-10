@@ -48,6 +48,13 @@ Behavior, in order:
      persist_message with the rowid attached — CONTEXT must persist
      or the window diverges from its reload.
 
+Ponder: the funnel also gives the agent a ``ponder`` tool, a pause of at
+most ``MAX_PONDER_SECONDS`` that ends early when the funnel gets something
+for the channel (``ingest``, ``ingest_and_wake``, or a pull promise
+resolving). The tool call stays outstanding, so the kernel holds the next
+assistant turn and counts the channel busy until it returns. It waits on
+arrival, never on a drain, because the drain only runs inside a turn.
+
 Config:
     funnel:
       default_budget: 512      # tokens per admit() call
@@ -62,16 +69,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from corvidae.context import ContextWindow, MessageType, count_tokens
 from corvidae.hooks import CorvidaePlugin, hookimpl, hookspec, resolve_single_result
+from corvidae.tool import Tool, tool_to_schema
 
 logger = logging.getLogger("corvidae.funnel")
 
 DEFAULT_BUDGET_TOKENS = 512
+
+# Longest one ponder call may last, in seconds. The tool is a filler pause, not
+# a scheduler: anything longer belongs to the scheduler plugin.
+MAX_PONDER_SECONDS = 5.0
+# What ponder waits when the model gives no duration.
+DEFAULT_PONDER_SECONDS = 2.0
 
 # The mandatory injection-defense frame (§2.2 rendering discipline). Tests
 # assert this exact format; sources must not bypass it.
@@ -260,6 +275,9 @@ class FunnelPlugin(CorvidaePlugin):
         # Pull path (#717): channel.id -> source -> that source's one pending
         # promise. The inner key is what makes one pending per source structural.
         self._pending: dict[str, dict[str, _Pending]] = {}
+        # Ponder (see module doc): channel.id -> one Event per outstanding
+        # ponder call. Arrivals set them all; each call removes its own.
+        self._ponderers: dict[str, list[asyncio.Event]] = {}
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -300,6 +318,8 @@ class FunnelPlugin(CorvidaePlugin):
         self._next_turn.setdefault(channel.id, []).append(
             _Payload(source, list(entries), self._now())
         )
+        # Something arrived: end any ponder on this channel.
+        self._wake_ponderers(channel.id)
 
     async def ingest_and_wake(
         self,
@@ -335,6 +355,8 @@ class FunnelPlugin(CorvidaePlugin):
         self._deferred.setdefault(pair, []).append(
             _Payload(source, list(entries), self._now())
         )
+        # Something arrived: end any ponder on this channel.
+        self._wake_ponderers(channel.id)
 
         # A stub is already pending for this pair: the payload just queues.
         if pair in self._stub_pending:
@@ -514,6 +536,14 @@ class FunnelPlugin(CorvidaePlugin):
                 self._discard(cid, source, old)
             self._pending.setdefault(cid, {})[source] = _Pending(promise, self._now())
 
+            def resolved(done: asyncio.Future) -> None:
+                # A promise that produced a result ends any ponder; a cancelled
+                # or failed one has nothing to admit.
+                if not done.cancelled() and done.exception() is None:
+                    self._wake_ponderers(cid)
+
+            promise.add_done_callback(resolved)
+
         # Ask every implementer to submit; a raising one is logged, and the others' submissions stand.
         try:
             await self.pm.ahook.on_funnel_ingest(
@@ -572,6 +602,112 @@ class FunnelPlugin(CorvidaePlugin):
             for source, pending in list(by_source.items()):
                 self._discard(channel_id, source, pending)
         self._pending.clear()
+        # Release every ponder so its tool call returns instead of timing out.
+        for channel_id in list(self._ponderers):
+            self._wake_ponderers(channel_id)
+
+    def _wake_ponderers(self, channel_id: str) -> None:
+        """Set the wake event of every outstanding ponder on ``channel_id``."""
+        for event in self._ponderers.get(channel_id, []):
+            event.set()
+
+    def _has_waiting(self, channel_id: str) -> bool:
+        """True when the funnel already holds something for ``channel_id``.
+
+        Items queued, or a pull promise that finished with a result, since the
+        turn that called ponder drained: waiting for them would be pointless.
+        """
+        # Stub-less payloads, then origin-keyed ones, for this channel.
+        if self._next_turn.get(channel_id):
+            return True
+        if any(cid == channel_id and queued for (cid, _), queued in self._deferred.items()):
+            return True
+        # A promise that is done and neither cancelled nor failed.
+        return any(
+            p.promise.done() and not p.promise.cancelled() and p.promise.exception() is None
+            for p in self._pending.get(channel_id, {}).values()
+        )
+
+    @hookimpl
+    def register_tools(self, tool_registry: list) -> None:
+        """Give the agent ``ponder``, a pause that ends early on arrivals."""
+        plugin = self
+
+        async def ponder(
+            seconds: float = DEFAULT_PONDER_SECONDS,
+            until_context: bool = True,
+            _ctx=None,
+        ) -> str:
+            """Pause briefly before your next turn, like clearing your throat. The pause
+            ends early when new context arrives for this channel. Use it to give pending
+            context a moment to land, not to wait on people or jobs.
+
+            Args:
+                seconds: How long to pause, in seconds, above 0 and at most 5.
+                until_context: End the pause early when new context arrives.
+            """
+            return await plugin._ponder(seconds, until_context, _ctx)
+
+        # Same wrapping goals uses, so the schema skips the injected _ctx.
+        tool_registry.append(Tool(name=ponder.__name__, fn=ponder, schema=tool_to_schema(ponder)))
+
+    async def _ponder(self, seconds: object, until_context: bool, ctx) -> str:
+        """Run one ponder call: validate, clamp, then wait for the time or an arrival."""
+        # The channel is what arrivals are matched against.
+        if ctx is None or getattr(ctx, "channel", None) is None:
+            return "Error: ponder has no channel context; it can only run inside a channel turn"
+        channel_id = ctx.channel.id
+        limit = MAX_PONDER_SECONDS
+        # bool is an int subclass, but True is not a number of seconds.
+        if (
+            isinstance(seconds, bool)
+            or not isinstance(seconds, (int, float))
+            or not math.isfinite(seconds)
+            or seconds <= 0
+        ):
+            return (
+                f"Error: ponder seconds must be a number above 0 and at most "
+                f"{limit:g}, got {seconds!r}; call ponder again with a value in that range"
+            )
+
+        # Over the cap: rescue by pausing for the cap, log it, and say so.
+        requested = float(seconds)
+        note = ""
+        if requested > limit:
+            logger.warning(
+                "ponder on %s asked for %g s, over the %g s limit; pausing %g s instead",
+                channel_id, requested, limit, limit,
+                extra={"channel_id": channel_id},
+            )
+            note = f" (you asked for {requested:g}s; the limit is {limit:g}s)"
+            requested = limit
+
+        start = time.monotonic()
+        # Context already waiting: no pause is useful, the next turn drains it.
+        if until_context and self._has_waiting(channel_id):
+            return "Woke at once: new context is already waiting."
+
+        # Register a wake event for this call, wait, and always unregister.
+        event = asyncio.Event()
+        waiters = self._ponderers.setdefault(channel_id, [])
+        if until_context:
+            waiters.append(event)
+        try:
+            await asyncio.wait_for(event.wait(), requested)
+            woke = True
+        except TimeoutError:
+            # The full pause elapsed with nothing arriving: the normal way out.
+            woke = False
+        finally:
+            if event in waiters:
+                waiters.remove(event)
+            if not waiters:
+                self._ponderers.pop(channel_id, None)
+
+        elapsed = time.monotonic() - start
+        if woke:
+            return f"Woke after {elapsed:.1f}s: new context is waiting."
+        return f"Pondered {requested:g}s{note}."
 
     async def _drain(
         self,

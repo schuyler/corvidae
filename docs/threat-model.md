@@ -1315,6 +1315,18 @@ it.
 
 ### Smaller things
 
+- The funnel's `ponder` tool lets the model pause its own next turn. Untrusted
+  text that talks the agent into calling it can only delay that channel's
+  replies, and the cost is bounded: each call is capped at 5 s
+  (`MAX_PONDER_SECONDS`, not configurable), longer requests are clamped and
+  logged, and a message or any funnel arrival ends or sidesteps the pause. It
+  reads nothing and writes nothing, and its result carries only the elapsed time.
+  The edge: a model looping on `ponder` spends turns and holds the channel
+  busy, so idle work (heartbeat, consolidation) stays off while it does; the
+  per-exchange `max_turns` budget is the bound on that loop. Remove the tool
+  with `plugins.disabled: [funnel]` (which also removes the funnel), or on one
+  channel with `channels.<id>.tools.disabled: [ponder]`.
+
 - Passive retrieval joins the vector search with a keyword search (#666),
   so a record that names a person, project or identifier surfaces whenever
   a query names it. Since #409 a record the keyword search found is gated

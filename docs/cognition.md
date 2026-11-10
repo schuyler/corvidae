@@ -876,6 +876,8 @@ point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
    key. shortcut: new entries are charged without their frame, so the
    window can pass the cap by one frame; charge it if caps under ~200
    tokens matter.
+   (The funnel also gives the agent a `ponder` tool, a pause of at most 5 s
+   that ends early when context arrives; see below.)
 3. **Frame** every admitted batch in explicit data-not-instructions
    wrapping with a source label (injection defense, written once here).
 4. **Append + persist** one CONTEXT message at the tail through
@@ -1176,6 +1178,37 @@ until then or until shutdown. And a promise that finishes after the turn's
 sweep is superseded, and its entries lost, if its provider submits again
 in that same turn's collect. The funnel does not admit such a result on
 re-submit yet.
+
+**`ponder` tool.** The funnel registers one tool, `ponder(seconds=2,
+until_context=true)`: the agent clearing its throat. The call stays
+outstanding for up to `seconds` and returns early when the funnel gets
+something for that channel: `ingest`, `ingest_and_wake`, or a pull promise
+resolving to a result. Nothing else wakes it, and other channels' arrivals
+are ignored. Content already waiting when it is called returns at once. With
+`until_context=false` it always waits the full time.
+
+- **The cap is 5 s** (`MAX_PONDER_SECONDS`, a constant, not config). A longer
+  request is clamped, logged at WARNING and reported in the result, naming the
+  value asked for and the limit. A value that is not a finite number above 0
+  is refused with an error naming the value and the accepted range. Anything
+  that needs a longer wait belongs to the scheduler.
+- **It waits on arrival, never on a drain.** The drain runs inside
+  `before_agent_turn`, and the turn is what the pause holds back, so waiting
+  for a drain would wait out the whole time.
+- **Held turn, busy channel.** Like any tool call, a ponder keeps its call id
+  pending: the kernel holds the next assistant turn until the result lands,
+  and the channel counts as busy, so idle work (heartbeat, consolidation)
+  stays off while it runs. That is intended. A message that arrives during a
+  ponder still gets a turn, as it does during any tool call.
+- **Two turns on an `ingest_and_wake` arrival.** Its stub notification starts
+  a turn of its own, which drains the content; the ponder result then starts
+  another. The extra turn is accepted, so as not to hold stub turns in the
+  kernel for a filler tool.
+- **The result admits nothing.** It says how long the pause lasted and whether
+  context woke it. The content reaches the window through the normal drain.
+- On shutdown, `on_stop` releases every waiting ponder.
+
+`plugins.disabled: [funnel]` removes the tool along with the rest of the funnel.
 
 ### GoalsPlugin (`packages/corvidae-cognition/corvidae_cognition/goals.py`)
 
