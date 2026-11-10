@@ -558,6 +558,24 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 
 ---
 
+## `markdown_recall` — markdown-folder recall source
+
+Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.
+
+`MarkdownRecallPlugin` (entry point `markdown_recall`) is a recall source: on every plain user turn it searches a folder of markdown files for what the turn is about and hands the top hits to the funnel as framed CONTEXT. The folder is the source of truth; the SQLite index under `db_path` (a vec0 vector surface + FTS5, kept current by a startup and an idle reconcile) is a cheap-to-rebuild cache. A search before the index is built resolves to nothing, never a block; an embedding failure degrades the affected chunks to FTS5-only. There is no `on_funnel_ingest` of its own — the [recall mixin](plugin-guide.md#implementing-on_funnel_ingest) owns the gate, cooldown and timeout, and this plugin supplies `search` and `render`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `markdown_recall.root` | path | `state/markdown_recall` | The folder of markdown files to mirror, relative to the workspace. Symlinks are not followed out of the folder; frontmatter is parsed with `yaml.safe_load`. A missing or unreadable folder is fail-soft: no index, no CONTEXT, no crash. |
+| `markdown_recall.db_path` | path | `state/markdown_recall/index.db` | The SQLite index file. The files under `root` are the source of truth; this is a cache, safe to delete (the next reconcile rebuilds it). |
+| `markdown_recall.max_hits` | positive integer | `5` | The top-k hits returned per search, in fused rank order (vec KNN + FTS5 by reciprocal rank, as memory does). A non-integer, bool or non-positive value is a config error at startup, naming the key and the value. |
+| `markdown_recall.cooldown` | seconds, `>= 0` | mixin default | Seconds between searches per channel (the recall mixin's `SearchGate`). A search while the cooldown is active is skipped; the next turn asks again. |
+| `markdown_recall.timeout` | seconds, `> 0` | mixin default | Seconds a search may run before it is cancelled and the turn proceeds without it (fail-soft). |
+
+The source admits under `funnel.budgets.markdown_recall` (falling back to `funnel.default_budget`), so a per-source token cap is available like any other source's.
+
+---
+
 ## `tools` — built-in tool settings
 
 The built-in tool keys are read by the plugin that owns the tool: `shell_timeout` by `ShellToolPlugin` (entry point `shell_tools`), `max_file_read_bytes` by `FileToolsPlugin` (`file_tools`), and the `web_*` keys by `WebToolsPlugin` (`web_tools`). These three replaced `CoreToolsPlugin` (`core_tools`); a config that still lists `core_tools` under `plugins.disabled` disables nothing and logs a WARNING, so list the plugins you meant instead (`shell_tools` also removes `task_pipeline`). `tools.max_result_chars` and the other dispatch keys are read by `ToolCollectionPlugin`.
