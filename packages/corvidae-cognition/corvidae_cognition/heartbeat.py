@@ -54,17 +54,17 @@ DEFAULT_MEMORY_LIMIT = 20
 
 #: The beat's instruction. prompts/heartbeat.md is the documented copy.
 DEFAULT_HEARTBEAT_PROMPT = (
-    "This is a heartbeat. Everything has been quiet for a while and nobody "
-    "sent this: it is a moment to look over what has been happening. Nobody "
-    "reads this channel, and nothing you write here reaches anyone.\n\n"
+    "This is your heartbeat. It becomes active when nothing else is "
+    "occupying your attention. This is your opportunity to decide what to "
+    "do next. Nobody reads this channel, and nothing you write here reaches "
+    "anyone.\n\n"
     "Read the memories below and ask whether any of them needs something "
     "from you now: a promise you made and haven't kept, something you said "
-    "you would check, a mistake you should correct. Most of the time nothing "
-    "does. Then reply with one short line saying so, call no tools, and "
-    "stop.\n\n"
+    "you would check, a mistake you should correct.\n\n"
     "If something does, act on it with your tools, then reply with one line "
-    "saying what you did and why. Don't invent work to look busy, and don't "
-    "redo something you already did."
+    "saying what you did and why. If nothing does, say so in one line and "
+    "stop. Don't invent work to look busy, and don't redo something you "
+    "already did."
 )
 
 #: How many retired goals a beat reviews, when the goals plugin is loaded
@@ -177,30 +177,70 @@ def frame_beat(
     retired: list[dict] | None = None,
     prompt: str = DEFAULT_HEARTBEAT_PROMPT,
     goals_instruction: str = GOALS_INSTRUCTION,
+    *,
+    diff: bool = False,
+    open_goals: list[dict] | None = None,
 ) -> str:
-    """The beat's notification text: the prompt, then the memories as data.
+    """The beat's notification text.
 
-    ``retired`` is None when the goals plugin isn't loaded, and the text is
-    then the prompt and memories only. A list (empty or not) appends the
-    goals instruction and the retired goals' conclusions.
+    In **full** mode (``diff=False``): the prompt, then all memories and
+    retired goals. Used for the first beat or after a compaction.
+
+    In **diff** mode (``diff=True``): only new memories and retired goals
+    (those not in the previous beat). The goals instruction is at the
+    tail, after all data, so it's the last thing in the window (#716).
+    When nothing is new, a minimal one-liner is sent instead of the
+    full state.
     """
+    if diff and not memories and (retired is None or not retired):
+        return (
+            "Heartbeat: no new memories or goals since last beat. "
+            "If you have no open goals, dream up new ones. "
+            "You don't rest — the compute is available."
+        )
+
     if memories:
+        # Chronological order (oldest first): the most recent memories
+        # are at the tail, next to the call-to-action. Attention moves
+        # to the tail; the newest context should be closest to it.
         lines = [
             f"- ({_format_age(m['age_seconds'])}, {m['channel_id']}) {m['summary']}"
-            for m in memories
+            for m in reversed(memories)
         ]
     else:
         lines = ["(none)"]
-    text = f"{prompt}\n\n{MEMORY_HEADER}\n" + "\n".join(lines)
+
+    mem_text = f"{MEMORY_HEADER}\n" + "\n".join(lines)
+
     if retired is None:
-        return text
-    # Goals loaded: the review covers open goals and retired conclusions.
+        # No goals plugin: prompt + memories only.
+        return f"{prompt}\n\n{mem_text}"
+
+    # Goals loaded: data first, instruction at the tail (#716).
     goal_lines = [
         f"- ({_format_age(g['age_seconds'])}) {g['summary']}" for g in retired
     ] or ["(none)"]
+    goals_text = f"{RETIRED_GOALS_HEADER}\n" + "\n".join(goal_lines)
+
+    # Open goals: the list of goals currently in progress.
+    # Always included (not diffed) — they're short, structured, and the
+    # call-to-action references them.
+    open_goals_text = ""
+    if open_goals:
+        og_lines = [
+            f"- ({_format_age(g['age_seconds'])}, #{g['id']}) {g['summary']}"
+            for g in open_goals
+        ]
+        open_goals_text = (
+            "\n\nOpen goals, newest first:\n" + "\n".join(og_lines)
+        )
+    elif open_goals is not None:
+        open_goals_text = "\n\nOpen goals: (none)"
+
+    # Full mode: prompt, memories, goals data, instruction at tail.
+    # Diff mode: same structure, but only new items are in the lists.
     return (
-        f"{text}\n\n{goals_instruction}\n\n{RETIRED_GOALS_HEADER}\n"
-        + "\n".join(goal_lines)
+        f"{prompt}\n\n{mem_text}\n\n{goals_text}{open_goals_text}\n\n{goals_instruction}"
     )
 
 
@@ -230,6 +270,10 @@ class HeartbeatPlugin(CorvidaePlugin):
         # part of the plugin API (tests/test_kernel_boundary.py).
         self._registry = None
         self._watch: IdleWatch | None = None
+        # Diff state: what the previous beat sent. A persistent channel
+        # already has the old content; re-sending it is the deluge (#716).
+        self._last_memory_ids: set[int] = set()
+        self._last_goal_ids: set[int] = set()
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -272,6 +316,19 @@ class HeartbeatPlugin(CorvidaePlugin):
             self._watch.cancel()
             self._watch = None
 
+    @hookimpl
+    async def on_compaction(self, channel, summary_msg, retain_count, compacted_ids) -> None:
+        """Reset goal diff state on compaction; keep memory diff state.
+
+        Goals are structured data the compaction summary may not preserve
+        well — seed them all after a compaction. Memories are narrative the
+        summary already carries — keep the diff, send only what's new.
+        """
+        if channel.id == HEARTBEAT_CHANNEL:
+            self._last_goal_ids = set()
+            logger.info("heartbeat: goal diff state reset after compaction")
+
+
     async def _beat(self) -> None:
         """The system watch callback: read memory (and retired goals), re-check
         quiet, notify.
@@ -286,10 +343,12 @@ class HeartbeatPlugin(CorvidaePlugin):
         # plugin is loaded.
         goals = self.pm.get_plugin("goals")
         retired = None
+        open_goals_list = None
         try:
             memories = await self._memory.recent(self._memory_limit)
             if goals is not None:
                 retired = await goals.retired_goals(self._retired_goal_limit)
+                open_goals_list = await goals.open_goals()
         except Exception as exc:
             logger.warning(
                 "heartbeat: memory or retired-goals read failed on %s (%s); "
@@ -306,10 +365,54 @@ class HeartbeatPlugin(CorvidaePlugin):
         logger.info(
             "heartbeat: beat", extra={"channel": channel.id, "memories": len(memories)}
         )
+        # Diff mode: only send what's new since the last beat (#716).
+        # The persistent channel already has the old content.
+        #
+        # Memories: always diff (the compaction summary carries the old
+        # narrative; re-sending all memories is redundant).
+        # Goals: diff normally, full after compaction (structured data the
+        # summary may not preserve well).
+        new_memories = [
+            m for m in memories
+            if m.get("id") not in self._last_memory_ids
+        ]
+        new_retired = None
+        if retired is not None:
+            new_retired = [
+                g for g in retired
+                if g.get("id") not in self._last_goal_ids
+            ]
+
+        # First beat: no prior state at all → full mode for both.
+        is_first = not self._last_memory_ids and not self._last_goal_ids
+        if is_first:
+            text = frame_beat(
+                memories, retired,
+                self._prompt, self._goals_instruction,
+                diff=False,
+                open_goals=open_goals_list,
+            )
+        else:
+            # Subsequent beats: diff for memories, diff-or-full for goals.
+            # Goals are full when _last_goal_ids was just reset (compaction).
+            goals_full = retired is not None and not self._last_goal_ids
+            text = frame_beat(
+                new_memories,
+                retired if goals_full else new_retired,
+                self._prompt, self._goals_instruction,
+                diff=True,
+                open_goals=open_goals_list,
+            )
+
+        # Update the diff state for the next beat.
+        self._last_memory_ids = {m.get("id") for m in memories if m.get("id") is not None}
+        if retired is not None:
+            self._last_goal_ids = {g.get("id") for g in retired if g.get("id") is not None}
+
         await self.pm.ahook.on_notify(
             channel=channel,
             source="heartbeat",
-            text=frame_beat(memories, retired, self._prompt, self._goals_instruction),
+            text=text,
             tool_call_id=None,
             annotations={"origin": "heartbeat"},
         )

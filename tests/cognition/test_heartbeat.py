@@ -24,6 +24,8 @@ from helpers import with_chat_llm
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae_cognition.heartbeat import (
     DEFAULT_HEARTBEAT_PROMPT,
+    GOALS_INSTRUCTION,
+    frame_beat,
     HEARTBEAT_CHANNEL,
     HeartbeatPlugin,
 )
@@ -276,8 +278,9 @@ async def test_rejects_an_after_that_would_beat_back_to_back(make_env, bad):
 
 async def test_beat_carries_prompt_and_recent_memory(make_env):
     """H2: the beat holds the heartbeat prompt and the newest memories of the
-    whole memory, every channel's and its own included, newest first. Redacted
-    records stay out. No configuration is needed to reach any channel."""
+    whole memory, every channel's and its own included, in chronological
+    order (oldest first, newest at the tail). Redacted records stay out.
+    No configuration is needed to reach any channel."""
     env = await make_env({"heartbeat": {"after": AFTER}})
     now = env.clock.now()
     await env.seed_memory("irc:#lex", "I promised kestrel a wiring diagram.", now - 7200)
@@ -290,13 +293,15 @@ async def test_beat_carries_prompt_and_recent_memory(make_env):
     assert len(env.beats) == 1
     text = env.beats[0]["text"]
     assert DEFAULT_HEARTBEAT_PROMPT in text
-    newest_first = [
-        text.index("I reviewed my memories."),
-        text.index("Alice's plans for Friday."),
-        text.index("kestrel said the station reboots at noon."),
+    # Chronological order (oldest first): the most recent memories are
+    # at the tail, next to the call-to-action.
+    chronological = [
         text.index("I promised kestrel a wiring diagram."),
+        text.index("kestrel said the station reboots at noon."),
+        text.index("Alice's plans for Friday."),
+        text.index("I reviewed my memories."),
     ]
-    assert newest_first == sorted(newest_first)
+    assert chronological == sorted(chronological)
     assert "A redacted thing." not in text
 
 
@@ -386,3 +391,126 @@ async def test_beat_obeys_memory_limit(make_env):
     assert "newest: the third plan." in text
     assert "middle: the second plan." in text
     assert "oldest: the first plan." not in text
+
+
+# --- Diff-mode tests (#716) -------------------------------------------------
+
+class TestHeartbeatDiffMode:
+    """Diff-based heartbeat prompt: only new items, instruction at tail."""
+
+    def test_first_beat_is_full_mode(self):
+        """First beat (no prior state) sends all memories and goals."""
+        memories = [
+            {"id": 1, "age_seconds": 60, "channel_id": "c1", "summary": "mem1"},
+            {"id": 2, "age_seconds": 120, "channel_id": "c2", "summary": "mem2"},
+        ]
+        retired = [
+            {"id": 10, "age_seconds": 300, "summary": "goal1"},
+        ]
+        text = frame_beat(memories, retired, diff=False)
+        # Full mode: all items present
+        assert "mem1" in text
+        assert "mem2" in text
+        assert "goal1" in text
+        # Goals instruction at the tail (last line)
+        assert text.strip().endswith(GOALS_INSTRUCTION.strip())
+
+    def test_diff_mode_no_new_items_minimal(self):
+        """Diff mode with no new items sends a minimal one-liner."""
+        text = frame_beat([], [], diff=True)
+        assert "no new memories or goals" in text
+        assert "dream up new ones" in text
+        assert "You don't rest" in text
+        # Should be short (not the full prompt)
+        assert len(text) < 200
+
+    def test_diff_mode_only_new_items(self):
+        """Diff mode sends only new memories and goals."""
+        memories = [
+            {"id": 3, "age_seconds": 30, "channel_id": "c3", "summary": "new_mem"},
+        ]
+        retired = [
+            {"id": 11, "age_seconds": 60, "summary": "new_goal"},
+        ]
+        text = frame_beat(memories, retired, diff=True)
+        # New items present
+        assert "new_mem" in text
+        assert "new_goal" in text
+        # Goals instruction at the tail
+        assert text.strip().endswith(GOALS_INSTRUCTION.strip())
+
+    def test_diff_mode_no_goals_plugin(self):
+        """Diff mode with no goals plugin (retired=None)."""
+        memories = [
+            {"id": 3, "age_seconds": 30, "channel_id": "c3", "summary": "new_mem"},
+        ]
+        text = frame_beat(memories, None, diff=True)
+        assert "new_mem" in text
+        # No goals instruction (no goals plugin)
+        assert GOALS_INSTRUCTION not in text
+
+    def test_full_mode_goals_instruction_at_tail(self):
+        """Full mode also has goals instruction at the tail."""
+        memories = [
+            {"id": 1, "age_seconds": 60, "channel_id": "c1", "summary": "mem1"},
+        ]
+        retired = [
+            {"id": 10, "age_seconds": 300, "summary": "goal1"},
+        ]
+        text = frame_beat(memories, retired, diff=False)
+        # Goals instruction is the last thing
+        assert text.strip().endswith(GOALS_INSTRUCTION.strip())
+        # Memories and goals data come before the instruction
+        mem_pos = text.index("mem1")
+        goal_pos = text.index("goal1")
+        instr_pos = text.index(GOALS_INSTRUCTION)
+        assert mem_pos < instr_pos
+        assert goal_pos < instr_pos
+
+    def test_post_compaction_goals_full_memories_diff(self):
+        """After compaction: goals are full (reset), memories are diff (kept)."""
+        # Simulate: last beat sent memories 1,2 and goals 10,11
+        plugin = HeartbeatPlugin()
+        plugin._last_memory_ids = {1, 2}
+        plugin._last_goal_ids = {10, 11}
+
+        # Compaction resets only goal IDs
+        plugin._last_goal_ids = set()
+
+        # Next beat: memories 1,2,3 (3 is new), goals 10,11,12 (all "new" because reset)
+        memories = [
+            {"id": 1, "age_seconds": 300, "channel_id": "c1", "summary": "old_mem1"},
+            {"id": 2, "age_seconds": 200, "channel_id": "c2", "summary": "old_mem2"},
+            {"id": 3, "age_seconds": 100, "channel_id": "c3", "summary": "new_mem3"},
+        ]
+        retired = [
+            {"id": 10, "age_seconds": 500, "summary": "old_goal10"},
+            {"id": 11, "age_seconds": 400, "summary": "old_goal11"},
+            {"id": 12, "age_seconds": 300, "summary": "new_goal12"},
+        ]
+
+        # Diff for memories: only 3 is new
+        new_memories = [m for m in memories if m["id"] not in plugin._last_memory_ids]
+        assert [m["id"] for m in new_memories] == [3]
+
+        # Goals are full (reset): all 10, 11, 12
+        goals_full = retired is not None and not plugin._last_goal_ids
+        assert goals_full is True
+
+        # frame_beat gets: new memories only, all goals
+        text = frame_beat(
+            new_memories,
+            retired,  # full goals
+            diff=True,
+        )
+        # New memory present
+        assert "new_mem3" in text
+        # Old memories NOT present (diff)
+        assert "old_mem1" not in text
+        assert "old_mem2" not in text
+        # All goals present (full after compaction)
+        assert "old_goal10" in text
+        assert "old_goal11" in text
+        assert "new_goal12" in text
+        # Call-to-action at tail
+        assert text.strip().endswith(GOALS_INSTRUCTION.strip())
