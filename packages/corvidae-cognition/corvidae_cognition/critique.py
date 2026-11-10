@@ -353,7 +353,7 @@ _FORK_PROMPT_PROACTIVITY = (
     "the user whether to do something. Your job is to check whether the "
     "subject of that question is something you own or are responsible for. "
     "Your system prompt (SOUL.md) contains an 'Ownership Boundary' section "
-    "that lists what is 'Mine' (you act without asking) versus 'His' (you "
+    "that lists what is 'Mine' (you act without asking) versus 'the user's' (you "
     "ask or route to the user).\n\n"
     "Check:\n\n"
     "- What is the specific thing you are asking permission to do?\n"
@@ -362,7 +362,7 @@ _FORK_PROMPT_PROACTIVITY = (
     "loops, memory operations)?\n"
     "- If it does, you should have acted without asking. The permission "
     "question is the failure; the action is the default.\n"
-    "- If it falls under the 'His' list (his repos, core changes, "
+    "- If it falls under the user's list (their repos, core changes, "
     "system-level, irreversible decisions), the question is appropriate.\n\n"
     "Only object when the subject is clearly in the 'Mine' list and you "
     "asked anyway. An empty objections list is a good outcome.\n\n" + _JSON_TAIL
