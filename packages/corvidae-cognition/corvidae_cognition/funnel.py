@@ -11,13 +11,20 @@ Two admission paths:
 - **Immediate** (Phase 1a): sources call ``admit()`` synchronously inside
   their own ``before_agent_turn`` (memory retrieval, date/time grounding).
 - **Deferred** (Phase 2, WP2.6): notification producers without a
-  ``tool_call_id`` call ``register_and_wake()``; payloads queue per
+  ``tool_call_id`` call ``ingest_and_wake()``; payloads queue per
   ``(channel.id, origin)``, one stub notification wakes the channel per
   pending pair, and the drain in ``before_agent_turn`` admits everything
   queued for the triggering exchange's origin. Tool results stay on their
   existing path, untouched. The registry is in-memory by design — payloads
   pending at shutdown are dropped (critique verdicts are advisory; losing
   one across a restart is acceptable). Do not persist.
+- **Pull** (#717): a provider implementing the ``on_funnel_ingest`` hook
+  ``submit``s one promise per source, an ``asyncio.Future`` resolving to an
+  ``Ingest`` (entries, plus an optional callback) or ``None``. A promise
+  finished at the turn's sweep is admitted that turn; one still pending is
+  admitted at the channel's first turn after it resolves, whatever its
+  origin. At most one pending promise per (channel, source): a newer submit
+  cancels the older. ``ingest()`` is the stub-less producer API (#202).
 
 Behavior, in order:
   1. Dedupe: drop any entry whose exact text already appears inside a
@@ -48,15 +55,19 @@ Config:
         memory: 512
       window_budgets:          # optional per-source window caps (unset: none)
         memory: 4096
+      ingest_ttl: 600          # seconds before a queued or pending ingest is dropped (unset: never)
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import dataclass
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 from corvidae.context import ContextWindow, MessageType, count_tokens
-from corvidae.hooks import CorvidaePlugin, hookimpl, resolve_single_result
+from corvidae.hooks import CorvidaePlugin, hookimpl, hookspec, resolve_single_result
 
 logger = logging.getLogger("corvidae.funnel")
 
@@ -105,6 +116,28 @@ def _read_window_budgets(raw: object) -> dict[str, int]:
     return caps
 
 
+def _read_ingest_ttl(raw: object) -> float | None:
+    """Validate ``funnel.ingest_ttl`` into seconds, or ``None`` for no expiry.
+
+    Unset means queued ingests never expire. A value that is not a number
+    greater than 0 (a bool is not a number here) logs a warning naming the
+    key, the value and what is accepted, and expiry stays off.
+    """
+    # Unset: nothing expires.
+    if raw is None:
+        return None
+    # bool is an int subclass, but True is not a number of seconds.
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+        logger.warning(
+            "funnel.ingest_ttl must be a number of seconds greater than 0, "
+            "got %r; expiry stays off — set funnel.ingest_ttl to a positive "
+            "number of seconds in agent.yaml, or remove it",
+            raw,
+        )
+        return None
+    return float(raw)
+
+
 def _source_rows(conv: ContextWindow, source: str) -> list[str]:
     """Contents of the window's CONTEXT rows framed for ``source``.
 
@@ -133,11 +166,67 @@ class Admission:
     duplicate: list[str]
 
 
+@dataclass(frozen=True)
+class Ingest:
+    """What a pull promise resolves to: entries to admit, and an optional callback."""
+
+    # Pre-formatted lines to admit, in priority order (admitted as one frame).
+    entries: list[str]
+    # Called with the Admission of each drain attempt, if given (sync).
+    on_admitted: Callable[[Admission], None] | None = None
+
+
+@dataclass
+class _Payload:
+    """One queued batch of entries, with the source that frames it."""
+
+    # Frame label at admission.
+    source: str
+    # Entries still waiting to be admitted.
+    entries: list[str]
+    # The funnel's clock when the batch was queued, or its promise submitted.
+    created: float
+    # Callback for the drain attempts, from the Ingest that produced it.
+    on_admitted: Callable[[Admission], None] | None = None
+
+
+@dataclass
+class _Pending:
+    """A submitted promise and the funnel-clock time it was submitted."""
+
+    # Resolves to an Ingest, or to None when the provider has nothing to admit.
+    promise: asyncio.Future
+    # The funnel's clock when the provider submitted it (its TTL age starts here).
+    created: float
+
+
+class FunnelSpec:
+    """Hooks the funnel owns."""
+
+    @hookspec
+    async def on_funnel_ingest(
+        self,
+        channel,
+        trace_id: str,
+        annotations: dict | None,
+        submit: Callable[[str, asyncio.Future], None],
+    ) -> None:
+        """Submit promises: ``submit("<source>", future)``, the future resolving to an ``Ingest`` or ``None``.
+
+        Implementers submit and return; they must not await the promise here.
+        A provider that submits again while its previous promise is pending
+        cancels that promise, so it should wait for the pending one to finish.
+        """
+
+
 class FunnelPlugin(CorvidaePlugin):
+    # Owns the on_funnel_ingest hook; its implementers are collected each turn.
+    hookspecs = FunnelSpec
     reloadable_keys = (
         "funnel.default_budget",
         "funnel.budgets",
         "funnel.window_budgets",
+        "funnel.ingest_ttl",
     )
 
     """The single admission point for tail CONTEXT entries."""
@@ -145,7 +234,11 @@ class FunnelPlugin(CorvidaePlugin):
     depends_on = frozenset()
     model_visible_annotations = frozenset({"origin"})
 
-    def __init__(self, pm=None) -> None:
+    def __init__(self, pm=None, now: Callable[[], float] = time.monotonic) -> None:
+        # The clock that stamps queued batches and submitted promises for TTL age.
+        self._now = now
+        # funnel.ingest_ttl in seconds; None means queued ingests never expire.
+        self._ttl: float | None = None
         if pm is not None:
             self.pm = pm
         self._default_budget: int = DEFAULT_BUDGET_TOKENS
@@ -153,17 +246,20 @@ class FunnelPlugin(CorvidaePlugin):
         # Per-source caps on what one window holds (funnel.window_budgets).
         self._window_budgets: dict[str, int] = {}
         # Deferred-registration state (WP2.6), keyed (channel.id, origin).
-        # _deferred queues (source, entries) payloads awaiting a drain;
+        # _deferred queues payloads awaiting a drain;
         # _stub_pending marks pairs whose wake stub has fired but whose
         # drain has not yet run. Per-ORIGIN keying is the §2.2 correctness
         # point, not an optimization: coalescing a critique verdict into
         # another origin's stub would make the verdict-responding turn
         # critique-eligible — the recursion loop reopened one coalesce deep.
-        self._deferred: dict[tuple[str, str], list[tuple[str, list[str]]]] = {}
+        self._deferred: dict[tuple[str, str], list[_Payload]] = {}
         self._stub_pending: set[tuple[str, str]] = set()
         # Stub-less payloads (#202), keyed by channel.id alone: admitted at
         # the channel's next turn whatever its origin, and waking nothing.
-        self._next_turn: dict[str, list[tuple[str, list[str]]]] = {}
+        self._next_turn: dict[str, list[_Payload]] = {}
+        # Pull path (#717): channel.id -> source -> that source's one pending
+        # promise. The inner key is what makes one pending per source structural.
+        self._pending: dict[str, dict[str, _Pending]] = {}
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -173,16 +269,18 @@ class FunnelPlugin(CorvidaePlugin):
         self._default_budget = funnel_cfg.get("default_budget", DEFAULT_BUDGET_TOKENS)
         self._budgets = dict(funnel_cfg.get("budgets", {}) or {})
         self._window_budgets = _read_window_budgets(funnel_cfg.get("window_budgets"))
+        self._ttl = _read_ingest_ttl(funnel_cfg.get("ingest_ttl"))
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
-        """Re-read budgets and window caps on config reload."""
+        """Re-read budgets, window caps and the ingest TTL on config reload."""
         funnel_cfg = config.get("funnel", {}) or {}
         self._default_budget = funnel_cfg.get("default_budget", DEFAULT_BUDGET_TOKENS)
         self._budgets = dict(funnel_cfg.get("budgets", {}) or {})
         self._window_budgets = _read_window_budgets(funnel_cfg.get("window_budgets"))
+        self._ttl = _read_ingest_ttl(funnel_cfg.get("ingest_ttl"))
 
-    def register(self, channel, source: str, entries: list[str]) -> None:
+    def ingest(self, channel, source: str, entries: list[str]) -> None:
         """Queue a payload for the channel's next turn, without waking it.
 
         Producer API for payloads that must not cause a turn of their own
@@ -195,11 +293,15 @@ class FunnelPlugin(CorvidaePlugin):
             source: Frame label at admission ("critique", ...).
             entries: Pre-formatted lines to admit.
         """
+        # Nothing to admit: queue nothing.
         if not entries:
             return
-        self._next_turn.setdefault(channel.id, []).append((source, list(entries)))
+        # Queue it on the channel's next-turn list, stamped with its creation time.
+        self._next_turn.setdefault(channel.id, []).append(
+            _Payload(source, list(entries), self._now())
+        )
 
-    async def register_and_wake(
+    async def ingest_and_wake(
         self,
         channel,
         origin: str,
