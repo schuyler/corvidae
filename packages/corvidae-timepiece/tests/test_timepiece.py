@@ -169,3 +169,35 @@ class TestConfig:
             )
         assert "timepiece.timezone" in str(exc.value)
         assert "Mars/Olympus" in str(exc.value)
+
+    async def test_malformed_format_raises_naming_key_and_value(self):
+        pm = create_plugin_manager()
+        plugin = TimepiecePlugin()
+        pm.register(plugin, name="timepiece")
+        import pytest
+
+        with pytest.raises(ValueError) as exc:
+            await pm.ahook.on_init(
+                pm=pm, config={"timepiece": {"format": ""}}
+            )
+        assert "timepiece.format" in str(exc.value)
+
+
+class TestCustomFormat:
+    async def test_custom_strftime_format(self):
+        plugin = await make_plugin(
+            {"timepiece": {"format": "%B %d, %Y %I:%M %p"}}
+        )
+        channel = FakeChannel()
+        await turn(plugin, channel)
+        content = context_entries(channel)[0]["content"]
+        # T0 = 2026-11-07 19:15 UTC -> "November 07, 2026 07:15 PM"
+        assert "November 07, 2026 07:15 PM" in content, content
+
+    async def test_default_format_unchanged(self):
+        plugin = await make_plugin({})
+        channel = FakeChannel()
+        await turn(plugin, channel)
+        content = context_entries(channel)[0]["content"]
+        assert "The current date and time are now" in content
+        assert "Saturday 2026-11-07 at 19:15 UTC" in content, content

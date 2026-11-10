@@ -13,6 +13,9 @@ one ~12-token line enters each channel per interval.
 Config (own section; absent block = defaults):
     timepiece.interval_minutes: positive number, default 10.
     timepiece.timezone: IANA timezone name, default the daemon's local time.
+    timepiece.format: strftime format string, default
+        "%A %Y-%m-%d at %H:%M %Z" (produces e.g. "Monday 2026-11-09
+        at 17:12 PST").
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from corvidae.tuning import config_value
 logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_MINUTES = 10
+DEFAULT_FORMAT = "%A %Y-%m-%d at %H:%M %Z"
 
 
 class TimepiecePlugin(CorvidaePlugin):
@@ -61,6 +65,13 @@ class TimepiecePlugin(CorvidaePlugin):
                 ) from exc
         else:
             self._tz = None  # fall back to the daemon's local time
+        fmt = config_value(config, "timepiece.format", DEFAULT_FORMAT)
+        if not isinstance(fmt, str) or not fmt:
+            raise ValueError(
+                "Config error: timepiece.format must be a non-empty "
+                f"strftime format string, got {fmt!r} \u2014 check agent.yaml"
+            )
+        self._format = fmt
         # channel id -> wall time of the last stamp injected there.
         # In-memory only: after a restart the first turn re-stamps, which
         # is the correct behavior (the window is fresh, so is the clock).
@@ -85,7 +96,7 @@ class TimepiecePlugin(CorvidaePlugin):
         # elapsed; strictly inside it the last stamp is still fresh.
         if last is not None and now - last < self._interval:
             return
-        stamp = now.strftime("%A %Y-%m-%d at %H:%M %Z")
+        stamp = now.strftime(self._format)
         marker = {"role": "system", "content": f"The current date and time are now {stamp}"}
         conv.append(marker, MessageType.CONTEXT)
         # No manual persist: the agent fires persist_message for entries
