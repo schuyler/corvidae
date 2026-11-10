@@ -888,8 +888,8 @@ payloads queue per `(channel, origin)` via `register_and_wake()`, one
 stub notification wakes the channel per pending pair, and the drain in
 `before_agent_turn` admits everything queued for the triggering
 exchange's origin. Entries the budget dropped stay queued for the next
-drain, except an entry larger than its source's whole budget or window
-cap: it can never fit, so the drain drops it with a warning that names
+drain (as do entries the window cap held back), except an entry larger
+than its source's whole budget or window cap: it can never fit, so the drain drops it with a warning that names
 the channel, the source and `funnel.budgets.<source>` or
 `funnel.window_budgets.<source>`. `register()` queues without a stub: those payloads wake
 nothing and are admitted at the channel's next turn, whatever its origin
@@ -1005,8 +1005,9 @@ dropped (the LLM call has already been paid for). The transcript is split
 on message lines (a message longer than a piece is cut by characters) into
 records that each fit the memory admission budget as a retrieved memory
 line (`funnel.budgets.memory`, else `funnel.default_budget`, else 512,
-read at startup; each piece leaves room for the longest `[marginal] (age) `
-prefix), so a raw record can actually be admitted (#626). The pieces are
+read at startup; each piece leaves room for the longest
+`[marginal] (age, memory <id>) ` prefix, a five-digit day count and a
+twelve-digit id), so a raw record can actually be admitted (#626). The pieces are
 records of one consolidation (shared range, importance and stamp) stamped
 `mode = raw`. A budget too small for any memory line keeps the transcript
 as one record, with a warning naming the key. One raw piece can fill the
@@ -1093,17 +1094,22 @@ by `MemoryPlugin`; only the agent's active access surface is absent.
 
 The context-admission funnel — the single chokepoint for tail CONTEXT
 admission. Entry point name: `"funnel"`. Exposes
-`admit(channel, conv, source, entries, budget_tokens=None) -> list[str]`
+`admit(channel, conv, source, entries, budget_tokens=None, keys=None) -> list[str]`
 (the admitted entries; empty when nothing was appended):
-dedupes against CONTEXT already in the window, budgets tokens per source
-(drops are logged, never silent), wraps everything in explicit
+dedupes against CONTEXT already in the window (on each entry's whole text
+against every CONTEXT row, or, with `keys`, one per entry, on its key
+against rows framed for the same source; a length mismatch raises
+`ValueError`), budgets tokens per source and, when
+`funnel.window_budgets.<source>` is set, to what is left under that
+source's window cap (drops are logged, never silent), wraps everything in explicit
 data-not-instructions framing with a source label, appends one CONTEXT
 message at the tail, and persists it with the rowid attached.
 
 `admit_detailed(...)` takes the same arguments and returns an `Admission`
 (frozen dataclass): `admitted` (the entries appended, in input order) and
 `duplicate` (the entries dropped because the window's CONTEXT already
-carried them). An entry in neither list was dropped by the budget.
+carried them). An entry in neither list was dropped by the budget or the
+window cap.
 `admit()` is `admit_detailed(...).admitted`. Memory retrieval uses the
 detailed form to label `dropped_dup` versus `dropped_budget` in the
 candidate log.

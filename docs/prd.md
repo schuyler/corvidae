@@ -1029,8 +1029,7 @@ only through the funnel.
    weak (a query with nothing above weak admits nothing), annotate
    conflicts between records with opposed claims and prefer the later
    one, and admit through the funnel as `(age, memory <id>) summary`
-   lines, marked `[marginal] (age, memory <id>) summary` when moderate;
-   the id is the one `recall_raw` takes, and its tool description says so. Admitted records get their
+   lines, marked `[marginal] (age, memory <id>) summary` when moderate. Admitted records get their
    access statistics bumped; every retrieval writes a `retrieval_log` row and the exchange's retrieval
    profile. Retrieval spans the agent's whole memory; there is no
    per-channel scope to narrow it (principle 14), and
@@ -1071,11 +1070,11 @@ only through the funnel.
 
 **Funnel.** The single admission chokepoint for tail CONTEXT: dedupe
 against CONTEXT already in the window, on the entry's key when its source
-gives one (memory gives its record id, matched against that source's
-CONTEXT), else on its text; per-source token budgets
-(`funnel.default_budget`, `funnel.budgets.<source>`), and an optional
+gives one (matched against that source's CONTEXT; memory gives its record
+id), else on its text; per-source token budgets
+(`funnel.default_budget`, `funnel.budgets.<source>`) and an optional
 per-source ceiling on what one window holds
-(`funnel.window_budgets.<source>`), in priority order,
+(`funnel.window_budgets.<source>`), admitting in priority order,
 skipping entries that don't fit, drops logged; data-not-instructions
 framing of retrieved data, labelled with where it came from, written
 once here (everything else is framed by the kernel, §3.3.11); append and persist one CONTEXT row with its rowid attached. Non-

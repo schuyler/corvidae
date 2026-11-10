@@ -316,8 +316,9 @@ class FunnelPlugin(CorvidaePlugin):
 
         Returns ``payloads`` unchanged when the channel has no conversation
         window. A payload whose admission raises is kept whole; entries the
-        budget dropped are kept as leftovers, except any larger than the
-        source's whole budget, which are dropped with a warning.
+        budget or window cap dropped are kept as leftovers, except any larger
+        than the source's whole budget or cap, which are dropped with a
+        warning.
         """
         conv = getattr(channel, "conversation", None)
         if conv is None:
