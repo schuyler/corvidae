@@ -31,6 +31,11 @@ discord = [
 cross-channel-send = [
     "cross-channel-send",
 ]
+# A live, read-only view of loaded context windows in the web console
+# (packages/context-panel).
+context-panel = [
+    "context-panel",
+]
 # Webhook deliveries to channels as notifications (packages/webhook-notify).
 webhook-notify = [
     "webhook-notify",
@@ -148,5 +153,6 @@ members = ["packages/*"]
 [tool.uv.sources]
 corvidae-cognition = { workspace = true }
 cross-channel-send = { workspace = true }
+context-panel = { workspace = true }
 webhook-notify = { workspace = true }
 corvidae-restart = { workspace = true }

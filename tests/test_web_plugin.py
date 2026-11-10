@@ -407,7 +407,8 @@ async def make_env(db):
     async def make(web_block=None, *, ready: bool = True, persistence: bool = True,
                    start: bool = True, token: str | None = TOKEN,
                    use_db: bool = True, idle: bool = False,
-                   extra_plugins: dict | None = None) -> Env:
+                   extra_plugins: dict | None = None,
+                   extra_config: dict | None = None) -> Env:
         env = Env()
         env.pm = create_plugin_manager()
         env.registry = ChannelRegistry()
@@ -434,8 +435,12 @@ async def make_env(db):
         block = {"host": "127.0.0.1", "port": 0} if web_block is None else web_block
         if token is not None and isinstance(block, dict) and "token" not in block:
             block = {**block, "token": token}
-        config = {"web": block}
+        config = {"web": block, **(extra_config or {})}
         env.config = config
+        # The real on_init broadcast starts every plugin's on_init before
+        # web's nested panel hook, so extras initialise first.
+        for extra in (extra_plugins or {}).values():
+            await extra.on_init(pm=env.pm, config=config)
         await env.plugin.on_init(pm=env.pm, config=config)
         if start:
             await env.plugin.on_start(config=config)
