@@ -1005,6 +1005,7 @@ No restart is required for the changes listed below. Changes that require restar
 | Transport-wide entries (`channels.<transport>:*`) | Replaced and re-matched against every running channel. Scalar keys apply from the next turn, `tools.disabled` as above, the register only to conversations that start after the reload. See [Transport-wide entries](#transport-wide-entries). |
 | `web.token` | A changed token logs out every browser (their sockets close and the page says the session expired). A token removed from config falls back to `CORVIDAE_WEB_TOKEN` as the daemon started with it, else a fresh generated one, which is logged. Changing `CORVIDAE_WEB_TOKEN` itself needs a restart. |
 | `agent` defaults | `ChannelRegistry.agent_defaults` is updated. `max_turns`, `max_context_tokens` and `reasoning_history` are resolved every turn, so running channels pick them up at their next turn; `system_prompt` and `register_prompt` reach only conversations that start after the reload. |
+| `inotify_ping.*` | `InotifyPingPlugin` re-validates the section and re-arms its watches; `enabled: false` stops them. |
 
 ### What requires restart
 
@@ -1028,6 +1029,7 @@ again.
 | `llm.*` (every profile, including `llm.main`, plus `llm.defaults` and `llm.stages`) | Read at startup. A reload that changes any of it logs a restart-only warning per changed key and `llm config changed; LLM profiles, llm.stages and llm.defaults apply on restart` and keeps the running clients. A malformed `llm:` section still refuses the whole reload. A reload is not checked against the registered stages, so a `llm.stages` entry of the wrong kind passes the reload and fails the next startup. |
 | `memory.*` (including `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after`, `memory.consolidate_after_tokens` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts, and the token threshold is read once then. |
 | `heartbeat.after` | `HeartbeatPlugin` reads it at init and registers its idle watch at start. Putting the heartbeat to sleep or waking it takes a restart. |
+| `timepiece.*` | `TimepiecePlugin` reads its section in `on_init` and has no reload hook. |
 | `tools.max_result_chars`, `tools.shell_timeout`, `tools.web_fetch_timeout`, `tools.call_timeout`, `tools.timeouts` | Deferred; not currently implemented in hot-reload path. A bad `tools.call_timeout` or `tools.timeouts` value still refuses the whole reload (see Error handling). |
 
 ### Error handling
@@ -1137,3 +1139,54 @@ The plugin reads and writes files under `<config_dir>/state/`:
 - `restart.json` — pending restart marker (written before SIGTERM, read and deleted on next boot).
 - `restart-history.jsonl` — append-only log of restart requests and deliveries.
 - `boot-history.jsonl` — written by an **external boot supervisor** (not by this plugin). The plugin reads it to determine the boot mode (normal vs. safe) and whether the previous run ended abnormally. Record format: one JSON object per line; start records have a `mode` key, exit records have a `service_result` key, reset records have a `reset` key. Nothing in this repository writes this file; the boot supervisor is deployment-specific.
+
+---
+
+## `timepiece` — wall-clock stamps in the window
+
+Requires the timepiece extra (`--extra timepiece` on your `uv sync` line). Without the block the plugin runs with its defaults; to turn it off, list `timepiece` in `plugins.disabled`.
+
+Before a turn, if the channel has had no stamp for `interval_minutes`, the plugin appends one CONTEXT line to the conversation, such as `The current date and time are now Monday 2026-11-09 at 17:12 PST`. Every channel that takes a turn is stamped, internal ones included. The line is persisted like any CONTEXT row. The last-stamp times are kept in memory, so the first turn on each channel after a restart is stamped. It adds no tool and starts no turn.
+
+```yaml
+timepiece:
+  interval_minutes: 10
+  timezone: America/Los_Angeles
+  format: "%A %Y-%m-%d at %H:%M %Z"
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `timepiece.interval_minutes` | number | `10` | Minimum minutes between stamps on one channel. Must be a number > 0. |
+| `timepiece.timezone` | string | daemon's local time | IANA timezone name for the stamp. Must name a known zone. |
+| `timepiece.format` | string | `"%A %Y-%m-%d at %H:%M %Z"` | `strftime` format for the time in the stamp. Must be a non-empty string. |
+
+A malformed key fails startup naming the key and the value. Restart to apply a change.
+
+---
+
+## `inotify_ping` — completion pings for background jobs
+
+Requires the inotify extra (`--extra inotify` on your `uv sync` line). Linux only.
+
+Watches files, typically the logs of jobs the agent started in the background, and sends a notification to one channel when a watched file has been written and then stays quiet for `debounce_seconds`. A burst of writes yields one ping, and the watch re-arms after each, so a long-lived log pings again after its next burst. The notification text is `[inotify] <path> settled — background work likely complete`, with `origin=inotify`. It does not include the file's contents. Off unless `enabled: true`.
+
+```yaml
+inotify_ping:
+  enabled: true
+  channel: internal:heartbeat
+  debounce_seconds: 5
+  paths:
+    - /var/log/jobs/train.log
+  terminal_marker: done
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `inotify_ping.enabled` | bool | `false` | Turns the watcher on. When false, only this key is validated, so the others can stay in place. |
+| `inotify_ping.channel` | string | none | Channel id (`transport:scope`) that receives the pings. Required when enabled. Resolved when a ping fires, so a channel not yet loaded still works; a ping to a channel that can't be resolved is dropped with a `WARNING`. |
+| `inotify_ping.debounce_seconds` | number | `5` | Quiet period, in seconds, after the last write before a file counts as settled. Must be a number ≥ 0. |
+| `inotify_ping.paths` | list of strings | none | Files to watch. Required when enabled; must be a non-empty list of non-empty strings. A file that doesn't exist yet is watched through its parent directory, so it can appear later. A path whose parent doesn't exist either is skipped with a `WARNING`. |
+| `inotify_ping.terminal_marker` | string or null | `null` | When set, a settled file pings only if its last non-empty line contains this text, so a pause in the middle of a job is not reported as completion. Must be a non-empty string or null. |
+
+A malformed block fails startup naming the key and the value. The whole section reloads live: a reload re-validates it and re-arms the watches, and setting `enabled: false` stops them.
