@@ -117,7 +117,7 @@ STYLISTIC_LENSES = ("predictive", "constrained", "adversarial")
 import re
 PERMISSION_QUESTION_PATTERNS = re.compile(
     r"(?:want me to|should i|do you want me to|shall i|would you like me to|"
-    r"do you want|want you me to|let me know if you want)"
+    r"do you want|would you want me to|let me know if you want)"
     r"\s+\w+",
     re.IGNORECASE,
 )
@@ -1021,13 +1021,6 @@ class CritiquePlugin(CorvidaePlugin):
         subject of the permission question falls under 'Mine' (act) or
         'His' (ask). If 'Mine', the objection is: you own this, act.
         """
-        target = self._provenance_fork(channel, trace_id)
-        if isinstance(target, str):
-            logger.debug(
-                "proactivity check skipped for trace %s on channel %s: %s",
-                trace_id, channel.id, target,
-            )
-            return
         prompt = self._fork_prompts.get("proactivity")
         if prompt is None:
             return
@@ -1038,6 +1031,10 @@ class CritiquePlugin(CorvidaePlugin):
         )
         target = self._provenance_fork(channel, trace_id)
         if isinstance(target, str):
+            logger.debug(
+                "proactivity check skipped for trace %s on channel %s: %s",
+                trace_id, channel.id, target,
+            )
             return
         agent, cut = target
         token = set_attribution(

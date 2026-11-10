@@ -1438,3 +1438,60 @@ class TestBurstProvenanceBoundary:
             assert _candidate_rowids(evidence) == [[earlier]]
         finally:
             await _teardown(env)
+
+
+# --- Proactivity lens tests -------------------------------------------------
+
+import re
+from corvidae_cognition.critique import (
+    PERMISSION_QUESTION_PATTERNS,
+    PROACTIVITY_ENABLED_DEFAULT,
+)
+
+
+class TestPermissionQuestionPatterns:
+    """Regex unit tests for the proactivity trigger."""
+
+    def test_positive_want_me_to(self):
+        assert PERMISSION_QUESTION_PATTERNS.search("Want me to update the skill?")
+
+    def test_positive_should_i(self):
+        assert PERMISSION_QUESTION_PATTERNS.search("Should I file the PR?")
+
+    def test_positive_do_you_want_me_to(self):
+        assert PERMISSION_QUESTION_PATTERNS.search("Do you want me to draft the section?")
+
+    def test_positive_shall_i(self):
+        assert PERMISSION_QUESTION_PATTERNS.search("Shall I proceed?")
+
+    def test_positive_would_you_like_me_to(self):
+        assert PERMISSION_QUESTION_PATTERNS.search("Would you like me to run the tests?")
+
+    def test_positive_would_you_want_me_to(self):
+        assert PERMISSION_QUESTION_PATTERNS.search("Would you want me to apply the fix?")
+
+    def test_positive_do_you_want(self):
+        assert PERMISSION_QUESTION_PATTERNS.search("Do you want more context?")
+
+    def test_positive_let_me_know_if_you_want(self):
+        assert PERMISSION_QUESTION_PATTERNS.search("Let me know if you want me to continue.")
+
+    def test_negative_should_issue(self):
+        assert not PERMISSION_QUESTION_PATTERNS.search("The should issue was resolved.")
+
+    def test_negative_i_should_note(self):
+        assert not PERMISSION_QUESTION_PATTERNS.search("I should note that this is a change.")
+
+    def test_negative_no_permission_question(self):
+        assert not PERMISSION_QUESTION_PATTERNS.search("The tests all pass.")
+
+    def test_negative_standalone_want_me_to_question_mark(self):
+        # "Want me to?" with no following word should not match (needs \s+\w+)
+        assert not PERMISSION_QUESTION_PATTERNS.search("Want me to?")
+
+
+class TestProactivityConfig:
+    """Config and gating tests for the proactivity lens."""
+
+    def test_default_enabled(self):
+        assert PROACTIVITY_ENABLED_DEFAULT is True
