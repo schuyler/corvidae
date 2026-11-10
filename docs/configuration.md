@@ -1106,7 +1106,7 @@ A malformed block fails startup naming the key and the value; an absent block le
 
 ## `context_panel` — live context window view
 
-Requires the context-panel extra (`--extra context-panel` on your `uv sync` line) and the `web` block. Adds a read-only page at `/panel/context_panel/`, linked from the chat page's sidebar. It lists every channel whose context window is loaded, on any transport, and shows the selected one as the model sees it: system prompt, tool schemas and stored rows with their kinds, followed live for the latest turn. The panel shows the whole window to anyone holding the console token; see the threat model's finding 9.
+Requires the context-panel extra (`--extra context-panel` on your `uv sync` line) and the `web` block. Adds a read-only page at `/panel/context_panel/`, linked from the chat page's sidebar. It lists every channel whose context window is loaded, on any transport, by its readable name when the transport has one (the id otherwise), and shows the selected one as the model sees it: system prompt, tool schemas and stored rows with their kinds, tool names and local-time stamps, followed live for the latest turn. Only chat messages (and the live progress text) start expanded; everything else starts collapsed. Stamps come from the session database, so a row not yet persisted has none. The panel shows the whole window to anyone holding the console token; see the threat model's finding 9.
 
 ```yaml
 context_panel: {}

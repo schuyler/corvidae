@@ -5,8 +5,6 @@
 
 const POLL_MS = 1000;
 const NON_BODY_KEYS = ["role", "content", "reasoning_content", "tool_calls", "tool_call_id"];
-// Categories whose entries start closed; every other entry starts open.
-const CLOSED_CATS = ["cat-thinking", "cat-tool-output"];
 
 const root = document.getElementById("panel");
 const state = {
@@ -17,6 +15,7 @@ const state = {
   stopped: false,
   liveFirst: null,  // seq of the first live event shown
   liveCount: 0,
+  toolNames: new Map(),  // tool_call_id -> tool name, filled as assistant rows render
   rowsText: "",  // the status line for the rows shown, restored after a failed poll
 };
 
@@ -44,7 +43,7 @@ root.append(el("div", { id: "bar" }, select, refresh), el("div", { id: "statusli
 function entry(cat, label, text, extraClasses = []) {
   const d = el("details", { className: ["entry", cat, ...extraClasses].join(" ") },
     el("summary", { textContent: label }), el("pre", { className: "body", textContent: text }));
-  d.open = !CLOSED_CATS.includes(cat);
+  d.open = cat === "cat-chat";
   return d;
 }
 
@@ -62,10 +61,23 @@ function callText(call) {
   return JSON.stringify(call, null, 2);
 }
 
+// The tool name of a call, or "" when it has none.
+function callName(call) {
+  const name = call && call.function && call.function.name;
+  return typeof name === "string" ? name : "";
+}
+
+// Local-time YYYY-MM-DD HH:MM for epoch seconds.
+function stamp(ts) {
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 // Turn one wire row into its entries, first matching rule wins.
 function rowEntries(index, row) {
   const msg = row.msg;
-  const tag = `#${index} · ${msg.role} · ${row.type}`;
+  const tag = `#${index} · ${msg.role} · ${row.type}` + (row.ts === undefined ? "" : ` · ${stamp(row.ts)}`);
   const extras = Object.keys(msg).filter((k) => !NON_BODY_KEYS.includes(k))
     .map((k) => `${k}: ${show(msg[k])}\n`).join("");
   const out = [];
@@ -73,7 +85,9 @@ function rowEntries(index, row) {
   if (row.type === "summary" || row.type === "context" || msg.role === "system") {
     out.push(entry("cat-inserted", tag, extras + content));
   } else if (msg.role === "tool") {
-    out.push(entry("cat-tool-output", `${tag} · ${msg.tool_call_id}`, extras + content));
+    const name = state.toolNames.get(msg.tool_call_id);
+    out.push(entry("cat-tool-output", `${tag} · ${msg.tool_call_id}${name ? ` · ${name}` : ""}`,
+      extras + content));
   } else if (msg.role === "user") {
     out.push(entry("cat-chat", tag, extras + content));
   } else if (msg.role === "assistant") {
@@ -86,7 +100,9 @@ function rowEntries(index, row) {
         withheld ? ["withheld"] : []));
     }
     for (const call of msg.tool_calls || []) {
-      out.push(entry("cat-tool-call", `${tag} · tool call`, callText(call)));
+      const name = callName(call);
+      if (call && call.id !== undefined) state.toolNames.set(call.id, name);
+      out.push(entry("cat-tool-call", `${tag} · tool call${name ? ` · ${name}` : ""}`, callText(call)));
     }
     if (out.length === 0) {
       out.push(entry("cat-chat", tag, ""));
@@ -106,7 +122,7 @@ function appendRows(rows, start) {
   rows.forEach((row, i) => entries.append(...rowEntries(start + i, row)));
 }
 
-// Live event -> entry: thinking and completed tools start closed, the rest open.
+// Live event -> entry: only progress (chat) starts open, like every other entry.
 function liveEntry(ev) {
   if (ev.kind === "thinking") return entry("cat-thinking", "thinking", ev.text);
   if (ev.kind === "progress") return entry("cat-chat", "progress", ev.text);
@@ -161,6 +177,7 @@ function failed(res) {
 // Clear the view for a channel that has no loaded window.
 function showUnloaded() {
   state.cursor = null;
+  state.toolNames.clear();
   entries.replaceChildren();
   showAll.hidden = true;
   renderLive([]);
@@ -181,6 +198,7 @@ async function openWindow(all) {
       showUnloaded();
       return;
     }
+    state.toolNames.clear();
     entries.replaceChildren(
       entry("cat-system-prompt", "system prompt", body.system_prompt),
       entry("cat-system-prompt", "tools",
@@ -247,7 +265,7 @@ async function loadChannels() {
     if (failed(res)) return;
     select.replaceChildren(el("option", { value: "", textContent: "choose a channel" }),
       ...res.body.channels.map((c) => el("option", { value: c.id,
-        textContent: `${c.id} — ${c.messages} msgs, ${c.tokens} / ${c.budget} tokens` })));
+        textContent: `${c.name ? `${c.name} (${c.id})` : c.id} — ${c.messages} msgs, ${c.tokens} / ${c.budget} tokens` })));
     select.value = state.channel;
   } catch (err) {
     console.warn("context panel: channel list failed", err);

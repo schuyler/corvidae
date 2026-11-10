@@ -3926,16 +3926,23 @@ listener with aiohttp's client and raw sockets.
 
 `ContextPanelPlugin` registers one panel when `context_panel` is in the
 config (a bare `context_panel:` counts) and otherwise nothing, deciding in
-`on_init`. It depends on `registry` and reads `channel.conversation` and
-the registry only, without an `await` between a read and the response, so
-every response is one consistent view. Three GET routes; `/window` and
+`on_init`. It depends on `registry` and `persistence`. It builds each
+response from `channel.conversation` and the registry without an `await`,
+so every response is one consistent view; only then does it await the
+timestamp lookup below, which cannot change the response because a row's
+timestamp never changes. Three GET routes; `/window` and
 `/poll` are keyed by `?channel=`, and a channel that is unregistered or has
 no loaded window answers `{"loaded": false}`:
 
-- `/channels`: loaded channels with message count, token estimate and budget.
+- `/channels`: loaded channels with message count, token estimate and budget,
+  and `name` (the transport's readable name, `Channel.name`) when one is set.
 - `/window`: system prompt, tool schemas and the newest 200 rows (all with
   `all=1`), each row with its `_message_type` tag and its visible fields
-  (`_`-prefixed keys dropped), plus the cursor.
+  (`_`-prefixed keys dropped), plus the cursor. A row whose `_db_id` has a
+  `message_log` row on that channel also carries `ts`, that row's epoch
+  timestamp; one query per response, and `ts` is absent otherwise. `/poll`
+  rows carry `ts` the same way, but a row is sent once, so one persisted
+  after it was sent gets no `ts` until the window is reopened.
 - `/poll?count=&digest=`: the rows after the client's cursor, the new
   cursor and the live events.
 
