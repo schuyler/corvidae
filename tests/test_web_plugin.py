@@ -61,6 +61,7 @@ from corvidae.persistence import PersistencePlugin
 # failing is the red phase's expected failure.
 from corvidae.channels import web as web_mod
 from corvidae.channels.web import (
+    Panel,
     WebPlugin,
     _compute_origins,
     _normalise_origin,
@@ -1838,9 +1839,6 @@ class PanelPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_web_console_init(self, panels) -> None:
-        # Imported here so the module loads before Panel exists.
-        from corvidae.channels.web import Panel
-
         self.calls += 1
         panels.append(Panel(self, self.title, self.static_dir, self.routes))
 
@@ -1954,8 +1952,6 @@ class TestPanels:
         assert "/panel/" not in body
 
     async def test_panel_plugin_without_web_block_is_inert(self, tmp_path):
-        from corvidae.channels.web import Panel  # noqa: F401
-
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(), name="registry")
         panel = PanelPlugin("Idle", tmp_path, [])

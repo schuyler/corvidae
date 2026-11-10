@@ -28,24 +28,27 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import logging
 import os
 import re
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import apluggy as pluggy
 from aiohttp import WSMsgType, web
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.context import MessageType, unsent_marker_emission
 from corvidae.persistence import decode_message_row, parse_message_type
 from corvidae.trace import mint_trace_id
-from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
+from corvidae.hooks import TransportPlugin, get_dependency, hookimpl, hookspec
 from corvidae.outbound import (
     OutboundMessage,
     OutboundProgress,
@@ -78,6 +81,9 @@ _HEARTBEAT = 30.0  # seconds; module-level so tests can shorten it
 _TOKEN_HINT = 'generate one with: python -c "import secrets; print(secrets.token_urlsafe(32))"'
 
 _STATIC_DIR = Path(str(resources.files("corvidae.channels") / "web_static"))
+
+# The marker in index.html and panel.html where the panel navigation goes.
+_PANELS_MARKER = "<!--panels-->"
 
 _LOGIN_PAGE = (
     '<!doctype html><html><head><meta charset="utf-8">'
@@ -355,10 +361,29 @@ def _slug(value: object) -> str:
 # Plugin
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class Panel:
+    """A read-only console panel contributed by a plugin (issue #227)."""
+
+    plugin: object  # the registering plugin (pass ``self``)
+    title: str  # link text in the console navigation
+    static_dir: Path  # must contain panel.js and panel.css
+    routes: Sequence[web.RouteDef] = ()  # data endpoints, e.g. web.get("/data", h)
+
+
+class WebConsoleSpec:
+    """Hooks the web plugin owns."""
+
+    @hookspec
+    async def on_web_console_init(self, panels: list[Panel]) -> None:
+        """Append one Panel per implementing plugin."""
+
+
 class WebPlugin(TransportPlugin):
     """Browser chat transport. Inert unless agent.yaml has a ``web`` block."""
 
     transport = "web"
+    hookspecs = WebConsoleSpec
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -380,6 +405,10 @@ class WebPlugin(TransportPlugin):
         self._secure_hosts: set[str] = set()
         self._login_base = ""
         self._csp = ""
+        # Panels: (registered plugin name, panel); pages with the navigation filled in.
+        self._panels: list[tuple[str, Panel]] = []
+        self._index_html = ""
+        self._panel_html = ""
         # Connections.
         self._clients: set[_Client] = set()
         self._handlers: set[asyncio.Task] = set()
@@ -410,6 +439,29 @@ class WebPlugin(TransportPlugin):
         self._set_token(token, generated)
         self._enabled = True
 
+        # Plugins contribute panels; refusing a non-GET route here lets the
+        # restart pre-flight (which runs on_init, not on_start) catch it.
+        panels: list[Panel] = []
+        await self.pm.ahook.on_web_console_init(panels=panels)
+        self._panels = []
+        for panel in panels:
+            name = self.pm.get_name(panel.plugin)
+            for route in panel.routes:
+                if not isinstance(route, web.RouteDef):
+                    raise pluggy.PluginValidationError(
+                        panel.plugin,
+                        f"web: plugin '{name}' registered {route!r} for its panel; "
+                        "only GET routes (aiohttp web.get) are accepted",
+                    )
+                if route.method != "GET":
+                    raise pluggy.PluginValidationError(
+                        panel.plugin,
+                        f"web: plugin '{name}' registered {route.method} {route.path} "
+                        "for its panel; panels are read-only, so only GET routes "
+                        "(aiohttp web.get) are accepted",
+                    )
+            self._panels.append((name, panel))
+
     @hookimpl
     async def on_start(self, config: dict) -> None:
         if not self._enabled:
@@ -432,6 +484,16 @@ class WebPlugin(TransportPlugin):
             self._idle_watch = idle.watch_channels(
                 0, self._on_channel_settled, name="web.working", repeat=3600,
             )
+
+        # Navigation links, rendered once into the two pages that carry them.
+        nav = "".join(
+            f'<a href="/panel/{html.escape(name)}/">{html.escape(panel.title)}</a>'
+            for name, panel in self._panels
+        )
+        if nav:
+            nav = f'<nav class="panels">{nav}</nav>'
+        self._index_html = (_STATIC_DIR / "index.html").read_text("utf-8").replace(_PANELS_MARKER, nav)
+        self._panel_html = (_STATIC_DIR / "panel.html").read_text("utf-8").replace(_PANELS_MARKER, nav)
 
         # Bind; a failure raises out of startup. access_log=None keeps
         # `?token=` out of the log; the short shutdown timeout keeps
@@ -574,24 +636,19 @@ class WebPlugin(TransportPlugin):
     # -- HTTP ---------------------------------------------------------------
 
     def _build_app(self) -> web.Application:
-        """Routes and middlewares (security headers → Host check → auth)."""
+        """Routes and middlewares (error guard → Host check → auth → Origin)."""
 
         @web.middleware
-        async def security_headers(request: web.Request, handler):
-            # Headers on every response, including errors; an unexpected
-            # exception becomes a logged 500 (no URL: it may carry ?token=).
+        async def error_guard(request: web.Request, handler):
+            # An unexpected exception becomes a logged 500 (no URL: it may
+            # carry ?token=).
             try:
-                response = await handler(request)
-            except web.HTTPException as exc:
-                self._apply_headers(exc.headers)
+                return await handler(request)
+            except web.HTTPException:
                 raise
             except Exception:
                 logger.exception("web: unhandled error in %s handler", request.method)
-                response = web.Response(status=500, text="internal error")
-            if isinstance(response, web.WebSocketResponse):
-                return response
-            self._apply_headers(response.headers)
-            return response
+                return web.Response(status=500, text="internal error")
 
         @web.middleware
         async def host_check(request: web.Request, handler):
@@ -616,10 +673,41 @@ class WebPlugin(TransportPlugin):
                 )
             return await handler(request)
 
-        app = web.Application(middlewares=[security_headers, host_check, auth])
+        @web.middleware
+        async def origin_check(request: web.Request, handler):
+            # Any WebSocket upgrade, including one a panel handler performs,
+            # needs an allowed Origin.
+            if request.headers.get("Upgrade", "").lower() == "websocket":
+                try:
+                    origin_ok = _normalise_origin(request.headers.get("Origin")) in self._origins
+                except ValueError:
+                    origin_ok = False
+                if not origin_ok:
+                    raise web.HTTPForbidden(text="bad origin")
+            return await handler(request)
+
+        async def on_prepare(request: web.Request, response: web.StreamResponse) -> None:
+            # Fires for every response just before its headers are sent,
+            # including streamed ones, so no handler can skip or loosen these.
+            self._apply_headers(response.headers)
+
+        app = web.Application(
+            middlewares=[error_guard, host_check, auth, origin_check]
+        )
+        app.on_response_prepare.append(on_prepare)
         app.router.add_get("/", self._index)
         app.router.add_get("/ws", self._ws_handler)
         app.router.add_static("/static", _STATIC_DIR, follow_symlinks=False, show_index=False)
+        for name, panel in self._panels:
+            base = f"/panel/{name}"
+            app.router.add_get(f"{base}/", self._panel_page)
+            app.router.add_static(
+                f"{base}/static", panel.static_dir, follow_symlinks=False, show_index=False,
+            )
+            for route in panel.routes:
+                # Route names are app-wide; dropping them keeps panels independent.
+                kwargs = {k: v for k, v in route.kwargs.items() if k != "name"}
+                app.router.add_get(f"{base}{route.path}", route.handler, **kwargs)
         return app
 
     def _apply_headers(self, headers) -> None:
@@ -638,21 +726,18 @@ class WebPlugin(TransportPlugin):
         )
         return response
 
-    async def _index(self, request: web.Request) -> web.FileResponse:
-        return web.FileResponse(_STATIC_DIR / "index.html")
+    async def _index(self, request: web.Request) -> web.Response:
+        return web.Response(text=self._index_html, content_type="text/html")
+
+    async def _panel_page(self, request: web.Request) -> web.Response:
+        return web.Response(text=self._panel_html, content_type="text/html")
 
     # -- WebSocket ----------------------------------------------------------
 
     async def _ws_handler(self, request: web.Request) -> web.StreamResponse:
-        # Refusals before the connection exists: shutting down, bad Origin.
+        # Refusal before the connection exists: shutting down.
         if self._stopping:
             raise web.HTTPServiceUnavailable(text="shutting down")
-        try:
-            origin_ok = _normalise_origin(request.headers.get("Origin")) in self._origins
-        except ValueError:
-            origin_ok = False
-        if not origin_ok:
-            raise web.HTTPForbidden(text="bad origin")
 
         # From here this task owns the connection until its finally.
         task = asyncio.current_task()
