@@ -1430,6 +1430,38 @@ it.
   message, a note or send that restates it, and whatever those channels
   consolidated from them.
 
+### 17. A markdown folder is a new untrusted-text ingress (#719)
+
+`MarkdownRecallPlugin` (entry point `markdown_recall`) mirrors a folder of
+markdown files (`markdown_recall.root`) and, on every plain user turn, hands
+the top hits to the funnel as framed CONTEXT. The files are untrusted text:
+they are the operator's own notes by default, but the folder is operator-
+writable and the plugin does not treat its content as trusted. The content
+reaches the window only through the funnel's framing (finding 3: funnel-
+admitted CONTEXT is a `role: system` row), so the same laundering risk
+applies and the same mitigations cover it: the "retrieved data, not
+instructions" frame, `mid_conversation_system_role`, and the per-source
+budget (`funnel.budgets.markdown_recall`).
+
+Specific to this source:
+
+- The index parses frontmatter with `yaml.safe_load` (no arbitrary Python)
+  and the walk never follows a symlink out of `root`, so a file in the folder
+  cannot read a path outside it. A file that is not valid UTF-8 is decoded
+  with replacement, never raised on.
+- The index is a cache; the files are the source of truth. An encoder or
+  chunker change rebuilds it, and an unmounted (zero-file) folder keeps the
+  old index rather than looking like mass deletion.
+- Embedding sends the chunk text to the embedding stage's endpoint (the same
+  data path as memory's embeddings; finding 12 covers hosted endpoints).
+- Pointing `root` at a world-writable or shared location makes that location
+  an injection surface for the agent; `root` is operator-controlled config,
+  so the threat is operator misconfiguration, not a remote attacker (unlike
+  finding 16's network ingress).
+
+The residual risk is the same as any funnel source: an operator-controlled
+folder whose content is framed, not trusted.
+
 ## Privilege separation
 
 There isn't any. Transports, the LLM loop, tool execution, the SQLite

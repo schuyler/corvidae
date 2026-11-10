@@ -35,6 +35,7 @@ silence = "corvidae_cognition.silence:SilencePlugin"
 heartbeat = "corvidae_cognition.heartbeat:HeartbeatPlugin"
 goals = "corvidae_cognition.goals:GoalsPlugin"
 skills = "corvidae_cognition.skills:SkillsPlugin"
+markdown_recall = "corvidae_cognition.markdown_recall:MarkdownRecallPlugin"
 
 [tool.uv.sources]
 corvidae = { workspace = true }

@@ -1,0 +1,200 @@
+"""Tests for the markdown-folder recall index (#719).
+
+Covers the schema (the vector surface only when an encoder + vec are
+available), reconcile (new/unchanged/edited/missing files, the unmounted-folder
+safety), and search (FTS5-only, and vec KNN + FTS5 fused by RRF). A fake
+embedding client stands in for the ``llm`` stanza's ``embedding`` stage.
+"""
+
+import hashlib
+
+import pytest
+from corvidae_cognition.markdown_recall.index import (
+    Hit,
+    MarkdownIndex,
+    _EncoderIdentity,
+    _fts_match,
+)
+
+
+class FakeEmbed:
+    """Deterministic stand-in for the embedding stage's client."""
+
+    def __init__(self, dim: int = 8) -> None:
+        self.dim = dim
+        self.calls = 0
+
+    async def embed(self, texts: list[str], kind: str = "document") -> list[list[float]]:
+        self.calls += 1
+        out = []
+        for t in texts:
+            h = hashlib.sha256(t.encode("utf-8")).digest()
+            out.append([b / 255.0 for b in h[: self.dim]])
+        return out
+
+
+IDENTITY = _EncoderIdentity(
+    model="fake-encoder", dimensions=8, document_prefix="", query_prefix=""
+)
+
+
+async def make_index(tmp_path, files, identity=IDENTITY):
+    root = tmp_path / "notes"
+    root.mkdir(parents=True)
+    for name, content in files.items():
+        (root / name).write_text(content)
+    dim = identity.dimensions if identity else 8
+    embed = FakeEmbed(dim=dim)
+    index = MarkdownIndex(
+        root=root,
+        db_path=tmp_path / "index.db",
+        get_client=lambda: embed,
+        get_identity=lambda: identity,
+    )
+    return index, root, embed
+
+
+async def _tables(db) -> set[str]:
+    async with db.execute(
+        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+    ) as cursor:
+        return {row[0] for row in await cursor.fetchall()}
+
+
+def _vec_importable() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("sqlite_vec") is not None
+
+
+@pytest.mark.parametrize(
+    "identity,expect_vec",
+    [(IDENTITY, _vec_importable()), (None, False)],
+)
+async def test_schema_creates_the_tables(tmp_path, identity, expect_vec):
+    index, _, _ = await make_index(tmp_path, {"a.md": "# A\n\nalpha content"}, identity)
+    db = await index._ensure_schema()
+    tables = await _tables(db)
+    assert {"chunks", "chunks_fts", "manifest", "embedding_meta"} <= tables
+    assert ("chunks_vec" in tables) == expect_vec
+    await index.close()
+
+
+async def test_reconcile_indexes_new_files(tmp_path):
+    index, _, embed = await make_index(
+        tmp_path, {"a.md": "# A\n\nalpha beta gamma", "b.md": "# B\n\nbravo charlie"}
+    )
+    await index.reconcile()
+    db = index._db
+    async with db.execute("SELECT count(*) AS n FROM manifest") as c:
+        assert (await c.fetchone())["n"] == 2
+    async with db.execute("SELECT count(*) AS n FROM chunks") as c:
+        assert (await c.fetchone())["n"] >= 2
+    # The manifest records the real file size (the stat shortcut depends on it).
+    async with db.execute("SELECT size FROM manifest") as c:
+        sizes = [r[0] for r in await c.fetchall()]
+    assert all(sz > 0 for sz in sizes), f"expected non-zero sizes, got {sizes}"
+    assert embed.calls >= 2
+    await index.close()
+
+
+async def test_reconcile_skips_unchanged_files(tmp_path):
+    index, _, embed = await make_index(tmp_path, {"a.md": "# A\n\nalpha beta"})
+    await index.reconcile()
+    calls = embed.calls
+    await index.reconcile()  # no change
+    assert embed.calls == calls  # nothing re-embedded
+    await index.close()
+
+
+async def test_reconcile_rechunks_on_edit(tmp_path):
+    index, root, embed = await make_index(tmp_path, {"a.md": "# A\n\nalpha beta"})
+    await index.reconcile()
+    root.joinpath("a.md").write_text("# A\n\ncompletely different delta content")
+    await index.reconcile()
+    db = index._db
+    async with db.execute("SELECT text FROM chunks WHERE path='a.md'") as c:
+        rows = [r[0] for r in await c.fetchall()]
+    assert any("delta" in r for r in rows)
+    assert embed.calls > 1
+    await index.close()
+
+
+async def test_reconcile_deletes_missing_files(tmp_path):
+    index, root, _ = await make_index(
+        tmp_path, {"a.md": "# A\n\nalpha", "b.md": "# B\n\nbravo"}
+    )
+    await index.reconcile()
+    root.joinpath("b.md").unlink()
+    await index.reconcile()
+    db = index._db
+    async with db.execute("SELECT path FROM manifest") as c:
+        paths = {r[0] for r in await c.fetchall()}
+    assert paths == {"a.md"}
+    await index.close()
+
+
+async def test_unmounted_folder_keeps_the_index(tmp_path):
+    index, _, _ = await make_index(tmp_path, {"a.md": "# A\n\nalpha beta"})
+    await index.reconcile()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    index._root = empty  # simulate the folder vanishing
+    await index.reconcile()
+    db = index._db
+    async with db.execute("SELECT count(*) AS n FROM manifest") as c:
+        assert (await c.fetchone())["n"] == 1  # kept, not mass-deleted
+    await index.close()
+
+
+async def test_search_fts_only_ranks_the_match_first(tmp_path):
+    index, _, _ = await make_index(
+        tmp_path,
+        {
+            "a.md": "# Radio\n\nthe waterfall is a map of the spectrum",
+            "b.md": "# Other\n\nunrelated content about cooking",
+        },
+        identity=None,  # FTS5-only
+    )
+    await index.reconcile()
+    hits = await index.search("waterfall spectrum", k=3)
+    assert hits, "expected at least one hit"
+    assert hits[0].path == "a.md"
+    await index.close()
+
+
+async def test_search_vec_plus_fts_fuses_and_ranks(tmp_path):
+    index, _, embed = await make_index(
+        tmp_path,
+        {
+            "a.md": "# Radio\n\nthe waterfall is a map of the spectrum",
+            "b.md": "# Other\n\nunrelated content about cooking",
+        },
+    )
+    await index.reconcile()
+    hits = await index.search("waterfall spectrum", k=3)
+    assert hits
+    assert hits[0].path == "a.md"
+    assert isinstance(hits[0], Hit)
+    assert hits[0].score > 0
+    await index.close()
+
+
+async def test_search_empty_index_returns_nothing(tmp_path):
+    index, _, _ = await make_index(tmp_path, {})
+    await index.reconcile()
+    assert await index.search("anything", k=3) == []
+    await index.close()
+
+
+def test_fts_match_sanitizes_and_ors():
+    assert _fts_match("hello world") == '"hello"* OR "world"*'
+    assert _fts_match("") == ""
+    assert _fts_match("   ") == ""
+    assert _fts_match("spectrum") == '"spectrum"*'
+
+
+def test_fts_match_escapes_double_quotes():
+    # A `"` in a token is doubled so the MATCH stays valid FTS5.
+    assert _fts_match('foo"bar') == '"foo""bar"*'
+    # a" -> a"" (the quote doubles), wrapped -> "a"""*
+    assert _fts_match('a" b"c') == '"a"""* OR "b""c"*'

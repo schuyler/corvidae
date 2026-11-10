@@ -138,6 +138,18 @@ agent:
 #     memory: 4096                    # compaction frees what it drops (non-negative integer; reloadable)
 #   ingest_ttl: 600                   # seconds a queued or pending ingest may wait before it is dropped (unset: never; reloadable)
 
+# Markdown-folder recall source (optional; cognition extra, see
+# docs/configuration.md "markdown_recall"). Searches a folder of markdown
+# files for the turn the agent is about to take and hands the hits to the
+# funnel as framed CONTEXT. The files are untrusted text; the funnel is the
+# only route to the window.
+# markdown_recall:
+#   root: state/markdown_recall       # the folder to mirror (relative to the workspace)
+#   db_path: state/markdown_recall/index.db  # the SQLite index (vec0 + FTS5); the files are the source of truth
+#   max_hits: 5                       # top-k hits returned per search
+#   cooldown: 30                      # seconds between searches per channel (mixin default)
+#   timeout: 20                       # seconds a search may run before it is cancelled (mixin default)
+
 # Fork instructions for appraisal and critique (optional; agent.forks).
 # Static config: set_settings can't change these.
 # appraisal:
