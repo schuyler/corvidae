@@ -2,7 +2,7 @@
 
 Before each LLM turn, if the channel's last stamp is older than
 ``timepiece.interval_minutes`` (default 10), a short CONTEXT marker
-(``[time 2026-11-07 19:15 PST (Sat)]``) is appended to the
+(``The current date and time are now Saturday 2026-11-07 at 19:15 PST``) is appended to the
 conversation. CONTEXT entries appear in the prompt for that turn and
 are persisted by the agent's post-hook sweep (agent.py, after
 ``before_agent_turn``); they survive compaction because compaction
@@ -48,7 +48,13 @@ class TimepiecePlugin(CorvidaePlugin):
                 "Config error: timepiece.interval_minutes must be a positive "
                 f"number of minutes, got {raw!r} — check agent.yaml"
             )
-        self._interval = timedelta(minutes=raw)
+        try:
+            self._interval = timedelta(minutes=raw)
+        except OverflowError:
+            raise ValueError(
+                "Config error: timepiece.interval_minutes is too large, "
+                f"got {raw!r} — check agent.yaml"
+            ) from None
         tz_name = config_value(config, "timepiece.timezone", None)
         if tz_name is not None:
             if not isinstance(tz_name, str) or not tz_name:
@@ -94,7 +100,7 @@ class TimepiecePlugin(CorvidaePlugin):
         last = self._last.get(channel.id)
         # Stamp on the first turn and whenever the interval has fully
         # elapsed; strictly inside it the last stamp is still fresh.
-        if last is not None and now - last < self._interval:
+        if last is not None and (now.timestamp() - last.timestamp()) < self._interval.total_seconds():
             return
         stamp = now.strftime(self._format)
         marker = {"role": "system", "content": f"The current date and time are now {stamp}"}

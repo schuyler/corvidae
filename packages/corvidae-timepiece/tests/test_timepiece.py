@@ -118,7 +118,10 @@ class TestConfig:
         plugin = await make_plugin({"timepiece": {"interval_minutes": 0.5}})
         channel = FakeChannel()
         await turn(plugin, channel)
-        plugin._now = lambda: T0 + timedelta(minutes=31)
+        # 1 min > 0.5 min interval, so a second stamp is expected.
+        # (31 min would also satisfy the default 10-min interval,
+        # making the test pass even if the config were ignored.)
+        plugin._now = lambda: T0 + timedelta(minutes=1)
         await turn(plugin, channel)
         assert len(context_entries(channel)) == 2
 
@@ -181,6 +184,62 @@ class TestConfig:
                 pm=pm, config={"timepiece": {"format": ""}}
             )
         assert "timepiece.format" in str(exc.value)
+
+
+    async def test_zero_interval_rejected(self):
+        pm = create_plugin_manager()
+        plugin = TimepiecePlugin()
+        pm.register(plugin, name="timepiece")
+        import pytest
+        with pytest.raises(ValueError) as exc:
+            await pm.ahook.on_init(
+                pm=pm, config={"timepiece": {"interval_minutes": 0}}
+            )
+        assert "timepiece.interval_minutes" in str(exc.value)
+
+    async def test_negative_interval_rejected(self):
+        pm = create_plugin_manager()
+        plugin = TimepiecePlugin()
+        pm.register(plugin, name="timepiece")
+        import pytest
+        with pytest.raises(ValueError) as exc:
+            await pm.ahook.on_init(
+                pm=pm, config={"timepiece": {"interval_minutes": -5}}
+            )
+        assert "timepiece.interval_minutes" in str(exc.value)
+
+    async def test_boolean_interval_rejected(self):
+        pm = create_plugin_manager()
+        plugin = TimepiecePlugin()
+        pm.register(plugin, name="timepiece")
+        import pytest
+        with pytest.raises(ValueError) as exc:
+            await pm.ahook.on_init(
+                pm=pm, config={"timepiece": {"interval_minutes": True}}
+            )
+        assert "timepiece.interval_minutes" in str(exc.value)
+
+    async def test_non_string_timezone_rejected(self):
+        pm = create_plugin_manager()
+        plugin = TimepiecePlugin()
+        pm.register(plugin, name="timepiece")
+        import pytest
+        with pytest.raises(ValueError) as exc:
+            await pm.ahook.on_init(
+                pm=pm, config={"timepiece": {"timezone": 123}}
+            )
+        assert "timepiece.timezone" in str(exc.value)
+
+    async def test_empty_timezone_rejected(self):
+        pm = create_plugin_manager()
+        plugin = TimepiecePlugin()
+        pm.register(plugin, name="timepiece")
+        import pytest
+        with pytest.raises(ValueError) as exc:
+            await pm.ahook.on_init(
+                pm=pm, config={"timepiece": {"timezone": ""}}
+            )
+        assert "timepiece.timezone" in str(exc.value)
 
 
 class TestCustomFormat:
