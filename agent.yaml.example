@@ -371,3 +371,23 @@ channels:
 #   window_seconds: 21600
 #   preflight_timeout_seconds: 120
 #   notify_delay_seconds: 5
+
+# --- Timepiece (requires --extra timepiece) ---
+# Appends a wall-clock CONTEXT line to a channel's window before a turn, at
+# most once per interval. Runs with these defaults when the extra is
+# installed; list it in plugins.disabled to turn it off. Restart to apply.
+# timepiece:
+#   interval_minutes: 10               # minutes between stamps per channel (number > 0)
+#   timezone: America/Los_Angeles      # IANA name; default the daemon's local time
+#   format: "%A %Y-%m-%d at %H:%M %Z"  # strftime format
+
+# --- inotify pings (requires --extra inotify; Linux only) ---
+# Notifies a channel when a watched file (e.g. a background job's log) is
+# written and then stays quiet. Reloads live.
+# inotify_ping:
+#   enabled: false
+#   channel: internal:heartbeat        # receives the pings
+#   debounce_seconds: 5                # quiet seconds before a file counts as settled
+#   paths:
+#     - /var/log/jobs/train.log        # a missing file is watched via its parent directory
+#   terminal_marker: done              # optional: ping only if the last line contains this
