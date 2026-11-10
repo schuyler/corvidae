@@ -85,8 +85,9 @@ class TestBandOn:
         assert [c["id"] for c in candidates] == [new, old]
         assert all(c["band"] == "strong" for c in candidates)
 
-    async def test_similarity_in_fts_degraded_mode_bands_on_proxy(self, env):
-        """Keyword hits carry the similarity proxy, so they band on it."""
+    async def test_similarity_in_fts_degraded_mode_bands_moderate(self, env):
+        """Keyword hits carry the similarity proxy as their similarity, and
+        every degraded hit bands moderate whatever band_on says (#409)."""
         memory, embedder, channel, _, db = await env(_config(band_on="similarity"))
         await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
         embedder.fail = True
@@ -120,7 +121,12 @@ class TestRecencyFrom:
         assert c["score"] == pytest.approx(math.exp(-2), rel=1e-3)
 
     async def test_last_used_ranks_from_last_retrieval(self, env):
-        memory, _, channel, _, db = await env(_config(recency_from="last_used"))
+        # band_on: score, so the band shows the last_used ranking age reaching
+        # it (aged from created, the same record would band weak). Under the
+        # relative default (#409) the band ignores decay.
+        memory, _, channel, _, db = await env(
+            _config(recency_from="last_used", band_on="score")
+        )
         mid = await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
         await _set_last_retrieved(db, mid, time.time() - 1 * DAY)
         [c], _ = await memory.retrieve(SUMMARY)

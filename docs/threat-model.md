@@ -1308,8 +1308,9 @@ it.
   reachable records is unchanged (the same `indexed`, `redacted` and trust
   filters apply); what changes is which ones rank. The new edge: someone
   whose words get consolidated into a record can attach that record to a
-  name, so it ranks whenever the name comes up, and is admitted when its
-  embedding also stands out from the memory for that query. Long, name-stuffed
+  name, so it ranks whenever the name comes up, and is admitted only when
+  its cosine also clears the gate (by default, stands out from the memory
+  for that query). Long, name-stuffed
   records gain little, since bm25 normalises for length and fusion takes
   only one rank from the keyword list. Set
   `memory.retrieval.candidates: vector` to go back to embedding-only

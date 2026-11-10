@@ -1287,7 +1287,7 @@ CREATE TABLE IF NOT EXISTS retrieval_candidate (
     retrieval_id INTEGER NOT NULL,   -- retrieval_log.id
     memory_id    INTEGER NOT NULL,   -- memory.id
     similarity   REAL NOT NULL,      -- cosine similarity, or FTS_SIMILARITY_PROXY when not measurable
-    score        REAL NOT NULL,      -- recency-decayed score (banding input; the vec-only rank key)
+    score        REAL NOT NULL,      -- recency-decayed score (banding input under band_on: score; the vec-only rank key)
     band         TEXT NOT NULL,      -- strong | moderate | weak
     rank         INTEGER NOT NULL,   -- 1-based; would-be rank for excluded_in_window rows
     outcome      TEXT NOT NULL,
