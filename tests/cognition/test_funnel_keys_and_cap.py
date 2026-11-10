@@ -14,12 +14,12 @@ the cap, and compaction frees what it drops.
 import logging
 
 import aiosqlite
+from corvidae_cognition.funnel import FRAME_HEADER, FunnelPlugin
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType, count_tokens
 from corvidae.hooks import create_plugin_manager
 from corvidae.persistence import PersistencePlugin, init_db
-from corvidae_cognition.funnel import FRAME_HEADER, FunnelPlugin
 
 
 async def build_funnel(config: dict | None = None):

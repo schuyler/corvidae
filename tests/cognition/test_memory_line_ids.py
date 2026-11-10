@@ -9,9 +9,10 @@ when its age or band reads differently now.
 
 import re
 
+from corvidae_cognition.memory import WORST_MEMORY_LINE_PREFIX, _memory_line
+
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow
-from corvidae_cognition.memory import WORST_MEMORY_LINE_PREFIX, _memory_line
 
 from .test_memory_retrieval import (
     EMBED_CONFIG,
