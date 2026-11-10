@@ -238,6 +238,11 @@ agent:
 #   allowed_origins:                   # extra origins: Tailscale name, reverse proxy
 #     - https://box.tailnet.ts.net
 
+# Context panel: a read-only view of every loaded channel's context window at
+# /panel/context_panel/ (needs the context-panel extra and the web block;
+# shows everything the model sees); docs/configuration.md.
+# context_panel: {}
+
 # Webhook ingress: POST /hook/<endpoint> events for subscribing plugins
 # (optional; omit to disable). Plain HTTP; see docs/configuration.md
 # ("webhook") and docs/threat-model.md finding 16.

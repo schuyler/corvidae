@@ -4,7 +4,7 @@
 
 Dependencies are installed by `.claude/hooks/session-start.sh` in Claude Code on
 the web. If an import fails, run
-`uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra restart` —
+`uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart` —
 that installs the `dev` extra (pytest, pytest-asyncio), the `dev` dependency
 group (pytest-timeout), which the pytest config needs, the `acp` and `discord`
 extras, whose transport tests import the SDKs, the `cognition` extra
@@ -13,20 +13,22 @@ outcome_log, goals), which `tests/cognition/` imports, and the
 `cross-channel-send` extra (`packages/cross-channel-send`: the send_message
 and list_channels tools), which `tests/test_cross_channel_send/` imports, and the `webhook-notify` extra
 (`packages/webhook-notify`: webhook deliveries as notifications), which
-`tests/test_webhook_notify/` imports. The
+`tests/test_webhook_notify/` imports, and the `context-panel` extra
+(`packages/context-panel`: the web console's context panel), which
+`tests/test_context_panel/` imports. The
 `cognition` extra includes `sqlite-vec` through the distribution's `vec`
 sub-extra; leave it out to exercise the FTS5-only path (`docs/cognition.md`),
 which is what CI's `cognition-fts` job does. That is CI's `full`
 job. The kernel alone is `--extra dev --extra acp`; CI's `kernel` job runs
 everything outside `tests/cognition/`, `tests/test_cross_channel_send/`,
-`tests/test_webhook_notify/` and `tests/corvidae_restart/` (which needs the
+`tests/test_webhook_notify/`, `tests/test_context_panel/` and `tests/corvidae_restart/` (which needs the
 `restart` extra) that way, so a kernel module must never import `corvidae_cognition`
 (`tests/test_kernel_boundary.py`).
 
 ```sh
-uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra restart  # everything
+uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart  # everything
 uv run pytest                    # full suite
-uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/corvidae_restart  # the kernel suite
+uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_context_panel --ignore=tests/corvidae_restart  # the kernel suite
 uv run pytest tests/test_foo.py  # one file
 uv run pytest --run-eval         # include live-LLM eval tests (deselected by default)
 uv run ruff check .              # lint
@@ -55,8 +57,9 @@ Discord SDK and `corvidae_cognition` are absent, then runs the kernel suite
 above), `full` (every extra; checks sqlite-vec and the Discord
 SDK load, then runs the whole suite), `cognition-fts` (the kernel install plus
 `packages/corvidae-cognition` without sqlite-vec; checks it is absent, then runs `tests/cognition/` on the
-FTS5 path), and `web-smoke` (kernel install plus a
-pinned Playwright and Chromium; runs `tests/test_web_render_smoke.py` and fails
+FTS5 path), and `web-smoke` (kernel install plus the context panel and a
+pinned Playwright and Chromium; runs `tests/test_web_render_smoke.py` and
+`tests/test_context_panel/test_render_smoke.py` and fails
 if it skips). It doesn't run the harness or `--run-eval`.
 
 `tool.pytest.ini_options` sets a global `timeout = 15`. Every async test inherits

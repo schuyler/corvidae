@@ -1,0 +1,41 @@
+/* Category colors: light defaults, dark overrides via prefers-color-scheme. */
+:root {
+  --cat-system-prompt: #6b4fbb; --cat-system-prompt-bg: #efeafb;
+  --cat-inserted: #b26a00;      --cat-inserted-bg: #fdf1dc;
+  --cat-thinking: #6b6a66;      --cat-thinking-bg: #efeeea;
+  --cat-tool-call: #0b7a75;     --cat-tool-call-bg: #def4f2;
+  --cat-tool-output: #2f7d32;   --cat-tool-output-bg: #e4f3e4;
+  --cat-chat: #3b5bdb;          --cat-chat-bg: #e3e9ff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --cat-system-prompt: #b9a5f2; --cat-system-prompt-bg: #2b2540;
+    --cat-inserted: #f0b45a;      --cat-inserted-bg: #3a2f1a;
+    --cat-thinking: #9a998f;      --cat-thinking-bg: #2a2a30;
+    --cat-tool-call: #6fd3cc;     --cat-tool-call-bg: #17332f;
+    --cat-tool-output: #8fd592;   --cat-tool-output-bg: #1c3320;
+    --cat-chat: #8ba4ff;          --cat-chat-bg: #26304f;
+  }
+}
+
+/* Page layout: bar and status line above the entries. */
+#panel { padding: 1rem; max-width: 70rem; }
+#bar, #statusline { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.6rem; }
+#bar select { flex: 1; min-width: 0; }
+#status { color: var(--muted); }
+
+/* Entries: a left border and tinted background per category. */
+details.entry { border-left: 4px solid var(--border); background: var(--panel); border-radius: 4px; padding: 0.3rem 0.6rem; margin-bottom: 0.4rem; }
+details.entry > summary { cursor: pointer; font-size: 0.85rem; color: var(--muted); }
+details.cat-system-prompt { border-left-color: var(--cat-system-prompt); background: var(--cat-system-prompt-bg); }
+details.cat-inserted { border-left-color: var(--cat-inserted); background: var(--cat-inserted-bg); }
+details.cat-thinking { border-left-color: var(--cat-thinking); background: var(--cat-thinking-bg); }
+details.cat-tool-call { border-left-color: var(--cat-tool-call); background: var(--cat-tool-call-bg); }
+details.cat-tool-output { border-left-color: var(--cat-tool-output); background: var(--cat-tool-output-bg); }
+details.cat-chat { border-left-color: var(--cat-chat); background: var(--cat-chat-bg); }
+details.withheld { opacity: 0.6; border-left-style: dashed; }
+pre.body { margin: 0.3rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 0.85rem/1.4 ui-monospace, monospace; }
+
+/* The live area groups the latest turn's events. */
+#live { margin-top: 1rem; border-top: 2px solid var(--border); padding-top: 0.5rem; }
+#live > summary { cursor: pointer; font-weight: 600; margin-bottom: 0.4rem; }

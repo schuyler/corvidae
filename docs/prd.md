@@ -1451,6 +1451,13 @@ design, not requirement. The requirements are outcomes:
    after that prefill and decode work is, approximately, the time it
    waited in the backend, so a call queued behind another on a shared
    backend can be told from a slow one.
+7. An operator can inspect the context window of any channel whose
+   window is loaded (what the model will see on that channel's next turn)
+   and follow it as it changes, including a turn's reasoning, reply and
+   tool activity while it is generated. The view is read-only, off unless
+   configured, and served only behind the console's authentication. It
+   shows untrusted text (memory, tool output, other people's messages) as
+   text, never as markup. The threat model accounts for it.
 
 ### 3.11 Configuration and operations
 
