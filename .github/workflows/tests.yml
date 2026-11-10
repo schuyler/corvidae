@@ -48,7 +48,7 @@ jobs:
           present = [m for m in ("sqlite_vec", "discord", "corvidae_cognition",
                                  "cross_channel_send", "corvidae_restart",
                                  "webhook_notify", "context_panel",
-                                 "corvidae_timepiece")
+                                 "corvidae_timepiece", "corvidae_inotify")
                      if importlib.util.find_spec(m) is not None]
           assert not present, f"kernel install has optional packages: {present}"
           import corvidae.channels.discord  # must import without its SDK
