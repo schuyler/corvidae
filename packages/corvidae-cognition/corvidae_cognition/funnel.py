@@ -48,12 +48,16 @@ Behavior, in order:
      persist_message with the rowid attached — CONTEXT must persist
      or the window diverges from its reload.
 
-Ponder: the funnel also gives the agent a ``ponder`` tool, a pause of at
-most ``MAX_PONDER_SECONDS`` that ends early when the funnel gets something
-for the channel (``ingest``, ``ingest_and_wake``, or a pull promise
-resolving to entries). The tool call stays outstanding, so the kernel holds the next
-assistant turn and counts the channel busy until it returns. It waits on
-arrival, never on a drain, because the drain only runs inside a turn.
+Ponder: the funnel also gives the agent a ``ponder`` tool: a wait of at most
+``PONDER_TIMEOUT_SECONDS`` for recall already in flight. Every
+``on_funnel_ingest`` submission for a turn is made before that turn's model
+call, so the channel's pending promises are final when the agent can call
+the tool. It waits for them to land (it returns at the first with entries, or
+once all have settled empty) and returns at once when none is running. It
+waits on the promises themselves, never on a drain and never on ``ingest`` or
+``ingest_and_wake`` arrivals, which start their own turn. The call stays
+outstanding, so the kernel holds the next assistant turn and counts the
+channel busy until it returns.
 
 Config:
     funnel:
@@ -69,7 +73,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -82,11 +85,9 @@ logger = logging.getLogger("corvidae.funnel")
 
 DEFAULT_BUDGET_TOKENS = 512
 
-# Longest one ponder call may last, in seconds. The tool is a filler pause, not
-# a scheduler: anything longer belongs to the scheduler plugin.
-MAX_PONDER_SECONDS = 5.0
-# What ponder waits when the model gives no duration.
-DEFAULT_PONDER_SECONDS = 2.0
+# How long one ponder call may wait for recall to land, in seconds. It is a
+# timeout so a slow source cannot stall the agent, not a pause to fill.
+PONDER_TIMEOUT_SECONDS = 5.0
 
 # The mandatory injection-defense frame (§2.2 rendering discipline). Tests
 # assert this exact format; sources must not bypass it.
@@ -291,9 +292,6 @@ class FunnelPlugin(CorvidaePlugin):
         # Pull path (#717): channel.id -> source -> that source's one pending
         # promise. The inner key is what makes one pending per source structural.
         self._pending: dict[str, dict[str, _Pending]] = {}
-        # Ponder (see module doc): channel.id -> one Event per outstanding
-        # ponder call. Arrivals set them all; each call removes its own.
-        self._ponderers: dict[str, list[asyncio.Event]] = {}
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -334,8 +332,6 @@ class FunnelPlugin(CorvidaePlugin):
         self._next_turn.setdefault(channel.id, []).append(
             _Payload(source, list(entries), self._now())
         )
-        # Something arrived: end any ponder on this channel.
-        self._wake_ponderers(channel.id)
 
     async def ingest_and_wake(
         self,
@@ -371,10 +367,8 @@ class FunnelPlugin(CorvidaePlugin):
         self._deferred.setdefault(pair, []).append(
             _Payload(source, list(entries), self._now())
         )
-        # A stub is already pending for this pair: the payload just queues, and
-        # that stub is already in the channel's queue, so wake ponders now.
+        # A stub is already pending for this pair: the payload just queues.
         if pair in self._stub_pending:
-            self._wake_ponderers(channel.id)
             return
         # Count queued entries across payloads for the stub text; stale by
         # design once later registrations coalesce behind this stub.
@@ -399,9 +393,6 @@ class FunnelPlugin(CorvidaePlugin):
                 "deferred-registration stub failed", exc_info=True,
                 extra={"channel_id": channel.id, "origin": origin, "source": source},
             )
-        # Wake ponders only after the stub is queued, so the stub's turn (which
-        # drains this payload) comes before the ponder result's turn.
-        self._wake_ponderers(channel.id)
 
     @hookimpl
     async def before_agent_turn(self, channel, trace_id, annotations) -> None:
@@ -554,13 +545,6 @@ class FunnelPlugin(CorvidaePlugin):
                 self._discard(cid, source, old)
             self._pending.setdefault(cid, {})[source] = _Pending(promise, self._now())
 
-            def resolved(done: asyncio.Future) -> None:
-                # Only a promise with entries to admit ends a ponder.
-                if _has_entries(done):
-                    self._wake_ponderers(cid)
-
-            promise.add_done_callback(resolved)
-
         # Ask every implementer to submit; a raising one is logged, and the others' submissions stand.
         try:
             await self.pm.ahook.on_funnel_ingest(
@@ -619,132 +603,75 @@ class FunnelPlugin(CorvidaePlugin):
             for source, pending in list(by_source.items()):
                 self._discard(channel_id, source, pending)
         self._pending.clear()
-        # Release every ponder so its tool call returns instead of timing out.
-        for channel_id in list(self._ponderers):
-            self._wake_ponderers(channel_id)
-
-    def _wake_ponderers(self, channel_id: str) -> None:
-        """Set the wake event of every outstanding ponder on ``channel_id``."""
-        for event in self._ponderers.get(channel_id, []):
-            event.set()
-
-    def _has_waiting(self, channel_id: str) -> bool:
-        """True when the funnel already holds something for ``channel_id``.
-
-        Items queued, or a pull promise that finished with entries, since the
-        turn that called ponder drained: waiting for them would be pointless.
-        An origin-keyed payload counts too, though it drains only on a turn of
-        its own origin, so a stuck one makes ponder return at once (deferred).
-        """
-        # Stub-less payloads, then origin-keyed ones, for this channel.
-        if self._next_turn.get(channel_id):
-            return True
-        if any(cid == channel_id and queued for (cid, _), queued in self._deferred.items()):
-            return True
-        # A promise that is done with entries to admit.
-        return any(_has_entries(p.promise) for p in self._pending.get(channel_id, {}).values())
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
-        """Give the agent ``ponder``, a pause that ends early on arrivals."""
+        """Give the agent ``ponder``, a bounded wait for recall already in flight."""
         # The tool is a closure so the schema builder sees a plain function; it
         # reaches the funnel's state through this reference.
         plugin = self
 
-        async def ponder(
-            seconds: float = DEFAULT_PONDER_SECONDS,
-            until_context: bool = True,
-            _ctx: ToolContext | None = None,
-        ) -> str:
-            """Pause up to 5 seconds before your next turn, like clearing your throat, so background context such as a memory or wiki recall that is still running can land; ends early when new context arrives.
-
-            Use it to give pending context a moment, not to wait on people or long jobs.
-            The model sees only the line above: the schema builder keeps one line.
-
-            Args:
-                seconds: How long to pause, in seconds, above 0 and at most 5.
-                until_context: End the pause early when new context arrives.
-            """
-            return await plugin._ponder(seconds, until_context, _ctx)
+        async def ponder(_ctx: ToolContext | None = None) -> str:
+            """Pause for a moment (up to 5 seconds) to let your recollections catch up; returns at once if none are still coming in."""
+            return await plugin._ponder(_ctx)
 
         # Same wrapping goals uses, so the schema skips the injected _ctx.
         tool_registry.append(Tool(name=ponder.__name__, fn=ponder, schema=tool_to_schema(ponder)))
 
-    async def _ponder(
-        self, seconds: object, until_context: bool, ctx: ToolContext | None
-    ) -> str:
-        """Run one ponder call: validate, clamp, then wait for the time or an arrival."""
-        # The channel is what arrivals are matched against.
+    async def _ponder(self, ctx: ToolContext | None) -> str:
+        """Wait for this channel's in-flight pull promises, up to the timeout.
+
+        Every submission for the turn was made before its model call, so the
+        channel's ``_pending`` promises are final here. Returns at once when one
+        already landed with entries or none is still running; otherwise waits for
+        the first promise with entries, or for all to settle empty. The promises
+        belong to their providers and the funnel: waiting never cancels them, and
+        nothing is admitted here, since the next turn's sweep does that.
+        """
+        # The channel decides whose promises to wait on.
         if ctx is None or getattr(ctx, "channel", None) is None:
             return (
                 "Error: ponder has no channel context; it can only run inside a "
                 "channel turn, so do not call ponder here"
             )
-        channel_id = ctx.channel.id
-        limit = MAX_PONDER_SECONDS
-        # bool is an int subclass, but True is not a number of seconds. An int is
-        # always finite (and math.isfinite overflows on a huge one), so only a
-        # float is checked for nan and inf.
-        if (
-            isinstance(seconds, bool)
-            or not isinstance(seconds, (int, float))
-            or (isinstance(seconds, float) and not math.isfinite(seconds))
-            or seconds <= 0
-        ):
-            # The value is the model's own text: echo a shortened form of it.
-            shown = repr(seconds)
-            if len(shown) > 40:
-                shown = shown[:37] + "..."
-            return (
-                f"Error: ponder seconds must be a number above 0 and at most "
-                f"{limit:g}, got {shown}; call ponder again with a value in that range"
-            )
+        promises = [p.promise for p in self._pending.get(ctx.channel.id, {}).values()]
 
-        # Over the cap: rescue by pausing for the cap, log it, and say so. The
-        # asked-for value is shown as text because a huge int cannot become a float.
-        note = ""
-        if seconds > limit:
-            asked = str(seconds) if len(str(seconds)) <= 20 else str(seconds)[:17] + "..."
-            logger.warning(
-                "ponder on %s asked for %s s, over the %g s limit; pausing %g s instead",
-                channel_id, asked, limit, limit,
-                extra={"channel_id": channel_id},
-            )
-            note = f" (you asked for {asked}s; the limit is {limit:g}s)"
-            requested = limit
-        else:
-            requested = float(seconds)
+        # A recall already landed with entries: the next turn's sweep admits it.
+        if any(_has_entries(promise) for promise in promises):
+            return "Recall already landed: its context is admitted on your next turn."
+        # Only an unfinished promise can still bring something.
+        running = [promise for promise in promises if not promise.done()]
+        if not running:
+            return "Nothing is being recalled for this channel, so there is nothing to wait for."
 
+        timeout = PONDER_TIMEOUT_SECONDS
         start = time.monotonic()
-        # Context already waiting: no pause is useful, the next turn drains it.
-        if until_context and self._has_waiting(channel_id):
-            return "Woke at once: new context was already waiting."
+        # asyncio.wait, never wait_for: wait_for would cancel the recall on timeout.
+        while running:
+            remaining = timeout - (time.monotonic() - start)
+            if remaining <= 0:
+                break
+            done, still_running = await asyncio.wait(
+                running, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
+            )
+            # Nothing finished within the timeout.
+            if not done:
+                break
+            elapsed = time.monotonic() - start
+            # A finished promise with entries ends the wait; the others can follow.
+            if any(_has_entries(promise) for promise in done):
+                return f"Recall landed after {elapsed:.1f}s: its context is admitted on your next turn."
+            # Finished empty, failed or cancelled: keep waiting on the rest.
+            running = list(still_running)
 
-        # Register a wake event for this call (only when arrivals should end it),
-        # wait, and always unregister.
-        event = asyncio.Event()
-        waiters: list[asyncio.Event] = (
-            self._ponderers.setdefault(channel_id, []) if until_context else []
+        # Every promise settled without entries.
+        if not running:
+            return f"Recall finished after {time.monotonic() - start:.1f}s with nothing to add."
+        # Timed out: the recalls keep running and are admitted when they land.
+        return (
+            f"Still waiting on recall after {timeout:g}s; carry on, whatever it finds "
+            "is admitted on a later turn."
         )
-        if until_context:
-            waiters.append(event)
-        try:
-            await asyncio.wait_for(event.wait(), requested)
-            woke = True
-        except TimeoutError:
-            # The full pause elapsed with nothing arriving: the normal way out.
-            woke = False
-        finally:
-            if event in waiters:
-                waiters.remove(event)
-            # Drop the channel's entry only if it is still our (now empty) list.
-            if not waiters and self._ponderers.get(channel_id) is waiters:
-                del self._ponderers[channel_id]
-
-        elapsed = time.monotonic() - start
-        if woke:
-            return f"Woke after {elapsed:.1f}s: new context arrived."
-        return f"Pondered {requested:g}s{note}."
 
     async def _drain(
         self,

@@ -1315,27 +1315,26 @@ it.
 
 ### Smaller things
 
-- The funnel's `ponder` tool lets the model pause its own next turn, and it is
-  a tool call like any other: it occupies one worker of the shared task queue
-  (`daemon.max_task_workers`, default 4) for as long as it waits, and that queue
-  also carries other channels' tool calls, subagents, appraisal and critique.
-  Each call is capped at 5 s (`MAX_PONDER_SECONDS`, not configurable) and a
-  funnel arrival ends it early, but nothing caps how many calls one assistant
-  message makes. Untrusted text that talks the agent into a message of K
-  `ponder` calls holds the workers for about ceil(K/4) x 5 s, and a loop of
-  such messages repeats that up to `max_turns` times per exchange. Beyond the
-  shared workers it delays that channel's replies, holds the channel busy so idle
-  work (heartbeat, retention, consolidation) stays off while it waits, and
-  spends an LLM call per turn. It reads and writes nothing. Its result is built
-  in code: a duration, whether context arrived, the clamp note, or a refusal that
-  echoes the model's own `seconds` argument back (unfenced; the kernel does no
-  schema validation of arguments). Remove it everywhere with
-  `tools.disabled: [ponder]`, or on one channel with
-  `channels.<id>.tools.disabled: [ponder]`. `plugins.disabled: [funnel]` also
-  removes it, but fails startup on a stock cognition install because goals
-  depends on the funnel; use it only with goals disabled too, as
-  `agent.minimal.yaml.example` does. A cap on concurrent ponders per channel
-  is proposed, not built.
+- The funnel's `ponder` tool lets the model wait, at most 5 s
+  (`PONDER_TIMEOUT_SECONDS`, not configurable), for recall already in flight. It is
+  a tool call like any other: while it waits it occupies one worker of the shared
+  task queue (`daemon.max_task_workers`, default 4), which also carries other
+  channels' tool calls, subagents, appraisal and critique; it holds its channel
+  busy so idle work (heartbeat, retention, consolidation) stays off; and each
+  ponder costs an LLM turn. It returns at once when no recall is in flight, so
+  the hold needs a pending recall to exist, and none does in-tree today (no
+  recall source ships yet, and memory retrieves before the model call). The edge,
+  once a source exists: nothing caps how many `ponder` calls one assistant
+  message makes, so K calls hold K workers until the same recall settles or 5 s
+  pass, about ceil(K/4) x 5 s of shared-worker time per message, repeated up to
+  `max_turns` times per exchange, and untrusted text can talk the agent into it.
+  It reads and writes nothing, and its result is fixed sentences plus a duration,
+  built in code. A guard (a second concurrent ponder on a channel returns at once)
+  is proposed, not built. Remove the tool with `tools.disabled: [ponder]`, or on
+  one channel with `channels.<id>.tools.disabled: [ponder]`.
+  `plugins.disabled: [funnel]` also removes it, but fails startup on a stock
+  cognition install because goals depends on the funnel; use it only with goals
+  disabled too, as `agent.minimal.yaml.example` does.
 
 - Passive retrieval joins the vector search with a keyword search (#666),
   so a record that names a person, project or identifier surfaces whenever

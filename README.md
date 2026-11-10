@@ -139,7 +139,7 @@ other tenants.
 |--------|---------|
 | MemoryPlugin | Consolidates conversation (at turn ends, on idle, and at compaction) into long-term memories and retrieves them into context |
 | MemoryToolsPlugin | `search_memory` and `recall_raw` tools |
-| FunnelPlugin | Admits retrieved context into the prompt under a budget; gives the agent `ponder`, a pause of at most 5 s for background context |
+| FunnelPlugin | Admits retrieved context into the prompt under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | AppraisalPlugin | Scores each exchange as it happens |
 | CritiquePlugin | Reviews the agent's replies after the fact |
 | OutcomeLogPlugin | Records each exchange and its outcome |

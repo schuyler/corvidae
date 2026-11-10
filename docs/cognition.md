@@ -31,7 +31,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 |---|---|---|
 | `MemoryPlugin` | `memory` | Consolidates conversation (at turn ends, on idle, and at compaction) into durable memories and retrieves them into context; owns `sqlite-vec` |
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
-| `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a pause of at most 5 s for background context |
+| `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
 | `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss) and the provenance check |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
@@ -1177,47 +1177,48 @@ sweep is superseded, and its entries lost, if its provider submits again
 in that same turn's collect. The funnel does not admit such a result on
 re-submit yet.
 
-**`ponder` tool.** The funnel registers one tool, `ponder(seconds, until_context)`
-(the code defaults are 2 and true, but the schema marks both required): the
-agent clearing its throat. The call stays outstanding for up to `seconds` and
-returns early when the funnel gets something for that channel: `ingest`,
-`ingest_and_wake`, or a pull promise resolving to entries. Only those producers
-end it early (shutdown releases it too), and other channels' arrivals are
-ignored. Content already waiting when it is called returns at once. With
-`until_context=false` it always waits the full time.
+**`ponder` tool.** The funnel registers one tool, `ponder()`, which takes no
+arguments: a bounded wait for recall already in flight. Every
+`on_funnel_ingest` submission for a turn is made in that turn's
+`before_agent_turn`, before the model call, so when the agent can call a tool
+the channel's pending promises are final. `ponder` waits for those:
 
-The model sees only the first docstring line (`tool_to_schema` keeps one line),
-so that line carries the guidance: pause up to 5 seconds so background context,
-such as a memory or wiki recall that is still running, can land. That is the
-pull path's use: a recall source (see [Recall sources](#recall-sources-packagescorvidae-cognitioncorvidae_cognitionrecallpy) and [plugin-guide.md](plugin-guide.md#writing-a-recall-source))
-submits a promise for a background search, and ponder gives it a moment to
-resolve before the model answers. Memory's own retrieval does not need it, since
-it runs before the model call. No recall source uses the pull path in-tree yet
-(the first, #711, and moving memory onto it, #721, are open), so today a ponder
-ends early only on `ingest` and `ingest_and_wake` arrivals such as critique's.
-
-- **The cap is 5 s** (`MAX_PONDER_SECONDS`, a constant, not config). A longer
-  request is clamped and logged at WARNING; when the pause then runs its full
-  length the result names the value asked for and the limit. A value that is not a finite number above 0
-  is refused with an error naming the value and the accepted range. Anything
-  that needs a longer wait belongs to the scheduler.
-- **It waits on arrival, never on a drain.** The drain runs inside
-  `before_agent_turn`, and the turn is what the pause holds back, so waiting
-  for a drain would wait out the whole time.
+- **Nothing in flight: it returns at once.** "Nothing is being recalled for
+  this channel", since waiting cannot bring more. If a promise already finished
+  with entries and the next turn's sweep has not admitted it yet, it returns
+  "Recall already landed".
+- **Otherwise it waits** for the first promise with entries ("Recall landed after
+  Xs") or until every one has settled without any ("Recall finished with nothing
+  to add"). The funnel knows because it holds the promises in `_pending`: a
+  `None` result, an `Ingest` with no entries, a failure and a cancellation all
+  count as a finished recall. It cannot tell "no hits" from a timeout or a
+  failure, which the recall mixin both resolves to `None` (it logs failures).
+- **A timeout of 5 s** (`PONDER_TIMEOUT_SECONDS`, a constant, not config) keeps a
+  slow source from stalling the agent: "Still waiting on recall". The recalls
+  keep running, because the wait uses `asyncio.wait`, which does not cancel what
+  it waits on, and are admitted at the first turn after they resolve.
+- **Only recall promises count.** `ingest` and `ingest_and_wake` arrivals
+  neither end nor lengthen the wait: `ingest_and_wake` starts a turn of its own
+  through its stub, and `ingest` payloads wait for the next turn.
 - **Held turn, busy channel.** Like any tool call, a ponder keeps its call id
   pending: the kernel holds the next assistant turn until the result lands,
   and the channel counts as busy, so idle work (heartbeat, consolidation)
   stays off while it runs. That is intended. A message that arrives during a
-  ponder still gets a turn, as it does during any tool call. It also occupies a
-  worker of the shared task queue while it waits (see the threat model).
-- **Two turns on an `ingest_and_wake` arrival.** Its stub notification starts
-  a turn of its own, which drains the content; the ponder result then starts
-  another. The extra turn is accepted, so as not to hold stub turns in the
-  kernel for a filler tool.
-- **The result admits nothing.** It says how long the pause lasted and whether
-  context woke it. The content reaches the window through the normal drain.
-- On shutdown, `on_stop` releases every ponder that is waiting on context. One
-  started with `until_context=false` waits out its time (5 s at most).
+  ponder still gets a turn, as it does during any tool call. A waiting ponder
+  also occupies a worker of the shared task queue (see the threat model).
+- **The tool admits nothing.** Its result says what happened; the next turn's
+  sweep and drain admit whatever landed.
+- On shutdown, `on_stop` cancels every pending promise, so a waiting ponder
+  returns.
+
+The model sees only the first docstring line (`tool_to_schema` keeps one line),
+so that line carries the guidance: pause for a moment (up to 5 seconds) to let
+your recollections catch up, and it returns at once if none are still coming in. No recall source
+uses the pull path in-tree yet (the first, #711, and moving memory onto it,
+#721, are open), and memory's own retrieval runs before the model call, so
+today `ponder` always finds nothing in flight and returns at once. A recall
+source is the plugin-guide's [Writing a recall
+source](plugin-guide.md#writing-a-recall-source).
 
 Remove the tool with `tools.disabled: [ponder]`, or per channel with
 `channels.<id>.tools.disabled: [ponder]`. `plugins.disabled: [funnel]` removes it
