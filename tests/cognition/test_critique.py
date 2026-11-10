@@ -442,6 +442,10 @@ class TestLensSelection:
     async def test_retention_not_in_random_sampling_pool(self, tmp_path):
         """Retention is a gated lens, not part of the random-sampling pool.
         A below-threshold exchange that does sample must never yield retention."""
+        from corvidae_cognition.critique import STYLISTIC_LENSES
+        assert "retention" not in STYLISTIC_LENSES, (
+            "retention must not be in the random-sampling pool"
+        )
         appraisal = FakeAppraisal(
             stage1={"commitment_density": 0.0, "disagreement": 0.0},
             stage2={"ambiguity": 0.0, "valence": 0.5},
@@ -453,9 +457,7 @@ class TestLensSelection:
         await _run_next_task(env.task)
         outcomes = await _read_outcomes(env.db, "krand")
         lenses = outcomes["critique"]["lenses"]
-        assert "retention" not in lenses, (
-            "retention must not be in the random-sampling pool"
-        )
+        assert "retention" not in lenses
         await _teardown(env)
 
     async def test_novelty_threshold_tunable(self, tmp_path):

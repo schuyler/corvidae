@@ -77,7 +77,7 @@ logger = logging.getLogger("corvidae.critique")
 # decision time — never cached at init).
 # --------------------------------------------------------------------------
 LENS_AMBIGUITY_DEFAULT = 0.6        # critique.lens.ambiguity → predictive
-LENS_COMMITMENT_DEFAULT = 0.5       # critique.lens.commitment → constrained
+LENS_COMMITMENT_DEFAULT = 0.5       # critique.lens.commitment → constrained, retention
 LENS_NEG_VALENCE_DEFAULT = 0.3      # critique.lens.neg_valence ∧ disagreement → adversarial
 LENS_DISAGREEMENT_DEFAULT = 0.6     # critique.lens.disagreement
 LENS_NOVELTY_DEFAULT = 0.6          # critique.lens.novelty → retention
