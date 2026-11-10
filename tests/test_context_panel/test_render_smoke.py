@@ -14,6 +14,8 @@ Like tests/test_web_render_smoke.py it is skipped without Playwright, and the
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 # Skip the module cleanly where Playwright isn't installed.
@@ -24,8 +26,9 @@ from playwright.async_api import Error as PlaywrightError  # noqa: E402
 from playwright.async_api import async_playwright  # noqa: E402
 
 from corvidae.context import ContextWindow, MessageType  # noqa: E402
-from corvidae.outbound import OutboundProgress  # noqa: E402
+from corvidae.outbound import OutboundProgress, OutboundToolStatus  # noqa: E402
 from corvidae.tool_policy import ToolView  # noqa: E402
+from tests.test_context_panel.test_context_panel import log_row  # noqa: E402
 from tests.test_web_plugin import TOKEN, _no_env_token, make_env  # noqa: E402,F401
 from tests.test_web_render_smoke import HOSTILE, _launch  # noqa: E402
 
@@ -53,11 +56,11 @@ async def seeded_env(make_env, build) -> tuple:
     return env, win
 
 
-async def open_panel(browser, env, live: str | None = None):
+async def open_panel(browser, env, live: str | None = None, timezone_id: str | None = None):
     """Log in, open the panel, pick web:main in the channel list, and wait
     for the live event whose text is ``live``, if given (it arrives on the poll
     after the open)."""
-    page = await browser.new_page()
+    page = await (await browser.new_context(timezone_id=timezone_id)).new_page()
     await page.goto(f"{env.base}/?token={TOKEN}")
     await page.wait_for_url(f"{env.base}/")
     await page.goto(f"{env.base}/panel/context_panel/")
@@ -169,33 +172,69 @@ async def test_category_classes(make_env):
 
 
 @pytest.mark.timeout(60)
-async def test_default_open_state_and_toggle(make_env):
-    """R16: thinking and tool output start closed, the rest open; clicks toggle."""
+async def test_only_chat_entries_start_open(make_env):
+    """R1: an entry starts open iff it is chat; clicking a summary toggles it."""
     env, _ = await seeded_env(make_env, fill_every_category)
     await send_live(env, OutboundProgress(text="live-text"))
+    await send_live(env, OutboundToolStatus(tool_name="live_tool", status="dispatched",
+                                            args_summary="live-args"))
     async with async_playwright() as pw:
         browser = await _launch(pw)
         try:
-            page = await open_panel(browser, env, "live-text")
+            page = await open_panel(browser, env, live="live-args")
             entries = await page.evaluate(ENTRIES_JS)
-            live_open = await page.evaluate(
-                "() => [...document.querySelectorAll('#panel details')]"
-                ".filter(d => d.querySelector(':scope > pre.body') === null).map(d => d.open)")
-            thinking = page.locator("#panel details.cat-thinking").first
-            summary = thinking.locator("summary").first
+            live_open = await page.evaluate("document.querySelector('#live').open")
+            summary = page.locator("#panel details.cat-thinking summary").first
             await summary.click()
-            opened = await thinking.evaluate("d => d.open")
-            await summary.click()
-            closed_again = await thinking.evaluate("d => d.open")
+            opened = await page.locator("#panel details.cat-thinking").first.evaluate("d => d.open")
         finally:
             await browser.close()
 
     for e in entries:
-        closed = "cat-thinking" in e["cls"] or "cat-tool-output" in e["cls"]
-        assert e["open"] is not closed, e["text"]
-    assert live_open and all(live_open)
+        assert e["open"] is ("cat-chat" in e["cls"]), (e["label"], e["cls"])
     assert opened is True
-    assert closed_again is False
+    assert live_open is True
+
+
+@pytest.mark.timeout(60)
+async def test_tool_name_in_call_and_output_summaries(make_env):
+    """R2: a tool call's summary and its output's both name the tool."""
+    def build(win):
+        win.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]})
+        win.append({"role": "tool", "tool_call_id": "c1", "content": "out"})
+
+    env, _ = await seeded_env(make_env, build)
+    async with async_playwright() as pw:
+        browser = await _launch(pw)
+        try:
+            entries = await (await open_panel(browser, env)).evaluate(ENTRIES_JS)
+        finally:
+            await browser.close()
+
+    for cls in ("cat-tool-call", "cat-tool-output"):
+        assert all("read_file" in e["label"] for e in entries if cls in e["cls"])
+
+
+@pytest.mark.timeout(60)
+async def test_row_stamp_is_browser_local_time(make_env):
+    """R3: a ts shows as local YYYY-MM-DD HH:MM; a row without ts shows no stamp."""
+    env, win = await seeded_env(make_env, lambda w: [
+        w.append({"role": "user", "content": "stamped"}),
+        w.append({"role": "user", "content": "bare"})])
+    win.messages[0]["_db_id"] = await log_row(env, CID, 1772618820)  # 10:07 UTC
+    async with async_playwright() as pw:
+        browser = await _launch(pw)
+        try:
+            page = await open_panel(browser, env, timezone_id="America/New_York")
+            entries = await page.evaluate(ENTRIES_JS)
+        finally:
+            await browser.close()
+
+    label = by_text(entries, "stamped")["label"]
+    assert "2026-03-04 05:07" in label and "10:07" not in label
+    assert "NaN" not in by_text(entries, "bare")["label"]
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", by_text(entries, "bare")["label"])
 
 
 @pytest.mark.timeout(60)

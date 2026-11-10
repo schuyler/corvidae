@@ -411,3 +411,27 @@ class TestLive:
         win.append({"role": "user", "content": "b"})
         assert len(win.messages) == 4
         assert (await poll(env, "web:main"))["live"] == []
+
+
+
+async def log_row(env, channel_id: str, ts: float) -> int:
+    cursor = await env.persistence.db.execute(
+        "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+        "VALUES (?, ?, ?, 'message')",
+        (channel_id, '{"role": "user", "content": "x"}', ts),
+    )
+    await env.persistence.db.commit()
+    return cursor.lastrowid
+
+
+async def test_rows_carry_log_timestamp(make_env):
+    env, _ = await panel_env(make_env)
+    win = seed(env, numbered(2))
+    win.messages[0]["_db_id"] = await log_row(env, "web:main", 1700000000.5)
+    body = await open_window(env, "web:main")
+    assert body["rows"][0]["ts"] == 1700000000.5
+    assert "ts" not in body["rows"][1]
+    win.append({"role": "user", "content": "new"})
+    win.messages[-1]["_db_id"] = await log_row(env, "web:main", 1700000200.0)
+    polled = await poll(env, "web:main", body["cursor"])
+    assert [r["ts"] for r in polled["rows"]] == [1700000200.0]

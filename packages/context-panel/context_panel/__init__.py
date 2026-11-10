@@ -12,6 +12,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Iterator
 
+import aiosqlite
 from aiohttp import web
 
 from corvidae.channel import Channel, ChannelRegistry
@@ -24,6 +25,7 @@ from corvidae.outbound import (
     OutboundThinking,
     OutboundToolStatus,
 )
+from corvidae.persistence import PersistencePlugin
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +94,25 @@ def _mark(conv: ContextWindow) -> tuple[int, str]:
     return len(rows), first
 
 
+async def _stamp(db: aiosqlite.Connection, channel: Channel, rows: list, wire: list[dict]) -> None:
+    """Attach each wire row's message_log time as `ts`; rows without a logged id get none."""
+    by_id = {
+        r["_db_id"]: w
+        for r, w in zip(rows, wire)
+        if isinstance(r, dict) and isinstance(r.get("_db_id"), int)
+    }
+    if not by_id:
+        return
+    # One range query rather than an id list, which could exceed SQLite's parameter limit.
+    async with db.execute(
+        "SELECT id, timestamp FROM message_log WHERE channel_id = ? AND id BETWEEN ? AND ?",
+        (channel.id, min(by_id), max(by_id)),
+    ) as cursor:
+        for row_id, ts in await cursor.fetchall():
+            if row_id in by_id:
+                by_id[row_id]["ts"] = ts
+
+
 def _json(data: dict) -> web.Response:
     """A JSON response; serialized here, so the caller's window read has no await before it."""
     return web.json_response(data, dumps=partial(json.dumps, default=str))
@@ -100,7 +121,7 @@ def _json(data: dict) -> web.Response:
 class ContextPanelPlugin(CorvidaePlugin):
     """Web console panel showing every loaded channel's context window."""
 
-    depends_on = frozenset({"registry"})
+    depends_on = frozenset({"registry", "persistence"})
     optional_depends_on = frozenset({"web"})
 
     def __init__(self, pm=None) -> None:
@@ -176,6 +197,10 @@ class ContextPanelPlugin(CorvidaePlugin):
             live = self._live[channel.id] = _Live(mark=mark, events=[])
         live.events.append({"seq": next(self._seq), **wire})
 
+    def _db(self) -> aiosqlite.Connection:
+        """The persistence plugin's database connection."""
+        return get_dependency(self.pm, "persistence", PersistencePlugin).db
+
     def _channel(self, request: web.Request) -> Channel | None:
         """The registry channel named by ?channel=, or None if it isn't registered."""
         registry = get_dependency(self.pm, "registry", ChannelRegistry)
@@ -209,17 +234,19 @@ class ContextPanelPlugin(CorvidaePlugin):
             return _json({"loaded": False})
         rows = conv.messages
         shown = rows if request.query.get("all") == "1" else rows[-WINDOW_ROWS:]
-        return _json(
-            {
-                "loaded": True,
-                "system_prompt": conv.system_prompt,
-                "tools": _tools(conv),
-                "total": len(rows),
-                "first": len(rows) - len(shown),
-                "rows": [_wire_row(r) for r in shown],
-                "cursor": {"count": len(rows), "digest": _digests(conv, len(rows))[1]},
-            }
-        )
+        wire = [_wire_row(r) for r in shown]
+        body = {
+            "loaded": True,
+            "system_prompt": conv.system_prompt,
+            "tools": _tools(conv),
+            "total": len(rows),
+            "first": len(rows) - len(shown),
+            "rows": wire,
+            "cursor": {"count": len(rows), "digest": _digests(conv, len(rows))[1]},
+        }
+        # The response is built before this await; only ts is attached after it.
+        await _stamp(self._db(), channel, shown, wire)
+        return _json(body)
 
     async def poll(self, request: web.Request) -> web.Response:
         """Tail a channel from the client's cursor, plus its live events."""
@@ -238,12 +265,15 @@ class ContextPanelPlugin(CorvidaePlugin):
         prefix, full = _digests(conv, int(count))
         if prefix != digest:
             return _json({"loaded": True, "resync": True, "live": live})
-        return _json(
-            {
-                "loaded": True,
-                "resync": False,
-                "rows": [_wire_row(r) for r in conv.messages[int(count):]],
-                "cursor": {"count": len(conv.messages), "digest": full},
-                "live": live,
-            }
-        )
+        tail = conv.messages[int(count):]
+        wire = [_wire_row(r) for r in tail]
+        body = {
+            "loaded": True,
+            "resync": False,
+            "rows": wire,
+            "cursor": {"count": len(conv.messages), "digest": full},
+            "live": live,
+        }
+        # The response is built before this await; only ts is attached after it.
+        await _stamp(self._db(), channel, tail, wire)
+        return _json(body)
