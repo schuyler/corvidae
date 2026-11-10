@@ -1191,3 +1191,53 @@ inotify_ping:
 | `inotify_ping.terminal_marker` | string or null | `null` | When set, a settled file pings only if its last non-empty line contains this text, so a pause in the middle of a job is not reported as completion. Must be a non-empty string or null. |
 
 A malformed block fails startup naming the key and the value. The whole section reloads live: a reload re-validates it and re-arms the watches, and setting `enabled: false` stops them.
+
+---
+
+## Running in a container
+
+The `Dockerfile` at the repo root builds the kernel (the agent loop, persistence, tools and transports) into a small image that runs `corvidae serve` against whatever `agent.yaml` you mount. Build it, give it a directory, and start it:
+
+```sh
+docker build -t corvidae .
+mkdir -p ~/corvidae-data && cp agent.yaml ~/corvidae-data/
+sudo chown -R 1000:1000 ~/corvidae-data
+```
+
+```sh
+docker run -d --name corvidae --restart unless-stopped \
+  -v ~/corvidae-data:/data \
+  -v ~/corvidae-data/agent.yaml:/data/agent.yaml:ro \
+  corvidae
+docker logs -f corvidae
+```
+
+**`/data` is the working directory.** Everything corvidae writes by default lands there, next to `agent.yaml`: `sessions.db`, `provenance.key`, log files, `state/`. Relative paths in the config resolve against it. Back that directory up and you've backed up the bot, and keep `provenance.key` with it, since fences only stay stable across restarts if the key does (see the top of this file).
+
+**The daemon runs as uid 1000, not root.** The shell tool runs as the daemon's user (see [threat-model.md](threat-model.md), finding 4), so the image doesn't hand it root. The cost: the mounted directory has to be writable by uid 1000, hence the `chown`. If it isn't, corvidae dies at startup with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory. Fix the ownership, or run with `--user $(id -u):$(id -g)` and a directory you own.
+
+**The second `-v` locks the config.** `agent.yaml` mounted read-only means `write_file` can't edit the agent's own configuration, which is the lock [prd.md](prd.md) §3.11.11 describes. Leave that line out if you want the agent to be able to change its own config, and know what that costs: a writable config plus hot reload lets it lift every other lock.
+
+**Nothing is exposed.** The image has no `EXPOSE`. If you configure [`web:`](#web--browser-chat-ui), the transport has to listen on a wildcard address inside the container (`host: 0.0.0.0`, which needs `allowed_origins` and logs a `WARNING`, as documented there), and you publish the port yourself. Publish it on loopback, so only the Docker host can reach it, and put TLS or a tunnel in front of that:
+
+```sh
+docker run -d --name corvidae --restart unless-stopped \
+  -p 127.0.0.1:8765:8765 \
+  -v ~/corvidae-data:/data \
+  corvidae
+```
+
+**`localhost` is the container.** A model backend on the Docker host isn't at `http://localhost:8080/v1` from in here. On Linux, add `--add-host host.docker.internal:host-gateway` to `docker run` and set `llm.main.base_url` to `http://host.docker.internal:8080/v1`, or use the host's LAN address. The same goes for signal-cli: it runs outside the container, so mount the directory holding its socket and point `signal.socket` at the path as the container sees it. The socket has to be readable by uid 1000. IRC, Discord and Zulip only need outbound network access.
+
+**Extras are chosen at build time.** The default image has none, which is `uv sync` with no `--extra`. Name what you want in `EXTRAS`, space separated, using the same names as the install line in the README:
+
+```sh
+docker build -t corvidae --build-arg EXTRAS="discord" .
+docker build -t corvidae-cognition --build-arg EXTRAS="cognition discord" .
+```
+
+The `restart` tool needs the `restart` extra. It ends the daemon with SIGTERM and expects something to start it again, which in a container is `--restart unless-stopped`.
+
+**tiktoken's encoding is baked in.** The build downloads `cl100k_base` once, so a container recreated on a host with no outbound network still counts tokens properly instead of falling back to the character estimate. The build fails if it can't fetch it.
+
+**A container is not a sandbox for the tools.** It limits the daemon and its tools to what you mounted and what the network lets them reach. It does not separate the tools from the daemon: `shell` still runs unsandboxed, as uid 1000 in the same container, next to `sessions.db`, the web token and the signal-cli socket. Running tools somewhere narrower than the daemon is a different feature, tracked in [#532](https://github.com/schuyler/corvidae/issues/532).

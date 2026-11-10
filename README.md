@@ -58,6 +58,11 @@ the transports, without the cognition plugins or sqlite-vec. Add
 `corvidae acp`, on the same line: `uv sync` removes any extra you don't
 name.
 
+To run it in Docker instead, `docker build -t corvidae .` makes a kernel image
+that runs `corvidae serve` against an `agent.yaml` you mount at `/data`. The
+mounts, ports and extras are in
+[docs/configuration.md](docs/configuration.md#running-in-a-container).
+
 For development (pytest, every extra its tests import):
 
 ```sh
