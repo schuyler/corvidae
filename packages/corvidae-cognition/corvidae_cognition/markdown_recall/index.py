@@ -151,9 +151,19 @@ class MarkdownIndex:
     # -- connection + schema ------------------------------------------------
 
     async def _connect(self) -> aiosqlite.Connection | None:
-        """Open the index connection (WAL) or None when unavailable."""
+        """Open the index connection (WAL) or None when unavailable.
+
+        Re-opens a stale closed connection: in the daemon the connection lives
+        for the process (one loop, never closed), but a closed handle must not
+        poison every later query — the schema is in the file, so re-opening is
+        cheap.
+        """
         if self._db is not None:
-            return self._db
+            try:
+                await self._db.execute("SELECT 1")
+                return self._db
+            except Exception:
+                self._db = None  # stale/closed: re-open below
         try:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             db = await aiosqlite.connect(self._db_path)

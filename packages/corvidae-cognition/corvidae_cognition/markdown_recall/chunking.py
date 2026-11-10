@@ -4,8 +4,6 @@ Vendored from schuyler/otterwiki-semantic-search (MIT, same author) per the
 #719 design. Public API: chunk_page(pagepath, content) -> [{id, text, metadata}].
 """
 
-"""Page content chunking for vector embedding."""
-
 import re
 
 from corvidae_cognition.markdown_recall.frontmatter import parse_frontmatter

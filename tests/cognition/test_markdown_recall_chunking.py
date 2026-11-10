@@ -1,6 +1,6 @@
 """Unit tests for chunking — no ChromaDB required."""
 
-from corvidae_cognition.markdown_recall.chunking import chunk_page, OVERLAP_WORDS
+from corvidae_cognition.markdown_recall.chunking import OVERLAP_WORDS, chunk_page
 
 
 class TestChunkPage:

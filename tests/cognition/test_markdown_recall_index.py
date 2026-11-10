@@ -7,10 +7,8 @@ embedding client stands in for the ``llm`` stanza's ``embedding`` stage.
 """
 
 import hashlib
-from pathlib import Path
 
 import pytest
-
 from corvidae_cognition.markdown_recall.index import (
     Hit,
     MarkdownIndex,
