@@ -194,9 +194,13 @@ class TestRetrievalBasics:
         # Funnel framing wraps the entries.
         assert content.startswith("[CONTEXT from memory")
         assert content.rstrip().endswith("[end CONTEXT from memory]")
-        # An age prefixes each line, after a [marginal] label when the record
-        # banded moderate (#409); a strong record carries no label.
-        assert re.search(r"^(\[marginal\] )?\(.+?\) .*wifi", content, re.MULTILINE)
+        # An age and the record id prefix each line, after a [marginal] label
+        # when the record banded moderate (#409, #632); a strong record
+        # carries no label.
+        assert re.search(
+            rf"^(\[marginal\] )?\((now|\d+[mhd]), memory {relevant}\) .*wifi",
+            content, re.MULTILINE,
+        )
         # The relevant memory is the first entry line.
         lines = content.split("\n")[1:-1]
         assert "wifi" in lines[0]
@@ -329,25 +333,26 @@ class TestDedupeAndStats:
 
         # Both memories band strong (band_on: similarity with thresholds at
         # 0.0, so scoring differences don't affect the label), so both lines
-        # are bare (#409). B's formatted line is
-        # "(now) wifi router fixed the issue"; A's is "(now) wifi router" —
-        # a strict prefix of B's line.
-        line_b_formatted = "(now) wifi router fixed the issue"
-        # Budget: admits B exactly; budget-drops A (A would add 8 more tokens).
-        budget = count_tokens(line_b_formatted)
-
+        # are bare (#409). Since #632 each line carries its record id, so A's
+        # line is no longer a prefix of B's; the guard that remains is that a
+        # budget-dropped record is never credited as admitted.
         config = {
             **EMBED_CONFIG,
             "memory": {"retrieval": {
                 "band_on": "similarity",
                 "bands": {"strong": 0.0, "moderate": 0.0},
             }},
-            "funnel": {"budgets": {"memory": budget}},
         }
         memory, embedder, channel, conv, db = await build_retrieval_env(config)
 
         rowid_a = await seed_memory(db, channel.id, "wifi router")
         rowid_b = await seed_memory(db, channel.id, "wifi router fixed the issue")
+
+        # Budget: admits B's line exactly; budget-drops A after it.
+        line_b_formatted = f"(now, memory {rowid_b}) wifi router fixed the issue"
+        await memory.pm.get_plugin("funnel").on_config_reload(
+            {"funnel": {"budgets": {"memory": count_tokens(line_b_formatted)}}}
+        )
 
         # Query that scores B (5 shared tokens) higher than A (2 shared tokens).
         await ask(memory, channel, conv, "wifi router fixed the issue")
@@ -358,8 +363,8 @@ class TestDedupeAndStats:
             rows = {row[0]: row[1] for row in await cursor.fetchall()}
 
         assert rows[rowid_b] == 1, "B was admitted; its retrieval_count must be 1"
-        # A's formatted line is a substring of B's, so the old `line in appended`
-        # check would credit A even though it was budget-dropped.
+        # A was offered to the funnel and budget-dropped; it must not be
+        # credited.
         assert rows[rowid_a] == 0, (
             f"A was budget-dropped (not admitted); retrieval_count must be 0, "
             f"got {rows[rowid_a]}"

@@ -12,9 +12,9 @@ Passive retrieval admits a memory only when it earns its place:
   nothing above weak admits nothing.
 - A keyword-only hit bands on its measured cosine like any other; one with no
   stored vector bands weak, so it is not admitted passively.
-- Lines read ``(age) summary`` for a strong record and
-  ``[marginal] (age) summary`` for a moderate one. The FTS5-degraded path
-  still admits the top k, every line marked ``[marginal]``.
+- Lines read ``(age, memory <id>) summary`` for a strong record and
+  ``[marginal] (age, memory <id>) summary`` for a moderate one (#632). The
+  FTS5-degraded path still admits the top k, every line marked ``[marginal]``.
 - Each logged candidate carries its z (NULL when no z was computed).
 """
 
@@ -206,11 +206,14 @@ class TestRelativeBanding:
     async def test_strong_record_is_admitted_without_a_label(self, env):
         needs_vec()
         memory, _, channel, conv, db = await env()
-        await seed_corpus(db, channel.id)
+        target = await seed_corpus(db, channel.id)
         await ask(memory, channel, conv, TARGET)
-        text = recalled(conv)
-        assert f"(now) {TARGET}" in text
-        assert f"] (now) {TARGET}" not in text
+        # The whole line, from its start: an id-bearing age and no label.
+        lines = recalled(conv).splitlines()
+        assert f"(now, memory {target}) {TARGET}" in lines
+        assert not any(
+            line.startswith("[") and TARGET in line for line in lines
+        )
 
     async def test_null_query_admits_nothing(self, env):
         # The whole point of the gate: an off-topic message adds nothing.
@@ -301,33 +304,36 @@ class TestLineFormat:
         # and strong z thresholds is admitted as [marginal].
         needs_vec()
         memory, _, channel, conv, db = await env()
-        await seed_corpus(db, channel.id)
+        target = await seed_corpus(db, channel.id)
         query = "kestrel's ESP32 weather station"
         z = z_of(query, TARGET, [*FILLER, TARGET])
         assert DEFAULT_BAND_MODERATE_Z <= z < DEFAULT_BAND_STRONG_Z
         await ask(memory, channel, conv, query)
-        assert f"[marginal] (now) {TARGET}" in recalled(conv)
+        assert f"[marginal] (now, memory {target}) {TARGET}" in (
+            recalled(conv).splitlines()
+        )
 
     async def test_moderate_record_is_marked_marginal(self, env):
         needs_vec()
         memory, _, channel, conv, db = await env(
             config(band_on="similarity", bands={"strong": 2.0, "moderate": 0.0})
         )
-        await seed_memory(db, channel.id, TARGET)
+        target = await seed_memory(db, channel.id, TARGET)
         await ask(memory, channel, conv, TARGET)
-        assert f"[marginal] (now) {TARGET}" in recalled(conv)
+        assert f"[marginal] (now, memory {target}) {TARGET}" in (
+            recalled(conv).splitlines()
+        )
 
     async def test_degraded_path_admits_top_k_marked_marginal(self, env):
         memory, embedder, channel, conv, db = await env()
-        await seed_memory(db, channel.id, TARGET, created_at=time.time() - 60 * DAY,
-                          embedded=_has_vec())
+        target = await seed_memory(
+            db, channel.id, TARGET, created_at=time.time() - 60 * DAY,
+            embedded=_has_vec(),
+        )
         embedder.fail = True
         await ask(memory, channel, conv, "weather station wifi")
-        text = recalled(conv)
-        assert TARGET in text
-        assert all(
-            line.startswith("[marginal] (")
-            for line in text.splitlines() if TARGET in line
+        assert f"[marginal] (60d, memory {target}) {TARGET}" in (
+            recalled(conv).splitlines()
         )
 
 
