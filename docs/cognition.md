@@ -1192,7 +1192,9 @@ such as a memory or wiki recall that is still running, can land. That is the
 pull path's use: a recall source (see [Recall sources](#recall-sources-packagescorvidae-cognitioncorvidae_cognitionrecallpy) and [plugin-guide.md](plugin-guide.md#writing-a-recall-source))
 submits a promise for a background search, and ponder gives it a moment to
 resolve before the model answers. Memory's own retrieval does not need it, since
-it runs before the model call.
+it runs before the model call. No recall source uses the pull path in-tree yet
+(the first, #711, and moving memory onto it, #721, are open), so today a ponder
+ends early only on `ingest` and `ingest_and_wake` arrivals such as critique's.
 
 - **The cap is 5 s** (`MAX_PONDER_SECONDS`, a constant, not config). A longer
   request is clamped and logged at WARNING; when the pause then runs its full

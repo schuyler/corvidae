@@ -51,7 +51,7 @@ Behavior, in order:
 Ponder: the funnel also gives the agent a ``ponder`` tool, a pause of at
 most ``MAX_PONDER_SECONDS`` that ends early when the funnel gets something
 for the channel (``ingest``, ``ingest_and_wake``, or a pull promise
-resolving). The tool call stays outstanding, so the kernel holds the next
+resolving to entries). The tool call stays outstanding, so the kernel holds the next
 assistant turn and counts the channel busy until it returns. It waits on
 arrival, never on a drain, because the drain only runs inside a turn.
 
@@ -647,6 +647,8 @@ class FunnelPlugin(CorvidaePlugin):
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
         """Give the agent ``ponder``, a pause that ends early on arrivals."""
+        # The tool is a closure so the schema builder sees a plain function; it
+        # reaches the funnel's state through this reference.
         plugin = self
 
         async def ponder(
@@ -680,34 +682,43 @@ class FunnelPlugin(CorvidaePlugin):
             )
         channel_id = ctx.channel.id
         limit = MAX_PONDER_SECONDS
-        # bool is an int subclass, but True is not a number of seconds.
+        # bool is an int subclass, but True is not a number of seconds. An int is
+        # always finite (and math.isfinite overflows on a huge one), so only a
+        # float is checked for nan and inf.
         if (
             isinstance(seconds, bool)
             or not isinstance(seconds, (int, float))
-            or not math.isfinite(seconds)
+            or (isinstance(seconds, float) and not math.isfinite(seconds))
             or seconds <= 0
         ):
+            # The value is the model's own text: echo a shortened form of it.
+            shown = repr(seconds)
+            if len(shown) > 40:
+                shown = shown[:37] + "..."
             return (
                 f"Error: ponder seconds must be a number above 0 and at most "
-                f"{limit:g}, got {seconds!r}; call ponder again with a value in that range"
+                f"{limit:g}, got {shown}; call ponder again with a value in that range"
             )
 
-        # Over the cap: rescue by pausing for the cap, log it, and say so.
-        requested = float(seconds)
+        # Over the cap: rescue by pausing for the cap, log it, and say so. The
+        # asked-for value is shown as text because a huge int cannot become a float.
         note = ""
-        if requested > limit:
+        if seconds > limit:
+            asked = str(seconds) if len(str(seconds)) <= 20 else str(seconds)[:17] + "..."
             logger.warning(
-                "ponder on %s asked for %g s, over the %g s limit; pausing %g s instead",
-                channel_id, requested, limit, limit,
+                "ponder on %s asked for %s s, over the %g s limit; pausing %g s instead",
+                channel_id, asked, limit, limit,
                 extra={"channel_id": channel_id},
             )
-            note = f" (you asked for {requested:g}s; the limit is {limit:g}s)"
+            note = f" (you asked for {asked}s; the limit is {limit:g}s)"
             requested = limit
+        else:
+            requested = float(seconds)
 
         start = time.monotonic()
         # Context already waiting: no pause is useful, the next turn drains it.
         if until_context and self._has_waiting(channel_id):
-            return "Woke at once: new context is already waiting."
+            return "Woke at once: new context was already waiting."
 
         # Register a wake event for this call (only when arrivals should end it),
         # wait, and always unregister.
@@ -732,7 +743,7 @@ class FunnelPlugin(CorvidaePlugin):
 
         elapsed = time.monotonic() - start
         if woke:
-            return f"Woke after {elapsed:.1f}s: new context is waiting."
+            return f"Woke after {elapsed:.1f}s: new context arrived."
         return f"Pondered {requested:g}s{note}."
 
     async def _drain(

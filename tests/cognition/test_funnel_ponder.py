@@ -262,9 +262,12 @@ class TestEmptyPromiseResults:
         env.provider.offer(env.channel.id, "memory", future)
         await turn(env)
         future.set_result(funnel_mod.Ingest(entries=["late"]))
+        # Let the promise's done-callback run with no ponder registered, as when it
+        # resolved during the model call: only the already-waiting check can answer.
+        await settle()
         start = time.monotonic()
         out = await ponder_tool(env)(5.0, _ctx=ctx_for(env))
-        assert time.monotonic() - start < 0.5 and "woke" in out.lower()
+        assert time.monotonic() - start < 0.5 and "at once" in out.lower()
 
 
 class TestAlreadyWaitingBranches:
@@ -345,3 +348,39 @@ class TestWakeOrder:
         await env.funnel.ingest_and_wake(env.channel, "user", "critique", ["x"])
         await asyncio.wait_for(task, 1.0)
         assert seen == [False]
+
+
+class TestRemainingBranches:
+
+    async def test_second_ingest_and_wake_for_a_pending_stub_wakes_it(self, build):
+        env = await build()
+        # The first call queues the stub and sets the pending flag; its wake is spent.
+        await env.funnel.ingest_and_wake(env.channel, "user", "critique", ["a"])
+        # Drain it so nothing is "already waiting", but leave the stub flag set.
+        env.funnel._deferred.clear()
+        assert env.funnel._stub_pending
+        task = asyncio.create_task(ponder_tool(env)(5.0, _ctx=ctx_for(env)))
+        await settle()
+        await env.funnel.ingest_and_wake(env.channel, "user", "critique", ["b"])
+        out = await asyncio.wait_for(task, 1.0)
+        assert "woke" in out.lower()
+
+    async def test_until_context_false_ignores_content_already_waiting(self, build):
+        env = await build()
+        env.funnel.ingest(env.channel, "critique", ["x"])
+        start = time.monotonic()
+        out = await ponder_tool(env)(0.2, until_context=False, _ctx=ctx_for(env))
+        assert time.monotonic() - start >= 0.15
+        assert "woke" not in out.lower()
+
+    async def test_huge_integer_is_clamped_not_a_crash(self, build, monkeypatch):
+        env = await build()
+        monkeypatch.setattr(funnel_mod, "MAX_PONDER_SECONDS", 0.05)
+        out = await ponder_tool(env)(10**400, _ctx=ctx_for(env))
+        # Names the limit; the asked-for value is shortened, not formatted as a float.
+        assert "0.05" in out and "you asked for" in out
+
+    async def test_long_rejected_value_is_truncated_in_the_message(self, build):
+        env = await build()
+        out = await ponder_tool(env)("x" * 5000, _ctx=ctx_for(env))
+        assert out.startswith("Error:") and "seconds" in out and len(out) < 400
