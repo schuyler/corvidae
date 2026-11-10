@@ -866,6 +866,53 @@ class TestInbound:
         assert sender == "web"
         assert text == "hello"
 
+    # Frames on `conn` that carry this seq (an answer to that send).
+    @staticmethod
+    def _answers(conn, seq):
+        return [f for f in conn.frames if f.get("seq") == seq]
+
+    async def test_send_acknowledged(self, make_env):
+        env = await make_env()
+        conn = await env.connect("main")
+        await conn.send(type="send", conversation="main", text="hello", seq=7)
+        await conn.wait_type("sent", seq=7)
+        await conn.sync()
+        assert [f["type"] for f in self._answers(conn, 7)] == ["sent"]
+
+    async def test_whitespace_only_send_acknowledged(self, make_env):
+        env = await make_env()
+        conn = await env.connect("main")
+        # "\x1c" survives JS trim() but not str.strip().
+        await conn.send(type="send", conversation="main", text="\x1c", seq=3)
+        await conn.wait_type("sent", seq=3)
+        await conn.sync()
+        assert [f["type"] for f in self._answers(conn, 3)] == ["sent"]
+        assert "user" not in conn.types() and "error" not in conn.types()
+        assert env.agent.calls == []
+
+    async def test_raising_gate_answers_one_error(self, make_env):
+        env = await make_env()
+        env.pm.register(RaiseGate(), name="raise")
+        conn = await env.connect("main")
+        await conn.send(type="send", conversation="main", text="hi", seq=5)
+        err = await conn.wait_type("error", seq=5)
+        assert err["request"] == "send"
+        await conn.sync()
+        assert [f["type"] for f in self._answers(conn, 5)] == ["error"]
+        assert "sent" not in conn.types()
+
+    async def test_ack_only_to_sender(self, make_env):
+        env = await make_env()
+        a = await env.connect("main")
+        b = await env.connect("main")
+        await a.send(type="send", conversation="main", text="hello", seq=9)
+        await a.wait_type("sent", seq=9)
+        # The other subscriber sees the echo but no answer of its own.
+        await b.wait_type("user", text="hello")
+        await b.sync()
+        assert "sent" not in b.types()
+        assert self._answers(b, 9) == []
+
     async def test_send_not_ready(self, make_env):
         env = await make_env()
         conn = await env.connect("main")

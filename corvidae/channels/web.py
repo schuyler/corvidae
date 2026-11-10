@@ -759,15 +759,21 @@ class WebPlugin(TransportPlugin):
             else:
                 self._enqueue(client, frame)
 
-    def _error(self, client: _Client, request: str | None, code: str, message: str) -> None:
-        self._enqueue(client, {"type": "error", "request": request, "code": code,
-                               "message": message})
+    def _error(self, client: _Client, request: str | None, seq: object, code: str,
+               message: str) -> None:
+        self._enqueue(client, {"type": "error", "request": request, "seq": seq,
+                               "code": code, "message": message})
 
     # -- inbound frames -----------------------------------------------------
 
     async def _handle_frame(self, client: _Client, data: str) -> None:
-        """Validate and dispatch one client frame; failures become `error`."""
+        """Validate and dispatch one client frame; failures become `error`.
+
+        A finished `send` is answered with `sent`. `seq` is the page's own id
+        for the frame, echoed to the sender unread.
+        """
         request: str | None = None
+        seq: object = None
         try:
             try:
                 msg = json.loads(data)
@@ -775,6 +781,7 @@ class WebPlugin(TransportPlugin):
                 raise _BadRequest("frame is not valid JSON") from None
             if not isinstance(msg, dict):
                 raise _BadRequest("frame must be a JSON object")
+            seq = msg.get("seq")
             kind = msg.get("type")
             if not isinstance(kind, str):
                 raise _BadRequest("type must be a string")
@@ -785,15 +792,17 @@ class WebPlugin(TransportPlugin):
                 await self._on_subscribe(client, msg)
             elif kind == "send":
                 await self._on_send(client, msg)
+                self._enqueue(client, {"type": "sent", "seq": seq})
             else:
                 raise _BadRequest("unknown frame type")
         except _NotReady:
-            self._error(client, request, "starting", "the agent is still starting")
+            self._error(client, request, seq, "starting", "the agent is still starting")
         except _BadRequest as exc:
-            self._error(client, request, "bad_request", str(exc))
+            self._error(client, request, seq, "bad_request", str(exc))
         except Exception:
             logger.exception("web: failed to handle a %s frame", request)
-            self._error(client, request, "bad_request", "the message could not be processed")
+            self._error(client, request, seq, "bad_request",
+                        "the message could not be processed")
 
     async def _on_list(self, client: _Client) -> None:
         if not self._ready():
