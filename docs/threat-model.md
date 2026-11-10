@@ -703,7 +703,7 @@ stands in the way:
   characters; otherwise a 32-byte one is generated. Comparisons are
   constant-time.
 - **Cross-site requests can't drive it.** The cookie is `HttpOnly` and
-  `SameSite=Strict`; the WebSocket needs an `Origin` from the allowed set,
+  `SameSite=Strict`; every WebSocket upgrade needs an `Origin` from the allowed set,
   and every request needs a `Host` from it, which blocks DNS rebinding. A
   page on another site can't open the socket or ride the cookie.
 - **Model output can't run script in the page.** That's the
@@ -718,8 +718,25 @@ stands in the way:
   reply can't beacon to a remote URL), no frames, no plugins, no form
   posts. No CDNs. If DOMPurify had a bypass, the CSP would still stop
   inline script.
+- **Panels share the floor.** Plugins can add read-only panels to the
+  console. Their pages, assets and data routes sit on the same app, behind
+  the same cookie, `Host` check and `Origin` check, and every response,
+  streamed ones included, gets the console's headers after the handler
+  runs, so a panel can't loosen the CSP or skip a check. A panel can only
+  register GET routes; anything else fails startup.
 
 What it doesn't protect against, so you know:
+
+- **A panel is in-process code, not a sandboxed view.** GET-only is a
+  floor on the HTTP method, not on what a handler does: a GET handler runs
+  in the daemon with the daemon's access and could change state or call
+  tools. Installing a panel plugin trusts it like any other plugin.
+- **Panels show untrusted text.** A panel that displays prompts, tool
+  output or other people's messages puts untrusted text in an
+  authenticated page. Panel script must render it as text (`textContent`),
+  never markup. The CSP stops inline script if a panel gets that wrong,
+  but not injected HTML that spoofs the console or exfiltrates through
+  links.
 
 - **Cookies aren't port-scoped.** Any other service on the same loopback
   host name (another dev server on `localhost:3000`) receives the

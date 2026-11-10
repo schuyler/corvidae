@@ -141,7 +141,8 @@ plugin.
 
 The `webhook` plugin owns `on_webhook_subscribe(subscriptions)`, through which
 plugins register handlers for webhook endpoints; see "Webhook ingress" under
-Transports.
+Transports. The `web` plugin owns `on_web_console_init(panels)`, through which
+plugins add read-only console panels; see "Web" under Transports.
 
 ### Broadcast dispatch and result resolution
 
@@ -3657,8 +3658,9 @@ With no `zulip:` block the plugin loads, resolves its registry dependency and do
 
 ### Web (`channels/web.py`)
 
-`WebPlugin` serves a browser chat UI over `aiohttp.web`: a single page,
-one WebSocket per tab, JSON frames both ways. Configuration and remote
+`WebPlugin` serves a browser chat UI over `aiohttp.web`: a chat page, one
+WebSocket per tab, JSON frames both ways, plus read-only panels that other
+plugins contribute. Configuration and remote
 access are in [configuration.md](configuration.md#web); what an attacker
 can do with the listener is in [threat-model.md](threat-model.md).
 
@@ -3684,21 +3686,32 @@ the same token and dies when the token changes. Every route needs it.
 Comparisons are constant-time and treat non-ASCII input as unequal.
 
 Middlewares, outermost first:
-1. security headers on every response, errors included: a strict CSP
-   (`default-src 'self'`, scripts and styles from `'self'` only, `img-src
-   'self' data:`, `connect-src 'self'` plus an explicit `ws://`/`wss://`
-   source per allowed origin, IPv6 literals excepted since CSP can't
-   express them), `nosniff`, `no-referrer`, `no-store`. An unexpected
-   exception becomes a 500 logged without the URL (it may carry `?token=`);
+1. `error_guard`: an unexpected exception becomes a 500 logged without the
+   URL (it may carry `?token=`);
 2. a `Host` check against values derived from the allowed origins (a
    DNS-rebinding guard);
-3. auth, as above.
+3. auth, as above;
+4. an `Origin` check on any request whose `Upgrade` header is `websocket`
+   (compared case-insensitively, as aiohttp accepts it): the `Origin` must
+   be in the allowed set, else 403. It covers the chat socket and any
+   WebSocket a panel handler opens. It runs after auth, so a request
+   without the cookie gets 401 first.
 
-The WebSocket also needs an `Origin` in the allowed set. Allowed origins
-are the bind origin (for a loopback bind, all of `127.0.0.1`, `localhost`
-and `[::1]` on the bound port) plus `web.allowed_origins`, all
-canonicalised the same way the incoming headers are. The `AppRunner` runs
-with `access_log=None`: aiohttp's access log would write `?token=` to disk.
+Security headers go on every response through an `on_response_prepare`
+signal handler, which runs just before a response's headers are sent:
+normal, streamed (a handler that prepares its own `StreamResponse`),
+`HTTPException`, 404 and the guard's 500 alike. Because it runs as the
+headers go out, a security header a handler sets itself is overwritten. The
+headers: a strict CSP (`default-src 'self'`, scripts and styles from
+`'self'` only, `img-src 'self' data:`, `connect-src 'self'` plus an
+explicit `ws://`/`wss://` source per allowed origin, IPv6 literals excepted
+since CSP can't express them), `nosniff`, `no-referrer`, `no-store`.
+
+Allowed origins are the bind origin (for a loopback bind, all of
+`127.0.0.1`, `localhost` and `[::1]` on the bound port) plus
+`web.allowed_origins`, all canonicalised the same way the incoming headers
+are. The `AppRunner` runs with `access_log=None`: aiohttp's access log
+would write `?token=` to disk.
 
 **Protocol.** Client → server: `list`, `subscribe {conversation}`, `send
 {conversation, text, seq}`. Server → client: `conversations`, `history
@@ -3778,6 +3791,52 @@ The conversation list merges `message_log`'s `web:*` channels with the
 registry's live ones (the later `last_active` wins), drops names that fail
 the slug rule, and sorts newest first.
 
+**Panels.** `WebPlugin` owns `on_web_console_init(panels: list[Panel])`
+(spec class `WebConsoleSpec`). Each implementer appends one frozen `Panel`:
+`plugin` (the registering plugin), `title`, `static_dir` (holding
+`panel.js` and `panel.css`) and `routes`, a sequence of aiohttp
+`RouteDef`s. The hook runs at the end of `on_init`, only when the `web`
+block is present, and the routes are validated right after it returns:
+each must be a `RouteDef` with method `GET`, else `PluginValidationError`
+naming the plugin. `ValueError` would be reported as a config error, and
+the plugin, not agent.yaml, is at fault. Running in `on_init` means the
+restart pre-flight, which skips `on_start`, refuses a bad panel. The panel
+is named by its plugin's registered name, which is unique. The stored
+list is `(name, panel)` pairs in registration order.
+
+`_build_app` mounts each panel on the console's own app, after the
+console's routes, so every middleware and the header signal apply with no
+per-panel code:
+- `GET /panel/<name>/`: the shell page;
+- `GET /panel/<name>/static/<file>`: `add_static` on `static_dir`, with
+  the same options as `/static` (no symlinks, no index);
+- `GET /panel/<name><path>` per route, through `add_get` (which also
+  answers HEAD) with the route's `name` kwarg dropped, since route names
+  are app-wide and two panels could collide.
+
+A plugin registers one panel; a second panel from the same plugin is not
+supported. The app is frozen once running, so a handler can't add routes,
+middlewares or signals through `request.app`.
+
+`on_start` renders the navigation once: `<nav class="panels">` with one
+`<a href="/panel/<name>/">` per panel, `name` and `title` HTML-escaped, or
+the empty string with no panels. It replaces the `<!--panels-->` marker in
+`index.html` (at the bottom of the sidebar, so on a phone it collapses
+with the conversation list) and in `panel.html`, and both pages are served
+from those strings. With no panels the chat page is unchanged but for the
+marker. `panel.html` is one static shell shared by every panel: the
+console's `/static/app.css`, then relative `static/panel.css` and
+`static/panel.js`, a header with a link back to `/` and the navigation,
+and an empty `<main id="panel">` that `panel.js` fills. It has no inline
+script or style, so the CSP needs nothing extra. Because the asset URLs
+are relative, the page URL needs its trailing slash; `/panel/<name>` is a
+404.
+
+With no `web` block the hook never fires. With `web` blocked or not
+installed the spec is never installed, so a panel plugin's impl is an
+orphan, logged at DEBUG when the plugin lists `web` in
+`optional_depends_on`.
+
 **Fan-out and backpressure.** Every server frame goes through the client's
 queue (1024) and a writer task. Enqueueing never awaits. A client whose
 queue fills, or whose subscribe buffer passes 512 frames, is removed from
@@ -3816,7 +3875,7 @@ apply". A removed block logs the same and changes nothing. A malformed
 block raises (the watcher logs it) and changes nothing.
 
 **Frontend.** `web_static/` ships as package data: `index.html`,
-`app.css`, `app.js` (plain JS, no build) and vendored marked 15.0.12 and
+`panel.html`, `app.css`, `app.js` (plain JS, no build) and vendored marked 15.0.12 and
 DOMPurify 3.2.6 (`vendor/README.md` records versions, hashes and
 licences). Model text reaches the DOM through one sink:
 `DOMPurify.sanitize(marked.parse(text))` with `style`, `class`, `id` and
@@ -3857,8 +3916,8 @@ Known limitations:
 - a send whose socket closes after the agent took it but before `sent`
   arrived is restored anyway, and may be sent twice.
 
-Out of scope for v1: paging back past 200 rows, token streaming, an
-inspector pane, and views of other transports' channels.
+Out of scope for v1: paging back past 200 rows, token streaming, and views
+of other transports' channels.
 
 Behavior is pinned by `tests/test_web_plugin.py`, which drives a real
 listener with aiohttp's client and raw sockets.

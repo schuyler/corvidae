@@ -443,7 +443,6 @@ class WebPlugin(TransportPlugin):
         # restart pre-flight (which runs on_init, not on_start) catch it.
         panels: list[Panel] = []
         await self.pm.ahook.on_web_console_init(panels=panels)
-        self._panels = []
         for panel in panels:
             name = self.pm.get_name(panel.plugin)
             for route in panel.routes:
@@ -492,8 +491,12 @@ class WebPlugin(TransportPlugin):
         )
         if nav:
             nav = f'<nav class="panels">{nav}</nav>'
-        self._index_html = (_STATIC_DIR / "index.html").read_text("utf-8").replace(_PANELS_MARKER, nav)
-        self._panel_html = (_STATIC_DIR / "panel.html").read_text("utf-8").replace(_PANELS_MARKER, nav)
+        self._index_html = (
+            (_STATIC_DIR / "index.html").read_text("utf-8").replace(_PANELS_MARKER, nav)
+        )
+        self._panel_html = (
+            (_STATIC_DIR / "panel.html").read_text("utf-8").replace(_PANELS_MARKER, nav)
+        )
 
         # Bind; a failure raises out of startup. access_log=None keeps
         # `?token=` out of the log; the short shutdown timeout keeps
