@@ -289,6 +289,18 @@ elevated trust. Injected text in a public channel can be laundered into a
 system-role CONTEXT row. The row itself survives restarts, and the memory
 it came from outlives compaction and gets re-admitted on later turns.
 
+Memory lines carry their record id, and the funnel dedupes them on
+`memory <id>)` within memory's own CONTEXT (#624, #632). Because a summary
+is distilled from participants' text, a summary that quotes another
+record's key (`memory 5)`) makes record 5 look present while that line
+stays in the window, so record 5 is skipped as a duplicate. The effect is
+that one recollection is suppressed for a window; nothing is injected.
+Line-anchored keys would close it and are not built. Another source's
+CONTEXT can't do this, since keys match only their own source's rows.
+`funnel.window_budgets.<source>` bounds how much CONTEXT one source can
+hold in a window, which also bounds how much laundered text that source can
+put there between compactions.
+
 Fix shape: deliver CONTEXT as a `user` turn (or a tool result) with the
 same framing, and reserve `system` for text the operator wrote.
 

@@ -4156,6 +4156,8 @@ funnel:
   default_budget: 512           # tokens per admission-funnel call
   budgets:
     memory: 512                 # optional per-source overrides
+  # window_budgets:             # optional cap on one source's CONTEXT per window
+  #   memory: 4096
 
 channels:
   "irc:#channel":

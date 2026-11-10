@@ -129,6 +129,14 @@ agent:
 #                                     # agent's rebuilt view; replaces the removed consolidation_prompt
 #                                     # (still set: startup warning, ignored)
 
+# Context-admission funnel (optional; see docs/configuration.md)
+# funnel:
+#   default_budget: 512               # tokens per admission when the source has no override
+#   budgets:
+#     memory: 512                     # per-source override of default_budget
+#   window_budgets:                   # cap on one source's CONTEXT in a window (unset: no cap);
+#     memory: 4096                    # compaction frees what it drops (non-negative integer; reloadable)
+
 # Fork instructions for appraisal and critique (optional; agent.forks).
 # Static config: set_settings can't change these.
 # appraisal:
