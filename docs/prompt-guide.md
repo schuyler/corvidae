@@ -128,7 +128,7 @@ Each message injected during `before_agent_turn` is individually persisted by `A
 
 Nothing is removed from the middle of the window, so a plugin never clears its earlier `CONTEXT` entries before injecting fresh ones. Inject at the tail instead, and let two mechanisms keep the window from filling with repeats:
 
-- **Dedupe.** Route injections through the funnel (`admit()`, or `register()` / `register_and_wake()` for deferred payloads; see [cognition.md](cognition.md#funnelplugin)). It drops entries that already appear in `CONTEXT` still in the window.
+- **Dedupe.** Route injections through the funnel (`admit()`, or `ingest()` / `ingest_and_wake()` for deferred payloads; see [cognition.md](cognition.md#funnelplugin)). It drops entries that already appear in `CONTEXT` still in the window.
 - **Aging.** Stale `CONTEXT` retires when it ages past the compaction boundary, so the window does not accumulate it indefinitely.
 
 ---

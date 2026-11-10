@@ -262,6 +262,68 @@ declares`), since it will never be called. Usually that's a typo. The
 exception is an impl for a hook owned by one of your `optional_depends_on`
 plugins that isn't loaded: that's expected, and is logged at DEBUG.
 
+### Implementing `on_funnel_ingest`
+
+The funnel (cognition extra) owns `on_funnel_ingest`, the hook a source uses
+to hand it entries ahead of a turn. Use it when your entries are not ready
+when the funnel asks: you submit a promise, and the entries are admitted
+once it resolves, through the same dedupe, budget and framing as `admit()`.
+If you have the entries now, call `admit()` or `ingest()` instead. The full
+contract is under `FunnelPlugin` in
+[cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy).
+
+```python
+import asyncio
+
+from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae_cognition.funnel import Ingest  # cognition extra
+
+class RecallPlugin(CorvidaePlugin):
+    optional_depends_on = frozenset({"funnel"})
+
+    def __init__(self) -> None:
+        # The promise this plugin last submitted, per channel id.
+        self._promises: dict[str, asyncio.Future] = {}
+
+    @hookimpl
+    async def on_funnel_ingest(self, channel, trace_id, annotations, submit) -> None:
+        # Do not submit again while this channel's promise is pending: a newer submit cancels it.
+        old = self._promises.get(channel.id)
+        if old is not None and not old.done():
+            return
+        # Start the slow work in the background and hand the funnel the future.
+        promise = asyncio.ensure_future(self._recall(channel))
+        self._promises[channel.id] = promise
+        submit("recall", promise)
+
+    async def _recall(self, channel) -> Ingest | None:
+        # Resolve to the lines to admit, or to None when there is nothing to add.
+        lines = await search_notes(channel)  # your own lookup
+        return Ingest(entries=lines) if lines else None
+```
+
+- The hook must be `async`. It submits and returns; it never awaits a promise.
+- `submit(source, promise)` takes a source label, which becomes the frame
+  label, and an `asyncio.Future`. The future resolves to
+  `Ingest(entries, on_admitted=None)` or to `None`. `entries` are
+  pre-formatted lines, admitted as one frame in the order given.
+- One pending promise per `(channel, source)`. A newer submit cancels the
+  older, which is why the example checks before it submits.
+- A promise that raised is logged with its source and channel and dropped.
+  A promise its provider cancelled is dropped quietly. `None` admits nothing.
+- `on_admitted`, if given, is a sync callable. The funnel calls it with the
+  `Admission` (`admitted` and `duplicate` lists) at each drain attempt. A
+  raise is logged and does not stop the drain.
+- A promise that is done when the turn starts is admitted that turn. One
+  still pending is admitted at the channel's next turn after it resolves,
+  whatever that turn's origin. Nothing wakes the channel for it.
+- `funnel.ingest_ttl`, when set, drops a queued payload or a pending promise
+  older than it; an unresolved promise is cancelled, so your work should
+  tolerate cancellation. Shutdown cancels pending promises.
+- A promise that finishes during a turn, after the funnel's sweep, is lost
+  if you submit again in that same turn. The funnel does not admit such a
+  result on re-submit yet.
+
 ## Subscribing to webhooks
 
 The `webhook` plugin (`corvidae/channels/webhook.py`) owns `on_webhook_subscribe(subscriptions)`. Implement it to receive the JSON objects POSTed to `/hook/<endpoint>`; the listener, auth and endpoint names are the operator's `webhook:` config ([configuration.md](configuration.md#webhook--webhook-ingress)).

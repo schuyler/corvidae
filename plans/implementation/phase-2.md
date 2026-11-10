@@ -1208,7 +1208,7 @@ notifications only — tool results stay on their existing path, untouched.
 1. **Producer API:**
 
 ```python
-async def register_and_wake(
+async def ingest_and_wake(
     self,
     channel,
     origin: str,          # stamped into on_notify meta; §3.3 vocabulary
@@ -1228,7 +1228,7 @@ async def register_and_wake(
    clear the pending flag FIRST (a failure inside admission leaves
    payloads registered; the next producer's stub re-arms the channel
    rather than wedging it), then `admit()` them under the producer's
-   source label. Payloads unregister at successful **admission**; entries
+   source label. Payloads leave the queue at successful **admission**; entries
    the budget dropped stay registered for the next stub (§2.2). The drain
    admits ONLY payloads matching the triggering exchange's origin — the
    origin comes from the enriched hook parameter, never parsed from stub
@@ -1248,7 +1248,7 @@ across a restart is acceptable. Do not persist.
   on_notify), one drain admits all three.
 - Payloads of origin A do not drain on an origin-B turn or a user turn.
 - Admission failure (monkeypatched `admit` raising) → payloads still
-  registered; next `register_and_wake` fires a fresh stub.
+  registered; next `ingest_and_wake` fires a fresh stub.
 - Budget-dropped entries survive to the next drain.
 
 ### WP2.7 — CritiquePlugin
@@ -1317,7 +1317,7 @@ structured, not free text).
    outcomes=json merge {"critique": {"lens": …, "objections": 0, …}})`
    and NOTHING re-enters the window (the silent mode exists for exactly
    this). Non-empty → record the outcome, then
-   `funnel.register_and_wake(channel, origin="critique",
+   `funnel.ingest_and_wake(channel, origin="critique",
    source="critique", entries=[formatted objections])` — the verdict
    enters as budgeted, framed CONTEXT at the turn its stub triggers; the
    agent corrects itself on-channel, updates a goal, or lets it stand.
@@ -1391,7 +1391,7 @@ async def should_send_response(
    `withheld=True` (critique still sees it), and **immediately `admit()`** a
    one-line marker into the current window (`source="gate"`): "the previous
    response was withheld — the channel did not see it" (anti-citation, §3.3).
-   Immediate `admit()`, NOT a deferred `register_and_wake(origin="gate")`
+   Immediate `admit()`, NOT a deferred `ingest_and_wake(origin="gate")`
    stub — a gate-origin stub would need a gate-origin turn to drain, which
    nothing produces. The text this firing gate-checks is `result.text` on
    the final-text branch and, on the max-turns branch, the
@@ -1675,7 +1675,7 @@ fails open (the same code branch, WP2.9 points 1 and 3).
    parameter, `origin`; see the WP2.1 as-implemented note), enriched
    `before_agent_turn`/`on_agent_response`,
    `should_send_response`, `Task.deliver`, funnel
-   `register_and_wake`).
+   `ingest_and_wake`).
 2. `docs/configuration.md`: every `appraisal.*`, `critique.*`, `gate.*`,
    `memory.contradiction.*` key with its best-guess default, marked
    runtime-tunable; the recommended blocklist (trap #9);

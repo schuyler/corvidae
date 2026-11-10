@@ -136,6 +136,7 @@ agent:
 #     memory: 512                     # per-source override of default_budget
 #   window_budgets:                   # cap on one source's CONTEXT in a window (unset: no cap);
 #     memory: 4096                    # compaction frees what it drops (non-negative integer; reloadable)
+#   ingest_ttl: 600                   # seconds a queued or pending ingest may wait before it is dropped (unset: never; reloadable)
 
 # Fork instructions for appraisal and critique (optional; agent.forks).
 # Static config: set_settings can't change these.

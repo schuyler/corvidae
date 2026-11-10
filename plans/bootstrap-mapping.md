@@ -191,7 +191,7 @@ qualifications make the rule implementable:
   enriched `before_agent_turn(channel, exchange_key, origin)` hook (§4.7) —
   never by parsing the stub's rendered text, which §4.7's no-inference rule
   forbids.
-  Payloads unregister at successful **admission** (the funnel's append in
+  Payloads leave the queue at successful **admission** (the funnel's append in
   `before_agent_turn`) — not at turn success, because admission persists
   before the LLM call can fail, and waiting for turn success would
   double-admit on the next drain. The pending flag itself clears when a
