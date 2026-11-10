@@ -31,6 +31,17 @@ def dockerfile() -> list[str]:
 
 
 @pytest.fixture(scope="module")
+def runtime(dockerfile: list[str]) -> list[str]:
+    """Instructions of the final stage only, which is what the shipped image inherits.
+
+    Settings in the builder stage (ENV, WORKDIR, USER) don't carry over, so a test about
+    the image has to read this, not the whole file.
+    """
+    last_from = max(i for i, ln in enumerate(dockerfile) if ln.upper().startswith("FROM "))
+    return dockerfile[last_from:]
+
+
+@pytest.fixture(scope="module")
 def ignored() -> list[str]:
     """Non-comment patterns in .dockerignore."""
     path = ROOT / ".dockerignore"
@@ -45,26 +56,27 @@ def _instructions(lines: list[str], name: str) -> list[str]:
     return [ln[len(prefix) :] for ln in lines if ln.upper().startswith(prefix)]
 
 
-def test_entrypoint_is_corvidae_and_default_command_serves(dockerfile):
+def test_entrypoint_is_corvidae_and_default_command_serves(runtime):
     """Bare `corvidae` prints help, so the image has to default to `serve`."""
-    assert _instructions(dockerfile, "ENTRYPOINT")[-1] == '["corvidae"]'
-    assert _instructions(dockerfile, "CMD")[-1] == '["serve"]'
+    assert _instructions(runtime, "ENTRYPOINT") == ['["corvidae"]']
+    assert _instructions(runtime, "CMD") == ['["serve"]']
 
 
-def test_working_directory_is_data(dockerfile):
+def test_working_directory_is_data(runtime):
     """`agent.yaml`, sessions.db and logs resolve against the working directory."""
-    assert _instructions(dockerfile, "WORKDIR")[-1] == "/data"
-    assert "/data" in " ".join(_instructions(dockerfile, "VOLUME"))
+    assert _instructions(runtime, "WORKDIR")[-1] == "/data"
+    # Exactly /data, not a subdirectory of it: a substring match would accept /data/x.
+    assert _instructions(runtime, "VOLUME") == ["/data"]
 
 
-def test_no_port_is_exposed(dockerfile):
+def test_no_port_is_exposed(runtime):
     """PRD §3.11.12: no ports unless `web:` is configured, and then the operator publishes."""
-    assert _instructions(dockerfile, "EXPOSE") == []
+    assert _instructions(runtime, "EXPOSE") == []
 
 
-def test_final_user_is_not_root(dockerfile):
+def test_final_user_is_not_root(runtime):
     """Tools run unsandboxed as the daemon user (threat model, finding 4)."""
-    users = _instructions(dockerfile, "USER")
+    users = _instructions(runtime, "USER")
     assert users, "no USER instruction: the daemon would run as root"
     assert users[-1].split(":")[0] not in {"root", "0"}
 
@@ -114,13 +126,14 @@ def test_dockerignore_does_not_hide_build_inputs(ignored, needed):
     assert not any(p.rstrip("/") == needed for p in ignored), f"{needed!r} is needed to build"
 
 
-def test_tiktoken_encoding_is_baked_into_the_image(dockerfile):
+def test_tiktoken_encoding_is_baked_into_the_image(dockerfile, runtime):
     """tiktoken fetches cl100k_base on first import; a container would redo that on every
     recreate, and a host with no outbound network would silently fall back to a character
     estimate. The build fetches it once, where the network is, and fails loudly if it can't."""
-    env = " ".join(_instructions(dockerfile, "ENV"))
+    # The builder's ENV doesn't reach the shipped image, so read the final stage.
+    env = " ".join(_instructions(runtime, "ENV"))
     assert "TIKTOKEN_CACHE_DIR=" in env, "the runtime stage does not point tiktoken at a cache"
     runs = " ".join(_instructions(dockerfile, "RUN"))
     assert "get_encoding" in runs and "cl100k_base" in runs, "the build never warms the cache"
-    copies = " ".join(_instructions(dockerfile, "COPY"))
+    copies = " ".join(_instructions(runtime, "COPY"))
     assert "--from=builder" in copies and "tiktoken" in copies, "the warmed cache is not copied"

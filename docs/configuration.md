@@ -1201,7 +1201,8 @@ The `Dockerfile` at the repo root builds the kernel (the agent loop, persistence
 ```sh
 docker build -t corvidae .
 mkdir -p ~/corvidae-data && cp agent.yaml ~/corvidae-data/
-sudo chown -R 1000:1000 ~/corvidae-data
+sudo chown 1000:1000 ~/corvidae-data
+sudo chown root:root ~/corvidae-data/agent.yaml
 ```
 
 ```sh
@@ -1214,20 +1215,38 @@ docker logs -f corvidae
 
 **`/data` is the working directory.** Everything corvidae writes by default lands there, next to `agent.yaml`: `sessions.db`, `provenance.key`, log files, `state/`. Relative paths in the config resolve against it. Back that directory up and you've backed up the bot, and keep `provenance.key` with it, since fences only stay stable across restarts if the key does (see the top of this file).
 
-**The daemon runs as uid 1000, not root.** The shell tool runs as the daemon's user (see [threat-model.md](threat-model.md), finding 4), so the image doesn't hand it root. The cost: the mounted directory has to be writable by uid 1000, hence the `chown`. If it isn't, corvidae dies at startup with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory. Fix the ownership, or run with `--user $(id -u):$(id -g)` and a directory you own.
+**The daemon runs as uid 1000, not root.** The shell tool runs as the daemon's user (see [threat-model.md](threat-model.md), finding 4), so the image doesn't hand it root. The cost: the mounted directory has to be writable by uid 1000, hence the first `chown`. (The second leaves `agent.yaml` itself owned by root, which matters for the config lock below, and means you edit it with `sudo`.) If the directory isn't writable by uid 1000, corvidae dies at startup with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory. Fix the ownership, or run with `--user $(id -u):$(id -g)` and a directory you own.
 
-**The second `-v` locks the config.** `agent.yaml` mounted read-only means `write_file` can't edit the agent's own configuration, which is the lock [prd.md](prd.md) §3.11.11 describes. Leave that line out if you want the agent to be able to change its own config, and know what that costs: a writable config plus hot reload lets it lift every other lock.
+**The second `-v` and the root-owned file lock the config.** `agent.yaml` mounted read-only and owned by root means `write_file` can't edit the agent's own configuration, which is the lock [prd.md](prd.md) §3.11.11 describes. Leave both out if you want the agent to be able to change its own config, and know what that costs: a writable config plus hot reload lets it lift every other lock. The lock has two limits:
 
-**Nothing is exposed.** The image has no `EXPOSE`. If you configure [`web:`](#web--browser-chat-ui), the transport has to listen on a wildcard address inside the container (`host: 0.0.0.0`, which needs `allowed_origins` and logs a `WARNING`, as documented there), and you publish the port yourself. Publish it on loopback, so only the Docker host can reach it, and put TLS or a tunnel in front of that:
+- **A host edit that replaces the file detaches the read-only mount.** `sed -i` and most editors write a new file and rename it over the old one, and the running container's mount of the old file disappears. `/data/agent.yaml` then resolves through the writable `/data` mount: your edit still reloads, but the read-only protection is gone until you `docker restart corvidae`, which restores it. Restart the container after every config edit.
+- **The daemon owns the directory.** A root-owned file it can't write is one it can still rename a new file over, because `/data` is its to write to. A lock that survives that needs `agent.yaml` in a directory the daemon can't write at all. That moves where relative paths resolve (see the top of this file), so the writable paths would need to be absolute, and I haven't built or tested that layout.
+
+The same rule covers prompt files: mount any you keep outside `/data` read-only too, or the agent can edit its own prompts.
+
+**Nothing is exposed.** The image has no `EXPOSE`. If you configure [`web:`](#web--browser-chat-ui), the transport has to listen on a wildcard address inside the container, and you publish the port yourself. Publish it on loopback, so only the Docker host can reach it, and put TLS or a tunnel in front of that:
 
 ```sh
 docker run -d --name corvidae --restart unless-stopped \
   -p 127.0.0.1:8765:8765 \
   -v ~/corvidae-data:/data \
+  -v ~/corvidae-data/agent.yaml:/data/agent.yaml:ro \
   corvidae
 ```
 
-**`localhost` is the container.** A model backend on the Docker host isn't at `http://localhost:8080/v1` from in here. On Linux, add `--add-host host.docker.internal:host-gateway` to `docker run` and set `llm.main.base_url` to `http://host.docker.internal:8080/v1`, or use the host's LAN address. The same goes for signal-cli: it runs outside the container, so mount the directory holding its socket and point `signal.socket` at the path as the container sees it. The socket has to be readable by uid 1000. IRC, Discord and Zulip only need outbound network access.
+```yaml
+web:
+  host: 0.0.0.0            # inside the container; the -p above keeps it on loopback
+  allowed_origins:
+    - http://127.0.0.1:8765   # the address you browse to, with the host-side port
+```
+
+A wildcard bind derives no origins of its own, so the address you browse to has to be in `allowed_origins` or the page answers `403 bad host`. List `http://localhost:8765` too if you use that name, and list the TLS or tunnel origin if there's one in front. The login URL in the log is built from the first origin listed. The wildcard bind logs a `WARNING` at startup, as described in the web section.
+
+**`localhost` is the container.** A model backend on the Docker host isn't at `http://localhost:8080/v1` from in here. On Linux, add `--add-host host.docker.internal:host-gateway` to `docker run` and set `llm.main.base_url` to `http://host.docker.internal:8080/v1`, or use the host's LAN address. The same goes for signal-cli: it runs outside the container, so mount the directory holding its socket and point `signal.socket` at the path as the container sees it. Two things about that:
+
+- **The mount follows the directory, not the path.** The unit in [signal-ops.md](signal-ops.md) uses `RuntimeDirectory=corvidae`, which systemd deletes when signal-cli stops and creates afresh on start. The container keeps looking at the deleted directory, corvidae's reconnect loop retries forever, and Signal stays down until you restart the container. Add `RuntimeDirectoryPreserve=yes` to that unit, or put the socket in a directory systemd doesn't recreate.
+- **Connecting needs write permission on the socket**, not read. That unit runs as the same user as corvidae, so run the container as that user: `--user <uid>:<gid>`, with `/data` owned by the same uid. IRC, Discord and Zulip only need outbound network access.
 
 **Extras are chosen at build time.** The default image has none, which is `uv sync` with no `--extra`. Name what you want in `EXTRAS`, space separated, using the same names as the install line in the README:
 
