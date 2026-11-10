@@ -81,6 +81,10 @@ async def test_reconcile_indexes_new_files(tmp_path):
         assert (await c.fetchone())["n"] == 2
     async with db.execute("SELECT count(*) AS n FROM chunks") as c:
         assert (await c.fetchone())["n"] >= 2
+    # The manifest records the real file size (the stat shortcut depends on it).
+    async with db.execute("SELECT size FROM manifest") as c:
+        sizes = [r[0] for r in await c.fetchall()]
+    assert all(sz > 0 for sz in sizes), f"expected non-zero sizes, got {sizes}"
     assert embed.calls >= 2
     await index.close()
 
@@ -179,3 +183,10 @@ def test_fts_match_sanitizes_and_ors():
     assert _fts_match("") == ""
     assert _fts_match("   ") == ""
     assert _fts_match("spectrum") == '"spectrum"*'
+
+
+def test_fts_match_escapes_double_quotes():
+    # A `"` in a token is doubled so the MATCH stays valid FTS5.
+    assert _fts_match('foo"bar') == '"foo""bar"*'
+    # a" -> a"" (the quote doubles), wrapped -> "a"""*
+    assert _fts_match('a" b"c') == '"a"""* OR "b""c"*'

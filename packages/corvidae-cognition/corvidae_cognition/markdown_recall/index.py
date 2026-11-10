@@ -197,18 +197,25 @@ class MarkdownIndex:
         await db.execute(MANIFEST_DDL)
         await db.execute(EMBEDDING_META_DDL)
 
-        # The vector surface exists only with an embedding profile configured
-        # and a loadable sqlite-vec extension; anything else degrades to
-        # FTS5-only. Text is canonical; vectors are a cache.
         identity = self._get_identity()
-        if identity is not None and await self._load_vec_extension(db):
-            await self._check_embedding_meta(db, identity)
-            if not self._encoder_mismatch:
-                await db.execute(
-                    "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0("
-                    f"rowid INTEGER PRIMARY KEY, embedding float[{identity.dimensions}])"
-                )
-                self._vec_available = True
+        # Always track the chunker version (and the encoder identity when
+        # present), so a chunker bump rebuilds even an FTS-only index.
+        await self._check_embedding_meta(db, identity)
+        # The vector surface exists only with an embedding profile, a loadable
+        # sqlite-vec extension, and no identity mismatch; anything else degrades
+        # to FTS5-only. Text is canonical; vectors are a cache.
+        if (
+            identity is not None
+            and await self._load_vec_extension(db)
+            and not self._encoder_mismatch
+        ):
+            await db.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0("
+                f"rowid INTEGER PRIMARY KEY, embedding float[{identity.dimensions}])"
+            )
+            self._vec_available = True
+        else:
+            self._vec_available = False
 
         self._schema_ready = True
         return db
@@ -233,13 +240,20 @@ class MarkdownIndex:
                 logger.warning("markdown recall: could not re-disable extension loading")
 
     async def _check_embedding_meta(
-        self, db: aiosqlite.Connection, identity: _EncoderIdentity
+        self, db: aiosqlite.Connection, identity: _EncoderIdentity | None
     ) -> None:
         """Set ``_encoder_mismatch`` when the stored identity differs from now.
 
-        A mismatch means the vectors were built by a different encoder (or a
-        different chunker); reconcile() rebuilds everything in that case.
+        A ``None`` identity (FTS-only) is stored as a sentinel (empty model,
+        zero dimensions) so the chunker version is always tracked and compared,
+        and a transition to or from an embedding profile is detected. A
+        mismatch means the index was built by a different encoder or chunker;
+        reconcile() rebuilds everything in that case.
         """
+        model = identity.model if identity is not None else ""
+        dimensions = identity.dimensions if identity is not None else 0
+        doc_prefix = identity.document_prefix if identity is not None else ""
+        query_prefix = identity.query_prefix if identity is not None else ""
         async with db.execute(
             "SELECT encoder, dimensions, document_prefix, query_prefix, "
             "chunker_version FROM embedding_meta LIMIT 1"
@@ -249,10 +263,7 @@ class MarkdownIndex:
             await db.execute(
                 "INSERT INTO embedding_meta (encoder, dimensions, document_prefix, "
                 "query_prefix, chunker_version) VALUES (?, ?, ?, ?, ?)",
-                (
-                    identity.model, identity.dimensions, identity.document_prefix,
-                    identity.query_prefix, CHUNKER_VERSION,
-                ),
+                (model, dimensions, doc_prefix, query_prefix, CHUNKER_VERSION),
             )
             self._encoder_mismatch = False
             return
@@ -260,10 +271,7 @@ class MarkdownIndex:
             row["encoder"], row["dimensions"], row["document_prefix"],
             row["query_prefix"], row["chunker_version"],
         )
-        current = (
-            identity.model, identity.dimensions, identity.document_prefix,
-            identity.query_prefix, CHUNKER_VERSION,
-        )
+        current = (model, dimensions, doc_prefix, query_prefix, CHUNKER_VERSION)
         self._encoder_mismatch = stored != current
         if self._encoder_mismatch:
             logger.warning(
@@ -380,27 +388,42 @@ class MarkdownIndex:
     async def _rebuild_all(
         self, db: aiosqlite.Connection, files: dict[str, tuple[int, int]]
     ) -> None:
-        """Drop all rows and reindex every file (encoder/chunker changed)."""
+        """Drop all rows and reindex every file (encoder/chunker changed).
+
+        The vector surface is dropped and recreated with the current identity's
+        dimensions: after a dimension change the old table would reject new
+        inserts (rolling back every file), and after a chunker-only change the
+        stale rowids would join to different text on the next start.
+        """
         logger.info("markdown recall: rebuilding the whole index (identity changed)")
+        identity = self._get_identity()
+        model = identity.model if identity is not None else ""
+        dimensions = identity.dimensions if identity is not None else 0
+        doc_prefix = identity.document_prefix if identity is not None else ""
+        query_prefix = identity.query_prefix if identity is not None else ""
+        # Re-stamp the identity (sentinel when FTS-only) so future reconciles match.
+        await db.execute(
+            "UPDATE embedding_meta SET encoder=?, dimensions=?, "
+            "document_prefix=?, query_prefix=?, chunker_version=?",
+            (model, dimensions, doc_prefix, query_prefix, CHUNKER_VERSION),
+        )
+        self._encoder_mismatch = False
+        # Drop + recreate the vector surface with the current dimensions.
+        if identity is not None and await self._load_vec_extension(db):
+            await db.execute("DROP TABLE IF EXISTS chunks_vec")
+            await db.execute(
+                "CREATE VIRTUAL TABLE chunks_vec USING vec0("
+                f"rowid INTEGER PRIMARY KEY, embedding float[{identity.dimensions}])"
+            )
+            self._vec_available = True
+        else:
+            await db.execute("DROP TABLE IF EXISTS chunks_vec")
+            self._vec_available = False
+        # Reindex every file from scratch.
         async with db.execute("DELETE FROM chunks") as _c:
             pass
         async with db.execute("DELETE FROM manifest") as _c:
             pass
-        if self._vec_available:
-            async with db.execute("DELETE FROM chunks_vec") as _c:
-                pass
-        # Re-stamp the identity so future reconciles see a match.
-        identity = self._get_identity()
-        if identity is not None:
-            await db.execute(
-                "UPDATE embedding_meta SET encoder=?, dimensions=?, "
-                "document_prefix=?, query_prefix=?, chunker_version=?",
-                (
-                    identity.model, identity.dimensions, identity.document_prefix,
-                    identity.query_prefix, CHUNKER_VERSION,
-                ),
-            )
-            self._encoder_mismatch = False
         for path, (size, mtime_ns) in files.items():
             await self._reconcile_file(db, path, size, mtime_ns, None)
         await db.commit()
@@ -425,8 +448,10 @@ class MarkdownIndex:
             st = full.stat()
         except OSError:
             return
-        if st.st_mtime_ns != mtime_ns and st.st_size != size:
-            # Changed while we read it; the next reconcile picks up the new state.
+        if st.st_mtime_ns != mtime_ns or st.st_size != size:
+            # Changed while we read it (either stat moved); skip, the next
+            # reconcile picks up the settled state. `or`, not `and`: a
+            # same-size in-place edit must not slip through.
             return
         content_hash = self._hash_bytes(data)
         # Hash unchanged (an mtime-only touch): update the mtime, keep the rows.
@@ -438,12 +463,15 @@ class MarkdownIndex:
         text = data.decode("utf-8", errors="replace")
         chunks = chunk_page(path, text)
         vectors = await self._embed([c["text"] for c in chunks], "document")
-        await self._replace_file_chunks(db, path, mtime_ns, content_hash, chunks, vectors)
+        await self._replace_file_chunks(
+            db, path, size, mtime_ns, content_hash, chunks, vectors
+        )
 
     async def _replace_file_chunks(
         self,
         db: aiosqlite.Connection,
         path: str,
+        size: int,
         mtime_ns: int,
         content_hash: str,
         chunks: list[dict],
@@ -483,8 +511,8 @@ class MarkdownIndex:
                 )
             await db.execute(
                 "INSERT OR REPLACE INTO manifest (path, size, mtime_ns, "
-                "content_hash, chunk_count) VALUES (?, 0, ?, ?, ?)",
-                (path, mtime_ns, content_hash, len(chunks)),
+                "content_hash, chunk_count) VALUES (?, ?, ?, ?, ?)",
+                (path, size, mtime_ns, content_hash, len(chunks)),
             )
             await db.commit()
         except Exception:
@@ -626,4 +654,7 @@ def _fts_match(query: str) -> str:
     tokens = [t for t in query.lower().split() if t]
     if not tokens:
         return ""
-    return " OR ".join(f'"{t}"*' for t in tokens)
+    # A `"` inside a double-quoted FTS5 term is escaped by doubling it, so a
+    # query token that contains one (foo"bar) does not break the MATCH syntax.
+    escaped = [t.replace('"', '""') for t in tokens]
+    return " OR ".join(f'"{t}"*' for t in escaped)

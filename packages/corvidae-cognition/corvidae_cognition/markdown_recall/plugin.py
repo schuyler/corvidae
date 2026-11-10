@@ -124,11 +124,13 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
     def render(self, hit: Hit) -> str:
         """Render one hit as the line the funnel admits.
 
-        Stable for a given chunk's content: the funnel dedupes on whole text,
-        so a line that changes between turns would defeat it. An edit changes
-        the text and so the line — the new content re-surfaces.
+        ``hit.text`` already carries the chunker's ``[section_path]`` prefix, so
+        it is the line as-is (adding the prefix again would double it). Stable
+        for a given chunk's content: the funnel dedupes on whole text, so a line
+        that changes between turns would defeat it. An edit changes the text and
+        so the line — the new content re-surfaces.
         """
-        return f"[{hit.section_path}] {hit.text}"
+        return hit.text
 
     # -- the embedding stage ----------------------------------------------
 

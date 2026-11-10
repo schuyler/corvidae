@@ -172,8 +172,11 @@ async def test_config_validation_names_the_key(build, tmp_path):
 
 def test_render_is_a_stable_line():
     plugin = MarkdownRecallPlugin()
+    # The chunker embeds the section prefix into the text; render returns it
+    # as-is (adding the prefix again would double it).
+    text = "[Waterfall] The waterfall maps the spectrum."
     hit = Hit(
         rowid=1, path="a.md", section_path="Waterfall",
-        chunk_index=0, text="The waterfall maps the spectrum.", score=1.0,
+        chunk_index=0, text=text, score=1.0,
     )
-    assert plugin.render(hit) == "[Waterfall] The waterfall maps the spectrum."
+    assert plugin.render(hit) == text
