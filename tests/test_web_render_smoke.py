@@ -1,11 +1,15 @@
-"""Browser smoke test for the web UI's Markdown sanitising (issue #90).
+"""Browser smoke tests for the web UI: Markdown sanitising (issue #90) and
+restoring unacknowledged sends when the socket closes (issue #89).
 
-Starts a real WebPlugin on 127.0.0.1, opens the page in headless Chrome or
-Chromium, has the "model" send a hostile reply plus an ordinary Markdown
-fixture, and asserts on the rendered DOM: no ``class``, ``id`` or
-``data-*`` attribute inside a message, the older protections (no style, no
-script, no ``on*``, safe links) still hold, and ordinary Markdown still
-renders.
+Starts a real WebPlugin on 127.0.0.1 and opens the page in headless Chrome or
+Chromium. For the sanitising check, the "model" sends a hostile reply plus an
+ordinary Markdown fixture, and the test asserts on the rendered DOM: no
+``class``, ``id`` or ``data-*`` attribute inside a message, the older
+protections (no style, no script, no ``on*``, safe links) still hold, and
+ordinary Markdown still renders. For the restore checks, a WebSocket route
+drops the page's ``send`` frames and then closes the socket, and the test
+asserts that each unconfirmed message appears in the banner labelled with its
+conversation, in order, and that the composer draft is untouched.
 
 It needs Playwright and a browser, so the whole module is skipped when
 ``playwright`` isn't importable. The ``web-smoke`` CI job
@@ -20,6 +24,8 @@ Playwright's own Chromium.
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -153,3 +159,121 @@ async def test_rendered_model_output_is_sanitised(make_env):
     assert ordinary["ul"] == 2 and ordinary["ol"] == 2
     assert ordinary["th"] == 2 and ordinary["td"] == 2
     assert ordinary["links"] == [["_blank", "noopener noreferrer"]]
+
+
+async def _open_page(browser, env, *, drop_sends=False):
+    """Log in, open the page behind a forwarding WebSocket route, and wait
+    for its subscribe to finish.
+
+    Returns (page, state). While state["drop"] is true, client `send`
+    frames are swallowed (not forwarded) and appended to state["dropped"];
+    await state["routes"][-1].close() closes the page's current socket.
+    """
+    state = {"drop": drop_sends, "dropped": [], "routes": []}
+
+    def handle(route):
+        # Forward both ways, except for swallowed sends.
+        server = route.connect_to_server()
+        state["routes"].append(route)
+
+        def from_page(message):
+            if state["drop"] and json.loads(message).get("type") == "send":
+                state["dropped"].append(message)
+            else:
+                server.send(message)
+
+        route.on_message(from_page)
+        server.on_message(lambda message: route.send(message))
+
+    page = await browser.new_page()
+    await page.route_web_socket("**/ws", handle)
+    await page.goto(f"{env.base}/?token={TOKEN}")
+    await page.wait_for_url(f"{env.base}/")
+    await _wait_subscribed(page, env, "main")
+    return page, state
+
+
+async def _wait_subscribed(page, env, name):
+    """Wait until the server has finished the page's subscribe/history."""
+    for _ in range(200):
+        if any(c.conversation == f"web:{name}" and c.buffer is None
+               for c in env.plugin._clients):
+            return
+        await page.wait_for_timeout(50)
+    pytest.fail(f"page never subscribed to web:{name}")
+
+
+async def _send_dropped(page, state, text):
+    """Send `text` from the composer and wait until the route swallowed it."""
+    n = len(state["dropped"])
+    await page.fill("#input", text)
+    await page.click("#send")
+    for _ in range(100):
+        if len(state["dropped"]) == n + 1:
+            return
+        await page.wait_for_timeout(50)
+    pytest.fail(f"send of {text!r} never reached the route")
+
+
+async def _unconfirmed(page):
+    """The banner's entries as (label, text) pairs."""
+    await page.wait_for_selector("#unconfirmed:not(.hidden)", timeout=3000)
+    return await page.eval_on_selector_all(
+        "#unconfirmed-list li",
+        "els => els.map(e => [e.querySelector('.conv').textContent,"
+        " e.querySelector('.text').textContent])")
+
+
+@pytest.mark.timeout(60)
+async def test_unanswered_send_restored_on_close(make_env):
+    """S2: a send with no answer before the socket closes comes back."""
+    env = await make_env()
+    async with async_playwright() as pw:
+        browser = await _launch(pw)
+        try:
+            page, state = await _open_page(browser, env, drop_sends=True)
+            await _send_dropped(page, state, "lost one")
+            await state["routes"][-1].close()
+            entries = await _unconfirmed(page)
+        finally:
+            await browser.close()
+    assert entries == [["#main", "lost one"]]
+
+
+@pytest.mark.timeout(60)
+async def test_unanswered_send_restored_after_switching(make_env):
+    """S2: the restored send keeps the conversation it was sent to."""
+    env = await make_env()
+    async with async_playwright() as pw:
+        browser = await _launch(pw)
+        try:
+            page, state = await _open_page(browser, env, drop_sends=True)
+            await _send_dropped(page, state, "lost in main")
+            # Switch conversation before the socket closes.
+            await page.evaluate("location.hash = 'other'")
+            await _wait_subscribed(page, env, "other")
+            await state["routes"][-1].close()
+            entries = await _unconfirmed(page)
+        finally:
+            await browser.close()
+    assert entries == [["#main", "lost in main"]]
+
+
+@pytest.mark.timeout(60)
+async def test_dropped_sends_and_draft_survive_close(make_env):
+    """S2: two lost sends are restored in order; the typed draft is kept."""
+    env = await make_env()
+    async with async_playwright() as pw:
+        browser = await _launch(pw)
+        try:
+            page, state = await _open_page(browser, env, drop_sends=True)
+            await _send_dropped(page, state, "first lost")
+            await _send_dropped(page, state, "second lost")
+            await page.fill("#input", "my draft")
+            await state["routes"][-1].close()
+            entries = await _unconfirmed(page)
+            draft = await page.input_value("#input")
+        finally:
+            await browser.close()
+    assert entries == [["#main", "first lost"], ["#main", "second lost"]]
+    assert draft == "my draft"

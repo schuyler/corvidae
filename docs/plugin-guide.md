@@ -201,19 +201,22 @@ A hook that only one plugin calls doesn't belong in the kernel's
 the plugin class to a class of `@hookspec` methods:
 
 ```python
-from corvidae.hooks import TransportPlugin, hookspec
+from corvidae.hooks import TransportPlugin, hookimpl, hookspec
 
-# PanelRegistry stands for whatever object the owner hands implementers.
 class WebConsoleSpec:
     @hookspec
-    async def on_web_console_init(self, panels: PanelRegistry) -> None:
-        """Panel plugins add their panels to ``panels``."""
+    async def on_web_console_init(self, panels: list[Panel]) -> None:
+        """Append one Panel per implementing plugin."""
 
 class WebPlugin(TransportPlugin):
     hookspecs = WebConsoleSpec
 
-    async def on_start(self, config):
-        await self.pm.ahook.on_web_console_init(panels=self._panels)
+    @hookimpl
+    async def on_init(self, pm, config):
+        ...  # parse and store the web block
+        panels: list[Panel] = []
+        await self.pm.ahook.on_web_console_init(panels=panels)
+        ...  # validate and store the panels
 ```
 
 `Runtime.start()` installs every declared spec right after entry points
@@ -285,6 +288,90 @@ Declare `optional_depends_on = frozenset({"webhook"})` so the impl is not report
 - To let the model see an event, call `on_notify` yourself; the ingress never does.
 - An exception is logged at `ERROR` and the next delivery proceeds. A handler that falls 100 deliveries behind loses its oldest ones, with a `WARNING`.
 
+## Adding a web console panel
+
+The `web` plugin (`corvidae/channels/web.py`) owns `on_web_console_init(panels)`. Implement it to add a read-only panel to the console: a page of your own, linked from the chat page's sidebar, with its own assets and JSON endpoints. The hook fires at the end of `WebPlugin.on_init`, only when agent.yaml has a `web` block.
+
+```python
+from importlib.resources import files
+from pathlib import Path
+
+from aiohttp import web
+
+from corvidae.channel import ChannelRegistry
+from corvidae.channels.web import Panel
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+
+class ChannelsPanel(CorvidaePlugin):
+    optional_depends_on = frozenset({"web"})
+
+    @hookimpl
+    async def on_web_console_init(self, panels: list[Panel]) -> None:
+        panels.append(Panel(
+            plugin=self,
+            title="Channels",
+            static_dir=Path(str(files("my_pkg") / "panel")),
+            routes=[web.get("/data", self.data)],
+        ))
+
+    async def data(self, request: web.Request) -> web.Response:
+        registry = get_dependency(self.pm, "registry", ChannelRegistry)
+        rows = [
+            {"id": c.id, "messages": len(c.conversation.messages) if c.conversation else 0}
+            for c in registry.all()
+        ]
+        return web.json_response(rows)
+```
+
+`Panel` has four fields:
+
+- `plugin`: the registering plugin; pass `self`. Its registered name becomes the panel's URL segment.
+- `title`: the link text in the console's navigation.
+- `static_dir`: a directory holding `panel.js` and `panel.css`, plus anything else they load.
+- `routes`: data endpoints, as aiohttp route definitions (`web.get(path, handler)`). Handlers are ordinary aiohttp handlers.
+
+A plugin named `channels_panel` gets these URLs:
+
+| URL | Serves |
+|---|---|
+| `/panel/channels_panel/` | the console's shell page: a header with a link back to chat and the panel navigation, an empty `<main id="panel">`, `/static/app.css` (the console's theme), and your `static/panel.css` and `static/panel.js` |
+| `/panel/channels_panel/static/<file>` | files from `static_dir` |
+| `/panel/channels_panel/data` | each route, under the panel's prefix |
+
+The trailing slash on the page URL matters: the shell links its assets by relative URL. `panel.js` fills `#panel`, and fetches its data the same way, by relative URL:
+
+```js
+const main = document.getElementById("panel");
+const timer = setInterval(refresh, 2000);
+refresh();
+
+async function refresh() {
+  const resp = await fetch("data", { cache: "no-store" });
+  if (resp.status === 401) {
+    clearInterval(timer);
+    main.textContent = "Session expired; reload to log in.";
+    return;
+  }
+  const rows = await resp.json();
+  main.replaceChildren(...rows.map((row) => {
+    const p = document.createElement("p");
+    p.textContent = `${row.id}: ${row.messages} messages`;
+    return p;
+  }));
+}
+```
+
+The contract:
+
+- **Read-only.** Every route must be a GET route made with `web.get`. Anything else (`web.post`, `web.view`, `web.route("*", ...)`, a static definition) fails startup with a `PluginValidationError` that names your plugin. It fails in `on_init`, so the restart pre-flight refuses the restart too. GET is a floor on the HTTP method, not a sandbox: your handler runs in-process, so it's on you not to change state from it.
+- **One panel per plugin.** Register a single `Panel`; a second one from the same plugin is not supported.
+- **Resolve dependencies lazily.** When the hook fires, each plugin's `on_init` has run up to its first suspending `await`, so a panel may decide whether to register from its own config, read synchronously in `on_init`. That holds only while no plugin wraps `on_init` or `on_web_console_init` with `@hookimpl(wrapper=True)`: apluggy then awaits the impls one by one. Look up other plugins in the handlers, not at registration. A handler can be called before your `on_start` or before a channel has a conversation, so check for `None`.
+- **Read synchronously.** Handlers run on the event loop. They may read kernel objects this guide documents for plugins (`channel.conversation`, the channel registry), as long as they read without awaiting in between, so the view is consistent.
+- **Text, never markup.** A panel often shows untrusted text: prompts, tool output, other people's messages. Render it with `textContent` or `createTextNode`, never `innerHTML`.
+- **The console's floor applies.** Panel routes sit behind the console's token cookie, `Host` check and security headers, and the CSP (`'self'` only, no inline script or style) covers your page. A handler can't loosen them: headers are applied to every response just before it is sent, streamed ones included. A WebSocket upgrade in a handler needs an allowed `Origin`, like the chat socket.
+
+Declare `optional_depends_on = frozenset({"web"})` so the impl is not reported as specless when the console isn't installed. With no `web` block, the hook never fires and the panel plugin does nothing.
+
 ## Available hooks
 
 ### Lifecycle
@@ -332,7 +419,7 @@ The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwa
 | `on_message_rejected(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |
 | `should_send_response(channel, text: str, emission: str, trace_id: str \| None, annotations: dict)` | async broadcast, reject-wins | Outbound gate, before each emission (`final`, `progress`, `thinking`, `error`). Return False to withhold, None for no opinion. See [Output gating](#output-gating). |
 | `on_message_persisted(channel, trace_id: str, rowid: int \| None, text: str, annotations: dict)` | async broadcast | After the trace-originating message is persisted to the database. Fires once per originating item regardless of persistence outcome (`rowid` may be None). |
-| `send(channel, event: Outbound)` | async broadcast | Outbound delivery: `event` is an `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus` or `OutboundProgress` (`corvidae/outbound.py`). Transports receive it through `TransportPlugin` (see [Writing a transport](#writing-a-transport)) |
+| `send(channel, event: Outbound)` | async broadcast | Outbound delivery: `event` is an `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus` or `OutboundProgress` (`corvidae/outbound.py`). Transports receive it through `TransportPlugin` (see [Writing a transport](#writing-a-transport)). A non-transport plugin may implement `send` to observe every channel's events, as the context panel does |
 | `on_notify(channel, source: str, text: str, tool_call_id: str \| None, annotations: dict \| None)` | async broadcast | Notification injected into channel |
 
 Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMessage(text="..."))`. `send` is broadcast to every plugin, and `TransportPlugin` drops the events for channels a transport does not own, so a sender never addresses a transport by name.
@@ -638,6 +725,7 @@ line in this guide.
 | `corvidae.tuning` | `config_value`, `resolve_tunable` |
 | `corvidae.channel` | `ChannelRegistry`, `resolve_persisted_channel`, `ChannelNotReady` |
 | `corvidae.channels.webhook` | `WebhookDelivery`, `WebhookHandler` (for subscribers to the webhook ingress) |
+| `corvidae.channels.web` | `Panel` (see [Adding a web console panel](#adding-a-web-console-panel)) |
 | `corvidae.context` | `MessageType`, `ContextWindow`, `count_tokens`, `message_tokens` |
 | `corvidae.task` | `Task` |
 | `corvidae.tool` | `Tool`, `tool_to_schema` |
@@ -814,7 +902,7 @@ class ProfilerPanel(CorvidaePlugin):
 
     @hookimpl
     async def on_web_console_init(self, panels):
-        panels.add(...)  # only called when web is loaded
+        panels.append(...)  # only called when web is loaded
 ```
 
 If the owner is absent, the impl stays registered with no spec and is

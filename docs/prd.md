@@ -523,35 +523,37 @@ Per transport:
   `discord:dm:<user_id>`. Every send passes `AllowedMentions.none()`. A bad
   token is logged once at ERROR and not retried. Gateway events are queued
   and consumed by one processor so arrival order holds.
-- **Web**: one page, one WebSocket per tab, JSON frames both ways, served
-  by aiohttp in the daemon's loop, no new dependencies, no build step,
-  vendored marked and DOMPurify with recorded versions and hashes. Binds
-  loopback by default and warns at startup on anything else. The token
-  comes from config, then `CORVIDAE_WEB_TOKEN`, then a generated one logged
-  once as a login URL; a provided token shorter than 16 characters is
-  rejected; there is no setting that turns auth off; comparisons are
-  constant-time. Login sets an `HttpOnly; SameSite=Strict` cookie whose
-  value is an HMAC of the token, so sessions survive a restart with the
-  same token and die when it changes. Every route needs the cookie; the
-  WebSocket also needs an allowed `Origin`; every request needs an allowed
-  `Host`. A strict CSP (`'self'` only, `img-src 'self' data:`, explicit
-  `ws://`/`wss://` per allowed origin), `nosniff`, `no-referrer`,
+- **Web**: one chat page, plus read-only panels that plugins contribute,
+  served behind the same token, cookie, `Host` and `Origin` checks and CSP,
+  which no panel can loosen or bypass; one WebSocket per tab, JSON frames
+  both ways, served by aiohttp in the daemon's loop, no new dependencies, no
+  build step, vendored marked and DOMPurify with recorded versions and
+  hashes. Binds loopback by default and warns at startup on anything else.
+  The token comes from config, then `CORVIDAE_WEB_TOKEN`, then a generated
+  one logged once as a login URL; a provided token shorter than 16
+  characters is rejected; there is no setting that turns auth off;
+  comparisons are constant-time. Login sets an `HttpOnly; SameSite=Strict`
+  cookie whose value is an HMAC of the token, so sessions survive a restart
+  with the same token and die when it changes. Every route needs the cookie;
+  the WebSocket also needs an allowed `Origin`; every request needs an
+  allowed `Host`. A strict CSP (`'self'` only, `img-src 'self' data:`,
+  explicit `ws://`/`wss://` per allowed origin), `nosniff`, `no-referrer`,
   `no-store`; the access log is off; a 500 never logs the URL. Model output
-  reaches the DOM only through `DOMPurify.sanitize(marked.parse(text))`
-  with `style`, `class`, `id` and `data-*` forbidden. Scopes are
-  operator-chosen slugs `[a-z0-9][a-z0-9_-]{0,63}`; the conversation list
-  merges `message_log` and the live registry. Subscribe replays the newest
-  200 rows mapped to the same item kinds the live hooks produce (summary
-  rows as dividers, context and system rows skipped), favouring duplicates
-  over losses. Every send is acknowledged to the sending socket with its
-  sequence number, and the page keeps unacknowledged sends to restore when
-  the socket closes, so a half-open socket loses nothing. Fan-out is
-  through a bounded per-client queue and a writer task; a client that falls
-  behind is dropped with 1008. Each connection is owned by its handler
-  task; `on_stop` closes fan-out sockets, cancels handlers, and finishes
-  inside Runtime's 3 s budget, aborting transports a dead peer will never
-  drain. A token change on reload closes every socket with 4001; host, port
-  and origins changes log "restart to apply".
+  reaches the DOM only through `DOMPurify.sanitize(marked.parse(text))` with
+  `style`, `class`, `id` and `data-*` forbidden. Scopes are operator-chosen
+  slugs `[a-z0-9][a-z0-9_-]{0,63}`; the conversation list merges
+  `message_log` and the live registry. Subscribe replays the newest 200 rows
+  mapped to the same item kinds the live hooks produce (summary rows as
+  dividers, context and system rows skipped), favouring duplicates over
+  losses. Every send is acknowledged to the sending socket with its sequence
+  number, and the page keeps unacknowledged sends to restore when the socket
+  closes, so a half-open socket loses nothing. Fan-out is through a bounded
+  per-client queue and a writer task; a client that falls behind is dropped
+  with 1008. Each connection is owned by its handler task; `on_stop` closes
+  fan-out sockets, cancels handlers, and finishes inside Runtime's 3 s
+  budget, aborting transports a dead peer will never drain. A token change
+  on reload closes every socket with 4001; host, port and origins changes
+  log "restart to apply".
 - **ACP**: Agent Client Protocol v1 over stdio, the official Python SDK,
   as a dedicated `corvidae acp` subprocess that owns stdio (JSON-RPC only
   on stdout; logs to stderr or a file). Inert under `serve` and `cli`.
@@ -1449,6 +1451,13 @@ design, not requirement. The requirements are outcomes:
    after that prefill and decode work is, approximately, the time it
    waited in the backend, so a call queued behind another on a shared
    backend can be told from a slow one.
+7. An operator can inspect the context window of any channel whose
+   window is loaded (what the model will see on that channel's next turn)
+   and follow it as it changes, including a turn's reasoning, reply and
+   tool activity while it is generated. The view is read-only, off unless
+   configured, and served only behind the console's authentication. It
+   shows untrusted text (memory, tool output, other people's messages) as
+   text, never as markup. The threat model accounts for it.
 
 ### 3.11 Configuration and operations
 

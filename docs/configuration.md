@@ -636,7 +636,7 @@ Pass the ids explicitly rather than using the `range` form: `message_log` ids ar
 
 The transport needs the Discord SDK: add `--extra discord` to your `uv sync` line. A `discord:` block without it fails at startup with a message saying so; with no block, the SDK is never loaded.
 
-The `discord` section is optional. If absent, `DiscordPlugin` loads but stays inert: no client, no tasks, nothing logged above `DEBUG`. If present, it must be well-formed — no token (in the block or the environment), an `allow` that is not a list, a `message_chunk_size` that is not an integer from 100 to 2000, a `require_mention` that is not a boolean, a `channels` entry keyed on anything but a numeric channel id, or an unknown key inside one, raises at startup naming the offending field and the remedy.
+The `discord` section is optional. If absent, `DiscordPlugin` loads but stays inert: no client, no tasks, nothing logged above `DEBUG`. If present, it must be well-formed — no token (in the block or the environment), an `allow` that is not a list, a `message_chunk_size` that is not an integer from 100 to 2000, a `require_mention` or `allow_bots` that is not a boolean, a `channels` entry keyed on anything but a numeric channel id, or an unknown key inside one, raises at startup naming the offending field and the remedy.
 
 corvidae logs in as a Discord bot account. Creating the application, getting the token, and inviting the bot are covered in [discord-ops.md](discord-ops.md). In DMs the bot answers every message from an allowed user; in servers and threads it answers only messages that @-mention it, unless `discord.require_mention` is `false`.
 
@@ -645,6 +645,7 @@ corvidae logs in as a Discord bot account. Creating the application, getting the
 | `discord.token` | string | `$DISCORD_TOKEN` | The bot token. If the key is absent, null, or empty, the `DISCORD_TOKEN` environment variable is used; if neither is set, startup fails. |
 | `discord.allow` | list of user ids | `[]` | Discord user ids permitted to drive the agent. Numeric ids, written as YAML ints or quoted strings; they are compared as strings. Default-deny: an empty or absent list refuses everyone, silently — no reply and no typing indicator. An explicit `allow: null` is an error, not an empty list. |
 | `discord.message_chunk_size` | integer | `2000` | Maximum UTF-8 bytes per outbound Discord message, 100 to 2000 inclusive. Longer replies are split, keeping code fences intact, and sent as several messages; nothing is truncated. An explicit `null` is rejected (unlike a null `token`, which falls back to the environment). The limit is bytes, while Discord's 2000 is characters, so text with multi-byte characters splits earlier than strictly needed. |
+| `discord.allow_bots` | boolean | `false` | Whether messages from other bot accounts reach the agent. With `false` (the default) every message authored by a bot is dropped before the allowlist is consulted, so two agents cannot hear each other. With `true` a bot-authored message is treated like any other: it must still come from an id in `discord.allow`, and the bot still never answers itself, so opening this admits one named bot at a time, never every bot in the server. Keep the allowlist short: two bots that both answer every message will answer each other until something stops them, and `require_mention` is what makes stopping possible. Read at startup only. |
 | `discord.channels` | mapping | `{}` | Per-channel overrides, keyed by the Discord channel id — the number alone, quoted or not, as it appears after `discord:` in the agent's logs — digits, no prefix, no leading zeros. Each entry is a mapping whose only key is `require_mention`; listing one id twice (quoted and as a number) fails startup. A thread uses its parent channel's entry; a thread whose parent has no entry stays on `discord.require_mention`. A key that is not a bare number (`discord:123…`, `#general`) fails startup rather than matching nothing, because a silently ignored override is a channel left conversational. An empty section means no overrides. Read at startup only. |
 | `discord.require_mention` | boolean | `true` | The default for every channel. With `true`, servers and threads get an answer only when a message @-mentions the bot. With `false`, every message from an allowlisted user in any channel the bot can see reaches the agent, which may still decline to reply; a mention token, if present, is still stripped. Messages from anyone else are refused by the allowlist before they are stored, as always. Answering unaddressed anywhere makes the client request the privileged Message Content intent, which must also be switched on for the application in the Developer Portal — the intent is per client, so one conversational channel is enough to need it. Per-channel overrides live in `discord.channels` below. Read at startup only. |
 | `discord.attachment_dir` | string | `state/discord-attachments` | Directory where images attached to inbound messages are written. Created on first download; files are not pruned automatically, so retention is the operator's responsibility. |
@@ -658,6 +659,7 @@ discord:
     - 123456789012345678
   message_chunk_size: 2000
   # require_mention: false         # answer allowed users without an @-mention
+  # allow_bots: true               # let an allowlisted bot's messages through
   channels:                       # per-channel overrides (#512)
     "1568093636044787772":        # the channel id the agent sees
       require_mention: false      # this one channel may answer unaddressed
@@ -1097,6 +1099,18 @@ webhook_notify:
 | `webhook_notify.endpoints.<endpoint>` | list of strings | none | Non-empty list of channel ids (`transport:scope`) notified of each delivery on that `webhook` endpoint. Repeated ids are notified once. |
 
 A malformed block fails startup naming the key and the value; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet (Discord or Signal before they start) is skipped with a `WARNING` for that delivery. For GitHub, filter events in the webhook's own settings: payloads such as `pull_request` and `check_run` are large and are cut at the cap, with the rest in a spill file.
+
+---
+
+## `context_panel` — live context window view
+
+Requires the context-panel extra (`--extra context-panel` on your `uv sync` line) and the `web` block. Adds a read-only page at `/panel/context_panel/`, linked from the chat page's sidebar. It lists every channel whose context window is loaded, on any transport, and shows the selected one as the model sees it: system prompt, tool schemas and stored rows with their kinds, followed live for the latest turn. The panel shows the whole window to anyone holding the console token; see the threat model's finding 9.
+
+```yaml
+context_panel: {}
+```
+
+The block has no keys. `context_panel: {}` or an empty `context_panel:` enables the panel; without the block it is off. Restart to apply a change. A block that is not a mapping fails startup naming `context_panel`.
 
 ---
 

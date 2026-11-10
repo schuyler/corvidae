@@ -14,6 +14,11 @@ entry may override ``require_mention`` for one channel, and its threads inherit
 it (#512); the intent is requested once for the client, so a single
 conversational channel is enough to need it.
 
+Messages from other bot accounts are dropped. ``allow_bots: true`` lets an
+allowlisted bot through instead, which is how two agents talk to each other in
+a channel; the allowlist still decides which bot, and the bot never answers
+itself.
+
 The SDK (discord-py) is optional: add ``--extra discord`` to the ``uv sync``
 line. This module
 never imports it at load time, because pluggy loads every entry point
@@ -406,6 +411,17 @@ class DiscordPlugin(TransportPlugin):
                 f"got {require_mention!r}; fix it in the discord: block of agent.yaml"
             )
 
+        # allow_bots is off by default: two bots that both answer every
+        # message will answer each other forever, and the allowlist is the only
+        # thing that makes opening it safe. Same strictness as require_mention,
+        # because `allow_bots: "false"` in YAML is a truthy string.
+        allow_bots = block.get("allow_bots", False)
+        if not isinstance(allow_bots, bool):
+            raise ValueError(
+                "discord: config field 'allow_bots' must be true or false, "
+                f"got {allow_bots!r}; fix it in the discord: block of agent.yaml"
+            )
+
         # Per-channel overrides (#512). Each entry may set its own
         # require_mention; an unknown key is named rather than ignored, because
         # a typo there would silently leave the channel on the default.
@@ -506,6 +522,7 @@ class DiscordPlugin(TransportPlugin):
         self._allow = {str(entry) for entry in allow}
         self._message_chunk_size = chunk_size
         self._require_mention = require_mention
+        self._allow_bots = allow_bots
         self._channel_require_mention = channel_overrides
 
     @hookimpl
@@ -636,9 +653,15 @@ class DiscordPlugin(TransportPlugin):
         """Filter one inbound message and, if it passes, fire on_message."""
         author = message.author
 
-        # Never respond to ourselves or to other bots.
-        if author.bot or (bot_user_id is not None and author.id == bot_user_id):
+        # Never respond to ourselves. Another bot's message is dropped unless
+        # allow_bots opens the door, and even then it still has to pass the
+        # allowlist gate below, so it is one named bot at a time -- never every
+        # bot in the server.
+        if author.bot and not self._allow_bots:
             logger.debug("discord: ignoring message from bot account %s", author.id)
+            return
+        if bot_user_id is not None and author.id == bot_user_id:
+            logger.debug("discord: ignoring message from ourselves (%s)", author.id)
             return
 
         is_dm = message.guild is None

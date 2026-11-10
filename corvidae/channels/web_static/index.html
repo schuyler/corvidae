@@ -24,11 +24,18 @@
                pattern="[a-z0-9][a-z0-9_\-]{0,63}" maxlength="64" title="lowercase letters, digits, - and _ (max 64)">
         <button type="submit">Go</button>
       </form>
+      <!--panels-->
     </div>
   </aside>
   <!-- Main pane: banner, items, working indicator, composer -->
   <main id="main">
     <div id="banner" class="hidden" role="alert"></div>
+    <!-- Sends that got no answer, restored here with their conversation -->
+    <div id="unconfirmed" class="hidden" role="status">
+      <p class="unconfirmed-head">These messages may not have arrived. Copy any you still want to send.</p>
+      <ul id="unconfirmed-list"></ul>
+      <button type="button" id="unconfirmed-dismiss">Dismiss</button>
+    </div>
     <div id="items" aria-live="polite"></div>
     <div id="working" class="hidden">working…</div>
     <form id="composer">

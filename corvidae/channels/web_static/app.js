@@ -6,7 +6,9 @@
   const inputEl = $("input"), listEl = $("conversations"), sidebarEl = $("sidebar");
   const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
   let ws = null, backoff = 1000, failures = 0, opened = false, stopped = false;
-  let current = "main", knownNames = new Set(), lastSent = "", convos = [];
+  let current = "main", knownNames = new Set(), convos = [];
+  const pending = new Map(); // seq -> {conversation, text}: sends not yet answered
+  let nextSeq = 1;
   const sendBtn = $("send");
 
   // ---- Markdown sanitising: links open in a new tab safely ----
@@ -169,6 +171,7 @@
   function onFrame(f) {
     if (!f || typeof f !== "object") return;
     if (f.type === "conversations") { renderList(f.items || []); return; }
+    if (f.type === "sent") { pending.delete(f.seq); return; }
     if (f.type === "error") { onError(f); return; }
     // Drop anything for a conversation we are no longer viewing.
     if (f.conversation !== undefined && f.conversation !== current) return;
@@ -184,18 +187,33 @@
     }
   }
   function onError(f) {
+    const lost = pending.get(f.seq);
+    if (lost) { pending.delete(f.seq); restore([lost]); }
     if (f.code === "starting") {
-      // Server not ready: retry list/subscribe after 2s; restore refused send text.
+      // Server not ready: retry list/subscribe after 2s; a refused send was already restored above.
       if (f.request === "list") setTimeout(() => send({ type: "list" }), 2000);
       else if (f.request === "subscribe") setTimeout(() => send({ type: "subscribe", conversation: current }), 2000);
-      else if (f.request === "send") {
-        notice("server is starting — message not sent");
-        if (!inputEl.value) inputEl.value = lastSent;
-      }
+      else if (f.request === "send") notice("server is starting — message not sent");
       return;
     }
     notice("error" + (f.request ? " (" + f.request + ")" : "") + ": " + (f.message || f.code || "unknown"));
   }
+
+  // ---- Unconfirmed sends: shown again, never put back in the composer ----
+  function restore(entries) {
+    const list = $("unconfirmed-list");
+    for (const e of entries) {
+      const li = el("li");
+      li.appendChild(el("span", "conv", "#" + e.conversation));
+      li.appendChild(el("div", "text", e.text));
+      list.appendChild(li);
+    }
+    if (list.children.length) $("unconfirmed").classList.remove("hidden");
+  }
+  $("unconfirmed-dismiss").addEventListener("click", () => {
+    $("unconfirmed-list").textContent = "";
+    $("unconfirmed").classList.add("hidden");
+  });
 
   // ---- Connection with exponential backoff ----
   function connect() {
@@ -215,6 +233,8 @@
     ws.addEventListener("close", (ev) => onClose(ev));
   }
   async function onClose(ev) {
+    restore(pending.values());
+    pending.clear();
     if (ev.code === 4001) { expired(); return; }
     if (!opened && ++failures >= 3) {
       // Repeated connect failures: probe the page to detect an expired session.
@@ -233,11 +253,13 @@
     const text = inputEl.value;
     if (!text.trim()) return;
     // Keep the text in the composer if the socket is down.
-    if (!send({ type: "send", conversation: current, text })) {
+    const seq = nextSeq;
+    if (!send({ type: "send", conversation: current, text, seq })) {
       notice("not connected — message not sent");
       return;
     }
-    lastSent = text;
+    nextSeq++;
+    pending.set(seq, { conversation: current, text });
     inputEl.value = "";
     // A send to an unlisted conversation should show up in the list.
     if (!knownNames.has(current)) send({ type: "list" });
