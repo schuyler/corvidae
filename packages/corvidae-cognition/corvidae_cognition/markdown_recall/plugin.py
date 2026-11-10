@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from pathlib import Path
 from typing import Sequence
 
@@ -61,14 +62,19 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)  # stores self.pm and self.config
         self._pm = pm
-        # Inert when the operator has not configured a markdown_recall block:
-        # no index, no reconcile, no search. The plugin is loaded by entry
-        # point in every cognition install; the config block is the opt-in.
+        # The recall gate (cooldown/timeout) is always initialized, even
+        # when the plugin is inert: the mixin's on_funnel_ingest runs on
+        # every user turn and raises if _recall_gate is None (#739). An
+        # inert source's search() returns None, so the gate is never
+        # exercised.
+        self.init_recall(config)
+        # Inert when the operator has not configured a markdown_recall
+        # block: no index, no reconcile, no search. The plugin is loaded
+        # by entry point in every cognition install; the config block is
+        # the opt-in.
         if config_value(config, "markdown_recall", None) is None:
             logger.debug("markdown_recall: no config block; plugin is inert")
             return
-        # The recall gate (cooldown/timeout) reads my config block.
-        self.init_recall(config)
         self._root = Path(config_value(config, "markdown_recall.root", DEFAULT_ROOT))
         db_path = Path(config_value(config, "markdown_recall.db_path", DEFAULT_DB_PATH))
         raw_max = config_value(config, "markdown_recall.max_hits", DEFAULT_MAX_HITS)
@@ -108,6 +114,19 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
         idle.watch_system(
             IDLE_QUIET_SECONDS, self._reconcile, name="markdown_recall.reconcile"
         )
+
+    @hookimpl
+    async def on_stop(self) -> None:
+        """Cancel the startup task and close the index connection so the
+        aiosqlite worker thread can exit. Without this, threading._shutdown
+        blocks at interpreter exit and the daemon hangs (#738)."""
+        task = self._startup_task
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        if self._index is not None:
+            await self._index.close()
 
     async def _reconcile(self) -> None:
         """Re-sync the index to the folder; the index serializes on its own lock."""

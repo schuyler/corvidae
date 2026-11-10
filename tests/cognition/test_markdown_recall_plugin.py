@@ -189,3 +189,78 @@ def test_render_is_a_stable_line():
         chunk_index=0, text=text, score=1.0,
     )
     assert plugin.render(hit) == text
+
+
+async def test_on_stop_closes_the_index(build, tmp_path):
+    """#738: on_stop closes the aiosqlite connection so the worker thread
+    can exit and the daemon doesn't hang at interpreter shutdown."""
+    root = tmp_path / "notes"
+    write_folder(root, {"a.md": "# A\n\nalpha content"})
+    config = {"markdown_recall": {"root": str(root), "db_path": str(tmp_path / "index.db")}}
+    env = await build(config, root)
+    await env.source._reconcile()  # open the connection
+    assert env.source._index._db is not None, "connection should be open"
+    await env.source.on_stop()
+    assert env.source._index._db is None, "connection should be closed"
+
+
+async def test_unconfigured_source_is_inert_in_funnel_ingest(tmp_path):
+    """#739: an unconfigured plugin (no markdown_recall block) must not raise
+    in on_funnel_ingest. The gate is initialized, search returns None, and
+    the funnel never sees a result.
+
+    Bypasses the make() helper, which always injects a markdown_recall block
+    for the db_path override.
+    """
+    db = await aiosqlite.connect(":memory:")
+    await init_db(db)
+    pm = create_plugin_manager()
+    persistence = PersistencePlugin()
+    persistence.db = db
+    pm.register(persistence, name="persistence")
+    clock = Clock()
+    funnel = FunnelPlugin(now=clock)
+    pm.register(funnel, name="funnel")
+    source = MarkdownRecallPlugin()
+    pm.register(source, name="markdown_recall")
+    install_plugin_hookspecs(pm)
+    await funnel.on_init(pm=pm, config={})
+    await source.on_init(pm=pm, config={})  # no markdown_recall block
+    channel = Channel(transport="test", scope="recall")
+    channel.conversation = ContextWindow(channel.id)
+
+    # The gate must be initialized (not None), or on_funnel_ingest raises.
+    assert source._recall_gate is not None, "gate must be initialized"
+    # The index must be None (inert).
+    assert source._index is None, "index must be None when unconfigured"
+    # on_funnel_ingest must not raise.
+    channel.conversation.append({"role": "user", "content": "hello"})
+    await funnel.before_agent_turn(channel=channel, trace_id="t", annotations={"origin": "user"})
+    for _ in range(8):
+        await asyncio.sleep(0)
+    # No CONTEXT was admitted (search returned None).
+    ctx_lines = [
+        m.get("content") or "" for m in channel.conversation.messages
+        if m.get("_message_type") == MessageType.CONTEXT
+    ]
+    assert ctx_lines == []
+    # on_stop on an inert plugin must not raise.
+    await source.on_stop()
+    await db.close()
+
+
+async def test_on_stop_cancels_active_startup_task(build, tmp_path):
+    """#738 review: on_stop must cancel AND await the startup task before
+    closing the index. A cancel() without await leaves the task pending,
+    and the reconcile can hit a closed connection."""
+    root = tmp_path / "notes"
+    write_folder(root, {"a.md": "# A\n\nalpha content"})
+    config = {"markdown_recall": {"root": str(root), "db_path": str(tmp_path / "index.db")}}
+    env = await build(config, root)
+    # Start the plugin (creates the startup task).
+    await env.source.on_start(config)
+    assert env.source._startup_task is not None, "startup task should exist"
+    # on_stop must cancel and await it.
+    await env.source.on_stop()
+    assert env.source._startup_task.done(), "startup task should be done"
+    assert env.source._index._db is None, "connection should be closed"
