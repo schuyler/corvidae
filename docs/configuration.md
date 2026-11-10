@@ -1196,11 +1196,11 @@ A malformed block fails startup naming the key and the value. The whole section 
 
 ## Running in a container
 
-The `Dockerfile` at the repo root builds the kernel (the agent loop, persistence, tools and transports) into an image that runs `corvidae serve` against an `agent.yaml` mounted at `/data`. The quickest useful setup is the browser chat page:
+The `Dockerfile` at the repo root builds corvidae with every extra (Discord, the cognition plugins and the rest) into an image that runs `corvidae serve` against an `agent.yaml` mounted at `/data`. The quickest useful setup is the browser chat page:
 
 ```sh
 docker build -t corvidae .
-mkdir -p ~/corvidae-data && sudo chown 1000:1000 ~/corvidae-data
+mkdir -p ~/corvidae-data
 ```
 
 Put this in `~/corvidae-data/agent.yaml`:
@@ -1219,6 +1219,7 @@ web:
 ```
 
 ```sh
+sudo chown 1000:1000 ~/corvidae-data     # the daemon's uid; a no-op if that is already yours
 TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 docker run -d --name corvidae --restart unless-stopped \
   --add-host host.docker.internal:host-gateway \
@@ -1229,20 +1230,18 @@ docker run -d --name corvidae --restart unless-stopped \
 echo "http://127.0.0.1:8765/?token=$TOKEN"
 ```
 
-Open that URL. Why the config looks like this: inside a container the page has to listen on a wildcard address, and a wildcard bind derives no allowed origins of its own, so the address you browse to must be in `allowed_origins` or the page answers `403 bad host` (add `http://localhost:8765` if you use that name). The wildcard bind logs a `WARNING` at startup, as described in the [web section](#web--browser-chat-ui). The token comes from the environment so a restart doesn't log you out. It is shell access to the machine, so keep the port on loopback and put TLS or a tunnel in front of it for anything remote.
+Open that URL. Why the config looks like this: inside a container the page has to listen on a wildcard address, and a wildcard bind derives no allowed origins of its own, so the address you browse to must be in `allowed_origins` or the page answers `403 bad host` (add `http://localhost:8765` if you use that name). The wildcard bind logs a `WARNING` at startup, as described in the [web section](#web--browser-chat-ui). The token comes from the environment so a restart doesn't log you out. It is shell access to the container and everything mounted into it, so keep the port on loopback and put TLS or a tunnel in front of it for anything remote.
 
-**Discord.** The bot only connects out, so there is nothing to publish, but the default image has no Discord SDK. A `discord:` block on it stops at startup with a message telling you to `uv sync --extra discord`; in a container that means rebuilding with the extra:
+**The model server.** On a Linux host, `host.docker.internal` is the Docker host's bridge address, so a model server listening only on `127.0.0.1` can't be reached through it, and every turn fails to connect. Either make the server listen on an address the container can reach (mind your firewall), or run the container with `--network host` in place of the `-p` and `--add-host` lines, so it shares the host's loopback. In that case use `http://127.0.0.1:8080/v1` as the `base_url` and write the `web:` block as just `web: {}`: the default bind is loopback, and the wildcard and `allowed_origins` above would expose the page on every host address.
 
-```sh
-docker build -t corvidae --build-arg EXTRAS="discord" .
-```
+**The batteries are on.** Because the image carries every extra, memory, appraisal, critique and goals run by default, and memory consolidates through model calls of its own. Without an `llm.embedding` profile memory still works but stores records without vectors, which is what the startup warning about a missing embedding profile means ([cognition.md](cognition.md)). List plugins under `plugins.disabled`, as `agent.minimal.yaml.example` does, to turn any of them off. The `restart` tool ends the daemon with SIGTERM, which is why the run command has `--restart unless-stopped`.
 
-Pass the bot token as `-e DISCORD_TOKEN=…` instead of writing it into `agent.yaml`, and list your user id under `discord.allow` (the default refuses everyone). Creating the application and inviting the bot are in [discord-ops.md](discord-ops.md). Two `voice will NOT be supported` warnings at startup are expected.
+**Discord.** The bot only connects out, so there is nothing to publish. Add a `discord:` block with your user id under `allow` (the default refuses everyone), and pass the bot token as `-e DISCORD_TOKEN=…` rather than writing it into `agent.yaml`. `docker restart` keeps the old environment, so to add either to a running container, `docker rm -f corvidae` and run it again. Creating the application and inviting the bot are in [discord-ops.md](discord-ops.md). Two `voice will NOT be supported` warnings at startup are expected.
 
-**Everything lands in `/data`:** `sessions.db`, `provenance.key` (keep it with the directory), logs and `state/`. Back that directory up and you've backed up the bot. The daemon runs as uid 1000, not root, because the shell tool runs as the daemon's user ([threat-model.md](threat-model.md), finding 4), so the directory has to be writable by that uid. If it isn't, startup dies with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory. Fix the ownership, or run with `--user $(id -u):$(id -g)` and a directory you own.
+**What lands in `/data`:** `sessions.db`, `provenance.key` (keep it with the directory), `state/`, and a log file if you set `logging.file`; otherwise logs go to `docker logs`. Back that directory up and you've backed up the bot. The daemon runs as uid 1000, not root, because the shell tool runs as the daemon's user ([threat-model.md](threat-model.md), finding 4), so the directory has to be writable by that uid. That's what the `chown` is for, and after it, editing `agent.yaml` on the host needs `sudo`. If you'd rather not, skip the `chown` and run with `--user $(id -u):$(id -g)` on a directory you own. If the daemon can't write the directory, startup dies with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory.
 
-**Locking the config (optional).** Add `-v ~/corvidae-data/agent.yaml:/data/agent.yaml:ro` to `docker run` and the agent can't edit its own configuration, which is what [prd.md](prd.md) §3.11.11 asks for. A host edit that replaces the file (`sed -i`, most editors) detaches the read-only mount until the container restarts, so run `docker restart corvidae` after each edit.
+**Locking the config (optional).** Add `-v ~/corvidae-data/agent.yaml:/data/agent.yaml:ro` to `docker run` and the agent can't edit its own configuration, which is the config half of [prd.md](prd.md) §3.11.11 (prompt files need the same treatment). A host edit that replaces the file (`sed -i`, most editors) detaches the read-only mount until the container restarts, so run `docker restart corvidae` after each edit.
 
-**Extras are chosen at build time** with `EXTRAS`, space separated, using the names from the README install line: `--build-arg EXTRAS="cognition discord"`. The default is none. `corvidae acp` isn't a container use: your editor starts it against a local checkout, and it needs the ACP SDK. Signal needs signal-cli running outside the container, with its socket mounted in; see [signal-ops.md](signal-ops.md).
+**Extras are chosen at build time** with `EXTRAS`, space separated, using the names from the README install line: `--build-arg EXTRAS="cognition discord"` for a subset, or `--build-arg EXTRAS=""` for the bare kernel. `corvidae acp` isn't a container use: your editor starts it against a local checkout. Signal needs signal-cli running outside the container with its socket mounted in; see [signal-ops.md](signal-ops.md).
 
 **A container is not a sandbox for the tools.** It limits the daemon and its tools to what you mounted and what the network lets them reach. It does not separate the tools from the daemon: `shell` still runs unsandboxed, as the same user in the same container, next to `sessions.db` and the web token. Running tools somewhere narrower is a different feature, tracked in [#532](https://github.com/schuyler/corvidae/issues/532).

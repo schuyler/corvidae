@@ -58,9 +58,9 @@ the transports, without the cognition plugins or sqlite-vec. Add
 `corvidae acp`, on the same line: `uv sync` removes any extra you don't
 name.
 
-To run it in Docker instead, `docker build -t corvidae .` makes a kernel image
-that runs `corvidae serve` against an `agent.yaml` you mount at `/data`. The
-web chat page, Discord and the extras are in
+To run it in Docker instead, `docker build -t corvidae .` makes an image with
+every extra installed that runs `corvidae serve` against an `agent.yaml` you
+mount at `/data`. The web chat page, Discord and choosing extras are in
 [docs/configuration.md](docs/configuration.md#running-in-a-container).
 
 For development (pytest, every extra its tests import):

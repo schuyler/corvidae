@@ -10,6 +10,7 @@ install, or a build context that leaks `agent.yaml`.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -103,15 +104,32 @@ def test_apluggy_git_dependency_has_a_git_binary(dockerfile):
     assert re.search(r"apt-get install[^&]*\bgit\b", runs)
 
 
-def test_extras_are_a_build_arg_defaulting_to_the_kernel(dockerfile):
-    """The default image is the kernel alone; extras are opt-in at build time."""
+def _pyproject_extras() -> set[str]:
+    """Every optional-dependency extra the project declares, except the test-only `dev`."""
+    with (ROOT / "pyproject.toml").open("rb") as fh:
+        extras = tomllib.load(fh)["project"]["optional-dependencies"]
+    return set(extras) - {"dev"}
+
+
+def test_extras_default_to_every_extra(dockerfile):
+    """The image is batteries-included: a user who pulls it gets every transport and plugin.
+
+    The default is an explicit list, so a new extra added to pyproject.toml has to be added
+    to the Dockerfile too; this test fails until it is, instead of the image silently
+    shipping without it. `dev` (pytest, jinja2) stays out.
+    """
     args = [a for a in _instructions(dockerfile, "ARG") if a.split("=", 1)[0] == "EXTRAS"]
     assert args, "no EXTRAS build arg"
-    # An empty default means the kernel alone; a non-empty one would ship an extra unasked.
-    for arg in args:
-        default = arg.partition("=")[2].strip("\"'")
-        assert default == "", f"EXTRAS defaults to {default!r}, not the kernel alone"
-    # The step that turns EXTRAS into `--extra` flags has to actually read it.
+    default = set(args[-1].partition("=")[2].strip("\"'").split())
+    missing, unknown = _pyproject_extras() - default, default - _pyproject_extras()
+    assert not missing, f"extras in pyproject.toml but not in the EXTRAS default: {sorted(missing)}"
+    assert not unknown, f"EXTRAS default names extras pyproject.toml lacks: {sorted(unknown)}"
+    assert "dev" not in default, "the test-only dev extra is in the image"
+
+
+def test_extras_build_arg_is_read_by_the_install(dockerfile):
+    """The step that turns EXTRAS into `--extra` flags has to actually read it, so that
+    `--build-arg EXTRAS=""` (the bare kernel) and a subset both work."""
     assert any("--extra" in ln and "$EXTRAS" in ln for ln in _instructions(dockerfile, "RUN")), (
         "no RUN turns $EXTRAS into --extra flags"
     )

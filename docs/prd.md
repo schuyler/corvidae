@@ -1511,12 +1511,15 @@ design, not requirement. The requirements are outcomes:
     the cost of leaving them writable: `write_file` plus hot reload or a
     restart lets the agent lift every other lock.
 12. A container image ships as the `Dockerfile` at the repo root, built
-    when a second deployment needed one (#37). It is a kernel image with
-    `/data` as the working directory and `agent.yaml` bind-mounted, no
-    ports unless `web:` is configured, and signal-cli and llama-server
-    outside the container. Extras are a build argument, none by default;
-    the daemon runs as a non-root user; dependencies install from
-    `uv.lock` with `--locked`. The image does not sandbox tools (§3.5.5).
+    when a second deployment needed one (#37). It has `/data` as the
+    working directory and `agent.yaml` bind-mounted, no ports unless
+    `web:` is configured, and signal-cli and llama-server outside the
+    container. It is batteries-included: every extra installs by default,
+    so a pulled image runs Discord and the cognition plugins without a
+    rebuild, and `EXTRAS` is a build argument that selects a subset or,
+    empty, the bare kernel. The daemon runs as a non-root user, and
+    dependencies install from `uv.lock` with `--locked`. The image does
+    not sandbox tools (§3.5.5).
 13. The agent can restart the daemon to apply changes to its own code,
     configuration, prompt files and plugin set (principle 15). Restarts
     it requests are rate-limited by operator config, so an edit-restart
@@ -1723,7 +1726,7 @@ record that holds the reasoning.
 | No process separation until corvidae runs on a machine the operator does not own | §3.5.5; `threat-model.md`, Privilege separation |
 | Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject, ungated beyond trust inheritance; the self-model compile reads only facts above a trust floor and sends the operator each diff; interoception line and self-model compile; commitment records and endogenous goal candidates | §3.7; §3.12.9; PR #48 |
 | No runtime plugin loading; changing the plugin set is a restart, which the agent may request (rate-limited) | #28; principle 15 |
-| A kernel container image exists, built when a second deployment needed one; extras are a build argument, the daemon runs non-root, and the image is not a tool sandbox | §3.11.12; #37; #532 |
+| A container image exists, built when a second deployment needed one; it installs every extra by default (`EXTRAS` narrows it, empty is the bare kernel), the daemon runs non-root, and the image is not a tool sandbox | §3.11.12; #37; #532; operator, 2026-11-10 |
 | Topic structure is the `topic` subject's job, not a retrieval dimension | §3.7 Memory 7 |
 | Per-turn tool filtering and per-turn system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). A per-call tool veto and per-channel tool sets, fixed per conversation, are tracked with the trust plugin (#138); a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |
 | The kernel owns the clock; idle keeps firing through quiet, and no plugin needs another's queues to learn of it; idle reaches plugins by push | #167; #165 |

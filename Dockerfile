@@ -1,7 +1,9 @@
-# Corvidae kernel image (PRD §3.11.12, #37).
+# Corvidae container image (PRD §3.11.12, #37). Batteries included: every
+# extra (Discord, the cognition plugins, ...) is installed by default.
 #
 #   docker build -t corvidae .
-#   docker build -t corvidae --build-arg EXTRAS="discord" .   # opt-in extras
+#   docker build -t corvidae --build-arg EXTRAS="discord" .   # just these extras
+#   docker build -t corvidae --build-arg EXTRAS="" .          # the bare kernel
 #
 # `/data` is the working directory: bind-mount a directory holding agent.yaml
 # there and sessions.db, logs and state/ land beside it. No port is exposed;
@@ -27,8 +29,10 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     UV_LINK_MODE=copy \
     UV_NO_EDITABLE=1
 
-# Extras are opt-in, space separated (e.g. "discord acp"). Empty is the kernel.
-ARG EXTRAS=""
+# Extras to install, space separated. The default is every extra in
+# pyproject.toml except `dev`; tests/test_dockerfile.py fails if this list and
+# pyproject.toml drift apart. "" builds the bare kernel.
+ARG EXTRAS="acp discord cognition cross-channel-send webhook-notify context-panel restart timepiece inotify"
 
 WORKDIR /build
 
