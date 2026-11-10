@@ -1146,7 +1146,7 @@ The plugin reads and writes files under `<config_dir>/state/`:
 
 Requires the timepiece extra (`--extra timepiece` on your `uv sync` line). Without the block the plugin runs with its defaults; to turn it off, list `timepiece` in `plugins.disabled`.
 
-Before a turn, if the channel has had no stamp for `interval_minutes`, the plugin appends one CONTEXT line to the conversation, such as `The current date and time are now Monday 2026-11-09 at 17:12 PST`. Every channel that takes a turn is stamped, internal ones included. The line is persisted like any CONTEXT row and survives compaction. The last-stamp times are kept in memory, so the first turn on each channel after a restart is stamped. It adds no tool and starts no turn.
+Before a turn, if the channel has had no stamp for `interval_minutes`, the plugin appends one CONTEXT line to the conversation, such as `The current date and time are now Monday 2026-11-09 at 17:12 PST`. Every channel that takes a turn is stamped, internal ones included. The line is persisted like any CONTEXT row. The last-stamp times are kept in memory, so the first turn on each channel after a restart is stamped. It adds no tool and starts no turn.
 
 ```yaml
 timepiece:
@@ -1157,7 +1157,7 @@ timepiece:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `timepiece.interval_minutes` | number | `10` | Minimum minutes between stamps on one channel. Must be a number > 0 (bools are rejected). |
+| `timepiece.interval_minutes` | number | `10` | Minimum minutes between stamps on one channel. Must be a number > 0. |
 | `timepiece.timezone` | string | daemon's local time | IANA timezone name for the stamp. Must name a known zone. |
 | `timepiece.format` | string | `"%A %Y-%m-%d at %H:%M %Z"` | `strftime` format for the time in the stamp. Must be a non-empty string. |
 
@@ -1167,7 +1167,7 @@ A malformed key fails startup naming the key and the value. Restart to apply a c
 
 ## `inotify_ping` — completion pings for background jobs
 
-Requires the inotify extra (`--extra inotify` on your `uv sync` line). Linux only: it calls libc's inotify directly.
+Requires the inotify extra (`--extra inotify` on your `uv sync` line). Linux only.
 
 Watches files, typically the logs of jobs the agent started in the background, and sends a notification to one channel when a watched file has been written and then stays quiet for `debounce_seconds`. A burst of writes yields one ping, and the watch re-arms after each, so a long-lived log pings again after its next burst. The notification text is `[inotify] <path> settled — background work likely complete`, with `origin=inotify`. It does not include the file's contents. Off unless `enabled: true`.
 
@@ -1187,6 +1187,6 @@ inotify_ping:
 | `inotify_ping.channel` | string | none | Channel id (`transport:scope`) that receives the pings. Required when enabled. Resolved when a ping fires, so a channel not yet loaded still works; a ping to a channel that can't be resolved is dropped with a `WARNING`. |
 | `inotify_ping.debounce_seconds` | number | `5` | Quiet period, in seconds, after the last write before a file counts as settled. Must be a number ≥ 0. |
 | `inotify_ping.paths` | list of strings | none | Files to watch. Required when enabled; must be a non-empty list of non-empty strings. A file that doesn't exist yet is watched through its parent directory, so it can appear later. A path whose parent doesn't exist either is skipped with a `WARNING`. |
-| `inotify_ping.terminal_marker` | string or null | `null` | When set, a settled file pings only if its last non-empty line contains this text, so a pause in the middle of a job is not reported as completion. |
+| `inotify_ping.terminal_marker` | string or null | `null` | When set, a settled file pings only if its last non-empty line contains this text, so a pause in the middle of a job is not reported as completion. Must be a non-empty string or null. |
 
 A malformed block fails startup naming the key and the value. The whole section reloads live: a reload re-validates it and re-arms the watches, and setting `enabled: false` stops them.
