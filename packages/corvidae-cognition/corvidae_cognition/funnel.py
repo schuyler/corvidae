@@ -21,12 +21,19 @@ Two admission paths:
 
 Behavior, in order:
   1. Dedupe: drop any entry whose exact text already appears inside a
-     CONTEXT message in the window.
+     CONTEXT message in the window. A caller may instead give each entry a
+     key (``keys=``, #624); then an entry is a duplicate when its key
+     appears inside a CONTEXT message framed for the same source, so a
+     stable identity (memory's record id) dedupes even when the rendered
+     line (its age, its band) reads differently now.
   2. Budget: token-count entries and admit them in given order, skipping
      any entry that would overrun what is left of the budget; the drop
-     count is logged, never silent. In the deferred drain, an entry larger
-     than its source's whole budget is dropped with a warning rather than
-     re-queued, since it can never fit.
+     count is logged, never silent. When the source has a window cap
+     (``funnel.window_budgets.<source>``), the budget is also limited to
+     what is left under the cap after the source's CONTEXT already in the
+     window. In the deferred drain, an entry larger than its source's whole
+     budget or cap is dropped with a warning rather than re-queued, since
+     it can never fit.
   3. Frame: wrap admitted entries in explicit data-not-instructions
      framing with a source label (injection defense — everything the
      funnel admits is data that arrived, not instructions).
@@ -39,6 +46,8 @@ Config:
       default_budget: 512      # tokens per admit() call
       budgets:                 # optional per-source overrides
         memory: 512
+      window_budgets:          # optional per-source window caps (unset: none)
+        memory: 4096
 """
 
 from __future__ import annotations
@@ -63,6 +72,54 @@ FRAME_HEADER = (
 FRAME_FOOTER = "[end CONTEXT from {source}]"
 
 
+def _read_window_budgets(raw: object) -> dict[str, int]:
+    """Validate ``funnel.window_budgets`` into ``{source: cap}``.
+
+    A missing key means no caps. A non-mapping value, or a source whose cap
+    is not a non-negative integer, logs a warning naming the key, the value
+    and what is accepted, and is ignored (that source stays uncapped).
+    """
+    # Unset: no source is capped.
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning(
+            "funnel.window_budgets must be a mapping of source name to a "
+            "non-negative integer token cap, got %r; ignoring it, so no "
+            "source is capped — fix funnel.window_budgets in agent.yaml",
+            raw,
+        )
+        return {}
+    caps: dict[str, int] = {}
+    for source, cap in raw.items():
+        # bool is an int subclass, but True is not a token count.
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 0:
+            logger.warning(
+                "funnel.window_budgets.%s must be a non-negative integer "
+                "token cap, got %r; ignoring it, so %s is uncapped — fix "
+                "funnel.window_budgets.%s in agent.yaml",
+                source, cap, source, source,
+            )
+            continue
+        caps[source] = cap
+    return caps
+
+
+def _source_rows(conv: ContextWindow, source: str) -> list[str]:
+    """Contents of the window's CONTEXT rows framed for ``source``.
+
+    The funnel opens every row it writes with the source's frame header, so
+    the header identifies which source a row came from.
+    """
+    header = FRAME_HEADER.format(source=source)
+    return [
+        content
+        for msg in conv.messages
+        if msg.get("_message_type") == MessageType.CONTEXT
+        and (content := msg.get("content") or "").startswith(header)
+    ]
+
+
 @dataclass(frozen=True)
 class Admission:
     """What one ``admit_detailed`` call did with its entries (#407).
@@ -80,6 +137,7 @@ class FunnelPlugin(CorvidaePlugin):
     reloadable_keys = (
         "funnel.default_budget",
         "funnel.budgets",
+        "funnel.window_budgets",
     )
 
     """The single admission point for tail CONTEXT entries."""
@@ -92,6 +150,8 @@ class FunnelPlugin(CorvidaePlugin):
             self.pm = pm
         self._default_budget: int = DEFAULT_BUDGET_TOKENS
         self._budgets: dict[str, int] = {}
+        # Per-source caps on what one window holds (funnel.window_budgets).
+        self._window_budgets: dict[str, int] = {}
         # Deferred-registration state (WP2.6), keyed (channel.id, origin).
         # _deferred queues (source, entries) payloads awaiting a drain;
         # _stub_pending marks pairs whose wake stub has fired but whose
@@ -112,13 +172,15 @@ class FunnelPlugin(CorvidaePlugin):
         funnel_cfg = config.get("funnel", {}) or {}
         self._default_budget = funnel_cfg.get("default_budget", DEFAULT_BUDGET_TOKENS)
         self._budgets = dict(funnel_cfg.get("budgets", {}) or {})
+        self._window_budgets = _read_window_budgets(funnel_cfg.get("window_budgets"))
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
-        """Re-read budgets on config reload."""
+        """Re-read budgets and window caps on config reload."""
         funnel_cfg = config.get("funnel", {}) or {}
         self._default_budget = funnel_cfg.get("default_budget", DEFAULT_BUDGET_TOKENS)
         self._budgets = dict(funnel_cfg.get("budgets", {}) or {})
+        self._window_budgets = _read_window_budgets(funnel_cfg.get("window_budgets"))
 
     def register(self, channel, source: str, entries: list[str]) -> None:
         """Queue a payload for the channel's next turn, without waking it.
@@ -308,11 +370,26 @@ class FunnelPlugin(CorvidaePlugin):
 
         Each dropped entry is logged at warning level with the channel, the
         source, its token count, the budget and the config key that fixes it.
+        An entry larger than the source's window cap
+        (``funnel.window_budgets.<source>``) can never fit either, and is
+        dropped the same way.
         """
         budget = self._budgets.get(source, self._default_budget)
+        cap = self._window_budgets.get(source)
         kept: list[str] = []
         for entry in entries:
             entry_tokens = count_tokens(entry)
+            # Larger than the whole window cap: no compaction makes room.
+            if cap is not None and entry_tokens > cap:
+                logger.warning(
+                    "funnel dropped a deferred %s entry for %s: %d tokens "
+                    "exceeds the %d-token window cap, so it can never be "
+                    "admitted; raise funnel.window_budgets.%s to admit "
+                    "entries this size",
+                    source, channel_id, entry_tokens, cap, source,
+                    extra={"channel_id": channel_id, "source": source},
+                )
+                continue
             if entry_tokens > budget:
                 logger.warning(
                     "funnel dropped a deferred %s entry for %s: %d tokens "
@@ -332,11 +409,12 @@ class FunnelPlugin(CorvidaePlugin):
         source: str,
         entries: list[str],
         budget_tokens: int | None = None,
+        keys: list[str] | None = None,
     ) -> list[str]:
         """Admit entries (see ``admit_detailed``); return only the admitted ones."""
         return (
             await self.admit_detailed(
-                channel, conv, source, entries, budget_tokens
+                channel, conv, source, entries, budget_tokens, keys=keys
             )
         ).admitted
 
@@ -347,6 +425,7 @@ class FunnelPlugin(CorvidaePlugin):
         source: str,
         entries: list[str],
         budget_tokens: int | None = None,
+        keys: list[str] | None = None,
     ) -> Admission:
         """Admit pre-formatted entries as one framed CONTEXT message.
 
@@ -357,29 +436,54 @@ class FunnelPlugin(CorvidaePlugin):
                 the frame.
             entries: Pre-formatted lines, one per entry, in priority order.
             budget_tokens: Explicit token budget; None resolves
-                funnel.budgets.<source>, then funnel.default_budget.
+                funnel.budgets.<source>, then funnel.default_budget. The
+                source's window cap, when set, limits it either way.
+            keys: Optional dedupe keys, one per entry (#624). With keys, an
+                entry is a duplicate when its key appears in a CONTEXT row
+                framed for ``source``; without, when its whole text appears
+                in any CONTEXT row.
 
         Returns:
             An Admission: the admitted entries (empty list means nothing was
             appended) and the entries dropped as duplicates of window CONTEXT.
             Callers identify entries by exact equality, not by substring
             search against the framed window content.
+
+        Raises:
+            ValueError: ``keys`` is given with a length other than
+                ``entries``'s.
         """
+        # A key list must pair one key with each entry.
+        if keys is not None and len(keys) != len(entries):
+            raise ValueError(
+                f"funnel.admit_detailed for source {source!r} got "
+                f"{len(keys)} keys for {len(entries)} entries; pass one key "
+                f"per entry, or no keys"
+            )
         if budget_tokens is None:
             budget_tokens = self._budgets.get(source, self._default_budget)
 
         # 1. Dedupe against CONTEXT already in the window (§2.2). A linear
         # scan is fine at window scale; entries live inside framed blocks,
-        # so substring containment is the match.
-        window_context = [
-            msg.get("content") or ""
-            for msg in conv.messages
-            if msg.get("_message_type") == MessageType.CONTEXT
-        ]
-        fresh = [
-            entry for entry in entries
-            if not any(entry in existing for existing in window_context)
-        ]
+        # so substring containment is the match. Keyed entries match their
+        # key against this source's rows only; keyless ones match their whole
+        # text against every CONTEXT row.
+        if keys is None:
+            window_context = [
+                msg.get("content") or ""
+                for msg in conv.messages
+                if msg.get("_message_type") == MessageType.CONTEXT
+            ]
+            fresh = [
+                entry for entry in entries
+                if not any(entry in existing for existing in window_context)
+            ]
+        else:
+            own_rows = _source_rows(conv, source)
+            fresh = [
+                entry for entry, key in zip(entries, keys)
+                if not any(key in existing for existing in own_rows)
+            ]
         # Entries the dedupe dropped, for the caller's outcome log.
         duplicate = [entry for entry in entries if entry not in fresh]
         deduped_count = len(entries) - len(fresh)
@@ -390,6 +494,19 @@ class FunnelPlugin(CorvidaePlugin):
                 extra={"channel_id": conv.channel_id, "source": source},
             )
 
+        # The window cap: the source may add only what is left under it
+        # after its CONTEXT already in the window (frames included).
+        # shortcut: new entries are charged without their frame, so the
+        # window can pass the cap by one frame; charge it if caps under ~200
+        # tokens matter.
+        cap = self._window_budgets.get(source)
+        room: int | None = None
+        held = 0
+        if cap is not None:
+            held = sum(count_tokens(row) for row in _source_rows(conv, source))
+            room = max(cap - held, 0)
+        limit = budget_tokens if room is None else min(budget_tokens, room)
+
         # 2. Budget: admit in given order, skipping any entry that would
         # overrun what's left, so one large entry never blocks smaller ones
         # after it (#603 design §6). Drops are logged, never silent.
@@ -397,12 +514,23 @@ class FunnelPlugin(CorvidaePlugin):
         spent = 0
         for entry in fresh:
             entry_tokens = count_tokens(entry)
-            if spent + entry_tokens > budget_tokens:
+            if spent + entry_tokens > limit:
                 continue
             spent += entry_tokens
             admitted.append(entry)
         dropped = len(fresh) - len(admitted)
-        if dropped:
+        if dropped and room is not None and room < budget_tokens:
+            # The window cap bound, not the per-call budget.
+            logger.info(
+                "funnel dropped %d %s entr%s for %s: the window holds %d of "
+                "its %d-token cap (per-call budget %d); compaction frees "
+                "room, or raise funnel.window_budgets.%s",
+                dropped, source, "y" if dropped == 1 else "ies",
+                conv.channel_id, held, cap,
+                budget_tokens, source,
+                extra={"channel_id": conv.channel_id, "source": source},
+            )
+        elif dropped:
             logger.info(
                 "funnel dropped %d entr%s over the %d-token budget",
                 dropped, "y" if dropped == 1 else "ies", budget_tokens,

@@ -324,11 +324,10 @@ class TestDedupeAndStats:
         await db.close()
 
     async def test_budget_dropped_record_is_not_credited(self):
-        """Bug I-1 regression: when A's formatted line is a substring of B's
-        formatted line, and only B is admitted (A is budget-dropped), the old
-        substring-search code (`line_A in appended`) falsely credits A via the
-        containment check.  The fixed code compares against the list of admitted
-        lines returned by FunnelPlugin.admit, so only exact matches count."""
+        """Bug I-1 regression: only B is admitted and A is budget-dropped, so
+        only B's access stats move. Records are credited from the exact lines
+        FunnelPlugin.admit_detailed returns, never by substring search of the
+        framed window content."""
         from corvidae.context import count_tokens
 
         # Both memories band strong (band_on: similarity with thresholds at
