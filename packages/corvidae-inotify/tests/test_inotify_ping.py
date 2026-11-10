@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+import pytest
+
 import asyncio
 import struct
 
@@ -284,7 +287,7 @@ async def test_directory_watch_file_created_after_arm(tmp_path):
     await plugin.on_start({})
     await _wait_armed(plugin)
     # the watch degraded to a directory watch filtered on the basename
-    assert any(fn == "late.log" for _p, fn in plugin._wd_info.values())
+    assert any(fn == "late.log" for entries in plugin._wd_info.values() for _p, fn in entries)
     # now the job creates + writes the file
     target.write_text("start\nwork\n")
     await asyncio.sleep(0.7)

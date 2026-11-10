@@ -41,6 +41,7 @@ import os
 import select
 import struct
 import threading
+from threading import Lock
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,7 +52,14 @@ logger = logging.getLogger("corvidae.inotify_ping")
 
 # --- libc inotify bindings (no pip dependency) --------------------------------
 
-_libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+_libc: ctypes.CDLL | None = None
+
+
+def _get_libc() -> ctypes.CDLL:
+    global _libc
+    if _libc is None:
+        _libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+    return _libc
 
 IN_MODIFY = 0x2
 IN_CLOSE_WRITE = 0x8
@@ -66,7 +74,7 @@ _EVENT_BASE = struct.calcsize(_EVENT_FMT)  # 16 bytes
 
 
 def _inotify_init() -> int:
-    fd = _libc.inotify_init()
+    fd = _get_libc().inotify_init()
     if fd < 0:
         raise OSError(ctypes.get_errno(), "inotify_init failed")
     return fd
@@ -75,14 +83,14 @@ def _inotify_init() -> int:
 def _inotify_add_watch(fd: int, path: str, mask: int) -> int:
     if isinstance(path, str):
         path = path.encode("utf-8")
-    wd = _libc.inotify_add_watch(fd, path, mask)
+    wd = _get_libc().inotify_add_watch(fd, path, mask)
     if wd < 0:
         raise OSError(ctypes.get_errno(), f"inotify_add_watch({path!r}) failed")
     return wd
 
 
 def _inotify_rm_watch(fd: int, wd: int) -> None:
-    _libc.inotify_rm_watch(fd, wd)
+    _get_libc().inotify_rm_watch(fd, wd)
 
 
 def parse_events(buf: bytes) -> list[tuple[int, int, str]]:
@@ -239,7 +247,8 @@ class InotifyPingPlugin(CorvidaePlugin):
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._wd_info: dict[int, tuple[str, str | None]] = {}
+        self._wd_info: dict[int, list[tuple[str, str | None]]] = {}
+        self._wd_lock = Lock()
         self._settle_tasks: dict[str, asyncio.Task] = {}
         self._arm_task: asyncio.Task | None = None
 
@@ -265,7 +274,11 @@ class InotifyPingPlugin(CorvidaePlugin):
 
     async def _wait_and_arm(self) -> None:
         await self._wait_for_agent()
-        self._arm_watches()
+        try:
+            self._arm_watches()
+        except OSError as exc:
+            logger.error("inotify_ping: arm failed: %s", exc)
+            self._fd = None
 
     async def _wait_for_agent(self) -> None:
         """Block until the Agent can take notifications (the guide's requirement).
@@ -293,25 +306,26 @@ class InotifyPingPlugin(CorvidaePlugin):
         self._reset_watches()
 
     def _reset_watches(self) -> None:
-        for wd in list(self._wd_info):
-            try:
-                _inotify_rm_watch(self._fd, wd)
-            except OSError:
-                pass
-        self._wd_info.clear()
-        n_file = n_dir = 0
-        for path in self._config.paths:
-            watch_path, filter_name = watch_target(path)
-            try:
-                wd = _inotify_add_watch(self._fd, watch_path, WRITE_MASK)
-            except OSError as exc:
-                logger.warning("inotify_ping: could not watch %s: %s", path, exc)
-                continue
-            self._wd_info[wd] = (path, filter_name)
-            if filter_name is None:
-                n_file += 1
-            else:
-                n_dir += 1
+        with self._wd_lock:
+            for wd in list(self._wd_info):
+                try:
+                    _inotify_rm_watch(self._fd, wd)
+                except OSError:
+                    pass
+            self._wd_info.clear()
+            n_file = n_dir = 0
+            for p in self._config.paths:
+                watch_path, filter_name = watch_target(p)
+                try:
+                    wd = _inotify_add_watch(self._fd, watch_path, WRITE_MASK)
+                except OSError as exc:
+                    logger.warning("inotify_ping: could not watch %s: %s", p, exc)
+                    continue
+                self._wd_info.setdefault(wd, []).append((p, filter_name))
+                if filter_name is None:
+                    n_file += 1
+                else:
+                    n_dir += 1
         logger.info(
             "inotify_ping: armed %d/%d watches (%d file, %d dir) -> channel %r (debounce %.1fs)",
             len(self._wd_info), len(self._config.paths), n_file, n_dir,
@@ -334,14 +348,20 @@ class InotifyPingPlugin(CorvidaePlugin):
             if not data:
                 continue
             for wd, mask, name in parse_events(data):
-                info = self._wd_info.get(wd)
-                if info is None or classify(mask) is None:
+                with self._wd_lock:
+                    targets = list(self._wd_info.get(wd, []))
+                if not targets or classify(mask) is None:
                     continue
-                target_path, filter_name = info
-                if filter_name is not None and name != filter_name:
-                    continue  # directory watch: the event is for a different file
-                if self._loop is not None:
-                    asyncio.run_coroutine_threadsafe(self._on_fs_event(target_path), self._loop)
+                for target_path, filter_name in targets:
+                    if filter_name is not None and name != filter_name:
+                        continue
+                    if self._loop is not None:
+                        asyncio.run_coroutine_threadsafe(
+                            self._on_fs_event(target_path), self._loop
+                        )
+        # Thread is exiting: clear the fd so a subsequent reload can re-arm.
+        logger.warning("inotify_ping: watcher thread exiting")
+        self._fd = None
 
     async def _on_fs_event(self, path: str) -> None:
         """Coalesce: cancel any pending settle for this path, start a fresh one."""
@@ -366,6 +386,8 @@ class InotifyPingPlugin(CorvidaePlugin):
         await self._emit_ping(path)
 
     async def _emit_ping(self, path: str) -> None:
+        if not self._enabled:
+            return
         channel = None
         try:
             registry = get_dependency(self.pm, "registry", ChannelRegistry)
@@ -394,16 +416,19 @@ class InotifyPingPlugin(CorvidaePlugin):
         if not new_config.enabled:
             self._enabled = False
             await self._cancel_arm()
+            for task in list(self._settle_tasks.values()):
+                task.cancel()
+            self._settle_tasks.clear()
             self._disarm()
             return
         self._config = new_config
         self._enabled = True
         if self._fd is not None:
             self._reset_watches()
-        # else: the background arm task (or on_start) will arm once the
-        # agent is up; if the task already completed, re-arm now.
-        elif self._arm_task is not None and self._arm_task.done():
-            self._arm_watches()
+        else:
+            # No active fd: spawn a fresh arm task (covers disabled->enabled
+            # and enabled->disabled->enabled transitions).
+            self._arm_task = asyncio.ensure_future(self._wait_and_arm())
 
     def _disarm(self) -> None:
         self._stop.set()
@@ -416,7 +441,8 @@ class InotifyPingPlugin(CorvidaePlugin):
                 pass
         self._fd = None
         self._thread = None
-        self._wd_info.clear()
+        with self._wd_lock:
+            self._wd_info.clear()
 
     @hookimpl
     async def on_stop(self) -> None:
