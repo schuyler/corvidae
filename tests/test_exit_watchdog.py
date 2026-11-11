@@ -157,6 +157,9 @@ def test_leaked_thread_forces_exit_1_with_warning(tmp_path, raise_on_stop):
         # R2: the line names the leaked thread and the config key.
         assert "_connection_worker_thread" in output, output
         assert "daemon.exit_timeout" in output, output
+        if raise_on_stop:
+            # Case (b) really went through a raising on_stop.
+            assert "raiser: on_stop failed" in output, output
     finally:
         child.kill()
 

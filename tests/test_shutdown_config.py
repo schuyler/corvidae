@@ -57,7 +57,9 @@ def test_arm_exit_watchdog_none_starts_no_thread():
     from corvidae.shutdown import arm_exit_watchdog
 
     before = set(threading.enumerate())
-    arm_exit_watchdog(None)
+    # Patched so a wrong implementation's thread can't kill the pytest run.
+    with patch("os._exit"):
+        arm_exit_watchdog(None)
     # Any thread started by the call would show up here.
     assert set(threading.enumerate()) - before == set()
 
