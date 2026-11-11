@@ -503,12 +503,11 @@ class TaskPlugin(CorvidaePlugin):
         """Deliver a background result through the spill service, cut at the cap.
 
         The cap is ``tools.max_result_chars``, read at delivery. Returns True
-        when the notification
-        was delivered; False when there is no cap or no service to cut with, and
-        the caller delivers it whole.
+        when the notification was delivered; False when there is no cap or no
+        service to cut with, and the caller delivers it whole.
         """
-        # Imported here: spill imports the tool collection, which this module
-        # must not pull in at import time.
+        # Imported at call time to keep this module's own imports to the queue
+        # and hooks. Nothing forces it: there is no import cycle today.
         from corvidae.spill import NotificationSpill
         from corvidae.tool_collection import ToolCollectionPlugin
 
