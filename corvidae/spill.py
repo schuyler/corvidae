@@ -52,6 +52,8 @@ DEFAULT_MAX_AGE_DAYS: float = 7
 CLEANUP_INTERVAL_SECONDS = 3600.0
 #: The only names the service writes or deletes.
 SPILL_NAME = re.compile(r"[0-9a-f]{32}\.txt")
+#: A spill file name inside longer text, such as a tool call's argument.
+SPILL_NAME_IN_TEXT = re.compile(r"(?<![0-9a-f])[0-9a-f]{32}\.txt")
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,7 @@ class Cut:
     path: str | None = None  # spill file path; set only when this channel gets a pointer
     spilled: int | None = None  # characters in the file; set with path
     failed: bool = False  # this channel can read spills, but the write failed
+    source: str | None = None  # who the item came from, kept on the row (#576)
 
 
 _current_cut: contextvars.ContextVar[Cut | None] = contextvars.ContextVar(
@@ -170,6 +173,7 @@ class NotificationSpill(CorvidaePlugin):
                 path=str(path) if reads and path else None,
                 spilled=spilled if reads and path else None,
                 failed=reads and failed,
+                source=source,
             )
             token = _current_cut.set(cut)
             try:
@@ -190,6 +194,7 @@ class NotificationSpill(CorvidaePlugin):
         return Cut(
             shown=limit, total=len(text),
             path=str(path) if path else None, spilled=spilled, failed=failed,
+            source=source,
         )
 
     def can_read(self, channel: Channel, tools: dict | None = None) -> bool:

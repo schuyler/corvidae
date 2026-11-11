@@ -1378,8 +1378,8 @@ role:
 - notification: `origin_channel` and `origin_trace`, read from the
   attribution of the code that called `on_notify`; and, for a notification
   the spill service cut, `cut_shown`, `cut_total`, `spill_path`,
-  `spill_chars` and `spill_failed` (see [Notification
-  spill](#notification-spill-spillpy));
+  `spill_chars`, `spill_failed` and `cut_source` (who sent it; see
+  [Notification spill](#notification-spill-spillpy));
 - tool result: the cut fields above when the Agent cut it (see [Tool
   results](#tool-results)); `tool` and `target`, the dispatched call's name and the first
   argument naming another registered channel, set by `on_notify` with a
@@ -1497,8 +1497,18 @@ fenced too.
 
 The flag is stamped into the row's provenance record when the result is
 built, so a later change to a declaration does not re-render history. The
-header names no spill source: it says the content is untrusted, not that it
-came from a notification's spill file (#576). The estimator counts the stored
+header of a result that read a spill file back also names where the content
+came from (#576). `Agent.on_notify` finds the one spill-directory path in the
+call's arguments and asks `PersistencePlugin.find_spill_source` for the
+`cut_source` on the log row that cut it (matched by file name, decoding each
+candidate row; a scan, since message_log has no index on the path), then
+stamps it into the result's provenance as `spill_source`, so a reload renders
+`[metadata: content spilled from <source>]` from the stored row alone, after
+the file and the row are swept. The source is cleaned like any header value:
+a webhook origin is sender-chosen. A call naming no spill file, or two, is
+stamped with nothing; a file with no row (pruned, from before sources were
+recorded, or no persistence service) is still fenced, with no source line and
+a WARNING naming the file. The estimator counts the stored
 row, not the added framing, so a fenced row costs more tokens than it is
 estimated at (#577).
 
