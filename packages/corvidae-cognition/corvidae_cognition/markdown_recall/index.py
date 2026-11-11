@@ -175,9 +175,11 @@ class MarkdownIndex:
             self._roots = [Path(root)]
         # Backward-compat alias: _root is the first root (single-root mode).
         self._root = self._roots[0]
+        # Resolve roots once at construction (avoids CWD desync).
+        self._roots = [r.resolve() for r in self._roots]
         # Precomputed name→root map for fast _resolve_path lookups.
         self._root_by_name: dict[str, Path] = {
-            r.resolve().name: r for r in self._roots
+            r.name: r for r in self._roots
         }
         self._db_path = Path(db_path)
         self._get_client = get_client
@@ -346,7 +348,7 @@ class MarkdownIndex:
                     root,
                 )
                 return None  # any root unreadable: keep the old index
-            prefix = root.resolve().name if multi else ""
+            prefix = root.name if multi else ""
             try:
                 for p in root.rglob("*.md"):
                     if p.is_symlink():
@@ -373,7 +375,7 @@ class MarkdownIndex:
         """Resolve a (possibly namespaced) index path to a filesystem path.
 
         Single-root: path is relative to the root.
-        Multi-root: path is \`<root_basename>/relative\`; look up the root
+        Multi-root: path is <root_basename>/relative; look up the root
         by basename. Validates containment against the matched root to
         prevent path traversal.
         """
@@ -392,13 +394,13 @@ class MarkdownIndex:
             raise FileNotFoundError(
                 f"markdown recall: multi-root path {path!r} has no root prefix"
             )
-        # Containment check: resolve and verify the path is under the
-        # matched root (not any configured root).
-        resolved = candidate.resolve()
-        if not resolved.is_relative_to(matched_root.resolve()):
-            raise FileNotFoundError(
-                f"markdown recall: path {path!r} escapes the root directory"
-            )
+        # Containment check (multi-root only; single-root path is unchanged).
+        if len(self._roots) > 1:
+            resolved = candidate.resolve()
+            if not resolved.is_relative_to(matched_root.resolve()):
+                raise FileNotFoundError(
+                    f"markdown recall: path {path!r} escapes the root directory"
+                )
         return candidate
 
     @staticmethod
@@ -457,27 +459,32 @@ class MarkdownIndex:
                 return
 
             # Per-root check: a present-but-empty root (transient unmount)
-            # must not prune its rows. If a root prefix has manifest entries
-            # but zero files in the walk, abort.
+            # must not prune its rows. Collect the set of "frozen" prefixes
+            # (manifest has entries, walk found none) and skip pruning for
+            # those prefixes while still applying the diff for present roots.
+            frozen_prefixes: set[str] = set()
             if len(self._roots) > 1 and manifest_count > 0:
                 walk_prefixes = {
                     p.split("/", 1)[0] for p in files if "/" in p
                 }
+                prefix_counts: dict[str, int] = {}
                 async with db.execute(
-                    "SELECT DISTINCT path FROM manifest"
+                    "SELECT path FROM manifest"
                 ) as cursor:
                     async for r in cursor:
                         mp = r["path"]
                         if "/" in mp:
-                            prefix = mp.split("/", 1)[0]
-                            if prefix not in walk_prefixes:
-                                logger.warning(
-                                    "markdown recall: root %r has %d manifest "
-                                    "entries but zero files in the walk; "
-                                    "kept the old index (transient unmount?)",
-                                    prefix, manifest_count,
-                                )
-                                return
+                            pfx = mp.split("/", 1)[0]
+                            prefix_counts[pfx] = prefix_counts.get(pfx, 0) + 1
+                for pfx, cnt in prefix_counts.items():
+                    if pfx not in walk_prefixes:
+                        logger.warning(
+                            "markdown recall: root %r has %d manifest entries "
+                            "but zero files in the walk; skipping prune for "
+                            "this prefix (transient unmount?)",
+                            pfx, cnt,
+                        )
+                        frozen_prefixes.add(pfx)
 
             # An encoder/chunker change rebuilds everything.
             if self._encoder_mismatch:
@@ -499,7 +506,12 @@ class MarkdownIndex:
                 await self._reconcile_file(db, path, size, mtime_ns, prev)
 
             # Missing files: in the manifest, not in the walk.
+            # Skip frozen prefixes (transient unmount protection).
             for path in set(current) - set(files):
+                if "/" in path:
+                    pfx = path.split("/", 1)[0]
+                    if pfx in frozen_prefixes:
+                        continue
                 await self._delete_file(db, path)
             await db.commit()
 

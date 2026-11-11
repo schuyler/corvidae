@@ -267,12 +267,14 @@ async def test_on_stop_cancels_active_startup_task(build, tmp_path):
 
 
 async def test_roots_list_config(build, tmp_path):
-    """markdown_recall.roots (list) is accepted and passed to the index."""
+    """markdown_recall.roots (list) is accepted, passed to the index,
+    and reconciles correctly."""
     values = tmp_path / "values"
     skills = tmp_path / "skills"
     values.mkdir()
     skills.mkdir()
     (values / "test.md").write_text("# Test")
+    (skills / "skill.md").write_text("# Skill")
 
     env = await build(
         {"markdown_recall": {"roots": [str(values), str(skills)]}},
@@ -280,6 +282,15 @@ async def test_roots_list_config(build, tmp_path):
     )
     assert isinstance(env.source._root, list)
     assert len(env.source._root) == 2
+    # The index received the multi-root config
+    assert len(env.source._index._roots) == 2
+    # Reconcile works end-to-end through the plugin
+    await env.source._index.reconcile()
+    async with env.source._index._db.execute(
+        "SELECT count(*) FROM manifest"
+    ) as cur:
+        (count,) = await cur.fetchone()
+    assert count == 2
     await env.source.on_stop()
 
 
