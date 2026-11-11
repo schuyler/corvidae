@@ -63,7 +63,7 @@ def _get_libc() -> ctypes.CDLL:
 
 IN_MODIFY = 0x2
 IN_CLOSE_WRITE = 0x8
-IN_MOVED_TO = 0x40
+IN_MOVED_TO = 0x80  # the kernel's value; 0x40 is IN_MOVED_FROM (#723)
 IN_DELETE = 0x200
 # The masks that mean "the file's content changed" and should count as activity.
 WRITE_MASK = IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO
