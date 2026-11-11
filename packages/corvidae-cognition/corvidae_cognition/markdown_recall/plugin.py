@@ -78,7 +78,11 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
         # Multi-root: accept roots (list) or root (single, backward compat).
         roots_raw = config_value(config, "markdown_recall.roots", None)
         if roots_raw is not None:
-            if not isinstance(roots_raw, list) or not all(isinstance(r, str) for r in roots_raw):
+            if not isinstance(roots_raw, list) or not roots_raw:
+                raise ValueError(
+                    "Config error: markdown_recall.roots must be a non-empty list of strings"
+                )
+            if not all(isinstance(r, str) for r in roots_raw):
                 raise ValueError(
                     "Config error: markdown_recall.roots must be a list of strings"
                 )

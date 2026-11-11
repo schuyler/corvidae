@@ -234,6 +234,10 @@ class TestMultiRoot:
         files = idx._walk()
         assert "values/radio.md" in files
         assert "skills/radio.md" in files
+        # Manifest has rows for both files (proves _resolve_path worked)
+        async with idx._db.execute("SELECT count(*) FROM manifest") as cur:
+            (count,) = await cur.fetchone()
+        assert count == 2, f"expected 2 manifest rows, got {count}"
         await idx.close()
 
     async def test_single_root_unnamespaced(self, tmp_path):
@@ -262,6 +266,24 @@ class TestMultiRoot:
         assert files is not None
         assert "values/radio.md" in files  # multi-root mode (2 roots in list)
         await idx.close()
+
+    async def test_same_basename_rejected(self, tmp_path):
+        """Two roots with the same basename are rejected at construction."""
+        root_a = tmp_path / "work" / "values"
+        root_b = tmp_path / "personal" / "values"
+        root_a.mkdir(parents=True)
+        root_b.mkdir(parents=True)
+        (root_a / "a.md").write_text("# A")
+        (root_b / "b.md").write_text("# B")
+        import pytest
+        with pytest.raises(ValueError, match="duplicate root basename"):
+            MarkdownIndex(
+                root=[root_a, root_b],
+                db_path=tmp_path / "index.db",
+                get_client=lambda: FakeEmbed(),
+                get_identity=lambda: IDENTITY,
+            )
+        await idx.close() if False else None
 
     async def test_all_roots_unreadable(self, tmp_path):
         """All roots unreadable: _walk returns None."""

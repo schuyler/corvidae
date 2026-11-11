@@ -137,7 +137,20 @@ class MarkdownIndex:
     ) -> None:
         # Accept a single root (backward compat) or a list of roots.
         if isinstance(root, list):
+            if not root:
+                raise ValueError("markdown_recall: roots list is empty")
             self._roots = [Path(r) for r in root]
+            # Same-basename roots collide in the namespaced key space.
+            if len(self._roots) > 1:
+                names = [r.resolve().name for r in self._roots]
+                seen = set()
+                for n in names:
+                    if n in seen:
+                        raise ValueError(
+                            f"markdown_recall: duplicate root basename {n!r}; "
+                            "roots must have unique directory names"
+                        )
+                    seen.add(n)
         else:
             self._roots = [Path(root)]
         # Backward-compat alias: _root is the first root (single-root mode).
@@ -303,7 +316,14 @@ class MarkdownIndex:
         any_readable = False
         for root in self._roots:
             if not root.is_dir():
-                logger.debug("markdown recall: root %s is not a directory; skipping", root)
+                if multi:
+                    logger.warning(
+                        "markdown recall: root %s is not a directory; "
+                        "its indexed files will be pruned until it reappears",
+                        root,
+                    )
+                else:
+                    return None  # single-root: keep the old index
                 continue
             any_readable = True
             prefix = root.resolve().name if multi else ""
@@ -321,7 +341,10 @@ class MarkdownIndex:
                     key = f"{prefix}/{rel}" if prefix else rel
                     files[key] = (st.st_size, st.st_mtime_ns)
             except OSError:
-                logger.warning("markdown recall: could not walk %s", root, exc_info=True)
+                if multi:
+                    logger.warning("markdown recall: could not walk %s", root, exc_info=True)
+                else:
+                    return None  # single-root: keep the old index
         if not any_readable:
             return None
         return files
@@ -331,22 +354,34 @@ class MarkdownIndex:
 
         Single-root: path is relative to the root.
         Multi-root: path is \`<root_basename>/relative\`; look up the root
-        by basename.
+        by basename. Validates containment to prevent path traversal.
         """
         if len(self._roots) == 1:
-            return self._roots[0] / path
-        # Multi-root: split on the first / to get the prefix
-        if "/" in path:
+            candidate = self._roots[0] / path
+        elif "/" in path:
             prefix, rel = path.split("/", 1)
+            candidate = None
             for root in self._roots:
                 if root.resolve().name == prefix:
-                    return root / rel
-        # Fallback: try each root
+                    candidate = root / rel
+                    break
+            if candidate is None:
+                raise FileNotFoundError(
+                    f"markdown recall: no root matches prefix {prefix!r} in {path!r}"
+                )
+        else:
+            raise FileNotFoundError(
+                f"markdown recall: multi-root path {path!r} has no root prefix"
+            )
+        # Containment check: resolve and verify the path is under the root.
+        resolved = candidate.resolve()
+        root_resolved = candidate.parts[0]  # not useful; use the actual root
         for root in self._roots:
-            candidate = root / path
-            if candidate.exists():
+            if resolved.is_relative_to(root.resolve()):
                 return candidate
-        raise FileNotFoundError(f"markdown recall: cannot resolve path {path!r}")
+        raise FileNotFoundError(
+            f"markdown recall: path {path!r} escapes the root directory"
+        )
 
     @staticmethod
     def _hash_bytes(data: bytes) -> str:
@@ -479,11 +514,11 @@ class MarkdownIndex:
         prev: tuple[int, int, str] | None,
     ) -> None:
         """Index one file: hash, and re-chunk only when the hash changed."""
-        full = self._resolve_path(path)
         try:
+            full = self._resolve_path(path)
             data = full.read_bytes()
         except OSError:
-            logger.warning("markdown recall: could not read %s", full, exc_info=True)
+            logger.warning("markdown recall: could not read %s", path, exc_info=True)
             return
         # Re-stat after reading: skip a file written mid-read.
         try:

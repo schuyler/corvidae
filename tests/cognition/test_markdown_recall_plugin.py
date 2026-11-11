@@ -266,23 +266,42 @@ async def test_on_stop_cancels_active_startup_task(build, tmp_path):
     assert env.source._index._db is None, "connection should be closed"
 
 
-    async def test_roots_list_config(self, tmp_path):
-        """markdown_recall.roots (list) is accepted and passed to the index."""
-        values = tmp_path / "values"
-        skills = tmp_path / "skills"
-        values.mkdir()
-        skills.mkdir()
-        (values / "test.md").write_text("# Test")
+async def test_roots_list_config(build, tmp_path):
+    """markdown_recall.roots (list) is accepted and passed to the index."""
+    values = tmp_path / "values"
+    skills = tmp_path / "skills"
+    values.mkdir()
+    skills.mkdir()
+    (values / "test.md").write_text("# Test")
 
-        plugin = MarkdownRecallPlugin()
-        config = {
-            "markdown_recall": {
-                "roots": [str(values), str(skills)],
-                "db_path": str(tmp_path / "index.db"),
-            }
-        }
-        pm = _fake_pm()
-        await plugin.on_init(pm, config)
-        assert isinstance(plugin._root, list)
-        assert len(plugin._root) == 2
-        await plugin.on_stop()
+    env = await build(
+        {"markdown_recall": {"roots": [str(values), str(skills)]}},
+        values,
+    )
+    assert isinstance(env.source._root, list)
+    assert len(env.source._root) == 2
+    await env.source.on_stop()
+
+
+async def test_empty_roots_rejected(build, tmp_path):
+    """markdown_recall.roots: [] is rejected with a clear error."""
+    import pytest
+    values = tmp_path / "values"
+    values.mkdir()
+    with pytest.raises(ValueError, match="non-empty"):
+        await build({"markdown_recall": {"roots": []}}, values)
+
+
+async def test_single_root_backward_compat(build, tmp_path):
+    """markdown_recall.root (single string) still works after the config change."""
+    values = tmp_path / "values"
+    values.mkdir()
+    (values / "test.md").write_text("# Test")
+
+    env = await build(
+        {"markdown_recall": {"root": str(values)}},
+        values,
+    )
+    from pathlib import Path
+    assert isinstance(env.source._root, Path)
+    await env.source.on_stop()
