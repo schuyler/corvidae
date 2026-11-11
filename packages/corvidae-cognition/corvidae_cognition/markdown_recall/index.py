@@ -130,12 +130,18 @@ class MarkdownIndex:
 
     def __init__(
         self,
-        root: Path,
+        root: Path | list[Path],
         db_path: Path,
         get_client: Callable[[], Any],
         get_identity: Callable[[], _EncoderIdentity | None],
     ) -> None:
-        self._root = Path(root)
+        # Accept a single root (backward compat) or a list of roots.
+        if isinstance(root, list):
+            self._roots = [Path(r) for r in root]
+        else:
+            self._roots = [Path(root)]
+        # Backward-compat alias: _root is the first root (single-root mode).
+        self._root = self._roots[0]
         self._db_path = Path(db_path)
         self._get_client = get_client
         self._get_identity = get_identity
@@ -282,29 +288,65 @@ class MarkdownIndex:
     # -- reconcile ----------------------------------------------------------
 
     def _walk(self) -> dict[str, tuple[int, int]] | None:
-        """Map relative path -> (size, mtime_ns) for every .md under the root.
+        """Map namespaced path -> (size, mtime_ns) for every .md under all roots.
 
-        Returns None when the root is unreadable (the caller aborts). Never
-        follows a symlink out of the folder.
+        For a single root, paths are relative to that root (backward compat).
+        For multiple roots, paths are prefixed with the root's basename so
+        chunks from different roots don't collide (e.g. `values/radio.md`
+        vs `skills/radio.md`).
+
+        Returns None when all roots are unreadable (the caller aborts).
+        Never follows a symlink out of a folder.
         """
-        if not self._root.is_dir():
-            return None
+        multi = len(self._roots) > 1
         files: dict[str, tuple[int, int]] = {}
-        try:
-            for p in self._root.rglob("*.md"):
-                if p.is_symlink():
-                    continue  # do not follow symlinks out of the folder
-                if not p.is_file():
-                    continue
-                try:
-                    st = p.stat()
-                except OSError:
-                    continue
-                files[p.relative_to(self._root).as_posix()] = (st.st_size, st.st_mtime_ns)
-        except OSError:
-            logger.warning("markdown recall: could not walk %s", self._root, exc_info=True)
+        any_readable = False
+        for root in self._roots:
+            if not root.is_dir():
+                logger.debug("markdown recall: root %s is not a directory; skipping", root)
+                continue
+            any_readable = True
+            prefix = root.resolve().name if multi else ""
+            try:
+                for p in root.rglob("*.md"):
+                    if p.is_symlink():
+                        continue
+                    if not p.is_file():
+                        continue
+                    try:
+                        st = p.stat()
+                    except OSError:
+                        continue
+                    rel = p.relative_to(root).as_posix()
+                    key = f"{prefix}/{rel}" if prefix else rel
+                    files[key] = (st.st_size, st.st_mtime_ns)
+            except OSError:
+                logger.warning("markdown recall: could not walk %s", root, exc_info=True)
+        if not any_readable:
             return None
         return files
+
+    def _resolve_path(self, path: str) -> Path:
+        """Resolve a (possibly namespaced) index path to a filesystem path.
+
+        Single-root: path is relative to the root.
+        Multi-root: path is \`<root_basename>/relative\`; look up the root
+        by basename.
+        """
+        if len(self._roots) == 1:
+            return self._roots[0] / path
+        # Multi-root: split on the first / to get the prefix
+        if "/" in path:
+            prefix, rel = path.split("/", 1)
+            for root in self._roots:
+                if root.resolve().name == prefix:
+                    return root / rel
+        # Fallback: try each root
+        for root in self._roots:
+            candidate = root / path
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError(f"markdown recall: cannot resolve path {path!r}")
 
     @staticmethod
     def _hash_bytes(data: bytes) -> str:
@@ -345,8 +387,8 @@ class MarkdownIndex:
             files = self._walk()
             if files is None:
                 logger.warning(
-                    "markdown recall: root %s is unreadable; kept the old index",
-                    self._root,
+                    "markdown recall: no roots readable; kept the old index",
+                    self._roots,
                 )
                 return
             async with db.execute("SELECT count(*) AS n FROM manifest") as cursor:
@@ -357,7 +399,7 @@ class MarkdownIndex:
                 logger.warning(
                     "markdown recall: walk of %s found no files but the manifest "
                     "holds %d; kept the old index (unmounted folder?)",
-                    self._root, manifest_count,
+                    self._roots, manifest_count,
                 )
                 return
 
@@ -437,7 +479,7 @@ class MarkdownIndex:
         prev: tuple[int, int, str] | None,
     ) -> None:
         """Index one file: hash, and re-chunk only when the hash changed."""
-        full = self._root / path
+        full = self._resolve_path(path)
         try:
             data = full.read_bytes()
         except OSError:

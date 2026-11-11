@@ -264,3 +264,25 @@ async def test_on_stop_cancels_active_startup_task(build, tmp_path):
     await env.source.on_stop()
     assert env.source._startup_task.done(), "startup task should be done"
     assert env.source._index._db is None, "connection should be closed"
+
+
+    async def test_roots_list_config(self, tmp_path):
+        """markdown_recall.roots (list) is accepted and passed to the index."""
+        values = tmp_path / "values"
+        skills = tmp_path / "skills"
+        values.mkdir()
+        skills.mkdir()
+        (values / "test.md").write_text("# Test")
+
+        plugin = MarkdownRecallPlugin()
+        config = {
+            "markdown_recall": {
+                "roots": [str(values), str(skills)],
+                "db_path": str(tmp_path / "index.db"),
+            }
+        }
+        pm = _fake_pm()
+        await plugin.on_init(pm, config)
+        assert isinstance(plugin._root, list)
+        assert len(plugin._root) == 2
+        await plugin.on_stop()

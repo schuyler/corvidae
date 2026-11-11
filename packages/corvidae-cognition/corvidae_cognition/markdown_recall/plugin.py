@@ -75,7 +75,16 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
         if config_value(config, "markdown_recall", None) is None:
             logger.debug("markdown_recall: no config block; plugin is inert")
             return
-        self._root = Path(config_value(config, "markdown_recall.root", DEFAULT_ROOT))
+        # Multi-root: accept roots (list) or root (single, backward compat).
+        roots_raw = config_value(config, "markdown_recall.roots", None)
+        if roots_raw is not None:
+            if not isinstance(roots_raw, list) or not all(isinstance(r, str) for r in roots_raw):
+                raise ValueError(
+                    "Config error: markdown_recall.roots must be a list of strings"
+                )
+            self._root = [Path(r) for r in roots_raw]
+        else:
+            self._root = Path(config_value(config, "markdown_recall.root", DEFAULT_ROOT))
         db_path = Path(config_value(config, "markdown_recall.db_path", DEFAULT_DB_PATH))
         raw_max = config_value(config, "markdown_recall.max_hits", DEFAULT_MAX_HITS)
         if type(raw_max) is not int or raw_max < 1:

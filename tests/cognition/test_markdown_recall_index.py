@@ -198,3 +198,78 @@ def test_fts_match_escapes_double_quotes():
     assert _fts_match('foo"bar') == '"foo""bar"*'
     # a" -> a"" (the quote doubles), wrapped -> "a"""*
     assert _fts_match('a" b"c') == '"a"""* OR "b""c"*'
+
+
+class TestMultiRoot:
+    """Multi-root: multiple directories, namespaced paths."""
+
+    async def _make_multi(self, tmp_path, root_names, files_per_root):
+        """Create a multi-root index with the given roots and files."""
+        roots = []
+        for name, files in zip(root_names, files_per_root):
+            root = tmp_path / name
+            root.mkdir(parents=True, exist_ok=True)
+            for fname, fcontent in files.items():
+                (root / fname).write_text(fcontent)
+            roots.append(root)
+        dim = IDENTITY.dimensions
+        embed = FakeEmbed(dim=dim)
+        index = MarkdownIndex(
+            root=roots,
+            db_path=tmp_path / "index.db",
+            get_client=lambda: embed,
+            get_identity=lambda: IDENTITY,
+        )
+        return index, roots, embed
+
+    async def test_two_roots_namespaced(self, tmp_path):
+        """Two roots: paths are prefixed with the root basename."""
+        idx, roots, _ = await self._make_multi(
+            tmp_path,
+            ["values", "skills"],
+            [{"radio.md": "# Radio\n\nSome content."},
+             {"radio.md": "# Radio Skill\n\nDifferent content."}],
+        )
+        await idx.reconcile()
+        files = idx._walk()
+        assert "values/radio.md" in files
+        assert "skills/radio.md" in files
+        await idx.close()
+
+    async def test_single_root_unnamespaced(self, tmp_path):
+        """Single root (list of one): paths are NOT prefixed (backward compat)."""
+        idx, roots, _ = await self._make_multi(
+            tmp_path,
+            ["values"],
+            [{"radio.md": "# Radio\n\nContent."}],
+        )
+        await idx.reconcile()
+        files = idx._walk()
+        assert "radio.md" in files
+        assert "values/radio.md" not in files
+        await idx.close()
+
+    async def test_nonexistent_root_skipped(self, tmp_path):
+        """A non-existent root is skipped; the other root still works."""
+        idx, roots, _ = await self._make_multi(
+            tmp_path,
+            ["values"],
+            [{"radio.md": "# Radio\n\nContent."}],
+        )
+        # Add a non-existent root
+        idx._roots.append(tmp_path / "nonexistent")
+        files = idx._walk()
+        assert files is not None
+        assert "values/radio.md" in files  # multi-root mode (2 roots in list)
+        await idx.close()
+
+    async def test_all_roots_unreadable(self, tmp_path):
+        """All roots unreadable: _walk returns None."""
+        idx = MarkdownIndex(
+            root=[tmp_path / "a", tmp_path / "b"],
+            db_path=tmp_path / "index.db",
+            get_client=lambda: FakeEmbed(),
+            get_identity=lambda: IDENTITY,
+        )
+        assert idx._walk() is None
+        await idx.close()
