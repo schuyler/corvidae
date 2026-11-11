@@ -116,7 +116,7 @@ async def test_long_background_result_is_cut_and_spilled(rig):
 
 
 async def test_result_within_the_cap_is_unchanged(rig):
-    """At the cap: delivered whole, nothing cut, nothing written."""
+    """Under the cap: delivered whole, nothing cut, nothing written."""
     pm, plugin, _, recorder, directory = await rig(limit=1000)
     task = make_task()
     await plugin._on_task_complete(task, "short")
@@ -138,6 +138,18 @@ async def test_a_result_that_answers_a_tool_call_is_left_to_the_agent(rig):
     assert call["text"] == f"[Task {task.task_id}] {BIG}"
     assert call["tool_call_id"] == "call_1"
     assert call["cut"] is None
+    await plugin.on_stop()
+
+
+async def test_an_empty_call_id_is_no_call_id(rig):
+    """The Agent treats "" as no id, so the plugin cuts the result as it would for None."""
+    pm, plugin, _, recorder, _ = await rig()
+    task = make_task(tool_call_id="")
+    await plugin._on_task_complete(task, BIG)
+
+    [call] = recorder.calls
+    assert len(call["text"]) == LIMIT
+    assert call["cut"] is not None
     await plugin.on_stop()
 
 
@@ -182,4 +194,7 @@ async def test_without_a_spill_service_the_result_is_delivered_whole_with_a_warn
     [call] = recorder.calls
     assert call["text"] == f"[Task {task.task_id}] {BIG}"
     assert "spill" in caplog.text and task.task_id in caplog.text
+    # The message names the cap and the remedy, not just the failure.
+    assert "tools.max_result_chars (40)" in caplog.text
+    assert "register NotificationSpill" in caplog.text
     await plugin.on_stop()

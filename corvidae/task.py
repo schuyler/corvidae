@@ -475,7 +475,7 @@ class TaskPlugin(CorvidaePlugin):
         try:
             # A result that answers no tool call is cut here (#744); one that
             # does is cut by the Agent when it stores the result row (#575).
-            if not (task.tool_call_id is None and await self._notify_cut(task, text, annotations)):
+            if not (not task.tool_call_id and await self._notify_cut(task, text, annotations)):
                 await self.pm.ahook.on_notify(
                     channel=task.channel,
                     source="task",
@@ -502,8 +502,8 @@ class TaskPlugin(CorvidaePlugin):
     async def _notify_cut(self, task: Task, text: str, annotations: dict) -> bool:
         """Deliver a background result through the spill service, cut at the cap.
 
-        The cap is ``tools.max_result_chars``, read at delivery so a settings
-        change applies to the next result. Returns True when the notification
+        The cap is ``tools.max_result_chars``, read at delivery. Returns True
+        when the notification
         was delivered; False when there is no cap or no service to cut with, and
         the caller delivers it whole.
         """
@@ -519,13 +519,13 @@ class TaskPlugin(CorvidaePlugin):
         spill = self.pm.get_plugin("spill")
         if not isinstance(spill, NotificationSpill):
             if len(text) > limit:
-                # shortcut: a bare plugin manager has no spill service, so the
-                # result goes out whole; the Runtime always registers one.
+                # shortcut: with no spill service (a bare plugin manager, or
+                # plugins.disabled removed it) the result goes out whole.
                 logger.warning(
                     "task %s on channel %s: result of %d characters is over "
                     "tools.max_result_chars (%d) but no spill service is registered, "
                     "so it is delivered whole; register NotificationSpill as 'spill' "
-                    "to cut it",
+                    "(and do not list spill under plugins.disabled) to cut it",
                     task.task_id, task.channel.id, len(text), limit,
                     extra={"channel": task.channel.id, "task_id": task.task_id},
                 )
