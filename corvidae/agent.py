@@ -16,7 +16,8 @@ Config:
         enabled: true       # default; see corvidae.fork for the full section
 
 LLM client configuration is owned by LLMPlugin (llm: main:, llm: embedding:).
-Tool result truncation configuration is owned by ToolCollectionPlugin (tools: max_result_chars:).
+The tool result cap is owned by ToolCollectionPlugin (tools: max_result_chars:); on_notify
+cuts a longer result and spills its full text through the spill service (#575).
 
 Logging:
     - INFO: on_start complete, on_message received, agent response sent
@@ -25,6 +26,7 @@ Logging:
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 import time
@@ -94,7 +96,7 @@ from corvidae.outbound import (
     OutboundToolStatus,
 )
 from corvidae.queue import SerialQueue
-from corvidae.spill import current_cut
+from corvidae.spill import Cut, NotificationSpill, current_cut
 from corvidae.task import Task
 from corvidae.tool import (
     DEFAULT_TOOL_TIMEOUTS,
@@ -510,7 +512,15 @@ class Agent(CorvidaePlugin):
         tool_call_id: str | None,
         annotations: dict | None,
     ) -> None:
-        """Enqueue a notification item on the channel's queue."""
+        """Enqueue a notification item on the channel's queue.
+
+        A tool result (``tool_call_id`` set) over ``tools.max_result_chars``
+        is cut here and its full text spilled (#575), so the cut is recorded
+        in the row's provenance and the header is rendered from it.
+        """
+        metadata = self._notification_metadata(channel, tool_call_id)
+        if tool_call_id and len(text) > self._max_tool_result_chars:
+            text, metadata = await self._cut_tool_result(channel, source, text, metadata)
         item = QueueItem(
             role=QueueItemRole.NOTIFICATION,
             content=text,
@@ -518,7 +528,7 @@ class Agent(CorvidaePlugin):
             source=source,
             tool_call_id=tool_call_id,
             annotations=annotations or {},
-            metadata=self._notification_metadata(channel, tool_call_id),
+            metadata=metadata,
         )
         logger.debug(
             "on_notify received",
@@ -569,6 +579,36 @@ class Agent(CorvidaePlugin):
         # The error result is inbound work like any notification.
         self._note_activity(channel.id)
         return True
+
+    async def _cut_tool_result(
+        self, channel, source: str, text: str, metadata: ItemMetadata
+    ) -> tuple[str, ItemMetadata]:
+        """Cut a tool result to the cap, spill its full text, and record the cut."""
+        limit = self._max_tool_result_chars
+        spill = self.pm.get_plugin("spill")
+        if isinstance(spill, NotificationSpill):
+            cut = await spill.cut(
+                text, limit=limit, source=f"tool result ({source})",
+                can_read=spill.can_read(channel),
+            )
+        else:
+            # The Runtime always registers the service; a bare plugin manager
+            # (tests, embedders) still gets the cut and the header.
+            logger.warning(
+                "channel %s: tool result of %d characters cut to %d with no spill "
+                "service registered, so the full text was not saved; register "
+                "NotificationSpill as 'spill' to keep it",
+                channel.id, len(text), limit, extra={"channel": channel.id},
+            )
+            cut = Cut(shown=limit, total=len(text))
+        return text[:limit], dataclasses.replace(
+            metadata,
+            cut_shown=cut.shown,
+            cut_total=cut.total,
+            spill_path=cut.path,
+            spill_chars=cut.spilled,
+            spill_failed=True if cut.failed else None,
+        )
 
     def _notification_metadata(self, channel, tool_call_id: str | None) -> ItemMetadata:
         """What the kernel can certify about a notification: the attribution of
@@ -1982,7 +2022,6 @@ class Agent(CorvidaePlugin):
                     call, self._tools,
                     channel=channel,
                     task_queue=task_queue,
-                    max_result_chars=self._max_tool_result_chars,
                     pm=self.pm,
                     call_timeouts=self._tool_call_timeouts,
                 )

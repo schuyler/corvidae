@@ -149,49 +149,16 @@ async def test_execute_tool_call_ctx_defaults_none():
 
 
 # ---------------------------------------------------------------------------
-# Tests for tool result truncation (item D — red phase, expected to FAIL)
+# execute_tool_call returns the whole result: the Agent cuts it at
+# tools.max_result_chars when it is delivered, and spills the rest (#575)
 # ---------------------------------------------------------------------------
 
 
-class TestToolResultTruncation:
-    """Tests for MAX_TOOL_RESULT_CHARS truncation in execute_tool_call.
+class TestToolResultNotCutAtDispatch:
+    """The result string leaves execute_tool_call whole."""
 
-    These tests MUST FAIL against current code because truncation is not
-    implemented yet.
-    """
-
-    async def test_result_within_limit_unchanged(self):
-        """A tool returning 100 chars returns that result unchanged."""
-        from corvidae.tool import MAX_TOOL_RESULT_CHARS  # noqa: F401 — import confirms constant exists
-
-        output = "x" * 100
-
-        async def small_tool() -> str:
-            """Returns 100 chars."""
-            return output
-
-        result = await execute_tool_call(small_tool, {}, tool_call_id="call_small")
-        assert result == output
-        assert len(result) == 100
-
-    async def test_result_at_limit_unchanged(self):
-        """A tool returning exactly MAX_TOOL_RESULT_CHARS returns that result unchanged."""
-        from corvidae.tool import MAX_TOOL_RESULT_CHARS
-
-        output = "y" * MAX_TOOL_RESULT_CHARS
-
-        async def exact_tool() -> str:
-            """Returns exactly MAX_TOOL_RESULT_CHARS chars."""
-            return output
-
-        result = await execute_tool_call(exact_tool, {}, tool_call_id="call_exact")
-        assert result == output
-        assert len(result) == MAX_TOOL_RESULT_CHARS
-
-    async def test_result_exceeds_limit_truncated(self):
-        """A tool returning 150_000 chars is truncated to MAX_TOOL_RESULT_CHARS."""
-        from corvidae.tool import MAX_TOOL_RESULT_CHARS
-
+    async def test_large_result_is_returned_whole(self):
+        """A 150k-character result is returned unchanged, with no marker."""
         output = "z" * 150_000
 
         async def large_tool() -> str:
@@ -199,23 +166,13 @@ class TestToolResultTruncation:
             return output
 
         result = await execute_tool_call(large_tool, {}, tool_call_id="call_large")
-        assert len(result) <= MAX_TOOL_RESULT_CHARS + 200  # allow for truncation notice
-        assert result[:MAX_TOOL_RESULT_CHARS] == output[:MAX_TOOL_RESULT_CHARS]
-        assert "truncated" in result.lower()
+        assert result == output
 
-    async def test_truncation_notice_format(self):
-        """Truncation notice includes the original length."""
-        from corvidae.tool import MAX_TOOL_RESULT_CHARS
+    def test_execute_tool_call_takes_no_cap(self):
+        """The cap is not execute_tool_call's: it has no max_result_chars."""
+        import inspect
 
-        original_len = 150_000
-        output = "a" * original_len
-
-        async def big_tool() -> str:
-            """Returns 150k chars."""
-            return output
-
-        result = await execute_tool_call(big_tool, {}, tool_call_id="call_notice")
-        assert str(original_len) in result
+        assert "max_result_chars" not in inspect.signature(execute_tool_call).parameters
 
 
 # ---------------------------------------------------------------------------
