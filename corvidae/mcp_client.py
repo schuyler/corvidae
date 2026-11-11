@@ -341,7 +341,8 @@ def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
 
 
 # Upper bound on how long on_stop waits for owner tasks to close their
-# transports. Runtime gives the whole stop broadcast 3 s, so stay under it.
+# transports. Runtime gives the whole stop broadcast daemon.shutdown_timeout
+# (3 s by default), so stay under it.
 _STOP_BOUND_SECONDS = 2.5
 # After cancelling a straggler, how long to wait for it to unwind.
 _CANCEL_GRACE_SECONDS = 0.3
@@ -710,7 +711,7 @@ class McpClientPlugin(CorvidaePlugin):
 
         Concurrent, not one after another: the SDK's stdio_client can take
         about 2 s per server to terminate a process, and Runtime allows the
-        whole stop broadcast 3 s. An owner that has not finished within
+        whole stop broadcast daemon.shutdown_timeout (3 s by default). An owner that has not finished within
         _STOP_BOUND_SECONDS is cancelled and logged. Never raises (a
         cancellation of this coroutine itself excepted).
         """

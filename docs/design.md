@@ -1930,8 +1930,9 @@ included (a `CancelledError` leaked from a plugin's `on_start`, #282; a
 config error's `SystemExit` before any plugin loads finds nothing to close),
 `Runtime.run` runs `_cleanup_failed_start()` before re-raising: the
 `on_stop` broadcast, `idle.stop()` and `clock.close()`, under the same
-bound as `stop()` (`daemon.shutdown_timeout`, 3 s by default) (as there, an `on_stop` that raises skips the last two;
-`asyncio.run` cancels leftover timers on exit). `agent.on_stop` is skipped, since the Agent may not
+bound as `stop()`, `daemon.shutdown_timeout` (3 s by default). As there, an
+`on_stop` that raises skips the last two;
+`asyncio.run` cancels leftover timers on exit. `agent.on_stop` is skipped, since the Agent may not
 have started. Without this, persistence's open aiosqlite connection (a
 non-daemon worker thread) kept the interpreter from exiting, so a daemon
 whose plugin failed to start stayed alive and silent (#177). A cleanup

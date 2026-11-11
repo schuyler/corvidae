@@ -1521,8 +1521,8 @@ design, not requirement. The requirements are outcomes:
     the operator can lock it.
 14. Shutdown is bounded. The graceful phase and the time the process may
     then take to exit are operator-set limits; past either one the
-    process exits non-zero, and a forced exit logs the threads that
-    kept it alive. One plugin's leaked thread cannot wedge a stop or a
+    process exits non-zero, and a forced exit after the graceful phase
+    logs the threads that kept it alive. One plugin's leaked thread cannot wedge a stop or a
     restart.
 
 ### 3.12 Evaluation and the harness
