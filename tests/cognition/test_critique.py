@@ -416,6 +416,79 @@ class TestLensSelection:
         assert "adversarial" in outcomes["critique"]["lenses"]
         await _teardown(env)
 
+    async def test_high_novelty_and_commitment_selects_retention(self, tmp_path):
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
+        )
+        env = await build_critique(tmp_path, appraisal=appraisal,
+                                   chat_text=EMPTY_VERDICT)
+        await _fire(env, "kret", origin="user")
+        await _run_next_task(env.task)
+        outcomes = await _read_outcomes(env.db, "kret")
+        assert "retention" in outcomes["critique"]["lenses"]
+        await _teardown(env)
+
+    async def test_novelty_alone_does_not_select_retention(self, tmp_path):
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.0, "disagreement": 0.0},
+            stage2={"novelty": 0.9, "ambiguity": 0.0, "valence": 0.5},
+        )
+        env = await build_critique(tmp_path, appraisal=appraisal)
+        env.plugin._rng = FixedRng(value=0.99)  # never sampled
+        await _fire(env, "knov", origin="user", response_text="no claims")
+        assert env.task.task_queue.queue.qsize() == 0
+        await _teardown(env)
+
+    async def test_retention_not_in_random_sampling_pool(self, tmp_path):
+        """Retention is a gated lens, not part of the random-sampling pool.
+        A below-threshold exchange that does sample must never yield retention."""
+        from corvidae_cognition.critique import STYLISTIC_LENSES
+        assert "retention" not in STYLISTIC_LENSES, (
+            "retention must not be in the random-sampling pool"
+        )
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.0, "disagreement": 0.0},
+            stage2={"ambiguity": 0.0, "valence": 0.5},
+        )
+        env = await build_critique(tmp_path, appraisal=appraisal)
+        # Force the sampling path to fire (value below the 0.05 rate)
+        env.plugin._rng = FixedRng(value=0.01)
+        await _fire(env, "krand", origin="user", response_text="no claims")
+        await _run_next_task(env.task)
+        outcomes = await _read_outcomes(env.db, "krand")
+        lenses = outcomes["critique"]["lenses"]
+        assert "retention" not in lenses
+        await _teardown(env)
+
+    async def test_novelty_threshold_tunable(self, tmp_path):
+        """Setting critique.lens.novelty to 0.95 suppresses retention
+        at novelty=0.9 (below the raised threshold)."""
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.9},
+            stage2={"novelty": 0.9},
+        )
+        env = await build_critique(
+            tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
+            config={"critique": {"lens": {"novelty": 0.95}}},
+        )
+        await _fire(env, "ktune", origin="user")
+        await _run_next_task(env.task)
+        outcomes = await _read_outcomes(env.db, "ktune")
+        assert "retention" not in outcomes["critique"]["lenses"]
+        await _teardown(env)
+
+    async def test_commitment_alone_does_not_select_retention(self, tmp_path):
+        appraisal = FakeAppraisal(stage1={"commitment_density": 0.9})
+        env = await build_critique(tmp_path, appraisal=appraisal,
+                                   chat_text=EMPTY_VERDICT)
+        await _fire(env, "kcom", origin="user")
+        await _run_next_task(env.task)
+        outcomes = await _read_outcomes(env.db, "kcom")
+        # commitment alone selects constrained, not retention
+        assert "constrained" in outcomes["critique"]["lenses"]
+        assert "retention" not in outcomes["critique"]["lenses"]
+        await _teardown(env)
+
     async def test_below_threshold_no_task_when_not_sampled(self, tmp_path):
         appraisal = FakeAppraisal(
             stage1={"commitment_density": 0.0, "disagreement": 0.0},
