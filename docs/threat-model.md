@@ -551,7 +551,8 @@ unfenced on reload. Unfenced today:
 text that was untrusted when it first arrived; the results inside a
 subagent's own loop, which reach the subagent's model with no frame; and the
 subagent's final report to the main model, which can repeat what the
-subagent read. The header names no spill source for a read-back (#576), and
+subagent read. The header names the spill source for a read-back when the log
+still holds the row that cut it (#576), cleaned like any header value, and
 fenced rows are costed by the estimator without their framing, so a long run
 of them can undercount tokens against the hard ceiling (#577).
 
@@ -1307,14 +1308,15 @@ declares it reads spill files (`read_file`, `shell`). What `read_file` reads
 back is fenced: the header's pointer is kernel text, and the file's contents
 arrive as a `read_file` result under the untrusted-output header and nonce
 fence (#571), though not the notification's own fence, and the header names
-no source (#576). A `cat` of the file through `shell` arrives unfenced
+the source recorded when the content was spilled, if the log row survives
+(#576). A `cat` of the file through `shell` arrives unfenced
 (#580). The spill directory is not inside any tool root
 (`read_file` has none until #444), so the file is reachable the same way any
 other path is, and the agent can read it whether or not a header pointed at
 it.
 
 Tool results over `tools.max_result_chars` are spilled by the same service
-(#575), so the directory also holds tool output: command output, file
+(#575), and so are background task results that answer no tool call (#744), so the directory also holds tool output: command output, file
 contents, fetched pages and MCP results, any of which can carry secrets or
 injected text. Its bounds are the same cap and age, so the directory's worst
 case adds the cap times the rate of long tool results. The file is written

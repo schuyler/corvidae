@@ -466,18 +466,23 @@ class TaskPlugin(CorvidaePlugin):
             except Exception:
                 logger.warning("send hook failed for tool status", exc_info=True, extra={"channel": task.channel.id})
 
+        text = f"[Task {task.task_id}] {result}"
+        annotations = {
+            "task_id": task.task_id,
+            "trace_id": task.trace_id,
+            **task.annotations,
+        }
         try:
-            await self.pm.ahook.on_notify(
-                channel=task.channel,
-                source="task",
-                text=f"[Task {task.task_id}] {result}",
-                tool_call_id=task.tool_call_id,
-                annotations={
-                    "task_id": task.task_id,
-                    "trace_id": task.trace_id,
-                    **task.annotations,
-                },
-            )
+            # A result that answers no tool call is cut here (#744); one that
+            # does is cut by the Agent when it stores the result row (#575).
+            if not (not task.tool_call_id and await self._notify_cut(task, text, annotations)):
+                await self.pm.ahook.on_notify(
+                    channel=task.channel,
+                    source="task",
+                    text=text,
+                    tool_call_id=task.tool_call_id,
+                    annotations=annotations,
+                )
         except Exception as exc:
             logger.warning(
                 "on_notify hook failed in _on_task_complete",
@@ -493,6 +498,41 @@ class TaskPlugin(CorvidaePlugin):
             # to the Agent's queue; it skips this if the real one got there.
             if task.tool_call_id:
                 await self._deliver_tool_error(task, exc)
+
+    async def _notify_cut(self, task: Task, text: str, annotations: dict) -> bool:
+        """Deliver a background result through the spill service, cut at the cap.
+
+        The cap is ``tools.max_result_chars``, read at delivery. Returns True
+        when the notification was delivered; False when there is no cap or no
+        service to cut with, and the caller delivers it whole.
+        """
+        # Imported at call time to keep this module's own imports to the queue
+        # and hooks. Nothing forces it: there is no import cycle today.
+        from corvidae.spill import NotificationSpill
+        from corvidae.tool_collection import ToolCollectionPlugin
+
+        tools = self.pm.get_plugin("tools")
+        if not isinstance(tools, ToolCollectionPlugin):
+            return False
+        limit = tools.max_result_chars
+        spill = self.pm.get_plugin("spill")
+        if not isinstance(spill, NotificationSpill):
+            if len(text) > limit:
+                # shortcut: with no spill service (a bare plugin manager, or
+                # plugins.disabled removed it) the result goes out whole.
+                logger.warning(
+                    "task %s on channel %s: result of %d characters is over "
+                    "tools.max_result_chars (%d) but no spill service is registered, "
+                    "so it is delivered whole; register NotificationSpill as 'spill' "
+                    "(and do not list spill under plugins.disabled) to cut it",
+                    task.task_id, task.channel.id, len(text), limit,
+                    extra={"channel": task.channel.id, "task_id": task.task_id},
+                )
+            return False
+        await spill.notify(
+            [task.channel], source="task", text=text, annotations=annotations, limit=limit,
+        )
+        return True
 
     async def _deliver_tool_error(self, task: Task, exc: Exception) -> None:
         """Hand the Agent an error result for a task whose on_notify raised."""

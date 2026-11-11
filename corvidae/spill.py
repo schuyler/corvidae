@@ -63,6 +63,7 @@ class Cut:
     path: str | None = None  # spill file path; set only when this channel gets a pointer
     spilled: int | None = None  # characters in the file; set with path
     failed: bool = False  # this channel can read spills, but the write failed
+    source: str | None = None  # who the item came from, kept on the row (#576)
 
 
 _current_cut: contextvars.ContextVar[Cut | None] = contextvars.ContextVar(
@@ -170,6 +171,7 @@ class NotificationSpill(CorvidaePlugin):
                 path=str(path) if reads and path else None,
                 spilled=spilled if reads and path else None,
                 failed=reads and failed,
+                source=source,
             )
             token = _current_cut.set(cut)
             try:
@@ -190,6 +192,7 @@ class NotificationSpill(CorvidaePlugin):
         return Cut(
             shown=limit, total=len(text),
             path=str(path) if path else None, spilled=spilled, failed=failed,
+            source=source,
         )
 
     def can_read(self, channel: Channel, tools: dict | None = None) -> bool:

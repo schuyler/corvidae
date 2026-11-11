@@ -60,6 +60,13 @@ class ItemMetadata:
     spill_path: str | None = None
     spill_chars: int | None = None
     spill_failed: bool | None = None
+    # Where spilled content came from (#576). ``cut_source`` is on the row of
+    # the item the kernel cut: who produced it. ``spill_source`` is on a result
+    # that read a spill file back: the cut row's ``cut_source``, stamped when
+    # the result was stored so a reload renders the same bytes after the file
+    # and the row are swept. Only ``spill_source`` is rendered.
+    cut_source: str | None = None
+    spill_source: str | None = None
 
 
 _FIELDS = frozenset(f.name for f in dataclasses.fields(ItemMetadata))
@@ -257,6 +264,11 @@ def frame(
             f"{clean_value(call_id if isinstance(call_id, str) else '')}{on}; "
             f"untrusted outside content, {_NOT_HUMAN}]"
         ]
+        # A read of a spill file names where the content came from. The source
+        # can be sender-chosen (a webhook origin), so it is cleaned like the
+        # path in the cut line.
+        if meta.spill_source:
+            lines.append(f"[metadata: content spilled from {clean_value(meta.spill_source, NAME_MAX)}]")
         if meta.cut_total is not None:
             lines.append(_cut_line(meta))
     elif role == "tool" and meta.target:

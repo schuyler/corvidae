@@ -28,6 +28,7 @@ Logging:
 import asyncio
 import dataclasses
 import json
+import os
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -96,11 +97,12 @@ from corvidae.outbound import (
     OutboundToolStatus,
 )
 from corvidae.queue import SerialQueue
-from corvidae.spill import Cut, NotificationSpill, current_cut
+from corvidae.spill import SPILL_NAME, Cut, NotificationSpill, current_cut
 from corvidae.task import Task
 from corvidae.tool import (
     DEFAULT_TOOL_TIMEOUTS,
     ToolTimeouts,
+    declares_spill_reader,
     declares_untrusted_output,
     dispatch_tool_call,
 )
@@ -519,6 +521,9 @@ class Agent(CorvidaePlugin):
         in the row's provenance and the header is rendered from it.
         """
         metadata = self._notification_metadata(channel, tool_call_id)
+        # A result that read a spill file back names where it came from (#576).
+        if tool_call_id and metadata.untrusted:
+            metadata = await self._stamp_spill_source(channel, tool_call_id, metadata)
         if tool_call_id and len(text) > self._max_tool_result_chars:
             text, metadata = await self._cut_tool_result(channel, source, text, metadata)
         item = QueueItem(
@@ -580,6 +585,84 @@ class Agent(CorvidaePlugin):
         self._note_activity(channel.id)
         return True
 
+    async def _stamp_spill_source(
+        self, channel, tool_call_id: str, metadata: ItemMetadata
+    ) -> ItemMetadata:
+        """Stamp the source of the spill file a tool call read onto its result.
+
+        Only a tool that declares it reads spill files is stamped, and the file
+        is the one argument that is, whole, a spill-directory path. The source
+        is the one recorded on the log row that cut it (#576). Anything less
+        certain stamps nothing, because a wrong source is worse than none: no
+        spill file in the call, two of them, no row, or a log that cannot be
+        read. Those last cases are logged, since the result is then fenced
+        without a source line; the lookup is advisory, so it never fails the
+        result.
+        """
+        spill = self.pm.get_plugin("spill")
+        if not isinstance(spill, NotificationSpill):
+            return metadata
+        if not declares_spill_reader(self._tools.get(metadata.tool or "")):
+            return metadata
+        names = self._spill_files_named_by_call(channel, tool_call_id, spill)
+        if len(names) != 1:
+            return metadata
+        [name] = names
+        finder = getattr(self.pm.get_plugin("persistence"), "find_spill_source", None)
+        try:
+            source = await finder(name) if callable(finder) else None
+        except Exception as exc:
+            logger.warning(
+                "channel %s: looking up the source of spill file %s for tool call %s "
+                "failed (%s), so the result is fenced without a source line; check "
+                "that the session database is readable",
+                channel.id, name, tool_call_id, type(exc).__name__,
+                exc_info=True, extra={"channel": channel.id},
+            )
+            return metadata
+        if source is None:
+            logger.warning(
+                "channel %s: no source is recorded for spill file %s, so the result "
+                "of tool call %s is fenced without a source line; the log row that "
+                "cut it was pruned, predates source recording, or there is no "
+                "persistence service",
+                channel.id, name, tool_call_id, extra={"channel": channel.id},
+            )
+            return metadata
+        return dataclasses.replace(metadata, spill_source=source)
+
+    def _spill_files_named_by_call(
+        self, channel, tool_call_id: str, spill: NotificationSpill
+    ) -> set[str]:
+        """The spill files, by name, that the arguments of a tool call are.
+
+        An argument counts only when the whole value is a path directly inside
+        the spill directory with a service-written name. Text that merely
+        contains such a path (a URL, a longer string, a path with a prefix or
+        suffix) does not: the path is shown to the model in the cut header, so
+        outside text can carry it.
+        """
+        conv = channel.conversation
+        for msg in reversed(conv.messages if conv is not None else []):
+            for call in well_formed_calls(msg):
+                if call["id"] != tool_call_id:
+                    continue
+                function = call.get("function")
+                function = function if isinstance(function, dict) else {}
+                try:
+                    args = json.loads(function.get("arguments") or "{}")
+                except (TypeError, ValueError):
+                    return set()
+                values = [v for v in args.values() if isinstance(v, str)] if isinstance(args, dict) else []
+                # abspath is lexical, so it normalises ./ and relative spellings
+                # without touching the filesystem.
+                paths = [Path(os.path.abspath(v)) for v in values if v]
+                return {
+                    p.name for p in paths
+                    if p.parent == spill.dir and SPILL_NAME.fullmatch(p.name)
+                }
+        return set()
+
     async def _cut_tool_result(
         self, channel, source: str, text: str, metadata: ItemMetadata
     ) -> tuple[str, ItemMetadata]:
@@ -588,7 +671,7 @@ class Agent(CorvidaePlugin):
         spill = self.pm.get_plugin("spill")
         if isinstance(spill, NotificationSpill):
             cut = await spill.cut(
-                text, limit=limit, source=f"tool result ({source})",
+                text, limit=limit, source=f"tool result ({metadata.tool or source})",
                 can_read=spill.can_read(channel),
             )
         else:
@@ -608,6 +691,7 @@ class Agent(CorvidaePlugin):
             spill_path=cut.path,
             spill_chars=cut.spilled,
             spill_failed=True if cut.failed else None,
+            cut_source=cut.source,
         )
 
     def _notification_metadata(self, channel, tool_call_id: str | None) -> ItemMetadata:
@@ -626,6 +710,7 @@ class Agent(CorvidaePlugin):
             spill_path=cut.path if cut else None,
             spill_chars=cut.spilled if cut else None,
             spill_failed=True if cut and cut.failed else None,
+            cut_source=cut.source if cut else None,
         )
 
     def _tool_result_metadata(self, channel, tool_call_id: str) -> ItemMetadata:
