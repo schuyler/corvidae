@@ -831,7 +831,13 @@ Per transport:
    the call was dispatched, recorded in the result row's provenance, so a
    later change does not re-render history. Tools that bring in outside
    content (file reads, web fetch and search) are declared, and tools
-   served by an MCP server are always declared.
+   served by an MCP server are always declared. A `read_file` result is
+   a page sized to the channel it serves: one page cannot by itself
+   overflow that channel's `max_context_tokens`, so reading a long file
+   or a spill (§3.4.9) costs the reader a bounded share of its window,
+   not its history or a compaction (§3.3.2). A file longer than a page
+   is returned as a page whose header says where to continue. A call
+   with no channel is bounded by `tools.max_result_chars` alone.
 5. Tools run in the daemon's process. Process separation (tool workers in
    another process with a narrowed filesystem and network, credentials and
    the database on the trusted side) is out of scope until corvidae runs

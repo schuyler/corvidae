@@ -187,7 +187,7 @@ Keeping a fork's cached prefix is the operator's job. A stage mapped to another 
 | `daemon.notification_spill_max_chars` | integer | `1000000` | Most characters written to one spill file; a longer text is cut to this and the header says how many characters the file holds. Must be an integer ≥ 1 (booleans and floats are rejected; a bad value fails startup naming the key and the value). Restart to apply. |
 | `daemon.notification_spill_max_age_days` | number | `7` | Spill files older than this many days (by modification time) are deleted: once at startup, then hourly. Only the age is checked; nothing limits the directory's total size. Only files the service named (`<32 hex digits>.txt`) are deleted. Must be a number > 0 (booleans and NaN are rejected; a bad value fails startup naming the key and the value). Restart to apply. |
 
-A notification cut by the plugin that sent it (see `webhook_notify.max_payload_chars`) shows the model its first characters inline. When the channel has a tool that reads spill files (`read_file` or `shell`, not disabled there), the header also names the file holding the rest, and the agent pages through it with `read_file`'s `offset` and `length`. A file deleted by age gives `read_file` an error that says so and names `notification_spill_max_age_days`. If the write fails, the notification is delivered cut and the header says the full text was not saved; the daemon logs a warning naming the directory. A tool result over `tools.max_result_chars` is cut and spilled the same way.
+A notification cut by the plugin that sent it (see `webhook_notify.max_payload_chars`) shows the model its first characters inline. When the channel has a tool that reads spill files (`read_file` or `shell`, not disabled there), the header also names the file holding the rest, and the agent pages through it with `read_file`'s `offset` and `length`; a page is sized to the channel's budget (`tools.read_file_window_fraction`). A file deleted by age gives `read_file` an error that says so and names `notification_spill_max_age_days`. If the write fails, the notification is delivered cut and the header says the full text was not saved; the daemon logs a warning naming the directory. A tool result over `tools.max_result_chars` is cut and spilled the same way.
 
 `daemon.idle_cooldown_seconds` and `daemon.idle_poll_interval` are removed with the `on_idle` hook. Either one in the config is an error at startup, and a reload carrying one is rejected. Idle work now runs on the kernel clock and each plugin sets its own period (for example `memory.idle_consolidate_after`); delete the key.
 
@@ -585,6 +585,7 @@ The built-in tool keys are read by the plugin that owns the tool: `shell_timeout
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `tools.max_result_chars` | integer | `100000` | Longest tool result kept whole. A longer one reaches the model as its first `max_result_chars` characters behind the kernel's cut line (`[metadata: cut to the first N of M characters; the full text is in <path>]`), and its full text is written to a spill file under the `daemon.notification_spill_*` settings, where the channel has a tool that reads spill files. A subagent's results get the same words as a plain-text line. A background task's result that answers no tool call is cut and spilled the same way, by `TaskPlugin`. Read by `ToolCollectionPlugin`. The legacy key `agent.max_tool_result_chars` is accepted but deprecated; use `tools.max_result_chars` instead. |
+| `tools.read_file_window_fraction` | number | `0.08` | The fraction of the channel's `max_context_tokens` one `read_file` page may take. A page is `min(tools.max_result_chars, max(2000, fraction x max_context_tokens x 3.0))` characters, so it never exceeds `tools.max_result_chars`; a call with no channel, or with no channel registry loaded, uses `tools.max_result_chars`. Must be a number with `0 < value <= 1`; any other value is a config error at startup and refuses a reload. Read by `ToolCollectionPlugin`. |
 | `tools.shell_timeout` | integer | `30` | Seconds before a `shell` command is killed. |
 | `tools.web_fetch_timeout` | integer | `15` | Seconds before a `web_fetch` HTTP request is aborted. |
 | `tools.web_max_response_bytes` | integer | `50000` | Maximum bytes of HTTP response body returned by `web_fetch`. Content beyond this limit is truncated with `[truncated]`. This limit is independent of `tools.max_result_chars`. |
@@ -1053,14 +1054,14 @@ again.
 | `heartbeat.after` | `HeartbeatPlugin` reads it at init and registers its idle watch at start. Putting the heartbeat to sleep or waking it takes a restart. |
 | `timepiece.*` | `TimepiecePlugin` reads its section in `on_init` and has no reload hook. |
 | `daemon.shutdown_timeout`, `daemon.exit_timeout` | Read once at startup by the runtime. A reload that changes either logs the restart-only warning and does not validate the value; a bad value fails the next startup (and the restart tool's pre-flight). |
-| `tools.max_result_chars`, `tools.shell_timeout`, `tools.web_fetch_timeout`, `tools.call_timeout`, `tools.timeouts` | Deferred; not currently implemented in hot-reload path. A bad `tools.call_timeout` or `tools.timeouts` value still refuses the whole reload (see Error handling). |
+| `tools.max_result_chars`, `tools.read_file_window_fraction`, `tools.shell_timeout`, `tools.web_fetch_timeout`, `tools.call_timeout`, `tools.timeouts` | Deferred; not currently implemented in hot-reload path. A bad `tools.call_timeout`, `tools.timeouts` or `tools.read_file_window_fraction` value still refuses the whole reload (see Error handling). |
 
 ### Error handling
 
 At startup (not reload), a missing or malformed config file, or a rejected
 value in the `agent` or `channels` sections (e.g. a `channels.<id>.tools`
 block that is not `{disabled: [names]}`, or an unknown key such as
-`channels.<id>.max_turn`), in the `llm` section (profiles, `extends`, `llm.defaults`, `llm.stages`), or in `tools.call_timeout` / `tools.timeouts`, prints
+`channels.<id>.max_turn`), in the `llm` section (profiles, `extends`, `llm.defaults`, `llm.stages`), or in `tools.call_timeout` / `tools.timeouts` / `tools.read_file_window_fraction`, prints
 `Config error: <detail> — check <path>` to stderr and exits non-zero. The
 detail names the key, the rejected value and what is accepted. The file is
 read as UTF-8 whatever the locale: one that isn't valid UTF-8 says so, with
@@ -1070,7 +1071,7 @@ nested too deeply to load says to reduce the nesting.
 - **Invalid YAML**: logged at `ERROR`; reload is skipped and the running config is unchanged.
 - **Not valid UTF-8, or YAML nested too deeply**: logged at `ERROR` naming the file, the cause (with the byte offset for UTF-8) and the remedy; reload is skipped and the running config stays in force.
 - **Rejected value in `agent:`, `daemon:` or `channels:`** (e.g. a malformed `channels.<id>.tools`): logged at `ERROR` naming the file. For `channels:` the message also names the key and the value and says "reload skipped"; for `agent:` and `daemon:` the key is in the logged traceback. The reload is skipped whole: no section is applied and no plugin receives `on_config_reload`, so a typo in one `channels:` entry cannot change `agent:` values.
-- **Rejected `tools.call_timeout` or `tools.timeouts`**: logged at `ERROR` naming the key and the value, with "reload skipped"; the running config is unchanged.
+- **Rejected `tools.call_timeout`, `tools.timeouts` or `tools.read_file_window_fraction`**: logged at `ERROR` naming the key and the value, with "reload skipped"; the running config is unchanged.
 - **Malformed `llm:` section** (an unknown `extends` base, an `extends` cycle, an unknown `kind`, an embedding profile with no `dimensions`, no default chat profile, an `llm.stages` entry naming a missing profile, and so on): logged at `ERROR` naming the key, with "reload skipped"; the running config is unchanged.
 - **Config file deleted**: logged at `WARNING`; polling continues. The file may reappear.
 - **Per-plugin failure in `on_config_reload`**: logged at `ERROR`; other plugins still receive the reload.
