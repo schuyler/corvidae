@@ -267,9 +267,10 @@ agent:
 #   allowed_origins:                   # extra origins: Tailscale name, reverse proxy
 #     - https://box.tailnet.ts.net
 
-# Context panel: a read-only view of every loaded channel's context window at
-# /panel/context_panel/ (needs the context-panel extra and the web block;
-# shows everything the model sees); docs/configuration.md.
+# Context panel: a "Context" section in the chat page's sidebar with a tab per
+# loaded channel, each a read-only view of that channel's context window
+# (needs the context-panel extra and the web block; shows everything the model
+# sees); docs/configuration.md.
 # context_panel: {}
 
 # Webhook ingress: POST /hook/<endpoint> events for subscribing plugins

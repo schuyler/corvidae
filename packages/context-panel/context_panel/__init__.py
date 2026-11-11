@@ -1,4 +1,4 @@
-"""Context panel: a live, read-only view of any loaded channel's context window (#687)."""
+"""Context panel: a live, read-only view of any loaded channel's context window, in a section of the web console's chat page (#687)."""
 
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ def _json(data: dict) -> web.Response:
 
 
 class ContextPanelPlugin(CorvidaePlugin):
-    """Web console panel showing every loaded channel's context window."""
+    """Web console sidebar section with one tab per loaded channel, each showing that channel's context window."""
 
     depends_on = frozenset({"registry", "persistence"})
     optional_depends_on = frozenset({"web"})

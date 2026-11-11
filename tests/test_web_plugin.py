@@ -34,6 +34,7 @@ import socket
 import sqlite3
 import time
 import tomllib
+from html.parser import HTMLParser
 from importlib import resources
 from pathlib import Path
 from types import SimpleNamespace
@@ -462,6 +463,52 @@ async def make_env(db):
         for c in env.conns:
             await c.ws.close()
         await env.http.close()
+
+
+class _SideBody(HTMLParser):
+    """Collects the direct children of #side-body, and every panel section."""
+
+    _VOID = {"input", "meta", "link", "br", "img", "hr"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.depth = 0
+        self.body_depth: int | None = None
+        self.children: list[dict] = []
+        self.sections: list[dict] = []
+        self._open: list[dict] = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        entry = {"tag": tag, "attrs": attrs, "text": ""}
+        if self.body_depth is not None and self.depth == self.body_depth + 1:
+            self.children.append(entry)
+        if "panel-section" in attrs.get("class", "").split():
+            self.sections.append(entry)
+        if tag in self._VOID:
+            return
+        if attrs.get("id") == "side-body":
+            self.body_depth = self.depth
+        self.depth += 1
+        self._open.append(entry)
+
+    def handle_endtag(self, tag):
+        if tag in self._VOID:
+            return
+        self.depth -= 1
+        self._open.pop()
+        if self.body_depth is not None and self.depth == self.body_depth:
+            self.body_depth = None
+
+    def handle_data(self, data):
+        for entry in self._open:
+            entry["text"] += data
+
+
+def parse_side_body(page: str) -> _SideBody:
+    parser = _SideBody()
+    parser.feed(page)
+    return parser
 
 
 # ===========================================================================
@@ -1876,13 +1923,8 @@ class TestPanels:
     async def _env(self, make_env, panel):
         return await make_env(extra_plugins={"testpanel": panel})
 
-    async def test_panel_page_assets_and_json_served(self, make_env, panel):
+    async def test_panel_assets_and_json_served(self, make_env, panel):
         env = await self._env(make_env, panel)
-        async with env.http.get(f"{env.base}/panel/testpanel/",
-                                headers=env.cookie()) as r:
-            assert r.status == 200
-            assert r.content_type == "text/html"
-            assert "static/panel.js" in await r.text()
         async with env.http.get(f"{env.base}/panel/testpanel/static/panel.js",
                                 headers=env.cookie()) as r:
             assert r.status == 200
@@ -1895,10 +1937,17 @@ class TestPanels:
             assert r.status == 200
             assert await r.json() == {"answer": 42}
 
+    async def test_panel_page_is_gone(self, make_env, panel):
+        env = await self._env(make_env, panel)
+        async with env.http.get(f"{env.base}/panel/testpanel/",
+                                headers=env.cookie()) as r:
+            assert r.status == 404
+        async with env.http.get(f"{env.base}/panel/testpanel/") as r:
+            assert r.status == 401
+
     async def test_panel_routes_need_cookie(self, make_env, panel):
         env = await self._env(make_env, panel)
-        paths = ["/panel/testpanel/", "/panel/testpanel/static/panel.js",
-                 "/panel/testpanel/data"]
+        paths = ["/", "/panel/testpanel/static/panel.js", "/panel/testpanel/data"]
         for path in paths:
             # Control: the route exists for an authenticated client.
             async with env.http.get(f"{env.base}{path}", headers=env.cookie()) as r:
@@ -1908,7 +1957,7 @@ class TestPanels:
 
     async def test_panel_routes_bad_host_4xx(self, make_env, panel):
         env = await self._env(make_env, panel)
-        for path in ["/panel/testpanel/", "/panel/testpanel/data"]:
+        for path in ["/", "/panel/testpanel/static/panel.js", "/panel/testpanel/data"]:
             # Control: the route exists for a good Host.
             async with env.http.get(f"{env.base}{path}", headers=env.cookie()) as r:
                 assert r.status == 200, path
@@ -1920,7 +1969,7 @@ class TestPanels:
         env = await self._env(make_env, panel)
         expected = _expected_csp(
             {f"ws://127.0.0.1:{env.port}", f"ws://localhost:{env.port}"})
-        paths = ["/panel/testpanel/", "/panel/testpanel/static/panel.js",
+        paths = ["/", "/panel/testpanel/static/panel.js",
                  "/panel/testpanel/data", "/panel/testpanel/stream"]
         for path in paths:
             async with env.http.get(f"{env.base}{path}", headers=env.cookie()) as r:
@@ -1936,25 +1985,49 @@ class TestPanels:
         with pytest.raises(pluggy.PluginValidationError, match="badpanel"):
             await make_env(extra_plugins={"badpanel": bad})
 
-    async def test_chat_page_links_each_panel(self, make_env, tmp_path):
+    async def test_chat_page_has_a_section_and_assets_per_panel(self, make_env, tmp_path):
         first = PanelPlugin("First Panel", tmp_path, [])
         second = PanelPlugin("Second Panel", tmp_path, [])
         env = await make_env(extra_plugins={"first": first, "second": second})
         async with env.http.get(f"{env.base}/", headers=env.cookie()) as r:
             assert r.status == 200
             body = await r.text()
-        assert "app.js" in body
-        assert '<a href="/panel/first/">First Panel</a>' in body
-        assert '<a href="/panel/second/">Second Panel</a>' in body
+        head = body[:body.index("</head>")]
+        app_js = head.index('<script src="/static/app.js" defer></script>')
+        for name in ("first", "second"):
+            css = f'<link rel="stylesheet" href="/panel/{name}/static/panel.css">'
+            js = f'<script src="/panel/{name}/static/panel.js" data-panel="{name}" defer></script>'
+            assert head.count(css) == 1, name
+            assert head.count(js) == 1, name
+            assert head.index(js) > app_js, name
+        side = parse_side_body(body)
+        assert [(c["tag"], c["attrs"].get("data-panel"), c["text"])
+                for c in side.children[-2:]] == [
+            ("section", "first", "First Panel"),
+            ("section", "second", "Second Panel"),
+        ]
+        assert '<section class="panel-section" data-panel="first"><h2>First Panel</h2></section>' in body
+        assert '<section class="panel-section" data-panel="second"><h2>Second Panel</h2></section>' in body
 
-    async def test_no_panels_renders_no_nav(self, make_env):
+    async def test_chat_page_has_no_panel_links_or_nav(self, make_env, tmp_path):
+        first = PanelPlugin("First Panel", tmp_path, [])
+        env = await make_env(extra_plugins={"first": first})
+        async with env.http.get(f"{env.base}/", headers=env.cookie()) as r:
+            body = await r.text()
+        assert '<a href="/panel/' not in body
+        assert '<nav class="panels"' not in body
+        assert "panel-section" in body
+
+    async def test_no_panels_renders_no_panel_markup(self, make_env):
         env = await make_env()
         async with env.http.get(f"{env.base}/", headers=env.cookie()) as r:
             assert r.status == 200
             body = await r.text()
         assert "app.js" in body
+        assert "panel-section" not in body
         assert "<nav" not in body
         assert "/panel/" not in body
+        assert "data-panel" not in body
 
     async def test_panel_plugin_without_web_block_is_inert(self, tmp_path):
         pm = create_plugin_manager()
