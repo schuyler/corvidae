@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from corvidae.tool import MAX_TOOL_RESULT_CHARS, execute_tool_call
+from corvidae.tool import execute_tool_call
 
 if TYPE_CHECKING:
     from corvidae.channel import Channel
@@ -40,7 +40,6 @@ class LocalToolBackend:
     tools: dict[str, Callable]
     tool_call_id: str = "local"
     task_queue: TaskQueue | None = None
-    max_result_chars: int = MAX_TOOL_RESULT_CHARS
 
     async def run(self, name: str, args: dict, channel: Channel) -> str:
         """Resolve ``name`` in ``self.tools`` and execute it in-process."""
@@ -51,7 +50,6 @@ class LocalToolBackend:
             channel=channel,
             tool_call_id=self.tool_call_id,
             task_queue=self.task_queue,
-            max_result_chars=self.max_result_chars,
         )
 
 
@@ -61,7 +59,6 @@ def resolve_tool_backend(
     *,
     tool_call_id: str,
     task_queue: TaskQueue | None = None,
-    max_result_chars: int = MAX_TOOL_RESULT_CHARS,
 ) -> ToolBackend | None:
     """Pick a backend for this dispatch, or None to use inline execute_tool_call.
 
@@ -82,7 +79,6 @@ def resolve_tool_backend(
             tools=tools,
             tool_call_id=tool_call_id,
             task_queue=task_queue,
-            max_result_chars=max_result_chars,
         )
 
     return None

@@ -480,3 +480,137 @@ async def test_stale_pointer_error_inside_dir_only(make):
     assert AGE_KEY in error
 
     assert h.spill.stale_pointer_error(str(h.base / "elsewhere.txt")) is None
+
+
+# ---------------------------------------------------------------------------
+# Tool results (#575): a result over tools.max_result_chars is cut by the
+# Agent and spilled through the same service, with the same header
+# ---------------------------------------------------------------------------
+
+
+async def deliver_result(h: Harness, cid: str, text: str = TEXT, *, limit: int = 10,
+                         call_id: str = "call_1") -> QueueItem:
+    """Deliver ``text`` as the result of tool call ``call_id`` on ``cid``,
+    with the Agent's result cap at ``limit``; return the enqueued item."""
+    h.agent._max_tool_result_chars = limit
+    [channel] = h.channels(cid)
+    await h.agent.on_notify(
+        channel=channel, source="task", text=text, tool_call_id=call_id, annotations={},
+    )
+    return h.items[-1]
+
+
+def rendered(h: Harness, item: QueueItem) -> str:
+    """The content of the row the Agent stores for ``item``, as the model sees it."""
+    msg, _ = h.agent._build_conversation_message(item)
+    _, out = frame(msg, msg, item.channel.id, KEY)
+    return out["content"]
+
+
+async def test_tool_result_over_the_cap_is_cut_spilled_and_headed(make):
+    """A trusted tool result over the cap reaches the window as its head,
+    preceded by the kernel's cut line naming the spill file; no fence."""
+    h = await make()
+    item = await deliver_result(h, "irc:#a")
+
+    [path] = files_in(h.dir)
+    assert path.read_text(encoding="utf-8") == TEXT
+    assert item.content == TEXT[:10]
+    assert rendered(h, item) == f"{pointer(str(path))}\n{TEXT[:10]}"
+
+
+async def test_tool_result_within_the_cap_is_untouched(make):
+    """A result at or under the cap is not cut, spilled or headed."""
+    h = await make()
+    item = await deliver_result(h, "irc:#a", limit=50)
+
+    assert files_in(h.dir) == []
+    assert item.content == TEXT
+    assert rendered(h, item) == TEXT
+
+
+async def test_tool_result_without_a_reader_is_cut_without_a_pointer(make):
+    """A channel with no spill-reading tool gets the plain cut line and no file."""
+    h = await make(tools=_BOTH)
+    item = await deliver_result(h, "irc:#a")
+
+    assert files_in(h.dir) == []
+    assert rendered(h, item) == f"{plain_cut()}\n{TEXT[:10]}"
+
+
+async def test_untrusted_tool_result_keeps_its_fence_and_gains_the_cut_line(make):
+    """A declared-untrusted result keeps its header and fence, and the cut
+    line sits in the header, outside the fence."""
+    h = await make()
+    h.agent._dispatched_calls[("irc:#a", "call_1")] = ("web_fetch", True)
+    item = await deliver_result(h, "irc:#a")
+
+    [path] = files_in(h.dir)
+    lines = rendered(h, item).split("\n")
+    assert lines[0].startswith("[metadata: result of your own web_fetch call call_1;")
+    assert lines[1] == pointer(str(path))
+    assert lines[2].startswith("[payload ") and lines[2].endswith(" begins]")
+    assert lines[3] == TEXT[:10]
+
+
+async def test_tool_result_over_the_spill_cap_says_how_much_was_saved(make, tmp_path):
+    """Content over daemon.notification_spill_max_chars is spilled up to it,
+    and the header says how much the file holds."""
+    h = await make(daemon={"notification_spill_dir": str(tmp_path / "spill"),
+                           "notification_spill_max_chars": 20})
+    item = await deliver_result(h, "irc:#a")
+
+    [path] = files_in(h.dir)
+    assert path.read_text(encoding="utf-8") == TEXT[:20]
+    assert rendered(h, item).split("\n")[0] == (
+        f"[metadata: cut to the first 10 of 50 characters; "
+        f"the first 20 characters are in {path}]"
+    )
+
+
+async def test_tool_result_with_an_unwritable_dir_says_not_saved_and_warns(
+        make, tmp_path, caplog):
+    """A failed write still delivers the head, says the full text was not
+    saved, and logs a WARNING naming the directory and the remedy."""
+    (tmp_path / "spill").write_text("not a directory")
+    h = await make(start=False)
+    with caplog.at_level(logging.WARNING):
+        item = await deliver_result(h, "irc:#a")
+
+    assert rendered(h, item) == (
+        "[metadata: cut to the first 10 of 50 characters; the full text was not saved]\n"
+        + TEXT[:10]
+    )
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(str(h.dir) in w and "writable" in w for w in warnings), warnings
+
+
+async def test_notification_without_a_call_id_is_not_cut_by_the_agent(make):
+    """Only tool results are cut by the Agent; other notifications are
+    their sender's to cut (#744)."""
+    h = await make()
+    h.agent._max_tool_result_chars = 10
+    [channel] = h.channels("irc:#a")
+    await h.agent.on_notify(
+        channel=channel, source="task", text=TEXT, tool_call_id=None, annotations={},
+    )
+
+    assert h.items[-1].content == TEXT
+    assert files_in(h.dir) == []
+
+
+async def test_stale_pointer_error_names_tool_results_too(make):
+    """The stale-pointer error describes spill files generally, not only
+    notifications."""
+    h = await make(start=False)
+    error = h.spill.stale_pointer_error(str(h.dir / ("0" * 32 + ".txt")))
+    assert error is not None
+    assert "tool result" in error
+
+
+async def test_contains_is_true_only_inside_the_spill_dir(make):
+    """contains() says whether a path is inside the spill directory, so
+    read_file can clamp an unranged read of a spill file."""
+    h = await make(start=False)
+    assert h.spill.contains(str(h.dir / ("0" * 32 + ".txt")))
+    assert not h.spill.contains(str(h.base / "elsewhere.txt"))

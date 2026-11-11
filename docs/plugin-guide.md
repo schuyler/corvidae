@@ -1531,7 +1531,7 @@ The async-only rule extends to **tool functions** as well as hooks: `Tool.from_f
 
 These tools are registered by built-in plugins. They are available to the LLM in every standard Corvidae deployment.
 
-All tool results are truncated at `MAX_TOOL_RESULT_CHARS` (default 100,000 characters) by `execute_tool_call` in `corvidae/tool.py`. The truncation appends `[truncated — N chars total]` so the LLM knows output was cut. Override via config:
+A tool returns its whole result: `execute_tool_call` does not cut it. A result longer than `tools.max_result_chars` (default 100,000 characters) is cut when the Agent receives it, and its full text is spilled to a file through the kernel spill service. The model sees the head behind a kernel-built cut line naming the file, where the channel has a tool that declares `reads_spill_files`. A tool that can read spill files sets `reads_spill_files = True` on its function. Override the cap via config:
 
 ```yaml
 tools:
@@ -1964,8 +1964,8 @@ Implements one hook:
   collected items, then drops any tool named in `tools.disabled` — the
   single chokepoint every registered tool passes through, so there are no
   per-plugin opt-outs. Reads `tools.max_result_chars` (or the deprecated
-  `agent.max_tool_result_chars`) to configure the per-call result truncation
-  limit.
+  `agent.max_tool_result_chars`): the length past which a tool result is cut
+  and spilled.
 
 `Agent` retrieves the registry via
 `get_dependency(pm, "tools", ToolCollectionPlugin)`. The `trylast=True`

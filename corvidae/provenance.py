@@ -53,8 +53,8 @@ class ItemMetadata:
     # role tool: True when the tool declared its output untrusted at dispatch
     # (True or absent)
     untrusted: bool | None = None
-    # role system (notification): how the kernel cut the text, and where the
-    # full text went (spill_failed is True or absent)
+    # role system (notification) and role tool: how the kernel cut the text,
+    # and where the full text went (spill_failed is True or absent)
     cut_shown: int | None = None
     cut_total: int | None = None
     spill_path: str | None = None
@@ -178,18 +178,36 @@ def _person_header(meta: ItemMetadata, channel_id: str) -> str | None:
     return f"[metadata: {sender}; {where}{addressed}]"
 
 
-def _cut_line(meta: ItemMetadata) -> str:
-    """The ``metadata:`` line saying a notification was cut and where the rest is."""
-    line = f"[metadata: cut to the first {meta.cut_shown} of {meta.cut_total} characters"
-    if meta.spill_path:
-        path = clean_value(meta.spill_path)
-        if meta.spill_chars == meta.cut_total:
-            line += f"; the full text is in {path}"
+def cut_text(
+    shown: int, total: int, path: str | None, spilled: int | None, failed: bool
+) -> str:
+    """The words saying a text was cut and where the rest is, without brackets.
+
+    Shared by the kernel's ``metadata:`` line and the plain-text marker a
+    subagent loop puts on a cut tool result, so both say the same thing.
+    """
+    text = f"cut to the first {shown} of {total} characters"
+    if path:
+        shown_path = clean_value(path)
+        if spilled == total:
+            text += f"; the full text is in {shown_path}"
         else:
-            line += f"; the first {meta.spill_chars} characters are in {path}"
-    elif meta.spill_failed:
-        line += "; the full text was not saved"
-    return line + "]"
+            text += f"; the first {spilled} characters are in {shown_path}"
+    elif failed:
+        text += "; the full text was not saved"
+    return text
+
+
+def _cut_line(meta: ItemMetadata) -> str:
+    """The ``metadata:`` line saying an item was cut and where the rest is."""
+    # Callers check cut_total; a record missing cut_shown says the whole length.
+    total = meta.cut_total or 0
+    shown = meta.cut_shown if meta.cut_shown is not None else total
+    words = cut_text(
+        shown, total, meta.spill_path, meta.spill_chars,
+        bool(meta.spill_failed),
+    )
+    return f"[metadata: {words}]"
 
 
 def frame(
@@ -239,11 +257,22 @@ def frame(
             f"{clean_value(call_id if isinstance(call_id, str) else '')}{on}; "
             f"untrusted outside content, {_NOT_HUMAN}]"
         ]
+        if meta.cut_total is not None:
+            lines.append(_cut_line(meta))
     elif role == "tool" and meta.target:
         lines = [
             f"[metadata: result of your own {clean_value(meta.tool or '')} action on "
             f"{clean_value(meta.target)}; {_NOT_HUMAN}]"
         ]
+        if meta.cut_total is not None:
+            lines.append(_cut_line(meta))
+    elif role == "tool" and meta.cut_total is not None:
+        # A trusted result the kernel cut (#575): the cut line heads the
+        # content, which is not outside text and so is not fenced.
+        return None, {
+            **rendered,
+            "content": f"{_cut_line(meta)}\n{rendered.get('content') or ''}",
+        }
     else:
         return None, rendered
     if lines and annotations:

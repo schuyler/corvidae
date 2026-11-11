@@ -346,61 +346,6 @@ class TestContextWindowCharsPerToken:
 # ===========================================================================
 
 
-class TestToolTruncationTemplate:
-    def test_tool_truncation_template_constant(self):
-        """TOOL_TRUNCATION_TEMPLATE exists in corvidae.tool with em-dash."""
-        import corvidae.tool as tool_mod
-
-        assert hasattr(tool_mod, "TOOL_TRUNCATION_TEMPLATE"), (
-            "corvidae.tool must define TOOL_TRUNCATION_TEMPLATE"
-        )
-        template = tool_mod.TOOL_TRUNCATION_TEMPLATE
-        assert isinstance(template, str), "TOOL_TRUNCATION_TEMPLATE must be a str"
-        assert "\u2014" in template, (
-            "TOOL_TRUNCATION_TEMPLATE must contain an em-dash (—)"
-        )
-        assert "{original_len}" in template, (
-            "TOOL_TRUNCATION_TEMPLATE must contain '{original_len}' placeholder"
-        )
-
-
-class TestExecuteToolCallMaxResultChars:
-    async def test_execute_tool_call_max_result_chars_param(self):
-        """execute_tool_call accepts max_result_chars kwarg with default 100_000."""
-        from corvidae.tool import execute_tool_call
-
-        sig = inspect.signature(execute_tool_call)
-        assert "max_result_chars" in sig.parameters, (
-            "execute_tool_call() must accept a 'max_result_chars' keyword parameter"
-        )
-        param = sig.parameters["max_result_chars"]
-        assert param.default == 100_000, (
-            f"execute_tool_call() default max_result_chars must be 100000, got {param.default!r}"
-        )
-
-    async def test_execute_tool_call_max_result_chars_override(self):
-        """execute_tool_call truncates at max_result_chars when provided."""
-        from corvidae.tool import execute_tool_call
-
-        async def big_tool():
-            return "z" * 500
-
-        result = await execute_tool_call(
-            big_tool,
-            {},
-            tool_call_id="call1",
-            max_result_chars=50,
-        )
-
-        # Must start with 50 'z' chars and then be truncated.
-        assert result.startswith("z" * 50), (
-            f"execute_tool_call with max_result_chars=50 must keep first 50 chars"
-        )
-        assert len(result) < 500, (
-            "execute_tool_call with max_result_chars=50 must truncate a 500-char result"
-        )
-
-
 class TestRunAgentLoopMaxResultCharsParam:
     def test_agent_loop_max_result_chars_param(self):
         """run_agent_loop accepts max_result_chars kwarg."""

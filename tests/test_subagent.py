@@ -1688,3 +1688,83 @@ async def test_max_turns_exceeded_whitespace_only_assistant_text():
     )
 
     assert result == "(max tool-calling rounds reached)"
+
+
+# ---------------------------------------------------------------------------
+# A result over max_result_chars is cut and spilled (#575). A subagent loop
+# stores no rows for the kernel to render a header from, so the cut line is
+# plain text ahead of the head.
+# ---------------------------------------------------------------------------
+
+_LONG = "".join(chr(ord("a") + i % 26) for i in range(50))
+
+
+async def _spill_pm(tmp_path):
+    """A plugin manager with the spill service writing into tmp_path/spill."""
+    from corvidae.hooks import create_plugin_manager
+    from corvidae.spill import NotificationSpill
+    from fake_clock import install_kernel_clock
+
+    pm = create_plugin_manager()
+    clock, _ = install_kernel_clock(pm, started=False)
+    spill = NotificationSpill()
+    pm.register(spill, name="spill")
+    await spill.on_init(pm=pm, config={"daemon": {"notification_spill_dir": str(tmp_path / "spill")}})
+    return pm, clock
+
+
+async def _loop_with_long_result(tools: dict, pm) -> str:
+    """Run one round of run_agent_loop calling ``big`` with the cap at 10;
+    return the tool row's content."""
+    client = MagicMock()
+    client.chat = AsyncMock(side_effect=[
+        _make_tool_call_response([_make_tool_call("call_big", "big", {})]),
+        _make_text_response("done"),
+    ])
+    messages = [{"role": "user", "content": "go"}]
+    await run_agent_loop(client, messages, tools=tools, tool_schemas=[],
+                         pm=pm, max_result_chars=10)
+    return next(m for m in messages if m["role"] == "tool")["content"]
+
+
+async def _big() -> str:
+    """Returns 50 characters."""
+    return _LONG
+
+
+async def _reader(path: str) -> str:
+    """A tool that declares it reads spill files."""
+    return ""
+_reader.reads_spill_files = True  # type: ignore[attr-defined]
+
+
+async def test_subagent_result_over_the_cap_is_spilled_with_a_text_pointer(tmp_path):
+    """With a spill-reading tool in the subagent's set, the full result is
+    written to a file and the row names it ahead of the head."""
+    pm, clock = await _spill_pm(tmp_path)
+    try:
+        content = await _loop_with_long_result({"big": _big, "read_file": _reader}, pm)
+    finally:
+        await clock.close()
+
+    [path] = sorted((tmp_path / "spill").resolve().iterdir())
+    assert path.read_text(encoding="utf-8") == _LONG
+    assert content == f"[cut to the first 10 of 50 characters; the full text is in {path}]\n{_LONG[:10]}"
+
+
+async def test_subagent_result_without_a_reader_is_cut_without_a_file(tmp_path):
+    """Without a spill-reading tool, the row says it was cut and no file is written."""
+    pm, clock = await _spill_pm(tmp_path)
+    try:
+        content = await _loop_with_long_result({"big": _big}, pm)
+    finally:
+        await clock.close()
+
+    assert not (tmp_path / "spill").exists()
+    assert content == f"[cut to the first 10 of 50 characters]\n{_LONG[:10]}"
+
+
+async def test_subagent_result_without_a_plugin_manager_is_cut(tmp_path):
+    """With no plugin manager (no spill service), the row is still cut and says so."""
+    content = await _loop_with_long_result({"big": _big, "read_file": _reader}, None)
+    assert content == f"[cut to the first 10 of 50 characters]\n{_LONG[:10]}"

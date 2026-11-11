@@ -1313,6 +1313,19 @@ no source (#576). A `cat` of the file through `shell` arrives unfenced
 other path is, and the agent can read it whether or not a header pointed at
 it.
 
+Tool results over `tools.max_result_chars` are spilled by the same service
+(#575), so the directory also holds tool output: command output, file
+contents, fetched pages and MCP results, any of which can carry secrets or
+injected text. Its bounds are the same cap and age, so the directory's worst
+case adds the cap times the rate of long tool results. The file is written
+only where the channel (or, in a subagent, its tool set) has a spill reader,
+and read back the same ways as a notification's. The cut line on an
+untrusted result sits in the header, outside the fence. On a trusted result
+it heads the unfenced content, so text in that content (a `shell` command's
+output, say) could imitate it. That is no new reach: such output was
+already unfenced and could imitate any text. In a subagent's loop the cut
+line is plain text in the result, with no kernel header at all.
+
 ### Smaller things
 
 - The funnel's `ponder` tool lets the model wait, at most 5 s

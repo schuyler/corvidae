@@ -33,7 +33,6 @@ from pydantic import create_model
 # Maximum characters in a tool result before truncation. Override via agent.max_tool_result_chars in agent.yaml.
 MAX_TOOL_RESULT_CHARS = 100_000
 # Appended to truncated tool results. Format with original_len=<int>. Uses em-dash (U+2014).
-TOOL_TRUNCATION_TEMPLATE = "\n[truncated \u2014 {original_len} chars total]"  # em-dash, matching current code
 
 _LOG_TRUNCATION_LENGTH = 200
 
@@ -300,7 +299,6 @@ async def execute_tool_call(
     channel: "Channel | None" = None,
     tool_call_id: str,
     task_queue: "TaskQueue | None" = None,
-    max_result_chars: int = MAX_TOOL_RESULT_CHARS,
 ) -> str:
     """Invoke a tool function, injecting ToolContext if the function declares ``_ctx``.
 
@@ -318,11 +316,11 @@ async def execute_tool_call(
         channel: Channel for ToolContext injection. None when unavailable.
         tool_call_id: The LLM-assigned call ID for this invocation.
         task_queue: TaskQueue for ToolContext injection. None when unavailable.
-        max_result_chars: Maximum length of the result string before truncation.
-            Defaults to MAX_TOOL_RESULT_CHARS.
 
     Returns:
-        str(result) of the tool function's return value.
+        str(result) of the tool function's return value, whole: the Agent
+        cuts a result over tools.max_result_chars when it is delivered, and
+        spills the rest (#575).
     """
     sig = inspect.signature(tool_fn)
     call_kwargs = dict(args)
@@ -339,11 +337,7 @@ async def execute_tool_call(
         result = await asyncio.to_thread(tool_fn, **call_kwargs)
     else:
         result = await tool_fn(**call_kwargs)
-    result_str = str(result)
-    if len(result_str) > max_result_chars:
-        original_len = len(result_str)
-        result_str = result_str[:max_result_chars] + TOOL_TRUNCATION_TEMPLATE.format(original_len=original_len)
-    return result_str
+    return str(result)
 
 
 def _truncate(s: str, maxlen: int = _LOG_TRUNCATION_LENGTH) -> str:
@@ -401,7 +395,6 @@ async def dispatch_tool_call(
     *,
     channel: "Channel | None" = None,
     task_queue: "TaskQueue | None" = None,
-    max_result_chars: int = MAX_TOOL_RESULT_CHARS,
     pm=None,
     call_timeouts: ToolTimeouts = DEFAULT_TOOL_TIMEOUTS,
 ) -> ToolCallResult:
@@ -420,7 +413,6 @@ async def dispatch_tool_call(
         tools: Dict mapping tool names to async callable functions.
         channel: Channel for ToolContext injection. None when unavailable.
         task_queue: TaskQueue for ToolContext injection. None when unavailable.
-        max_result_chars: Maximum length of tool result strings before truncation.
         pm: pluggy PluginManager for firing transform_tool_result. None to skip.
         call_timeouts: Bound on the call (default 600 s, per-tool overrides).
             A timeout cancels the tool and returns an error result; the
@@ -484,7 +476,6 @@ async def dispatch_tool_call(
         tools,
         tool_call_id=call_id,
         task_queue=task_queue,
-        max_result_chars=max_result_chars,
     )
     latency_ms: float | None = None
     error = False
@@ -506,7 +497,6 @@ async def dispatch_tool_call(
                     channel=channel,
                     tool_call_id=call_id,
                     task_queue=task_queue,
-                    max_result_chars=max_result_chars,
                 )
         latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
         if scope.expired():
