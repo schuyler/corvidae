@@ -165,7 +165,7 @@ class TestAcpRunFailure:
                 self.pm = MagicMock()
                 self.pm.get_plugin.return_value = plugin
 
-            async def run(self):
+            async def run(self, **kwargs):
                 return
 
         monkeypatch.setattr("corvidae.channels.acp.Runtime", _FakeRuntime)

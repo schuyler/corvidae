@@ -102,9 +102,13 @@ def _write_config(tmp_path: Path, daemon_extra: dict) -> Path:
 
 
 def _spawn(tmp_path: Path, config: Path, *flags: str) -> _Child:
-    """Start the child daemon in tmp_path with stdin closed."""
+    """Start the child daemon in tmp_path with stdin closed.
+
+    -P keeps the script's directory (tests/) off sys.path, so test packages
+    such as tests/corvidae_restart cannot shadow the installed plugins.
+    """
     proc = subprocess.Popen(
-        [sys.executable, "-u", str(CHILD), str(config), *flags],
+        [sys.executable, "-P", "-u", str(CHILD), str(config), *flags],
         cwd=tmp_path,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,

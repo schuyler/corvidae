@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import click
 
-from corvidae.runtime import Runtime
+from corvidae.runtime import Runtime, run_daemon
 
 
 @click.command("serve")
@@ -14,4 +12,4 @@ from corvidae.runtime import Runtime
 def serve_command(config):
     """Start corvidae as a headless daemon."""
     runtime = Runtime(config_path=config)
-    asyncio.run(runtime.run())
+    run_daemon(runtime)

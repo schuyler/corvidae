@@ -18,6 +18,10 @@ from corvidae.hooks import hookimpl
 from corvidae.runtime import Runtime
 
 
+# Strong references to leaked connections, alive until interpreter exit.
+_LEAKED: list[aiosqlite.Connection] = []
+
+
 class _RaisingOnStop:
     """Plugin whose on_stop always raises, so stop() propagates an exception."""
 
@@ -34,9 +38,6 @@ class _ChildRuntime(Runtime):
         super().__init__(config_path=config_path)
         self._leak = leak
         self._raise_on_stop = raise_on_stop
-        # Strong reference so the leaked connection (and its non-daemon
-        # worker thread) lives until the process exits.
-        self._leaked: aiosqlite.Connection | None = None
 
     async def load_plugins(self, config: dict) -> None:
         """Load the real plugin set, then add the raising plugin if asked."""
@@ -48,8 +49,10 @@ class _ChildRuntime(Runtime):
         """Start for real, leak a connection if asked, then schedule READY."""
         await super().start()
         if self._leak:
-            # Opened and never closed: its worker thread is non-daemon.
-            self._leaked = await aiosqlite.connect(":memory:")
+            # Opened and never closed: its worker thread is non-daemon. Held
+            # at module level, not on the runtime: the runtime is freed when
+            # main() returns, and a collected connection stops its own thread.
+            _LEAKED.append(await aiosqlite.connect(":memory:"))
         # call_soon, not a direct print: run() installs the SIGTERM handler
         # only after start() returns, and this callback runs once run() is
         # awaiting the stop event, i.e. after the handler is in place.
