@@ -47,6 +47,21 @@ def test_exit_timeout_zero_or_null_disables(value):
     assert parse_shutdown_timeouts({"exit_timeout": value}).exit is None
 
 
+def test_arm_exit_watchdog_none_starts_no_thread():
+    """R6: a disabled watchdog (None) arms nothing, so it can never fire.
+
+    Catches an arming side that falls back to the 5 s default for None.
+    """
+    import threading
+
+    from corvidae.shutdown import arm_exit_watchdog
+
+    before = set(threading.enumerate())
+    arm_exit_watchdog(None)
+    # Any thread started by the call would show up here.
+    assert set(threading.enumerate()) - before == set()
+
+
 @pytest.mark.parametrize(
     "value", [v for _, v in BAD_EXIT], ids=_ids(BAD_EXIT)
 )

@@ -4,17 +4,13 @@ Runs a real ``Runtime`` through ``corvidae.runtime.run_daemon`` (the entry
 point that arms the exit watchdog) on an offline config, optionally leaking an
 aiosqlite connection and/or registering a plugin whose ``on_stop`` raises.
 
-Usage: python exit_watchdog_child.py CONFIG_PATH [--leak] [--raise-on-stop] [--no-watchdog]
-
-``--no-watchdog`` runs ``asyncio.run(runtime.run())`` instead, to validate the
-fixture itself (it must reach READY and exit 0 on SIGTERM without a leak).
+Usage: python exit_watchdog_child.py CONFIG_PATH [--leak] [--raise-on-stop]
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import sys
 
 import aiosqlite
 
@@ -66,13 +62,8 @@ def main() -> None:
     parser.add_argument("config_path")
     parser.add_argument("--leak", action="store_true")
     parser.add_argument("--raise-on-stop", action="store_true")
-    parser.add_argument("--no-watchdog", action="store_true")
     args = parser.parse_args()
     runtime = _ChildRuntime(args.config_path, args.leak, args.raise_on_stop)
-    if args.no_watchdog:
-        # Fixture validation path: plain asyncio.run, no watchdog.
-        asyncio.run(runtime.run())
-        return
     # Imported here so a missing run_daemon fails with a clear traceback in
     # the child's output rather than at collection time.
     from corvidae.runtime import run_daemon
@@ -82,4 +73,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    sys.exit(0)

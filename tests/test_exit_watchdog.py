@@ -33,7 +33,7 @@ MINIMAL_DISABLED = [
 ]
 
 # How long the child may take to boot and print READY.
-READY_DEADLINE = 8.0
+READY_DEADLINE = 5.0
 # Margin after SIGTERM: shutdown_timeout (3) + exit_timeout (0.5) is the
 # worst case, but a clean on_stop returns at once, so the watchdog fires at
 # about 0.5 s. 3.0 s is far above that yet far below an unbounded hang.
@@ -141,7 +141,6 @@ def test_leaked_thread_forces_exit_1_with_warning(tmp_path, raise_on_stop):
     try:
         _boot(child)
         child.proc.send_signal(signal.SIGTERM)
-        started = time.monotonic()
         try:
             status = child.proc.wait(timeout=EXIT_DEADLINE)
         except subprocess.TimeoutExpired:
@@ -149,14 +148,12 @@ def test_leaked_thread_forces_exit_1_with_warning(tmp_path, raise_on_stop):
                 f"daemon still alive {EXIT_DEADLINE}s after SIGTERM with a "
                 f"leaked thread (exit watchdog missing?); output:\n{child.output}"
             )
-        elapsed = time.monotonic() - started
         child._reader.join(timeout=2)
         output = child.output
 
         # R3: abnormal status.
         assert status == 1, f"expected exit status 1, got {status}; output:\n{output}"
-        # R1: well inside the bound plus margin.
-        assert elapsed < EXIT_DEADLINE
+        # R1: the bound is enforced by the wait above (EXIT_DEADLINE).
         # R2: the line names the leaked thread and the config key.
         assert "_connection_worker_thread" in output, output
         assert "daemon.exit_timeout" in output, output
