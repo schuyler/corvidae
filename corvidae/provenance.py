@@ -268,7 +268,7 @@ def frame(
         # can be sender-chosen (a webhook origin), so it is cleaned like the
         # path in the cut line.
         if meta.spill_source:
-            lines.append(f"[metadata: content spilled from {clean_value(meta.spill_source)}]")
+            lines.append(f"[metadata: content spilled from {clean_value(meta.spill_source, NAME_MAX)}]")
         if meta.cut_total is not None:
             lines.append(_cut_line(meta))
     elif role == "tool" and meta.target:

@@ -731,7 +731,8 @@ async def test_log_lookup_gives_none_for_a_row_from_before_sources_were_recorded
 
 
 async def read_back(h: Harness, persistence, path: str, *, extra_args: dict | None = None,
-                    register: bool = True) -> QueueItem:
+                    register: bool = True, tool: str = "read_file",
+                    arg: str = "path") -> QueueItem:
     """Deliver a read_file result for ``path`` through the Agent, as the
     result of a call whose arguments are recorded in the window."""
     if register:
@@ -740,14 +741,24 @@ async def read_back(h: Harness, persistence, path: str, *, extra_args: dict | No
     h.agent._registry = h.registry
     [channel] = h.channels("irc:#a")
     channel.conversation = ContextWindow(channel.id)
-    args = {"path": path, **(extra_args or {})}
+    args = {arg: path, **(extra_args or {})}
     channel.conversation.messages.append({
         "role": "assistant", "content": None,
         "tool_calls": [{"id": "call_1", "type": "function", "function": {
-            "name": "read_file", "arguments": json.dumps(args)}}],
+            "name": tool, "arguments": json.dumps(args)}}],
     })
-    h.agent._dispatched_calls[("irc:#a", "call_1")] = ("read_file", True)
+    # read_file declares it reads spill files; web_fetch declares nothing.
+    h.agent._tools = {"read_file": declaring("read_file"), "web_fetch": plain("web_fetch")}
+    h.agent._dispatched_calls[("irc:#a", "call_1")] = (tool, True)
     return await deliver_result(h, "irc:#a", "page text", limit=1000)
+
+
+async def log_cut_row(h: Harness, persistence, name: str = NAME, source: str = "hook:alpha"):
+    """Log the row that cut the spill file ``name`` in the harness's spill directory."""
+    [channel] = h.channels("irc:#a")
+    meta = ItemMetadata(cut_shown=10, cut_total=50, spill_path=str(h.dir / name), cut_source=source)
+    await log_row(persistence, channel, {
+        "role": "system", "content": "head", PROVENANCE_KEY: encode(meta, {})})
 
 
 async def test_reading_a_spill_file_back_names_the_source_and_reload_renders_the_same(
@@ -811,9 +822,61 @@ async def test_a_call_naming_two_spill_files_is_stamped_with_neither(make, persi
     assert item.metadata.spill_source is None
 
 
-async def test_a_file_outside_the_spill_directory_is_not_stamped(make, persistence):
-    """A path with a spill-looking name elsewhere is not a spill file."""
+@pytest.mark.parametrize("where", [
+    "elsewhere", "prefixed", "suffixed", "subdirectory", "inside_a_url",
+])
+async def test_only_a_whole_path_inside_the_spill_directory_is_stamped(make, persistence, where):
+    """A log row exists for the file, so the argument check is what decides: a
+    path elsewhere, or the real path buried in a longer string (a prefix, a
+    suffix, a URL an outside page could carry), is not the spill file."""
     h = await make()
-    item = await read_back(h, persistence, f"/elsewhere/{NAME}")
+    await log_cut_row(h, persistence)
+    real = str(h.dir / NAME)
+    path = {
+        "elsewhere": f"/elsewhere/{NAME}",
+        "prefixed": f"/tmp/evil{real}",
+        "suffixed": f"{real}.bak",
+        "subdirectory": str(h.dir / "sub" / NAME),
+        "inside_a_url": f"https://evil.example/?f={real}",
+    }[where]
+    item = await read_back(h, persistence, path)
 
     assert item.metadata.spill_source is None
+
+
+async def test_a_tool_that_does_not_read_spill_files_is_not_stamped(make, persistence):
+    """The stamp says the content came from a spill file, so it is only for
+    tools that declare they read them, even when the argument is the exact path."""
+    h = await make()
+    await log_cut_row(h, persistence)
+    item = await read_back(h, persistence, str(h.dir / NAME), tool="web_fetch", arg="url")
+
+    assert item.metadata.spill_source is None
+
+
+async def test_the_exact_path_in_a_spill_reader_call_is_stamped(make, persistence):
+    """The positive case the negatives above are measured against, including a
+    spelling of the same path that is not byte-identical."""
+    h = await make()
+    await log_cut_row(h, persistence)
+    item = await read_back(h, persistence, f"{h.dir}/./{NAME}")
+
+    assert item.metadata.spill_source == "hook:alpha"
+
+
+async def test_a_failing_log_lookup_does_not_lose_the_result(make, persistence, caplog):
+    """The source line is advisory: if the log cannot be read, the result is
+    still delivered, fenced, with no source line, and a warning names the file."""
+    h = await make()
+
+    async def broken(name: str):
+        raise RuntimeError("database is locked")
+
+    persistence.find_spill_source = broken
+    with caplog.at_level(logging.WARNING):
+        item = await read_back(h, persistence, str(h.dir / NAME))
+
+    assert item.content == "page text"
+    assert item.metadata.spill_source is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(NAME in w and "RuntimeError" in w for w in warnings), warnings

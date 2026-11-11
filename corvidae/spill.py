@@ -52,8 +52,6 @@ DEFAULT_MAX_AGE_DAYS: float = 7
 CLEANUP_INTERVAL_SECONDS = 3600.0
 #: The only names the service writes or deletes.
 SPILL_NAME = re.compile(r"[0-9a-f]{32}\.txt")
-#: A spill file name inside longer text, such as a tool call's argument.
-SPILL_NAME_IN_TEXT = re.compile(r"(?<![0-9a-f])[0-9a-f]{32}\.txt")
 
 
 @dataclass(frozen=True)

@@ -28,6 +28,7 @@ Logging:
 import asyncio
 import dataclasses
 import json
+import os
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -96,11 +97,12 @@ from corvidae.outbound import (
     OutboundToolStatus,
 )
 from corvidae.queue import SerialQueue
-from corvidae.spill import SPILL_NAME_IN_TEXT, Cut, NotificationSpill, current_cut
+from corvidae.spill import SPILL_NAME, Cut, NotificationSpill, current_cut
 from corvidae.task import Task
 from corvidae.tool import (
     DEFAULT_TOOL_TIMEOUTS,
     ToolTimeouts,
+    declares_spill_reader,
     declares_untrusted_output,
     dispatch_tool_call,
 )
@@ -588,22 +590,36 @@ class Agent(CorvidaePlugin):
     ) -> ItemMetadata:
         """Stamp the source of the spill file a tool call read onto its result.
 
-        The file is the one spill-directory path in the call's arguments; the
-        source is the one recorded on the log row that cut it (#576). Anything
-        less certain stamps nothing, because a wrong source is worse than none:
-        no spill file in the call, two of them, or no row to read it from. The
-        last of those is logged, since the result is then fenced without a
-        source line.
+        Only a tool that declares it reads spill files is stamped, and the file
+        is the one argument that is, whole, a spill-directory path. The source
+        is the one recorded on the log row that cut it (#576). Anything less
+        certain stamps nothing, because a wrong source is worse than none: no
+        spill file in the call, two of them, no row, or a log that cannot be
+        read. Those last cases are logged, since the result is then fenced
+        without a source line; the lookup is advisory, so it never fails the
+        result.
         """
         spill = self.pm.get_plugin("spill")
         if not isinstance(spill, NotificationSpill):
+            return metadata
+        if not declares_spill_reader(self._tools.get(metadata.tool or "")):
             return metadata
         names = self._spill_files_named_by_call(channel, tool_call_id, spill)
         if len(names) != 1:
             return metadata
         [name] = names
         finder = getattr(self.pm.get_plugin("persistence"), "find_spill_source", None)
-        source = await finder(name) if callable(finder) else None
+        try:
+            source = await finder(name) if callable(finder) else None
+        except Exception as exc:
+            logger.warning(
+                "channel %s: looking up the source of spill file %s for tool call %s "
+                "failed (%s), so the result is fenced without a source line; check "
+                "that the session database is readable",
+                channel.id, name, tool_call_id, type(exc).__name__,
+                exc_info=True, extra={"channel": channel.id},
+            )
+            return metadata
         if source is None:
             logger.warning(
                 "channel %s: no source is recorded for spill file %s, so the result "
@@ -618,10 +634,13 @@ class Agent(CorvidaePlugin):
     def _spill_files_named_by_call(
         self, channel, tool_call_id: str, spill: NotificationSpill
     ) -> set[str]:
-        """The spill files, by name, that the arguments of a tool call point at.
+        """The spill files, by name, that the arguments of a tool call are.
 
-        Only a path inside the spill directory counts: a file elsewhere with a
-        spill-looking name is not one.
+        An argument counts only when the whole value is a path directly inside
+        the spill directory with a service-written name. Text that merely
+        contains such a path (a URL, a longer string, a path with a prefix or
+        suffix) does not: the path is shown to the model in the cut header, so
+        outside text can carry it.
         """
         conv = channel.conversation
         for msg in reversed(conv.messages if conv is not None else []):
@@ -635,11 +654,12 @@ class Agent(CorvidaePlugin):
                 except (TypeError, ValueError):
                     return set()
                 values = [v for v in args.values() if isinstance(v, str)] if isinstance(args, dict) else []
+                # abspath is lexical, so it normalises ./ and relative spellings
+                # without touching the filesystem.
+                paths = [Path(os.path.abspath(v)) for v in values if v]
                 return {
-                    name
-                    for value in values
-                    for name in SPILL_NAME_IN_TEXT.findall(value)
-                    if str(spill.dir / name) in value
+                    p.name for p in paths
+                    if p.parent == spill.dir and SPILL_NAME.fullmatch(p.name)
                 }
         return set()
 

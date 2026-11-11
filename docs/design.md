@@ -1387,7 +1387,9 @@ role:
   record when there is one, else the call's row; the target from the call's
   row in the window); and `untrusted`, True when the tool declared its
   output untrusted as of dispatch (see [Untrusted tool
-  results](#untrusted-tool-results)), otherwise absent.
+  results](#untrusted-tool-results)), otherwise absent; and, on a result
+  that read a spill file back, `spill_source`, the source recorded when the
+  file was written (below).
 
 `metadata` is never passed as a hook argument; the kernel fills it from what
 it observes (the transport's sender and channel, the tool-call row in the window, the
@@ -1498,8 +1500,11 @@ fenced too.
 The flag is stamped into the row's provenance record when the result is
 built, so a later change to a declaration does not re-render history. The
 header of a result that read a spill file back also names where the content
-came from (#576). `Agent.on_notify` finds the one spill-directory path in the
-call's arguments and asks `PersistencePlugin.find_spill_source` for the
+came from (#576). For a tool that declares it reads spill files,
+`Agent.on_notify` takes the one argument that is, as a whole, a path directly
+inside the spill directory with a service-written name (text that merely
+contains such a path, such as a URL, does not count, because the path is shown
+to the model and outside text can carry it) and asks `PersistencePlugin.find_spill_source` for the
 `cut_source` on the log row that cut it (matched by file name, decoding each
 candidate row; a scan, since message_log has no index on the path), then
 stamps it into the result's provenance as `spill_source`, so a reload renders
@@ -1508,7 +1513,9 @@ the file and the row are swept. The source is cleaned like any header value:
 a webhook origin is sender-chosen. A call naming no spill file, or two, is
 stamped with nothing; a file with no row (pruned, from before sources were
 recorded, or no persistence service) is still fenced, with no source line and
-a WARNING naming the file. The estimator counts the stored
+a WARNING naming the file. The lookup is advisory: if the log cannot be read,
+the result is delivered fenced without a source line and a WARNING names the
+file. The estimator counts the stored
 row, not the added framing, so a fenced row costs more tokens than it is
 estimated at (#577).
 
@@ -1581,15 +1588,20 @@ see the whole result, since both run before the cut. The text delivered is
 the task's `[Task <id>] <result>`, so the prefix counts toward the cap and is
 in the file.
 
-A task that answers no tool call (a `task_pipeline` run or a `subagent`
-result delivered on its own) has no `tool_call_id`, so the Agent does not cut
-it. `TaskPlugin._on_task_complete` cuts it as the plugin that sends the
+A task that answers no tool call has no `tool_call_id`, so the Agent does not
+cut it. No task the tree enqueues is one: `subagent` and the Agent's own tool
+dispatch pass their call's id, `task_pipeline` runs inline inside its own
+call, and the cognition plugins' tasks are `deliver=False`. The path is for a
+plugin outside the tree that enqueues `Task(work, channel)` with the defaults.
+`TaskPlugin._on_task_complete` cuts such a result as the plugin that sends the
 notification (#744, PRD §3.3.11): it calls `spill.notify([channel],
 source="task", ..., limit=tools.max_result_chars)`, read from the tool
 collection at delivery, so the row records the same cut, pointer or "not
 saved" as any other notification. A result at or under the cap goes out
 unchanged. With no `"spill"` plugin registered, the result is delivered whole
-and a WARNING names the task and the cap.
+and a WARNING names the task and the cap; with no `"tools"` plugin there is
+no cap to apply, so it is delivered whole without one. The Runtime registers
+both unless `plugins.disabled` removes them.
 
 A subagent's `run_agent_loop` stores no rows, so it cannot carry a kernel
 header. It cuts the same way after each `dispatch_tool_call`, checks
