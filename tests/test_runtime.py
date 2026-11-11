@@ -1935,3 +1935,23 @@ async def test_start_bad_call_timeout_is_config_error(tmp_path, capsys):
     assert "number of seconds >= 0" in stderr
     assert "0 or null disables" in stderr
     assert str(config_path) in stderr
+
+
+async def test_start_bad_read_file_window_fraction_is_config_error(tmp_path, capsys):
+    """#578 R9: an out-of-range tools.read_file_window_fraction stops startup
+    with a Config error naming the key and the value."""
+    from corvidae.runtime import Runtime
+
+    config_path = tmp_path / "agent.yaml"
+    config_path.write_text(
+        "llm:\n  main: {base_url: 'http://127.0.0.1:1', model: m}\n"
+        "tools:\n  read_file_window_fraction: 1.5\n"
+    )
+
+    # Startup exits before any plugin runs, so there is nothing to stop.
+    with pytest.raises(SystemExit):
+        await Runtime(config_path=str(config_path)).start()
+
+    stderr = capsys.readouterr().err
+    assert "Config error:" in stderr
+    assert "tools.read_file_window_fraction" in stderr and "1.5" in stderr

@@ -12,6 +12,8 @@ Config:
       call_timeout: 600         # optional; seconds bound on every tool call
                                 # (0 or null disables)
       timeouts: {task_pipeline: 3600}  # optional; per-tool overrides
+      read_file_window_fraction: 0.08  # optional; share of a channel's
+                                       # max_context_tokens one read_file page may take
 
     # Legacy (deprecated):
     agent:
@@ -46,6 +48,35 @@ def _parse_seconds(key: str, value: object) -> float | None:
             f"{key} must be {_SECONDS_RULE}; got {value!r} ({type(value).__name__})"
         )
     return None if value == 0 else float(value)
+
+
+# Share of a channel's context budget one read_file page may take.
+DEFAULT_READ_FILE_WINDOW_FRACTION = 0.08
+
+
+def parse_read_file_window_fraction(tools_config: object) -> float:
+    """Parse ``tools.read_file_window_fraction``; absent gives the default.
+
+    Raises ValueError naming the key, the rejected value and the accepted
+    values. A non-mapping ``tools`` is left to parse_tool_timeouts.
+    """
+    # No tools block, or no key in it, keeps the default.
+    if not isinstance(tools_config, dict) or "read_file_window_fraction" not in tools_config:
+        return DEFAULT_READ_FILE_WINDOW_FRACTION
+    value = tools_config["read_file_window_fraction"]
+    # bool is an int subclass; null is not a number; NaN and inf are not finite.
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not 0 < value <= 1
+    ):
+        raise ValueError(
+            "tools.read_file_window_fraction must be a number with 0 < value <= 1 "
+            f"(the share of a channel's context budget one read_file page may take); "
+            f"got {value!r} ({type(value).__name__})"
+        )
+    return float(value)
 
 
 def parse_tool_timeouts(tools_config: object) -> ToolTimeouts:
@@ -95,6 +126,8 @@ class ToolCollectionPlugin(CorvidaePlugin):
             self.pm = pm
         self.registry: ToolRegistry | None = None
         self.max_result_chars: int = 100_000
+        # Share of a channel's context budget one read_file page may take.
+        self.read_file_window_fraction: float = DEFAULT_READ_FILE_WINDOW_FRACTION
         # Per-call time bounds (tools.call_timeout / tools.timeouts).
         self.call_timeouts: ToolTimeouts = DEFAULT_TOOL_TIMEOUTS
         self._disabled: list[str] = []
@@ -115,6 +148,8 @@ class ToolCollectionPlugin(CorvidaePlugin):
         ))
         # Bounds on tool calls; Runtime validates first, so this cannot fail there.
         self.call_timeouts = parse_tool_timeouts(tools_config)
+        # Runtime validates this key first too, so this cannot fail there.
+        self.read_file_window_fraction = parse_read_file_window_fraction(tools_config)
         fallback = config.get("agent", {}).get("max_tool_result_chars")
         if "max_result_chars" in tools_config:
             self.max_result_chars = tools_config["max_result_chars"]

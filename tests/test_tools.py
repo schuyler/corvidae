@@ -95,14 +95,20 @@ _RANGE_HEADER = re.compile(
 )
 
 
-async def _ranged_read_file(tools_config: dict | None = None, daemon: dict | None = None):
+async def _ranged_read_file(
+    tools_config: dict | None = None,
+    daemon: dict | None = None,
+    registry=None,
+):
     """Return the registered read_file callable and the ToolCollectionPlugin.
 
     Ranged calls look up the "tools" plugin for max_result_chars, and every
     call looks up the "spill" service for the stale-pointer check, so this
     builds a real plugin manager with the tools, the spill service on a
     FakeClock, and FileToolsPlugin registered, and the tool registry built.
-    ``daemon`` is the config's daemon section (the spill keys).
+    ``daemon`` is the config's daemon section (the spill keys). ``registry``,
+    when given, is registered as the "registry" plugin so read_file can size
+    its page to a channel.
     """
     from corvidae.hooks import create_plugin_manager
     from corvidae.spill import NotificationSpill
@@ -116,6 +122,9 @@ async def _ranged_read_file(tools_config: dict | None = None, daemon: dict | Non
     pm.register(collection, name="tools")
     spill = NotificationSpill()
     pm.register(spill, name="spill")
+    # The channel registry, when the test wants channel-sized pages.
+    if registry is not None:
+        pm.register(registry, name="registry")
     await collection.on_init(pm=pm, config=config)
     await spill.on_init(pm=pm, config=config)
     files = FileToolsPlugin(pm)
@@ -414,6 +423,230 @@ async def test_read_file_elsewhere_keeps_file_not_found(tmp_path):
     missing = tmp_path / "other.txt"
 
     assert await fn(str(missing)) == f"Error: file not found: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# read_file page clamp (#578) — a page is sized to the channel's budget
+# ---------------------------------------------------------------------------
+
+# Ordinary prose, so the token count of a page resembles real file reads.
+_PROSE = "The quick brown fox jumps over the lazy dog while reading a file.\n"
+
+
+def _prose_file(tmp_path, chars: int):
+    """Write about ``chars`` characters of ordinary ASCII text; return its path."""
+    f = tmp_path / "prose.txt"
+    f.write_text((_PROSE * (chars // len(_PROSE) + 1))[:chars])
+    return f
+
+
+def _channel_with_budget(budget: int):
+    """A real registry whose agent default budget is ``budget``, and a channel on it."""
+    from corvidae.channel import ChannelRegistry
+
+    registry = ChannelRegistry(agent_defaults={"max_context_tokens": budget})
+    return registry, registry.get_or_create("irc", "#room")
+
+
+def _ctx_for(channel):
+    """The ToolContext a dispatched read_file call receives for ``channel``."""
+    from corvidae.tool import ToolContext
+
+    return ToolContext(channel=channel, tool_call_id="t", task_queue=None)
+
+
+@pytest.mark.parametrize(
+    ("cap", "budget", "expected"),
+    [
+        # Fraction term binds: 0.08 x 24000 x 3.0.
+        (100_000, 24_000, 5_760),
+        # Cap term binds (R3), also when the cap is below the minimum page.
+        (32_000, 220_000, 32_000),
+        (1_000, 1_500, 1_000),
+        # Minimum-page term binds (R7).
+        (100_000, 1_500, 2_000),
+        # No channel budget: the cap alone.
+        (30_000, None, 30_000),
+    ],
+)
+def test_page_chars_formula(cap, budget, expected):
+    """R8: page = min(cap, max(MIN_PAGE_CHARS, fraction x budget x 3.0))."""
+    from corvidae.tools.files import page_chars
+
+    assert page_chars(cap, budget, 0.08) == expected
+
+
+async def _page_chain(fn, path, ctx, **first):
+    """Follow the continuation headers from ``first``; return the page bodies."""
+    # Each page's header names the next offset or start_line; stop when absent.
+    pattern = _LINE_HEADER if "start_line" in first else _RANGE_HEADER
+    key = "start_line" if "start_line" in first else "offset"
+    bodies, kwargs = [], first
+    while kwargs is not None:
+        page = await fn(str(path), _ctx=ctx, **kwargs)
+        header = pattern.match(page)
+        assert header, page[:200]
+        bodies.append(page[header.end():])
+        kwargs = {**first, key: int(header.group(5))} if header.group(5) else None
+    return bodies
+
+
+async def test_channel_page_is_a_bounded_share_of_the_window(tmp_path):
+    """R1/R11: on a 24000-token channel an unranged read of a long file and a
+    line-range page are each at most 8% of the window with a continuation
+    header; a file within a page comes back bare."""
+    from corvidae.context import message_tokens
+
+    # A 24000-token channel and the read_file tool wired to its registry.
+    registry, channel = _channel_with_budget(24_000)
+    fn, _ = await _ranged_read_file(registry=registry)
+    ctx = _ctx_for(channel)
+
+    # Unranged long file: first page with the header naming the next offset.
+    first = await fn(str(_prose_file(tmp_path, 40_000)), _ctx=ctx)
+    assert message_tokens({"role": "tool", "content": first}) <= 0.08 * 24_000
+    header = _RANGE_HEADER.match(first)
+    assert header.group(1) == "0" and header.group(3) == "40000"
+    assert header.group(5) is not None
+
+    # Line range of short lines: the page limit binds and names next start_line.
+    lines = tmp_path / "lines.txt"
+    lines.write_text("".join(f"{_PROSE.strip()} {n}\n" for n in range(2_000)))
+    line_page = await fn(str(lines), start_line=1, _ctx=ctx)
+    assert message_tokens({"role": "tool", "content": line_page}) <= 0.08 * 24_000
+    assert _LINE_HEADER.match(line_page).group(5) is not None
+
+    # A file that fits in a page is bare.
+    small = tmp_path / "small.txt"
+    small.write_text("fits in one page")
+    assert await fn(str(small), _ctx=ctx) == "fits in one page"
+
+
+async def test_page_follows_runtime_budget_override(tmp_path):
+    """R2: a runtime override of the budget changes the next page, no restart."""
+    # A 24000-token channel and a file longer than any page.
+    registry, channel = _channel_with_budget(24_000)
+    fn, _ = await _ranged_read_file(registry=registry)
+    f = _prose_file(tmp_path, 60_000)
+    ctx = _ctx_for(channel)
+
+    # First page at the agent-default budget.
+    small_page = await fn(str(f), offset=0, length=10**6, _ctx=ctx)
+    # set_settings stores its value here.
+    channel.runtime_overrides["max_context_tokens"] = 48_000
+    # Second page, same call, after the override.
+    large_page = await fn(str(f), offset=0, length=10**6, _ctx=ctx)
+
+    # The page grew with the budget: 5760 characters, then up to 11520.
+    assert len(small_page) <= 5_760 < len(large_page) <= 11_520
+
+
+@pytest.mark.parametrize(
+    ("budget", "tools_config", "expected"),
+    [
+        # R3: the cap binds at 220000 tokens; the default cap at 256000.
+        (220_000, {"max_result_chars": 32_000}, 32_000),
+        (256_000, {}, 61_440),
+        # R7: a 1500-token budget keeps the minimum page, or a lower cap.
+        (1_500, {}, 2_000),
+        (1_500, {"max_result_chars": 1_000}, 1_000),
+        # R9: a configured fraction sets the page (2% x 100000 x 3.0).
+        (100_000, {"read_file_window_fraction": 0.02}, 6_000),
+    ],
+)
+async def test_channel_page_size_by_configuration(tmp_path, budget, tools_config, expected):
+    """R3/R7/R9: the first page of a long file has the configured size, header intact."""
+    # A channel at the budget, the tool configured, and a file longer than any page.
+    registry, channel = _channel_with_budget(budget)
+    fn, _ = await _ranged_read_file(tools_config, registry=registry)
+    f = _prose_file(tmp_path, 150_000)
+
+    # Read the first page.
+    page = await fn(str(f), offset=0, length=10**6, _ctx=_ctx_for(channel))
+
+    # The header is intact and the page is within 200 characters of the size.
+    assert _RANGE_HEADER.match(page), page[:200]
+    assert expected - 200 <= len(page) <= expected
+
+
+@pytest.mark.parametrize("case", ["no_ctx", "no_channel", "no_registry"])
+async def test_no_channel_budget_is_bounded_by_max_result_chars(tmp_path, case):
+    """R4: with no _ctx, no channel, or no registry, a long file reads as a
+    page of tools.max_result_chars."""
+    # A channel exists; the registry is registered unless the case omits it.
+    cap = 30_000
+    registry, channel = _channel_with_budget(24_000)
+    fn, _ = await _ranged_read_file(
+        {"max_result_chars": cap}, registry=None if case == "no_registry" else registry
+    )
+    # The context each case passes: none, one without a channel, or one with.
+    ctx = {"no_ctx": None, "no_channel": _ctx_for(None), "no_registry": _ctx_for(channel)}[case]
+
+    # Read a long file with no channel budget available.
+    page = await fn(str(_prose_file(tmp_path, 100_000)), _ctx=ctx)
+
+    # The page is the cap alone, with its header.
+    assert cap - 200 <= len(page) <= cap
+    assert _RANGE_HEADER.match(page)
+
+
+async def test_dispatched_read_file_is_sized_to_the_calling_channel(tmp_path):
+    """R5: dispatch_tool_call with a channel gives the channel-sized page."""
+    import json
+
+    from corvidae.tool import dispatch_tool_call
+
+    # A 24000-token channel and the read_file tool wired to its registry.
+    registry, channel = _channel_with_budget(24_000)
+    fn, _ = await _ranged_read_file(registry=registry)
+    # The LLM's tool call for a long file.
+    call = {
+        "id": "c1",
+        "function": {
+            "name": "read_file",
+            "arguments": json.dumps({"path": str(_prose_file(tmp_path, 40_000))}),
+        },
+    }
+
+    # Dispatch with the channel in context.
+    result = await dispatch_tool_call(call, {"read_file": fn}, channel=channel)
+
+    # 24000 x 8% x 3.0 = 5760 characters at most.
+    assert 5_000 <= len(result.content) <= 5_760
+
+
+def test_read_file_schema_has_no_ctx_and_keeps_its_parameters():
+    """R6: the schema does not expose _ctx and the parameter list is unchanged."""
+    from corvidae.tool import Tool
+
+    # Register the tools and find read_file.
+    registry: list = []
+    FileToolsPlugin(None).register_tools(tool_registry=registry)
+    tool = next(t for t in registry if isinstance(t, Tool) and t.name == "read_file")
+    # The exposed parameters are exactly the original five.
+    props = tool.schema["function"]["parameters"]["properties"]
+    assert list(props) == ["path", "offset", "length", "start_line", "end_line"]
+
+
+async def test_character_and_line_paging_under_a_small_budget_reconstruct_the_file(tmp_path):
+    """R6: under a small budget, paging by character and by line each takes
+    several pages and reproduces the file exactly."""
+    # A 1500-token channel and a file of several minimum pages.
+    registry, channel = _channel_with_budget(1_500)
+    fn, _ = await _ranged_read_file(registry=registry)
+    ctx = _ctx_for(channel)
+    f = _prose_file(tmp_path, 9_000)
+    text = f.read_text()
+
+    # Page through the file by character range.
+    by_chars = await _page_chain(fn, f, ctx, offset=0, length=10**6)
+    # Page through the file by line range.
+    by_lines = await _page_chain(fn, f, ctx, start_line=1, end_line=len(text.splitlines()))
+
+    # Each takes several pages and joins back to the file.
+    for bodies in (by_chars, by_lines):
+        assert len(bodies) > 1
+        assert "".join(bodies) == text
 
 
 # ---------------------------------------------------------------------------

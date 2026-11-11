@@ -1401,6 +1401,47 @@ async def test_reload_with_bad_tools_timeouts_is_rejected(tmp_path, caplog):
     assert "reload skipped" in caplog.text
 
 
+async def test_reload_with_bad_read_file_window_fraction_is_rejected(tmp_path, caplog):
+    """#578 R9: a reload with an out-of-range tools.read_file_window_fraction
+    is skipped, with an ERROR naming the key and value."""
+    from corvidae.channel import ChannelRegistry
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "tools:\n  read_file_window_fraction: 1.5\n"
+    )
+
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    pm.get_plugin.return_value = ChannelRegistry({})
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+        },
+    )
+
+    dispatched = []
+
+    async def capture_dispatch(config: dict) -> None:
+        dispatched.append(config)
+
+    plugin._dispatch_config_reload = capture_dispatch
+
+    with caplog.at_level(logging.ERROR, logger="corvidae.config_watcher"):
+        await plugin._reload_config()
+
+    # Rejected before anything is dispatched.
+    assert not dispatched
+    assert "tools.read_file_window_fraction" in caplog.text and "1.5" in caplog.text
+    assert "reload skipped" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # #408: a restart-only key that changes must be reported, and a plugin's
 # declared live keys must be the ones its reload hook actually re-reads.

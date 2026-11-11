@@ -38,7 +38,7 @@ from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.idle import validate_daemon_config
 from corvidae.llm_plugin import parse_llm_config
 from corvidae.runtime import deep_merge
-from corvidae.tool_collection import parse_tool_timeouts
+from corvidae.tool_collection import parse_read_file_window_fraction, parse_tool_timeouts
 
 logger = logging.getLogger(__name__)
 
@@ -306,10 +306,12 @@ class ConfigWatcherPlugin(CorvidaePlugin):
             )
             return
 
-        # Step 3e: Validate tools.call_timeout / tools.timeouts. The keys
-        # stay restart-only; a bad value refuses the whole reload.
+        # Step 3e: Validate tools.call_timeout, tools.timeouts and
+        # tools.read_file_window_fraction. The keys stay restart-only; a bad
+        # value refuses the whole reload.
         try:
             parse_tool_timeouts(new_config.get("tools"))
+            parse_read_file_window_fraction(new_config.get("tools"))
         except ValueError as exc:
             logger.error(
                 "config reload failed: %s in %s; reload skipped, running config unchanged",

@@ -6,8 +6,28 @@ import pathlib
 
 from corvidae.tool import MAX_TOOL_RESULT_CHARS
 
+# Characters per token assumed when sizing a page from a token budget: the
+# measured p10 of ordinary text, so a page is unlikely to exceed its share.
+CHARS_PER_TOKEN_ESTIMATE = 3.0
+
+# Smallest page: leaves room for the range header and some content.
+MIN_PAGE_CHARS = 2000
+
 # Characters read per call when skipping to an offset or counting the rest.
 _CHUNK = 64 * 1024
+
+
+def page_chars(max_result_chars: int, budget: int | None, fraction: float) -> int:
+    """Characters in one read_file page for a channel budget in tokens.
+
+    No budget gives max_result_chars; otherwise the budget's share, at least
+    MIN_PAGE_CHARS, and never more than max_result_chars.
+    """
+    # Without a channel budget only the result cap bounds a page.
+    if budget is None:
+        return max_result_chars
+    share = int(fraction * budget * CHARS_PER_TOKEN_ESTIMATE)
+    return min(max_result_chars, max(MIN_PAGE_CHARS, share))
 
 
 async def read_file(
@@ -86,9 +106,13 @@ def _read_file_sync(
             "pass offset and length to read it in ranges"
         )
     try:
-        return p.read_text(errors="replace")
+        text = p.read_text(errors="replace")
     except OSError as exc:
         return f"Error: could not read file: {exc}"
+    # A file longer than a page returns its first page, header included.
+    if len(text) > max_chars:
+        return _read_range(p, path, 0, None, max_chars)
+    return text
 
 
 def _read_range(

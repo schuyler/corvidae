@@ -1627,10 +1627,25 @@ that never existed) returns an error saying it was a spill file, that spill
 files are deleted after the configured days, and which key sets that. The
 check is lexical (`os.path.abspath`), so a path with a NUL byte cannot raise.
 An unranged `read_file` of a path inside the spill directory
-(`spill.contains`) reads as `offset=0`: it returns the first page, clamped to
-`tools.max_result_chars` behind a header naming the next offset, so reading a
+(`spill.contains`) reads as `offset=0`: it returns the first page (see Page size)
+behind a header naming the next offset, so reading a
 spill file back never returns a result that is cut and spilled again. A `cat`
 through `shell` is not clamped, and a long one spills a copy.
+
+**Page size.** A `read_file` page is
+`min(tools.max_result_chars, max(2000, fraction x max_context_tokens x 3.0))`
+characters, where `fraction` is `tools.read_file_window_fraction` (default
+0.08, `0 < value <= 1`) and `max_context_tokens` is the calling channel's
+resolved budget, so per-channel overrides apply. A call with no channel, or
+with no registry plugin, uses `tools.max_result_chars`. A subagent's reads
+are sized to its calling channel's budget. The 3.0 characters per token is an
+estimate for ordinary text. Observed under the window's own counter, real
+tool results run about 3.0 or more characters per token for json, code and
+markdown (p10 about 3.0 to 3.3; the median 3.4 to 3.9), and fewer for web and
+shell output. One page at 8% of the window fits inside the headroom to the
+compaction trigger observed at the 90th percentile of main turns (0.085 to
+0.18 of the window). The 2000-character minimum can make a page larger than
+that share below about 8300 tokens of budget.
 
 **Configuration** (`daemon`, applied at restart):
 
@@ -2709,6 +2724,7 @@ read by both too and passed to `dispatch_tool_call`.
 ```yaml
 tools:
   max_result_chars: 100000   # longer tool results are cut and spilled (default 100_000)
+  read_file_window_fraction: 0.08  # share of a channel's max_context_tokens one read_file page may take (default 0.08)
   disabled: [write_file]     # dropped for every channel; shell <-> task_pipeline coupled
   call_timeout: 600          # seconds bound on every tool call; 0 or null disables
   timeouts: {task_pipeline: 3600}   # per-tool override of call_timeout
@@ -3163,7 +3179,7 @@ They replaced the combined `CoreToolsPlugin` (`core_tools`), with no alias.
 | Tool | File | Purpose |
 |------|------|---------|
 | `shell(command)` | `tools/shell.py` | Execute shell command (declares `reads_spill_files`), 30s timeout (configurable). On cancellation (the call bound, shutdown) it kills and reaps its `/bin/sh` process, then re-raises; `task_pipeline` inherits this. Grandchildren of the shell are not killed. Its companion `run_shell` returns the exit code beside the output, for callers that must know whether the command succeeded (#105). |
-| `read_file(path, offset, length, start_line, end_line)` | `tools/files.py` | Read file (declares `reads_spill_files`; a missing path in the spill directory gets the stale-spill error; 1MB limit, configurable), or a character range (`offset`, `length`) or a line range (`start_line`, `end_line`, 1-based, inclusive) of any size behind a header naming the range, total and next position; the two kinds cannot be combined; a range is clamped to `tools.max_result_chars`, a line range backing up to the last whole line (a first line longer than a page is cut, and the header gives the character offset to continue from and the start line where line paging resumes) |
+| `read_file(path, offset, length, start_line, end_line)` | `tools/files.py` | Read file (declares `reads_spill_files`; a missing path in the spill directory gets the stale-spill error; 1MB limit, configurable), or a character range (`offset`, `length`) or a line range (`start_line`, `end_line`, 1-based, inclusive) of any size behind a header naming the range, total and next position; the two kinds cannot be combined; a page is sized to the calling channel's budget (see Page size under the spill service), a line range backing up to the last whole line (a first line longer than a page is cut, and the header gives the character offset to continue from and the start line where line paging resumes); an unranged read of a file longer than a page returns the first page with its header |
 | `write_file(path, content)` | `tools/files.py` | Write file, creates parent dirs |
 | `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation (configurable) |
 | `web_search(query, max_results)` | `tools/web.py` | Search via DuckDuckGo, default 8 results (configurable) |
@@ -4251,6 +4267,7 @@ tools:
   web_max_response_bytes: 50000 # web_fetch response truncation (default 50_000)
   max_file_read_bytes: 1048576  # unranged read_file size limit in bytes (default 1MB)
   web_search_max_results: 8     # web_search result count (default 8)
+  # read_file_window_fraction: 0.08  # share of a channel's max_context_tokens one read_file page may take
 
 memory:
   idle_consolidate_after: 1800  # seconds a channel must be quiet before idle consolidation
