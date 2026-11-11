@@ -304,7 +304,34 @@ class GoalsPlugin(CorvidaePlugin):
                 f"Goal #{id} retired; conclusion recorded as memory #{memory_id}."
             )
 
-        for fn in (add_goal, update_goal, retire_goal):
+        async def list_goals(include_retired: bool = False, _ctx=None) -> str:
+            """List goals with their ids and status. Open goals by default;
+            pass include_retired=true to also see retired goals with their
+            conclusions."""
+            db = await plugin._require_db()
+            if include_retired:
+                query = "SELECT id, text, created_at, retired_at, memory_id FROM goals ORDER BY id"
+            else:
+                query = "SELECT id, text, created_at, retired_at, memory_id FROM goals WHERE retired_at IS NULL ORDER BY id"
+            async with db.execute(query) as cursor:
+                rows = await cursor.fetchall()
+            if not rows:
+                if include_retired:
+                    return "No goals."
+                return "No open goals."
+            lines = []
+            for row in rows:
+                gid, text, created, retired, mem_id = row
+                # Truncate long goal text for the listing
+                if len(text) > 120:
+                    text = text[:117] + "..."
+                if retired:
+                    lines.append(f"#{gid} [retired {_day(retired)}]: {text}")
+                else:
+                    lines.append(f"#{gid} [open since {_day(created)}]: {text}")
+            return "\n".join(lines)
+
+        for fn in (add_goal, update_goal, retire_goal, list_goals):
             tool_registry.append(Tool(name=fn.__name__, fn=fn, schema=tool_to_schema(fn)))
 
     @hookimpl
