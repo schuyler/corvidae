@@ -166,6 +166,11 @@ class MarkdownIndex:
                         )
         else:
             self._roots = [Path(root)]
+            if not self._roots[0].resolve().name:
+                raise ValueError(
+                    f"markdown_recall: root {root} has an empty resolved "
+                    "basename; use a subdirectory"
+                )
         # Backward-compat alias: _root is the first root (single-root mode).
         self._root = self._roots[0]
         self._db_path = Path(db_path)

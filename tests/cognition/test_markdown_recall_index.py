@@ -284,6 +284,95 @@ class TestMultiRoot:
             )
         await idx.close() if False else None
 
+    async def test_resolve_path_traversal_rejected(self, tmp_path):
+        """A namespaced path that traverses out of its root is rejected."""
+        values = tmp_path / "values"
+        skills = tmp_path / "skills"
+        values.mkdir()
+        skills.mkdir()
+        (values / "radio.md").write_text("# Values radio")
+        (skills / "secret.md").write_text("# Skills secret")
+
+        idx = MarkdownIndex(
+            root=[values, skills],
+            db_path=tmp_path / "index.db",
+            get_client=lambda: FakeEmbed(),
+            get_identity=lambda: IDENTITY,
+        )
+        await idx.reconcile()
+        # Normal resolution works
+        p = idx._resolve_path("values/radio.md")
+        assert p == values / "radio.md"
+        # Traversal out of the values root is rejected
+        import pytest
+        with pytest.raises(FileNotFoundError, match="escapes"):
+            idx._resolve_path("values/../skills/secret.md")
+        await idx.close()
+
+    async def test_nested_multi_root_paths(self, tmp_path):
+        """Nested paths resolve correctly in multi-root mode."""
+        values = tmp_path / "values"
+        sub = values / "sub"
+        sub.mkdir(parents=True)
+        (sub / "radio.md").write_text("# Nested radio")
+
+        idx = MarkdownIndex(
+            root=[values],
+            db_path=tmp_path / "index.db",
+            get_client=lambda: FakeEmbed(),
+            get_identity=lambda: IDENTITY,
+        )
+        await idx.reconcile()
+        p = idx._resolve_path("sub/radio.md")
+        assert p == sub / "radio.md"
+        await idx.close()
+
+    async def test_reconcile_with_missing_root_keeps_old_index(self, tmp_path):
+        """If a root disappears, _walk returns None (keep the old index)."""
+        values = tmp_path / "values"
+        skills = tmp_path / "skills"
+        values.mkdir()
+        skills.mkdir()
+        (values / "radio.md").write_text("# Values radio")
+        (skills / "radio.md").write_text("# Skills radio")
+
+        idx = MarkdownIndex(
+            root=[values, skills],
+            db_path=tmp_path / "index.db",
+            get_client=lambda: FakeEmbed(),
+            get_identity=lambda: IDENTITY,
+        )
+        # First reconcile: both roots present
+        await idx.reconcile()
+        async with idx._db.execute("SELECT count(*) FROM manifest") as cur:
+            (count1,) = await cur.fetchone()
+        assert count1 == 2
+
+        # Remove one root (file first, then directory)
+        (skills / "radio.md").unlink()
+        skills.rmdir()
+        # _walk should return None (keep old index)
+        result = idx._walk()
+        assert result is None
+        # Manifest is unchanged
+        async with idx._db.execute("SELECT count(*) FROM manifest") as cur:
+            (count2,) = await cur.fetchone()
+        assert count2 == 2
+        await idx.close()
+
+    async def test_empty_string_root_rejected(self, tmp_path):
+        """An empty-string root is rejected at construction."""
+        import pytest
+        values = tmp_path / "values"
+        values.mkdir()
+        with pytest.raises(ValueError, match="empty"):
+            MarkdownIndex(
+                root=["", str(values)],
+                db_path=tmp_path / "index.db",
+                get_client=lambda: FakeEmbed(),
+                get_identity=lambda: IDENTITY,
+            )
+
     async def test_all_roots_unreadable(self, tmp_path):
         """All roots unreadable: _walk returns None."""
         idx = MarkdownIndex(
