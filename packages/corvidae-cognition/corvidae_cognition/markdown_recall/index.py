@@ -139,6 +139,12 @@ class MarkdownIndex:
         if isinstance(root, list):
             if not root:
                 raise ValueError("markdown_recall: roots list is empty")
+            for r in root:
+                if not isinstance(r, (str, Path)) or (isinstance(r, str) and not r.strip()):
+                    raise ValueError(
+                        f"markdown_recall: root {r!r} is empty; "
+                        "use a non-empty path"
+                    )
             self._roots = [Path(r) for r in root]
             # Same-basename roots collide in the namespaced key space.
             if len(self._roots) > 1:
@@ -151,6 +157,13 @@ class MarkdownIndex:
                             "roots must have unique directory names"
                         )
                     seen.add(n)
+                # An empty resolved basename (e.g. '/') breaks namespacing.
+                for r in self._roots:
+                    if not r.resolve().name:
+                        raise ValueError(
+                            f"markdown_recall: root {r} has an empty resolved "
+                            "basename; use a subdirectory"
+                        )
         else:
             self._roots = [Path(root)]
         # Backward-compat alias: _root is the first root (single-root mode).
@@ -308,24 +321,20 @@ class MarkdownIndex:
         chunks from different roots don't collide (e.g. `values/radio.md`
         vs `skills/radio.md`).
 
-        Returns None when all roots are unreadable (the caller aborts).
-        Never follows a symlink out of a folder.
+        Returns None when any root is unreadable (the caller keeps the old
+        index — a transient failure must not prune a root's rows). Never
+        follows a symlink out of a folder.
         """
         multi = len(self._roots) > 1
         files: dict[str, tuple[int, int]] = {}
-        any_readable = False
         for root in self._roots:
             if not root.is_dir():
-                if multi:
-                    logger.warning(
-                        "markdown recall: root %s is not a directory; "
-                        "its indexed files will be pruned until it reappears",
-                        root,
-                    )
-                else:
-                    return None  # single-root: keep the old index
-                continue
-            any_readable = True
+                logger.warning(
+                    "markdown recall: root %s is not a directory; "
+                    "keeping the old index to avoid pruning its files",
+                    root,
+                )
+                return None  # any root unreadable: keep the old index
             prefix = root.resolve().name if multi else ""
             try:
                 for p in root.rglob("*.md"):
@@ -341,12 +350,12 @@ class MarkdownIndex:
                     key = f"{prefix}/{rel}" if prefix else rel
                     files[key] = (st.st_size, st.st_mtime_ns)
             except OSError:
-                if multi:
-                    logger.warning("markdown recall: could not walk %s", root, exc_info=True)
-                else:
-                    return None  # single-root: keep the old index
-        if not any_readable:
-            return None
+                logger.warning(
+                    "markdown recall: could not walk %s; "
+                    "keeping the old index",
+                    root, exc_info=True,
+                )
+                return None  # any root failure: keep the old index
         return files
 
     def _resolve_path(self, path: str) -> Path:
@@ -354,34 +363,36 @@ class MarkdownIndex:
 
         Single-root: path is relative to the root.
         Multi-root: path is \`<root_basename>/relative\`; look up the root
-        by basename. Validates containment to prevent path traversal.
+        by basename. Validates containment against the matched root to
+        prevent path traversal.
         """
         if len(self._roots) == 1:
-            candidate = self._roots[0] / path
+            matched_root = self._roots[0]
+            candidate = matched_root / path
         elif "/" in path:
             prefix, rel = path.split("/", 1)
-            candidate = None
+            matched_root = None
             for root in self._roots:
                 if root.resolve().name == prefix:
-                    candidate = root / rel
+                    matched_root = root
                     break
-            if candidate is None:
+            if matched_root is None:
                 raise FileNotFoundError(
                     f"markdown recall: no root matches prefix {prefix!r} in {path!r}"
                 )
+            candidate = matched_root / rel
         else:
             raise FileNotFoundError(
                 f"markdown recall: multi-root path {path!r} has no root prefix"
             )
-        # Containment check: resolve and verify the path is under the root.
+        # Containment check: resolve and verify the path is under the
+        # matched root (not any configured root).
         resolved = candidate.resolve()
-        root_resolved = candidate.parts[0]  # not useful; use the actual root
-        for root in self._roots:
-            if resolved.is_relative_to(root.resolve()):
-                return candidate
-        raise FileNotFoundError(
-            f"markdown recall: path {path!r} escapes the root directory"
-        )
+        if not resolved.is_relative_to(matched_root.resolve()):
+            raise FileNotFoundError(
+                f"markdown recall: path {path!r} escapes the root directory"
+            )
+        return candidate
 
     @staticmethod
     def _hash_bytes(data: bytes) -> str:
@@ -422,7 +433,7 @@ class MarkdownIndex:
             files = self._walk()
             if files is None:
                 logger.warning(
-                    "markdown recall: no roots readable; kept the old index",
+                    "markdown recall: no roots readable (%s); kept the old index",
                     self._roots,
                 )
                 return

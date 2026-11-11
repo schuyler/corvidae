@@ -82,9 +82,9 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
                 raise ValueError(
                     "Config error: markdown_recall.roots must be a non-empty list of strings"
                 )
-            if not all(isinstance(r, str) for r in roots_raw):
+            if not all(isinstance(r, str) and r.strip() for r in roots_raw):
                 raise ValueError(
-                    "Config error: markdown_recall.roots must be a list of strings"
+                    "Config error: markdown_recall.roots must be a list of non-empty strings"
                 )
             self._root = [Path(r) for r in roots_raw]
         else:
