@@ -17,7 +17,7 @@ from corvidae.hooks import TransportPlugin, create_plugin_manager, install_plugi
 from corvidae.outbound import OutboundProgress, OutboundThinking, OutboundToolStatus
 from corvidae.thinking import apply_reasoning_history
 from corvidae.tool_policy import ToolView
-from tests.test_web_plugin import TOKEN, _no_env_token, make_env  # noqa: F401
+from tests.test_web_plugin import TOKEN, _no_env_token, make_env, parse_side_body  # noqa: F401
 
 PANEL = "/panel/context_panel"
 ENABLED = {"context_panel": {}}
@@ -102,7 +102,10 @@ class TestConfig:
         for path in ("/", "/channels", "/window", "/poll"):
             assert await status_of(env, f"{PANEL}{path}") == 404, path
         async with env.http.get(f"{env.base}/", headers=env.cookie()) as r:
-            assert "context_panel" not in await r.text()
+            body = await r.text()
+        assert "context_panel" not in body
+        assert "panel-section" not in body
+        assert "/panel/" not in body
 
     async def test_no_block_buffers_no_live_events(self, make_env):
         env, plugin = await panel_env(make_env, extra_config={})
@@ -128,19 +131,40 @@ class TestConfig:
         await pm.ahook.on_stop()
         assert plugin._live == {}
 
+    async def _assert_enabled(self, env):
+        async with env.http.get(f"{env.base}/", headers=env.cookie()) as r:
+            body = await r.text()
+        assert [e["attrs"]["data-panel"] for e in parse_side_body(body).sections] == [
+            "context_panel"]
+        assert await status_of(env, f"{PANEL}/") == 404
+        await fetch(env, "channels")
+
     async def test_empty_block_enables(self, make_env):
         env, _ = await panel_env(make_env)
-        async with env.http.get(f"{env.base}{PANEL}/", headers=env.cookie()) as r:
-            assert r.status == 200
-        async with env.http.get(f"{env.base}/", headers=env.cookie()) as r:
-            assert f'<a href="{PANEL}/">' in await r.text()
+        await self._assert_enabled(env)
 
     async def test_null_block_enables(self, make_env):
         env, _ = await panel_env(make_env, extra_config={"context_panel": None})
-        async with env.http.get(f"{env.base}{PANEL}/", headers=env.cookie()) as r:
-            assert r.status == 200
+        await self._assert_enabled(env)
+
+    async def test_index_has_one_context_section_below_the_chat_list(self, make_env):
+        env, _ = await panel_env(make_env)
         async with env.http.get(f"{env.base}/", headers=env.cookie()) as r:
-            assert f'<a href="{PANEL}/">' in await r.text()
+            body = await r.text()
+        side = parse_side_body(body)
+        assert [e["attrs"].get("data-panel") for e in side.sections] == ["context_panel"]
+        section = side.sections[0]
+        assert section["tag"] == "section"
+        assert section["text"] == "Context"
+        ids = [c["attrs"].get("id") for c in side.children]
+        assert section in side.children
+        assert ids.index("conversations") < ids.index("new-form") < side.children.index(section)
+
+    async def test_context_page_is_gone(self, make_env):
+        env, _ = await panel_env(make_env)
+        assert await status_of(env, f"{PANEL}/") == 404
+        async with env.http.get(f"{env.base}{PANEL}/") as r:
+            assert r.status == 401
 
     @pytest.mark.parametrize("value", [[1], "yes"])
     async def test_non_mapping_block_fails_naming_key(self, value):

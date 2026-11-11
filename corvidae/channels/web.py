@@ -82,7 +82,8 @@ _TOKEN_HINT = 'generate one with: python -c "import secrets; print(secrets.token
 
 _STATIC_DIR = Path(str(resources.files("corvidae.channels") / "web_static"))
 
-# The marker in index.html and panel.html where the panel navigation goes.
+# Markers in index.html: panel stylesheets and scripts in <head>, panel sections in the sidebar.
+_PANEL_ASSETS_MARKER = "<!--panel-assets-->"
 _PANELS_MARKER = "<!--panels-->"
 
 _LOGIN_PAGE = (
@@ -363,11 +364,11 @@ def _slug(value: object) -> str:
 
 @dataclass(frozen=True)
 class Panel:
-    """A read-only console panel contributed by a plugin (issue #227)."""
+    """A read-only section of the chat page's sidebar, contributed by a plugin (issue #227)."""
 
     plugin: object  # the registering plugin (pass ``self``)
-    title: str  # link text in the console navigation
-    static_dir: Path  # must contain panel.js and panel.css
+    title: str  # heading of the panel's sidebar section
+    static_dir: Path  # must contain panel.js and panel.css, which the chat page loads
     routes: Sequence[web.RouteDef] = ()  # data endpoints, e.g. web.get("/data", h)
 
 
@@ -405,10 +406,9 @@ class WebPlugin(TransportPlugin):
         self._secure_hosts: set[str] = set()
         self._login_base = ""
         self._csp = ""
-        # Panels: (registered plugin name, panel); pages with the navigation filled in.
+        # Panels: (registered plugin name, panel); the chat page with their sections filled in.
         self._panels: list[tuple[str, Panel]] = []
         self._index_html = ""
-        self._panel_html = ""
         # Connections.
         self._clients: set[_Client] = set()
         self._handlers: set[asyncio.Task] = set()
@@ -484,19 +484,7 @@ class WebPlugin(TransportPlugin):
                 0, self._on_channel_settled, name="web.working", repeat=3600,
             )
 
-        # Navigation links, rendered once into the two pages that carry them.
-        nav = "".join(
-            f'<a href="/panel/{html.escape(name)}/">{html.escape(panel.title)}</a>'
-            for name, panel in self._panels
-        )
-        if nav:
-            nav = f'<nav class="panels">{nav}</nav>'
-        self._index_html = (
-            (_STATIC_DIR / "index.html").read_text("utf-8").replace(_PANELS_MARKER, nav)
-        )
-        self._panel_html = (
-            (_STATIC_DIR / "panel.html").read_text("utf-8").replace(_PANELS_MARKER, nav)
-        )
+        self._index_html = self._render_index()
 
         # Bind; a failure raises out of startup. access_log=None keeps
         # `?token=` out of the log; the short shutdown timeout keeps
@@ -703,7 +691,6 @@ class WebPlugin(TransportPlugin):
         app.router.add_static("/static", _STATIC_DIR, follow_symlinks=False, show_index=False)
         for name, panel in self._panels:
             base = f"/panel/{name}"
-            app.router.add_get(f"{base}/", self._panel_page)
             app.router.add_static(
                 f"{base}/static", panel.static_dir, follow_symlinks=False, show_index=False,
             )
@@ -729,11 +716,27 @@ class WebPlugin(TransportPlugin):
         )
         return response
 
+    def _render_index(self) -> str:
+        """index.html with each panel's assets and sidebar section filled in, in name order."""
+        assets = sections = ""
+        for name, panel in sorted(self._panels, key=lambda p: p[0]):
+            n = html.escape(name)
+            assets += (
+                f'<link rel="stylesheet" href="/panel/{n}/static/panel.css">\n'
+                f'<script src="/panel/{n}/static/panel.js" data-panel="{n}" defer></script>\n'
+            )
+            sections += (
+                f'<section class="panel-section" data-panel="{n}">'
+                f"<h2>{html.escape(panel.title)}</h2></section>\n"
+            )
+        return (
+            (_STATIC_DIR / "index.html").read_text("utf-8")
+            .replace(_PANEL_ASSETS_MARKER, assets)
+            .replace(_PANELS_MARKER, sections)
+        )
+
     async def _index(self, request: web.Request) -> web.Response:
         return web.Response(text=self._index_html, content_type="text/html")
-
-    async def _panel_page(self, request: web.Request) -> web.Response:
-        return web.Response(text=self._panel_html, content_type="text/html")
 
     # -- WebSocket ----------------------------------------------------------
 

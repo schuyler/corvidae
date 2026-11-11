@@ -436,7 +436,7 @@ Declare `optional_depends_on = frozenset({"webhook"})` so the impl is not report
 
 ## Adding a web console panel
 
-The `web` plugin (`corvidae/channels/web.py`) owns `on_web_console_init(panels)`. Implement it to add a read-only panel to the console: a page of your own, linked from the chat page's sidebar, with its own assets and JSON endpoints. The hook fires at the end of `WebPlugin.on_init`, only when agent.yaml has a `web` block.
+The `web` plugin (`corvidae/channels/web.py`) owns `on_web_console_init(panels)`. Implement it to add a read-only panel to the console: a section at the bottom of the chat page's sidebar, with its own script, styles and JSON endpoints. A panel has no page of its own; its script runs in the chat page. The hook fires at the end of `WebPlugin.on_init`, only when agent.yaml has a `web` block.
 
 ```python
 from importlib.resources import files
@@ -472,39 +472,71 @@ class ChannelsPanel(CorvidaePlugin):
 `Panel` has four fields:
 
 - `plugin`: the registering plugin; pass `self`. Its registered name becomes the panel's URL segment.
-- `title`: the link text in the console's navigation.
-- `static_dir`: a directory holding `panel.js` and `panel.css`, plus anything else they load.
+- `title`: the heading of the panel's sidebar section.
+- `static_dir`: a directory holding `panel.js` and `panel.css`, which the chat page loads, plus anything else they load.
 - `routes`: data endpoints, as aiohttp route definitions (`web.get(path, handler)`). Handlers are ordinary aiohttp handlers.
 
 A plugin named `channels_panel` gets these URLs:
 
 | URL | Serves |
 |---|---|
-| `/panel/channels_panel/` | the console's shell page: a header with a link back to chat and the panel navigation, an empty `<main id="panel">`, `/static/app.css` (the console's theme), and your `static/panel.css` and `static/panel.js` |
 | `/panel/channels_panel/static/<file>` | files from `static_dir` |
 | `/panel/channels_panel/data` | each route, under the panel's prefix |
 
-The trailing slash on the page URL matters: the shell links its assets by relative URL. `panel.js` fills `#panel`, and fetches its data the same way, by relative URL:
+There is no `/panel/channels_panel/` page. The chat page, rendered once at startup, carries for each panel a `<link>` for `panel.css`, a deferred `<script data-panel="channels_panel">` for `panel.js` (after the console's own script), and an empty `<section class="panel-section" data-panel="channels_panel"><h2>Channels</h2></section>` at the bottom of the sidebar. Panels appear in name order.
+
+The page and your script share a DOM contract and nothing else; there is no JS API, global or event:
+
+- **Find your section** with `document.currentScript.dataset.panel` (read it at load, not later) and fill it. Sidebar content, such as a list of links, goes there.
+- **Put a view in the main pane.** Append your own `<div class="panel-view hidden">` to `#main` and remove `hidden` only while the hash is your route. While any `#main > .panel-view` is shown, the console's CSS hides the rest of the chat pane (composer, banner, unconfirmed-sends list, conversation items, working indicator) and the view fills the pane as the scroller. You don't hide or restore anything yourself.
+- **Route by hash.** `#<slug>` is a conversation, `#<panel name>/<arg>` is a panel route, and anything else is `main`. `<arg>` is yours: percent-encode it (`encodeURIComponent`) and decode it with a `try`, since a hand-edited hash can be malformed. A link in your section such as `<a href="#channels_panel/web%3Ahome">` selects the route; listen to `hashchange` and check the hash once at load to follow it. The console recognizes a route by your panel's name, so the hash must start with `<name>/`. It closes the phone sidebar and unmarks the conversation list on your routes.
+- **Scope your CSS** under your view or section (`#channels-view ...`, `.panel-section[data-panel="channels_panel"] ...`). The stylesheet is global to the chat page, and the console's theme variables (`--border`, `--panel`, `--accent`, `--muted`) are available.
+- **Wrap your script in an IIFE** so it adds no globals to the chat page, and fetch with absolute URLs (`/panel/channels_panel/data`).
+
+An example `panel.js` for the plugin above:
 
 ```js
-const main = document.getElementById("panel");
-const timer = setInterval(refresh, 2000);
-refresh();
+(function () {
+  const NAME = document.currentScript.dataset.panel;
+  const section = document.querySelector(`.panel-section[data-panel="${NAME}"]`);
+  const list = document.createElement("ul");
+  const view = document.createElement("div");
+  view.id = "channels-view";
+  view.className = "panel-view hidden";
+  section.append(list);
+  document.getElementById("main").append(view);
 
-async function refresh() {
-  const resp = await fetch("data", { cache: "no-store" });
-  if (resp.status === 401) {
-    clearInterval(timer);
-    main.textContent = "Session expired; reload to log in.";
-    return;
+  async function load() {
+    const resp = await fetch(`/panel/${NAME}/data`, { cache: "no-store" });
+    if (resp.status === 401) {
+      list.textContent = "Session expired; reload to log in.";
+      return;
+    }
+    const rows = await resp.json();
+    list.replaceChildren(...rows.map((row) => {
+      const a = document.createElement("a");
+      a.href = `#${NAME}/${encodeURIComponent(row.id)}`;
+      a.textContent = `${row.id}: ${row.messages} messages`;
+      const li = document.createElement("li");
+      li.append(a);
+      return li;
+    }));
   }
-  const rows = await resp.json();
-  main.replaceChildren(...rows.map((row) => {
-    const p = document.createElement("p");
-    p.textContent = `${row.id}: ${row.messages} messages`;
-    return p;
-  }));
-}
+
+  function route() {
+    const prefix = `#${NAME}/`;
+    const shown = location.hash.startsWith(prefix);
+    view.classList.toggle("hidden", !shown);
+    if (!shown) return;
+    let id;
+    try { id = decodeURIComponent(location.hash.slice(prefix.length)); } catch (err) { id = "?"; }
+    view.textContent = `Channel ${id}`;
+  }
+
+  window.addEventListener("hashchange", route);
+  load();
+  route();
+})();
 ```
 
 The contract:
@@ -514,7 +546,7 @@ The contract:
 - **Resolve dependencies lazily.** When the hook fires, each plugin's `on_init` has run up to its first suspending `await`, so a panel may decide whether to register from its own config, read synchronously in `on_init`. That holds only while no plugin wraps `on_init` or `on_web_console_init` with `@hookimpl(wrapper=True)`: apluggy then awaits the impls one by one. Look up other plugins in the handlers, not at registration. A handler can be called before your `on_start` or before a channel has a conversation, so check for `None`.
 - **Read synchronously.** Handlers run on the event loop. They may read kernel objects this guide documents for plugins (`channel.conversation`, the channel registry), as long as they read without awaiting in between, so the view is consistent.
 - **Text, never markup.** A panel often shows untrusted text: prompts, tool output, other people's messages. Render it with `textContent` or `createTextNode`, never `innerHTML`.
-- **The console's floor applies.** Panel routes sit behind the console's token cookie, `Host` check and security headers, and the CSP (`'self'` only, no inline script or style) covers your page. A handler can't loosen them: headers are applied to every response just before it is sent, streamed ones included. A WebSocket upgrade in a handler needs an allowed `Origin`, like the chat socket.
+- **The console's floor applies.** Panel routes sit behind the console's token cookie, `Host` check and security headers, and the CSP (`'self'` only, no inline script or style) covers the chat page your script runs in. A handler can't loosen them: headers are applied to every response just before it is sent, streamed ones included. A WebSocket upgrade in a handler needs an allowed `Origin`, like the chat socket. Your script runs in the chat page's document, with the same origin and the same trust as the console's own script.
 
 Declare `optional_depends_on = frozenset({"web"})` so the impl is not reported as specless when the console isn't installed. With no `web` block, the hook never fires and the panel plugin does nothing.
 

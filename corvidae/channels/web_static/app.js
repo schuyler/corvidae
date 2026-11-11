@@ -7,6 +7,7 @@
   const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
   let ws = null, backoff = 1000, failures = 0, opened = false, stopped = false;
   let current = "main", knownNames = new Set(), convos = [];
+  let inPanel = false; // the hash is a panel route: no conversation is shown
   const pending = new Map(); // seq -> {conversation, text}: sends not yet answered
   let nextSeq = 1;
   const sendBtn = $("send");
@@ -115,7 +116,7 @@
     knownNames = new Set(convos.map((c) => c.name));
     listEl.textContent = "";
     for (const c of convos) {
-      const li = el("li", c.name === current ? "current" : "", c.name);
+      const li = el("li", !inPanel && c.name === current ? "current" : "", c.name);
       if (c.last_active) li.appendChild(el("span", "when", new Date(c.last_active * 1000).toLocaleString()));
       li.addEventListener("click", () => switchTo(c.name));
       listEl.appendChild(li);
@@ -123,7 +124,7 @@
   }
   function markCurrent() {
     for (const li of listEl.children) {
-      li.classList.toggle("current", li.firstChild.textContent === current);
+      li.classList.toggle("current", !inPanel && li.firstChild.textContent === current);
     }
   }
 
@@ -140,9 +141,12 @@
     setWorking(false);
     send({ type: "subscribe", conversation: current });
   }
-  function switchTo(name) {
+  function closeSidebar() {
     sidebarEl.classList.remove("open");
     $("sidebar-toggle").setAttribute("aria-expanded", "false");
+  }
+  function switchTo(name) {
+    closeSidebar();
     if (location.hash.slice(1) !== name) location.hash = name; // triggers hashchange
   }
   function hashName() {
@@ -151,13 +155,30 @@
     try { h = decodeURIComponent(location.hash.slice(1)); } catch (e) { h = ""; }
     return SLUG.test(h) ? h : "main";
   }
-  window.addEventListener("hashchange", () => {
+  // A hash "<panel name>/<arg>" belongs to the panel whose section carries that name.
+  function panelRoute() {
+    const name = location.hash.slice(1).split("/", 2)[0];
+    if (name === location.hash.slice(1)) return null;
+    for (const s of document.querySelectorAll(".panel-section[data-panel]")) {
+      if (s.dataset.panel === name) return name;
+    }
+    return null;
+  }
+  function route() {
+    if (panelRoute() !== null) {
+      inPanel = true;
+      closeSidebar();
+      markCurrent();
+      return;
+    }
     const n = hashName();
-    if (n === current) return;
+    if (!inPanel && n === current) return;
     current = n;
+    inPanel = false;
     markCurrent();
     subscribe();
-  });
+  }
+  window.addEventListener("hashchange", route);
 
   // ---- Terminal "session expired" state ----
   function expired() {
@@ -286,6 +307,7 @@
   });
 
   // ---- Start ----
+  inPanel = panelRoute() !== null;
   current = hashName();
   connect();
 })();

@@ -735,18 +735,22 @@ stands in the way:
   posts. No CDNs. If DOMPurify had a bypass, the CSP would still stop
   inline script.
 - **Panels share the floor.** Plugins can add read-only panels to the
-  console. Their pages, assets and data routes sit on the same app, behind
-  the same cookie, `Host` check and `Origin` check, and every response,
-  streamed ones included, gets the console's headers after the handler
-  runs, so a panel can't loosen the CSP or skip a check. A panel can only
-  register GET routes; anything else fails startup.
+  console, as sections of the chat page's sidebar. Their assets and data
+  routes sit on the same app, behind the same cookie and `Host` check
+  (the `Origin` check covers WebSocket upgrades, including one a panel
+  handler opens), and every response, streamed ones included, gets the
+  console's headers after the handler runs, so a panel can't loosen the CSP
+  or skip a check. A panel can only register GET routes; anything else
+  fails startup.
 
 What it doesn't protect against, so you know:
 
 - **A panel is in-process code, not a sandboxed view.** GET-only is a
   floor on the HTTP method, not on what a handler does: a GET handler runs
   in the daemon with the daemon's access and could change state or call
-  tools. Installing a panel plugin trusts it like any other plugin.
+  tools. Its script shares the chat page's document, so it can read and
+  change the chat DOM. Installing a panel plugin trusts it like any other
+  plugin.
 - **Panels show untrusted text.** A panel that displays prompts, tool
   output or other people's messages puts untrusted text in an
   authenticated page. Panel script must render it as text (`textContent`),
@@ -756,9 +760,9 @@ What it doesn't protect against, so you know:
 
 - **The context panel shows everything the model sees.** When
   `context_panel` is configured, anyone holding the console token can read
-  the context window of every loaded channel: system prompt, retrieved
-  memory, tool output, reasoning and other people's messages from every
-  transport, not only the web channels. It also shows the latest turn's
+  the context window of every loaded channel from the tabs in the chat
+  page's sidebar: system prompt, retrieved memory, tool output, reasoning
+  and other people's messages from every transport, not only the web channels. It also shows the latest turn's
   live reasoning, which can include reasoning that `reasoning_history:
   drop` keeps out of the window. It is off by default, its routes are
   read-only GETs behind the console's checks, and it renders everything as

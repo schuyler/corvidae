@@ -142,7 +142,7 @@ plugin.
 The `webhook` plugin owns `on_webhook_subscribe(subscriptions)`, through which
 plugins register handlers for webhook endpoints; see "Webhook ingress" under
 Transports. The `web` plugin owns `on_web_console_init(panels)`, through which
-plugins add read-only console panels; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path).
+plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path).
 
 ### Funnel pull path
 
@@ -3796,7 +3796,7 @@ With no `zulip:` block the plugin loads, resolves its registry dependency and do
 
 `WebPlugin` serves a browser chat UI over `aiohttp.web`: a chat page, one
 WebSocket per tab, JSON frames both ways, plus read-only panels that other
-plugins contribute. Configuration and remote
+plugins contribute as sections of the chat page's sidebar. Configuration and remote
 access are in [configuration.md](configuration.md#web); what an attacker
 can do with the listener is in [threat-model.md](threat-model.md).
 
@@ -3943,7 +3943,6 @@ list is `(name, panel)` pairs in registration order.
 `_build_app` mounts each panel on the console's own app, after the
 console's routes, so every middleware and the header signal apply with no
 per-panel code:
-- `GET /panel/<name>/`: the shell page;
 - `GET /panel/<name>/static/<file>`: `add_static` on `static_dir`, with
   the same options as `/static` (no symlinks, no index);
 - `GET /panel/<name><path>` per route, through `add_get` (which also
@@ -3954,19 +3953,43 @@ A plugin registers one panel; a second panel from the same plugin is not
 supported. The app is frozen once running, so a handler can't add routes,
 middlewares or signals through `request.app`.
 
-`on_start` renders the navigation once: `<nav class="panels">` with one
-`<a href="/panel/<name>/">` per panel, `name` and `title` HTML-escaped, or
-the empty string with no panels. It replaces the `<!--panels-->` marker in
-`index.html` (at the bottom of the sidebar, so on a phone it collapses
-with the conversation list) and in `panel.html`, and both pages are served
-from those strings. With no panels the chat page is unchanged but for the
-marker. `panel.html` is one static shell shared by every panel: the
-console's `/static/app.css`, then relative `static/panel.css` and
-`static/panel.js`, a header with a link back to `/` and the navigation,
-and an empty `<main id="panel">` that `panel.js` fills. It has no inline
-script or style, so the CSP needs nothing extra. Because the asset URLs
-are relative, the page URL needs its trailing slash; `/panel/<name>` is a
-404.
+A panel has no page of its own: `GET /panel/<name>/` is a 404, and the
+sidebar carries no navigation. `on_start` renders `index.html` once
+(`_render_index`) and serves it from that string. Two markers are filled,
+panels in name order, `name` and `title` HTML-escaped:
+- `<!--panel-assets-->`, in `<head>` after the `app.js` tag, becomes per
+  panel `<link rel="stylesheet" href="/panel/<name>/static/panel.css">` and
+  `<script src="/panel/<name>/static/panel.js" data-panel="<name>" defer>`;
+- `<!--panels-->`, at the bottom of `#side-body` (so on a phone it collapses
+  with the conversation list), becomes per panel
+  `<section class="panel-section" data-panel="<name>"><h2>title</h2></section>`.
+
+With no panels both markers become the empty string, so the page has no
+`/panel/` reference. The page has no inline script or style, so the CSP
+needs nothing extra. Panel code runs in the chat page's document.
+
+The contract between `app.js` and a `panel.js` is the DOM and the URL hash,
+with no JS API, globals or events:
+- `panel.js` finds its section through `document.currentScript.dataset.panel`
+  and fills it.
+- It appends its own view, a `div.panel-view` hidden with the `hidden`
+  class, to `#main`, and removes `hidden` exactly while the hash is its
+  route. `app.css` then hides every other child of `#main` (composer,
+  banner, unconfirmed-sends list, items, working indicator) with `:has()`, and the view fills the
+  pane as the scroller. The hidden chat keeps its state.
+- The hash is `#<slug>` for a conversation, `#<panel name>/<arg>` for a
+  panel route (`arg` percent-encoded and opaque to the console), and
+  anything else, including empty, for `main`. A conversation slug never
+  contains `/`, so the forms cannot collide. `app.js` treats a hash as a
+  panel route only when its prefix equals some section's `data-panel`; any
+  other hash with a `/` is `main`.
+- On a panel route `app.js` closes the phone sidebar and unmarks the
+  conversation list, but stays subscribed to the current conversation. On a
+  conversation hash it resubscribes when the name changed or a panel route
+  was showing, so `#items` is rebuilt from the history replay.
+- `panel.css` and `panel.js` are global to the chat page, so a panel scopes
+  every selector under its view or section and wraps its script in an IIFE.
+  Fetches use the absolute `/panel/<name>/...` URL.
 
 With no `web` block the hook never fires. With `web` blocked or not
 installed the spec is never installed, so a panel plugin's impl is an
@@ -4012,7 +4035,7 @@ apply". A removed block logs the same and changes nothing. A malformed
 block raises (the watcher logs it) and changes nothing.
 
 **Frontend.** `web_static/` ships as package data: `index.html`,
-`panel.html`, `app.css`, `app.js` (plain JS, no build) and vendored marked 15.0.12 and
+`app.css`, `app.js` (plain JS, no build) and vendored marked 15.0.12 and
 DOMPurify 3.2.6 (`vendor/README.md` records versions, hashes and
 licences). Model text reaches the DOM through one sink:
 `DOMPurify.sanitize(marked.parse(text))` with `style`, `class`, `id` and
@@ -4112,6 +4135,42 @@ The client polls one second after each poll completes, and polls again
 immediately after a window opens, so two polls can be in flight. A response
 is dropped if the selection changed, the window was reopened, or the page's
 cursor is no longer the one the request carried.
+
+**Client.** The panel is a section at the bottom of the chat page's sidebar,
+headed "Context", below the conversation list. It holds a `refresh` button
+and a list of tabs, one per loaded channel, in id order. A tab is an
+anchor to `#context_panel/<encodeURIComponent(channel id)>` showing the name
+and id (`name (id)` when the channel has a name, the id otherwise) and
+`N msgs, T / B tokens`; the tab of the selected channel is marked
+`current`. The list is fetched from `/channels` at page load and when
+`refresh` is pressed, never on a timer, because `/channels` estimates
+tokens for every loaded window on the event loop. Refreshing keeps the
+selected tab.
+
+The panel follows the hash. On a `#context_panel/<id>` hash it shows
+`#context-view`, a read-only scroller in the main pane in place of the chat
+(no input control), and opens that channel's window. Any other hash hides
+the view, empties it and stops polling. Reloading on a tab hash reopens the same channel.
+
+The view holds a status line (with "show all" when older rows are cut),
+the entries and the live area. Each entry is a collapsed `<details>` except
+user and assistant rows, which start open. Categories are colored by token,
+light and dark: system prompt and tools, inserted (summaries, context rows,
+system messages), thinking, tool call, tool output, user, and assistant.
+User and assistant have separate colors. Assistant text rows, unsent rows
+and live progress take the assistant category; an unsent row also carries
+`withheld`, which dims it and dashes its border. Every string reaches the DOM
+through `textContent`.
+
+Selecting a tab scrolls the view to the bottom once, after the window and
+the first poll have rendered. `state.scrollPending` is set on selection and
+cleared by the newest completed open (a compaction resync that overtakes
+the first poll is the newest open and does the scroll) or by routing away.
+Polls that append rows never scroll.
+
+A 401 on any panel request stops polling and shows "session expired;
+reload to log in" in the status line, since the chat banner is hidden while
+the view shows.
 
 ### Webhook ingress (`channels/webhook.py`)
 
