@@ -453,3 +453,35 @@ def test_parse_rejects_non_mapping_tools(value):
     # Key, accepted form and rejected value, per the design's message.
     assert "tools must be a mapping" in msg
     assert repr(value) in msg
+
+
+# ---------------------------------------------------------------------------
+# #578: tools.read_file_window_fraction parsing (R9)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_read_file_window_fraction_default_and_configured():
+    """R9: absent or no tools block gives 0.08; a configured value is used."""
+    from corvidae.tool_collection import parse_read_file_window_fraction
+
+    # Absent key or absent tools block falls back to the default.
+    assert parse_read_file_window_fraction({}) == 0.08
+    assert parse_read_file_window_fraction(None) == 0.08
+    # Configured values, float or int in range, are used as given.
+    assert parse_read_file_window_fraction({"read_file_window_fraction": 0.25}) == 0.25
+    assert parse_read_file_window_fraction({"read_file_window_fraction": 1}) == 1.0
+
+
+@pytest.mark.parametrize("value", [True, "abc", None, 0, -0.1, 1.5, float("nan")])
+def test_parse_rejects_bad_read_file_window_fraction(value):
+    """R9: a bad value names the key, the value and the accepted range."""
+    from corvidae.tool_collection import parse_read_file_window_fraction
+
+    # Parsing the bad value raises.
+    with pytest.raises(ValueError) as excinfo:
+        parse_read_file_window_fraction({"read_file_window_fraction": value})
+    # The message names the key, the rejected value and the accepted range.
+    msg = str(excinfo.value)
+    assert "tools.read_file_window_fraction" in msg
+    assert repr(value) in msg
+    assert "0 <" in msg and "<= 1" in msg
