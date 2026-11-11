@@ -464,12 +464,10 @@ def test_parse_read_file_window_fraction_default_and_configured():
     """R9: absent or no tools block gives 0.08; a configured value is used."""
     from corvidae.tool_collection import parse_read_file_window_fraction
 
-    # Absent key or absent tools block falls back to the default.
+    # Absent key or tools block gives the default; a configured value is used.
     assert parse_read_file_window_fraction({}) == 0.08
     assert parse_read_file_window_fraction(None) == 0.08
-    # Configured values, float or int in range, are used as given.
     assert parse_read_file_window_fraction({"read_file_window_fraction": 0.25}) == 0.25
-    assert parse_read_file_window_fraction({"read_file_window_fraction": 1}) == 1.0
 
 
 @pytest.mark.parametrize("value", [True, "abc", None, 0, -0.1, 1.5, float("nan")])

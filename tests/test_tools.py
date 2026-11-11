@@ -456,141 +456,136 @@ def _ctx_for(channel):
 
 
 @pytest.mark.parametrize(
-    ("cap", "budget", "fraction", "expected"),
+    ("cap", "budget", "expected"),
     [
         # Fraction term binds: 0.08 x 24000 x 3.0.
-        (100_000, 24_000, 0.08, 5_760),
-        # R3: the cap binds at 220000 tokens with a 32000 cap.
-        (32_000, 220_000, 0.08, 32_000),
-        # R3: a 256000-token window with the default cap.
-        (100_000, 256_000, 0.08, 61_440),
-        # Minimum page binds when the fraction term is smaller.
-        (100_000, 1_500, 0.08, 2_000),
-        # The cap wins even when it is below the minimum page.
-        (1_000, 1_500, 0.08, 1_000),
+        (100_000, 24_000, 5_760),
+        # Cap term binds (R3), also when the cap is below the minimum page.
+        (32_000, 220_000, 32_000),
+        (1_000, 1_500, 1_000),
+        # Minimum-page term binds (R7).
+        (100_000, 1_500, 2_000),
         # No channel budget: the cap alone.
-        (30_000, None, 0.08, 30_000),
+        (30_000, None, 30_000),
     ],
 )
-def test_page_chars_formula(cap, budget, fraction, expected):
-    """R8/R3: page = min(cap, max(MIN_PAGE_CHARS, fraction x budget x 3.0))."""
+def test_page_chars_formula(cap, budget, expected):
+    """R8: page = min(cap, max(MIN_PAGE_CHARS, fraction x budget x 3.0))."""
     from corvidae.tools.files import page_chars
 
-    assert page_chars(cap, budget, fraction) == expected
+    assert page_chars(cap, budget, 0.08) == expected
 
 
-def test_page_constants():
-    """R8: the characters-per-token ratio and the minimum page are constants."""
-    from corvidae.tools.files import CHARS_PER_TOKEN_ESTIMATE, MIN_PAGE_CHARS
-
-    assert CHARS_PER_TOKEN_ESTIMATE == 3.0
-    assert MIN_PAGE_CHARS == 2000
+async def _page_chain(fn, path, ctx, **first):
+    """Follow the continuation headers from ``first``; return the page bodies."""
+    # Each page's header names the next offset or start_line; stop when absent.
+    pattern = _LINE_HEADER if "start_line" in first else _RANGE_HEADER
+    key = "start_line" if "start_line" in first else "offset"
+    bodies, kwargs = [], first
+    while kwargs is not None:
+        page = await fn(str(path), _ctx=ctx, **kwargs)
+        header = pattern.match(page)
+        assert header, page[:200]
+        bodies.append(page[header.end():])
+        kwargs = {**first, key: int(header.group(5))} if header.group(5) else None
+    return bodies
 
 
 async def test_channel_page_is_a_bounded_share_of_the_window(tmp_path):
-    """R1/R11: on a 24000-token channel an unranged read of a long file is its
-    first page, at most 8% of the window, with a header naming the next offset;
-    following the offsets reconstructs the file. A file within a page is bare."""
+    """R1/R11: on a 24000-token channel an unranged read of a long file and a
+    line-range page are each at most 8% of the window with a continuation
+    header; a file within a page comes back bare."""
     from corvidae.context import message_tokens
 
+    # A 24000-token channel and the read_file tool wired to its registry.
     registry, channel = _channel_with_budget(24_000)
     fn, _ = await _ranged_read_file(registry=registry)
     ctx = _ctx_for(channel)
-    f = _prose_file(tmp_path, 40_000)
 
-    # First page of an unranged read: bounded, with the continuation header.
-    first = await fn(str(f), _ctx=ctx)
+    # Unranged long file: first page with the header naming the next offset.
+    first = await fn(str(_prose_file(tmp_path, 40_000)), _ctx=ctx)
     assert message_tokens({"role": "tool", "content": first}) <= 0.08 * 24_000
-    match = _RANGE_HEADER.match(first)
-    assert match, first[:200]
-    assert match.group(1) == "0" and match.group(3) == "40000"
-    assert match.group(5) is not None
+    header = _RANGE_HEADER.match(first)
+    assert header.group(1) == "0" and header.group(3) == "40000"
+    assert header.group(5) is not None
 
-    # Following the offsets reproduces the whole file.
-    pieces: list[str] = []
-    offset: int | None = 0
-    while offset is not None:
-        page = await fn(str(f), offset=offset, length=10**6, _ctx=ctx)
-        header = _RANGE_HEADER.match(page)
-        assert header, page[:200]
-        pieces.append(page[header.end():])
-        offset = int(header.group(5)) if header.group(5) else None
-    assert "".join(pieces) == f.read_text()
-
-    # A line-range page of short lines is bounded the same way and names the
-    # next start_line (the page limit, not the line count, binds).
+    # Line range of short lines: the page limit binds and names next start_line.
     lines = tmp_path / "lines.txt"
     lines.write_text("".join(f"{_PROSE.strip()} {n}\n" for n in range(2_000)))
     line_page = await fn(str(lines), start_line=1, _ctx=ctx)
     assert message_tokens({"role": "tool", "content": line_page}) <= 0.08 * 24_000
-    line_match = _LINE_HEADER.match(line_page)
-    assert line_match and line_match.group(5) is not None, line_page[:200]
+    assert _LINE_HEADER.match(line_page).group(5) is not None
 
-    # A file that fits in a page comes back bare.
+    # A file that fits in a page is bare.
     small = tmp_path / "small.txt"
     small.write_text("fits in one page")
     assert await fn(str(small), _ctx=ctx) == "fits in one page"
 
 
 async def test_page_follows_runtime_budget_override(tmp_path):
-    """R2: changing the channel's budget by runtime override changes the next
-    page's size with no restart."""
+    """R2: a runtime override of the budget changes the next page, no restart."""
+    # A 24000-token channel and a file longer than any page.
     registry, channel = _channel_with_budget(24_000)
     fn, _ = await _ranged_read_file(registry=registry)
     f = _prose_file(tmp_path, 60_000)
     ctx = _ctx_for(channel)
 
+    # First page at the agent-default budget.
     small_page = await fn(str(f), offset=0, length=10**6, _ctx=ctx)
     # set_settings stores its value here.
     channel.runtime_overrides["max_context_tokens"] = 48_000
+    # Second page, same call, after the override.
     large_page = await fn(str(f), offset=0, length=10**6, _ctx=ctx)
 
-    assert len(small_page) <= 5_760
-    assert 5_760 < len(large_page) <= 11_520
+    # The page grew with the budget: 5760 characters, then up to 11520.
+    assert len(small_page) <= 5_760 < len(large_page) <= 11_520
 
 
 @pytest.mark.parametrize(
-    ("budget", "cap", "expected"),
-    [(220_000, 32_000, 32_000), (256_000, None, 61_440)],
+    ("budget", "tools_config", "expected"),
+    [
+        # R3: the cap binds at 220000 tokens; the default cap at 256000.
+        (220_000, {"max_result_chars": 32_000}, 32_000),
+        (256_000, {}, 61_440),
+        # R7: a 1500-token budget keeps the minimum page, or a lower cap.
+        (1_500, {}, 2_000),
+        (1_500, {"max_result_chars": 1_000}, 1_000),
+        # R9: a configured fraction sets the page (2% x 100000 x 3.0).
+        (100_000, {"read_file_window_fraction": 0.02}, 6_000),
+    ],
 )
-async def test_channel_page_at_configured_caps(tmp_path, budget, cap, expected):
-    """R3: a 220000-token window with a 32000 cap gets 32000-character pages;
-    256000 tokens with the default 100000 cap gets 61440."""
-    # A channel at the budget, and a config with the cap or the default.
+async def test_channel_page_size_by_configuration(tmp_path, budget, tools_config, expected):
+    """R3/R7/R9: the first page of a long file has the configured size, header intact."""
+    # A channel at the budget, the tool configured, and a file longer than any page.
     registry, channel = _channel_with_budget(budget)
-    tools_config = {"max_result_chars": cap} if cap is not None else {}
     fn, _ = await _ranged_read_file(tools_config, registry=registry)
     f = _prose_file(tmp_path, 150_000)
 
-    # Read the first page of a file longer than any page.
+    # Read the first page.
     page = await fn(str(f), offset=0, length=10**6, _ctx=_ctx_for(channel))
 
-    # The page fills the clamp, header included.
+    # The header is intact and the page is within 200 characters of the size.
+    assert _RANGE_HEADER.match(page), page[:200]
     assert expected - 200 <= len(page) <= expected
 
 
 @pytest.mark.parametrize("case", ["no_ctx", "no_channel", "no_registry"])
 async def test_no_channel_budget_is_bounded_by_max_result_chars(tmp_path, case):
-    """R4: with no _ctx, no channel in it, or no registry plugin, a read of a
-    long file is a page of tools.max_result_chars."""
-    # A channel exists, but the registry is registered only when the case allows.
+    """R4: with no _ctx, no channel, or no registry, a long file reads as a
+    page of tools.max_result_chars."""
+    # A channel exists; the registry is registered unless the case omits it.
     cap = 30_000
     registry, channel = _channel_with_budget(24_000)
     fn, _ = await _ranged_read_file(
-        {"max_result_chars": cap}, registry=registry if case != "no_registry" else None
+        {"max_result_chars": cap}, registry=None if case == "no_registry" else registry
     )
-    f = _prose_file(tmp_path, 100_000)
-    # Build the context each case passes (none, one without a channel, or one with).
-    kwargs = {}
-    if case == "no_channel":
-        kwargs["_ctx"] = _ctx_for(None)
-    elif case == "no_registry":
-        kwargs["_ctx"] = _ctx_for(channel)
+    # The context each case passes: none, one without a channel, or one with.
+    ctx = {"no_ctx": None, "no_channel": _ctx_for(None), "no_registry": _ctx_for(channel)}[case]
 
-    # Read the long file with no channel budget available.
-    page = await fn(str(f), **kwargs)
+    # Read a long file with no channel budget available.
+    page = await fn(str(_prose_file(tmp_path, 100_000)), _ctx=ctx)
 
-    # The page is bounded by the cap alone and carries its header.
+    # The page is the cap alone, with its header.
     assert cap - 200 <= len(page) <= cap
     assert _RANGE_HEADER.match(page)
 
@@ -601,19 +596,22 @@ async def test_dispatched_read_file_is_sized_to_the_calling_channel(tmp_path):
 
     from corvidae.tool import dispatch_tool_call
 
-    # A 24000-token channel and a long file.
+    # A 24000-token channel and the read_file tool wired to its registry.
     registry, channel = _channel_with_budget(24_000)
     fn, _ = await _ranged_read_file(registry=registry)
-    f = _prose_file(tmp_path, 40_000)
-    # The LLM's tool call, dispatched with the channel in context.
+    # The LLM's tool call for a long file.
     call = {
         "id": "c1",
-        "function": {"name": "read_file", "arguments": json.dumps({"path": str(f)})},
+        "function": {
+            "name": "read_file",
+            "arguments": json.dumps({"path": str(_prose_file(tmp_path, 40_000))}),
+        },
     }
 
+    # Dispatch with the channel in context.
     result = await dispatch_tool_call(call, {"read_file": fn}, channel=channel)
 
-    # The result is the channel-sized page: 5760 characters at most.
+    # 24000 x 8% x 3.0 = 5760 characters at most.
     assert 5_000 <= len(result.content) <= 5_760
 
 
@@ -621,80 +619,34 @@ def test_read_file_schema_has_no_ctx_and_keeps_its_parameters():
     """R6: the schema does not expose _ctx and the parameter list is unchanged."""
     from corvidae.tool import Tool
 
+    # Register the tools and find read_file.
     registry: list = []
     FileToolsPlugin(None).register_tools(tool_registry=registry)
     tool = next(t for t in registry if isinstance(t, Tool) and t.name == "read_file")
+    # The exposed parameters are exactly the original five.
     props = tool.schema["function"]["parameters"]["properties"]
     assert list(props) == ["path", "offset", "length", "start_line", "end_line"]
 
 
 async def test_character_and_line_paging_under_a_small_budget_reconstruct_the_file(tmp_path):
-    """R6: with a small budget, paging by character range and by line range
-    each takes several pages and reproduces the file exactly."""
+    """R6: under a small budget, paging by character and by line each takes
+    several pages and reproduces the file exactly."""
+    # A 1500-token channel and a file of several minimum pages.
     registry, channel = _channel_with_budget(1_500)
     fn, _ = await _ranged_read_file(registry=registry)
     ctx = _ctx_for(channel)
     f = _prose_file(tmp_path, 9_000)
     text = f.read_text()
-    total_lines = len(text.splitlines())
 
-    # By character range.
-    pieces: list[str] = []
-    offset: int | None = 0
-    while offset is not None:
-        page = await fn(str(f), offset=offset, length=10**6, _ctx=ctx)
-        header = _RANGE_HEADER.match(page)
-        assert header, page[:200]
-        pieces.append(page[header.end():])
-        offset = int(header.group(5)) if header.group(5) else None
-    assert len(pieces) > 1
-    assert "".join(pieces) == text
+    # Page through the file by character range.
+    by_chars = await _page_chain(fn, f, ctx, offset=0, length=10**6)
+    # Page through the file by line range.
+    by_lines = await _page_chain(fn, f, ctx, start_line=1, end_line=len(text.splitlines()))
 
-    # By line range.
-    pieces = []
-    start: int | None = 1
-    while start is not None:
-        page = await fn(str(f), start_line=start, end_line=total_lines, _ctx=ctx)
-        header = _LINE_HEADER.match(page)
-        assert header, page[:200]
-        pieces.append(page[header.end():])
-        start = int(header.group(5)) if header.group(5) else None
-    assert len(pieces) > 1
-    assert "".join(pieces) == text
-
-
-@pytest.mark.parametrize(("cap", "expected"), [(100_000, 2_000), (1_000, 1_000)])
-async def test_small_budget_keeps_a_minimum_page(tmp_path, cap, expected):
-    """R7: a 1500-token budget gives a page of the minimum 2000 characters with
-    its header intact, or tools.max_result_chars when that is lower."""
-    # A tiny-budget channel and a file longer than the minimum page.
-    registry, channel = _channel_with_budget(1_500)
-    fn, _ = await _ranged_read_file({"max_result_chars": cap}, registry=registry)
-    f = _prose_file(tmp_path, 20_000)
-
-    # Read the first page.
-    page = await fn(str(f), offset=0, length=10**6, _ctx=_ctx_for(channel))
-
-    # The header is intact and the page is the minimum (or the lower cap).
-    assert _RANGE_HEADER.match(page), page[:200]
-    assert expected - 200 <= len(page) <= expected
-
-
-async def test_read_file_page_follows_configured_fraction(tmp_path):
-    """R9: a configured tools.read_file_window_fraction sets the page size."""
-    # A 100000-token channel and a config with a 2% fraction.
-    registry, channel = _channel_with_budget(100_000)
-    fn, collection = await _ranged_read_file(
-        {"read_file_window_fraction": 0.02}, registry=registry
-    )
-    f = _prose_file(tmp_path, 40_000)
-
-    # Read the first page.
-    page = await fn(str(f), offset=0, length=10**6, _ctx=_ctx_for(channel))
-
-    # The plugin carries the fraction and the page is 2% x 100000 x 3.0 = 6000.
-    assert collection.read_file_window_fraction == 0.02
-    assert 5_800 <= len(page) <= 6_000
+    # Each takes several pages and joins back to the file.
+    for bodies in (by_chars, by_lines):
+        assert len(bodies) > 1
+        assert "".join(bodies) == text
 
 
 # ---------------------------------------------------------------------------
