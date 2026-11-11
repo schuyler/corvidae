@@ -307,3 +307,64 @@ async def test_g3_retirement_record_is_retrievable(env):
         "kestrels carrying twigs to the nest on Brannan Street"
     )
     assert memory_id in [c["id"] for c in candidates]
+
+
+# -- list_goals tests -------------------------------------------------------
+
+
+async def test_list_goals_open(env):
+    """list_goals returns open goals with ids and dates."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("Find the kestrel nest", _ctx=ctx)
+    await env.tools["add_goal"]("Write the blog post", _ctx=ctx)
+    result = await env.tools["list_goals"](_ctx=ctx)
+    assert "#1" in result
+    assert "#2" in result
+    assert "Find the kestrel nest" in result
+    assert "Write the blog post" in result
+    assert "[open since" in result
+
+
+async def test_list_goals_empty(env):
+    """list_goals with no goals returns 'No open goals.'"""
+    ctx = ctx_for(env.channel)
+    result = await env.tools["list_goals"](_ctx=ctx)
+    assert result == "No open goals."
+
+
+async def test_list_goals_exclude_retired_by_default(env):
+    """list_goals excludes retired goals by default."""
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "context")
+    await env.tools["add_goal"]("Open goal", _ctx=ctx)
+    await env.tools["add_goal"]("To be retired", _ctx=ctx)
+    await env.tools["retire_goal"](2, "Done.", _ctx=ctx)
+    result = await env.tools["list_goals"](_ctx=ctx)
+    assert "#1" in result
+    assert "#2" not in result
+    assert "To be retired" not in result
+
+
+async def test_list_goals_include_retired(env):
+    """list_goals(include_retired=True) includes retired goals."""
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "context")
+    await env.tools["add_goal"]("Open goal", _ctx=ctx)
+    await env.tools["add_goal"]("To be retired", _ctx=ctx)
+    await env.tools["retire_goal"](2, "Done.", _ctx=ctx)
+    result = await env.tools["list_goals"](include_retired=True, _ctx=ctx)
+    assert "#1" in result
+    assert "#2" in result
+    assert "[retired" in result
+
+
+async def test_list_goals_truncates_long_text(env):
+    """list_goals truncates goal text longer than 120 chars."""
+    ctx = ctx_for(env.channel)
+    long_text = "A" * 200
+    await env.tools["add_goal"](long_text, _ctx=ctx)
+    result = await env.tools["list_goals"](_ctx=ctx)
+    # Truncated to 117 chars + "..."
+    assert "..." in result
+    # The full 200-char text should NOT appear
+    assert long_text not in result
