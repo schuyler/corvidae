@@ -56,7 +56,7 @@ daemon:
   # task_results_path: task-results.jsonl  # persist results to JSONL (off by default; survives deque eviction + restart)
   # idle_cooldown_seconds, idle_poll_interval: removed; either one is a config
   # error. Idle work runs on the kernel clock, per plugin.
-  # notification_spill_dir: state/notification-spill   # full text of cut notifications, mode 0600
+  # notification_spill_dir: state/notification-spill   # full text of cut notifications and tool results, mode 0600
   # notification_spill_max_chars: 1000000   # most characters written to one file
   # notification_spill_max_age_days: 7      # files older than this are deleted; no size limit
   # shutdown_timeout: 3     # seconds for every plugin's on_stop; past it, exit 1
@@ -70,7 +70,7 @@ agent:
                                   # exchange: keep it only for the current exchange (since the
                                   # last user message); pair with the server's preserve_thinking off.
   # max_turns: 10                   # max consecutive tool-calling turns per exchange (message or scheduled firing)
-  # max_tool_result_chars: 100000   # truncate tool results beyond this length
+  # max_tool_result_chars: 100000   # deprecated: use tools.max_result_chars (longer results are cut and spilled)
   # compaction_threshold: 0.8       # compact when token estimate exceeds this × max_context_tokens
   # compaction_retention: 0.5       # after compaction, retain this fraction of token budget
   #                                    ⚠ Must be significantly less than compaction_threshold.

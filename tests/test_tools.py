@@ -383,6 +383,30 @@ async def test_read_file_on_a_removed_spill_file_names_path_and_age(tmp_path):
     assert "daemon.notification_spill_max_age_days" in result
 
 
+async def test_unranged_read_of_a_spill_file_pages_from_the_start(tmp_path):
+    """An unranged read_file of a spill file returns its first page, clamped
+    to tools.max_result_chars with a header naming the next offset, so
+    reading a spill file back never produces a result that is cut and
+    spilled again (#575)."""
+    from corvidae.channel import ChannelRegistry
+
+    fn, collection = await _ranged_read_file(
+        tools_config={"max_result_chars": 1000},
+        daemon={"notification_spill_dir": str(tmp_path)},
+    )
+    spill = collection.pm.get_plugin("spill")
+    text = "".join(chr(ord("a") + i % 26) for i in range(5000))
+    channel = ChannelRegistry().get_or_create("irc", "#a")
+    pointer = await spill.notify([channel], source="test", text=text, annotations=None, limit=100)
+
+    result = await fn(pointer)
+    # The whole result, header included, fits the cap, so it is never cut.
+    assert len(result) <= 1000
+    header, body = result.split("\n", 1)
+    assert header == f"[characters 0-{len(body)} of 5000 in {pointer}; next offset {len(body)}]"
+    assert body == text[: len(body)]
+
+
 async def test_read_file_elsewhere_keeps_file_not_found(tmp_path):
     """A missing path outside the spill directory keeps read_file's
     own file-not-found message."""

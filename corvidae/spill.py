@@ -1,8 +1,11 @@
-"""The notification spill service: a notification too long to show inline is
-cut, and its full text is written once to a file the agent reads on demand.
+"""The spill service: a notification or tool result too long to show inline
+is cut, and its full text is written once to a file the agent reads on demand.
 
 A plugin that cuts notification text calls ``NotificationSpill.notify``
-instead of firing ``on_notify`` itself. The service decides, per channel,
+instead of firing ``on_notify`` itself. The Agent cuts a tool result over
+``tools.max_result_chars`` through ``NotificationSpill.cut`` and records the
+returned ``Cut`` in the result row's provenance (#575); a subagent loop,
+which stores no rows, renders the same words as plain text. The service decides, per channel,
 whether the channel's tools can read a spill file, writes one file for the
 whole delivery, and tells ``Agent.on_notify`` what it did through a context
 variable (``current_cut``), so the kernel renders the cut marker from the
@@ -15,9 +18,9 @@ Configuration (``daemon`` section, applied at restart):
     notification_spill_max_age_days: age after which files are deleted (default 7)
 
 Logging:
-    - INFO: a cut notification was spilled (characters, path, channel counts)
+    - INFO: a cut notification or tool result was spilled (characters, path)
     - INFO: the age sweep deleted files
-    - WARNING: the spill write failed; the notification is delivered cut
+    - WARNING: the spill write failed; the item is delivered cut
     - WARNING: the age sweep could not list the directory or delete a file
 """
 
@@ -53,13 +56,14 @@ SPILL_NAME = re.compile(r"[0-9a-f]{32}\.txt")
 
 @dataclass(frozen=True)
 class Cut:
-    """What the kernel did with one channel's copy of a cut notification."""
+    """What the kernel did with one channel's copy of a cut notification or tool result."""
 
     shown: int  # characters passed inline
     total: int  # characters in the full text
     path: str | None = None  # spill file path; set only when this channel gets a pointer
     spilled: int | None = None  # characters in the file; set with path
     failed: bool = False  # this channel can read spills, but the write failed
+    source: str | None = None  # who the item came from, kept on the row (#576)
 
 
 _current_cut: contextvars.ContextVar[Cut | None] = contextvars.ContextVar(
@@ -152,30 +156,11 @@ class NotificationSpill(CorvidaePlugin):
             return None
 
         readers = [self._can_read(channel) for channel in channels]
-        path: Path | None = None
-        spilled: int | None = None
-        failed = False
         # One file per item, written only when some channel can read it.
-        if any(readers):
-            content = text[: self.max_chars]
-            try:
-                path = await asyncio.to_thread(self._write, content)
-                spilled = len(content)
-                logger.info(
-                    "notification from %s cut from %d to %d characters; %d characters "
-                    "written to %s for %d of %d channels",
-                    source, len(text), limit, spilled, path, sum(readers), len(channels),
-                )
-            except OSError as exc:
-                failed = True
-                logger.warning(
-                    "notification spill: could not write the full text of a notification "
-                    "from %s (%d characters) to %s (%s); delivering the first %d characters "
-                    "with a header saying the full text was not saved — check that the "
-                    "directory is writable and has space",
-                    source, len(text), self.dir, type(exc).__name__, limit,
-                    exc_info=True,
-                )
+        path, spilled, failed = await self._spill(
+            text, source=source, limit=limit,
+            what=f"for {sum(readers)} of {len(channels)} channels",
+        ) if any(readers) else (None, None, False)
 
         # Each channel's row records its own cut: a pointer only where it can
         # read the file, "not saved" only where it could have.
@@ -186,6 +171,7 @@ class NotificationSpill(CorvidaePlugin):
                 path=str(path) if reads and path else None,
                 spilled=spilled if reads and path else None,
                 failed=reads and failed,
+                source=source,
             )
             token = _current_cut.set(cut)
             try:
@@ -194,16 +180,71 @@ class NotificationSpill(CorvidaePlugin):
                 _current_cut.reset(token)
         return str(path) if path else None
 
+    async def cut(self, text: str, *, limit: int, source: str, can_read: bool) -> Cut:
+        """Spill ``text``, which is longer than ``limit``, for one destination.
+
+        The caller passes the first ``limit`` characters on and records the
+        returned ``Cut``. The file is written only when ``can_read``.
+        """
+        path, spilled, failed = await self._spill(
+            text, source=source, limit=limit, what="for one destination",
+        ) if can_read else (None, None, False)
+        return Cut(
+            shown=limit, total=len(text),
+            path=str(path) if path else None, spilled=spilled, failed=failed,
+            source=source,
+        )
+
+    def can_read(self, channel: Channel, tools: dict | None = None) -> bool:
+        """Whether an enabled tool on ``channel`` declares it reads spill files.
+
+        ``tools`` is the tool set to check (a subagent's, say); by default the
+        daemon's registry.
+        """
+        if tools is None:
+            return self._can_read(channel)
+        disabled = disabled_on(channel) if channel is not None else frozenset()
+        return any(
+            declares_spill_reader(fn) and name not in disabled for name, fn in tools.items()
+        )
+
+    def contains(self, path: str) -> bool:
+        """Whether ``path`` lies inside the spill directory."""
+        return Path(os.path.abspath(path)).is_relative_to(self.dir)
+
     def stale_pointer_error(self, path: str) -> str | None:
         """The error text for a missing file inside the spill directory, else None."""
         absolute = Path(os.path.abspath(path))
         if not absolute.is_relative_to(self.dir) or os.path.exists(absolute):
             return None
         return (
-            f"Error: file not found: {path}; it was a notification spill file, and spill "
-            f"files are deleted {self.max_age_days:g} days after they are written "
+            f"Error: file not found: {path}; it was a spill file (the full text of a cut "
+            f"notification or tool result), and spill files are deleted "
+            f"{self.max_age_days:g} days after they are written "
             "(daemon.notification_spill_max_age_days)"
         )
+
+    async def _spill(
+        self, text: str, *, source: str, limit: int, what: str
+    ) -> tuple[Path | None, int | None, bool]:
+        """Write up to the cap of ``text``; return (path, characters, failed)."""
+        content = text[: self.max_chars]
+        try:
+            path = await asyncio.to_thread(self._write, content)
+        except OSError as exc:
+            logger.warning(
+                "spill: could not write the full text of an item from %s (%d characters) "
+                "to %s (%s); delivering the first %d characters with a header saying the "
+                "full text was not saved — check that the directory is writable and has space",
+                source, len(text), self.dir, type(exc).__name__, limit,
+                exc_info=True,
+            )
+            return None, None, True
+        logger.info(
+            "item from %s cut from %d to %d characters; %d characters written to %s %s",
+            source, len(text), limit, len(content), path, what,
+        )
+        return path, len(content), False
 
     async def _on_notify(
         self, channel: Channel, source: str, text: str, annotations: dict | None

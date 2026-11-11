@@ -222,12 +222,12 @@ tasks:
 """
         result = await tool.fn(definition)
 
-        assert plugin._task_status["build"] == "failed", (
-            f"a non-zero exit must fail the task, got "
-            f"{plugin._task_status['build']!r}: {result}"
+        # The run state is local to the call, so the result text is the record.
+        assert "build: failed" in result, (
+            f"a non-zero exit must fail the task: {result}"
         )
-        assert plugin._task_status["deploy"] == "failed", (
-            "a dependent of a failed task must not run"
+        assert "deploy: failed" in result, (
+            f"a dependent of a failed task must not run: {result}"
         )
         assert "blocked" in result.lower(), result
         assert "Exit code: 3" in result, f"the exit code must be reported: {result!r}"
@@ -292,3 +292,67 @@ async def test_task_pipeline_cancel_kills_step_process(tmp_path):
                 os.kill(int(pidfile.read_text().strip()), signal.SIGKILL)
             except (ProcessLookupError, ValueError):
                 pass
+
+
+class TestConcurrentPipelines:
+    """Overlapping task_pipeline calls keep their own run state (#650)."""
+
+    async def test_overlapping_pipelines_count_only_their_own_steps(self, monkeypatch):
+        """Two calls in flight at once, with a step name in common, each report
+        only their own steps in the header."""
+        import asyncio
+        import importlib
+
+        from corvidae.tools.task_pipeline import TaskPipelinePlugin
+
+        # Each command blocks on its own gate, so the test fixes the
+        # interleaving instead of relying on sleeps.
+        gates = {c: asyncio.Event() for c in ("ax", "ay", "bx", "bz")}
+        started = {c: asyncio.Event() for c in gates}
+
+        async def gated_run_shell(command, timeout=30):
+            started[command].set()
+            await gates[command].wait()
+            return "ok", 0
+
+        monkeypatch.setattr(
+            importlib.import_module("corvidae.tools.shell"), "run_shell", gated_run_shell
+        )
+
+        # One plugin instance, as ShellToolPlugin registers it.
+        plugin = TaskPipelinePlugin(None)
+        registry: list = []
+        plugin.register_tools(registry)
+        tool = next(t for t in registry if t.name == "task_pipeline")
+
+        pipeline_a = (
+            "tasks:\n"
+            "  - name: x\n    command: ax\n    depends_on: []\n"
+            "  - name: y\n    command: ay\n    depends_on: [x]\n"
+        )
+        pipeline_b = (
+            "tasks:\n"
+            "  - name: x\n    command: bx\n    depends_on: []\n"
+            "  - name: z\n    command: bz\n    depends_on: [x]\n"
+        )
+
+        # A finishes its first step and is waiting on its second.
+        run_a = asyncio.create_task(tool.fn(pipeline_a))
+        await started["ax"].wait()
+        gates["ax"].set()
+        await started["ay"].wait()
+
+        # B starts while A is mid-run, and runs to the end.
+        run_b = asyncio.create_task(tool.fn(pipeline_b))
+        await started["bx"].wait()
+        gates["bx"].set()
+        await started["bz"].wait()
+        gates["bz"].set()
+        result_b = await run_b
+
+        # A finishes last.
+        gates["ay"].set()
+        result_a = await run_a
+
+        assert result_a.startswith("Pipeline complete: 2 tasks, 2 succeeded, 0 failed"), result_a
+        assert result_b.startswith("Pipeline complete: 2 tasks, 2 succeeded, 0 failed"), result_b

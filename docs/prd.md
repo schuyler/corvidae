@@ -730,7 +730,9 @@ Per transport:
     names none. The marker is the kernel's and is derived from the stored
     row like the rest of the header. Content read back from a spill file
     through a tool declared to return untrusted output is fenced like any
-    other such result.
+    other such result. A tool result over `tools.max_result_chars` is cut
+    by the kernel and spilled through the same service, with the same
+    header (§3.5.4).
 
 ### 3.4 Persistence
 
@@ -774,7 +776,8 @@ Per transport:
    (principle 5). The log is compacted: finished entries retire and are
    removed, so it stays small. It is not the conversation log, and
    principle 4 does not bind it.
-9. Spilled notification content (§3.3.11) is written once per item,
+9. Spilled notification and tool-result content (§3.3.11, §3.5.4) is
+   written once per item,
    however many channels it reaches, and only when at least one of them
    can read it, to a configured directory, under a name that carries
    nothing a sender controls. A spill is capped in size before anything
@@ -782,7 +785,7 @@ Per transport:
    says so. Spill files older than a configured age are deleted at
    startup and periodically; the stored row's pointer outlives its file,
    and reading a removed spill file returns an error naming the path and
-   the age policy. A spill that cannot be written leaves the notification
+   the age policy. A spill that cannot be written leaves the item
    delivered with its inline excerpt and a header saying the full text
    was not saved, and logs a warning (principle 5).
 
@@ -815,7 +818,13 @@ Per transport:
    caps the response. `task_pipeline` is `shell` by another name:
    disabling one disables both, and a non-zero exit marks the task failed
    so dependents do not run.
-4. Tool results are truncated to `tools.max_result_chars`. Results from
+4. A tool result over `tools.max_result_chars` is cut to its first
+   `tools.max_result_chars` characters, and its full text is spilled
+   through the same kernel service as notifications (§3.3.11, §3.4.9):
+   the header, derived from the stored row, says how much is shown, the
+   full length, and, where the channel's tool set can read spill files,
+   the file's path. A subagent's loop stores no rows, so there the same
+   words head the result as plain text. Results from
    tools that return untrusted output are fenced as data by the kernel
    (§3.3.11); a tool plugin declares which of its tools those are. The
    declaration is an attribute of the registered tool, as it stood when

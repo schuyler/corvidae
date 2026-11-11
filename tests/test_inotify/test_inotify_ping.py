@@ -6,6 +6,7 @@ import sys
 import pytest
 
 import asyncio
+import os
 import struct
 
 import pytest
@@ -15,6 +16,7 @@ from corvidae_inotify import (
     IN_DELETE,
     IN_MODIFY,
     IN_MOVED_TO,
+    WRITE_MASK,
     InotifyPingPlugin,
     classify,
     has_terminal_marker,
@@ -315,6 +317,46 @@ async def test_directory_watch_ignores_other_files(tmp_path):
     assert len(pm.calls) == 0, "ping fired for a non-target file"
     # now write to the target — SHOULD trigger a ping
     target.write_text("work\n")
+    await asyncio.sleep(0.7)
+    await plugin.on_stop()
+    assert len(pm.calls) == 1
+    assert str(target) in pm.calls[0]["text"]
+
+
+def test_event_constants_match_kernel_values():
+    """The flag values are the kernel's (linux/inotify.h), not just self-consistent.
+
+    The other tests import these constants by name, so a wrong value passes
+    them all; this pins the literals (#723: IN_MOVED_TO was 0x40, which is
+    the kernel's IN_MOVED_FROM).
+    """
+    kernel_in_moved_from = 0x40
+    assert IN_MODIFY == 0x2
+    assert IN_CLOSE_WRITE == 0x8
+    assert IN_MOVED_TO == 0x80
+    assert IN_DELETE == 0x200
+    # A file leaving the directory is not a write; only arriving by rename is.
+    assert not WRITE_MASK & kernel_in_moved_from
+    assert WRITE_MASK & IN_MOVED_TO
+
+
+async def test_directory_watch_file_appears_by_rename(tmp_path):
+    """A missing file that appears by atomic rename (write a temp file, rename
+    it onto the name) settles and pings once, like one written in place (#723)."""
+    pm = FakePM("test:chan")
+    target = tmp_path / "renamed.log"  # does NOT exist at arm time
+    cfg = {"enabled": True, "channel": "test:chan", "debounce_seconds": 0.2, "paths": [str(target)]}
+    plugin = InotifyPingPlugin()
+    await plugin.on_init(pm, {"inotify_ping": cfg})
+    await plugin.on_start({})
+    await _wait_armed(plugin)
+    # The temp file's own writes are for another name and are filtered out;
+    # only the rename onto the target's name can ping.
+    tmp = tmp_path / "renamed.log.tmp"
+    tmp.write_text("work\n")
+    await asyncio.sleep(0.5)
+    assert len(pm.calls) == 0, "the temp name must not ping"
+    os.rename(tmp, target)
     await asyncio.sleep(0.7)
     await plugin.on_stop()
     assert len(pm.calls) == 1

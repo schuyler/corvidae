@@ -21,6 +21,7 @@ from pathlib import Path
 import aiosqlite
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.provenance import PROVENANCE_KEY, decode as decode_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -399,6 +400,41 @@ class PersistencePlugin(CorvidaePlugin):
             extra={"channel_id": channel.id, "count": len(result)},
         )
         return result
+
+    async def find_spill_source(self, name: str) -> str | None:
+        """The source recorded when the spill file ``name`` was written, or None.
+
+        ``name`` is the file's name (32 hex digits and ``.txt``). The row that
+        recorded the cut holds the file's path and source in its provenance
+        record (#576). None means no such row, or one from before sources were
+        recorded; the caller says which gap it was.
+
+        shortcut: this scans the rows that mention ``name`` by a substring
+        match, on every read of a spill file; add an index on the spill path
+        if message_log grows enough for that to show. It decodes each
+        candidate rather than using json_extract, which fails the whole query
+        on one corrupt row.
+        """
+        if self.db is None:
+            return None
+        async with self.db.execute(
+            "SELECT id, channel_id, CAST(message AS BLOB) FROM message_log "
+            "WHERE instr(CAST(message AS BLOB), CAST(? AS BLOB)) > 0 ORDER BY id",
+            (name,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        for row_id, channel_id, raw in rows:
+            msg = decode_message_row(
+                row_id, raw, channel_id,
+                consequence="it is skipped when looking for a spill file's source",
+            )
+            decoded = decode_provenance(msg.get(PROVENANCE_KEY)) if msg else None
+            if decoded is None:
+                continue
+            meta = decoded[0]
+            if meta.spill_path and Path(meta.spill_path).name == name and meta.cut_source:
+                return meta.cut_source
+        return None
 
     @hookimpl
     async def persist_message(

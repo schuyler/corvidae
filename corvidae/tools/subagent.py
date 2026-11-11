@@ -17,6 +17,8 @@ from corvidae.turn import run_agent_turn
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm import LLMClient
+from corvidae.provenance import cut_text
+from corvidae.spill import Cut, NotificationSpill
 from corvidae.task import Task
 from corvidae.thinking import strip_thinking
 from corvidae.tool import (
@@ -107,8 +109,9 @@ async def run_agent_loop(
         tools: Dict mapping tool names to async callable functions
         tool_schemas: List of tool schemas for LLM function calling
         max_turns: Maximum iterations before giving up
-        max_result_chars: Maximum length of tool result strings before truncation.
-            Defaults to MAX_TOOL_RESULT_CHARS.
+        max_result_chars: Longest tool result kept whole; a longer one is cut
+            to this, its full text spilled where a tool in ``tools`` can read
+            it, and a plain-text cut line put ahead of it.
         call_timeouts: Per-call tool time bounds (tools.call_timeout).
 
     Returns:
@@ -131,14 +134,18 @@ async def run_agent_loop(
                 call, tools,
                 channel=channel,
                 task_queue=task_queue,
-                max_result_chars=max_result_chars,
                 pm=pm,
                 call_timeouts=call_timeouts,
             )
+            content = tool_result.content
+            # A long result is cut and spilled here (#575): this loop stores
+            # no rows, so the cut line is plain text ahead of the head.
+            if len(content) > max_result_chars:
+                content = await _cut_result(content, max_result_chars, tools, channel, pm)
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_result.tool_call_id,
-                "content": tool_result.content,
+                "content": content,
             })
 
     logger.warning("max tool-calling rounds reached")
@@ -157,6 +164,28 @@ async def run_agent_loop(
     if last_text is None:
         return MAX_ROUNDS_REACHED_MESSAGE
     return f"{MAX_ROUNDS_REACHED_MESSAGE}\n\nLast progress: {last_text.strip()}"
+
+
+async def _cut_result(
+    content: str, limit: int, tools: dict[str, Callable], channel: "Channel | None", pm
+) -> str:
+    """Cut ``content`` to ``limit``, spill its full text, and head it with the cut line."""
+    spill = pm.get_plugin("spill") if pm is not None else None
+    if isinstance(spill, NotificationSpill):
+        cut = await spill.cut(
+            content, limit=limit, source="subagent tool result",
+            can_read=spill.can_read(channel, tools),
+        )
+    else:
+        # No spill service (a bare loop): the head is kept and the line says it was cut.
+        logger.warning(
+            "subagent tool result of %d characters cut to %d with no spill service "
+            "registered, so the full text was not saved",
+            len(content), limit,
+        )
+        cut = Cut(shown=limit, total=len(content))
+    words = cut_text(cut.shown, cut.total, cut.path, cut.spilled, cut.failed)
+    return f"[{words}]\n{content[:limit]}"
 
 
 class SubagentPlugin(CorvidaePlugin):

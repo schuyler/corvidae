@@ -102,12 +102,18 @@ class FileToolsPlugin(CorvidaePlugin):
             """Read a file. offset and length select a character range; start_line and end_line (1-based, inclusive) select a line range; use one kind per call. A ranged result's header names what it returned and where to continue."""
             from corvidae.tools.files import read_file as _read_file_impl
             # A spill file past its age is gone; say so rather than "not found".
-            stale = get_dependency(plugin.pm, "spill", NotificationSpill).stale_pointer_error(path)
+            spill = get_dependency(plugin.pm, "spill", NotificationSpill)
+            stale = spill.stale_pointer_error(path)
             if stale is not None:
                 return stale
             # An unranged read is untouched; a ranged one is clamped to the
-            # live result cap so it is never truncated after the fact.
-            if offset is None and length is None and start_line is None and end_line is None:
+            # live result cap so it is never cut after the fact. An unranged
+            # read of a spill file pages from the start instead, so reading
+            # one back never yields a result that is cut and spilled again.
+            unranged = offset is None and length is None and start_line is None and end_line is None
+            if unranged and spill.contains(path):
+                offset = 0
+            elif unranged:
                 return await _read_file_impl(path, max_size=plugin._max_file_read_bytes)
             max_chars = get_dependency(plugin.pm, "tools", ToolCollectionPlugin).max_result_chars
             return await _read_file_impl(

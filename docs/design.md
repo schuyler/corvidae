@@ -1378,15 +1378,18 @@ role:
 - notification: `origin_channel` and `origin_trace`, read from the
   attribution of the code that called `on_notify`; and, for a notification
   the spill service cut, `cut_shown`, `cut_total`, `spill_path`,
-  `spill_chars` and `spill_failed` (see [Notification
-  spill](#notification-spill-spillpy));
-- tool result: `tool` and `target`, the dispatched call's name and the first
+  `spill_chars`, `spill_failed` and `cut_source` (who sent it; see
+  [Notification spill](#notification-spill-spillpy));
+- tool result: the cut fields above when the Agent cut it (see [Tool
+  results](#tool-results)); `tool` and `target`, the dispatched call's name and the first
   argument naming another registered channel, set by `on_notify` with a
   `tool_call_id` and by `deliver_tool_error` (the name from the dispatch
   record when there is one, else the call's row; the target from the call's
   row in the window); and `untrusted`, True when the tool declared its
   output untrusted as of dispatch (see [Untrusted tool
-  results](#untrusted-tool-results)), otherwise absent.
+  results](#untrusted-tool-results)), otherwise absent; and, on a result
+  that read a spill file back, `spill_source`, the source recorded when the
+  file was written (below).
 
 `metadata` is never passed as a hook argument; the kernel fills it from what
 it observes (the transport's sender and channel, the tool-call row in the window, the
@@ -1434,6 +1437,12 @@ in code:
   call id and target go through `clean_value`, which matters because call ids
   come from model output. A result with a `target` and no `untrusted` keeps
   the cross-channel wording above.
+- A tool result the Agent cut (see [Tool results](#tool-results)) gets the
+  same cut line as a cut notification. On a fenced result it is the last
+  header line, outside the fence; on any other result it is the only header
+  line, followed by the content unfenced. Text in an unfenced (trusted)
+  result could imitate that line; shell output is trusted by declaration,
+  so this is accepted (see threat-model.md).
 - Declared annotations follow as `[annotations: k=v, ...]`.
 
 Notification payloads, cross-channel results (tool results with a
@@ -1490,8 +1499,23 @@ fenced too.
 
 The flag is stamped into the row's provenance record when the result is
 built, so a later change to a declaration does not re-render history. The
-header names no spill source: it says the content is untrusted, not that it
-came from a notification's spill file (#576). The estimator counts the stored
+header of a result that read a spill file back also names where the content
+came from (#576). For a tool that declares it reads spill files,
+`Agent.on_notify` takes the one argument that is, as a whole, a path directly
+inside the spill directory with a service-written name (text that merely
+contains such a path, such as a URL, does not count, because the path is shown
+to the model and outside text can carry it) and asks `PersistencePlugin.find_spill_source` for the
+`cut_source` on the log row that cut it (matched by file name, decoding each
+candidate row; a scan, since message_log has no index on the path), then
+stamps it into the result's provenance as `spill_source`, so a reload renders
+`[metadata: content spilled from <source>]` from the stored row alone, after
+the file and the row are swept. The source is cleaned like any header value:
+a webhook origin is sender-chosen. A call naming no spill file, or two, is
+stamped with nothing; a file with no row (pruned, from before sources were
+recorded, or no persistence service) is still fenced, with no source line and
+a WARNING naming the file. The lookup is advisory: if the log cannot be read,
+the result is delivered fenced without a source line and a WARNING names the
+file. The estimator counts the stored
 row, not the added framing, so a fenced row costs more tokens than it is
 estimated at (#577).
 
@@ -1502,8 +1526,9 @@ attribution.
 
 ## Notification spill (`spill.py`)
 
-A notification too long to show inline is cut, and its full text is written
-once to a file the agent reads on demand. `NotificationSpill` is a kernel
+A notification or tool result too long to show inline is cut, and its full
+text is written once to a file the agent reads on demand. Despite its name,
+the service and its `daemon.notification_spill_*` keys cover both. `NotificationSpill` is a kernel
 service, not an entry-point plugin: `Runtime.start()` registers it as
 `"spill"` beside `"registry"`, `"clock"` and `"idle"`, and listing it in
 `plugins.disabled` fails dependency validation. It depends on `"clock"` and
@@ -1543,6 +1568,48 @@ comes from the stored row and a plugin cannot assert it. An `on_notify`
 hookimpl must not spawn a task or fire `on_notify` again, or it carries the
 cut into that context; `Agent.on_notify` is the only one, and does neither.
 
+### Tool results
+
+`execute_tool_call` and `dispatch_tool_call` return the whole result; the
+cut happens on delivery (#575). `Agent.on_notify`, given a `tool_call_id`
+and text longer than `tools.max_result_chars`, calls `spill.cut(text,
+limit=..., source=..., can_read=spill.can_read(channel))`, keeps the first
+`max_result_chars` characters, and copies the returned `Cut` into the row's
+`ItemMetadata`. Every tool result reaches `on_notify`, so task results, the
+no-task-queue error path and results a plugin delivers late are cut alike.
+`cut` writes the file only when `can_read`, and returns the same
+pointer / "not saved" / plain cut the per-channel rows of `notify` get.
+With no `"spill"` plugin registered (a bare plugin manager, not the
+Runtime), the result is still cut and headed, and a WARNING says the full
+text was not saved.
+
+`on_notify` listeners other than the Agent, and `transform_tool_result`,
+see the whole result, since both run before the cut. The text delivered is
+the task's `[Task <id>] <result>`, so the prefix counts toward the cap and is
+in the file.
+
+A task that answers no tool call has no `tool_call_id`, so the Agent does not
+cut it. No task the tree enqueues is one: `subagent` and the Agent's own tool
+dispatch pass their call's id, `task_pipeline` runs inline inside its own
+call, and the cognition plugins' tasks are `deliver=False`. The path is for a
+plugin outside the tree that enqueues `Task(work, channel)` with the defaults.
+`TaskPlugin._on_task_complete` cuts such a result as the plugin that sends the
+notification (#744, PRD §3.3.11): it calls `spill.notify([channel],
+source="task", ..., limit=tools.max_result_chars)`, read from the tool
+collection at delivery, so the row records the same cut, pointer or "not
+saved" as any other notification. A result at or under the cap goes out
+unchanged. With no `"spill"` plugin registered, the result is delivered whole
+and a WARNING names the task and the cap; with no `"tools"` plugin there is
+no cap to apply, so it is delivered whole without one. The Runtime registers
+both unless `plugins.disabled` removes them.
+
+A subagent's `run_agent_loop` stores no rows, so it cannot carry a kernel
+header. It cuts the same way after each `dispatch_tool_call`, checks
+readers against the subagent's own tool set (`spill.can_read(channel,
+tools)`), and puts the cut line's words (`provenance.cut_text`) ahead of
+the head as plain text: `[cut to the first N of M characters; the full text
+is in <path>]`. With no plugin manager it keeps the plain cut line.
+
 **Cleanup.** `on_start` sweeps the directory, then arms an hourly
 `Clock.call_later` timer (`notification-spill-cleanup`) that re-arms itself
 before it sweeps, so a failed sweep never stops it. The sweep deletes only
@@ -1559,6 +1626,11 @@ missing path inside the spill directory (a file the sweep deleted, or a name
 that never existed) returns an error saying it was a spill file, that spill
 files are deleted after the configured days, and which key sets that. The
 check is lexical (`os.path.abspath`), so a path with a NUL byte cannot raise.
+An unranged `read_file` of a path inside the spill directory
+(`spill.contains`) reads as `offset=0`: it returns the first page, clamped to
+`tools.max_result_chars` behind a header naming the next offset, so reading a
+spill file back never returns a result that is cut and spilled again. A `cat`
+through `shell` is not clamped, and a long one spills a copy.
 
 **Configuration** (`daemon`, applied at restart):
 
@@ -2417,7 +2489,9 @@ and no tasks are currently executing.
 history bound, and `daemon.task_results_path` (unset by default) to enable
 JSONL result persistence. Starts/stops the worker on lifecycle hooks.
 Registers the `task_status` and `task_result` tools. On task completion,
-persists a JSONL record (when enabled) and fires `on_notify`.
+persists a JSONL record (when enabled) and fires `on_notify`; a result with
+no `tool_call_id` over `tools.max_result_chars` goes through the spill service
+first (#744).
 
 Results are kept in two places: an in-memory bounded deque (last
 `completed_task_buffer` entries, serving `task_status` and the fast path of
@@ -2625,15 +2699,16 @@ setup.
 agent loop. `ToolCollectionPlugin.get_registry()` returns the full `ToolRegistry`
 for inspection or filtering (e.g., `exclude("subagent")`).
 
-`ToolCollectionPlugin.max_result_chars` is a public attribute read by `Agent` and
-`SubagentPlugin`. `ToolCollectionPlugin.call_timeouts` (a `ToolTimeouts`) is
+`ToolCollectionPlugin.max_result_chars` is a public attribute read by `Agent`
+(which cuts a longer result in `on_notify`) and `SubagentPlugin` (whose loop
+cuts it after dispatch); see [Tool results](#tool-results). `ToolCollectionPlugin.call_timeouts` (a `ToolTimeouts`) is
 read by both too and passed to `dispatch_tool_call`.
 
 ### Configuration
 
 ```yaml
 tools:
-  max_result_chars: 100000   # truncation limit for tool result strings (default 100_000)
+  max_result_chars: 100000   # longer tool results are cut and spilled (default 100_000)
   disabled: [write_file]     # dropped for every channel; shell <-> task_pipeline coupled
   call_timeout: 600          # seconds bound on every tool call; 0 or null disables
   timeouts: {task_pipeline: 3600}   # per-tool override of call_timeout
@@ -4168,7 +4243,7 @@ agent:
     - max_turns
 
 tools:
-  max_result_chars: 100000      # truncation limit for tool result strings (default 100_000)
+  max_result_chars: 100000      # longer tool results are cut and spilled (default 100_000)
   # call_timeout: 600           # seconds bound on every tool call; 0 or null disables
   # timeouts: {task_pipeline: 3600}  # per-tool override of call_timeout
   shell_timeout: 30             # shell tool timeout in seconds (default 30)
