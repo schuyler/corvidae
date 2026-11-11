@@ -17,7 +17,7 @@ from corvidae.outbound import (
     OutboundThinking,
     OutboundToolStatus,
 )
-from corvidae.runtime import Runtime
+from corvidae.runtime import Runtime, run_daemon
 
 logger = logging.getLogger(__name__)
 
@@ -229,4 +229,4 @@ def cli_command(config):
             "_cli_exit_on_eof": True,
         },
     )
-    asyncio.run(runtime.run())
+    run_daemon(runtime)

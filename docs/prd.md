@@ -550,8 +550,8 @@ Per transport:
   closes, so a half-open socket loses nothing. Fan-out is through a bounded
   per-client queue and a writer task; a client that falls behind is dropped
   with 1008. Each connection is owned by its handler task; `on_stop` closes
-  fan-out sockets, cancels handlers, and finishes inside Runtime's 3 s
-  budget, aborting transports a dead peer will never drain. A token change
+  fan-out sockets, cancels handlers, and finishes inside Runtime's
+  default 3 s shutdown budget, aborting transports a dead peer will never drain. A token change
   on reload closes every socket with 4001; host, port and origins changes
   log "restart to apply".
 - **ACP**: Agent Client Protocol v1 over stdio, the official Python SDK,
@@ -1528,6 +1528,11 @@ design, not requirement. The requirements are outcomes:
     it requests are rate-limited by operator config, so an edit-restart
     loop can't flap. The restart tool is a capability like any other:
     the operator can lock it.
+14. Shutdown is bounded. The graceful phase and the time the process may
+    then take to exit are operator-set limits; past either one the
+    process exits non-zero, and a forced exit after the graceful phase
+    logs the threads that kept it alive. One plugin's leaked thread cannot wedge a stop or a
+    restart.
 
 ### 3.12 Evaluation and the harness
 

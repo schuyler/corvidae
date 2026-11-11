@@ -106,12 +106,9 @@ class TestDiscoverCommands:
 # ---------------------------------------------------------------------------
 # Tests for CLI subcommand: corvidae.channels.cli.cli_command
 #
-# Patch targets: corvidae.channels.cli.asyncio.run
-# Assumption: corvidae/channels/cli.py uses module-level `import asyncio`
-# (not a local import inside the function body). Module-level imports create
-# a module attribute that unittest.mock.patch can target. If the implementation
-# uses a local import instead, these patch targets will raise AttributeError
-# and the tests must be updated to patch `asyncio.run` directly.
+# Patch targets: corvidae.channels.cli.run_daemon
+# (run_daemon is imported at module level from corvidae.runtime, so
+# mock.patch can replace the name the command calls.)
 # ---------------------------------------------------------------------------
 
 
@@ -142,14 +139,12 @@ class TestCliCommand:
             def __init__(self, config_path="agent.yaml", overrides=None):
                 captured_overrides.append(overrides or {})
 
-            def run(self):
-                pass  # stub — asyncio.run is patched below
+            def run(self, **kwargs):
+                pass  # stub — run_daemon is patched below
 
-        # Assumption: corvidae/channels/cli.py imports asyncio at module level.
-        # The patch target corvidae.channels.cli.asyncio.run is valid only if
-        # `import asyncio` appears at module scope in cli.py.
+        # run_daemon is patched so no event loop starts.
         with patch("corvidae.channels.cli.Runtime", _CapturingRuntime), patch(
-            "corvidae.channels.cli.asyncio.run", side_effect=lambda coro: None
+            "corvidae.channels.cli.run_daemon", side_effect=lambda runtime: None
         ):
             runner = CliRunner()
             runner.invoke(cli_command, ["--config", "test.yaml"])
@@ -172,12 +167,12 @@ class TestCliCommand:
             def __init__(self, config_path="agent.yaml", overrides=None):
                 captured_overrides.append(overrides or {})
 
-            def run(self):
+            def run(self, **kwargs):
                 pass
 
-        # Assumption: corvidae/channels/cli.py imports asyncio at module level.
+        # run_daemon is patched so no event loop starts.
         with patch("corvidae.channels.cli.Runtime", _CapturingRuntime), patch(
-            "corvidae.channels.cli.asyncio.run", side_effect=lambda coro: None
+            "corvidae.channels.cli.run_daemon", side_effect=lambda runtime: None
         ):
             runner = CliRunner()
             runner.invoke(cli_command, [])
@@ -192,12 +187,9 @@ class TestCliCommand:
 # ---------------------------------------------------------------------------
 # Tests for serve subcommand: corvidae.commands.serve.serve_command
 #
-# Patch targets: corvidae.commands.serve.asyncio.run
-# Assumption: corvidae/commands/serve.py uses module-level `import asyncio`
-# (not a local import inside the function body). Module-level imports create
-# a module attribute that unittest.mock.patch can target. If the implementation
-# uses a local import instead, these patch targets will raise AttributeError
-# and the tests must be updated to patch `asyncio.run` directly.
+# Patch targets: corvidae.commands.serve.run_daemon
+# (run_daemon is imported at module level from corvidae.runtime, so
+# mock.patch can replace the name the command calls.)
 # ---------------------------------------------------------------------------
 
 
@@ -228,12 +220,12 @@ class TestServeCommand:
             def __init__(self, config_path="agent.yaml", overrides=None):
                 captured_kwargs.append({"config_path": config_path, "overrides": overrides})
 
-            def run(self):
+            def run(self, **kwargs):
                 pass
 
-        # Assumption: corvidae/commands/serve.py imports asyncio at module level.
+        # run_daemon is patched so no event loop starts.
         with patch("corvidae.commands.serve.Runtime", _CapturingRuntime), patch(
-            "corvidae.commands.serve.asyncio.run", side_effect=lambda coro: None
+            "corvidae.commands.serve.run_daemon", side_effect=lambda runtime: None
         ):
             runner = CliRunner()
             runner.invoke(serve_command, [])
@@ -255,12 +247,12 @@ class TestServeCommand:
             def __init__(self, config_path="agent.yaml", overrides=None):
                 captured_kwargs.append({"config_path": config_path})
 
-            def run(self):
+            def run(self, **kwargs):
                 pass
 
-        # Assumption: corvidae/commands/serve.py imports asyncio at module level.
+        # run_daemon is patched so no event loop starts.
         with patch("corvidae.commands.serve.Runtime", _CapturingRuntime), patch(
-            "corvidae.commands.serve.asyncio.run", side_effect=lambda coro: None
+            "corvidae.commands.serve.run_daemon", side_effect=lambda runtime: None
         ):
             runner = CliRunner()
             runner.invoke(serve_command, ["--config", "custom.yaml"])

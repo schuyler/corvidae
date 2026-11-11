@@ -7,7 +7,11 @@ import and use.
 Shutdown:
     SIGINT/SIGTERM trigger graceful shutdown via stop_event. A second signal
     during shutdown triggers os._exit(1) immediately. Graceful shutdown runs
-    under a 3-second timeout; os._exit(1) on timeout.
+    under ``daemon.shutdown_timeout`` (default 3 s); os._exit(1) on timeout.
+    Entry points call ``run_daemon``, which also arms an exit watchdog:
+    ``daemon.exit_timeout`` (default 5 s, 0/null disables) after the graceful
+    phase ends or raises, a process still alive (a leaked non-daemon thread)
+    is forced out with status 1 and a WARNING naming the threads.
 """
 
 from __future__ import annotations
@@ -34,6 +38,11 @@ from corvidae.hooks import (
 from corvidae.idle import IdleTracker, validate_daemon_config
 from corvidae.llm_plugin import parse_llm_config
 from corvidae.logging import configure_logging
+from corvidae.shutdown import (
+    DEFAULT_SHUTDOWN_TIMEOUTS,
+    arm_exit_watchdog,
+    parse_shutdown_timeouts,
+)
 from corvidae.spill import NotificationSpill
 from corvidae.tool_collection import parse_tool_timeouts
 from corvidae.tools.subagent import parse_subagent_max_turns
@@ -157,6 +166,8 @@ class Runtime:
         self.registry = None
         self.clock = None
         self.idle = None
+        # Shutdown bounds; replaced by the parsed daemon section at startup.
+        self.shutdown_timeouts = DEFAULT_SHUTDOWN_TIMEOUTS
 
     def load_config(self) -> dict:
         """Steps 1-3 of start(): read the YAML, merge overrides, set reserved keys.
@@ -254,6 +265,9 @@ class Runtime:
         # value is an operator error: one line naming the key, the value
         # and the file, like a malformed file above, not a traceback.
         try:
+            # daemon.shutdown_timeout / exit_timeout: parsed first so a later
+            # failure here still cleans up under the configured bound.
+            self.shutdown_timeouts = parse_shutdown_timeouts(config.get("daemon"))
             validate_agent_config(config.get("agent", {}))
             validate_daemon_config(config.get("daemon") or {})
             # The llm profiles, defaults and stage map: a bad block exits
@@ -401,8 +415,9 @@ class Runtime:
     async def stop(self) -> None:
         """Graceful shutdown: agent.on_stop, pm.ahook.on_stop, idle.stop, clock.close.
 
-        Runs under a 3-second timeout; os._exit(1) on timeout.
-        Raises RuntimeError if agent plugin is not registered.
+        Runs under ``daemon.shutdown_timeout`` (default 3 s); os._exit(1) on
+        timeout. The exit watchdog (``daemon.exit_timeout``) is armed by
+        run(), not here. Raises RuntimeError if agent plugin is not registered.
         """
         agent = self.pm.get_plugin("agent")
         if agent is None:
@@ -411,10 +426,14 @@ class Runtime:
         try:
             await asyncio.wait_for(
                 self._run_shutdown(agent),
-                timeout=3.0,
+                timeout=self.shutdown_timeouts.graceful,
             )
         except asyncio.TimeoutError:
-            logger.warning("graceful shutdown timed out after 3s, force-exiting")
+            logger.warning(
+                "graceful shutdown timed out after %ss (daemon.shutdown_timeout), "
+                "force-exiting",
+                self.shutdown_timeouts.graceful,
+            )
             logging.shutdown()
             os._exit(1)
 
@@ -433,8 +452,8 @@ class Runtime:
         without starting an agent.
 
         Runs the on_stop broadcast, stops the idle tracker and closes the
-        clock under the same 3-second bound as stop(). Skips agent.on_stop,
-        since the agent may never have started. Every failure here is logged
+        clock under the same bound as stop() (daemon.shutdown_timeout).
+        Skips agent.on_stop, since the agent may never have started. Every failure here is logged
         and swallowed, so the start failure is what the caller sees.
         """
         # Config loading failed before a plugin manager existed: nothing to close.
@@ -448,16 +467,20 @@ class Runtime:
             agent = self.pm.get_plugin("agent")
             if agent is not None:
                 agent.release_held_messages()
-            async with asyncio.timeout(3.0):
+            async with asyncio.timeout(self.shutdown_timeouts.graceful):
                 await self.pm.ahook.on_stop()
                 self.idle.stop()
                 await self.clock.close()
         except TimeoutError:
-            logger.warning("cleanup after failed startup timed out after 3s")
+            logger.warning(
+                "cleanup after failed startup timed out after %ss "
+                "(daemon.shutdown_timeout)",
+                self.shutdown_timeouts.graceful,
+            )
         except Exception:
             logger.warning("cleanup after failed startup raised", exc_info=True)
 
-    async def run(self) -> None:
+    async def run(self, *, exit_watchdog: bool = False) -> None:
         """start(), wait for SIGINT/SIGTERM, then stop().
 
         The SIGINT handler goes in before start(): a plugin can raise SIGINT
@@ -467,6 +490,10 @@ class Runtime:
         and stop() runs. SIGTERM keeps its default action until startup is
         done, so `systemctl stop` during a hung startup still ends the
         process at once.
+
+        With ``exit_watchdog`` true, the exit watchdog is armed once stop()
+        returns or raises (see ``corvidae.shutdown``). Off by default so
+        in-process callers (tests) are never force-exited.
         """
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -513,4 +540,20 @@ class Runtime:
 
         logger.info("shutdown signal received, stopping")
 
-        await self.stop()
+        # Arm the watchdog even if stop() raises; the exception still propagates.
+        try:
+            await self.stop()
+        finally:
+            if exit_watchdog:
+                arm_exit_watchdog(self.shutdown_timeouts.exit)
+
+
+def run_daemon(runtime: Runtime) -> None:
+    """Run ``runtime`` to completion with the exit watchdog armed.
+
+    The single entry-point helper for serve, cli and acp, so none of them can
+    hang on a leaked non-daemon thread after shutdown.
+    """
+    # Arming happens inside the coroutine so it also covers asyncio.run's
+    # up-to-300 s default-executor join.
+    asyncio.run(runtime.run(exit_watchdog=True))

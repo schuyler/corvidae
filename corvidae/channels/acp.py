@@ -29,7 +29,7 @@ from corvidae.outbound import (
     OutboundThinking,
     OutboundToolStatus,
 )
-from corvidae.runtime import Runtime
+from corvidae.runtime import Runtime, run_daemon
 from corvidae.trace import mint_trace_id
 
 logger = logging.getLogger(__name__)
@@ -834,7 +834,7 @@ def acp_command(config: str) -> None:
     # rejected agent/channels value, itself, as a one-line "Config error"
     # with the path, and exits non-zero.
     try:
-        asyncio.run(runtime.run())
+        run_daemon(runtime)
     except ValueError as exc:
         # Plugin config validation in on_init raises ValueError (a malformed
         # signal: or discord: block, say).
