@@ -1571,6 +1571,16 @@ see the whole result, since both run before the cut. The text delivered is
 the task's `[Task <id>] <result>`, so the prefix counts toward the cap and is
 in the file.
 
+A task that answers no tool call (a `task_pipeline` run or a `subagent`
+result delivered on its own) has no `tool_call_id`, so the Agent does not cut
+it. `TaskPlugin._on_task_complete` cuts it as the plugin that sends the
+notification (#744, PRD §3.3.11): it calls `spill.notify([channel],
+source="task", ..., limit=tools.max_result_chars)`, read from the tool
+collection at delivery, so the row records the same cut, pointer or "not
+saved" as any other notification. A result at or under the cap goes out
+unchanged. With no `"spill"` plugin registered, the result is delivered whole
+and a WARNING names the task and the cap.
+
 A subagent's `run_agent_loop` stores no rows, so it cannot carry a kernel
 header. It cuts the same way after each `dispatch_tool_call`, checks
 readers against the subagent's own tool set (`spill.can_read(channel,
@@ -2422,7 +2432,9 @@ and no tasks are currently executing.
 history bound, and `daemon.task_results_path` (unset by default) to enable
 JSONL result persistence. Starts/stops the worker on lifecycle hooks.
 Registers the `task_status` and `task_result` tools. On task completion,
-persists a JSONL record (when enabled) and fires `on_notify`.
+persists a JSONL record (when enabled) and fires `on_notify`; a result with
+no `tool_call_id` over `tools.max_result_chars` goes through the spill service
+first (#744).
 
 Results are kept in two places: an in-memory bounded deque (last
 `completed_task_buffer` entries, serving `task_status` and the fast path of

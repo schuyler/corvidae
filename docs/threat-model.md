@@ -1314,7 +1314,7 @@ other path is, and the agent can read it whether or not a header pointed at
 it.
 
 Tool results over `tools.max_result_chars` are spilled by the same service
-(#575), so the directory also holds tool output: command output, file
+(#575), and so are background task results that answer no tool call (#744), so the directory also holds tool output: command output, file
 contents, fetched pages and MCP results, any of which can carry secrets or
 injected text. Its bounds are the same cap and age, so the directory's worst
 case adds the cap times the rate of long tool results. The file is written
