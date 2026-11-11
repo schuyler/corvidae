@@ -198,3 +198,250 @@ def test_fts_match_escapes_double_quotes():
     assert _fts_match('foo"bar') == '"foo""bar"*'
     # a" -> a"" (the quote doubles), wrapped -> "a"""*
     assert _fts_match('a" b"c') == '"a"""* OR "b""c"*'
+
+
+class TestMultiRoot:
+    """Multi-root: multiple directories, namespaced paths."""
+
+    async def _make_multi(self, tmp_path, root_names, files_per_root):
+        """Create a multi-root index with the given roots and files."""
+        roots = []
+        for name, files in zip(root_names, files_per_root):
+            root = tmp_path / name
+            root.mkdir(parents=True, exist_ok=True)
+            for fname, fcontent in files.items():
+                (root / fname).write_text(fcontent)
+            roots.append(root)
+        dim = IDENTITY.dimensions
+        embed = FakeEmbed(dim=dim)
+        index = MarkdownIndex(
+            root=roots,
+            db_path=tmp_path / "index.db",
+            get_client=lambda: embed,
+            get_identity=lambda: IDENTITY,
+        )
+        return index, roots, embed
+
+    async def test_two_roots_namespaced(self, tmp_path):
+        """Two roots: paths are prefixed with the root basename."""
+        idx, roots, _ = await self._make_multi(
+            tmp_path,
+            ["values", "skills"],
+            [{"radio.md": "# Radio\n\nSome content."},
+             {"radio.md": "# Radio Skill\n\nDifferent content."}],
+        )
+        await idx.reconcile()
+        files = idx._walk()
+        assert "values/radio.md" in files
+        assert "skills/radio.md" in files
+        # Manifest has rows for both files (proves _resolve_path worked)
+        async with idx._db.execute("SELECT count(*) FROM manifest") as cur:
+            (count,) = await cur.fetchone()
+        assert count == 2, f"expected 2 manifest rows, got {count}"
+        await idx.close()
+
+    async def test_single_root_unnamespaced(self, tmp_path):
+        """Single root (list of one): paths are NOT prefixed (backward compat)."""
+        idx, roots, _ = await self._make_multi(
+            tmp_path,
+            ["values"],
+            [{"radio.md": "# Radio\n\nContent."}],
+        )
+        await idx.reconcile()
+        files = idx._walk()
+        assert "radio.md" in files
+        assert "values/radio.md" not in files
+        await idx.close()
+
+    async def test_nonexistent_root_aborts_walk(self, tmp_path):
+        """A non-existent root aborts the walk (keeps the old index)."""
+        idx, roots, _ = await self._make_multi(
+            tmp_path,
+            ["values"],
+            [{"radio.md": "# Radio\n\nContent."}],
+        )
+        # Add a non-existent root
+        idx._roots.append(tmp_path / "nonexistent")
+        files = idx._walk()
+        assert files is None  # any root unreadable: keep the old index
+        await idx.close()
+
+    async def test_same_basename_rejected(self, tmp_path):
+        """Two roots with the same basename are rejected at construction."""
+        root_a = tmp_path / "work" / "values"
+        root_b = tmp_path / "personal" / "values"
+        root_a.mkdir(parents=True)
+        root_b.mkdir(parents=True)
+        (root_a / "a.md").write_text("# A")
+        (root_b / "b.md").write_text("# B")
+        import pytest
+        with pytest.raises(ValueError, match="duplicate root basename"):
+            MarkdownIndex(
+                root=[root_a, root_b],
+                db_path=tmp_path / "index.db",
+                get_client=lambda: FakeEmbed(),
+                get_identity=lambda: IDENTITY,
+            )
+
+    async def test_resolve_path_missing_prefix(self, tmp_path):
+        """A namespaced path with no matching root prefix is rejected (multi-root)."""
+        idx, roots, _ = await self._make_multi(
+            tmp_path,
+            ["values", "skills"],
+            [{"radio.md": "# Radio\n\nContent."},
+             {"skill.md": "# Skill\n\nContent."}],
+        )
+        import pytest
+        with pytest.raises(FileNotFoundError, match="no root matches prefix"):
+            idx._resolve_path("unknown/x.md")
+        await idx.close()
+
+    async def test_resolve_path_bare_name_multi_root(self, tmp_path):
+        """A bare name (no slash) in multi-root mode is rejected."""
+        idx, roots, _ = await self._make_multi(
+            tmp_path,
+            ["values", "skills"],
+            [{"radio.md": "# Radio\n\nContent."},
+             {"skill.md": "# Skill\n\nContent."}],
+        )
+        import pytest
+        with pytest.raises(FileNotFoundError, match="has no root prefix"):
+            idx._resolve_path("radio.md")
+        await idx.close()
+
+    async def test_present_but_empty_root_keeps_index(self, tmp_path):
+        """A root that exists but is empty (transient unmount) keeps its index rows."""
+        idx, roots, _ = await self._make_multi(
+            tmp_path,
+            ["values", "skills"],
+            [{"radio.md": "# Radio\n\nContent."},
+             {"skill.md": "# Skill\n\nContent."}],
+        )
+        await idx.reconcile()
+        async with idx._db.execute("SELECT count(*) FROM manifest") as cur:
+            (count1,) = await cur.fetchone()
+        assert count1 == 2
+
+        # Empty the skills root (directory still exists, no files)
+        (roots[1] / "skill.md").unlink()
+        # Reconcile should keep the old index (per-root emptiness check)
+        await idx.reconcile()
+        async with idx._db.execute("SELECT count(*) FROM manifest") as cur:
+            (count2,) = await cur.fetchone()
+        assert count2 == 2, "present-but-empty root should not prune its rows"
+        await idx.close()
+
+    async def test_overlapping_roots_rejected(self, tmp_path):
+        """Nested/overlapping roots are rejected at construction."""
+        import pytest
+        a = tmp_path / "a"
+        b = a / "b"
+        a.mkdir()
+        b.mkdir()
+        with pytest.raises(ValueError, match="overlap"):
+            MarkdownIndex(
+                root=[a, b],
+                db_path=tmp_path / "index.db",
+                get_client=lambda: FakeEmbed(),
+                get_identity=lambda: IDENTITY,
+            )
+
+    async def test_all_roots_unreadable(self, tmp_path):
+        """All roots unreadable: _walk returns None."""
+        idx = MarkdownIndex(
+            root=[tmp_path / "a", tmp_path / "b"],
+            db_path=tmp_path / "index.db",
+            get_client=lambda: FakeEmbed(),
+            get_identity=lambda: IDENTITY,
+        )
+        assert idx._walk() is None
+        await idx.close()
+    async def test_resolve_path_traversal_rejected(self, tmp_path):
+        """_resolve_path rejects path traversal that escapes the matched root."""
+        idx, roots, _ = await self._make_multi(
+            tmp_path,
+            ["values", "skills"],
+            [{"radio.md": "# Radio\n\nContent."},
+             {"secret.md": "# Secret\n\nHidden."}],
+        )
+        # values/../skills/secret.md resolves under skills/, but the
+        # namespace says values/ — must be rejected.
+        import pytest
+        with pytest.raises(FileNotFoundError, match="escapes the root"):
+            idx._resolve_path("values/../skills/secret.md")
+        # Traversal through a non-existent intermediate directory
+        with pytest.raises(FileNotFoundError, match="escapes the root"):
+            idx._resolve_path("values/../tmp/skills/secret.md")
+        await idx.close()
+
+    async def test_nested_multi_root_paths(self, tmp_path):
+        """Nested paths within a root are namespaced correctly."""
+        root = tmp_path / "values"
+        root.mkdir(parents=True)
+        sub = root / "sub"
+        sub.mkdir()
+        (sub / "radio.md").write_text("# Nested\n\nContent.")
+        (root / "top.md").write_text("# Top\n\nContent.")
+        dim = IDENTITY.dimensions
+        embed = FakeEmbed(dim=dim)
+        idx = MarkdownIndex(
+            root=[root, tmp_path / "skills"],
+            db_path=tmp_path / "index.db",
+            get_client=lambda: embed,
+            get_identity=lambda: IDENTITY,
+        )
+        (tmp_path / "skills").mkdir()
+        await idx.reconcile()
+        files = idx._walk()
+        assert "values/sub/radio.md" in files
+        assert "values/top.md" in files
+        # _resolve_path round-trips the nested path
+        resolved = idx._resolve_path("values/sub/radio.md")
+        assert resolved == sub / "radio.md"
+        await idx.close()
+
+    async def test_reconcile_missing_root_keeps_index(self, tmp_path):
+        """reconcile() with a missing root keeps the old index (no pruning)."""
+        idx, roots, _ = await self._make_multi(
+            tmp_path,
+            ["values", "skills"],
+            [{"radio.md": "# Radio\n\nContent."},
+             {"skill.md": "# Skill\n\nContent."}],
+        )
+        await idx.reconcile()
+        # Verify both files are indexed
+        async with idx._db.execute("SELECT count(*) FROM manifest") as cur:
+            (count,) = await cur.fetchone()
+        assert count == 2
+        # Remove one root, then reconcile
+        import shutil
+        shutil.rmtree(tmp_path / "skills")
+        await idx.reconcile()
+        # The old index is kept (no pruning of the missing root's files)
+        async with idx._db.execute("SELECT count(*) FROM manifest") as cur:
+            (count,) = await cur.fetchone()
+        assert count == 2, "missing root should not prune the old index"
+        await idx.close()
+
+    async def test_empty_string_root_rejected(self, tmp_path):
+        """Empty-string roots are rejected at construction."""
+        import pytest
+        with pytest.raises(ValueError, match="is empty"):
+            MarkdownIndex(
+                root=["", "values"],
+                db_path=tmp_path / "index.db",
+                get_client=lambda: FakeEmbed(),
+                get_identity=lambda: IDENTITY,
+            )
+
+    async def test_root_with_empty_basename_rejected(self, tmp_path):
+        """A root that resolves to '/' (empty basename) is rejected."""
+        import pytest
+        with pytest.raises(ValueError, match="empty basename"):
+            MarkdownIndex(
+                root=["/", "values"],
+                db_path=tmp_path / "index.db",
+                get_client=lambda: FakeEmbed(),
+                get_identity=lambda: IDENTITY,
+            )
+
