@@ -20,11 +20,11 @@ import aiohttp
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.spill import NotificationSpill
-from corvidae.tool import Tool
+from corvidae.tool import Tool, ToolContext
 from corvidae.tool_collection import ToolCollectionPlugin
 
 from corvidae.tools.shell import shell
-from corvidae.tools.files import read_file, write_file
+from corvidae.tools.files import page_chars, read_file, write_file
 from corvidae.tools.web import web_fetch, web_fetch_with_session, web_search
 
 
@@ -71,9 +71,11 @@ class ShellToolPlugin(CorvidaePlugin):
 class FileToolsPlugin(CorvidaePlugin):
     """Registers ``read_file`` and ``write_file``; owns ``tools.max_file_read_bytes``."""
 
-    # read_file resolves the spill service (stale pointers) and the tool
-    # collection (the live result cap for ranged reads).
+    # read_file resolves the spill service (stale pointers), the tool
+    # collection (the live result cap and page fraction) and, optionally,
+    # the channel registry (the calling channel's budget).
     depends_on = frozenset({"tools", "spill"})
+    optional_depends_on = frozenset({"registry"})
 
     def __init__(self, pm=None) -> None:
         self.pm = pm  # May be None; on_init will set it via CorvidaePlugin.on_init
@@ -87,6 +89,17 @@ class FileToolsPlugin(CorvidaePlugin):
             "max_file_read_bytes", 1024 * 1024
         )
 
+    def _channel_budget(self, ctx: ToolContext | None) -> int | None:
+        """The calling channel's resolved max_context_tokens, or None."""
+        # No context or no channel means no budget to size a page by.
+        if ctx is None or ctx.channel is None:
+            return None
+        # The registry is optional: without it the budget is unknown.
+        registry = self.pm.get_plugin("registry")
+        if registry is None:
+            return None
+        return registry.resolve_config(ctx.channel)["max_context_tokens"]
+
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
         # The tool closures read this plugin's settings live, at call time.
@@ -98,6 +111,7 @@ class FileToolsPlugin(CorvidaePlugin):
             length: int | None = None,
             start_line: int | None = None,
             end_line: int | None = None,
+            _ctx: ToolContext | None = None,
         ) -> str:
             """Read a file. offset and length select a character range; start_line and end_line (1-based, inclusive) select a line range; use one kind per call. A ranged result's header names what it returned and where to continue."""
             from corvidae.tools.files import read_file as _read_file_impl
@@ -106,16 +120,23 @@ class FileToolsPlugin(CorvidaePlugin):
             stale = spill.stale_pointer_error(path)
             if stale is not None:
                 return stale
-            # An unranged read is untouched; a ranged one is clamped to the
-            # live result cap so it is never cut after the fact. An unranged
-            # read of a spill file pages from the start instead, so reading
+            # Every read is one page, sized to the calling channel's budget and
+            # never above the live result cap, so it is never cut after the fact.
+            tools = get_dependency(plugin.pm, "tools", ToolCollectionPlugin)
+            max_chars = page_chars(
+                tools.max_result_chars,
+                plugin._channel_budget(_ctx),
+                tools.read_file_window_fraction,
+            )
+            # An unranged read of a spill file pages from the start, so reading
             # one back never yields a result that is cut and spilled again.
             unranged = offset is None and length is None and start_line is None and end_line is None
             if unranged and spill.contains(path):
                 offset = 0
             elif unranged:
-                return await _read_file_impl(path, max_size=plugin._max_file_read_bytes)
-            max_chars = get_dependency(plugin.pm, "tools", ToolCollectionPlugin).max_result_chars
+                return await _read_file_impl(
+                    path, max_size=plugin._max_file_read_bytes, max_chars=max_chars
+                )
             return await _read_file_impl(
                 path, offset=offset, length=length, max_chars=max_chars,
                 start_line=start_line, end_line=end_line,
