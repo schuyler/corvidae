@@ -523,9 +523,10 @@ Per transport:
   `discord:dm:<user_id>`. Every send passes `AllowedMentions.none()`. A bad
   token is logged once at ERROR and not retried. Gateway events are queued
   and consumed by one processor so arrival order holds.
-- **Web**: one chat page, plus read-only panels that plugins contribute,
-  served behind the same token, cookie, `Host` and `Origin` checks and CSP,
-  which no panel can loosen or bypass; one WebSocket per tab, JSON frames
+- **Web**: one chat page that plugins extend with read-only panels in its
+  sidebar, not with pages of their own, served behind the same token,
+  cookie, `Host` and `Origin` checks and CSP, which no panel can loosen or
+  bypass; one WebSocket per tab, JSON frames
   both ways, served by aiohttp in the daemon's loop, no new dependencies, no
   build step, vendored marked and DOMPurify with recorded versions and
   hashes. Binds loopback by default and warns at startup on anything else.
@@ -1473,7 +1474,9 @@ design, not requirement. The requirements are outcomes:
    tool activity while it is generated. The view is read-only, off unless
    configured, and served only behind the console's authentication. It
    shows untrusted text (memory, tool output, other people's messages) as
-   text, never as markup. The threat model accounts for it.
+   text, never as markup. The operator reaches it from the page they chat
+   on, beside the conversations, so inspecting a channel's context is not a
+   trip away from the conversation. The threat model accounts for it.
 
 ### 3.11 Configuration and operations
 
