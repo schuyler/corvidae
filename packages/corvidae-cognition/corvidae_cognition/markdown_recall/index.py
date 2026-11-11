@@ -146,33 +146,39 @@ class MarkdownIndex:
                         "use a non-empty path"
                     )
             self._roots = [Path(r) for r in root]
-            # Same-basename roots collide in the namespaced key space.
             if len(self._roots) > 1:
-                names = [r.resolve().name for r in self._roots]
+                resolved = [r.resolve() for r in self._roots]
+                names = [r.name for r in resolved]
+                # Same-basename roots collide in the namespaced key space.
                 seen = set()
                 for n in names:
+                    if not n:
+                        raise ValueError(
+                            "markdown_recall: a root resolves to an empty "
+                            "basename (e.g. /); choose a subdirectory"
+                        )
                     if n in seen:
                         raise ValueError(
                             f"markdown_recall: duplicate root basename {n!r}; "
                             "roots must have unique directory names"
                         )
                     seen.add(n)
-                # An empty resolved basename (e.g. '/') breaks namespacing.
-                for r in self._roots:
-                    if not r.resolve().name:
-                        raise ValueError(
-                            f"markdown_recall: root {r} has an empty resolved "
-                            "basename; use a subdirectory"
-                        )
+                # Overlapping roots index the same files twice.
+                for i, a in enumerate(resolved):
+                    for b in resolved[i + 1:]:
+                        if a.is_relative_to(b) or b.is_relative_to(a):
+                            raise ValueError(
+                                f"markdown_recall: roots {a} and {b} overlap; "
+                                "one is nested inside the other"
+                            )
         else:
             self._roots = [Path(root)]
-            if not self._roots[0].resolve().name:
-                raise ValueError(
-                    f"markdown_recall: root {root} has an empty resolved "
-                    "basename; use a subdirectory"
-                )
         # Backward-compat alias: _root is the first root (single-root mode).
         self._root = self._roots[0]
+        # Precomputed name→root map for fast _resolve_path lookups.
+        self._root_by_name: dict[str, Path] = {
+            r.resolve().name: r for r in self._roots
+        }
         self._db_path = Path(db_path)
         self._get_client = get_client
         self._get_identity = get_identity
@@ -376,11 +382,7 @@ class MarkdownIndex:
             candidate = matched_root / path
         elif "/" in path:
             prefix, rel = path.split("/", 1)
-            matched_root = None
-            for root in self._roots:
-                if root.resolve().name == prefix:
-                    matched_root = root
-                    break
+            matched_root = self._root_by_name.get(prefix)
             if matched_root is None:
                 raise FileNotFoundError(
                     f"markdown recall: no root matches prefix {prefix!r} in {path!r}"
@@ -453,6 +455,29 @@ class MarkdownIndex:
                     self._roots, manifest_count,
                 )
                 return
+
+            # Per-root check: a present-but-empty root (transient unmount)
+            # must not prune its rows. If a root prefix has manifest entries
+            # but zero files in the walk, abort.
+            if len(self._roots) > 1 and manifest_count > 0:
+                walk_prefixes = {
+                    p.split("/", 1)[0] for p in files if "/" in p
+                }
+                async with db.execute(
+                    "SELECT DISTINCT path FROM manifest"
+                ) as cursor:
+                    async for r in cursor:
+                        mp = r["path"]
+                        if "/" in mp:
+                            prefix = mp.split("/", 1)[0]
+                            if prefix not in walk_prefixes:
+                                logger.warning(
+                                    "markdown recall: root %r has %d manifest "
+                                    "entries but zero files in the walk; "
+                                    "kept the old index (transient unmount?)",
+                                    prefix, manifest_count,
+                                )
+                                return
 
             # An encoder/chunker change rebuilds everything.
             if self._encoder_mismatch:
