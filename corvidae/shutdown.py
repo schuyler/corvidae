@@ -108,8 +108,13 @@ def arm_exit_watchdog(timeout: float | None) -> None:
             ", ".join(names) if names else "none",
         )
         # Flush (not close) the root handlers so the line survives os._exit.
-        for handler in logging.getLogger().handlers:
-            handler.flush()
-        os._exit(1)
+        # The exit sits in a finally: a handler whose flush raises (a closed
+        # stream, a broken pipe) must not kill this thread and bring back
+        # the hang.
+        try:
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+        finally:
+            os._exit(1)
 
     threading.Thread(target=_watch, name="exit-watchdog", daemon=True).start()

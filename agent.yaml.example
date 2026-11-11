@@ -59,6 +59,8 @@ daemon:
   # notification_spill_dir: state/notification-spill   # full text of cut notifications, mode 0600
   # notification_spill_max_chars: 1000000   # most characters written to one file
   # notification_spill_max_age_days: 7      # files older than this are deleted; no size limit
+  # shutdown_timeout: 3     # seconds for every plugin's on_stop; past it, exit 1
+  # exit_timeout: 5         # seconds to exit after that; a leaked thread then gets exit 1 (0/null: wait forever)
 
 # Agent-level defaults — apply to all channels unless overridden (optional)
 agent:

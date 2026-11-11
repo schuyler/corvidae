@@ -452,8 +452,8 @@ class Runtime:
         without starting an agent.
 
         Runs the on_stop broadcast, stops the idle tracker and closes the
-        clock under the same bound as stop() (daemon.shutdown_timeout). Skips agent.on_stop,
-        since the agent may never have started. Every failure here is logged
+        clock under the same bound as stop() (daemon.shutdown_timeout).
+        Skips agent.on_stop, since the agent may never have started. Every failure here is logged
         and swallowed, so the start failure is what the caller sees.
         """
         # Config loading failed before a plugin manager existed: nothing to close.

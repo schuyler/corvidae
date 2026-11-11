@@ -1891,12 +1891,46 @@ of never. `note_restored` ignores channels the tracker already knows.
 `clock.close()`, which cancels any timers plugins left behind. Plugins
 should still cancel their own watches and timers in `on_stop`.
 
+**Shutdown bounds and the exit watchdog (#746).** Two bounds, both
+`daemon:` keys parsed by `corvidae/shutdown.py` as the first step of
+startup validation (a bad value is a `Config error` at startup; neither
+key is validated on hot reload, so a bad edit is caught by the next
+restart or the restart tool's pre-flight):
+
+1. `daemon.shutdown_timeout` (default 3 s) bounds the graceful phase
+   above. On overrun `stop()` logs a WARNING naming the key and calls
+   `os._exit(1)`.
+2. `daemon.exit_timeout` (default 5 s; `0`/`null` disables) bounds what
+   comes after. When `stop()` returns, CPython still has to finish
+   `asyncio.run` (which joins executor threads for up to 300 s) and
+   then join every non-daemon thread in `threading._shutdown`, with no
+   limit. A thread a plugin leaked (an aiosqlite connection never closed
+   keeps one alive) hangs the process there forever, and `atexit` runs
+   only after that join, so it cannot help. `Runtime.run(exit_watchdog=True)`
+   arms a daemon thread in a `finally` around `await self.stop()`, so it
+   is armed even when an `on_stop` raises (apluggy's broadcast propagates
+   the first exception and skips the rest of shutdown, the likeliest way
+   to leak). If the process is still alive `exit_timeout` seconds later,
+   the thread logs a WARNING naming the non-daemon threads still running
+   and the key, flushes the root logger's handlers (not
+   `logging.shutdown()`, which runs from `atexit` and would close
+   handlers the main thread may still use) and calls `os._exit(1)`.
+   The non-zero status is deliberate: the supervisor records an
+   abnormal run, and the restart plugin's next boot reports it.
+
+The watchdog is armed only through `corvidae.runtime.run_daemon(runtime)`,
+which `serve`, `cli` and `acp` call. `run()` defaults the flag off because
+tests drive `run()` and `stop()` in-process, where a watchdog would end
+the pytest process. Worst case after SIGTERM:
+`shutdown_timeout + exit_timeout`. The restart pre-flight and a failed
+`start()` are not covered.
+
 **Failed start.** If `Runtime.start()` raises anything, `BaseException`
 included (a `CancelledError` leaked from a plugin's `on_start`, #282; a
 config error's `SystemExit` before any plugin loads finds nothing to close),
 `Runtime.run` runs `_cleanup_failed_start()` before re-raising: the
-`on_stop` broadcast, `idle.stop()` and `clock.close()`, under the same 3 s
-bound as `stop()` (as there, an `on_stop` that raises skips the last two;
+`on_stop` broadcast, `idle.stop()` and `clock.close()`, under the same
+bound as `stop()` (`daemon.shutdown_timeout`, 3 s by default) (as there, an `on_stop` that raises skips the last two;
 `asyncio.run` cancels leftover timers on exit). `agent.on_stop` is skipped, since the Agent may not
 have started. Without this, persistence's open aiosqlite connection (a
 non-daemon worker thread) kept the interpreter from exiting, so a daemon
@@ -2856,7 +2890,7 @@ same task. Owners live in `self._owners` (name to owner).
 
 `on_stop` sets every owner's `stop` event at once and awaits all the tasks
 together with `asyncio.wait`, bounded by `_STOP_BOUND_SECONDS` (2.5 s, inside
-Runtime's 3 s stop budget). The SDK's `stdio_client` can take about 2 s to
+Runtime's default 3 s stop budget, `daemon.shutdown_timeout`). The SDK's `stdio_client` can take about 2 s to
 terminate a process, so closing serially would blow the budget. An owner
 still running at the bound is cancelled and logged at WARNING with the server
 name and a "may need to be killed by hand" remedy. An exception while closing
@@ -3867,7 +3901,8 @@ it still holds unsent bytes. `on_stop`:
    handler's `finally` removes its entry;
 3. runs `runner.cleanup()` (`shutdown_timeout=0.5`).
 
-The worst case is about 2.5 s, inside Runtime's 3 s budget.
+The worst case is about 2.5 s, inside Runtime's default 3 s budget
+(`daemon.shutdown_timeout`).
 New WebSocket handshakes during shutdown get 503. Aborting rather than
 closing matters with a peer that stopped reading (a phone asleep):
 `transport.close()` waits to flush a full buffer forever, and aiohttp's
