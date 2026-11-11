@@ -21,11 +21,12 @@ Architecture:
     - Topological sort determines execution order
     - Cycle detection prevents invalid definitions
     - Failed tasks block dependent tasks from running
-    - Progress reported via on_task_event hook for channel delivery
+    - Run state (step statuses, failed steps) is local to each call, so
+      pipelines that overlap cannot affect each other's results
 
-Plugin hooks used:
-    - register_tools     — exposes the task_pipeline tool
-    - before_agent_turn  — clears transient failed-task state from previous turns
+``TaskPipelinePlugin`` is a tool factory, not a plugin: ``ShellToolPlugin``
+calls its ``register_tools`` and it is never registered with the plugin
+manager, so it has no hooks.
 """
 
 from __future__ import annotations
@@ -245,25 +246,16 @@ class TaskPipelinePlugin:
 
     Failed tasks prevent their dependents from running. The agent can query
     status via the returned result string.
-    """
 
-    depends_on = set()
+    One instance serves every call, and calls can overlap (two channels, or
+    two calls in one turn), so it holds no per-run state.
+    """
 
     def __init__(self, pm) -> None:
         self.pm = pm
-        self._tasks_cache: list[dict] = []  # last parsed task list
-        self._task_status: dict[str, str] = {}  # name -> "pending"|"running"|"done"|"failed"
-        self._task_results: dict[str, str] = {}  # name -> output/error string
-
-    def _reset(self) -> None:
-        """Clear transient state between agent turns."""
-        self._task_status.clear()
-        self._task_results.clear()
 
     def register_tools(self, tool_registry: list) -> None:
         from corvidae.tool import Tool
-
-        plugin = self
 
         async def task_pipeline(
             definition: str, _ctx: ToolContext | None = None
@@ -317,12 +309,11 @@ class TaskPipelinePlugin:
 
             task_map = {t["name"]: t for t in tasks_raw}
 
-            # Reset state for this execution
-            plugin._reset()
-            plugin._tasks_cache = tasks_raw
-
+            # Run state is local to this call: the instance is shared and
+            # other calls may be running at the same time (#650).
             results_lines: list[str] = []
             failed_tasks: set[str] = set()
+            task_status: dict[str, str] = {}
 
             for task_name in order:
                 task = task_map[task_name]
@@ -358,15 +349,14 @@ class TaskPipelinePlugin:
                         )
                         failed_tasks.add(task_name)
 
-                plugin._task_status[task_name] = status
-                plugin._task_results[task_name] = result
+                task_status[task_name] = status
                 results_lines.append(f"  {task_name}: {status}")
                 if result and len(result) < 500:
                     results_lines.append(f"    → {result[:400]}{'...' if len(result) > 400 else ''}")
 
             total = len(order)
-            done = sum(1 for s in plugin._task_status.values() if s == "done")
-            failed = sum(1 for s in plugin._task_status.values() if s == "failed")
+            done = sum(1 for s in task_status.values() if s == "done")
+            failed = sum(1 for s in task_status.values() if s == "failed")
 
             header = f"Pipeline complete: {total} tasks, {done} succeeded, {failed} failed"
             return header + "\n" + "\n".join(results_lines)
