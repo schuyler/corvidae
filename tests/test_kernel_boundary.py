@@ -42,7 +42,6 @@ ALLOWED_KERNEL_MODULES = {
     "corvidae.channels.web",
     "corvidae.runtime",
     "corvidae.spill",
-    "corvidae.scheduler",  # rss-reader uses parse_duration
 }
 
 

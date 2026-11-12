@@ -624,14 +624,18 @@ send tool (finding 15): registry membership is the whole gate. Bounding
 the tools (per-channel cap, operator opt-in) is a follow-up.
 
 The RSS reader (packages/rss-reader) polls configured feeds and delivers
-new items as notifications on a configured channel. The threat is the
+new items as notifications on the configured targets. The threat is the
 same as for other notification sources: the feed content is untrusted
-external data that re-enters the agent's context. The mitigation is the
-same as for all fetched content: the kernel wraps it in the notification
-header, and the model is instructed (via the prompt) that content from
-external sources is data, not instructions. The feed URLs are
+external data that re-enters the agent's context. A successful injection
+lands in the target channel's window, which may have tools (shell,
+web_fetch, send_attachment, etc.), so the blast radius is the same as
+for any cross-channel notification (finding 15): registry membership is
+the whole gate. The kernel wraps the item in the notification header
+(`[RSS] title / link / summary`), which is a weak signal; the model may
+or may not treat it as untrusted. The feed URLs are
 operator-configured in agent.yaml, so the same file-permission
-discipline applies.
+discipline applies. A body cap and a defusedxml dependency are
+follow-ups.
 
 `discord.send_attachment` (issue #521) and `send_signal_attachment` (issue
 #544) are the first tools that send a *file* to a channel the model chooses

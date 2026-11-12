@@ -1279,20 +1279,32 @@ Open that URL. Why the config looks like this: inside a container the page has t
 
 **Discord.** The bot only connects out, so there is nothing to publish. Add a `discord:` block with your user id under `allow` (the default refuses everyone), and pass the bot token as `-e DISCORD_TOKEN=…` rather than writing it into `agent.yaml`. A new `discord:` block needs only `docker restart corvidae`, but `docker restart` keeps the old environment, so to add or change `DISCORD_TOKEN`, `docker rm -f corvidae` and run it again. Creating the application and inviting the bot are in [discord-ops.md](discord-ops.md). Two `voice will NOT be supported` warnings at startup are expected.
 
-**RSS.** Add an `rss:` block to enable the RSS reader plugin. The plugin polls the configured feeds on a timer and delivers new items as notifications on the configured channel. Feed content is untrusted external data (see [threat-model.md](threat-model.md)).
+## `rss` — feed polling and notification delivery
+
+`RSSPlugin` polls the configured feeds on a timer and delivers new items as notifications on the configured targets. Feed content is untrusted external data (see [threat-model.md](threat-model.md)).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `rss.feeds` | list | — | Non-empty list of feed URLs (http/https). Required. |
+| `rss.targets` | list | — | Non-empty list of `transport:scope` channels to deliver to. Required. |
+| `rss.poll_interval` | string | `"30m"` | Duration string: `30s`, `20m`, `6h`, `1d`, `7d`, `1h30m`. |
+| `rss.max_items_per_poll` | integer | `10` | Cap on items delivered per cycle. Items beyond the cap are retried on the next cycle. |
+| `rss.max_payload_chars` | integer | `2000` | Max characters per item (title + link + summary). |
+| `rss.state_file` | path | `state/rss/seen.json` | Where seen guids are tracked. |
 
 ```yaml
 rss:
   feeds:
     - https://example.com/feed.xml
     - https://blog.example.com/atom.xml
-  channel: "internal:heartbeat"  # where items are delivered
-  poll_interval: 300  # seconds between poll cycles (default 300)
-  max_items_per_poll: 10  # cap on items delivered per cycle (default 10)
-  state_file: state/rss/seen.json  # where seen guids are tracked
+  targets:
+    - internal:heartbeat
+  poll_interval: 30m
+  max_items_per_poll: 10
+  state_file: state/rss/seen.json
 ```
 
-The plugin is optional; it is not installed by default. Add `rss-reader` to the `EXTRAS` build arg or install it from the worktree.
+The plugin is optional; it is not installed by default. Add `rss-reader` to the `EXTRAS` build arg or install it from the worktree. Config changes require a restart.
 
 **What lands in `/data`:** `sessions.db`, `provenance.key` (keep it with the directory), `state/`, and a log file if you set `logging.file`; otherwise logs go to `docker logs`. Back that directory up and you've backed up the bot. The daemon runs as uid 1000, not root, because the shell tool runs as the daemon's user ([threat-model.md](threat-model.md), finding 4), so the directory has to be writable by that uid. That's what the `chown` is for, and after it the files belong to uid 1000, so editing `agent.yaml` on the host needs `sudo`. If you'd rather not, skip the `chown` and run with `--user $(id -u):$(id -g)` on a directory you own. If the daemon can't write the directory, startup dies with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory.
 

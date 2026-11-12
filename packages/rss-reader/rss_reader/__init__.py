@@ -45,7 +45,25 @@ from corvidae.channel import (
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.spill import NotificationSpill
 from corvidae.tuning import config_value
-from corvidae.scheduler import parse_duration
+
+
+def _parse_duration(text: str) -> float:
+    """Parse a duration string like `30m`, `2h`, `1h30m` to seconds."""
+    cleaned = str(text).strip().lower()
+    if cleaned.isdigit():
+        return float(cleaned)
+    total = 0.0
+    found = False
+    for unit, factor in [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]:
+        import re
+        match = re.search(rf"(\d+(?:\.\d+)?)\s*{unit}", cleaned)
+        if match:
+            total += float(match.group(1)) * factor
+            found = True
+    if not found:
+        raise ValueError(f"rss: invalid duration {text!r}; use e.g. 30m, 2h, 1h30m")
+    return total
+
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +163,7 @@ class RSSPlugin(CorvidaePlugin):
         interval = block.get("poll_interval", DEFAULT_POLL_INTERVAL)
         if not isinstance(interval, str):
             raise _bad("rss.poll_interval", interval, "use a duration string like 30m")
-        self._poll_secs = parse_duration(interval)
+        self._poll_secs = _parse_duration(interval)
 
         targets = block.get("targets")
         if targets is None:
@@ -222,18 +240,6 @@ class RSSPlugin(CorvidaePlugin):
         new_items = new_items[: self._max_items]
 
         # Mark only the delivered items as seen.
-        for url, item in new_items:
-            guid = item.get("guid", "")
-            if guid:
-                seen.setdefault(url, []).append(guid)
-
-        # Trim seen sets to prevent unbounded growth (keep last 500 per feed).
-        for url in seen:
-            if len(seen[url]) > 500:
-                # Keep the most recent 500 (list preserves insertion order)
-                seen[url] = seen[url][-500:]
-        self._save_seen(seen)
-
         channels = []
         for cid in self._targets:
             try:
@@ -244,8 +250,11 @@ class RSSPlugin(CorvidaePlugin):
             channels.append(channel)
 
         if not channels:
+            # No channel ready (normal at startup). Items stay unseen so
+            # they are delivered on the next poll.
             return
 
+        delivered: list[tuple[str, str]] = []
         for feed_url, item in new_items:
             title = item.get("title", "(untitled)")
             link = item.get("link", "")
@@ -254,10 +263,25 @@ class RSSPlugin(CorvidaePlugin):
             if summary:
                 text += f"\n{summary}"
             origin = f"rss:{feed_url}"
-            await self._spill.notify(
-                channels, source=origin, text=text,
-                annotations={"origin": origin}, limit=self._max_chars,
-            )
+            try:
+                await self._spill.notify(
+                    channels, source=origin, text=text,
+                    annotations={"origin": origin}, limit=self._max_chars,
+                )
+                delivered.append((feed_url, item.get("guid", "")))
+            except Exception as exc:
+                logger.warning("rss: delivery failed for %s: %s", feed_url, exc)
+
+        # Mark items seen only after delivery succeeds.
+        for url, guid in delivered:
+            if guid:
+                seen.setdefault(url, []).append(guid)
+
+        # Trim seen lists to prevent unbounded growth (keep last 500 per feed).
+        for url in seen:
+            if len(seen[url]) > 500:
+                seen[url] = seen[url][-500:]
+        self._save_seen(seen)
         logger.info("rss: delivered %d new items", len(new_items))
 
     def _load_seen(self) -> dict[str, list[str]]:
