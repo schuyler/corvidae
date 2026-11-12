@@ -14,6 +14,7 @@ members = [
     "corvidae-inotify",
     "corvidae-restart",
     "corvidae-timepiece",
+    "corvidae-vision",
     "cross-channel-send",
     "webhook-notify",
 ]
@@ -666,6 +667,17 @@ requires-dist = [
     { name = "corvidae", editable = "." },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
+
+[[package]]
+name = "corvidae-vision"
+version = "0.1.0"
+source = { editable = "packages/corvidae-vision" }
+dependencies = [
+    { name = "corvidae" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "corvidae", editable = "." }]
 
 [[package]]
 name = "cross-channel-send"
