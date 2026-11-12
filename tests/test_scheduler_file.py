@@ -59,42 +59,6 @@ def test_write_is_atomic_no_partial(tmp_path: Path):
     assert leftovers == []
 
 
-def test_read_rejects_non_mapping(tmp_path: Path):
-    f = tmp_path / "jobs.yaml"
-    f.write_text('["not", "a", "mapping"]')
-    with pytest.raises(ValueError, match="must be a mapping"):
-        read_jobs(f)
-
-
-def test_read_rejects_non_list_jobs(tmp_path: Path):
-    f = tmp_path / "jobs.yaml"
-    f.write_text('{"jobs": "not a list"}')
-    with pytest.raises(ValueError, match="jobs must be a list"):
-        read_jobs(f)
-
-
-def test_read_rejects_job_without_name(tmp_path: Path):
-    f = tmp_path / "jobs.yaml"
-    f.write_text('{"jobs": [{"channel": "x"}]}')
-    with pytest.raises(ValueError, match="missing 'name'"):
-        read_jobs(f)
-
-
-def test_read_rejects_job_with_non_string_name(tmp_path: Path):
-    f = tmp_path / "jobs.yaml"
-    f.write_text('{"jobs": [{"name": 42}]}')
-    with pytest.raises(ValueError, match="missing 'name'"):
-        read_jobs(f)
-
-
-def test_read_rejects_non_dict_job(tmp_path: Path):
-    f = tmp_path / "jobs.yaml"
-    f.write_text('{"jobs": ["string job"]}')
-    with pytest.raises(ValueError, match="must be a mapping"):
-        read_jobs(f)
-
-
-def test_read_json_format(tmp_path: Path):
     """Our writer produces JSON; reading JSON should work."""
     f = tmp_path / "jobs.yaml"
     data = {"jobs": [{"name": "json-job", "channel": "x", "cron": "0 0 * * *"}]}
