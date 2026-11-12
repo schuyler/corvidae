@@ -73,10 +73,10 @@ DEFAULT_RETIRED_GOAL_LIMIT = 5
 
 #: Appended when the goals plugin is loaded (PRD §3.7 Goals and Heartbeat).
 GOALS_INSTRUCTION = (
-    "Also look at the goals entry in your window, if there is one, and the "
-    "goals you retired below: if there's a next step on an open goal you can "
-    "take now, or a goal that's done and should be retired, do it. Don't take "
-    "up again a goal you retired unless something new has changed."
+    "Goals are your work queue. If there's an open goal you can advance, "
+    "do it. If a goal is done, retire it. Don't take up again a goal you "
+    "retired unless something new has changed. Otherwise act only when the "
+    "assessment warrants it — a beat with nothing to advance is fine."
 )
 
 #: Heads the retired-goals list that follows the goals instruction.
@@ -183,11 +183,12 @@ def frame_beat(
 ) -> str:
     """The beat's notification text.
 
-    Layout: data blocks first, imperative text at the tail. Attention
-    moves to the tail; the call-to-action should be the last thing in
-    the window, not buried under 20 memories and 20 retired goals.
+    Layout: goals first (context: what's been done, what's in
+    progress), then memories (recent context), then the imperative
+    prompt at the tail. Attention moves to the tail; the call-to-action
+    is the last thing in the window.
 
-    Order: memories (chronological) → retired goals → open goals →
+    Order: retired goals → open goals → memories (chronological) →
     prompt (imperatives) → goals instruction.
 
     In **full** mode (``diff=False``): all memories and retired goals
@@ -243,9 +244,11 @@ def frame_beat(
     elif open_goals is not None:
         open_goals_text = "\n\nOpen goals: (none)"
 
-    # Data first, imperatives at the tail.
+    # Goals first (what's been done, what's in progress), then memories
+    # (recent context), then the imperative prompt at the tail. Attention
+    # moves to the tail; the call-to-action is the last thing in the window.
     return (
-        f"{mem_text}\n\n{goals_text}{open_goals_text}\n\n{prompt}\n\n{goals_instruction}"
+        f"{goals_text}{open_goals_text}\n\n{mem_text}\n\n{prompt}\n\n{goals_instruction}"
     )
 
 

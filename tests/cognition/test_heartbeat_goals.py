@@ -227,7 +227,15 @@ async def test_beat_obeys_retired_goal_limit(make_env, monkeypatch):
     text = env.agent.calls[0]["text"]
     # The conclusion can also surface in the memory section (a beat reviews
     # the whole memory, #168); the limit governs the retired-goals list, so
-    # assert on that section only.
-    retired_section = text[text.index(heartbeat.RETIRED_GOALS_HEADER):]
+    # assert on that section only. With the new order (retired goals first),
+    # the memory section follows the retired-goals section, so extract only
+    # up to the next section marker.
+    retired_start = text.index(heartbeat.RETIRED_GOALS_HEADER)
+    retired_end = len(text)
+    for marker in ("Open goals", heartbeat.MEMORY_HEADER):
+        idx = text.find(marker, retired_start)
+        if idx != -1:
+            retired_end = min(retired_end, idx)
+    retired_section = text[retired_start:retired_end]
     assert "New conclusion: the schedule holds." in retired_section
     assert "Old conclusion: it ran every night." not in retired_section
