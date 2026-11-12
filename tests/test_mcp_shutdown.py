@@ -190,9 +190,9 @@ class TestStopBudget:
     async def test_hung_teardown_is_cancelled_and_logged(self, caplog, monkeypatch):
         # R5: a teardown that hangs past the bound is cancelled and logged
         # at WARNING with the server name and the by-hand remedy.
-        monkeypatch.setattr(mcp_client, "_STOP_BOUND_SECONDS", 0.3)
         plugin, config = _make_plugin({"srv": _stdio_cfg()})
         await _start_in_own_task(plugin, config)
+        monkeypatch.setattr(plugin, "_stop_bound", 0.3)
 
         async def hang() -> None:
             await asyncio.sleep(60)
