@@ -136,7 +136,7 @@ The bot is online but a message gets no reply:
   not count: corvidae checks for a mention of the bot user. An @-mention with
   no text after it is dropped too. All of these drops are logged at DEBUG.
 - The message was handled but nothing was sent: with the `silence` plugin
-  loaded the model may answer `NO_REPLY`, and then nothing goes out.
+  loaded the model may answer `NO_REPLY` (or, with `silence.mode` `tool` or `both`, call `end_turn`), and then nothing goes out.
 
 Discord login fails:
 

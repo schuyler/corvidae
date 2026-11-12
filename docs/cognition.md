@@ -1498,13 +1498,13 @@ model makes both language judgments; the code only fetches evidence:
    `[provenance]`. Stylistic objections queue through `ingest` and wait for
 the channel's next turn. Provenance objections wake the channel with a
 stub whose text tells the agent the default is to send nothing: reply
-contains `NO_REPLY`, and reply in the channel only if its earlier reply
+exactly `NO_REPLY`, and reply in the channel only if its earlier reply
 could lead the other party to take an incorrect action. The plugin's
 `should_send_response` vetoes a `final` on a critique-origin turn whose
 stripped text is `NO_REPLY`; the kernel stores it as `unsent` with the
 not-sent marker. That veto is critique's own and always on with this plugin
 loaded; [SilencePlugin](#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)
-vetoes the same text on every origin. The outcome is
+vetoes any final containing the token on every origin. The outcome is
 recorded as
    `outcomes.provenance = {claims, candidates, supported, objections}`;
    `objections: 0` means every claim was judged supported.
@@ -1635,21 +1635,21 @@ The hook runs on the composed prompt whatever the register's source, so a channe
 
 **The veto.** `should_send_response` returns `False` for a `final` emission whose text contains `NO_REPLY` (a containment check, not an exact match), on every turn origin. The kernel stores the row as `unsent` with the not-sent marker, so on later turns the model can see it stayed silent instead of believing it spoke. Nothing reaches the transport. A final that mentions the token in passing (e.g. "reply with NO_REPLY to stop") is also dropped — a known tradeoff of the containment design. Only `final` is covered: a `NO_REPLY` that shows up as progress text beside tool calls goes out. A veto that raises fails open, with a warning, and the text is sent.
 
-**The record.** `on_agent_response` fires for unsent finals too, after the row is in the window. When the final was unsent (`final_was_unsent`) and its text is `NO_REPLY` or empty, the plugin writes `outcomes.silence` on that trace's `exchange_log` row, from a background task so the reply path never waits on the write connection:
+**The record.** `on_agent_response` fires for unsent finals too, after the row is in the window. When the final was unsent (`final_was_unsent`) and its text contains `NO_REPLY` (the same test as the veto) or is empty, the plugin writes `outcomes.silence` on that trace's `exchange_log` row, from a background task so the reply path never waits on the write connection:
 
 | `outcomes.silence` | Meaning |
 |---|---|
-| `no_reply` | The model replied `NO_REPLY` and the veto kept it unsent |
+| `no_reply` | The model's final was `NO_REPLY`, or contained it, and the veto kept it unsent |
 | `empty` | The final had no text and no tool calls; the kernel left it unsent without asking any gate |
 | `tool` | The model called `end_turn` (`silence.mode` `tool` or `both`). It records the call, not what followed: it is written when the tool runs, before the follow-up exists, so a model that then answers anyway still has this row. `outcomes.silence_reason` carries the model's own words, cut at 200 characters |
 
 A `NO_REPLY` that was actually sent (say another gate's veto raised and the send failed open) is not recorded, and neither is a final some other gate vetoed; the `tool` row above is the exception, because it is written before the final exists. A turn with two finals, a reply and then a declined follow-up, gets the flag. Without `outcome_log` there is nowhere to write and declines go unrecorded; the veto still works. A write that fails logs a warning naming the trace and channel. A decline with no trace id logs a warning and records nothing.
 
-**The `end_turn` tool (`silence.mode`, #797).** Writing a literal `NO_REPLY` is an unusual thing for a chat-trained model to do, since such models are trained to alternate turns and answer. The hypothesis behind the tool is that a tool call is a shape they are trained to emit more readily; whether that holds is what the experiment measures (see The record). With `silence.mode: tool` (or `both`) the plugin registers `end_turn(reason)` through `register_tools`, and the instruction says to call it on its own when nothing needs saying (`TOOL_FRAGMENT`; `both` adds a fallback to the token, `BOTH_FRAGMENT`). `token`, the default, registers no tool and behaves as before. A `silence.instruction` replaces the built-in text in every mode, so in `tool` or `both` mode it has to mention `end_turn`.
+**The `end_turn` tool (`silence.mode`, #797).** Writing a literal `NO_REPLY` is an unusual thing for a chat-trained model to do, since such models are trained to alternate turns and answer. The hypothesis behind the tool is that a tool call is a shape they are trained to emit more readily; whether that holds is what the experiment measures (see The tool's record). With `silence.mode: tool` (or `both`) the plugin registers `end_turn(reason)` through `register_tools`, and the instruction says to call it on its own when nothing needs saying (`TOOL_FRAGMENT`; `both` adds a fallback to the token, `BOTH_FRAGMENT`). `token`, the default, registers no tool and behaves as before. A `silence.instruction` replaces the built-in text in every mode, so in `tool` or `both` mode it has to mention `end_turn`.
 
 **What the tool does, and what it cannot.** The tool has no kernel support, so it does not end the turn: the loop calls the model again after any tool result. The result therefore says `Nothing was sent. Your next message must be exactly NO_REPLY and nothing else.`, and the veto withholds that echo *when the model complies*. If it writes anything else (a near miss, a sign-off, a real answer), that text is sent. The call is the decision and the echo is mechanical; it costs one more model call, which a backend that reuses the cached prompt prefix makes cheap. The tool refuses on a channel whose transport isn't conversational, including a channel no transport owns (an `Error:` result naming the channel and saying to answer normally), and with no channel context.
 
-**The record.** It writes `outcomes.silence = "tool"` and `outcomes.silence_reason` when the tool is called, from a tracked task like the other records, only when `outcome_log` is loaded and the turn has a trace id. The turn's own final is then never recorded over it, whether it was withheld or sent. A `tool` row therefore means "called", not "stayed silent"; count rows against the wind-down messages to measure whether the model uses the tool, and read the sent rows to see whether the follow-up complied.
+**The tool's record.** It writes `outcomes.silence = "tool"` and `outcomes.silence_reason` when the tool is called, from a tracked task like the other records, only when `outcome_log` is loaded and the turn has a trace id. The turn's own final is then never recorded over it, whether it was withheld or sent. A `tool` row therefore means "called", not "stayed silent"; count rows against the wind-down messages to measure whether the model uses the tool, and read the sent rows to see whether the follow-up complied.
 
 **Known limits.**
 - Text the model writes alongside the call goes out as progress, because the progress gate runs before the tool executes and receives no tool calls. The tool's description says to call it alone.

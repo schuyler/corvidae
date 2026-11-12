@@ -212,8 +212,8 @@ What to expect:
 - Everyone else is refused as before, before anything is stored. Each
   refused message logs `discord: rejected message from unauthorized sender
   <id>` at INFO, so a busy channel makes a busy log.
-- The agent can decline to reply: with the `silence` plugin loaded, a turn
-  that ends in `silence` (the `NO_REPLY` convention) sends nothing, which is
+- The agent can decline to reply: with the `silence` plugin loaded, a final
+  that contains `NO_REPLY` sends nothing (`silence.mode` `tool` or `both` adds an `end_turn` tool that leads to the same), which is
   how it stays quiet in a conversation that is not addressed to it.
 - A mention token is still stripped from the text.
 - If the intent is switched off in the portal, Discord refuses the
