@@ -189,6 +189,38 @@ class TestSend:
         positions = [joined.index(t) for t in tokens]
         assert positions == sorted(positions)
 
+    async def test_voice_note_flag_sets_voicenote_in_params(self, env):
+        """voice_note=True adds voiceNote: true to the send frame."""
+        out = await env.h.plugin.send_signal_attachment(
+            env.channel.id, str(env.f), "", voice_note=True
+        )
+        assert not out.startswith("Could not send")
+        frames = _send_frames(env.h)
+        assert len(frames) == 1
+        assert frames[0]["params"] == {
+            "recipient": AUTH_ACI,
+            "attachments": [PNG_URI],
+            "voiceNote": True,
+        }
+
+    async def test_voice_note_default_false_omits_key(self, env):
+        """voice_note=False (the default) does not add voiceNote to params."""
+        await env.h.plugin.send_signal_attachment(
+            env.channel.id, str(env.f), ""
+        )
+        frames = _send_frames(env.h)
+        assert len(frames) == 1
+        assert "voiceNote" not in frames[0]["params"]
+
+    async def test_voice_note_rejects_non_bool(self, env):
+        """A non-bool voice_note is refused before any frame is sent."""
+        out = await env.h.plugin.send_signal_attachment(
+            env.channel.id, str(env.f), "", voice_note="yes"
+        )
+        assert out.startswith("Could not send")
+        assert "voice_note" in out
+        assert _send_frames(env.h) == []
+
 
 class TestRootAndSize:
     """R2, R3: the jail and the cap, each refused before any frame is sent."""
