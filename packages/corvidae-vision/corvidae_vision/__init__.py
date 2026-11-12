@@ -6,8 +6,8 @@ analysis. The model is the main vision-capable LLM (swift-1.5 with
 mmproj), running locally on the llama.cpp server. No external service,
 no relay: the image bytes go from disk to the local API and back.
 
-Uses the "snap" LLM stage (no reasoning overhead for a single-image
-description).
+Uses the "vision" LLM stage (backed by the "snap" profile — no
+reasoning overhead for a single-image description).
 
 Tool:
   view_image(path, prompt?) — analyze an image file
@@ -68,7 +68,6 @@ class VisionPlugin(CorvidaePlugin):
     def register_llm_stages(self, stages: dict) -> None:
         stages["vision"] = "chat"
 
-    @hookimpl
     async def view_image(self, path: str, prompt: str = DEFAULT_PROMPT) -> str:
         """Analyze an image file using the local vision LLM.
 
@@ -104,7 +103,10 @@ class VisionPlugin(CorvidaePlugin):
             )
 
         # Check the size.
-        size = p.stat().st_size
+        try:
+            size = p.stat().st_size
+        except OSError as exc:
+            return f"Error: cannot stat file: {exc}"
         if size > MAX_IMAGE_BYTES:
             return (
                 f"Error: file is {size / 1024 / 1024:.1f} MB, "
@@ -151,12 +153,12 @@ class VisionPlugin(CorvidaePlugin):
             logger.exception("vision: LLM call failed")
             return f"Error: LLM call failed: {exc}"
 
+        choices = response.get("choices") or []
         text = (
-            response.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content")
-            or ""
-        )
+            choices[0].get("message", {}).get("content")
+            if choices
+            else ""
+        ) or ""
         if not text:
             return "Error: model returned empty response."
 

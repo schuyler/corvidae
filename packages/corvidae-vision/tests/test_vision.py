@@ -202,3 +202,60 @@ class TestEdgeCases:
         for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
             assert ext in IMAGE_EXTENSIONS
             assert IMAGE_EXTENSIONS[ext].startswith("image/")
+
+
+class TestReviewFixes:
+    """Tests for LLM review findings."""
+
+    @pytest.mark.asyncio
+    async def test_empty_choices_list_returns_error(self, plugin: VisionPlugin, tmp_path: Path):
+        """Bug #1: {"choices": []} must not raise IndexError."""
+        png = tmp_path / "img.png"
+        png.write_bytes(TINY_PNG)
+
+        llm_plugin, _ = _mock_llm()
+        # Override with empty choices
+        llm_plugin.get_client.return_value.chat = AsyncMock(
+            return_value={"choices": []}
+        )
+
+        with patch("corvidae_vision.get_dependency") as mock_get:
+            mock_get.return_value = llm_plugin
+            result = await plugin.view_image(str(png))
+
+        assert "empty response" in result
+
+    @pytest.mark.asyncio
+    async def test_get_client_failure_returns_error(self, plugin: VisionPlugin, tmp_path: Path):
+        """get_client raising should return an error string, not crash."""
+        png = tmp_path / "img.png"
+        png.write_bytes(TINY_PNG)
+
+        llm_plugin = MagicMock()
+        llm_plugin.get_client.side_effect = RuntimeError("no client")
+
+        with patch("corvidae_vision.get_dependency") as mock_get:
+            mock_get.return_value = llm_plugin
+            result = await plugin.view_image(str(png))
+
+        assert "cannot access LLM client" in result
+
+    def test_register_llm_stages(self, plugin: VisionPlugin):
+        """register_llm_stages should map 'vision' to 'chat'."""
+        stages = {}
+        plugin.register_llm_stages(stages)
+        assert stages["vision"] == "chat"
+
+    @pytest.mark.asyncio
+    async def test_correct_stage_name_passed(self, plugin: VisionPlugin, tmp_path: Path):
+        """get_client should be called with 'vision', not 'snap'."""
+        png = tmp_path / "img.png"
+        png.write_bytes(TINY_PNG)
+
+        llm_plugin, client = _mock_llm()
+
+        with patch("corvidae_vision.get_dependency") as mock_get:
+            mock_get.return_value = llm_plugin
+            await plugin.view_image(str(png))
+
+        llm_plugin.get_client.assert_called_with("vision")
