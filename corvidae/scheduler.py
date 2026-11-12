@@ -697,12 +697,12 @@ class SchedulerPlugin(CorvidaePlugin):
             return
 
         # Read jobs from the YAML file if configured; otherwise use agent.yaml.
+        # An existing file that parses to an empty list is authoritative
+        # (it means the operator emptied the file), not a fallback trigger.
         jobs_raw = self._jobs_raw
         if self._jobs_file_path is not None and self._jobs_file_path.exists():
             try:
-                file_jobs = read_jobs_file(self._jobs_file_path)
-                if file_jobs:
-                    jobs_raw = file_jobs
+                jobs_raw = read_jobs_file(self._jobs_file_path)
             except (ValueError, OSError) as exc:
                 logger.error("scheduler: failed to read jobs file %s: %s",
                              self._jobs_file_path, exc)
