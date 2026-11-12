@@ -414,7 +414,7 @@ class TestModeConfig:
     @pytest.mark.parametrize(
         "block, key, value, wanted",
         [
-            ({"mode": "tools"}, "silence.mode", "'tools'", ("token", "tool", "both")),
+            ({"mode": "tools"}, "silence.mode", "'tools'", ("token, tool, both",)),
             ("tool", "silence", "'tool'", ("mapping", "plugins.disabled")),
         ],
     )
@@ -438,8 +438,7 @@ class TestModeConfig:
 class TestModeInstruction:
     async def _prompt(self, **kwargs):
         pm, _silence, _tools = await _tool_pm(**kwargs)
-        result = await pm.ahook.transform_system_prompt(channel=IRC, text="IDENTITY")
-        return result.removeprefix("IDENTITY\n\n")
+        return await pm.ahook.transform_system_prompt(channel=IRC, text="IDENTITY")
 
     @pytest.mark.parametrize(
         "mode, names_tool, asks_for_token",
@@ -452,7 +451,7 @@ class TestModeInstruction:
         assert ("reply with exactly NO_REPLY" in fragment) is asks_for_token
 
     async def test_operator_instruction_still_wins_in_tool_mode(self):
-        assert await self._prompt(mode="tool", instruction="CUSTOM") == "CUSTOM"
+        assert await self._prompt(mode="tool", instruction="CUSTOM") == "IDENTITY\n\nCUSTOM"
 
 
 class TestEndTurnTool:
