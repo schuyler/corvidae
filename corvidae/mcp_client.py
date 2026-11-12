@@ -343,7 +343,10 @@ def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
 # Upper bound on how long on_stop waits for owner tasks to close their
 # transports. Runtime gives the whole stop broadcast daemon.shutdown_timeout
 # (3 s by default), so stay under it.
-_STOP_BOUND_SECONDS = 2.5
+# The stop bound is derived from daemon.shutdown_timeout at init time
+# (see McpClientPlugin._stop_bound). The default of 2.5 s is a fallback
+# for when the config is unavailable.
+_DEFAULT_STOP_BOUND_SECONDS = 2.5
 # After cancelling a straggler, how long to wait for it to unwind.
 _CANCEL_GRACE_SECONDS = 0.3
 
@@ -583,6 +586,14 @@ class McpClientPlugin(CorvidaePlugin):
         await super().on_init(pm, config)
         # Raises ValueError for a malformed mcp block (Runtime reports it).
         self._servers_config = validate_mcp_config(config)
+        # Derive the stop bound from daemon.shutdown_timeout so an operator
+        # who lowers that value doesn't turn every shutdown with a slow stdio
+        # MCP server into a forced os._exit(1) mid-broadcast. We use 80% of
+        # the graceful timeout to leave room for the rest of the stop
+        # broadcast (clock close, channel drain).
+        daemon_cfg = config.get("daemon") or {}
+        shutdown_timeout = float(daemon_cfg.get("shutdown_timeout", 3.0))
+        self._stop_bound = max(1.0, shutdown_timeout * 0.8)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -712,17 +723,19 @@ class McpClientPlugin(CorvidaePlugin):
         Concurrent, not one after another: the SDK's stdio_client can take
         about 2 s per server to terminate a process, and Runtime allows the
         whole stop broadcast daemon.shutdown_timeout (3 s by default). An owner that has not finished within
-        _STOP_BOUND_SECONDS is cancelled and logged. Never raises (a
-        cancellation of this coroutine itself excepted).
+        the derived stop bound (80% of daemon.shutdown_timeout) is cancelled
+        and logged. Never raises (a cancellation of this coroutine itself
+        excepted).
         """
         owners = list(self._owners.values())
         tasks = [o.task for o in owners if o.task is not None]
+        stop_bound = getattr(self, '_stop_bound', _DEFAULT_STOP_BOUND_SECONDS)
         # Tell every owner to close its transport at the same moment.
         for owner in owners:
             owner.stop.set()
         try:
             if tasks:
-                _, pending = await asyncio.wait(tasks, timeout=_STOP_BOUND_SECONDS)
+                _, pending = await asyncio.wait(tasks, timeout=stop_bound)
             else:
                 pending = set()
             # Cancel stragglers and give them a moment to unwind.
@@ -732,7 +745,7 @@ class McpClientPlugin(CorvidaePlugin):
                         "MCP server %r did not shut down within %ss and was "
                         "cancelled; the server process may need to be killed "
                         "by hand",
-                        owner.name, _STOP_BOUND_SECONDS,
+                        owner.name, stop_bound,
                         extra={"server": owner.name},
                     )
                     owner.task.cancel()
