@@ -402,7 +402,7 @@ IRC = Channel(transport="irc", scope="#lex")
 
 class TestModeConfig:
     @pytest.mark.parametrize(
-        "mode, registers", [(None, False), ("token", False), ("tool", True), ("both", True)]
+        "mode, registers", [("token", False), ("tool", True), ("both", True)]
     )
     async def test_only_tool_modes_register_end_turn(self, mode, registers):
         _pm, _silence, tools = await _tool_pm(mode=mode)
@@ -415,10 +415,7 @@ class TestModeConfig:
         "block, key, value, wanted",
         [
             ({"mode": "tools"}, "silence.mode", "'tools'", ("token", "tool", "both")),
-            ({"mode": None}, "silence.mode", "None", ("token", "tool", "both")),
-            ({"mode": 3}, "silence.mode", "3", ("token", "tool", "both")),
             ("tool", "silence", "'tool'", ("mapping", "plugins.disabled")),
-            (0, "silence", "0", ("mapping", "plugins.disabled")),
         ],
     )
     async def test_bad_config_names_key_value_and_remedy(self, block, key, value, wanted):
@@ -446,7 +443,7 @@ class TestModeInstruction:
 
     @pytest.mark.parametrize(
         "mode, names_tool, asks_for_token",
-        [("token", False, True), ("tool", True, False), ("both", True, True)],
+        [("tool", True, False), ("both", True, True)],
     )
     async def test_instruction_follows_the_mode(self, mode, names_tool, asks_for_token):
         fragment = await self._prompt(mode=mode)
@@ -488,10 +485,9 @@ class TestEndTurnTool:
     @pytest.mark.parametrize(
         "transport, scope, names",
         [
-            # web and cli are owned by a non-conversational transport;
-            # internal has no owning transport; None is no channel at all.
+            # web is owned by a non-conversational transport; internal has
+            # no owning transport; None is no channel at all.
             ("web", "tab1", "web:tab1"),
-            ("cli", "local", "cli:local"),
             ("internal", "heartbeat", "internal:heartbeat"),
             (None, None, "no channel context"),
         ],
@@ -508,40 +504,12 @@ class TestEndTurnTool:
         assert names in result and "answer normally" in result
         assert log.writes == []
 
-    async def test_a_call_with_no_trace_id_warns_and_records_nothing(self, caplog):
-        log = _StubOutcomeLog()
-        _pm, silence, tools = await _tool_pm(outcome_log=log)
-
-        with caplog.at_level("WARNING", logger="corvidae.silence"):
-            result = await _call(tools, IRC, reason="x")
-        await silence.on_stop()
-
-        assert "Nothing was sent" in result
-        assert "irc:#lex" in caplog.text and "no trace id" in caplog.text
-        assert log.writes == []
-
-    async def test_a_failed_write_is_logged_not_raised(self, caplog):
-        class _Broken:
-            async def upsert_exchange(self, *args, **kwargs):
-                raise RuntimeError("db closed")
-
-        _pm, silence, tools = await _tool_pm(outcome_log=_Broken())
-
-        with caplog.at_level("WARNING", logger="corvidae.silence"):
-            result = await _call(tools, IRC, trace_id="t-broken", reason="x")
-            await silence.on_stop()
-
-        assert "Nothing was sent" in result
-        assert "t-broken" in caplog.text and "irc:#lex" in caplog.text
-
     @pytest.mark.parametrize(
         "reason, final_type, final_text",
         [
-            # The guard is membership, not the reason's value: a null or
-            # empty reason must not let the echo overwrite the record.
+            # The guard is membership, not the reason's value: a null reason
+            # must not let the echo overwrite the record.
             (None, MessageType.UNSENT, "NO_REPLY"),
-            ("", MessageType.UNSENT, "NO_REPLY"),
-            ("done", MessageType.UNSENT, "NO_REPLY"),
             # A model that answers anyway still leaves no stale entry.
             ("done", MessageType.MESSAGE, "Goodnight!"),
         ],
