@@ -11,6 +11,21 @@ from it, and it cites none of them. It cites only external references (the
 Persyn BOOTSTRAP specification, the GitHub issues and operator directives
 that record decisions) and the threat model it requires (principle 9).
 
+**What this document governs.** Every principle in §2 and every
+requirement in §3 binds, including those about a particular plugin,
+transport or tool. Where this document speaks about a plugin, the plugin
+meets it. Where it is silent, the plugin defines its own behaviour (its
+tools, config keys, prompts, storage and tuning) in its own documentation
+and tests, and that silence is neither a prohibition nor a gap this
+document must fill. The freedom ends where a plugin would contradict a
+requirement or weaken a principle, need a change to the kernel (principle
+1), change a contract other plugins rely on (a hook's semantics, the
+transport contract in §3.2), or change who may reach the agent, as a new
+transport does (principle 9). Those go to the owner, who decides whether
+this document changes. A plugin that lets untrusted text reach somewhere
+new or a tool do something new records it in the threat model (principle
+9) whether or not this document mentions the plugin.
+
 ## 1. What it is
 
 Corvidae is a personal agent daemon: one Python asyncio process on one
@@ -189,7 +204,9 @@ one is a bug even if its tests pass.
 
 12. **How the work is done.** Red/green TDD; every test under a timeout;
     docs current before a change is complete. A plan for a change takes
-    its requirements from this document, is written to be executed
+    its requirements from this document and, for behaviour this document
+    leaves to a plugin (see "What this document governs" above), from
+    the issue or request that asks for it; it is written to be executed
     without architectural judgment calls, tags each requirement with its
     provenance, and is gated by the owner. Plans
     pass code-grounded adversarial review until a round comes back clean.
