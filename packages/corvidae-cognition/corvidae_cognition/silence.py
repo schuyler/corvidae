@@ -3,11 +3,12 @@
 The agent may end any turn without sending anything. The plugin does three
 things:
 
-  * It appends an instruction telling the model how (reply with exactly
+  * It appends an instruction telling the model how (reply with
     ``NO_REPLY``) to the system prompt of every channel whose transport is
     conversational, through the kernel's ``transform_system_prompt`` hook.
-  * It vetoes a final emission that is exactly ``NO_REPLY``, so nothing
-    reaches the transport and the window records it as unsent.
+  * It vetoes a final emission that carries the ``NO_REPLY`` token — an
+    exact reply, or a reply that embeds it — so nothing reaches the
+    transport and the window records it as unsent.
   * It records every decline (a vetoed ``NO_REPLY`` or an empty final) in
     ``exchange_log.outcomes`` as ``{"silence": "no_reply" | "empty"}``.
 
@@ -24,6 +25,18 @@ logger = logging.getLogger("corvidae.silence")
 
 # Same literal as critique.py's NO_REPLY_MARKER; critique is unchanged.
 NO_REPLY = "NO_REPLY"
+
+
+def _carries_no_reply(text: str) -> bool:
+    """True if the final text carries the NO_REPLY token anywhere in it.
+
+    Containment, not equality: the model is told to reply with exactly the
+    token, but a reply that embeds it ("quiet: NO_REPLY") is a silence
+    signal too and must not leak to the transport. The token is a
+    distinctive control string; ordinary prose does not contain it.
+    """
+    return NO_REPLY in text
+
 
 # The built-in instruction appended to a conversational channel's system
 # prompt (S7); it reaches custom and empty registers too (I1). Operators
@@ -85,13 +98,14 @@ class SilencePlugin(CorvidaePlugin):
 
     @hookimpl
     async def should_send_response(self, channel, text, emission, trace_id, annotations) -> bool | None:
-        """Veto a final that is exactly NO_REPLY, for every origin.
+        """Veto a final that carries the NO_REPLY token, for every origin.
 
-        Anything else is no opinion. An error fails open: a broken plugin
-        must never silence the agent.
+        A reply that is exactly the token, or that embeds it, is a silence
+        signal: nothing reaches the transport. Anything else is no opinion.
+        An error fails open: a broken plugin must never silence the agent.
         """
         try:
-            if emission == "final" and text.strip() == NO_REPLY:
+            if emission == "final" and _carries_no_reply(text):
                 return False
             return None
         except Exception:
@@ -128,7 +142,7 @@ class SilencePlugin(CorvidaePlugin):
             return
         # Only the two decline shapes count; another gate's veto is not ours.
         text = response_text.strip()
-        if text == NO_REPLY:
+        if _carries_no_reply(text):
             kind = "no_reply"
         elif text == "":
             kind = "empty"

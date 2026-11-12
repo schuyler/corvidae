@@ -10,13 +10,15 @@ Design: .claude/plans/215-silence.md. Interface pinned here:
       transform_system_prompt (wrapper) — on a channel owned by a
           conversational transport (IRC, Discord, Signal) appends a blank
           line and REGISTER_FRAGMENT; any other channel is unchanged
-      should_send_response — final emission, text equal to NO_REPLY after
-          stripping, any origin -> False; anything else -> None
+      should_send_response — final emission carrying the NO_REPLY token
+          (an exact reply, or a reply embedding it), any origin -> False;
+          anything else -> None
       on_agent_response — when the newest assistant row is UNSENT: a
-          NO_REPLY response records outcomes {"silence": "no_reply"}, an
-          empty one {"silence": "empty"}, any other unsent final nothing;
-          a sent final records nothing. Writes go through
-          outcome_log.upsert_exchange from tracked tasks that on_stop awaits.
+          response carrying the NO_REPLY token records outcomes
+          {"silence": "no_reply"}, an empty one {"silence": "empty"}, any
+          other unsent final nothing; a sent final records nothing. Writes
+          go through outcome_log.upsert_exchange from tracked tasks that
+          on_stop awaits.
 """
 
 import json
@@ -62,7 +64,16 @@ class TestVeto:
         assert NO_REPLY in REGISTER_FRAGMENT
         assert not hasattr(SilencePlugin, "register_fragment")
 
-    @pytest.mark.parametrize("text", ["NO_REPLY", "  NO_REPLY\n"])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "NO_REPLY",
+            "  NO_REPLY\n",
+            "I'll be quiet: NO_REPLY",
+            "NO_REPLY (standing by)",
+            "nothing to add — NO_REPLY",
+        ],
+    )
     @pytest.mark.parametrize("origin", ["user", "heartbeat", "critique"])
     async def test_marker_final_is_vetoed_for_any_origin(self, text, origin):
         assert await self._verdict(text=text, origin=origin) is False
@@ -71,6 +82,8 @@ class TestVeto:
         "text, emission",
         [
             ("The deadline is Thursday.", "final"),
+            ("No replies from CI yet.", "final"),
+            ("The marker is NO_REPL, a near miss.", "final"),
             ("NO_REPLY", "progress"),
             ("NO_REPLY", "thinking"),
             ("NO_REPLY", "error"),
@@ -268,7 +281,12 @@ async def _respond(response_text: str, final_type: MessageType) -> list[dict]:
 class TestDeclineRecord:
     @pytest.mark.parametrize(
         "response_text, expected",
-        [("NO_REPLY", "no_reply"), (" NO_REPLY\n", "no_reply"), ("", "empty")],
+        [
+            ("NO_REPLY", "no_reply"),
+            (" NO_REPLY\n", "no_reply"),
+            ("quiet, standing by: NO_REPLY", "no_reply"),
+            ("", "empty"),
+        ],
     )
     async def test_unsent_decline_is_recorded(self, response_text, expected):
         writes = await _respond(response_text, MessageType.UNSENT)
