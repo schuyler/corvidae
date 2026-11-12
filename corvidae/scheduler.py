@@ -56,7 +56,7 @@ from corvidae.channel import (
 from corvidae.clock import MAX_WALL_SLEEP_SECONDS, Clock
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.tool import Tool, tool_to_schema
-from corvidae.cron import parse_cron, next_fire as cron_next_fire
+from corvidae.cron import CronParseError, parse_cron, next_fire as cron_next_fire, cron_description
 from corvidae.scheduler_file import read_jobs as read_jobs_file, write_jobs as write_jobs_file
 from corvidae.scheduler_crud import add_job as crud_add, update_job as crud_update, remove_job as crud_remove, list_jobs as crud_list
 from corvidae.scheduler_watch import FileWatcher
@@ -330,9 +330,15 @@ def frame_firing(row: ScheduleRow, tz: tzinfo, overdue: float | None) -> str:
     policy fires late after the daemon was down.
     """
     if row.created_by == "config":
-        every = format_duration(row.interval_seconds) if row.interval_seconds else "once"
+        cron_expr = _cron_expr_from_spec(row.schedule_spec)
+        if cron_expr is not None:
+            cadence = f'cron "{cron_description(cron_expr)}"'
+        elif row.interval_seconds:
+            cadence = f"every {format_duration(row.interval_seconds)}"
+        else:
+            cadence = "once"
         body = (
-            f"Scheduled job \"{row.name}\" (set by the operator, every {every}) is due. "
+            f"Scheduled job \"{row.name}\" (set by the operator, {cadence}) is due. "
             f"Job prompt: {_quote_as_data(row.text)}. "
             "Decide whether and how to act on it."
         )
@@ -360,23 +366,30 @@ class JobSpec:
     name: str
     channel_id: str
     origin: str
-    interval_seconds: float
+    interval_seconds: float | None
     at: str | None
     text: str
+    cron: str | None = None
 
     def schedule_spec(self, tz_name: str) -> str:
         """Canonical string of everything that determines the schedule, so
         a reload recomputes next_fire_at only when it actually changed."""
+        if self.cron is not None:
+            return f"cron={self.cron};tz={tz_name}"
         return f"every={self.interval_seconds!r};at={self.at or ''};tz={tz_name}"
 
     def first_fire(self, now: float, tz: tzinfo) -> float:
         """The first fire time for a newly (re)scheduled job.
 
-        No anchor: one interval from now. ``HH:MM``: the next occurrence.
-        ISO datetime: the anchor itself if future, else the first slot
-        ``anchor + k*every`` after now (``every: 7d`` anchored on a Friday
-        09:00 is "every Friday at 9am").
+        Cron: the next cron slot after now. No anchor: one interval
+        from now. ``HH:MM``: the next occurrence. ISO datetime: the anchor
+        itself if future, else the first slot ``anchor + k*every`` after now
+        (``every: 7d`` anchored on a Friday 09:00 is "every Friday at 9am").
         """
+        if self.cron is not None:
+            return cron_next_fire(
+                parse_cron(self.cron), datetime.fromtimestamp(now, tz), tz,
+            ).timestamp()
         if self.at is None:
             return now + self.interval_seconds
         match = _HHMM.match(self.at)
@@ -410,17 +423,31 @@ def parse_job(raw: object, base_dir: Path) -> JobSpec:
     origin = raw.get("origin", "reminder")
     if origin not in VALID_ORIGINS:
         raise ValueError(f"job {name!r} origin {origin!r} is not one of {', '.join(VALID_ORIGINS)}")
-    if raw.get("every") is None:
-        raise ValueError(f"job {name!r} is missing required field 'every'")
-    interval = parse_duration(raw["every"])
-    at = raw.get("at")
-    if at is not None:
-        at = str(at).strip()
-        if not _HHMM.match(at):
-            try:
-                datetime.fromisoformat(at)
-            except ValueError:
-                raise ValueError(f"job {name!r} 'at' {at!r} is not HH:MM or an ISO datetime") from None
+    every = raw.get("every")
+    cron_expr = raw.get("cron")
+    if every is None and cron_expr is None:
+        raise ValueError(f"job {name!r} needs 'every' or 'cron'")
+    if every is not None and cron_expr is not None:
+        raise ValueError(f"job {name!r} sets both 'every' and 'cron'")
+    if cron_expr is not None:
+        cron_expr = str(cron_expr).strip()
+        try:
+            parse_cron(cron_expr)
+        except CronParseError as exc:
+            raise ValueError(f"job {name!r} has invalid cron {cron_expr!r}: {exc}") from exc
+        interval = None
+        at = None
+    else:
+        interval = parse_duration(every)
+        cron_expr = None
+        at = raw.get("at")
+        if at is not None:
+            at = str(at).strip()
+            if not _HHMM.match(at):
+                try:
+                    datetime.fromisoformat(at)
+                except ValueError:
+                    raise ValueError(f"job {name!r} 'at' {at!r} is not HH:MM or an ISO datetime") from None
 
     # The objective text comes inline or from a file relative to agent.yaml.
     prompt = raw.get("prompt")
@@ -440,7 +467,7 @@ def parse_job(raw: object, base_dir: Path) -> JobSpec:
 
     return JobSpec(
         name=name.strip(), channel_id=channel_id, origin=origin,
-        interval_seconds=interval, at=at, text=prompt.strip(),
+        interval_seconds=interval, at=at, text=prompt.strip(), cron=cron_expr,
     )
 
 
@@ -492,6 +519,7 @@ class SchedulerPlugin(CorvidaePlugin):
         self._task: asyncio.Task | None = None
         self._stale_overdue: dict[int, float] = {}
         self._deferred_rows: set[int | None] = set()
+        self._file_watcher: FileWatcher | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -515,13 +543,7 @@ class SchedulerPlugin(CorvidaePlugin):
             await self._startup_if_ready()
         except Exception:
             logger.warning("scheduler startup deferred to the timer task", exc_info=True)
-        # Start the file watcher if a jobs file is configured.
-        if self._jobs_file_path is not None:
-            self._file_watcher = FileWatcher(
-                self._jobs_file_path,
-                on_change=self._on_jobs_file_changed,
-            )
-            await self._file_watcher.start()
+        await self._restart_watcher()
 
         self._task = asyncio.create_task(self._timer_loop())
 
@@ -529,6 +551,19 @@ class SchedulerPlugin(CorvidaePlugin):
         """Callback: re-sync jobs and wake the timer."""
         await self._sync_jobs()
         self.wake()
+
+    async def _restart_watcher(self) -> None:
+        """Stop the current file watcher (if any) and start a new one if
+        a jobs file is configured. Used by on_start and on_config_reload."""
+        if self._file_watcher is not None:
+            await self._file_watcher.stop()
+            self._file_watcher = None
+        if self._jobs_file_path is not None:
+            self._file_watcher = FileWatcher(
+                self._jobs_file_path,
+                on_change=self._on_jobs_file_changed,
+            )
+            await self._file_watcher.start()
 
     @hookimpl
     async def on_stop(self) -> None:
@@ -552,10 +587,11 @@ class SchedulerPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
-        """Re-read config, re-sync jobs by name, and wake the timer so the
-        change takes effect immediately."""
+        """Re-read config, restart the file watcher, re-sync jobs by name,
+        and wake the timer so the change takes effect immediately."""
         self._apply_config(config)
         if self._started_up:
+            await self._restart_watcher()
             await self._sync_jobs()
         self.wake()
 
@@ -586,7 +622,7 @@ class SchedulerPlugin(CorvidaePlugin):
         jobs_file = sched.get("jobs_file")
         if jobs_file:
             self._jobs_file_path = (Path(self._base_dir) / jobs_file).resolve()
-        self._file_watcher: FileWatcher | None = None
+
 
     def wake(self) -> None:
         """Wake the timer so it re-reads the earliest due row."""
@@ -759,7 +795,8 @@ class SchedulerPlugin(CorvidaePlugin):
             overdue_rows = await self._fetch(db, "enabled = 1 AND next_fire_at <= ?", (now,))
             for row in overdue_rows:
                 overdue = now - row.next_fire_at
-                if row.interval_seconds is None:
+                cron_expr = _cron_expr_from_spec(row.schedule_spec)
+                if row.interval_seconds is None and cron_expr is None:
                     # One-shot reminder: fire late within the window, else missed.
                     if overdue < self._catch_up_window:
                         self._stale_overdue[row.id] = overdue
@@ -772,11 +809,23 @@ class SchedulerPlugin(CorvidaePlugin):
                         )
                         logger.info("scheduler: reminder missed while daemon was down",
                                     extra={"schedule_id": row.id, "overdue_s": round(overdue)})
+                elif cron_expr is not None:
+                    # Cron: skip to the next future slot, no replay of missed firings.
+                    next_fire = cron_next_fire(
+                        parse_cron(cron_expr),
+                        datetime.fromtimestamp(now, self._tz), self._tz,
+                    ).timestamp()
+                    await db.execute(
+                        "UPDATE schedule SET next_fire_at = ? WHERE id = ?", (next_fire, row.id),
+                    )
+                    logger.info("scheduler: cron job skipped ahead after downtime",
+                                extra={"schedule_id": row.id,
+                                       "next_fire_at": format_time(next_fire, self._tz)})
                 elif overdue < row.interval_seconds:
-                    # Recurring, less than one slot behind: fire the missed slot once.
+                    # Recurring (interval), less than one slot behind: fire the missed slot once.
                     self._stale_overdue[row.id] = overdue
                 else:
-                    # Recurring, more than a slot behind: skip ahead, no replay.
+                    # Recurring (interval), more than a slot behind: skip ahead, no replay.
                     next_fire = advance(row.next_fire_at, row.interval_seconds, now, self._tz)
                     await db.execute(
                         "UPDATE schedule SET next_fire_at = ? WHERE id = ?", (next_fire, row.id),
@@ -873,14 +922,21 @@ class SchedulerPlugin(CorvidaePlugin):
         # still being enabled, so a cancel or config removal that landed
         # after the due rows were fetched wins and nothing fires.
         async with self._db_lock:
-            if row.interval_seconds is None:
+            cron_expr = _cron_expr_from_spec(row.schedule_spec)
+            if row.interval_seconds is None and cron_expr is None:
                 cursor = await db.execute(
                     "UPDATE schedule SET enabled = 0, disabled_reason = 'fired', "
                     "last_fired_at = ? WHERE id = ? AND enabled = 1",
                     (now, row.id),
                 )
             else:
-                next_fire = advance(row.next_fire_at, row.interval_seconds, now, self._tz)
+                if cron_expr is not None:
+                    next_fire = cron_next_fire(
+                        parse_cron(cron_expr),
+                        datetime.fromtimestamp(now, self._tz), self._tz,
+                    ).timestamp()
+                else:
+                    next_fire = advance(row.next_fire_at, row.interval_seconds, now, self._tz)
                 cursor = await db.execute(
                     "UPDATE schedule SET next_fire_at = ?, last_fired_at = ? "
                     "WHERE id = ? AND enabled = 1",
