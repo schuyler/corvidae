@@ -37,7 +37,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
-| `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that contains `NO_REPLY` goes unsent, and each decline is recorded in `exchange_log`. It adds the instruction to the system prompt of chat channels |
+| `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that contains `NO_REPLY` goes unsent, and each decline is recorded in `exchange_log`. It adds the instruction to the system prompt of chat channels, and with `silence.mode: tool` or `both` an `end_turn` tool |
 | `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn reviews recent memory (and goals, when loaded) and acts only if something warrants it. Asleep unless configured |
 | `SkillsPlugin` | `skills` | Scans a skills directory for `SKILL.md` files; contributes an index (name + description) to the system prompt via `transform_system_prompt` at conversation start and compaction; provides a `use_skill` tool that loads a skill's full text on demand |
 
@@ -1498,13 +1498,13 @@ model makes both language judgments; the code only fetches evidence:
    `[provenance]`. Stylistic objections queue through `ingest` and wait for
 the channel's next turn. Provenance objections wake the channel with a
 stub whose text tells the agent the default is to send nothing: reply
-contains `NO_REPLY`, and reply in the channel only if its earlier reply
+exactly `NO_REPLY`, and reply in the channel only if its earlier reply
 could lead the other party to take an incorrect action. The plugin's
 `should_send_response` vetoes a `final` on a critique-origin turn whose
 stripped text is `NO_REPLY`; the kernel stores it as `unsent` with the
 not-sent marker. That veto is critique's own and always on with this plugin
 loaded; [SilencePlugin](#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)
-vetoes the same text on every origin. The outcome is
+vetoes any final containing the token on every origin. The outcome is
 recorded as
    `outcomes.provenance = {claims, candidates, supported, objections}`;
    `objections: 0` means every claim was judged supported.
@@ -1625,7 +1625,7 @@ SilencePlugin lets the agent end a turn without saying anything, on any channel,
 
 The test for staying quiet is Grice's: does the agent have anything true, relevant and worth saying to add? "thanks, night!" and "lol ok" fail it; a question passes. The decision is the model's, made in the turn, and it is driven by the system prompt rather than by a score: a channel only gets the option if its prompt says so.
 
-**The instruction.** The plugin wraps the kernel's `transform_system_prompt` hook. Once a channel's identity and register are composed, it adds a blank line and the paragraph below to the end, but only when the transport that owns the channel is conversational (`TransportPlugin.conversational`, true for IRC, Discord, Signal and Zulip). ACP, web and the CLI are not, so they never hear about `NO_REPLY` and always answer; that is deliberate, because a request addressed to the agent in a task session should never go unanswered. (A model can still end a turn with an empty reply anywhere. The kernel leaves that unsent too, and it is recorded the same way.) The built-in text is `REGISTER_FRAGMENT` in `silence.py`; `silence.instruction` replaces it (inline, a file, or a list of files; read at startup, see [configuration.md](configuration.md#silence--the-right-to-silence)):
+**The instruction.** The plugin wraps the kernel's `transform_system_prompt` hook. Once a channel's identity and register are composed, it adds a blank line and the paragraph below to the end, but only when the transport that owns the channel is conversational (`TransportPlugin.conversational`, true for IRC, Discord, Signal and Zulip). ACP, web and the CLI are not, so they never hear about `NO_REPLY` and always answer; that is deliberate, because a request addressed to the agent in a task session should never go unanswered. (A model can still end a turn with an empty reply anywhere. The kernel leaves that unsent too, and it is recorded the same way.) The built-in text is `REGISTER_FRAGMENT` in `silence.py` (`TOOL_FRAGMENT` or `BOTH_FRAGMENT` when `silence.mode` is `tool` or `both`, see below); `silence.instruction` replaces it (inline, a file, or a list of files; read at startup, see [configuration.md](configuration.md#silence--the-right-to-silence)):
 
 ```
 You don't have to answer every message. Before replying, ask whether you have anything true, relevant and worth saying to add. When a conversation has wound down (thanks, goodnight, "lol ok", an acknowledgement that needs nothing back), stay silent: reply with NO_REPLY (and nothing else), and nothing is sent. If they wanted more, they'll say so. A question or request addressed to you still gets a real answer.
@@ -1635,18 +1635,36 @@ The hook runs on the composed prompt whatever the register's source, so a channe
 
 **The veto.** `should_send_response` returns `False` for a `final` emission whose text contains `NO_REPLY` (a containment check, not an exact match), on every turn origin. The kernel stores the row as `unsent` with the not-sent marker, so on later turns the model can see it stayed silent instead of believing it spoke. Nothing reaches the transport. A final that mentions the token in passing (e.g. "reply with NO_REPLY to stop") is also dropped — a known tradeoff of the containment design. Only `final` is covered: a `NO_REPLY` that shows up as progress text beside tool calls goes out. A veto that raises fails open, with a warning, and the text is sent.
 
-**The record.** `on_agent_response` fires for unsent finals too, after the row is in the window. When the final was unsent (`final_was_unsent`) and its text is `NO_REPLY` or empty, the plugin writes `outcomes.silence` on that trace's `exchange_log` row, from a background task so the reply path never waits on the write connection:
+**The record.** `on_agent_response` fires for unsent finals too, after the row is in the window. When the final was unsent (`final_was_unsent`) and its text contains `NO_REPLY` (the same test as the veto) or is empty, the plugin writes `outcomes.silence` on that trace's `exchange_log` row, from a background task so the reply path never waits on the write connection:
 
 | `outcomes.silence` | Meaning |
 |---|---|
-| `no_reply` | The model replied `NO_REPLY` and the veto kept it unsent |
+| `no_reply` | The model's final was `NO_REPLY`, or contained it, and the veto kept it unsent |
 | `empty` | The final had no text and no tool calls; the kernel left it unsent without asking any gate |
+| `tool` | The model called `end_turn` (`silence.mode` `tool` or `both`). It records the call, not what followed: it is written when the tool runs, before the follow-up exists, so a model that then answers anyway still has this row. `outcomes.silence_reason` carries the model's own words, cut at 200 characters |
 
-A `NO_REPLY` that was actually sent (say another gate's veto raised and the send failed open) is not recorded, and neither is a final some other gate vetoed. A turn with two finals, a reply and then a declined follow-up, gets the flag. Without `outcome_log` there is nowhere to write and declines go unrecorded; the veto still works. A write that fails logs a warning naming the trace and channel. A decline with no trace id logs a warning and records nothing.
+A `NO_REPLY` that was actually sent (say another gate's veto raised and the send failed open) is not recorded, and neither is a final some other gate vetoed; the `tool` row above is the exception, because it is written before the final exists. A turn with two finals, a reply and then a declined follow-up, gets the flag. Without `outcome_log` there is nowhere to write and declines go unrecorded; the veto still works. A write that fails logs a warning naming the trace and channel. A decline with no trace id logs a warning and records nothing.
+
+**The `end_turn` tool (`silence.mode`, #797).** Writing a literal `NO_REPLY` is an unusual thing for a chat-trained model to do, since such models are trained to alternate turns and answer. The hypothesis behind the tool is that a tool call is a shape they are trained to emit more readily; whether that holds is what the experiment measures (see The tool's record). With `silence.mode: tool` (or `both`) the plugin registers `end_turn(reason)` through `register_tools`, and the instruction says to call it on its own when nothing needs saying (`TOOL_FRAGMENT`; `both` adds a fallback to the token, `BOTH_FRAGMENT`). `token`, the default, registers no tool and behaves as before. A `silence.instruction` replaces the built-in text in every mode, so in `tool` or `both` mode it has to mention `end_turn`.
+
+**What the tool does, and what it cannot.** The tool has no kernel support, so it does not end the turn: the loop calls the model again after any tool result. The result therefore says `Nothing was sent. Your next message must be exactly NO_REPLY and nothing else.`, and the veto withholds that echo *when the model complies*. If it writes anything else (a near miss, a sign-off, a real answer), that text is sent. The call is the decision and the echo is mechanical; it costs one more model call, which a backend that reuses the cached prompt prefix makes cheap. The tool refuses on a channel whose transport isn't conversational, including a channel no transport owns (an `Error:` result naming the channel and saying to answer normally), and with no channel context.
+
+**The tool's record.** It writes `outcomes.silence = "tool"` and `outcomes.silence_reason` when the tool is called, from a tracked task like the other records, only when `outcome_log` is loaded and the turn has a trace id. The turn's own final is then never recorded over it, whether it was withheld or sent. A `tool` row therefore means "called", not "stayed silent"; count rows against the wind-down messages to measure whether the model uses the tool, and read the sent rows to see whether the follow-up complied.
+
+**Known limits.**
+- Text the model writes alongside the call goes out as progress, because the progress gate runs before the tool executes and receives no tool calls. The tool's description says to call it alone.
+- At `max_turns` the kernel suppresses the tool call and sends the model's own text, or its fallback text if it wrote none, so that turn is not silent and nothing is recorded.
+- The tool is in the tool list of every channel and refuses where it can't work. To remove it, add `end_turn` to `tools.disabled` (globally or per channel); the instruction would still tell the model to call it, so also set `silence.mode: token` or a `silence.instruction` that doesn't mention it.
+- A kernel-level turn-ending tool, which would skip the follow-up call, is a separate proposal.
+
+**Divergences from the PRD.** The code is what runs; where it differs from [prd.md](prd.md) §3.7 (Output gate and the right to silence), this section says how, and the PRD is unchanged until the owner decides which side moves.
+
+- *A declined turn "sends nothing" and "is recorded" (item 5).* In `tool` and `both` mode that is not guaranteed. `end_turn` does not end the turn (the loop calls the model again), so nothing is sent only when the model then echoes `NO_REPLY`; any other follow-up is sent, and text written beside the call goes out as progress. The `tool` row is written when the tool is called, so it also exists for a turn that went on to reply: it records a call, not a decline.
+- *Withholding is for declines (items 4 to 6, and principle 9).* The veto is a containment check, so it also withholds a final that is not a decline but quotes the token, such as a reply repeating an incoming message that contains `NO_REPLY`. Untrusted text can therefore get one reply suppressed without the agent choosing silence. The channel can still answer its next message, and the withheld row is stored as `unsent` and recorded as `no_reply`, so it is visible; but the PRD's "no gate withholds a direct user reply by default" does not hold for a reply that carries the token. See [threat-model.md](threat-model.md).
 
 **Ending the turn.** An unsent final never reaches `send_message`, which is where Discord and Signal give back every outstanding typing slot, ACP completes the prompt and the CLI prints its next `> `. Those four transports now do the same in an `on_agent_response` of their own when the final was unsent (see [the plugin guide](plugin-guide.md#transports-with-per-turn-state)). That runs whether or not this plugin is loaded, so an empty final no longer keeps the typing indicator refreshing or an ACP prompt hanging. On Signal, a release that takes the count to zero sends an explicit typing stop, so the indicator clears at once; Discord has no stop, so its indicator lingers until the client times it out.
 
-**Disabling it.** `plugins.disabled: [silence]` removes the instruction and the veto; `agent.minimal.yaml.example` does this. A restart rebuilds every conversation's system prompt, so disabling the plugin drops the instruction everywhere at once. The windows still hold earlier `NO_REPLY` rows, though, and with no veto the model may imitate them and send the literal text. If that matters, start those conversations fresh.
+**Disabling it.** `plugins.disabled: [silence]` removes the instruction, the veto and the `end_turn` tool; `agent.minimal.yaml.example` does this. A restart rebuilds every conversation's system prompt, so disabling the plugin drops the instruction everywhere at once. The windows still hold earlier `NO_REPLY` rows, though, and with no veto the model may imitate them and send the literal text. If that matters, start those conversations fresh.
 
 **Known gaps.** Appraisal and critique still score a declined turn, so `NO_REPLY` can draw a stylistic objection. The instruction is the same in DMs and group channels; a group-specific variant that names addressing isn't built.
 

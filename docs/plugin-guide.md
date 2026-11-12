@@ -1345,7 +1345,7 @@ class MyTransport(TransportPlugin):
         await self.client.post(channel.scope, event.text)
 ```
 
-`conversational` is a plain fact about the transport, default `False`. Plugins that tailor the system prompt to chats read it: with the `silence` plugin loaded, a conversational transport's channels get the `NO_REPLY` instruction, and a transport left at `False`, third-party ones included, never does. IRC, Discord, Signal and Zulip set it; ACP, web and the CLI don't.
+`conversational` is a plain fact about the transport, default `False`. Plugins that tailor the system prompt to chats read it: with the `silence` plugin loaded, a conversational transport's channels get the silence instruction, and a transport left at `False`, third-party ones included, never does. IRC, Discord, Signal and Zulip set it; ACP, web and the CLI don't.
 
 The filter is `owns(channel)`, which by default is `channel.matches_transport(self.transport)`. Override it only to narrow it: `WebPlugin` also requires that it is enabled. Inbound hooks are not filtered for you; open each inbound hookimpl with `if not self.owns(channel): return`.
 

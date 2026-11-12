@@ -201,7 +201,7 @@ owner's plugin name after the prefix.
 | `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, Zulip, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines; `MemoryPlugin` runs its turn consolidation trigger from it, awaiting nothing, since the send waits on the hook |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
-| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that contains `NO_REPLY` (exact match, pending update), and `SilencePlugin` vetoes any `final` containing `NO_REPLY` (containment check) (cognition extra); a raising implementation fails open (logged, sent); no kernel implementation, so with none registered everything is sent |
+| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes any `final` of any origin that contains `NO_REPLY` (a containment check, not an exact match) (cognition extra); a raising implementation fails open (logged, sent); no kernel implementation, so with none registered everything is sent |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
 | `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None). Each message of a coalesced burst fires it under its own trace, in arrival order, before the turn's model call |
@@ -347,7 +347,7 @@ when the conversation starts or restarts and is not rebuilt at compaction.
 `TransportPlugin.conversational` (default False; IRC, Discord, Signal and
 Zulip set True) is the neutral fact a plugin reads to tell a chat transport from
 one that always answers. `SilencePlugin` is the one implementation: it
-appends the `NO_REPLY` instruction on conversational channels
+appends the silence instruction (`NO_REPLY`, or the `end_turn` tool, per `silence.mode`) on conversational channels
 ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)).
 
 **resolve_system_prompt(value, base_dir)** — if `value` is a string,
@@ -4731,7 +4731,7 @@ packages/corvidae-cognition/   # the cognition extra (docs/cognition.md)
     ├── appraisal.py      # AppraisalPlugin
     ├── critique.py       # CritiquePlugin
     ├── goals.py          # GoalsPlugin (goals table, add/update/retire_goal)
-    ├── silence.py        # SilencePlugin (NO_REPLY veto, decline record, system-prompt instruction)
+    ├── silence.py        # SilencePlugin (NO_REPLY veto, decline record, system-prompt instruction, end_turn tool)
     └── outcome_log.py    # OutcomeLogPlugin (exchange_log)
 ```
 

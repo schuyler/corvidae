@@ -295,7 +295,7 @@ the key.
 | `heartbeat.goals_instruction` | `prompts/heartbeat-goals.md` | restart |
 | `tools.subagent.system_prompt` | built-in | restart |
 | `memory.rubric_prompt` | built-in | restart |
-| `silence.instruction` | built-in (`REGISTER_FRAGMENT`) | restart |
+| `silence.instruction` | built-in (`REGISTER_FRAGMENT`; `TOOL_FRAGMENT` or `BOTH_FRAGMENT` when `silence.mode` is `tool` or `both`) | restart |
 
 Editing a prompt file does not trigger a reload; the change applies when
 the key is next resolved (on reload or at restart, per the table). Whether
@@ -541,7 +541,8 @@ See [threat-model.md](threat-model.md#skills-directory-reaches-the-system-role-1
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `silence.instruction` | string / file / list | built-in | The paragraph `SilencePlugin` appends to a conversational channel's system prompt, telling the model it may reply `NO_REPLY` to send nothing (see [cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)). Same resolution as `heartbeat.prompt`. Keep the literal `NO_REPLY` in any replacement: the veto drops any message containing that token (containment check), not just an exact match. Read at startup only. |
+| `silence.instruction` | string / file / list | built-in | The paragraph `SilencePlugin` appends to a conversational channel's system prompt, telling the model it may stay silent, by replying `NO_REPLY` or, with `silence.mode` `tool` or `both`, by calling `end_turn` (see [cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)). Same resolution as `heartbeat.prompt`. Keep the literal `NO_REPLY` in any replacement in `token` or `both` mode: the veto drops any message containing that token (a containment check, not an exact match), not your wording; in `tool` or `both` mode the replacement must also mention `end_turn`. Read at startup only. |
+| `silence.mode` | string | `token` | How the agent is asked to decline a turn (#797). `token`: the instruction tells it to reply `NO_REPLY`. `tool`: `SilencePlugin` registers an `end_turn(reason)` tool and the instruction tells the model to call it. `both`: the tool first, `NO_REPLY` as a fallback. The tool works on conversational transports only and refuses on any other channel, web, CLI and ACP included. The veto of a `NO_REPLY` final is on in every mode. Any other value, or a `silence:` block that isn't a mapping, fails startup with a `Config error` naming the key, the value and what is accepted. A custom `silence.instruction` replaces the built-in text in every mode, so in `tool` or `both` mode it must mention `end_turn`. Read at startup only. |
 
 ---
 
@@ -877,7 +878,7 @@ channels:
 
 Every channel's system prompt is the agent's identity (`agent.system_prompt`) followed by a blank line and the channel's register, if it has one. The register resolves like any channel setting: the exact entry, then transport-wide entries from most to least specific, then `agent.register_prompt`, then the default the channel's transport ships, then none. Each layer replaces the ones below it; nothing is merged. An explicit `""` or `[]` at any layer means no register, which is how to switch a shipped default off.
 
-Signal, Discord, Zulip and IRC ship defaults (texting-length turns and only the formatting the transport shows; see [prompt-guide.md](prompt-guide.md#chat-register-fragments)). Web, CLI and ACP ship none. A `register_prompt` replaces the whole default. While the `silence` plugin is loaded, a conversational transport's system prompt then gets one more paragraph after the register, which lets the agent reply `NO_REPLY` to send nothing ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy) has the text). It is added whatever the register's source, so a custom register and `register_prompt: ""` still get it; to opt a channel out, disable the plugin (`plugins.disabled: [silence]`). A register file that can't be read logs a WARNING naming the channel and the path, and the conversation starts on the identity alone. Like the identity, the register is fixed when a conversation starts.
+Signal, Discord, Zulip and IRC ship defaults (texting-length turns and only the formatting the transport shows; see [prompt-guide.md](prompt-guide.md#chat-register-fragments)). Web, CLI and ACP ship none. A `register_prompt` replaces the whole default. While the `silence` plugin is loaded, a conversational transport's system prompt then gets one more paragraph after the register, which lets the agent stay silent, by replying `NO_REPLY` or, with `silence.mode` `tool` or `both`, by calling `end_turn` ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy) has the text). It is added whatever the register's source, so a custom register and `register_prompt: ""` still get it; to opt a channel out, disable the plugin (`plugins.disabled: [silence]`). A register file that can't be read logs a WARNING naming the channel and the path, and the conversation starts on the identity alone. Like the identity, the register is fixed when a conversation starts.
 
 ### Transport-wide entries
 
