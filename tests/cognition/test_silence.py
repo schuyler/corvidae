@@ -10,13 +10,15 @@ Design: .claude/plans/215-silence.md. Interface pinned here:
       transform_system_prompt (wrapper) — on a channel owned by a
           conversational transport (IRC, Discord, Signal) appends a blank
           line and REGISTER_FRAGMENT; any other channel is unchanged
-      should_send_response — final emission, text equal to NO_REPLY after
-          stripping, any origin -> False; anything else -> None
+      should_send_response — final emission carrying the NO_REPLY token
+          (an exact reply, or a reply embedding it), any origin -> False;
+          anything else -> None
       on_agent_response — when the newest assistant row is UNSENT: a
-          NO_REPLY response records outcomes {"silence": "no_reply"}, an
-          empty one {"silence": "empty"}, any other unsent final nothing;
-          a sent final records nothing. Writes go through
-          outcome_log.upsert_exchange from tracked tasks that on_stop awaits.
+          response carrying the NO_REPLY token records outcomes
+          {"silence": "no_reply"}, an empty one {"silence": "empty"}, any
+          other unsent final nothing; a sent final records nothing. Writes
+          go through outcome_log.upsert_exchange from tracked tasks that
+          on_stop awaits.
 """
 
 import json
@@ -62,7 +64,16 @@ class TestVeto:
         assert NO_REPLY in REGISTER_FRAGMENT
         assert not hasattr(SilencePlugin, "register_fragment")
 
-    @pytest.mark.parametrize("text", ["NO_REPLY", "  NO_REPLY\n"])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "NO_REPLY",
+            "  NO_REPLY\n",
+            "I'll be quiet: NO_REPLY",
+            "NO_REPLY (standing by)",
+            "nothing to add — NO_REPLY",
+        ],
+    )
     @pytest.mark.parametrize("origin", ["user", "heartbeat", "critique"])
     async def test_marker_final_is_vetoed_for_any_origin(self, text, origin):
         assert await self._verdict(text=text, origin=origin) is False
@@ -71,6 +82,8 @@ class TestVeto:
         "text, emission",
         [
             ("The deadline is Thursday.", "final"),
+            ("No replies from CI yet.", "final"),
+            ("The marker is NO_REPL, a near miss.", "final"),
             ("NO_REPLY", "progress"),
             ("NO_REPLY", "thinking"),
             ("NO_REPLY", "error"),
@@ -268,7 +281,12 @@ async def _respond(response_text: str, final_type: MessageType) -> list[dict]:
 class TestDeclineRecord:
     @pytest.mark.parametrize(
         "response_text, expected",
-        [("NO_REPLY", "no_reply"), (" NO_REPLY\n", "no_reply"), ("", "empty")],
+        [
+            ("NO_REPLY", "no_reply"),
+            (" NO_REPLY\n", "no_reply"),
+            ("quiet, standing by: NO_REPLY", "no_reply"),
+            ("", "empty"),
+        ],
     )
     async def test_unsent_decline_is_recorded(self, response_text, expected):
         writes = await _respond(response_text, MessageType.UNSENT)
@@ -289,3 +307,34 @@ class TestDeclineRecord:
     async def test_other_unsent_final_records_nothing(self):
         """Another gate's veto is not this plugin's decline."""
         assert await _respond("a vetoed answer", MessageType.UNSENT) == []
+
+    async def test_near_miss_not_recorded(self):
+        """A near-miss substring (NO_REPL, No replies) is not a no_reply decline."""
+        writes = await _respond('The marker is NO_REPL', MessageType.UNSENT)
+        assert writes == []
+
+        writes = await _respond('No replies from CI yet.', MessageType.UNSENT)
+        assert writes == []
+
+
+class TestEndToEndConsistency:
+    """A contained final is both dropped (UNSENT) and recorded (no_reply)."""
+
+    async def test_contained_final_dropped_and_recorded(self):
+        from corvidae_cognition.silence import SilencePlugin
+
+        text = 'done, NO_REPLY'
+
+        # The veto: should_send_response returns False
+        pm = create_plugin_manager()
+        pm.register(SilencePlugin(), name='silence')
+        results = await pm.ahook.should_send_response(
+            channel=Channel(transport='test', scope='e2e'),
+            text=text, emission='final', trace_id='e2e', annotations={'origin': 'user'},
+        )
+        assert resolve_reject_wins(results) is False
+
+        # The record: on_agent_response records no_reply
+        writes = await _respond(text, MessageType.UNSENT)
+        assert len(writes) == 1
+        assert writes[0]['outcomes'] == {'silence': 'no_reply'}
