@@ -261,6 +261,7 @@ class SignalPlugin(TransportPlugin):
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._next_request_id = 1
+        self._rpc_timeout = 30.0
         self._pending_requests: dict[int, asyncio.Future] = {}
 
         # Inbound notifications are queued and processed by a separate task
@@ -596,7 +597,12 @@ class SignalPlugin(TransportPlugin):
         writer.write((json.dumps(frame) + "\n").encode("utf-8"))
         await writer.drain()
         try:
-            return await future
+            return await asyncio.wait_for(future, timeout=self._rpc_timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"signal-cli RPC {method!r} timed out after {self._rpc_timeout:.0f} s; "
+                "the daemon may be wedged"
+            ) from None
         finally:
             # A caller that bounds this await (the liveness RPCs, #413) cancels
             # it on timeout. The response may never come, so drop the entry
