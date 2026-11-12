@@ -211,22 +211,28 @@ class RSSPlugin(CorvidaePlugin):
                 items = _parse_feed(resp.content)
                 for item in items:
                     guid = item.get("guid", "")
-                    if guid and guid not in seen.get(url, set()):
+                    if guid and guid not in seen.get(url, []):
                         new_items.append((url, item))
-                        seen.setdefault(url, set()).add(guid)
-
-        # Trim seen sets to prevent unbounded growth (keep last 500 per feed).
-        for url in seen:
-            if len(seen[url]) > 500:
-                # Keep the most recent 500 (arbitrary order in a set; good enough)
-                seen[url] = set(list(seen[url])[:500])
-        self._save_seen(seen)
 
         if not new_items:
             return
 
-        # Cap items per poll.
+        # Cap items per poll BEFORE marking seen, so items beyond the cap
+        # are retried on the next poll cycle.
         new_items = new_items[: self._max_items]
+
+        # Mark only the delivered items as seen.
+        for url, item in new_items:
+            guid = item.get("guid", "")
+            if guid:
+                seen.setdefault(url, []).append(guid)
+
+        # Trim seen sets to prevent unbounded growth (keep last 500 per feed).
+        for url in seen:
+            if len(seen[url]) > 500:
+                # Keep the most recent 500 (list preserves insertion order)
+                seen[url] = seen[url][-500:]
+        self._save_seen(seen)
 
         channels = []
         for cid in self._targets:
