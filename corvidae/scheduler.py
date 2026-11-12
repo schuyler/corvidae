@@ -56,6 +56,10 @@ from corvidae.channel import (
 from corvidae.clock import MAX_WALL_SLEEP_SECONDS, Clock
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.tool import Tool, tool_to_schema
+from corvidae.cron import parse_cron, next_fire as cron_next_fire
+from corvidae.scheduler_file import read_jobs as read_jobs_file, write_jobs as write_jobs_file
+from corvidae.scheduler_crud import add_job as crud_add, update_job as crud_update, remove_job as crud_remove, list_jobs as crud_list
+from corvidae.scheduler_watch import FileWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -503,7 +507,20 @@ class SchedulerPlugin(CorvidaePlugin):
             await self._startup_if_ready()
         except Exception:
             logger.warning("scheduler startup deferred to the timer task", exc_info=True)
+        # Start the file watcher if a jobs file is configured.
+        if self._jobs_file_path is not None:
+            self._file_watcher = FileWatcher(
+                self._jobs_file_path,
+                on_change=self._on_jobs_file_changed,
+            )
+            await self._file_watcher.start()
+
         self._task = asyncio.create_task(self._timer_loop())
+
+    async def _on_jobs_file_changed(self, path: Path) -> None:
+        """Callback: re-sync jobs and wake the timer."""
+        await self._sync_jobs()
+        self.wake()
 
     @hookimpl
     async def on_stop(self) -> None:
@@ -519,6 +536,11 @@ class SchedulerPlugin(CorvidaePlugin):
                 pass
             except Exception:
                 logger.warning("scheduler: timer task raised during shutdown", exc_info=True)
+
+        # Stop the file watcher.
+        if self._file_watcher is not None:
+            await self._file_watcher.stop()
+            self._file_watcher = None
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
@@ -552,6 +574,11 @@ class SchedulerPlugin(CorvidaePlugin):
             sched.get("max_reminders_per_channel", DEFAULT_MAX_REMINDERS_PER_CHANNEL)
         )
         self._jobs_raw = sched.get("jobs", []) if sched.get("jobs") is not None else []
+        self._jobs_file_path: Path | None = None
+        jobs_file = sched.get("jobs_file")
+        if jobs_file:
+            self._jobs_file_path = (Path(self._base_dir) / jobs_file).resolve()
+        self._file_watcher: FileWatcher | None = None
 
     def wake(self) -> None:
         """Wake the timer so it re-reads the earliest due row."""
@@ -624,14 +651,26 @@ class SchedulerPlugin(CorvidaePlugin):
         db = await self._ensure_schema()
         if db is None:
             return
-        if not isinstance(self._jobs_raw, list):
+
+        # Read jobs from the YAML file if configured; otherwise use agent.yaml.
+        jobs_raw = self._jobs_raw
+        if self._jobs_file_path is not None and self._jobs_file_path.exists():
+            try:
+                file_jobs = read_jobs_file(self._jobs_file_path)
+                if file_jobs:
+                    jobs_raw = file_jobs
+            except (ValueError, OSError) as exc:
+                logger.error("scheduler: failed to read jobs file %s: %s",
+                             self._jobs_file_path, exc)
+
+        if not isinstance(jobs_raw, list):
             logger.error("scheduler.jobs must be a list; job sync skipped")
             return
 
         # Validate every entry; invalid names are protected from removal.
         specs: dict[str, JobSpec] = {}
         protected: set[str] = set()
-        for raw in self._jobs_raw:
+        for raw in jobs_raw:
             try:
                 spec = parse_job(raw, Path(self._base_dir))
             except ValueError as exc:
