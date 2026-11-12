@@ -704,8 +704,13 @@ class SchedulerPlugin(CorvidaePlugin):
             try:
                 jobs_raw = read_jobs_file(self._jobs_file_path)
             except (ValueError, OSError) as exc:
-                logger.error("scheduler: failed to read jobs file %s: %s",
+                # A malformed or deleted jobs file must not disable every
+                # file-defined job. Return early and leave existing rows alone,
+                # as parse_job already does for a single invalid entry.
+                logger.error("scheduler: failed to read jobs file %s: %s; "
+                             "keeping existing rows",
                              self._jobs_file_path, exc)
+                return
 
         if not isinstance(jobs_raw, list):
             logger.error("scheduler.jobs must be a list; job sync skipped")
