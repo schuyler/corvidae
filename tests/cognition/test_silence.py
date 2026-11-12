@@ -307,3 +307,34 @@ class TestDeclineRecord:
     async def test_other_unsent_final_records_nothing(self):
         """Another gate's veto is not this plugin's decline."""
         assert await _respond("a vetoed answer", MessageType.UNSENT) == []
+
+    async def test_near_miss_not_recorded(self):
+        """A near-miss substring (NO_REPL, No replies) is not a no_reply decline."""
+        writes = await _respond('The marker is NO_REPL', MessageType.UNSENT)
+        assert writes == []
+
+        writes = await _respond('No replies from CI yet.', MessageType.UNSENT)
+        assert writes == []
+
+
+class TestEndToEndConsistency:
+    """A contained final is both dropped (UNSENT) and recorded (no_reply)."""
+
+    async def test_contained_final_dropped_and_recorded(self):
+        from corvidae_cognition.silence import SilencePlugin
+
+        text = 'done, NO_REPLY'
+
+        # The veto: should_send_response returns False
+        pm = create_plugin_manager()
+        pm.register(SilencePlugin(), name='silence')
+        results = await pm.ahook.should_send_response(
+            channel=Channel(transport='test', scope='e2e'),
+            text=text, emission='final', trace_id='e2e', annotations={'origin': 'user'},
+        )
+        assert resolve_reject_wins(results) is False
+
+        # The record: on_agent_response records no_reply
+        writes = await _respond(text, MessageType.UNSENT)
+        assert len(writes) == 1
+        assert writes[0]['outcomes'] == {'silence': 'no_reply'}
