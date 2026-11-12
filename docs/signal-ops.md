@@ -319,6 +319,49 @@ local path. A file that corvidae cannot read is answered `cannot read <path> (<E
 the path and its permissions`. Sizes are bounded by `signal.max_attachment_size`;
 base64 inflates the frame by about a third.
 
+## Reactions
+
+The agent can react to your messages, and your reactions reach the agent.
+Neither takes any config.
+
+**The agent reacting.** `signal_react(emoji)` and `signal_unreact(emoji)` exist
+whenever the `signal:` block is configured. They take only the emoji. The
+target is the message that started the current turn (the last one, if several
+were answered together), on that channel; there is no way to name another
+message yet (#777). They send signal-cli's `sendReaction` call. If the turn
+did not start from a message (a reminder), corvidae has restarted since, or the
+message is older than the most recent 256 from allowlisted senders, the tool
+says there is no message to react to and the agent replies in text. If
+signal-cli is not connected or rejects the emoji, the tool says so and names the
+channel. The call has no timeout of its own, so a wedged daemon can hold it for
+`tools.call_timeout`. Caveat: the call's parameters follow signal-cli's man
+page and are tested against a fake daemon only; nobody has run them against a
+live signal-cli, so if reactions do not appear on your phone, check the daemon
+log first.
+
+**You reacting.** A reaction from an allowlisted sender is added to the
+conversation as a system line the next time that channel has a turn:
+
+```
+[reaction: 👍 on your message from 2026-11-12 14:03 UTC]
+```
+
+"your" is the bot's message, "their own" is a message of yours, and "a" is used
+when signal-cli did not say whose. It does not start a turn, so a thumbs-up
+gets no reply; the agent sees it when you next write (or a reminder fires).
+Limits:
+
+- Only adds. Removing a reaction is dropped.
+- Only a single emoji, optionally with a skin tone. Flags, keycaps (1️⃣) and
+  multi-part emoji like family or rainbow-flag are dropped, with a WARNING in
+  the log naming the sender. The value goes into the prompt, so the accepted
+  shape is deliberately narrow.
+- No snippet of the message you reacted to, only its time (#777).
+- At most 20 waiting per channel; the oldest goes first, with a WARNING. They
+  are kept in memory and lost if corvidae crashes before the next turn.
+- A sender the allowlist refuses gets one INFO line and nothing else.
+- Like the tools, tested against a fake daemon only.
+
 ## What corvidae ignores
 
 Behavior that looks like a bug and isn't:
@@ -329,8 +372,9 @@ Behavior that looks like a bug and isn't:
   /abs/path]`); a message from a sender the allowlist refuses is dropped
   before anything is fetched. Text sent alongside an attachment is processed
   normally.
-- **Reactions, quotes, edits, and delete-for-everyone** are ignored. None of
-  them carry message text, so they fall out of the same filter.
+- **Quotes, edits, and delete-for-everyone** are ignored. None of them carry
+  message text, so they fall out of the empty-text filter. **Reactions** are
+  not ignored; see [Reactions](#reactions).
 - **Outbound files go one per send**, through the `send_signal_attachment`
   tool (see [Sending files](#sending-files)). There is no way to attach
   several files to one message.
