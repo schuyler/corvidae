@@ -609,6 +609,14 @@ prompt is framed as the operator's. It is hot-reloaded, so it joins the
 just at the next restart. The mitigation is the one finding 4 already
 gives: keep `agent.yaml` unwritable by the daemon user.
 
+The YAML jobs file (scheduler.jobs_file) adds a second operator surface
+for scheduler jobs. The CRUD tools (add_job, update_job, remove_job,
+list_jobs) write to the file and trigger a hot reload. The threat is the
+same as for agent.yaml: a model that can write the jobs file can schedule
+messages to any channel. The mitigation is the same: keep the jobs file
+unwritable by the daemon user. The file is in the working directory by
+default, so the same file-permission discipline applies.
+
 `discord.send_attachment` (issue #521) and `send_signal_attachment` (issue
 #544) are the first tools that send a *file* to a channel the model chooses
 (the cross-channel `notify_other_channel` of #234 also takes a model-chosen channel,
