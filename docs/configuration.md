@@ -541,7 +541,7 @@ See [threat-model.md](threat-model.md#skills-directory-reaches-the-system-role-1
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `silence.instruction` | string / file / list | built-in | The paragraph `SilencePlugin` appends to a conversational channel's system prompt, telling the model it may reply `NO_REPLY` to send nothing (see [cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)). Same resolution as `heartbeat.prompt`. Keep the literal `NO_REPLY` in any replacement: the veto matches that token, not your wording. Read at startup only. |
+| `silence.instruction` | string / file / list | built-in | The paragraph `SilencePlugin` appends to a conversational channel's system prompt, telling the model it may reply `NO_REPLY` to send nothing (see [cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)). Same resolution as `heartbeat.prompt`. Keep the literal `NO_REPLY` in any replacement: the veto drops any message containing that token (containment check), not just an exact match. Read at startup only. |
 
 ---
 

@@ -45,9 +45,11 @@ REGISTER_FRAGMENT = (
     "You don't have to answer every message. Before replying, ask whether you "
     "have anything true, relevant and worth saying to add. When a conversation "
     "has wound down (thanks, goodnight, \"lol ok\", an acknowledgement that "
-    "needs nothing back), stay silent: reply with exactly NO_REPLY and nothing "
-    "else, and nothing is sent. If they wanted more, they'll say so. A question "
-    "or request addressed to you still gets a real answer."
+    "needs nothing back), stay silent: reply with NO_REPLY and nothing else, "
+    "and nothing is sent. If they wanted more, they'll say so. A question "
+    "or request addressed to you still gets a real answer. "
+    "Never write NO_REPLY anywhere else in a message; any reply containing "
+    "the token is dropped entirely."
 )
 
 
