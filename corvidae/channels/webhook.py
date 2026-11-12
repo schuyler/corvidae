@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 QUEUE_MAX = 100
 DEDUPE_IDS = 32
 DELIVERY_ID_HEADERS = ("X-GitHub-Delivery", "Idempotency-Key")
+EVENT_TYPE_HEADERS = ("X-GitHub-Event", "X-Gitea-Event", "X-Gitlab-Event")
 
 _NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _AUTH_MODES = ("bearer", "hmac-sha256")
@@ -56,6 +57,7 @@ class WebhookDelivery:
     endpoint: str
     payload: dict[str, Any]  # treat as read-only; shared by all subscribers
     delivery_id: str | None
+    event_type: str | None = None
 
     @property
     def origin(self) -> str:
@@ -338,13 +340,14 @@ class WebhookPlugin(CorvidaePlugin):
 
         # A repeated delivery id is a provider retry; remember ids only once dispatched.
         delivery_id = next((v for h in DELIVERY_ID_HEADERS if (v := request.headers.get(h))), None)
+        event_type = next((v for h in EVENT_TYPE_HEADERS if (v := request.headers.get(h))), None)
         seen = self._seen[endpoint]
         if delivery_id is not None:
             if delivery_id in seen:
                 return web.json_response({"status": "duplicate"}, status=200)
             seen.append(delivery_id)
 
-        delivery = WebhookDelivery(endpoint, payload, delivery_id)
+        delivery = WebhookDelivery(endpoint, payload, delivery_id, event_type)
         for sub in subs:
             self._enqueue(sub, delivery)
         logger.info('webhook: accepted delivery %s on "%s" for %d subscribers', delivery_id, endpoint, len(subs))
