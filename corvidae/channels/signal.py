@@ -820,16 +820,19 @@ class SignalPlugin(TransportPlugin):
         self, channel: Channel, trace_id: str | None, annotations: dict
     ) -> None:
         """Append this channel's waiting reaction lines as CONTEXT rows."""
+        # Another transport's channel is none of ours (checklist trap 11).
         if not self.owns(channel):
             return
+        # A channel with no window yet has nowhere to put a row; keep the lines.
         conv = channel.conversation
         if conv is None:
             return
+        # Nothing waiting for this channel: the common case, so exit early.
         pending = self._pending_reactions.get(channel.id)
         if not pending:
             return
         # Append each row before removing it, so a failure loses nothing.
-        # shortcut: the row bypasses the cognition funnel's quarantine and has
+        # shortcut: the row bypasses the cognition trust quarantine and has
         # no kernel provenance header (PRD 3.3.11); safe only because the
         # accepted emoji is one symbol and the rest of the row is built here.
         # The allowlist check is the transport's own, not should_process_message.
@@ -1648,14 +1651,18 @@ class SignalPlugin(TransportPlugin):
             )
         channel_id, author, timestamp = entry
 
+        # The sendReaction frame; the recipient is the sender's ACI, the channel
+        # scope, and the target is the message that started this turn.
         params: dict[str, Any] = {
             "recipient": channel_id.partition(":")[2],
             "emoji": emoji,
             "targetAuthor": author,
             "targetTimestamp": timestamp,
         }
+        # Removing a reaction is the same call with remove set.
         if remove:
             params["remove"] = True
+        # The daemon may be down or reject the call; report it, never raise.
         try:
             await self._send_rpc("sendReaction", params)
         except Exception as exc:

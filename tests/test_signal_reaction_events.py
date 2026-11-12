@@ -218,7 +218,9 @@ async def test_reaction_removal_is_dropped(tmp_path, caplog):
     h, spy = await _start(tmp_path)
     try:
         channel = _channel_with_conversation(h)
-        with caplog.at_level(logging.DEBUG):
+        # Scope the level to the transport's logger: an earlier test can leave the
+        # `corvidae` logger at INFO, which a root-only level would not override.
+        with caplog.at_level(logging.DEBUG, logger="corvidae.signal_plugin"):
             await h.plugin._handle_notification("receive", _reaction_params(is_remove=True))
         # The drop is deliberate, so it is logged at DEBUG (design step 2). Only a
         # mention of the removal distinguishes it from the existing "no content" line.
