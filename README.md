@@ -143,7 +143,7 @@ other tenants.
 | AppraisalPlugin | Scores each exchange as it happens |
 | CritiquePlugin | Reviews the agent's replies after the fact |
 | OutcomeLogPlugin | Records each exchange and its outcome |
-| SilencePlugin | Lets the agent end a turn with `NO_REPLY` and send nothing; tells it so on chat channels |
+| SilencePlugin | Lets the agent end a turn with `NO_REPLY` (or an `end_turn` tool, per `silence.mode`) and send nothing; tells it so on chat channels |
 | HeartbeatPlugin | Starts a turn after a quiet spell to review recent memory, acting only when something warrants it (asleep unless `heartbeat.after` is set) |
 
 ## CLI subcommands

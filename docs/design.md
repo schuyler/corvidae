@@ -347,7 +347,7 @@ when the conversation starts or restarts and is not rebuilt at compaction.
 `TransportPlugin.conversational` (default False; IRC, Discord, Signal and
 Zulip set True) is the neutral fact a plugin reads to tell a chat transport from
 one that always answers. `SilencePlugin` is the one implementation: it
-appends the `NO_REPLY` instruction on conversational channels
+appends the silence instruction (`NO_REPLY`, or the `end_turn` tool, per `silence.mode`) on conversational channels
 ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)).
 
 **resolve_system_prompt(value, base_dir)** — if `value` is a string,
@@ -4731,7 +4731,7 @@ packages/corvidae-cognition/   # the cognition extra (docs/cognition.md)
     ├── appraisal.py      # AppraisalPlugin
     ├── critique.py       # CritiquePlugin
     ├── goals.py          # GoalsPlugin (goals table, add/update/retire_goal)
-    ├── silence.py        # SilencePlugin (NO_REPLY veto, decline record, system-prompt instruction)
+    ├── silence.py        # SilencePlugin (NO_REPLY veto, decline record, system-prompt instruction, end_turn tool)
     └── outcome_log.py    # OutcomeLogPlugin (exchange_log)
 ```
 

@@ -17,7 +17,9 @@ things:
 tool-trained model takes a tool call more readily than a magic string. The
 tool's result tells the model to echo ``NO_REPLY``, which the veto then
 withholds, so the follow-up model call the loop makes after any tool result
-cannot leak text. The call is recorded as ``{"silence": "tool"}``.
+cannot leak text when the model complies. The call is recorded as
+``{"silence": "tool", "silence_reason": ...}``; the row means the tool was
+called, not that nothing was sent.
 
 With the plugin disabled there is no instruction and no veto.
 """
@@ -88,10 +90,6 @@ END_TURN_RESULT = (
     "Nothing was sent. Your next message must be exactly NO_REPLY and nothing else."
 )
 
-# How many end_turn traces to remember until their final reaches
-# on_agent_response; older ones are dropped (the write already happened).
-_ENDED_TRACES_CAP = 256
-
 _MODE_FRAGMENTS = {
     "token": REGISTER_FRAGMENT,
     "tool": TOOL_FRAGMENT,
@@ -117,8 +115,9 @@ class SilencePlugin(CorvidaePlugin):
         # How silence is asked for: token (default), tool or both.
         self._mode: str = "token"
         # Traces that called end_turn, so the echoed NO_REPLY final does not
-        # overwrite the tool's outcome under the same key.
-        self._ended: dict[str, str] = {}
+        # overwrite the tool's outcome under the same key. A trace leaves the
+        # set when its final reaches on_agent_response.
+        self._ended: set[str] = set()
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -130,12 +129,19 @@ class SilencePlugin(CorvidaePlugin):
         """
         await super().on_init(pm, config)
         block = config.get("silence")
-        mode = block.get("mode", "token") if isinstance(block, dict) else "token"
-        # Reject an unknown mode loudly: a typo must not quietly fall back.
-        if not isinstance(mode, str) or mode not in SILENCE_MODES:
+        # The runtime reports a ValueError from on_init as "Config error:
+        # <detail> — check <path>", so the message carries the detail only.
+        # A scalar block (``silence: tool``) is a typo, not "no block".
+        if block is not None and not isinstance(block, dict):
             raise ValueError(
-                f"Config error: silence.mode is {mode!r}; use one of "
-                f"{', '.join(SILENCE_MODES)} — check agent.yaml"
+                f"silence is {block!r}; use a mapping such as "
+                f"'silence: {{mode: tool}}'"
+            )
+        mode = block.get("mode", "token") if block else "token"
+        # Reject an unknown mode loudly: a typo must not quietly fall back.
+        if mode not in SILENCE_MODES:
+            raise ValueError(
+                f"silence.mode is {mode!r}; use one of {', '.join(SILENCE_MODES)}"
             )
         self._mode = mode
         self._instruction = resolve_prompt(
@@ -149,8 +155,9 @@ class SilencePlugin(CorvidaePlugin):
             return
         plugin = self
 
-        async def end_turn(reason: str, _ctx: ToolContext | None = None) -> str:
+        async def end_turn(reason: str = "", _ctx: ToolContext | None = None) -> str:
             """End your turn without sending anything. Call it on its own, with no other text, when nothing needs saying. reason: one short phrase on why."""
+            # A call with no channel cannot be checked or recorded; refuse it.
             channel = _ctx.channel if _ctx is not None else None
             if channel is None:
                 return (
@@ -164,6 +171,7 @@ class SilencePlugin(CorvidaePlugin):
                     f"Error: end_turn is not available on {channel.id}, where every "
                     "request gets an answer; answer normally"
                 )
+            # Record the call against the turn's trace, if it has one.
             trace_id = get_attribution().get("trace_id")
             if trace_id is None:
                 logger.warning(
@@ -171,7 +179,7 @@ class SilencePlugin(CorvidaePlugin):
                     "recorded", channel.id, extra={"channel": channel.id},
                 )
             else:
-                plugin._remember_ended(trace_id, reason)
+                plugin._ended.add(trace_id)
                 plugin._record(
                     trace_id, channel.id,
                     {"silence": "tool", "silence_reason": str(reason)[:200]},
@@ -186,12 +194,6 @@ class SilencePlugin(CorvidaePlugin):
             if isinstance(plugin, TransportPlugin) and plugin.owns(channel):
                 return bool(plugin.conversational)
         return False
-
-    def _remember_ended(self, trace_id: str, reason: str) -> None:
-        """Note that ``trace_id`` called end_turn, bounded so it cannot grow."""
-        self._ended[trace_id] = reason
-        while len(self._ended) > _ENDED_TRACES_CAP:
-            self._ended.pop(next(iter(self._ended)))
 
     def _record(self, trace_id: str, channel_id: str, outcomes: dict) -> None:
         """Write ``outcomes`` to exchange_log from a tracked fire-and-forget
@@ -275,11 +277,13 @@ class SilencePlugin(CorvidaePlugin):
                 extra={"channel": channel.id, "trace_id": trace_id},
             )
             return
-        if not unsent:
-            return
-        # A turn that called end_turn already has its outcome; the echoed
-        # NO_REPLY must not replace it under the same key.
-        if trace_id is not None and self._ended.pop(trace_id, None) is not None:
+        # A turn that called end_turn already has its outcome; its final,
+        # echoed or not, must not replace it under the same key. Leave the
+        # set whether or not the final was withheld.
+        ended = trace_id is not None and trace_id in self._ended
+        if ended:
+            self._ended.discard(trace_id)
+        if not unsent or ended:
             return
         # Only the two decline shapes count; another gate's veto is not ours.
         text = response_text.strip()

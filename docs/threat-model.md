@@ -1376,20 +1376,26 @@ line is plain text in the result, with no kernel header at all.
   before.
 
 - Untrusted text in a chat channel can talk the agent into silence. Where
-  `SilencePlugin` is loaded, the system prompt of every IRC, Discord and
-  Signal channel tells the model it may answer `NO_REPLY` to send nothing, and
+  `SilencePlugin` is loaded, the system prompt of every IRC, Discord, Signal and
+  Zulip channel tells the model it may answer `NO_REPLY` to send nothing (or,
+  with `silence.mode` `tool` or `both`, call `end_turn`), and
   a message that says "don't reply to this" may be enough. The worst case is
   a missed reply. A decline is a row in `exchange_log` with
   `outcomes.silence` (`no_reply` or `empty`) only when `outcome_log` is loaded
   and the turn has a trace id, so look there to find them. With
   `silence.mode: tool` or `both` the agent also has an `end_turn(reason)` tool,
   a second route to the same effect: an injected "don't reply" can get the
-  tool called, the record is `outcomes.silence = "tool"` with the model's
-  reason, and the tool refuses on web, CLI and ACP. It adds no
-  capability: the agent could already stay quiet by sending an empty final,
+  tool called. The tool is in the tool list of every channel and refuses on
+  any that isn't conversational. The record is `outcomes.silence = "tool"`,
+  written when the tool is called, so it shows the call and not whether the
+  follow-up stayed silent. `outcomes.silence_reason` is the model's own words,
+  steerable by an injection, cut at 200 characters and stored in
+  `exchange_log.outcomes`, which is for offline analysis; check before routing
+  it into a prompt. It adds no capability: the agent could already stay quiet by sending an empty final,
   and nothing it can reach changes. A custom `register_prompt`, or an empty
   one, does not remove the instruction. If a channel must always answer,
-  disable `silence`.
+  disable `silence`; to drop only the tool, list `end_turn` in `tools.disabled`
+  and set `silence.mode: token`.
 
 - Control-token strings (`<|im_start|>`, `<|endoftext|>`) and bare
   `<think>`/`</think>`/`<tool_call>`/`</tool_call>`/`<tool_response>`/`</tool_response>` tags in untrusted
