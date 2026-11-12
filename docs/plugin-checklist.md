@@ -15,10 +15,20 @@ file is the short path; it does not replace either.
 
 ## 1. Before you write anything
 
-1. Read `docs/prd.md` principles 1, 5, 9 and 12 (the numbered list near the top, roughly lines 50–190).
-2. If the work comes from an issue or a plan, compare it with the PRD. List every
-   place they disagree, **post the list and your plan as a comment on the issue,
-   and wait for the owner.** Do not pick a side.
+1. Read `docs/prd.md` principles 1, 5, 9 and 12 (§2, the numbered list near the top, roughly lines 62–220).
+2. If the work comes from an issue or a plan, compare it with the PRD (its
+   opening paragraph, "What this document governs", says where it binds).
+   Sort every difference:
+   - **Wait for the owner** if the issue contradicts, rules out or omits a PRD
+     requirement, weakens a principle, or the PRD is silent about the kernel, a
+     hook or contract other plugins rely on, or a new transport. Do not pick a
+     side.
+   - **Proceed** if the PRD is silent about behaviour inside your plugin (its
+     tools, config keys, prompts, storage, tuning). Mark these "plugin-defined"
+     and document them in step 6. Silence is not a prohibition.
+
+   Either way, **post the comparison and your plan as a comment on the issue**
+   before you write code. If anything is in the first group, wait for the owner.
 3. Decide where the code goes. Default: **a plugin, never the kernel.**
    - Principle 1: every capability is an optional plugin. The kernel is only the
      agent loop, queues, context window, channels, hooks, tools, LLM client,
