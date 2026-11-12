@@ -1203,7 +1203,15 @@ deciding only what to newly append and in what order.
    concluded gets silence. A declined turn sends nothing, is withheld as a
    vetoed final is (item 2) so the agent knows it stayed silent, and is
    recorded in the outcome log. In conversational registers it errs toward
-   silence: a missed reply costs the user one re-prompt.
+   silence: a missed reply costs the user one re-prompt. How the agent
+   signals a decline is the plugin's choice (a token in the final text, a
+   tool call, or both). The veto that enforces it is the agent's own act, not
+   a gate in the sense of item 4. A plugin that matches a token may treat any
+   final containing it as the signal; that withholds a final which only
+   quotes the token, which is accepted, because the withheld row and the
+   outcome record keep it visible (principle 5) and the cost is one
+   re-prompt. A signal followed by text that is sent is not a decline: it is
+   not recorded as one, and what was sent is not withheld.
 6. A final with no text and no tool calls is a decline (item 5): it is
    withheld, never sent. A generation that stopped before its reasoning
    finished is not a decline but a failed generation. The agent rescues
@@ -1732,6 +1740,7 @@ record that holds the reasoning.
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
 | The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
+| A decline is signalled by a plugin-chosen mechanism (token, tool or both) and enforced by the agent's own veto, which is not a gate; containment matching is accepted with its false positives made visible, not prevented; a signal followed by sent text is not a decline | #791, #795, #797, #799 |
 | Model endpoints may be remote; a profile's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each profile sends | #217 |
 | Critique is gated: stylistic lenses run on salience, the provenance check on every claim about the past, never unconditionally per reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
 | No inline refine step: the sent reply is the candidate, and correction arrives on a later turn | principle 3; §3.7 Critique 4; the Persyn spec's own deferred-deliberation default |
