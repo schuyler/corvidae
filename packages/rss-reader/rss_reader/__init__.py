@@ -260,19 +260,19 @@ class RSSPlugin(CorvidaePlugin):
             )
         logger.info("rss: delivered %d new items", len(new_items))
 
-    def _load_seen(self) -> dict[str, set[str]]:
+    def _load_seen(self) -> dict[str, list[str]]:
         if not self._state_path.exists():
             return {}
         try:
             raw = json.loads(self._state_path.read_text())
-            # JSON has list values; convert to sets.
-            return {k: set(v) for k, v in raw.items()}
+            # JSON has list values; preserve insertion order.
+            return {k: list(v) for k, v in raw.items()}
         except (json.JSONDecodeError, OSError):
             logger.warning("rss: could not read state file %s, starting fresh", self._state_path)
             return {}
 
-    def _save_seen(self, seen: dict[str, set[str]]) -> None:
+    def _save_seen(self, seen: dict[str, list[str]]) -> None:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        # Sets → lists for JSON.
-        raw = {k: sorted(v) for k, v in seen.items()}
+        # Lists → JSON (order preserved for the [-500:] trim).
+        raw = {k: list(v) for k, v in seen.items()}
         self._state_path.write_text(json.dumps(raw, indent=2))

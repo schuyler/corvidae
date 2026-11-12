@@ -166,13 +166,13 @@ def test_load_seen_existing(tmp_path: Path):
     }))
     plugin._state_path = state_file
     seen = plugin._load_seen()
-    assert seen == {"https://example.com/feed": {"guid1", "guid2"}}
+    assert seen == {"https://example.com/feed": ["guid1", "guid2"]}
 
 
 def test_save_and_load_roundtrip(tmp_path: Path):
     plugin = _make_plugin({})
     plugin._state_path = tmp_path / "seen.json"
-    seen = {"https://example.com/feed": {"guid1", "guid2", "guid3"}}
+    seen = {"https://example.com/feed": ["guid1", "guid2", "guid3"]}
     plugin._save_seen(seen)
     loaded = plugin._load_seen()
     assert loaded == seen
@@ -278,3 +278,55 @@ async def test_poll_once_caps_items_per_poll(tmp_path: Path):
 
     # Only 1 item delivered (capped)
     assert plugin._spill.notify.call_count == 1
+
+
+class TestSecondPoll:
+    """Regression: _load_seen returns lists, not sets, so list ops
+    (.append, [-500:]) work on the second and subsequent polls."""
+
+    async def test_second_poll_does_not_crash(self, tmp_path):
+        plugin = _make_plugin({})
+        plugin._feeds = ["https://example.com/feed.xml"]
+        plugin._channel_id = "test:channel"
+        plugin._state_path = tmp_path / "seen.json"
+        plugin._max_chars = 2000
+        plugin._poll_secs = 60
+        plugin._max_items = 10
+        plugin._targets = ("test:channel",)
+
+        # Seed the state file with a seen guid (simulating a first poll).
+        import json
+        plugin._state_path.parent.mkdir(parents=True, exist_ok=True)
+        plugin._state_path.write_text(json.dumps({
+            "https://example.com/feed.xml": ["guid-1", "guid-2"]
+        }))
+
+        # Second poll: feed has guid-1 (seen) + guid-3 (new).
+        feed_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<title>Test</title><link>https://example.com</link><description>Test</description>
+<item><guid>guid-1</guid><title>Old</title><link>https://example.com/1</link><description>Old</description></item>
+<item><guid>guid-3</guid><title>New</title><link>https://example.com/3</link><description>New</description></item>
+</channel></rss>"""
+
+        mock_resp = MagicMock()
+        mock_resp.content = feed_xml.encode()
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        mock_channel = MagicMock()
+        with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=mock_channel)):
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                await plugin._poll_once()  # Must not crash
+
+        # Only the new guid (guid-3) should be delivered.
+        assert plugin._spill.notify.call_count == 1
+
+        # State file should now have all 3 guids (2 old + 1 new).
+        saved = json.loads(plugin._state_path.read_text())
+        assert "guid-3" in saved["https://example.com/feed.xml"]
+        assert "guid-1" in saved["https://example.com/feed.xml"]
