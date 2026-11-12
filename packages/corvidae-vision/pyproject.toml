@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "corvidae-vision"
+version = "0.1.0"
+description = "Vision plugin for corvidae: image analysis via the local multimodal LLM"
+requires-python = ">=3.13"
+dependencies = [
+    "corvidae",
+]
+
+[tool.uv.sources]
+corvidae = { workspace = true }
+
+[project.entry-points.corvidae]
+vision = "corvidae_vision:VisionPlugin"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
