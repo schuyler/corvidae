@@ -91,10 +91,10 @@ The resulting URL looks like this, with your application id and the
 permissions integer the generator computes. For the five permissions above
 that integer is `274877975616` (View Channels 1024, Send Messages 2048, Add
 Reactions 64, Read Message History 65536, Send Messages in Threads
-274877906944). This page gave no integer before; the earlier three
-permissions alone come to `274877910016`. If you invited the bot already,
-add the two new ones to its role (or re-run the invite URL) rather than
-removing it.
+274877906944). If you invited the bot already, add the two new ones to its role (or
+re-run the invite URL) rather than removing it. The `start_thread` tool
+additionally needs Create Public Threads (34359738368); with it the integer
+is `309237713984`.
 
 ```
 https://discord.com/oauth2/authorize?client_id=<application id>&scope=bot&permissions=<integer>
@@ -171,7 +171,7 @@ bot, and it will not tell them so.
   burst of messages answered in one turn, that is the last one. The emoji is a
   Unicode emoji or a custom `<:name:id>`. If the turn did not start from a
   message (a reminder, say), the message is from before the last restart or
-  older than the most recent 256 allowed messages, the tool says there is no
+  older than the most recent 256 allowed messages (counted across all channels), the tool says there is no
   message to react to and the agent falls back to text. Reactions from users
   are not delivered to the agent. These tools are tested against fake
   clients, not a real server, so a permission or emoji quirk Discord has and

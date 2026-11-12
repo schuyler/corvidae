@@ -40,7 +40,7 @@ Take the `-Linux-native` build (GraalVM-compiled) rather than the JVM one and
 you need no JRE at all — whatever Java the host happens to have, the native
 build means signal-cli doesn't care.
 
-**Pin the version.** corvidae's JSON-RPC calls are verified against 0.14.7.
+**Pin the version.** corvidae's JSON-RPC calls are verified against 0.14.7, except `sendReaction`, which is pinned only against a fake daemon (see [Reactions](#reactions)).
 Tracking "latest" reintroduces exactly the drift the pin exists to prevent.
 Upgrading is fine — just do it deliberately, and re-check the method names
 in `corvidae/channels/signal.py` against the new release's `--help` output.
@@ -330,7 +330,7 @@ target is the message that started the current turn (the last one, if several
 were answered together), on that channel; there is no way to name another
 message yet (#777). They send signal-cli's `sendReaction` call. If the turn
 did not start from a message (a reminder), corvidae has restarted since, or the
-message is older than the most recent 256 from allowlisted senders, the tool
+message is older than the most recent 256 from allowlisted senders (counted across all channels, not per channel), the tool
 says there is no message to react to and the agent replies in text. If
 signal-cli is not connected or rejects the emoji, the tool says so and names the
 channel. The call has no timeout of its own, so a wedged daemon can hold it for
@@ -340,13 +340,13 @@ live signal-cli, so if reactions do not appear on your phone, check the daemon
 log first.
 
 **You reacting.** A reaction from an allowlisted sender is added to the
-conversation as a system line the next time that channel has a turn:
+conversation as a system line the next time that channel has a turn that is not a retry:
 
 ```
 [reaction: 👍 on your message from 2026-11-12 14:03 UTC]
 ```
 
-"your" is the bot's message, "their own" is a message of yours, and "a" is used
+"your" means the target's author is not the sender (in a one-to-one chat, the bot), "their own" is a message of yours, and "a" is used
 when signal-cli did not say whose. It does not start a turn, so a thumbs-up
 gets no reply; the agent sees it when you next write (or a reminder fires).
 Limits:
@@ -357,7 +357,7 @@ Limits:
   the log naming the sender. The value goes into the prompt, so the accepted
   shape is deliberately narrow.
 - No snippet of the message you reacted to, only its time (#777).
-- At most 20 waiting per channel; the oldest goes first, with a WARNING. They
+- At most 20 waiting per channel; the oldest is dropped, with a WARNING. They
   are kept in memory and lost if corvidae crashes before the next turn.
 - A sender the allowlist refuses gets one INFO line and nothing else.
 - Like the tools, tested against a fake daemon only.

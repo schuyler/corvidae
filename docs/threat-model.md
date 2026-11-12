@@ -1481,7 +1481,7 @@ Specific to this source:
 The residual risk is the same as any funnel source: an operator-controlled
 folder whose content is framed, not trusted.
 
-### 18. Reactions: a new tool, and a new way for a sender's text to reach the prompt (accepted)
+### 18. Reactions: a new tool, and a new way for a sender's text to reach the prompt (accepted, #545, #546, #233)
 
 PRD principle 9 asks for an entry when a tool can do something new or untrusted
 text can reach somewhere new. Emoji reactions do both.
@@ -1510,8 +1510,8 @@ the window as a `role: system` CONTEXT row of the form
 `[reaction: <emoji> on <whose> message from <UTC time>]`. The emoji is
 sender-controlled text in a system-role row, which is the finding 3 shape, and
 this path skips both of its usual guards: the row has no kernel provenance
-header (PRD §3.3.11) and it does not go through the funnel's or the cognition
-trust quarantine. The allowlist check is the transport's own `_is_allowed`, not
+header (PRD §3.3.11) and it does not go through the cognition funnel's trust
+quarantine. The allowlist check is the transport's own `_is_allowed`, not
 `should_process_message`, so a plugin that vetoes there does not see it.
 
 Mitigations:

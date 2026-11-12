@@ -3586,7 +3586,7 @@ task returns inherits the trace of the message that started it, so it reacts to
 that message. The local emoji check is non-empty and at most 16 code points;
 whether it is a real emoji is signal-cli's call, and its rejection text comes
 back in the tool's error. Any failure (daemon not connected, daemon rejection)
-is logged at WARNING with the traceback and returned as a "Could not react"
+is logged at WARNING with the traceback and returned as a "Could not react" or "Could not remove reaction"
 string naming the channel, with retry-or-reply-in-text as the remedy.
 
 Known limits: the tools can only reach the triggering message until #777
