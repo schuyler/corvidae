@@ -564,6 +564,9 @@ restart = [
 timepiece = [
     { name = "corvidae-timepiece" },
 ]
+vision = [
+    { name = "corvidae-vision" },
+]
 webhook-notify = [
     { name = "webhook-notify" },
 ]
@@ -588,6 +591,7 @@ requires-dist = [
     { name = "corvidae-inotify", marker = "extra == 'inotify'", editable = "packages/corvidae-inotify" },
     { name = "corvidae-restart", marker = "extra == 'restart'", editable = "packages/corvidae-restart" },
     { name = "corvidae-timepiece", marker = "extra == 'timepiece'", editable = "packages/corvidae-timepiece" },
+    { name = "corvidae-vision", marker = "extra == 'vision'", editable = "packages/corvidae-vision" },
     { name = "cross-channel-send", marker = "extra == 'cross-channel-send'", editable = "packages/cross-channel-send" },
     { name = "ddgs", specifier = ">=9.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.4" },
@@ -601,7 +605,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "webhook-notify", marker = "extra == 'webhook-notify'", editable = "packages/webhook-notify" },
 ]
-provides-extras = ["dev", "acp", "discord", "cross-channel-send", "context-panel", "webhook-notify", "cognition", "restart", "timepiece", "inotify"]
+provides-extras = ["dev", "acp", "discord", "cross-channel-send", "vision", "context-panel", "webhook-notify", "cognition", "restart", "timepiece", "inotify"]
 
 [package.metadata.requires-dev]
 dev = [

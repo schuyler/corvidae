@@ -56,7 +56,7 @@ jobs:
           PY
 
       - name: Run kernel tests
-        run: uv run --no-sync pytest -q --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify
+        run: uv run --no-sync pytest -q --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=packages/corvidae-vision/tests
 
       # Advisory until the tree is clean (#111, #455): the output is in the
       # log, but a finding does not fail the run. Drop continue-on-error in
@@ -107,7 +107,7 @@ jobs:
           PY
 
       - name: Run tests
-        run: uv run --no-sync pytest -q
+        run: uv run --no-sync pytest -q --ignore=packages/corvidae-vision/tests
 
   # Cognition without its sqlite-vec extra (#130): the FTS5-only degradation
   # path PRD §3.7 (Memory 5) requires. Without this job the vector tests skip
