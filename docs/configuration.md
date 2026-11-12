@@ -472,7 +472,16 @@ The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)
 | `scheduler.catch_up_window` | float (seconds) | `3600` | On startup, a one-shot reminder that came due while the daemon was down fires once (prefixed `[overdue by …, daemon was down]`) if it is late by less than this; older ones are disabled as `missed`. |
 | `scheduler.max_reminders_per_channel` | integer | `50` | Pending tool-created reminders allowed per channel. `remind_me` refuses beyond it. Bounds what a hostile speaker can park in the table ([threat-model.md](threat-model.md)). |
 | `scheduler.jobs` | list | `[]` | Operator jobs, synced by `name` on startup and on every reload. See below. |
-| `scheduler.jobs_file` | path | — | Path to a YAML file with job definitions (relative to `agent.yaml`). When set and the file exists, jobs are read from the file instead of `scheduler.jobs`. The file is watched for changes (mtime polling, 5 s); edits trigger a re-sync without a restart. Format: `{"jobs": [{"name": ..., "channel": ..., "cron": "M H DOM MON DOW", "origin": ..., "prompt": ...}]`. Cron supports `*`, `N`, `N-M`, `*/N`, lists, and range-with-step. |
+| `scheduler.jobs_file` | path | — | Path to a YAML file with job definitions (relative to `agent.yaml`). When set and the file exists, jobs are read from the file instead of `scheduler.jobs`. The file is watched for changes (mtime polling, 5 s); edits trigger a re-sync without a restart. Format (YAML):
+```
+jobs:
+  - name: morning-checkin
+    channel: signal:4d8d...
+    cron: "0 8 * * *"
+    origin: reminder
+    prompt: "Good morning."
+```
+Cron supports `*`, `N`, `N-M`, `*/N`, lists, and range-with-step. The file is watched for changes (mtime polling, 5 s); edits trigger a re-sync without a restart. A malformed file leaves existing rows alone (logged, not fatal). |
 
 Each job:
 
@@ -481,8 +490,9 @@ Each job:
 | `name` | yes | Unique; the sync key. Renaming a job disables the old row and creates a new one. |
 | `channel` | yes | `transport:scope` to fire into. Any channel, including one no transport owns, such as `internal:notes`, whose replies go to the log and `sessions.db` only. |
 | `origin` | no | `reminder` (default); becomes `annotations["origin"]`, which the model sees as `[annotations: origin=reminder]` under the notification header. `heartbeat` is still accepted so old configs load, but a scheduler heartbeat is superseded by the [`heartbeat`](#heartbeat--a-turn-on-system-idle) plugin; delete the job when you enable the plugin, or both will run turns on `internal:heartbeat`. |
-| `every` | yes | Interval: `30s`, `20m`, `6h`, `1d`, `7d`, `1h30m`, or a number of seconds. |
-| `at` | no | Anchor. `HH:MM`: the first fire is the next such time, then every `every`. An ISO datetime: slots are that instant plus multiples of `every` (`every: 7d` with `at: "2026-10-16T09:00"`, a Friday, is every Friday at 09:00). Without it, the first fire is one interval after the job is first synced. |
+| `every` | one of `every`/`cron` | Interval: `30s`, `20m`, `6h`, `1d`, `7d`, `1h30m`, or a number of seconds. Mutually exclusive with `cron`. |
+| `cron` | one of `every`/`cron` | Cron expression: `M H DOM MON DOW`. Fire times are the next matching slots. Mutually exclusive with `every`. |
+| `at` | no | Anchor. `HH:MM`: the first fire is the next such time, then every `every` (or next cron slot). An ISO datetime: slots are that instant plus multiples of `every`. Without it, the first fire is one interval after the job is first synced (or the next cron slot). |
 | `prompt` / `prompt_file` | one of them | The job's text. `prompt_file` is relative to the directory holding `agent.yaml`. |
 
 The next fire time is computed from the scheduled time, not the fire time, so jobs do not drift; a job more than one interval behind (after downtime) skips to the next slot rather than replaying. On reload, a changed `every`, `at`, or `timezone` reschedules a job from now; a changed `prompt`, `channel`, or `origin` keeps its schedule. A job removed from the list is disabled (`removed_from_config`), which survives restart. An invalid entry logs an ERROR and leaves its existing row as it was.
@@ -496,7 +506,13 @@ scheduler:
       every: 7d
       at: "2026-10-16T09:00"
       prompt: "Post a short summary of what we worked on this week."
+    - name: morning-brief
+      channel: signal:4d8d...
+      cron: "0 8 * * *"
+      prompt: "Good morning. Here's what's on today."
 ```
+
+The four CRUD tools (`add_job`, `update_job`, `remove_job`, `list_jobs`) write to the `jobs_file` and trigger a hot reload. They are registered on every channel; see [threat-model.md](threat-model.md) for the exposure.
 
 A job costs a main-model turn per firing on the shared backend; keep intervals in hours. The firing text is framed as data for the model to judge ("Decide whether and how to act on it"), not as an order.
 
