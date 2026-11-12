@@ -24,7 +24,10 @@ from helpers import with_chat_llm
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae_cognition.heartbeat import (
     DEFAULT_HEARTBEAT_PROMPT,
+    DEFAULT_MEMORY_LIMIT,
+    DEFAULT_RETIRED_GOAL_LIMIT,
     GOALS_INSTRUCTION,
+    MEMORY_HEADER,
     frame_beat,
     HEARTBEAT_CHANNEL,
     HeartbeatPlugin,
@@ -358,19 +361,19 @@ async def test_rejects_a_bad_retired_goal_limit(make_env, bad):
     assert "agent.yaml" in message
 
 
-def test_review_limits_default_to_twenty_and_accept_zero():
-    """Absent or null limits are 20; 0 is a valid count (reviews none)."""
+def test_review_limits_default_to_five_and_accept_zero():
+    """Absent or null limits are 5; 0 is a valid count (reviews none)."""
     from corvidae_cognition.heartbeat import (
         parse_memory_limit,
         parse_retired_goal_limit,
     )
 
-    assert parse_memory_limit({}) == 20
-    assert parse_memory_limit({"heartbeat": {"memory_limit": None}}) == 20
+    assert parse_memory_limit({}) == 5
+    assert parse_memory_limit({"heartbeat": {"memory_limit": None}}) == 5
     assert parse_memory_limit({"heartbeat": {"memory_limit": 0}}) == 0
     assert parse_memory_limit({"heartbeat": {"memory_limit": 5}}) == 5
-    assert parse_retired_goal_limit({}) == 20
-    assert parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": None}}) == 20
+    assert parse_retired_goal_limit({}) == 5
+    assert parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": None}}) == 5
     assert parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": 0}}) == 0
     assert parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": 7}}) == 7
 
@@ -514,3 +517,33 @@ class TestHeartbeatDiffMode:
         assert "new_goal12" in text
         # Call-to-action at tail
         assert text.strip().endswith(GOALS_INSTRUCTION.strip())
+
+
+def test_prompt_after_data_blocks():
+    """The imperative prompt text comes after all data blocks."""
+    memories = [
+        {"id": 1, "age_seconds": 60, "channel_id": "c1", "summary": "mem1"},
+    ]
+    retired = [
+        {"id": 10, "age_seconds": 300, "summary": "goal1"},
+    ]
+    prompt = "DO THE THING."
+    text = frame_beat(memories, retired, prompt=prompt, diff=False)
+    # Data blocks come before the prompt
+    mem_pos = text.index("mem1")
+    goal_pos = text.index("goal1")
+    prompt_pos = text.index("DO THE THING.")
+    assert mem_pos < prompt_pos
+    assert goal_pos < prompt_pos
+
+
+def test_default_limits_are_five():
+    """Default memory and retired-goal limits are 5, not 20."""
+    assert DEFAULT_MEMORY_LIMIT == 5
+    assert DEFAULT_RETIRED_GOAL_LIMIT == 5
+
+
+def test_memory_header_says_oldest_first():
+    """Memory header reflects chronological (oldest-first) order."""
+    assert "oldest first" in MEMORY_HEADER
+    assert "newest first" not in MEMORY_HEADER
