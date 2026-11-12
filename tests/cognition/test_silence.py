@@ -8,8 +8,9 @@ Design: .claude/plans/215-silence.md. Interface pinned here:
   corvidae_cognition.silence.SilencePlugin (entry point "silence",
       optional_depends_on = {"outcome_log"}):
       transform_system_prompt (wrapper) — on a channel owned by a
-          conversational transport (IRC, Discord, Signal) appends a blank
-          line and REGISTER_FRAGMENT; any other channel is unchanged
+          conversational transport (IRC, Discord, Signal, Zulip) appends a
+          blank line and the instruction for the mode (REGISTER_FRAGMENT in
+          token mode); any other channel is unchanged
       silence.mode (token | tool | both) — token registers no tool; tool and
           both register end_turn(reason) through the register_tools hook;
           a bad mode or a non-mapping silence block fails on_init naming the
@@ -431,6 +432,7 @@ class TestModeConfig:
         assert "silence" in str(exc.value)
         assert repr(block) in str(exc.value)
         assert "mapping" in str(exc.value)
+        assert "plugins.disabled" in str(exc.value)
 
 
 class TestModeInstruction:
@@ -508,7 +510,12 @@ class TestEndTurnTool:
             "silence": "tool", "silence_reason": "they said thanks",
         }
 
-    @pytest.mark.parametrize("transport, scope", [("web", "tab1"), ("cli", "local")])
+    @pytest.mark.parametrize(
+        "transport, scope",
+        # web and cli are owned by a non-conversational transport; internal
+        # has no owning transport at all.
+        [("web", "tab1"), ("cli", "local"), ("internal", "heartbeat")],
+    )
     async def test_non_conversational_channel_is_refused_with_a_remedy(
         self, transport, scope
     ):
@@ -548,6 +555,20 @@ class TestEndTurnTool:
         await silence.on_stop()
 
         assert log.writes[0]["outcomes"]["silence_reason"] == "x" * 200
+
+    async def test_a_call_with_no_trace_id_warns_and_records_nothing(self, caplog):
+        log = _StubOutcomeLog()
+        _pm, silence, tools = await _tool_pm(outcome_log=log)
+        channel = Channel(transport="irc", scope="#lex")
+
+        with caplog.at_level("WARNING", logger="corvidae.silence"):
+            result = await tools["end_turn"].fn(reason="x", _ctx=_tool_ctx(channel))
+        await silence.on_stop()
+
+        assert "Nothing was sent" in result
+        assert "irc:#lex" in caplog.text
+        assert "no trace id" in caplog.text
+        assert log.writes == []
 
     async def test_a_call_without_a_reason_still_ends_the_turn(self):
         """A model that omits the argument must still reach the echo."""

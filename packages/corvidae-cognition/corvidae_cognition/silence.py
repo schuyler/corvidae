@@ -135,7 +135,8 @@ class SilencePlugin(CorvidaePlugin):
         if block is not None and not isinstance(block, dict):
             raise ValueError(
                 f"silence is {block!r}; use a mapping such as "
-                f"'silence: {{mode: tool}}'"
+                f"'silence: {{mode: tool}}', or 'plugins.disabled: [silence]' "
+                "to switch the plugin off"
             )
         mode = block.get("mode", "token") if block else "token"
         # Reject an unknown mode loudly: a typo must not quietly fall back.
@@ -168,8 +169,8 @@ class SilencePlugin(CorvidaePlugin):
             # session's request addressed to the agent is always answered.
             if not plugin._is_conversational(channel):
                 return (
-                    f"Error: end_turn is not available on {channel.id}, where every "
-                    "request gets an answer; answer normally"
+                    f"Error: end_turn is not available on {channel.id}, which is not "
+                    "a conversational channel; answer normally"
                 )
             # Record the call against the turn's trace, if it has one.
             trace_id = get_attribution().get("trace_id")
