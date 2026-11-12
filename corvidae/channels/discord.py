@@ -41,6 +41,7 @@ from typing import Any, Optional
 import aiohttp
 
 from corvidae.attachments import save_attachment
+from corvidae.attribution import get_attribution
 # The sender-name cache helper moved to corvidae.channel (shared with Zulip);
 # both names stay importable from here, where tests and callers already look.
 from corvidae.channel import (  # noqa: F401
@@ -272,6 +273,14 @@ def _client_class() -> type:
 #: first and says which limit was hit rather than relaying an API error (#593).
 _MAX_THREAD_NAME = 100
 
+# How many admitted messages the transport remembers as turn triggers, so a
+# reaction tool can find the message a turn started from. The oldest is evicted.
+_TRIGGER_MAP_MAX = 256
+
+# Longest emoji argument the reaction tools accept. Whether it is a real emoji
+# is Discord's to judge; this only stops an obviously wrong value.
+_MAX_EMOJI_CHARS = 64
+
 
 def _channel_name(channel: Any) -> str | None:
     """The name to show the model for a Discord channel or thread (#513).
@@ -346,6 +355,10 @@ class DiscordPlugin(TransportPlugin):
         # Trace ids admitted while their on_message call is still
         # running; _handle_message's finally consumes them (#102).
         self._admitted: set[str] = set()
+        # trace_id -> (the discord.Message, its channel id), insertion-ordered
+        # and bounded by _TRIGGER_MAP_MAX. In memory only: a restart forgets
+        # it, and the reaction tools say so (R5).
+        self._triggers: dict[str, tuple[Any, str]] = {}
 
     # -----------------------------------------------------------------
     # Lifecycle
@@ -758,6 +771,13 @@ class DiscordPlugin(TransportPlugin):
         # Mint the trace id here; the Agent uses it verbatim (#95), and it
         # keys whether this message was admitted.
         trace_id = mint_trace_id()
+        # Remember the message as this turn's trigger, for an allowed sender
+        # only: a refused sender's messages are never held, so they cannot
+        # evict real triggers. The oldest entry goes once the map is full.
+        if allowed:
+            self._triggers[trace_id] = (message, channel.id)
+            if len(self._triggers) > _TRIGGER_MAP_MAX:
+                del self._triggers[next(iter(self._triggers))]
         took_slot = allowed
         try:
             if took_slot:
@@ -1119,6 +1139,8 @@ class DiscordPlugin(TransportPlugin):
         if self._token is not None:
             tool_registry.append(self.send_attachment)
             tool_registry.append(self.start_thread)
+            tool_registry.append(self.discord_react)
+            tool_registry.append(self.discord_unreact)
 
     async def send_attachment(
         self, channel_id: str, path: str, caption: str = "",
@@ -1329,3 +1351,92 @@ class DiscordPlugin(TransportPlugin):
                         f"({exc})."
                     )
         return f"Started thread {thread_channel.id}."
+
+    def _trigger_message(self) -> Any | None:
+        """The message that started the current turn, or None.
+
+        Resolved from the turn's attribution; the remembered entry must belong
+        to the channel the turn is on, because a notification can carry a
+        trace into another channel.
+        """
+        attribution = get_attribution()
+        entry = self._triggers.get(attribution.get("trace_id") or "")
+        if entry is None or entry[1] != attribution.get("channel_id"):
+            return None
+        return entry[0]
+
+    async def _react(self, emoji: str, remove: bool) -> str:
+        """Add or remove the bot's reaction on the turn's triggering message.
+
+        Shared body of discord_react and discord_unreact. Every failure is
+        returned as text for the model to read, never raised.
+        """
+        verb = "remove" if remove else "add"
+        # A local sanity check only; Discord rules on whether it is an emoji.
+        if not isinstance(emoji, str) or not 0 < len(emoji) <= _MAX_EMOJI_CHARS:
+            return (
+                f"Could not {verb} a reaction: emoji {emoji!r} must be 1 to "
+                f"{_MAX_EMOJI_CHARS} characters; try a Unicode emoji such as 👍, "
+                "or reply in text."
+            )
+        # Find the message this turn started from (R5 when there is none).
+        message = self._trigger_message()
+        if message is None:
+            return (
+                f"Could not {verb} {emoji}: there is no message to react to. "
+                "This turn either did not start from a message or the transport "
+                "has forgotten it; a text reply is the alternative."
+            )
+        try:
+            if remove:
+                # Removing needs the bot's own user, unknown until the gateway
+                # has identified it.
+                user = getattr(self._client, "user", None)
+                if user is None:
+                    return (
+                        f"Could not remove {emoji}: Discord is not connected yet; "
+                        "retry in a moment."
+                    )
+                await message.remove_reaction(emoji, user)
+            else:
+                await message.add_reaction(emoji)
+        except Exception as exc:
+            logger.warning(
+                "discord: %s reaction %s failed (%s)", verb, emoji,
+                type(exc).__name__, exc_info=True,
+            )
+            # A refusal is almost always a missing permission, and the SDK
+            # only says "Missing Permissions".
+            if isinstance(exc, _sdk().Forbidden):
+                return (
+                    f"Could not {verb} {emoji}: Discord refused permission. The "
+                    "bot needs Add Reactions and Read Message History in this "
+                    "channel."
+                )
+            return (
+                f"Could not {verb} {emoji}: {type(exc).__name__}; try a "
+                "different emoji or reply in text."
+            )
+        return f"{'Removed' if remove else 'Added'} {emoji} on the message that started this turn."
+
+    async def discord_react(self, emoji: str) -> str:
+        """React with an emoji to the message that started this turn.
+
+        Args:
+            emoji: A Unicode emoji (👍) or a custom emoji written <:name:id>.
+
+        Returns:
+            A confirmation, or an error saying what was wrong and what to do.
+        """
+        return await self._react(emoji, remove=False)
+
+    async def discord_unreact(self, emoji: str) -> str:
+        """Remove your own emoji reaction from the message that started this turn.
+
+        Args:
+            emoji: The emoji to remove, written as it was added.
+
+        Returns:
+            A confirmation, or an error saying what was wrong and what to do.
+        """
+        return await self._react(emoji, remove=True)
