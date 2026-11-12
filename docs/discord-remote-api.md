@@ -209,8 +209,9 @@ WantedBy=multi-user.target
 Logs go to the journal. A startup error exits the process, so with
 `Restart=always` it will retry until you fix it; read `journalctl -u corvidae`.
 
-`TimeoutStopSec` is sized above `daemon.shutdown_timeout` (default 30 s) plus
-`daemon.exit_timeout` (default 10 s), with margin: 60 s covers both plus the
-time systemd needs to deliver the signal. If you raise either timeout in
-`agent.yaml`, raise `TimeoutStopSec` proportionally so systemd's outer bound
-doesn't kill a stop that is still within the daemon's own budget.
+`TimeoutStopSec` is sized above the daemon's worst-case stop,
+`daemon.shutdown_timeout` + `daemon.exit_timeout` (3 s + 5 s = 8 s by
+default). 60 s is a deliberately large, safe margin over that 8 s: systemd
+should never SIGKILL a daemon that is still shutting down cleanly. If you
+raise either timeout in `agent.yaml`, raise `TimeoutStopSec` so the outer
+bound stays above the daemon's own budget.
