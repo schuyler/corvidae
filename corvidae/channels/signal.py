@@ -1450,6 +1450,7 @@ class SignalPlugin(TransportPlugin):
 
     async def send_signal_attachment(
         self, channel_id: str, path: str, caption: str = "",
+        voice_note: bool = False,
     ) -> str:
         """Send a file under signal.send_attachment_root to a Signal contact, with an optional caption.
 
@@ -1461,6 +1462,8 @@ class SignalPlugin(TransportPlugin):
                 (or an absolute path inside it). Paths outside that root are
                 refused.
             caption: Optional text to send with the file. Pass "" for none.
+            voice_note: If True, send as a voice note bubble instead of a
+                regular file attachment. Use for audio files (WAV, OGG, MP3).
 
         Returns:
             A confirmation naming the file and channel, or an error saying
@@ -1476,6 +1479,8 @@ class SignalPlugin(TransportPlugin):
             caption = ""
         if not isinstance(caption, str):
             return "Could not send: caption must be a string."
+        if not isinstance(voice_note, bool):
+            return "Could not send: voice_note must be a boolean."
         if self._registry is None:
             return (
                 f"Could not send: the channel registry is not available for "
@@ -1552,6 +1557,8 @@ class SignalPlugin(TransportPlugin):
         params: dict[str, Any] = {
             "recipient": channel.scope, "attachments": [uri],
         }
+        if voice_note:
+            params["voiceNote"] = True
         if chunks:
             params["message"] = chunks[0]
         # file_sent tells the handler how far the send got; part counts the
