@@ -47,9 +47,13 @@ CREATE TABLE IF NOT EXISTS goals (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     retired_at REAL,
-    memory_id INTEGER
+    memory_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'open'
 )
 """
+
+#: Valid status values for an open goal.
+VALID_STATUSES = ("open", "blocked", "waiting")
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,7 @@ class Goal:
     updated_at: float
     retired_at: float | None
     memory_id: int | None
+    status: str = "open"
 
 
 def _collapse(text: str) -> str:
@@ -103,13 +108,22 @@ class GoalsPlugin(CorvidaePlugin):
         return get_dependency(self.pm, "memory", MemoryPlugin)
 
     async def _ensure_schema(self) -> aiosqlite.Connection | None:
-        """Create the table; returns the DB, or None when it isn't open yet."""
+        """Create the table (or migrate it); returns the DB, or None when
+        it isn't open yet."""
         from corvidae.persistence import PersistencePlugin
         db = get_dependency(self.pm, "persistence", PersistencePlugin).db
         if db is None:
             return None
         if not self._schema_ready:
             await db.execute(GOALS_DDL)
+            # Migrate existing tables that lack the status column.
+            async with db.execute("PRAGMA table_info(goals)") as cur:
+                cols = {row[1] for row in await cur.fetchall()}
+            if "status" not in cols:
+                await db.execute(
+                    "ALTER TABLE goals ADD COLUMN status TEXT NOT NULL DEFAULT 'open'"
+                )
+                logger.info("goals: migrated existing table (added status column)")
             await db.commit()
             self._schema_ready = True
         return db
@@ -124,7 +138,7 @@ class GoalsPlugin(CorvidaePlugin):
         """Every row, open and retired, in id order."""
         db = await self._require_db()
         async with db.execute(
-            "SELECT id, text, created_at, updated_at, retired_at, memory_id "
+            "SELECT id, text, created_at, updated_at, retired_at, memory_id, status "
             "FROM goals ORDER BY id"
         ) as cursor:
             return [Goal(*row) for row in await cursor.fetchall()]
@@ -310,9 +324,9 @@ class GoalsPlugin(CorvidaePlugin):
             conclusions."""
             db = await plugin._require_db()
             if include_retired:
-                query = "SELECT id, text, created_at, retired_at, memory_id FROM goals ORDER BY id"
+                query = "SELECT id, text, created_at, retired_at, memory_id, status FROM goals ORDER BY id"
             else:
-                query = "SELECT id, text, created_at, retired_at, memory_id FROM goals WHERE retired_at IS NULL ORDER BY id"
+                query = "SELECT id, text, created_at, retired_at, memory_id, status FROM goals WHERE retired_at IS NULL ORDER BY id"
             async with db.execute(query) as cursor:
                 rows = await cursor.fetchall()
             if not rows:
@@ -321,17 +335,37 @@ class GoalsPlugin(CorvidaePlugin):
                 return "No open goals."
             lines = []
             for row in rows:
-                gid, text, created, retired, mem_id = row
+                gid, text, created, retired, mem_id, status = row
                 # Truncate long goal text for the listing
                 if len(text) > 120:
                     text = text[:117] + "..."
                 if retired:
                     lines.append(f"#{gid} [retired {_day(retired)}]: {text}")
                 else:
-                    lines.append(f"#{gid} [open since {_day(created)}]: {text}")
+                    label = status if status != "open" else f"open since {_day(created)}"
+                    lines.append(f"#{gid} [{label}]: {text}")
             return "\n".join(lines)
 
-        for fn in (add_goal, update_goal, retire_goal, list_goals):
+        async def set_goal_status(id: int, status: str, _ctx=None) -> str:
+            """Set the status of an open goal. Status must be one of:
+            open, blocked, waiting. 'blocked' means the goal cannot be
+            pursued until an external dependency is resolved. 'waiting'
+            means the goal is complete but awaiting someone's review or
+            decision. 'open' means the goal is actively pursuable."""
+            if status not in VALID_STATUSES:
+                return f"Error: status must be one of {VALID_STATUSES}, got {status!r}"
+            db = await plugin._require_db()
+            now = time.time()
+            async with db.execute(
+                "UPDATE goals SET status = ?, updated_at = ? WHERE id = ? AND retired_at IS NULL",
+                (status, now, id),
+            ) as cursor:
+                if cursor.rowcount == 0:
+                    return f"Error: no open goal with id {id}"
+            await db.commit()
+            return f"Goal #{id} status set to {status!r}"
+
+        for fn in (add_goal, update_goal, retire_goal, list_goals, set_goal_status):
             tool_registry.append(Tool(name=fn.__name__, fn=fn, schema=tool_to_schema(fn)))
 
     @hookimpl
