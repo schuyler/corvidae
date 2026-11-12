@@ -1141,36 +1141,37 @@ class SchedulerPlugin(CorvidaePlugin):
                 return f"Error: {id!r} is not a reminder id; use the number from list_reminders"
             return await plugin.cancel_reminder_on(row_id, channel.id)
 
-        # CRUD tools for the YAML jobs file (operator-facing).
+        # CRUD tools for the YAML jobs file (operator-facing). They act on
+        # the operator's jobs file, not a channel; the file must be
+        # configured, and mutations are picked up by the watcher's reload.
         jobs_file = plugin._jobs_file_path
 
-        async def add_job(name: str, channel: str, cron: str, origin: str = "reminder", prompt: str = "", _ctx=None) -> str:
-            """Add a job to the scheduler jobs file. The job is synced on the next reload."""
+        async def add_job(name: str, channel: str, cron: str, prompt: str = "", origin: str = "reminder", _ctx=None) -> str:
+            """Add a job to the scheduler jobs file: a name, a channel (transport:scope), a 5-field cron, and a prompt. Synced on the next reload."""
             if jobs_file is None:
-                return "Error: no jobs_file configured"
-            from corvidae.scheduler_crud import add_job as _add
-            return await _add(jobs_file, name, channel, cron, origin, prompt)
+                return "Error: no scheduler jobs_file is configured"
+            return crud_add(jobs_file, name, channel, cron, prompt, origin)
 
         async def update_job(name: str, channel: str = "", cron: str = "", origin: str = "", prompt: str = "", _ctx=None) -> str:
-            """Update an existing job in the scheduler jobs file."""
+            """Update fields of an existing job in the scheduler jobs file. Only the fields you provide are changed (channel, cron, origin, prompt)."""
             if jobs_file is None:
-                return "Error: no jobs_file configured"
-            from corvidae.scheduler_crud import update_job as _upd
-            return await _upd(jobs_file, name, channel, cron, origin, prompt)
+                return "Error: no scheduler jobs_file is configured"
+            changes = {k: v for k, v in (("channel", channel), ("cron", cron), ("origin", origin), ("prompt", prompt)) if v}
+            if not changes:
+                return "Error: provide at least one field to update (channel, cron, origin, prompt)"
+            return crud_update(jobs_file, name, **changes)
 
         async def remove_job(name: str, _ctx=None) -> str:
-            """Remove a job from the scheduler jobs file."""
+            """Remove a job from the scheduler jobs file by name."""
             if jobs_file is None:
-                return "Error: no jobs_file configured"
-            from corvidae.scheduler_crud import remove_job as _rem
-            return await _rem(jobs_file, name)
+                return "Error: no scheduler jobs_file is configured"
+            return crud_remove(jobs_file, name)
 
         async def list_jobs(_ctx=None) -> str:
             """List all jobs in the scheduler jobs file."""
             if jobs_file is None:
-                return "Error: no jobs_file configured"
-            from corvidae.scheduler_crud import list_jobs as _lst
-            return await _lst(jobs_file)
+                return "Error: no scheduler jobs_file is configured"
+            return crud_list(jobs_file)
 
         for fn in (remind_me, list_reminders, cancel_reminder,
                     add_job, update_job, remove_job, list_jobs):

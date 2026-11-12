@@ -406,6 +406,42 @@ class TestConfigSync:
         await env.sched.on_config_reload(sched_config(jobs=[JOB]))
         assert env.sched._wake.is_set()
 
+    async def test_cron_job_syncs_with_cron_spec(self, memdb):
+        cron_job = {"name": "cronjob", "channel": "irc:#lex",
+                    "cron": "0 8 * * *", "prompt": "cron beat"}
+        e = await Env(memdb, sched_config(jobs=[cron_job])).init()
+        (row,) = await e.rows()
+        assert row.name == "cronjob" and row.created_by == "config"
+        assert row.interval_seconds is None
+        assert row.schedule_spec.startswith("cron=")
+        assert "0 8 * * *" in row.schedule_spec
+        local = datetime.fromtimestamp(row.next_fire_at, LA)
+        assert (local.hour, local.minute) == (8, 0)
+
+    async def test_cron_and_every_are_mutually_exclusive(self, memdb, caplog):
+        both = {"name": "both", "channel": "irc:#lex", "every": "1d",
+                "cron": "0 8 * * *", "prompt": "x"}
+        e = await Env(memdb, sched_config(jobs=[both])).init()
+        assert await e.rows() == []
+        assert "invalid job" in caplog.text
+
+    async def test_neither_every_nor_cron_is_rejected(self, memdb, caplog):
+        neither = {"name": "neither", "channel": "irc:#lex", "prompt": "x"}
+        e = await Env(memdb, sched_config(jobs=[neither])).init()
+        assert await e.rows() == []
+        assert "invalid job" in caplog.text
+
+    async def test_cron_firing_advances_to_next_slot_and_stays_enabled(self, memdb):
+        cron_job = {"name": "cronjob", "channel": "irc:#lex",
+                    "cron": "*/15 * * * *", "prompt": "cron beat"}
+        e = await Env(memdb, sched_config(jobs=[cron_job])).init()
+        (row,) = await e.rows()
+        await e.sched._fire(e.db, row, e.clock.now())
+        (row2,) = await e.rows()
+        assert row2.enabled
+        assert row2.disabled_reason is None
+        assert row2.next_fire_at > e.clock.now()
+
 
 # ---------------------------------------------------------------------------
 # Timer loop
