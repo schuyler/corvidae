@@ -199,6 +199,7 @@ EnvironmentFile=/etc/corvidae/discord.env
 ExecStart=/home/corvidae/corvidae/.venv/bin/corvidae serve
 Restart=always
 RestartSec=5
+TimeoutStopSec=60
 
 [Install]
 WantedBy=multi-user.target
@@ -207,3 +208,9 @@ WantedBy=multi-user.target
 `WorkingDirectory` is where `agent.yaml` and the relative `sessions.db` live.
 Logs go to the journal. A startup error exits the process, so with
 `Restart=always` it will retry until you fix it; read `journalctl -u corvidae`.
+
+`TimeoutStopSec` is sized above `daemon.shutdown_timeout` (default 30 s) plus
+`daemon.exit_timeout` (default 10 s), with margin: 60 s covers both plus the
+time systemd needs to deliver the signal. If you raise either timeout in
+`agent.yaml`, raise `TimeoutStopSec` proportionally so systemd's outer bound
+doesn't kill a stop that is still within the daemon's own budget.
