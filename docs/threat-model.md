@@ -623,6 +623,16 @@ the tool path. The real exposure is the same as for any cross-channel
 send tool (finding 15): registry membership is the whole gate. Bounding
 the tools (per-channel cap, operator opt-in) is a follow-up.
 
+The RSS reader (packages/rss-reader) polls configured feeds and delivers
+new items as notifications on a configured channel. The threat is the
+same as for other notification sources: the feed content is untrusted
+external data that re-enters the agent's context. The mitigation is the
+same as for all fetched content: the kernel wraps it in the notification
+header, and the model is instructed (via the prompt) that content from
+external sources is data, not instructions. The feed URLs are
+operator-configured in agent.yaml, so the same file-permission
+discipline applies.
+
 `discord.send_attachment` (issue #521) and `send_signal_attachment` (issue
 #544) are the first tools that send a *file* to a channel the model chooses
 (the cross-channel `notify_other_channel` of #234 also takes a model-chosen channel,

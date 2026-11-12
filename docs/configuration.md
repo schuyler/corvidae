@@ -1279,6 +1279,21 @@ Open that URL. Why the config looks like this: inside a container the page has t
 
 **Discord.** The bot only connects out, so there is nothing to publish. Add a `discord:` block with your user id under `allow` (the default refuses everyone), and pass the bot token as `-e DISCORD_TOKEN=…` rather than writing it into `agent.yaml`. A new `discord:` block needs only `docker restart corvidae`, but `docker restart` keeps the old environment, so to add or change `DISCORD_TOKEN`, `docker rm -f corvidae` and run it again. Creating the application and inviting the bot are in [discord-ops.md](discord-ops.md). Two `voice will NOT be supported` warnings at startup are expected.
 
+**RSS.** Add an `rss:` block to enable the RSS reader plugin. The plugin polls the configured feeds on a timer and delivers new items as notifications on the configured channel. Feed content is untrusted external data (see [threat-model.md](threat-model.md)).
+
+```yaml
+rss:
+  feeds:
+    - https://example.com/feed.xml
+    - https://blog.example.com/atom.xml
+  channel: "internal:heartbeat"  # where items are delivered
+  poll_interval: 300  # seconds between poll cycles (default 300)
+  max_items_per_poll: 10  # cap on items delivered per cycle (default 10)
+  state_file: state/rss/seen.json  # where seen guids are tracked
+```
+
+The plugin is optional; it is not installed by default. Add `rss-reader` to the `EXTRAS` build arg or install it from the worktree.
+
 **What lands in `/data`:** `sessions.db`, `provenance.key` (keep it with the directory), `state/`, and a log file if you set `logging.file`; otherwise logs go to `docker logs`. Back that directory up and you've backed up the bot. The daemon runs as uid 1000, not root, because the shell tool runs as the daemon's user ([threat-model.md](threat-model.md), finding 4), so the directory has to be writable by that uid. That's what the `chown` is for, and after it the files belong to uid 1000, so editing `agent.yaml` on the host needs `sudo`. If you'd rather not, skip the `chown` and run with `--user $(id -u):$(id -g)` on a directory you own. If the daemon can't write the directory, startup dies with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory.
 
 **Locking the config (optional).** Add `-v ~/corvidae-data/agent.yaml:/data/agent.yaml:ro` to `docker run` and the agent can't edit its own configuration, which is the config half of [prd.md](prd.md) §3.11.11 (prompt files need the same treatment). A host edit that replaces the file (`sed -i`, most editors) detaches the read-only mount until the container restarts, so run `docker restart corvidae` after each edit.
