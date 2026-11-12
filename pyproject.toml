@@ -31,6 +31,9 @@ discord = [
 cross-channel-send = [
     "cross-channel-send",
 ]
+vision = [
+    "corvidae-vision",
+]
 # A live, read-only view of loaded context windows in the web console
 # (packages/context-panel).
 context-panel = [
@@ -164,3 +167,4 @@ webhook-notify = { workspace = true }
 corvidae-restart = { workspace = true }
 corvidae-timepiece = { workspace = true }
 corvidae-inotify = { workspace = true }
+    corvidae-vision = { workspace = true }
