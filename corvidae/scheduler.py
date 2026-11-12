@@ -281,6 +281,14 @@ def advance(scheduled: float, interval: float, now: float, tz: tzinfo) -> float:
     return candidate.timestamp()
 
 
+def _cron_expr_from_spec(spec: str | None) -> str | None:
+    """The cron expression from a schedule_spec string, or None for an
+    interval (every) job. Cron specs are cron=<expr>;tz=<name>."""
+    if spec and spec.startswith("cron="):
+        return spec.split(";", 1)[0].split("=", 1)[1]
+    return None
+
+
 def format_time(ts: float, tz: tzinfo) -> str:
     """Render a unix time in ``tz``, e.g. ``Fri 2026-10-23 14:22 PDT``."""
     return datetime.fromtimestamp(ts, tz).strftime("%a %Y-%m-%d %H:%M %Z")
@@ -1053,9 +1061,13 @@ class SchedulerPlugin(CorvidaePlugin):
             for row in rows:
                 due = format_time(row.next_fire_at, plugin._tz)
                 if row.created_by == "config":
-                    every = format_duration(row.interval_seconds or 0)
+                    cron_expr = _cron_expr_from_spec(row.schedule_spec)
+                    if cron_expr is not None:
+                        sched = f'cron "{cron_description(cron_expr)}"'
+                    else:
+                        sched = f"every {format_duration(row.interval_seconds or 0)}"
                     preview = row.text if len(row.text) <= 80 else row.text[:77] + "..."
-                    lines.append(f"#{row.id} {due} [operator job \"{row.name}\", every {every}, "
+                    lines.append(f"#{row.id} {due} [operator job \"{row.name}\", {sched}, "
                                  f"read-only] {preview}")
                 else:
                     lines.append(f"#{row.id} {due}: {row.text}")
