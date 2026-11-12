@@ -1481,6 +1481,65 @@ Specific to this source:
 The residual risk is the same as any funnel source: an operator-controlled
 folder whose content is framed, not trusted.
 
+### 18. Reactions: a new tool, and a new way for a sender's text to reach the prompt (accepted, #545, #546, #233)
+
+PRD principle 9 asks for an entry when a tool can do something new or untrusted
+text can reach somewhere new. Emoji reactions do both.
+
+**What the tool can do.** `discord_react` / `discord_unreact` and
+`signal_react` / `signal_unreact` let the agent add or remove an emoji reaction
+as the bot. They take only the emoji. The target is read from the turn's
+provenance, never from an argument: the message that started the current turn,
+on that turn's own channel. A trace that belongs to another channel, a turn
+that did not start from a message, a message the transport has forgotten (a
+bounded in-memory map of the last 256 messages from allowed senders; a restart
+clears it) all get an error and nothing is sent. So, unlike
+`send_attachment` and `send_signal_attachment` (finding 7), there is no
+model-chosen channel and no cross-channel reach. Injected text that reaches the
+model can make it react to the person who is already talking to it, which is
+about as much as it can already do by replying. The emoji argument is
+model-controlled and goes to Discord or signal-cli, which judge it; the tools
+check only its length (64 characters, 16 code points). The remaining exposure
+is the bot's Discord permissions: Add Reactions and Read Message History are
+now needed (`docs/discord-ops.md`), and both are channel-wide, not per-message.
+
+**What untrusted text can now reach.** Before this, a Signal reaction was
+dropped as an empty message. Now an allowlisted sender's reaction (add only;
+removals are dropped) is queued and, at that channel's next turn, appended to
+the window as a `role: system` CONTEXT row of the form
+`[reaction: <emoji> on <whose> message from <UTC time>]`. The emoji is
+sender-controlled text in a system-role row, which is the finding 3 shape, and
+this path skips both of its usual guards: the row has no kernel provenance
+header (PRD §3.3.11) and it does not go through the cognition funnel's trust
+quarantine. The allowlist check is the transport's own `_is_allowed`, not
+`should_process_message`, so a plugin that vetoes there does not see it.
+
+Mitigations:
+
+- The emoji must `fullmatch` one shape: a single pictograph from the emoji
+  Unicode blocks, then optionally one skin-tone modifier, then optionally VS16.
+  That is at most three code points, one of which carries content. ZWJ, tag
+  characters, digits, keycaps and regional indicators do not match, so nothing
+  this shape accepts can spell a sentence or hide a payload. Everything else
+  (including a real flag or a family emoji) is dropped with a WARNING naming the
+  sender.
+- Every other part of the row is built in code: the whose-message word comes
+  from a UUID comparison, and the time from an integer that must be positive and
+  below year 9999. A non-integer, boolean or out-of-range timestamp drops the
+  reaction.
+- A refused sender gets one INFO line and creates no channel and no state. At
+  most 20 lines wait per channel; the oldest is dropped with a WARNING.
+- No turn starts, so a reaction cannot be used to spend compute (finding 14).
+  Only the sender's own channel receives the row.
+
+Accepted residual: the sender is already allowlisted and can send arbitrary text
+through the normal path, so the row adds no capability a sender lacks. What it
+adds is a route around the header and the funnel for one symbol. If the accepted
+set is ever widened (flags and keycaps are the likely ask), the widening needs a
+real emoji table and a fresh look at this entry, not a longer regex. Waiting
+reactions are lost on a crash, and the tools and the event path are verified
+against fake clients and a fake signal-cli socket only (PRD §3.2.9).
+
 ## Privilege separation
 
 There isn't any. Transports, the LLM loop, tool execution, the SQLite

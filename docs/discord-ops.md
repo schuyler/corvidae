@@ -72,19 +72,29 @@ it for you):
 
 - Scope: `bot`. You do not need `applications.commands`; corvidae registers
   no slash commands.
-- Permissions: **View Channels**, **Send Messages**, and **Send Messages in
-  Threads**.
+- Permissions: **View Channels**, **Send Messages**, **Send Messages in
+  Threads**, **Add Reactions**, and **Read Message History**.
 
-You do not need **Read Message History**, **Manage Messages**,
-**Mention Everyone**, **Embed Links**, or **Attach Files**. corvidae only
-reads messages the gateway pushes to it, sends plain text, and shows the
-typing indicator, which needs only Send Messages. Every outbound message
-also suppresses mentions on its own, so Mention Everyone would do nothing.
-Give it less than you think it needs, and add permissions only if Discord
-reports a failure.
+The last two are for the reaction tools (`discord_react` and
+`discord_unreact`, below): Discord's add-reaction call needs both, and a
+bot without them gets "Discord refused permission" back from the tool. If you
+turn the tools off (`tools.disabled`), you can leave them out.
+
+You do not need **Manage Messages**, **Mention Everyone**, **Embed Links**,
+or **Attach Files**. corvidae only reads messages the gateway pushes to it,
+sends plain text, and shows the typing indicator, which needs only Send
+Messages. Every outbound message also suppresses mentions on its own, so
+Mention Everyone would do nothing. Give it less than you think it needs, and
+add permissions only if Discord reports a failure.
 
 The resulting URL looks like this, with your application id and the
-permissions integer the generator computes:
+permissions integer the generator computes. For the five permissions above
+that integer is `274877975616` (View Channels 1024, Send Messages 2048, Add
+Reactions 64, Read Message History 65536, Send Messages in Threads
+274877906944). If you invited the bot already, add the two new ones to its role (or
+re-run the invite URL) rather than removing it. The `start_thread` tool
+additionally needs Create Public Threads (34359738368); with it the integer
+is `309237713984`.
 
 ```
 https://discord.com/oauth2/authorize?client_id=<application id>&scope=bot&permissions=<integer>
@@ -154,6 +164,18 @@ bot, and it will not tell them so.
   `send_attachment` tool posts one file from `discord.send_attachment_root`
   with an optional caption.
 - **Reasoning and tool-status** messages are not sent to Discord.
+- **Reactions.** The agent has two reaction tools: `discord_react(emoji)` and
+  `discord_unreact(emoji)` (plus `send_attachment` and `start_thread`). They
+  react to, or remove the bot's own reaction from, the message that started the
+  current turn, in that channel; they take no message id or channel. For a
+  burst of messages answered in one turn, that is the last one. The emoji is a
+  Unicode emoji or a custom `<:name:id>`. If the turn did not start from a
+  message (a reminder, say), the message is from before the last restart or
+  older than the most recent 256 allowed messages (counted across all channels), the tool says there is no
+  message to react to and the agent falls back to text. Reactions from users
+  are not delivered to the agent. These tools are tested against fake
+  clients, not a real server, so a permission or emoji quirk Discord has and
+  the fakes don't will show up as a "Could not add" reply.
 
 ## Answering without a mention (experimental)
 

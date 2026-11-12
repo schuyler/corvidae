@@ -13,14 +13,17 @@ import json
 import logging
 import mimetypes
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from corvidae.attachments import save_attachment, safe_suffix
+from corvidae.attribution import get_attribution
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.channels._registers import shipped_register
 from corvidae.channels.split import split_message
+from corvidae.context import MessageType
 from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress
 from corvidae.trace import mint_trace_id
@@ -188,6 +191,47 @@ def _format_stale_prefix(timestamp_ms: int) -> str:
     return f"[sent {dt.strftime('%Y-%m-%d %H:%M')} UTC]\n"
 
 
+# Reactions: the trigger map holds this many recent messages, the oldest evicted.
+TRIGGER_MAP_SIZE = 256
+# A channel holds at most this many reaction lines waiting for its next turn.
+MAX_PENDING_REACTIONS = 20
+# The tool's local emoji check: signal-cli judges a single grapheme cluster,
+# so this only bounds what is sent (code points, not bytes).
+MAX_REACT_EMOJI_CODE_POINTS = 16
+# A target timestamp must be below year 9999, in milliseconds.
+_MAX_TARGET_TS_MS = 253402300800000
+
+# One pictograph from the emoji-bearing Unicode blocks (whole blocks, so emoji
+# added later still pass), then optionally one skin-tone modifier and VS16.
+# The skin-tone modifiers U+1F3FB-1F3FF are carved out of the pictograph
+# ranges, so they are accepted only after a base. No ZWJ, tag character, digit
+# or keycap matches, so a compound emoji is dropped (design: Deferred).
+_PLAIN_EMOJI = re.compile(
+    "[\u00a9\u00ae\u203c\u2049\u2122\u2139\u2190-\u21ff\u2300-\u23ff"
+    "\u24c2\u25a0-\u25ff\u2600-\u27bf\u2900-\u297f\u2b00-\u2bff"
+    "\u3030\u303d\u3297\u3299\U0001f000-\U0001f0ff\U0001f170\U0001f171"
+    "\U0001f17e\U0001f17f\U0001f18e\U0001f191-\U0001f19a"
+    "\U0001f200-\U0001f3fa\U0001f400-\U0001faff]"
+    "[\U0001f3fb-\U0001f3ff]?\ufe0f?"
+)
+
+
+def _is_plain_emoji(value: str) -> bool:
+    """Whether ``value`` is one pictograph, optionally with a skin tone and VS16.
+
+    The value is sender-controlled and goes into the prompt, so the accepted
+    set is kept small enough to check exhaustively. ``fullmatch``, not
+    ``match``: a trailing newline must fail.
+    """
+    return _PLAIN_EMOJI.fullmatch(value) is not None
+
+
+def _format_reaction_time(timestamp_ms: int) -> str:
+    """Render a ms epoch as ``YYYY-MM-DD HH:MM UTC``."""
+    dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%d %H:%M UTC")
+
+
 class SignalPlugin(TransportPlugin):
     """Transport plugin for a Signal DM conversation via signal-cli's daemon."""
 
@@ -256,6 +300,15 @@ class SignalPlugin(TransportPlugin):
         # Trace ids admitted while their on_message call is still
         # running; _handle_notification's finally consumes them.
         self._admitted: set[str] = set()
+
+        # Trigger map: trace id -> (channel id, author ACI, envelope timestamp
+        # ms) for messages from allowed senders, so a reaction tool can find the
+        # message that started its turn. Bounded, oldest evicted; in memory
+        # only, so a restart forgets it and the tool reports that.
+        self._triggers: OrderedDict[str, tuple[str, str, int]] = OrderedDict()
+        # channel id -> reaction lines waiting for that channel's next turn.
+        # shortcut: lost on a crash, upgrade if acknowledgements prove worth a WAL.
+        self._pending_reactions: dict[str, list[str]] = {}
 
     # -----------------------------------------------------------------
     # Lifecycle
@@ -584,9 +637,15 @@ class SignalPlugin(TransportPlugin):
             logger.debug("signal: ignoring group message")
             return
 
+        # Reaction events (R8) are handled and end here; a null or absent
+        # reaction falls through to Rule 4.
+        if data_message.get("reaction") is not None:
+            await self._handle_reaction(envelope, data_message["reaction"])
+            return
+
         # Rule 4: text must be non-empty, or there must be a downloadable
-        # attachment. Reactions, quotes, edits, and remote deletes all fall
-        # out here since none of them carry a "message" field.
+        # attachment. Quotes, edits, and remote deletes fall out here since
+        # none of them carry a "message" field.
         attachments = data_message.get("attachments") or []
         text = data_message.get("message") or ""
 
@@ -655,6 +714,13 @@ class SignalPlugin(TransportPlugin):
         # The id is minted here and keys everything this message holds, so
         # the lifecycle hooks can be matched back to it without inference.
         trace_id = mint_trace_id()
+        # Remember which message started this turn, for the reaction tools:
+        # only an allowed sender's, and only with an int timestamp (a float
+        # or missing one cannot name a message).
+        if allowed and type(timestamp) is int:
+            self._triggers[trace_id] = (channel.id, source_uuid, timestamp)
+            while len(self._triggers) > TRIGGER_MAP_SIZE:
+                self._triggers.popitem(last=False)
         try:
             if allowed and timestamp is not None:
                 # Remember the timestamp (for the read receipt) and take a
@@ -676,6 +742,105 @@ class SignalPlugin(TransportPlugin):
                     await self._decrement_outstanding(channel)
             self._admitted.discard(trace_id)
 
+
+    async def _handle_reaction(self, envelope: dict, reaction: Any) -> None:
+        """Queue an allowed sender's emoji reaction as a context line for
+        their channel's next turn. Starts no turn; every drop is logged."""
+        # A reaction cannot be scoped to a channel without a sender.
+        source_uuid = envelope.get("sourceUuid")
+        if not source_uuid:
+            logger.warning(
+                "signal: reaction envelope has no sourceUuid, cannot scope a channel, dropping"
+            )
+            return
+
+        # Same allowlist predicate as the text path, before any state is
+        # touched: a refused sender gets one INFO line and no channel.
+        if not await self._is_allowed(source_uuid):
+            logger.info("signal: ignoring reaction from unauthorized sender %s", source_uuid)
+            return
+
+        # A value of the wrong type is dropped; show it cut to 32 characters
+        # first, then repr'd, so an escape is never split.
+        if not isinstance(reaction, dict):
+            logger.warning(
+                "signal: dropped reaction from %s: not an object, got %r",
+                source_uuid, str(reaction)[:32],
+            )
+            return
+
+        # A removal is noise by decision (design: Deferred).
+        if reaction.get("isRemove") is True:
+            logger.debug("signal: dropping reaction removal from %s", source_uuid)
+            return
+
+        # The emoji is sender-controlled and enters the prompt: validate it.
+        emoji = reaction.get("emoji")
+        if not isinstance(emoji, str) or not _is_plain_emoji(emoji):
+            logger.warning(
+                "signal: dropped reaction from %s: %r is not a single emoji "
+                "(a compound reaction such as a flag or keycap is not accepted)",
+                source_uuid, str(emoji)[:32],
+            )
+            return
+
+        # The target's time must be a plausible int (type check so True fails).
+        target_ts = reaction.get("targetSentTimestamp")
+        if type(target_ts) is not int or not 0 < target_ts < _MAX_TARGET_TS_MS:
+            logger.warning(
+                "signal: dropped reaction from %s: bad targetSentTimestamp %r",
+                source_uuid, str(target_ts)[:32],
+            )
+            return
+
+        # Whose message: "your" when the target author is known and is not
+        # the sender; the legacy targetAuthor (maybe a number) is not used.
+        author = reaction.get("targetAuthorUuid")
+        if not author:
+            whose = "a"
+        elif author == source_uuid:
+            whose = "their own"
+        else:
+            whose = "your"
+        line = f"[reaction: {emoji} on {whose} message from {_format_reaction_time(target_ts)}]"
+
+        # Resolve the channel as the text path does for an allowed sender.
+        channel = await self._resolve_channel(source_uuid, envelope.get("sourceNumber"))
+        pending = self._pending_reactions.setdefault(channel.id, [])
+        if len(pending) >= MAX_PENDING_REACTIONS:
+            pending.pop(0)
+            logger.warning(
+                "signal: %s has %d reactions waiting for its next turn; dropped the oldest",
+                channel.id, MAX_PENDING_REACTIONS,
+            )
+        pending.append(line)
+
+    @hookimpl
+    async def before_agent_turn(
+        self, channel: Channel, trace_id: str | None, annotations: dict
+    ) -> None:
+        """Append this channel's waiting reaction lines as CONTEXT rows."""
+        # Another transport's channel is none of ours (checklist trap 11).
+        if not self.owns(channel):
+            return
+        # A channel with no window yet has nowhere to put a row; keep the lines.
+        conv = channel.conversation
+        if conv is None:
+            return
+        # Nothing waiting for this channel: the common case, so exit early.
+        pending = self._pending_reactions.get(channel.id)
+        if not pending:
+            return
+        # Append each row before removing it, so a failure loses nothing.
+        # shortcut: the row bypasses the cognition trust quarantine and has
+        # no kernel provenance header (PRD 3.3.11); safe only because the
+        # accepted emoji is one symbol and the rest of the row is built here.
+        # The allowlist check is the transport's own, not should_process_message.
+        # The Agent persists rows appended here that lack a _db_id.
+        while pending:
+            conv.append({"role": "system", "content": pending[0]}, MessageType.CONTEXT)
+            pending.pop(0)
+        del self._pending_reactions[channel.id]
 
     async def _download_attachment(
         self,
@@ -1280,6 +1445,8 @@ class SignalPlugin(TransportPlugin):
         """
         if self._socket_path is not None:
             tool_registry.append(self.send_signal_attachment)
+            tool_registry.append(self.signal_react)
+            tool_registry.append(self.signal_unreact)
 
     async def send_signal_attachment(
         self, channel_id: str, path: str, caption: str = "",
@@ -1429,3 +1596,81 @@ class SignalPlugin(TransportPlugin):
                 f"({type(exc).__name__}); nothing was delivered, retry."
             )
         return f"Sent {target.name} to {channel_id}."
+
+    # -----------------------------------------------------------------
+    # Reactions (R2-R5)
+    # -----------------------------------------------------------------
+
+    async def signal_react(self, emoji: str) -> str:
+        """React with an emoji to the message that started this turn.
+
+        Args:
+            emoji: One emoji, such as a thumbs-up.
+
+        Returns:
+            A confirmation, or an error saying what was wrong and what to do next.
+        """
+        return await self._send_reaction(emoji, remove=False)
+
+    async def signal_unreact(self, emoji: str) -> str:
+        """Remove your emoji reaction from the message that started this turn.
+
+        Args:
+            emoji: The emoji you reacted with.
+
+        Returns:
+            A confirmation, or an error saying what was wrong and what to do next.
+        """
+        return await self._send_reaction(emoji, remove=True)
+
+    async def _send_reaction(self, emoji: str, remove: bool) -> str:
+        """Send a sendReaction RPC aimed at the message that triggered the
+        current turn; every failure is returned as text, never raised."""
+        verb = "remove reaction" if remove else "react"
+        # Local emoji check: the daemon judges the rest.
+        if (
+            not isinstance(emoji, str)
+            or not emoji
+            or len(emoji) > MAX_REACT_EMOJI_CODE_POINTS
+        ):
+            return (
+                f"Could not {verb}: {emoji!r} is not a usable emoji (it must be "
+                f"1 to {MAX_REACT_EMOJI_CODE_POINTS} characters); try a single "
+                f"emoji, or reply in text."
+            )
+
+        # The target comes from the turn's provenance, never an argument.
+        attribution = get_attribution()
+        trace_id = attribution.get("trace_id")
+        entry = self._triggers.get(trace_id) if trace_id else None
+        if entry is None or entry[0] != attribution.get("channel_id"):
+            return (
+                "Could not {verb}: there is no message to react to. This turn "
+                "either did not start from a message, or the transport has "
+                "forgotten it; send a text reply instead.".format(verb=verb)
+            )
+        channel_id, author, timestamp = entry
+
+        # The sendReaction frame; the recipient is the sender's ACI, the channel
+        # scope, and the target is the message that started this turn.
+        params: dict[str, Any] = {
+            "recipient": channel_id.partition(":")[2],
+            "emoji": emoji,
+            "targetAuthor": author,
+            "targetTimestamp": timestamp,
+        }
+        # Removing a reaction is the same call with remove set.
+        if remove:
+            params["remove"] = True
+        # The daemon may be down or reject the call; report it, never raise.
+        try:
+            await self._send_rpc("sendReaction", params)
+        except Exception as exc:
+            logger.warning(
+                "signal: sendReaction (%s) failed on %s (%s)",
+                verb, channel_id, type(exc).__name__, exc_info=True,
+            )
+            return (
+                f"Could not {verb} on {channel_id}: {exc}; retry, or reply in text."
+            )
+        return f"{'Removed' if remove else 'Added'} reaction {emoji} on the message that started this turn."

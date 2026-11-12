@@ -3406,8 +3406,10 @@ keeps a `syncMessage` — the account's own traffic echoed from another
 device signed into it — from being read as input and driving the agent in
 a loop. Attachments are downloaded under a size cap once the sender passes the
 allowlist, written under `signal.attachment_dir` and named in the message text
-(`[image: /abs/path]`); a refused sender's file is named, never fetched. Reactions, quotes, edits, and remote deletes all fall out
-of the empty-text rule, since none of them carry a `message` field. An
+(`[image: /abs/path]`); a refused sender's file is named, never fetched. Quotes, edits, and remote deletes fall out
+of the empty-text rule, since none of them carry a `message` field. A
+reaction does not fall out: it is caught just before that rule and handled as
+a reaction event (**Reaction events**, below). An
 envelope whose send timestamp is more than five minutes old gets a
 `[sent YYYY-MM-DD HH:MM UTC]` prefix prepended, so backlog delivered after
 a reconnect reads as backlog rather than as current.
@@ -3555,6 +3557,112 @@ phase one: a `send_to_channel` tool" note under
 [SchedulerPlugin](#schedulerplugin) and the deferred entry in
 `docs/threat-model.md`.
 
+**Reaction tools.** `register_tools` also offers `signal_react(emoji)` and
+`signal_unreact(emoji)` under the same `signal:` guard as the attachment tool.
+Neither takes a message or a channel: the target is always the message that
+started the current turn, and the model cannot aim them anywhere else.
+Data flow: `_handle_notification` mints the trace id before it fires
+`on_message`, and for an allowed sender whose envelope `timestamp` is an `int`
+it records `trace_id -> (channel id, sender ACI, timestamp ms)` in
+`SignalPlugin._triggers`, an `OrderedDict` bounded at 256 entries (the oldest
+is evicted). A refused sender's messages are never recorded, so they cannot
+push real triggers out. The tool reads `trace_id` and `channel_id` from
+`corvidae.attribution.get_attribution()` (the same provenance
+`notify_other_channel` reads), looks the trace up, and treats an entry whose
+channel differs from the turn's channel as not found, because a notification
+can carry a trace across channels. It then sends one `sendReaction` RPC through
+`_send_rpc` with `recipient` (the sender's ACI, the channel scope), `emoji`,
+`targetAuthor` (the same ACI), `targetTimestamp` (the envelope timestamp) and,
+for `signal_unreact`, `remove: true`. A burst coalesced into one turn owns the
+trace of its last message (PRD §3.1.19), so the reaction lands on that one.
+
+The map is in memory on purpose. Reacting after a restart to a message from
+before it is rare, and persisting a message reference needs the kernel work
+tracked in #777. A turn with no entry (a reminder or heartbeat turn, a turn on
+another transport's channel, an evicted or pre-restart trace, an envelope whose
+timestamp was missing or not an `int`) gets an error saying there is no message
+to react to and suggesting a text reply; nothing is sent. A result a background
+task returns inherits the trace of the message that started it, so it reacts to
+that message. The local emoji check is non-empty and at most 16 code points;
+whether it is a real emoji is signal-cli's call, and its rejection text comes
+back in the tool's error. Any failure (daemon not connected, daemon rejection)
+is logged at WARNING with the traceback and returned as a "Could not react" or "Could not remove reaction"
+string naming the channel, with retry-or-reply-in-text as the remedy.
+
+Known limits: the tools can only reach the triggering message until #777
+exposes message ids; the `_send_rpc` call has no timeout of its own, so a
+wedged daemon can hold the call for `tools.call_timeout` (the attachment tool
+has the same exposure); and the `sendReaction` parameter names are taken from
+signal-cli's man page (v0.14.7) and pinned against the fake daemon in
+`tests/signal_fake.py` only. A live signal-cli cannot be driven in CI
+(PRD §3.2.9), so the wire shape has not been checked against a running one.
+
+**Reaction events.** A reaction an allowlisted sender puts on a message reaches
+the agent as context, without starting a turn. In `_handle_notification`, after
+the self, `syncMessage` and group rules and before the empty-text rule, a
+non-null `dataMessage.reaction` goes to `_handle_reaction` and the function
+returns (a null or absent `reaction` falls through to the text rule as before).
+`_handle_reaction` runs these steps in order, and every drop is logged:
+
+1. No `sourceUuid`: WARNING, dropped (a channel cannot be scoped without one).
+2. Allowlist: the same `_is_allowed` predicate the text path uses, before any
+   state is touched. A refusal is one INFO line naming the sender; no channel is
+   created.
+3. A `reaction` that is not an object: WARNING, dropped.
+4. `isRemove` true: DEBUG, dropped. Removals are noise by decision.
+5. Emoji check (`_is_plain_emoji`): see below. A mismatch is a WARNING naming the
+   sender, with the value cut to 32 characters and then `%r`'d, so an escape is
+   never split.
+6. `targetSentTimestamp` must be an `int` (`type(x) is int`, so `True` fails),
+   positive and below year 9999 in milliseconds; otherwise WARNING, dropped.
+7. The line is built in code: `[reaction: <emoji> on <whose> message from
+   <YYYY-MM-DD HH:MM UTC>]`. `<whose>` is "your" when `targetAuthorUuid` is
+   present and not the sender's ACI, "their own" when it is the sender's, and
+   "a" when it is absent (the legacy `targetAuthor` can be a phone number and is
+   not used). The time is the target message's, not the reaction's.
+8. The channel is resolved as the text path does for an allowed sender
+   (`_resolve_channel(source_uuid, sourceNumber)`; the number is passed because
+   alias config applies only when a channel is first created), and the line is
+   appended to `_pending_reactions[channel.id]`, at most 20 per channel. On
+   overflow the oldest is dropped with a WARNING naming the channel.
+
+`SignalPlugin.before_agent_turn` drains that list. It opens with
+`if not self.owns(channel): return`, returns (keeping the lines) when
+`channel.conversation` is `None`, and otherwise appends each waiting line as a
+`CONTEXT` row with role `system`, removing each from the list only after its
+append. The Agent persists rows appended inside the hook that lack a `_db_id`,
+the way `corvidae_timepiece` does. No `on_notify` and no `on_message` fires, so
+a thumbs-up starts no turn and gets no reply; the row sits at the tail of the
+next turn's window, after that turn's own user message. `on_notify` was
+rejected for this because it always enqueues a turn.
+
+*Why the emoji shape is so narrow.* The emoji string is sender-controlled and
+goes into the prompt. A grammar for compound emoji (flags, keycaps, ZWJ
+sequences) was tried twice in review and each version had a new hole: tag-sequence
+payloads, enclosed letters joined by ZWJ, regional-indicator words. So
+`_PLAIN_EMOJI` accepts exactly one pictograph, then optionally one skin-tone
+modifier (U+1F3FB to 1F3FF), then optionally VS16 (U+FE0F), matched with
+`fullmatch` (a trailing newline fails). A pictograph is a code point in one of
+the emoji-bearing Unicode blocks, taken as whole blocks so emoji added later
+still pass; the skin-tone modifiers are carved out of those ranges so they only
+follow a base. No ZWJ, tag character, digit, keycap or regional indicator
+matches, so at most three code points get through and only one of them carries
+content. The price is that a real compound reaction (a flag, a keycap, a
+family, 🏳️‍🌈) is dropped with a WARNING. Widening it needs a real emoji table, not a
+hand-written grammar.
+
+*Shortcuts, each marked `shortcut:` in the code.* Waiting reactions live in
+memory and are lost on a crash. The row has no kernel provenance header and
+bypasses the cognition funnel's trust quarantine (PRD §3.3.11), and the
+allowlist check is the transport's own rather than `should_process_message`
+(PRD §3.2.2); this is safe only because the accepted string is a single symbol
+and the rest of the row is built here (`docs/threat-model.md`, finding 18). An
+agent-initiated contact is not on the allowlist, so its reactions are refused by
+the same check. There is no snippet of the target message, so the agent learns
+that a message was reacted to and when it was sent, not what it said (#777), and
+no per-reaction way to start a turn. Like the reaction tools, this path is
+pinned against the fake daemon (PRD §3.2.9), not a live signal-cli.
+
 Group conversations are out of scope, as is any privacy handling specific
 to disappearing messages.
 
@@ -3637,6 +3745,43 @@ right: a later send to that scope has to find it, and an inbound message would
 have registered it had someone typed in the thread first. A permission refusal
 is reported as the permission Discord wanted (Create Public Threads), not as an
 SDK exception.
+
+**Reactions.** `register_tools` offers `discord_react(emoji)` and
+`discord_unreact(emoji)` next to the other Discord tools (only when a token is
+set). Neither takes a message id or a channel: the target is the message that
+started the current turn. Data flow: `_handle_message` mints the trace id and,
+for an allowed sender only, stores `trace_id -> (the discord.Message, channel
+id)` in `DiscordPlugin._triggers`, an insertion-ordered dict bounded at 256
+entries (the oldest is evicted). Refused senders are never stored, so they
+cannot push real triggers out. The tool reads `trace_id` and `channel_id` from
+`get_attribution()` and treats an entry whose channel differs from the turn's as
+not found. The stored object is the message itself, so the tool calls its
+`add_reaction` / `remove_reaction` with no extra fetch. `discord_unreact`
+removes the bot's own reaction (`remove_reaction(emoji, client.user)`); before
+the gateway has identified the bot that user is unknown and the tool answers
+"not connected yet, retry". A burst coalesced into one turn owns the trace of
+its last message (PRD §3.1.19).
+
+The map is in memory only: a restart forgets it, and reacting to a message
+from before the restart is rare enough that persisting waits for the message
+references in #777. A turn with no entry (reminder or heartbeat turn, another
+transport's channel, evicted or pre-restart trace) gets an error saying there
+is no message to react to and that a text reply is the alternative.
+
+The emoji is passed to the SDK as given, a Unicode emoji or a custom
+`<:name:id>`; the only local check is non-empty and at most 64 characters, because
+whether an emoji exists is Discord's judgment and a local list would go stale.
+Every failure is returned as text and logged at WARNING with the traceback. The
+catch is `Exception`, like the sibling tools, because a message held across a
+reconnect belongs to a closed client and raises something other than
+`HTTPException`. A `Forbidden` is reported as the missing permissions (Add
+Reactions and Read Message History, both of which `add_reaction` needs); anything
+else names the emoji and the exception type. A repeated identical reaction is a
+no-op on Discord's side and reads as success. Known limit: reactions can only
+target the triggering message until #777 exposes message ids. Like the rest of
+this transport, the tools are pinned against fake clients, since there is no
+local Discord server (PRD §3.2.9). Inbound Discord reactions are not delivered
+to the agent.
 
 **Ordering.** discord.py runs every gateway event as its own task, so
 handling a message inside `on_message` would let two quick messages
@@ -3753,7 +3898,9 @@ not provided by the transport: PRD §3.5.9 (operator allowlist that starts
 empty, plus a budget); see the scheduler's "Not in phase one: a
 `send_to_channel` tool" note and `docs/threat-model.md`.
 
-Out of scope: voice, slash commands, embeds, and reactions. Attachments are in
+Out of scope: voice, slash commands, embeds, and inbound reactions (the agent
+can add and remove its own reaction on the triggering message, see
+**Reactions** above, but a user's reaction is not delivered). Attachments are in
 scope in both directions — see **Attachments** above for the inbound rules and
 `send_attachment` for the outbound one.
 
