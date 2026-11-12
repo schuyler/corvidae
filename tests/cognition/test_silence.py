@@ -338,3 +338,218 @@ class TestEndToEndConsistency:
         writes = await _respond(text, MessageType.UNSENT)
         assert len(writes) == 1
         assert writes[0]['outcomes'] == {'silence': 'no_reply'}
+
+# ---------------------------------------------------------------------------
+# silence.mode: the end_turn tool (#797)
+# ---------------------------------------------------------------------------
+
+
+async def _tool_pm(mode: str | None = "tool", outcome_log=None):
+    """A plugin manager with SilencePlugin in ``mode`` and an IRC transport,
+    plus the plugin and the tools it registered, keyed by name."""
+    from corvidae.channels.irc import IRCPlugin
+    from corvidae_cognition.silence import SilencePlugin
+
+    pm = create_plugin_manager()
+    silence = SilencePlugin()
+    pm.register(silence, name="silence")
+    pm.register(IRCPlugin(), name="irc")
+    if outcome_log is not None:
+        pm.register(outcome_log, name="outcome_log")
+    config = {} if mode is None else {"silence": {"mode": mode}}
+    await silence.on_init(pm=pm, config=config)
+    registry: list = []
+    silence.register_tools(registry)
+    return pm, silence, {tool.name: tool for tool in registry}
+
+
+def _tool_ctx(channel):
+    from corvidae.tool import ToolContext
+
+    return ToolContext(channel=channel, tool_call_id="call-1", task_queue=None)
+
+
+class TestModeConfig:
+    async def test_default_mode_is_token_and_registers_no_tool(self):
+        _pm, silence, tools = await _tool_pm(mode=None)
+
+        assert silence._mode == "token"
+        assert tools == {}
+
+    @pytest.mark.parametrize("mode", ["tool", "both"])
+    async def test_tool_modes_register_end_turn(self, mode):
+        _pm, _silence, tools = await _tool_pm(mode=mode)
+
+        assert set(tools) == {"end_turn"}
+        assert "reason" in tools["end_turn"].schema["function"]["parameters"]["properties"]
+
+    @pytest.mark.parametrize("bad", ["tools", "", None, 3, True])
+    async def test_bad_mode_names_key_value_and_accepted_values(self, bad):
+        from corvidae_cognition.silence import SilencePlugin
+
+        pm = create_plugin_manager()
+        silence = SilencePlugin()
+
+        with pytest.raises(ValueError) as exc:
+            await silence.on_init(pm=pm, config={"silence": {"mode": bad}})
+
+        message = str(exc.value)
+        assert "silence.mode" in message
+        assert repr(bad) in message
+        for accepted in ("token", "tool", "both"):
+            assert accepted in message
+        assert "agent.yaml" in message
+
+
+class TestModeInstruction:
+    async def _fragment(self, mode):
+        pm, _silence, _tools = await _tool_pm(mode=mode)
+        result = await pm.ahook.transform_system_prompt(
+            channel=Channel(transport="irc", scope="#lex"), text="IDENTITY"
+        )
+        return result.removeprefix("IDENTITY\n\n")
+
+    async def test_token_mode_keeps_the_built_in_fragment(self):
+        from corvidae_cognition.silence import REGISTER_FRAGMENT
+
+        assert await self._fragment("token") == REGISTER_FRAGMENT
+
+    async def test_tool_mode_names_the_tool_not_the_token_reply(self):
+        fragment = await self._fragment("tool")
+
+        assert "end_turn" in fragment
+        assert "reply with exactly NO_REPLY" not in fragment
+
+    async def test_both_mode_names_the_tool_and_the_token(self):
+        fragment = await self._fragment("both")
+
+        assert "end_turn" in fragment
+        assert "NO_REPLY" in fragment
+
+    async def test_operator_instruction_still_wins_in_tool_mode(self):
+        from corvidae.channels.irc import IRCPlugin
+        from corvidae_cognition.silence import SilencePlugin
+
+        pm = create_plugin_manager()
+        silence = SilencePlugin()
+        pm.register(silence, name="silence")
+        pm.register(IRCPlugin(), name="irc")
+        await silence.on_init(
+            pm=pm, config={"silence": {"mode": "tool", "instruction": "CUSTOM"}}
+        )
+
+        result = await pm.ahook.transform_system_prompt(
+            channel=Channel(transport="irc", scope="#lex"), text="IDENTITY"
+        )
+
+        assert result == "IDENTITY\n\nCUSTOM"
+
+
+class TestEndTurnTool:
+    async def test_result_tells_the_model_to_echo_the_token(self):
+        _pm, _silence, tools = await _tool_pm()
+        channel = Channel(transport="irc", scope="#lex")
+
+        result = await tools["end_turn"].fn(reason="they said thanks", _ctx=_tool_ctx(channel))
+
+        assert "Nothing was sent" in result
+        assert "exactly NO_REPLY" in result
+
+    async def test_the_follow_up_token_is_withheld(self):
+        """The echo the result asks for is what the veto catches."""
+        pm, _silence, _tools = await _tool_pm()
+        results = await pm.ahook.should_send_response(
+            channel=Channel(transport="irc", scope="#lex"), text="NO_REPLY",
+            emission="final", trace_id="t-tool", annotations={"origin": "user"},
+        )
+
+        assert resolve_reject_wins(results) is False
+
+    async def test_call_is_recorded_with_its_reason(self):
+        from corvidae.attribution import reset_attribution, set_attribution
+
+        log = _StubOutcomeLog()
+        _pm, silence, tools = await _tool_pm(outcome_log=log)
+        channel = Channel(transport="irc", scope="#lex")
+
+        token = set_attribution(trace_id="t-tool")
+        try:
+            await tools["end_turn"].fn(reason="they said thanks", _ctx=_tool_ctx(channel))
+        finally:
+            reset_attribution(token)
+        await silence.on_stop()
+
+        assert len(log.writes) == 1
+        assert log.writes[0]["trace_id"] == "t-tool"
+        assert log.writes[0]["channel_id"] == "irc:#lex"
+        assert log.writes[0]["outcomes"] == {
+            "silence": "tool", "silence_reason": "they said thanks",
+        }
+
+    async def test_unconversational_channel_is_refused_with_a_remedy(self):
+        log = _StubOutcomeLog()
+        _pm, silence, tools = await _tool_pm(outcome_log=log)
+        channel = Channel(transport="web", scope="tab1")
+
+        result = await tools["end_turn"].fn(reason="x", _ctx=_tool_ctx(channel))
+        await silence.on_stop()
+
+        assert result.startswith("Error")
+        assert "web:tab1" in result
+        assert "answer" in result
+        assert log.writes == []
+
+    async def test_missing_channel_context_is_refused(self):
+        _pm, _silence, tools = await _tool_pm()
+
+        result = await tools["end_turn"].fn(reason="x", _ctx=_tool_ctx(None))
+
+        assert result.startswith("Error")
+        assert "no channel context" in result
+
+    async def test_a_failed_write_is_logged_not_raised(self, caplog):
+        from corvidae.attribution import reset_attribution, set_attribution
+
+        class _Broken:
+            async def upsert_exchange(self, *args, **kwargs):
+                raise RuntimeError("db closed")
+
+        _pm, silence, tools = await _tool_pm(outcome_log=_Broken())
+        channel = Channel(transport="irc", scope="#lex")
+
+        token = set_attribution(trace_id="t-broken")
+        try:
+            with caplog.at_level("WARNING", logger="corvidae.silence"):
+                result = await tools["end_turn"].fn(reason="x", _ctx=_tool_ctx(channel))
+                await silence.on_stop()
+        finally:
+            reset_attribution(token)
+
+        assert "Nothing was sent" in result
+        assert "t-broken" in caplog.text
+        assert "irc:#lex" in caplog.text
+
+    async def test_the_echoed_token_does_not_overwrite_the_tool_record(self):
+        """The turn's final is an unsent NO_REPLY; recording it as no_reply
+        would replace the tool outcome under the same key."""
+        from corvidae.attribution import reset_attribution, set_attribution
+
+        log = _StubOutcomeLog()
+        pm, silence, tools = await _tool_pm(outcome_log=log)
+        # end_turn only works on a conversational channel, so rebuild the
+        # helper's window on an IRC channel.
+        channel = Channel(transport="irc", scope="s5")
+        channel.conversation = _channel_ending_in(MessageType.UNSENT).conversation
+
+        token = set_attribution(trace_id="t-s5")
+        try:
+            await tools["end_turn"].fn(reason="done", _ctx=_tool_ctx(channel))
+        finally:
+            reset_attribution(token)
+        await pm.ahook.on_agent_response(
+            channel=channel, request_text="thanks, night!", response_text="NO_REPLY",
+            trace_id="t-s5", annotations={}, logprobs=None,
+        )
+        await silence.on_stop()
+
+        assert [w["outcomes"]["silence"] for w in log.writes] == ["tool"]

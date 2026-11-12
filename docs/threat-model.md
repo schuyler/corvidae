@@ -1381,7 +1381,11 @@ line is plain text in the result, with no kernel header at all.
   a message that says "don't reply to this" may be enough. The worst case is
   a missed reply. A decline is a row in `exchange_log` with
   `outcomes.silence` (`no_reply` or `empty`) only when `outcome_log` is loaded
-  and the turn has a trace id, so look there to find them. It adds no
+  and the turn has a trace id, so look there to find them. With
+  `silence.mode: tool` or `both` the agent also has an `end_turn(reason)` tool,
+  a second route to the same effect: an injected "don't reply" can get the
+  tool called, the record is `outcomes.silence = "tool"` with the model's
+  reason, and the tool refuses on web, CLI and ACP. It adds no
   capability: the agent could already stay quiet by sending an empty final,
   and nothing it can reach changes. A custom `register_prompt`, or an empty
   one, does not remove the instruction. If a channel must always answer,
