@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rss-reader"
+version = "0.0.1"
+description = "RSS/Atom reader plugin for corvidae: polls feeds and delivers new items as notifications"
+requires-python = ">=3.13"
+dependencies = ["corvidae", "httpx"]
+
+[project.entry-points.corvidae]
+rss = "rss_reader:RSSPlugin"
+
+[tool.uv.sources]
+corvidae = { workspace = true }
+
+# Explicit, so a later docs/ directory here can't break the build.
+[tool.setuptools.packages.find]
+include = ["rss_reader*"]

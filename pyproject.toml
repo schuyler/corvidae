@@ -43,6 +43,10 @@ context-panel = [
 webhook-notify = [
     "webhook-notify",
 ]
+# RSS/Atom feed polling and notification delivery (packages/rss-reader).
+rss = [
+    "rss-reader",
+]
 # Memory, appraisal, critique, funnel and outcome log
 # (packages/corvidae-cognition, docs/cognition.md). Includes the `vec`
 # sub-extra, so the documented install keeps vector memory (#130). For the
@@ -169,3 +173,4 @@ corvidae-restart = { workspace = true }
 corvidae-timepiece = { workspace = true }
 corvidae-inotify = { workspace = true }
     corvidae-vision = { workspace = true }
+    rss-reader = { workspace = true }
