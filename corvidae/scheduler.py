@@ -1085,5 +1085,37 @@ class SchedulerPlugin(CorvidaePlugin):
                 return f"Error: {id!r} is not a reminder id; use the number from list_reminders"
             return await plugin.cancel_reminder_on(row_id, channel.id)
 
-        for fn in (remind_me, list_reminders, cancel_reminder):
+        # CRUD tools for the YAML jobs file (operator-facing).
+        jobs_file = plugin._jobs_file_path
+
+        async def add_job(name: str, channel: str, cron: str, origin: str = "reminder", prompt: str = "", _ctx=None) -> str:
+            """Add a job to the scheduler jobs file. The job is synced on the next reload."""
+            if jobs_file is None:
+                return "Error: no jobs_file configured"
+            from corvidae.scheduler_crud import add_job as _add
+            return await _add(jobs_file, name, channel, cron, origin, prompt)
+
+        async def update_job(name: str, channel: str = "", cron: str = "", origin: str = "", prompt: str = "", _ctx=None) -> str:
+            """Update an existing job in the scheduler jobs file."""
+            if jobs_file is None:
+                return "Error: no jobs_file configured"
+            from corvidae.scheduler_crud import update_job as _upd
+            return await _upd(jobs_file, name, channel, cron, origin, prompt)
+
+        async def remove_job(name: str, _ctx=None) -> str:
+            """Remove a job from the scheduler jobs file."""
+            if jobs_file is None:
+                return "Error: no jobs_file configured"
+            from corvidae.scheduler_crud import remove_job as _rem
+            return await _rem(jobs_file, name)
+
+        async def list_jobs(_ctx=None) -> str:
+            """List all jobs in the scheduler jobs file."""
+            if jobs_file is None:
+                return "Error: no jobs_file configured"
+            from corvidae.scheduler_crud import list_jobs as _lst
+            return await _lst(jobs_file)
+
+        for fn in (remind_me, list_reminders, cancel_reminder,
+                    add_job, update_job, remove_job, list_jobs):
             tool_registry.append(Tool(name=fn.__name__, fn=fn, schema=tool_to_schema(fn)))

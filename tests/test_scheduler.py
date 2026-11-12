@@ -634,7 +634,11 @@ class TestTools:
         params = {t.name: set(t.schema["function"]["parameters"].get("properties", {}))
                   for t in registry}
         assert params == {"remind_me": {"when", "text"}, "list_reminders": set(),
-                          "cancel_reminder": {"id"}}
+                          "cancel_reminder": {"id"},
+                          "add_job": {"name", "channel", "cron", "origin", "prompt"},
+                          "update_job": {"name", "channel", "cron", "origin", "prompt"},
+                          "remove_job": {"name"},
+                          "list_jobs": set()}
 
 
 # ---------------------------------------------------------------------------
