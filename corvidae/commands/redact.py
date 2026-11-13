@@ -301,17 +301,13 @@ async def redact_messages(
                 continue
             affected_messages += 1
             dry_by_channel.setdefault(ch_row[0], []).append(msg_id)
-            if not has_memory:
-                continue
-            ch = ch_row[0]
-            async with db.execute(
-                "SELECT COUNT(*) FROM memory "
-                "WHERE channel_id = ? AND msg_id_start <= ? AND msg_id_end >= ? "
-                "AND redacted = 0",
-                (ch, msg_id, msg_id),
-            ) as cursor:
-                cnt_row = await cursor.fetchone()
-            affected_memories += cnt_row[0] if cnt_row else 0
+        # Distinct records per channel, the same set the real run tombstones: a
+        # record covering two redacted ids is one memory, not two (#680). The
+        # real run gets this for free, because its `redacted = 0` filter skips
+        # what an earlier id already tombstoned.
+        if has_memory:
+            for ch, ids in dry_by_channel.items():
+                affected_memories += len(await _cascade_memory_ids(db, ch, ids, -1))
         return {
             "affected_messages": affected_messages,
             "affected_memories": affected_memories,
