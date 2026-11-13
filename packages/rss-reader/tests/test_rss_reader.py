@@ -117,6 +117,18 @@ def _make_plugin(config: dict) -> RSSPlugin:
     return plugin
 
 
+def _make_plugin_for_on_init() -> RSSPlugin:
+    """Create a plugin instance for on_init tests, patching get_dependency."""
+    from unittest.mock import patch
+    plugin = RSSPlugin.__new__(RSSPlugin)
+    plugin.pm = MagicMock()
+    # Patch get_dependency to return our mocks without type checking
+    plugin._registry = MagicMock()
+    plugin._spill = MagicMock()
+    plugin._spill.notify = AsyncMock()
+    return plugin
+
+
 def test_on_init_no_config_is_inert():
     """Without an 'rss' config block, the plugin should be inert."""
     plugin = RSSPlugin.__new__(RSSPlugin)
@@ -183,6 +195,16 @@ def test_save_seen_creates_parent_dir(tmp_path: Path):
     plugin._state_path = tmp_path / "nested" / "dir" / "seen.json"
     plugin._save_seen({"url": {"guid"}})
     assert plugin._state_path.exists()
+
+
+def _sample_feed(n: int) -> bytes:
+    """Generate a sample RSS feed with n items."""
+    items = []
+    for i in range(1, n + 1):
+        item = '<item><title>Post %d</title><link>https://example.com/%d</link><guid>https://example.com/%d</guid><description>Summary of post %d</description></item>' % (i, i, i, i)
+        items.append(item)
+    xml = '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Test Feed</title><link>https://example.com</link>' + ''.join(items) + '</channel></rss>'
+    return xml.encode()
 
 
 # --- Poll logic tests ---
@@ -330,3 +352,254 @@ class TestSecondPoll:
         saved = json.loads(plugin._state_path.read_text())
         assert "guid-3" in saved["https://example.com/feed.xml"]
         assert "guid-1" in saved["https://example.com/feed.xml"]
+
+
+# --- Config validation tests (call on_init, assert message names key/value/form) ---
+
+@pytest.mark.asyncio
+async def test_on_init_rejects_non_list_feeds_calls_on_init():
+    """on_init must reject non-list feeds and name the key, value, and accepted form."""
+    from unittest.mock import patch
+    from rss_reader import RSSPlugin
+    plugin = _make_plugin_for_on_init()
+
+    with patch("rss_reader.get_dependency") as mock_getdep:
+        mock_getdep.side_effect = lambda pm, name, _type: {
+            "registry": plugin._registry,
+            "spill": plugin._spill,
+        }[name]
+        with pytest.raises(ValueError) as exc_info:
+            await plugin.on_init(
+                plugin.pm,
+                {"rss": {"feeds": "not a list", "poll_interval": "30m", "targets": ["signal:+1"]}}
+            )
+    msg = str(exc_info.value)
+    assert "rss.feeds" in msg
+    assert "not a list" in msg
+    assert "list of feed URLs" in msg
+
+
+@pytest.mark.asyncio
+async def test_on_init_rejects_non_url_feeds_calls_on_init():
+    """on_init must reject non-URL feeds and name the key, value, and accepted form."""
+    from unittest.mock import patch
+    from rss_reader import RSSPlugin
+    plugin = _make_plugin_for_on_init()
+
+    with patch("rss_reader.get_dependency") as mock_getdep:
+        mock_getdep.side_effect = lambda pm, name, _type: {
+            "registry": plugin._registry,
+            "spill": plugin._spill,
+        }[name]
+        with pytest.raises(ValueError) as exc_info:
+            await plugin.on_init(
+                plugin.pm,
+                {"rss": {"feeds": ["ftp://example.com/feed"], "poll_interval": "30m", "targets": ["signal:+1"]}}
+            )
+    msg = str(exc_info.value)
+    assert "rss.feeds" in msg
+    assert "ftp://example.com/feed" in msg
+    assert "http(s) URL" in msg
+
+
+@pytest.mark.asyncio
+async def test_on_init_rejects_zero_poll_interval():
+    """on_init must reject zero poll intervals."""
+    from unittest.mock import patch
+    from rss_reader import RSSPlugin
+    plugin = _make_plugin_for_on_init()
+
+    with patch("rss_reader.get_dependency") as mock_getdep:
+        mock_getdep.side_effect = lambda pm, name, _type: {
+            "registry": plugin._registry,
+            "spill": plugin._spill,
+        }[name]
+        with pytest.raises(ValueError) as exc_info:
+            await plugin.on_init(
+                plugin.pm,
+                {"rss": {"feeds": ["https://example.com/feed"], "poll_interval": "0m", "targets": ["signal:+1"]}}
+            )
+    msg = str(exc_info.value)
+    assert "rss.poll_interval" in msg
+    assert "0m" in msg
+    assert "positive" in msg
+
+
+@pytest.mark.asyncio
+async def test_on_init_rejects_negative_poll_interval():
+    """on_init must reject negative poll intervals (sign must not be lost)."""
+    from unittest.mock import patch
+    from rss_reader import RSSPlugin
+    plugin = _make_plugin_for_on_init()
+
+    with patch("rss_reader.get_dependency") as mock_getdep:
+        mock_getdep.side_effect = lambda pm, name, _type: {
+            "registry": plugin._registry,
+            "spill": plugin._spill,
+        }[name]
+        with pytest.raises(ValueError) as exc_info:
+            await plugin.on_init(
+                plugin.pm,
+                {"rss": {"feeds": ["https://example.com/feed"], "poll_interval": "-5m", "targets": ["signal:+1"]}}
+            )
+    msg = str(exc_info.value)
+    assert "rss.poll_interval" in msg
+    assert "-5m" in msg
+
+
+@pytest.mark.asyncio
+async def test_on_init_rejects_trailing_junk_poll_interval():
+    """on_init must reject poll intervals with trailing junk."""
+    from unittest.mock import patch
+    from rss_reader import RSSPlugin
+    plugin = _make_plugin_for_on_init()
+
+    with patch("rss_reader.get_dependency") as mock_getdep:
+        mock_getdep.side_effect = lambda pm, name, _type: {
+            "registry": plugin._registry,
+            "spill": plugin._spill,
+        }[name]
+        with pytest.raises(ValueError) as exc_info:
+            await plugin.on_init(
+                plugin.pm,
+                {"rss": {"feeds": ["https://example.com/feed"], "poll_interval": "30m junk", "targets": ["signal:+1"]}}
+            )
+    msg = str(exc_info.value)
+    assert "rss.poll_interval" in msg
+    assert "30m junk" in msg
+
+
+# --- _parse_duration regression tests ---
+
+def test_parse_duration_rejects_zero():
+    from rss_reader import _parse_duration
+    with pytest.raises(ValueError, match="positive"):
+        _parse_duration("0m")
+
+
+def test_parse_duration_rejects_negative():
+    from rss_reader import _parse_duration
+    with pytest.raises(ValueError):
+        _parse_duration("-5m")
+
+
+def test_parse_duration_rejects_trailing_junk():
+    from rss_reader import _parse_duration
+    with pytest.raises(ValueError):
+        _parse_duration("30m junk")
+
+
+def test_parse_duration_accepts_valid():
+    from rss_reader import _parse_duration
+    assert _parse_duration("30m") == 1800.0
+    assert _parse_duration("2h") == 7200.0
+    assert _parse_duration("1h30m") == 5400.0
+    assert _parse_duration("90") == 90.0
+
+
+# --- Regression tests for the delivery fixes ---
+
+@pytest.mark.asyncio
+async def test_items_stay_unseen_when_no_channel_ready(tmp_path: Path):
+    """Items must not be marked seen when no channel is ready to receive them."""
+    from rss_reader import RSSPlugin
+    plugin = _make_plugin({})
+    plugin._feeds = ["https://example.com/feed"]
+    plugin._targets = ("signal:+1",)
+    plugin._max_items = 500
+    plugin._state_path = tmp_path / "seen.json"
+    plugin._max_chars = 2000
+    plugin._poll_secs = 1800
+    # Simulate no channel ready
+    plugin._registry.get = MagicMock(return_value=None)
+
+    feed_xml = _sample_feed(3)
+    plugin._fetch = AsyncMock(return_value=feed_xml)
+
+    await plugin._poll_once()
+
+    # Items should NOT be marked seen (no channel ready)
+    seen = plugin._load_seen()
+    assert len(seen) == 0, f"Expected 0 seen items, got {len(seen)}"
+
+
+@pytest.mark.asyncio
+async def test_second_poll_delivers_new_items(tmp_path: Path):
+    """A second poll should deliver items that arrived after the first poll."""
+    from rss_reader import RSSPlugin
+    plugin = _make_plugin({})
+    plugin._feeds = ["https://example.com/feed"]
+    plugin._targets = ("signal:+1",)
+    plugin._max_items = 500
+    plugin._state_path = tmp_path / "seen.json"
+    plugin._max_chars = 2000
+    plugin._poll_secs = 1800
+
+    feed1 = _sample_feed(2)
+    feed2 = _sample_feed(3)
+
+    # Mock HTTP client for both polls
+    resp1 = MagicMock()
+    resp1.content = feed1
+    resp1.raise_for_status = MagicMock()
+    resp2 = MagicMock()
+    resp2.content = feed2
+    resp2.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(side_effect=[resp1, resp2])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    mock_channel = MagicMock()
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=mock_channel)):
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            # First poll
+            await plugin._poll_once()
+            seen_after_first = plugin._load_seen()
+            total_first = sum(len(v) for v in seen_after_first.values())
+            assert total_first == 2
+
+            # Second poll: should deliver only the new item
+            await plugin._poll_once()
+            seen_after_second = plugin._load_seen()
+            total_second = sum(len(v) for v in seen_after_second.values())
+            assert total_second == 3
+
+
+@pytest.mark.asyncio
+async def test_items_beyond_cap_arrive_next_cycle(tmp_path: Path):
+    """Items beyond the cap in one poll should be delivered in the next poll."""
+    from rss_reader import RSSPlugin
+    plugin = _make_plugin({})
+    plugin._feeds = ["https://example.com/feed"]
+    plugin._targets = ("signal:+1",)
+    plugin._max_items = 2
+    plugin._state_path = tmp_path / "seen.json"
+    plugin._max_chars = 2000
+    plugin._poll_secs = 1800
+
+    feed = _sample_feed(4)
+    resp = MagicMock()
+    resp.content = feed
+    resp.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    mock_channel = MagicMock()
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=mock_channel)):
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            # First poll: should deliver only 2 (cap)
+            await plugin._poll_once()
+            seen_after_first = plugin._load_seen()
+            total_first = sum(len(v) for v in seen_after_first.values())
+            assert total_first == 2
+
+            # Second poll: should deliver the remaining 2
+            await plugin._poll_once()
+            seen_after_second = plugin._load_seen()
+            total_second = sum(len(v) for v in seen_after_second.values())
+            assert total_second == 4
