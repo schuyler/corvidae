@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -249,7 +249,11 @@ class TestDST:
         # a time strictly after `after`.
         cron = parse_cron("30 1 * * *")
         result = next_fire(cron, after, tz)
-        assert result > after, f"next_fire returned {result} which is not after {after}"
+        # Compare in UTC: the wall-clock comparison (result > after) is the
+        # same one the guard uses, so it passes on a result 40 min in the past.
+        assert result.astimezone(UTC) > after.astimezone(UTC), (
+            f"next_fire returned {result} which is not after {after} (UTC)"
+        )
 
     def test_fallback_hour_every_20min(self):
         from zoneinfo import ZoneInfo
@@ -261,7 +265,9 @@ class TestDST:
         # */20 * * * * should not return 01:20 PDT (fold=0, in the past).
         cron = parse_cron("*/20 * * * *")
         result = next_fire(cron, after, tz)
-        assert result > after, f"next_fire returned {result} which is not after {after}"
+        assert result.astimezone(UTC) > after.astimezone(UTC), (
+            f"next_fire returned {result} which is not after {after} (UTC)"
+        )
 
     def test_spring_forward_still_works(self):
         from zoneinfo import ZoneInfo

@@ -173,9 +173,12 @@ def next_fire(
             t_utc += timedelta(minutes=1)
             continue
 
-        # Guard: the result must be strictly after `after` (real time).
+        # Guard: the result must be strictly after `after` in real time (UTC).
+        # Wall-clock comparison (result <= after) is wrong during the
+        # fall-back hour: 01:30 PDT (fold=0) > 01:10 PST (fold=1) as
+        # wall-clock, but 08:30Z < 09:10Z in real time.
         result = t_utc.astimezone(tz)
-        if result <= after:
+        if result.astimezone(UTC) <= after.astimezone(UTC):
             t_utc += timedelta(minutes=1)
             continue
         return result
