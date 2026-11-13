@@ -21,7 +21,7 @@ jobs:
   # acceptance test for "corvidae installs and works without the extras"
   # (plans/kernel-split.md, R1 and R10).
   kernel:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     # Backstop above pytest's own per-test timeout (15s, pyproject.toml).
     timeout-minutes: 15
     steps:
@@ -75,7 +75,7 @@ jobs:
 
   # Everything: the kernel plus the cognition and discord extras.
   full:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -113,7 +113,7 @@ jobs:
   # path PRD §3.7 (Memory 5) requires. Without this job the vector tests skip
   # silently in every other configuration.
   cognition-fts:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -149,7 +149,7 @@ jobs:
   # skip. Playwright is pinned and supplied with `--with`, so it stays out of
   # pyproject.toml and uv.lock.
   web-smoke:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
