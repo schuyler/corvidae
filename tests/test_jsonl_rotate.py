@@ -198,3 +198,65 @@ def test_a_second_failure_streak_warns_again(tmp_path, caplog, monkeypatch):
     appender.close()
     assert first_streak == 1, "one warning per streak"
     assert second_streak == 2, "the second streak is reported, not silent"
+
+
+def test_a_failure_part_way_through_the_chain_puts_every_backup_back(tmp_path, caplog, monkeypatch):
+    """The failure need not be the first rename (#606): whatever the attempt had
+    already shifted is replayed backwards, so `.1` through `.4` still hold the
+    data they held before, and the live file keeps its own records."""
+    import corvidae.jsonl_rotate as mod
+
+    path = tmp_path / "chan.jsonl"
+    before = {}
+    for n in range(1, 5):
+        backup = path.with_name(f"{path.name}.{n}")
+        backup.write_text(f"backup-{n}\n")
+        before[backup] = backup.read_text()
+    path.write_text("x" * 25 + "\n")
+
+    appender = RotatingAppender(path, max_bytes=30, backup_count=4)
+    real_replace = mod.os.replace
+
+    def deny_the_first_backup(src, dst, *args, **kwargs):
+        # `.1` lands last, after `.3`->`.4` and `.2`->`.3` have already happened.
+        if str(dst).endswith(".1") and str(src).endswith(".rotating-" + str(mod.os.getpid())):
+            raise PermissionError(1, "Operation not permitted", str(dst))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(mod.os, "replace", deny_the_first_backup)
+    with caplog.at_level(logging.WARNING, logger="corvidae.jsonl_rotate"):
+        for i in range(3):
+            appender.write_line(f"record-{i}")
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+    monkeypatch.undo()
+    for backup, contents in before.items():
+        assert backup.read_text() == contents, f"{backup.name} was not put back"
+    live = _read(path)
+    assert live[0] == "x" * 25 and live[1:] == [f"record-{i}" for i in range(3)]
+    assert len(warnings) == 1 and str(path) in warnings[0]
+    # No temporary file outlives the attempt.
+    assert [p.name for p in tmp_path.iterdir() if "rotating" in p.name or "dropping" in p.name] == []
+
+
+def test_a_partial_rotation_heals_on_the_next_successful_one(tmp_path, monkeypatch):
+    """After a failed attempt the chain is where it was, so the next write that
+    can rotate produces the same chain a first-time rotation would."""
+    import corvidae.jsonl_rotate as mod
+
+    path = tmp_path / "chan.jsonl"
+    for n in range(1, 3):
+        path.with_name(f"{path.name}.{n}").write_text(f"backup-{n}\n")
+    path.write_text("y" * 25 + "\n")
+
+    appender = RotatingAppender(path, max_bytes=30, backup_count=2)
+    real_replace = mod.os.replace
+    monkeypatch.setattr(mod.os, "replace", lambda *a, **k: (_ for _ in ()).throw(PermissionError(13, "denied")))
+    appender.write_line("record-0")
+    monkeypatch.setattr(mod.os, "replace", real_replace)
+
+    appender.write_line("record-1")
+    appender.close()
+    assert _read(path) == ["record-1"]
+    assert _read(path.with_name("chan.jsonl.1"))[0] == "y" * 25
+    assert _read(path.with_name("chan.jsonl.2")) == ["backup-1"]

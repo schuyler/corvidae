@@ -1898,7 +1898,13 @@ over the cap rotates on its first write and an external `copytruncate` still
 works. A lock serialises writers, since one appender can be written from
 several worker threads at once. A rotation that fails (a read-only directory)
 is logged once per streak at WARNING, naming the file, and the file keeps
-growing past the cap until rotation works again. `parse_rotation` validates
+growing past the cap until rotation works again; finding the file under the cap
+on a later write ends the streak, so a later failure warns again. The renames
+are recoverable at every step (#606): the live file is moved aside first, under
+a pid-suffixed `.rotating-<pid>` name, the oldest backup is moved aside rather
+than overwritten, and a failure part way through replays the renames already
+made in reverse, so `.1`–`.N` still hold what they held before. If restoring
+the live file fails too, the WARNING names the `.rotating` file holding it. `parse_rotation` validates
 the two keys in `on_init`; a bad value is a config error. Nothing reads a
 rotated segment; `message_log` is the durable record (principle 4).
 
