@@ -108,6 +108,11 @@ class RotatingAppender:
                     )
                 self._rotation_failing = True
             self._fh = open(self._path, "a", encoding="utf-8")
+        else:
+            # Under the cap, so no rotation was needed: whatever streak was
+            # running has ended, and a later failure must warn again rather than
+            # write silently into a file the operator thinks is being capped.
+            self._rotation_failing = False
         self._fh.write(line + "\n")
         self._fh.flush()
 
@@ -119,13 +124,30 @@ class RotatingAppender:
         if self._backup_count == 0:
             os.remove(self._path)
         else:
-            # Oldest first, so each rename lands on a name just vacated;
-            # os.replace overwrites the file that falls off the end.
-            for n in range(self._backup_count - 1, 0, -1):
-                src = self._path.with_name(f"{self._path.name}.{n}")
-                if src.exists():
-                    os.replace(src, self._path.with_name(f"{self._path.name}.{n + 1}"))
-            os.replace(self._path, self._path.with_name(f"{self._path.name}.1"))
+            # Move the live file out of the way *first*: if that rename fails (an
+            # append-only flag on it, a read-only directory) the backups below are
+            # still the ones from the last good rotation, instead of being shifted
+            # one step per retried write until only the oldest is left.
+            pending = self._path.with_name(f"{self._path.name}.rotating")
+            os.replace(self._path, pending)
+            try:
+                # Oldest first, so each rename lands on a name just vacated;
+                # os.replace overwrites the file that falls off the end.
+                for n in range(self._backup_count - 1, 0, -1):
+                    src = self._path.with_name(f"{self._path.name}.{n}")
+                    if src.exists():
+                        os.replace(src, self._path.with_name(f"{self._path.name}.{n + 1}"))
+                os.replace(pending, self._path.with_name(f"{self._path.name}.1"))
+            except OSError:
+                # Put the live file back rather than leave it under a temporary
+                # name: a half-shifted chain is recoverable, a lost live file is
+                # not. If even this fails, the next write opens a fresh file and
+                # the records stay in `.rotating` for the operator to find.
+                try:
+                    os.replace(pending, self._path)
+                except OSError:
+                    pass
+                raise
         logger.info(
             "rotated JSONL file %s (cap %d bytes, keeping %d)",
             self._path, self._max_bytes, self._backup_count,

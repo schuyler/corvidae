@@ -131,3 +131,70 @@ def test_a_failing_rotation_keeps_appending_and_warns_once(tmp_path, caplog, mon
     appender.write_line("record-06")
     appender.close()
     assert _read(tmp_path / "chan.jsonl.1")[0] == "record-00" and _read(path) == ["record-06"]
+
+
+def test_a_failed_rename_leaves_the_backup_chain_intact(tmp_path, caplog, monkeypatch):
+    """The live file is the one that cannot be renamed (#606): the chain of
+    backups is left as it was, rather than shifted one step per retry."""
+    import corvidae.jsonl_rotate as mod
+
+    path = tmp_path / "chan.jsonl"
+    before = {}
+    for n in range(1, 5):
+        backup = path.with_name(f"{path.name}.{n}")
+        backup.write_text(f"backup-{n}\n")
+        before[backup] = backup.read_text()
+    path.write_text("x" * 25 + "\n")
+
+    appender = RotatingAppender(path, max_bytes=30, backup_count=4)
+    real_replace = mod.os.replace
+
+    def deny_the_live_file(src, dst, *args, **kwargs):
+        # EPERM on the live file's rename, as `chattr +a` gives; the chain's own
+        # renames still work.
+        if str(src) == str(path):
+            raise PermissionError(1, "Operation not permitted", str(src))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(mod.os, "replace", deny_the_live_file)
+    with caplog.at_level(logging.WARNING, logger="corvidae.jsonl_rotate"):
+        for i in range(3):
+            appender.write_line(f"record-{i}")
+
+    monkeypatch.undo()
+    for backup, contents in before.items():
+        assert backup.read_text() == contents, f"{backup.name} was shifted by a failed rotation"
+
+
+def test_a_second_failure_streak_warns_again(tmp_path, caplog, monkeypatch):
+    """A streak that ends without a successful rotation -- the file falls back
+    under the cap -- does not silence the next one (#606)."""
+    import corvidae.jsonl_rotate as mod
+
+    path = tmp_path / "chan.jsonl"
+    appender = RotatingAppender(path, max_bytes=20, backup_count=2)
+
+    def denied(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(mod.os, "replace", denied)
+
+    def warnings() -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.jsonl_rotate"):
+        for i in range(4):
+            appender.write_line(f"record-{i}")
+        first_streak = len(warnings())
+
+        # Under the cap again: an external truncate, which the size check sees.
+        path.write_text("")
+        appender.write_line("after-the-truncate")
+        for i in range(4):
+            appender.write_line(f"again-{i}")
+        second_streak = len(warnings())
+
+    monkeypatch.undo()
+    appender.close()
+    assert first_streak == 1, "one warning per streak"
+    assert second_streak == 2, "the second streak is reported, not silent"
