@@ -169,6 +169,7 @@ class RSSPlugin(CorvidaePlugin):
             self._max_items: int = DEFAULT_MAX_ITEMS
             self._state_path: Path = Path(DEFAULT_STATE_FILE)
             self._max_chars: int = DEFAULT_MAX_CHARS
+            self._prompt: str = ""
             self._task: asyncio.Task | None = None
             return
 
@@ -208,6 +209,7 @@ class RSSPlugin(CorvidaePlugin):
         self._max_chars = block.get("max_payload_chars", DEFAULT_MAX_CHARS)
         if not isinstance(self._max_chars, int) or self._max_chars < 1:
             raise _bad("rss.max_payload_chars", self._max_chars, "use a positive integer")
+        self._prompt: str = str(block.get("prompt", "")).strip()
 
         self._task = None
 
@@ -290,6 +292,9 @@ class RSSPlugin(CorvidaePlugin):
             text = f"[RSS] {title}\n{link}"
             if summary:
                 text += f"\n{summary}"
+            prompt = getattr(self, "_prompt", "")
+            if prompt:
+                text = f"{prompt}\n\n{text}"
             origin = f"rss:{feed_url}"
             try:
                 await self._spill.notify(
