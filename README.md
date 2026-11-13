@@ -23,7 +23,7 @@ You need an OpenAI-compatible endpoint URL, a model name and an API key from you
 
 **This is a demo and development setup, not a deployment.** It runs in your terminal, as your own user, against your own files, and it stops when you close the terminal. It's the quickest way to see corvidae working. To keep it running, use [Docker](#run-it-in-docker).
 
-You need git and [uv](https://docs.astral.sh/uv/). uv fetches the Python 3.13 that corvidae needs if you don't have it. Corvidae isn't on PyPI, so clone it:
+You need git and [uv](https://docs.astral.sh/uv/). uv fetches the Python 3.13 that corvidae needs if you don't have it. Corvidae isn't on PyPI, and the `corvidae` package you'll find there is an unrelated project, so clone it:
 
 ```sh
 git clone https://github.com/schuyler/corvidae.git
