@@ -272,6 +272,9 @@ class RSSPlugin(CorvidaePlugin):
             except ChannelNotReady:
                 logger.warning("rss: skipped channel %s (not ready)", cid)
                 continue
+            if not channel:
+                logger.warning("rss: skipped channel %s (resolved to None)", cid)
+                continue
             channels.append(channel)
 
         if not channels:
