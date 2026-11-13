@@ -25,14 +25,14 @@ A PR is the unit of work and the issue is where its requirements live, so both a
 
 **The opener is your judgement, in a few sentences.** Before any detail, one short paragraph -- two to four sentences -- saying what was wrong or missing and what the change does about it, in plain language, with no headings and no bullet list. If the change is visible, a screenshot after the opener says more than a paragraph of description. This paragraph is a promise that the rest is worth reading; it is the only part most readers will read, so it must be written, not generated: if you cannot compress the change into four sentences, you do not yet know what the change is.
 
-**Everything else goes inside `<details><summary>`.** The requirements, the PRD comparison, the implementation plan, what you ran, the failure output, the alternatives you rejected, the follow-ups you left: all of it below the opener, collapsed. The summary names what wrote it, model and effort level (`<summary>Claude Opus 5.5 Medium</summary>`), so a reader can tell agent prose from the author's own summary, and so the same rule reads sensibly on a human-written PR. `<details><summary>` is GitHub Markdown; it renders in issues, PR bodies, comments and reviews, and the order is details-summary -- `<summary>` is the line that summarises, and `<details>` wraps everything else.
+**Everything else goes inside `<details><summary>`.** The requirements, the PRD comparison, the implementation plan, what you ran, the failure output, the alternatives you rejected, the follow-ups you left: all of it below the opener, collapsed. The summary names the agent that wrote it, in the form `<summary>Agent details (Alfred)</summary>`, so a reader can tell agent prose from the author's own summary and can go back to that agent with a question. Name the agent rather than the model behind it: a fixed format does not go stale when the model changes under it, and the agent is the party a reader can ask. A human-written PR can use the same shape with their own name, or leave the block out entirely. `<details><summary>` is GitHub Markdown; it renders in issues, PR bodies, comments and reviews, and the order is details-summary -- `<summary>` is the line that summarises, and `<details>` wraps everything else.
 
 ```markdown
 The poster row drew more avatars than the width it measured could hold, so the
 last one was drawn under the forward arrow. It now budgets the count label from
 the string it will print.
 
-<details><summary>Claude Opus 5.5 Medium</summary>
+<details><summary>Agent details (Alfred)</summary>
 
 ### What was measured
 ...
