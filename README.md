@@ -28,7 +28,7 @@ You need git and [uv](https://docs.astral.sh/uv/). uv fetches the Python 3.13 th
 ```sh
 git clone https://github.com/schuyler/corvidae.git
 cd corvidae
-uv sync
+uv sync --extra cognition
 ```
 
 Put this in `agent.yaml` in the checkout:
@@ -57,7 +57,10 @@ LLM_API_KEY='sk-...' uv run corvidae serve
 
 Among the startup lines is a warning that says `web: log in at http://127.0.0.1:8765/?token=...`. Open that URL and say hello. Ctrl-C stops it. The conversation is saved in `sessions.db`, and scratch files go in `state/`, both in the current directory. Start it again and the conversation picks up where you left off.
 
-A bare `uv sync` installs the kernel: the agent loop, persistence, tools and transports. It leaves out long-term memory and the other cognition plugins, which keeps a first run cheap. The Docker image includes all of them. [Installing without Docker](#installing-without-docker) covers adding them to a checkout.
+`--extra cognition` adds long-term memory, appraisal, critique, goals and the rest of the [cognition plugins](docs/cognition.md) to the kernel (the agent loop, persistence, tools and transports). Two things to know about them:
+
+- **They cost money.** Memory consolidation, appraisal and critique each make model calls of their own, in the background. On a metered API that adds up. To run just the core loop, copy the `plugins.disabled` list from [`agent.minimal.yaml.example`](agent.minimal.yaml.example).
+- **Without an embedding model,** memory falls back to keyword search. A startup warning about the missing embedding profile is telling you that. [Local models](#local-models) shows how to add one.
 
 ### Run it in Docker
 
@@ -104,11 +107,7 @@ docker logs corvidae 2>&1 | grep 'log in at'
 
 That prints a login URL with a token in it. Open it and say hello. The token sets a cookie in your browser, so you don't paste it again. Corvidae generates a new token every time it starts, though, so a restart logs you out and you fetch the new URL the same way. [Keep your login](#keep-your-login) fixes that once you're past the first run.
 
-Some things worth knowing before you go further:
-
-- **The token is the agent.** Whoever has it can tell the agent to do anything its tools allow. That's why the port is published on loopback only, and why the config above starts with the two most dangerous tools turned off. To reach the page from another machine, use an SSH tunnel (`ssh -L 8765:127.0.0.1:8765 yourhost`), Tailscale, or a TLS reverse proxy, and add that origin to `allowed_origins` ([details](docs/configuration.md#web--browser-chat-ui)).
-- **The batteries are on, and they cost money.** Memory consolidation, appraisal, critique and goals all run by default, and each one makes model calls of its own. On a metered API that adds up. To run just the core loop, copy the `plugins.disabled` list from [`agent.minimal.yaml.example`](agent.minimal.yaml.example).
-- **Without an embedding model,** memory falls back to keyword search. A startup warning about the missing embedding profile is telling you that. [Local models](#local-models) shows how to add one.
+**The token is the agent.** Whoever has it can tell the agent to do anything its tools allow. That's why the port is published on loopback only, and why the config starts with the two most dangerous tools turned off. To reach the page from another machine, use an SSH tunnel (`ssh -L 8765:127.0.0.1:8765 yourhost`), Tailscale, or a TLS reverse proxy, and add that origin to `allowed_origins` ([details](docs/configuration.md#web--browser-chat-ui)).
 
 If it doesn't work, `docker logs corvidae` is the first place to look:
 
