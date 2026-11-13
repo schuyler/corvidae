@@ -351,3 +351,35 @@ async def test_bind_failure_degrades(start, caplog):
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
     assert f"127.0.0.1:{port}" in errors[0] and "webhook.port" in errors[0]
+
+
+# AC: event type from provider header is passed through to subscribers.
+async def test_event_type_header_passed_to_subscriber(start):
+    deliveries = []
+
+    async def handler(d):
+        deliveries.append(d)
+
+    http, base = await start({"open": [handler]})
+    async with http.post(
+        f"{base}/open",
+        json={"action": "opened"},
+        headers={"X-GitHub-Event": "pull_request"},
+    ) as resp:
+        assert resp.status == 202
+    await wait_until(lambda: deliveries)
+    assert deliveries[0].event_type == "pull_request"
+
+
+# AC: no event type header means event_type is None.
+async def test_no_event_type_header_is_none(start):
+    deliveries = []
+
+    async def handler(d):
+        deliveries.append(d)
+
+    http, base = await start({"open": [handler]})
+    async with http.post(f"{base}/open", json={"action": "opened"}) as resp:
+        assert resp.status == 202
+    await wait_until(lambda: deliveries)
+    assert deliveries[0].event_type is None
