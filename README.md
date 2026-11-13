@@ -66,7 +66,7 @@ docker run -d --name corvidae --restart unless-stopped \
 docker logs corvidae 2>&1 | grep 'log in at'
 ```
 
-That prints a login URL with a token in it. Open it and say hello. The token sets a cookie in your browser, so you don't paste it again. Corvidae generates a new token every time it starts, though, so a restart logs you out and you fetch the new URL the same way. To keep one token across restarts, set it yourself with `-e CORVIDAE_WEB_TOKEN=...` ([details](docs/configuration.md#web--browser-chat-ui)).
+That prints a login URL with a token in it. Open it and say hello. The token sets a cookie in your browser, so you don't paste it again. Corvidae generates a new token every time it starts, though, so a restart logs you out and you fetch the new URL the same way. [Keep your login](#keep-your-login) fixes that once you're past the first run.
 
 Some things worth knowing before you go further:
 
@@ -112,6 +112,25 @@ docker run -d --name corvidae --restart unless-stopped \
 That's a fresh start, so the web page has a new login URL in `docker logs` too. The log should also say `discord: connected as user id <id>`. Two warnings that `voice will NOT be supported` are expected. DM the bot and it answers everything you send. In a server channel it answers only messages that @-mention it, unless you change `require_mention` ([docs/discord-ops.md](docs/discord-ops.md#answering-without-a-mention-experimental)).
 
 Your conversation history moves with you: the web page and Discord are separate channels, but the agent's memory covers both.
+
+### Keep your login
+
+A generated web token lasts until the next restart. To keep your browser logged in across restarts, choose a token yourself and pass it in the environment. Corvidae then uses it instead of generating one:
+
+```sh
+TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+echo "$TOKEN"     # save it somewhere safe, like your password manager
+docker rm -f corvidae
+docker run -d --name corvidae --restart unless-stopped \
+  -p 127.0.0.1:8765:8765 \
+  -e LLM_API_KEY='sk-...' \
+  -e DISCORD_TOKEN='your-bot-token' \
+  -e CORVIDAE_WEB_TOKEN="$TOKEN" \
+  -v ~/corvidae-data:/data \
+  corvidae
+```
+
+Log in once at `http://127.0.0.1:8765/?token=<your token>`. The cookie lasts 400 days, as long as the token stays the same. Changing the token is also the only way to revoke a session, and it logs out every browser at once. Once you set a token, the daemon stops logging the login URL.
 
 ### Giving it tools
 
