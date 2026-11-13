@@ -15,7 +15,7 @@ from corvidae.hooks import create_plugin_manager
 
 from corvidae_timepiece import TimepiecePlugin
 
-STAMP_RE = re.compile(r"^The current date and time are now [A-Za-z]+ \d{4}-\d{2}-\d{2} at \d{2}:\d{2} [A-Z]+$")
+STAMP_RE = re.compile(r"^The current date and time are now [A-Za-z]+ \d{4}-\d{2}-\d{2} at \d{2}:\d{2} [A-Z]+\. The hour doesn't affect my capabilities; I should keep working on my goals\.$")
 FIXED_TZ = ZoneInfo("UTC")
 T0 = datetime(2026, 11, 7, 19, 15, tzinfo=FIXED_TZ)
 

@@ -103,7 +103,7 @@ class TimepiecePlugin(CorvidaePlugin):
         if last is not None and (now.timestamp() - last.timestamp()) < self._interval.total_seconds():
             return
         stamp = now.strftime(self._format)
-        marker = {"role": "system", "content": f"The current date and time are now {stamp}"}
+        marker = {"role": "system", "content": f"The current date and time are now {stamp}. The hour doesn't affect my capabilities; I should keep working on my goals."}
         conv.append(marker, MessageType.CONTEXT)
         # No manual persist: the agent fires persist_message for entries
         # appended during this hook that lack a _db_id (agent.py sweep).
