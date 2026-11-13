@@ -36,6 +36,7 @@ from urllib.parse import urlsplit
 from corvidae.clock import Clock
 from corvidae.envref import EnvRefError, expand_env_refs
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.shutdown import parse_shutdown_timeouts
 from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
@@ -342,13 +343,29 @@ def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
 
 # Upper bound on how long on_stop waits for owner tasks to close their
 # transports. Runtime gives the whole stop broadcast daemon.shutdown_timeout
-# (3 s by default), so stay under it.
-# The stop bound is derived from daemon.shutdown_timeout at init time
-# (see McpClientPlugin._stop_bound). The default of 2.5 s is a fallback
-# for when the config is unavailable.
+# (3 s by default), so this is the MCP client's share of it (#760): the
+# graceful budget less a reserve for the cancel grace below and for the rest
+# of the broadcast (other plugins' on_stop, idle.stop, clock.close). At the
+# default 3 s that is the historical 2.5 s.
+_STOP_RESERVE_SECONDS = 0.5
+# Smallest bound worth handing to asyncio.wait: a value that rounds to zero
+# turns the wait into a poll, and a config value can be arbitrarily small.
+_MIN_STOP_BOUND_SECONDS = 0.05
+# Fallback for when the config cannot be read (on_stop without on_init).
 _DEFAULT_STOP_BOUND_SECONDS = 2.5
 # After cancelling a straggler, how long to wait for it to unwind.
 _CANCEL_GRACE_SECONDS = 0.3
+
+
+def stop_bound_seconds(shutdown_timeout: float) -> float:
+    """MCP's share of the graceful phase (``daemon.shutdown_timeout``).
+
+    A reserve rather than a fraction, because the cancel grace is spent
+    *after* the bound: a bound of 80% of a 1 s budget would cancel at 0.8 s
+    and then wait up to 0.3 s more, which is the overrun this bound exists to
+    prevent (#760). Never zero, so a tiny budget still gets a real timeout.
+    """
+    return max(_MIN_STOP_BOUND_SECONDS, shutdown_timeout - _STOP_RESERVE_SECONDS)
 
 
 # Transports a server config may name.
@@ -588,12 +605,10 @@ class McpClientPlugin(CorvidaePlugin):
         self._servers_config = validate_mcp_config(config)
         # Derive the stop bound from daemon.shutdown_timeout so an operator
         # who lowers that value doesn't turn every shutdown with a slow stdio
-        # MCP server into a forced os._exit(1) mid-broadcast. We use 80% of
-        # the graceful timeout to leave room for the rest of the stop
-        # broadcast (clock close, channel drain).
-        daemon_cfg = config.get("daemon") or {}
-        shutdown_timeout = float(daemon_cfg.get("shutdown_timeout", 3.0))
-        self._stop_bound = max(1.0, shutdown_timeout * 0.8)
+        # MCP server into a forced os._exit(1) mid-broadcast.
+        self._stop_bound = stop_bound_seconds(
+            parse_shutdown_timeouts(config.get("daemon")).graceful
+        )
 
     @hookimpl
     async def on_start(self, config: dict) -> None:

@@ -211,6 +211,46 @@ class TestStopBudget:
         assert "killed by hand" in message
 
 
+class TestStopBoundFromConfig:
+    """#760: the bound follows daemon.shutdown_timeout instead of a constant."""
+
+    def test_bound_is_the_budget_less_the_reserve(self):
+        # At the default 3 s this is the historical 2.5 s; at 1 s it must be
+        # under the whole budget, which is the case the issue exists for.
+        assert mcp_client.stop_bound_seconds(3.0) == pytest.approx(2.5)
+        assert mcp_client.stop_bound_seconds(1.0) == pytest.approx(0.5)
+        # Never a zero-length wait, however small the operator's budget.
+        assert mcp_client.stop_bound_seconds(0.5) == 0.05
+
+    async def test_bound_comes_from_daemon_shutdown_timeout(self):
+        plugin, config = _make_plugin({"srv": _stdio_cfg()})
+        config["daemon"] = {"shutdown_timeout": 1}
+        await plugin.on_init(pm=clock_pm(), config=config)
+        assert plugin._stop_bound == pytest.approx(0.5)
+
+    async def test_slow_server_is_cancelled_inside_a_one_second_budget(self, caplog):
+        """The acceptance case: budget 1 s, a server that takes 2 s to close."""
+        plugin, config = _make_plugin({"srv": _stdio_cfg()})
+        config["daemon"] = {"shutdown_timeout": 1}
+        await _start_in_own_task(plugin, config)
+
+        async def slow() -> None:
+            await asyncio.sleep(2)
+
+        plugin._owners["srv"].stack.push_async_callback(slow)
+        caplog.set_level(logging.DEBUG)
+
+        started = time.monotonic()
+        await _stop_in_own_task(plugin)
+        elapsed = time.monotonic() - started
+
+        # Cancelled and logged inside the graceful phase, not by force after it.
+        assert elapsed < 1.0, elapsed
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("srv" in m and "killed by hand" in m for m in warnings), warnings
+        assert await _wait_no_children() == []
+
+
 class TestOwnerLifecycle:
     async def test_server_started_from_tool_call_is_stopped_by_on_stop(self, caplog):
         # A server pending at startup connects on the first tool call (also

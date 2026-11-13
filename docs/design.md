@@ -2981,8 +2981,11 @@ the exception). It then waits on its `stop` event and closes the stack in the
 same task. Owners live in `self._owners` (name to owner).
 
 `on_stop` sets every owner's `stop` event at once and awaits all the tasks
-together with `asyncio.wait`, bounded by `_STOP_BOUND_SECONDS` (2.5 s, inside
-Runtime's default 3 s stop budget, `daemon.shutdown_timeout`). The SDK's `stdio_client` can take about 2 s to
+together with `asyncio.wait`, bounded by `stop_bound_seconds(...)`:
+`daemon.shutdown_timeout` less 0.5 s kept for the rest of the graceful phase,
+which is the historical 2.5 s at the default 3 s. A reserve rather than a
+fraction, because the cancel grace below is spent *after* the bound, so 80% of
+a 1 s budget would overrun the budget it derives from (#760). The SDK's `stdio_client` can take about 2 s to
 terminate a process, so closing serially would blow the budget. An owner
 still running at the bound is cancelled and logged at WARNING with the server
 name and a "may need to be killed by hand" remedy. An exception while closing
@@ -4163,8 +4166,14 @@ it still holds unsent bytes. `on_stop`:
    handler's `finally` removes its entry;
 3. runs `runner.cleanup()` (`shutdown_timeout=0.5`).
 
-The worst case is about 2.5 s, inside Runtime's default 3 s budget
-(`daemon.shutdown_timeout`).
+The three stages together are bounded by this transport's share of
+`daemon.shutdown_timeout`: that value less 0.5 s, kept for the rest of the
+graceful phase (the other plugins' `on_stop`, `idle.stop()`, `clock.close()`).
+At the default 3 s that is 2.5 s, which is exactly what the stages need; an
+operator who lowers the key shortens the budget instead of pushing the daemon
+past it, and a stage still running at the bound is cancelled and logged at
+WARNING saying how many sockets and handlers may still be open and naming the
+key. The same rule sizes the MCP client's stop bound (#760).
 New WebSocket handshakes during shutdown get 503. Aborting rather than
 closing matters with a peer that stopped reading (a phone asleep):
 `transport.close()` waits to flush a full buffer forever, and aiohttp's
