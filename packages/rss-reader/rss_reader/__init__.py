@@ -48,20 +48,45 @@ from corvidae.tuning import config_value
 
 
 def _parse_duration(text: str) -> float:
-    """Parse a duration string like `30m`, `2h`, `1h30m` to seconds."""
+    """Parse a duration string like `30m`, `2h`, `1h30m` to seconds.
+
+    Uses fullmatch to reject trailing junk. Rejects non-positive results.
+    Follows the AGENTS.md error form: names the key, the value, and the
+    accepted form.
+    """
+    import re
     cleaned = str(text).strip().lower()
-    if cleaned.isdigit():
-        return float(cleaned)
+    # Bare numbers are seconds.
+    if re.fullmatch(r"\d+(?:\.\d+)?", cleaned):
+        seconds = float(cleaned)
+        if seconds <= 0:
+            raise ValueError(
+                f"Config error: rss.poll_interval is {text!r}; "
+                "must be a positive duration (e.g. 30m, 2h, 1h30m) — check agent.yaml"
+            )
+        return seconds
+    # Compound durations: 1h30m, 2d4h, etc.
     total = 0.0
-    found = False
-    for unit, factor in [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]:
-        import re
-        match = re.search(rf"(\d+(?:\.\d+)?)\s*{unit}", cleaned)
-        if match:
-            total += float(match.group(1)) * factor
-            found = True
-    if not found:
-        raise ValueError(f"rss: invalid duration {text!r}; use e.g. 30m, 2h, 1h30m")
+    pos = 0
+    pattern = re.compile(r"(\d+(?:\.\d+)?)\s*([dhms])")
+    for match in pattern.finditer(cleaned):
+        if match.start() != pos:
+            break
+        value = float(match.group(1))
+        unit = match.group(2)
+        factor = {"d": 86400, "h": 3600, "m": 60, "s": 1}[unit]
+        total += value * factor
+        pos = match.end()
+    if pos != len(cleaned):
+        raise ValueError(
+            f"Config error: rss.poll_interval is {text!r}; "
+            "use a duration string like 30m, 2h, 1h30m — check agent.yaml"
+        )
+    if total <= 0:
+        raise ValueError(
+            f"Config error: rss.poll_interval is {text!r}; "
+            "must be a positive duration (e.g. 30m, 2h, 1h30m) — check agent.yaml"
+        )
     return total
 
 

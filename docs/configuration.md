@@ -1235,6 +1235,41 @@ A malformed block fails startup naming the key and the value. The whole section 
 
 ---
 
+## `rss` — feed polling and notification delivery
+
+`RSSPlugin` polls the configured feeds on a timer and delivers new items as notifications on the configured targets. Feed content is untrusted external data (see [threat-model.md](threat-model.md)).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `rss.feeds` | list | — | Non-empty list of feed URLs (http/https). Required. |
+| `rss.targets` | list | — | Non-empty list of `transport:scope` channels to deliver to. Required. |
+| `rss.poll_interval` | string | `"30m"` | Duration string: `30s`, `20m`, `6h`, `1d`, `7d`, `1h30m`. |
+| `rss.max_items_per_poll` | integer | `10` | Cap on items delivered per cycle. Items beyond the cap are retried on the next cycle. |
+| `rss.max_payload_chars` | integer | `2000` | Max characters per item (title + link + summary). |
+| `rss.state_file` | path | `state/rss/seen.json` | Where seen guids are tracked. |
+
+```yaml
+rss:
+  feeds:
+    - https://example.com/feed.xml
+    - https://blog.example.com/atom.xml
+  targets:
+    - internal:heartbeat
+  poll_interval: 30m
+  max_items_per_poll: 10
+  state_file: state/rss/seen.json
+```
+
+The plugin is optional; it is not installed by default. Add `rss-reader` to the `EXTRAS` build arg or install it from the worktree. Config changes require a restart.
+
+**What lands in `/data`:** `sessions.db`, `provenance.key` (keep it with the directory), `state/`, and a log file if you set `logging.file`; otherwise logs go to `docker logs`. Back that directory up and you've backed up the bot. The daemon runs as uid 1000, not root, because the shell tool runs as the daemon's user ([threat-model.md](threat-model.md), finding 4), so the directory has to be writable by that uid. That's what the `chown` is for, and after it the files belong to uid 1000, so editing `agent.yaml` on the host needs `sudo`. If you'd rather not, skip the `chown` and run with `--user $(id -u):$(id -g)` on a directory you own. If the daemon can't write the directory, startup dies with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory.
+
+**Locking the config (optional).** Add `-v ~/corvidae-data/agent.yaml:/data/agent.yaml:ro` to `docker run` and the agent can't edit its own configuration, which is the config half of [prd.md](prd.md) §3.11.11 (prompt files need the same treatment). A host edit that replaces the file (`sed -i`, most editors) detaches the read-only mount until the container restarts, so run `docker restart corvidae` after each edit.
+
+**Extras are chosen at build time** with `EXTRAS`, space separated, using the names in `[project.optional-dependencies]` in `pyproject.toml` (all but `dev` are installed by default): `--build-arg EXTRAS="cognition discord"` for a subset, or `--build-arg EXTRAS=""` for the bare kernel. `corvidae acp` isn't a container use: your editor starts it against a local checkout. Signal needs signal-cli running outside the container with its socket mounted in; see [signal-ops.md](signal-ops.md).
+
+**A container is not a sandbox for the tools.** It limits the daemon and its tools to what you mounted and what the network lets them reach. It does not separate the tools from the daemon: `shell` still runs unsandboxed, as the same user in the same container, next to `sessions.db` and the web token. Running tools somewhere narrower is a different feature, tracked in [#532](https://github.com/schuyler/corvidae/issues/532).
+
 ## Running in a container
 
 The `Dockerfile` at the repo root builds corvidae with every extra (Discord, the cognition plugins and the rest) into an image that runs `corvidae serve` against an `agent.yaml` mounted at `/data`. The quickest useful setup is the browser chat page:
@@ -1279,37 +1314,3 @@ Open that URL. Why the config looks like this: inside a container the page has t
 
 **Discord.** The bot only connects out, so there is nothing to publish. Add a `discord:` block with your user id under `allow` (the default refuses everyone), and pass the bot token as `-e DISCORD_TOKEN=…` rather than writing it into `agent.yaml`. A new `discord:` block needs only `docker restart corvidae`, but `docker restart` keeps the old environment, so to add or change `DISCORD_TOKEN`, `docker rm -f corvidae` and run it again. Creating the application and inviting the bot are in [discord-ops.md](discord-ops.md). Two `voice will NOT be supported` warnings at startup are expected.
 
-## `rss` — feed polling and notification delivery
-
-`RSSPlugin` polls the configured feeds on a timer and delivers new items as notifications on the configured targets. Feed content is untrusted external data (see [threat-model.md](threat-model.md)).
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `rss.feeds` | list | — | Non-empty list of feed URLs (http/https). Required. |
-| `rss.targets` | list | — | Non-empty list of `transport:scope` channels to deliver to. Required. |
-| `rss.poll_interval` | string | `"30m"` | Duration string: `30s`, `20m`, `6h`, `1d`, `7d`, `1h30m`. |
-| `rss.max_items_per_poll` | integer | `10` | Cap on items delivered per cycle. Items beyond the cap are retried on the next cycle. |
-| `rss.max_payload_chars` | integer | `2000` | Max characters per item (title + link + summary). |
-| `rss.state_file` | path | `state/rss/seen.json` | Where seen guids are tracked. |
-
-```yaml
-rss:
-  feeds:
-    - https://example.com/feed.xml
-    - https://blog.example.com/atom.xml
-  targets:
-    - internal:heartbeat
-  poll_interval: 30m
-  max_items_per_poll: 10
-  state_file: state/rss/seen.json
-```
-
-The plugin is optional; it is not installed by default. Add `rss-reader` to the `EXTRAS` build arg or install it from the worktree. Config changes require a restart.
-
-**What lands in `/data`:** `sessions.db`, `provenance.key` (keep it with the directory), `state/`, and a log file if you set `logging.file`; otherwise logs go to `docker logs`. Back that directory up and you've backed up the bot. The daemon runs as uid 1000, not root, because the shell tool runs as the daemon's user ([threat-model.md](threat-model.md), finding 4), so the directory has to be writable by that uid. That's what the `chown` is for, and after it the files belong to uid 1000, so editing `agent.yaml` on the host needs `sudo`. If you'd rather not, skip the `chown` and run with `--user $(id -u):$(id -g)` on a directory you own. If the daemon can't write the directory, startup dies with `sqlite3.OperationalError: unable to open database file`, which doesn't name the directory.
-
-**Locking the config (optional).** Add `-v ~/corvidae-data/agent.yaml:/data/agent.yaml:ro` to `docker run` and the agent can't edit its own configuration, which is the config half of [prd.md](prd.md) §3.11.11 (prompt files need the same treatment). A host edit that replaces the file (`sed -i`, most editors) detaches the read-only mount until the container restarts, so run `docker restart corvidae` after each edit.
-
-**Extras are chosen at build time** with `EXTRAS`, space separated, using the names in `[project.optional-dependencies]` in `pyproject.toml` (all but `dev` are installed by default): `--build-arg EXTRAS="cognition discord"` for a subset, or `--build-arg EXTRAS=""` for the bare kernel. `corvidae acp` isn't a container use: your editor starts it against a local checkout. Signal needs signal-cli running outside the container with its socket mounted in; see [signal-ops.md](signal-ops.md).
-
-**A container is not a sandbox for the tools.** It limits the daemon and its tools to what you mounted and what the network lets them reach. It does not separate the tools from the daemon: `shell` still runs unsandboxed, as the same user in the same container, next to `sessions.db` and the web token. Running tools somewhere narrower is a different feature, tracked in [#532](https://github.com/schuyler/corvidae/issues/532).
