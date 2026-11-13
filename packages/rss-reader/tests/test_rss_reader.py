@@ -499,10 +499,30 @@ def test_parse_duration_accepts_valid():
 
 # --- Regression tests for the delivery fixes ---
 
+def _client_serving(feed: bytes):
+    """An httpx.AsyncClient stand-in that answers every GET with `feed`."""
+    resp = MagicMock()
+    resp.content = feed
+    resp.raise_for_status = MagicMock()
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=resp)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    return client
+
+
 @pytest.mark.asyncio
 async def test_items_stay_unseen_when_no_channel_ready(tmp_path: Path):
-    """Items must not be marked seen when no channel is ready to receive them."""
+    """Items must not be marked seen when no channel is ready to receive them.
+
+    Resolution, not the registry, is what decides this: mock the resolver the
+    plugin actually calls. A MagicMock registry resolves to a truthy channel
+    through the bare-id fallback, which is how this test used to pass while
+    proving nothing.
+    """
+    from corvidae.channel import ChannelNotReady
     from rss_reader import RSSPlugin
+
     plugin = _make_plugin({})
     plugin._feeds = ["https://example.com/feed"]
     plugin._targets = ("signal:+1",)
@@ -510,17 +530,45 @@ async def test_items_stay_unseen_when_no_channel_ready(tmp_path: Path):
     plugin._state_path = tmp_path / "seen.json"
     plugin._max_chars = 2000
     plugin._poll_secs = 1800
-    # Simulate no channel ready
-    plugin._registry.get = MagicMock(return_value=None)
 
-    feed_xml = _sample_feed(3)
-    plugin._fetch = AsyncMock(return_value=feed_xml)
+    with (
+        patch(
+            "rss_reader.resolve_persisted_channel",
+            AsyncMock(side_effect=ChannelNotReady("signal:+1")),
+        ),
+        patch("httpx.AsyncClient", return_value=_client_serving(_sample_feed(3))),
+    ):
+        await plugin._poll_once()
 
-    await plugin._poll_once()
+    assert plugin._spill.notify.called is False
+    assert plugin._load_seen() == {}
 
-    # Items should NOT be marked seen (no channel ready)
-    seen = plugin._load_seen()
-    assert len(seen) == 0, f"Expected 0 seen items, got {len(seen)}"
+
+@pytest.mark.asyncio
+async def test_items_stay_unseen_when_a_target_resolves_to_none(tmp_path: Path):
+    """A target that resolves to nothing is skipped, not delivered to.
+
+    `resolve_persisted_channel` answers None for an id that is not
+    `transport:scope`, and config validation only checks for a colon.
+    """
+    from rss_reader import RSSPlugin
+
+    plugin = _make_plugin({})
+    plugin._feeds = ["https://example.com/feed"]
+    plugin._targets = ("signal:",)
+    plugin._max_items = 500
+    plugin._state_path = tmp_path / "seen.json"
+    plugin._max_chars = 2000
+    plugin._poll_secs = 1800
+
+    with (
+        patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=None)),
+        patch("httpx.AsyncClient", return_value=_client_serving(_sample_feed(3))),
+    ):
+        await plugin._poll_once()
+
+    assert plugin._spill.notify.called is False
+    assert plugin._load_seen() == {}
 
 
 @pytest.mark.asyncio
