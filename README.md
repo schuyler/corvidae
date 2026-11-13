@@ -1,176 +1,337 @@
 # corvidae
 
-Corvidae is a minimalist, extensible architecture for building LLM agent harnesses. It connects a local LLM to chat transports — CLI, IRC, Signal, Discord, Zulip, and a browser UI are built in — routes messages through any OpenAI-compatible Chat Completions API, runs a multi-turn tool-calling loop, and sends replies. It's designed as a personal agent daemon for a single machine.
+Corvidae is a personal agent daemon. It connects an LLM to the chat apps you already use, runs a tool-calling loop on your behalf, and remembers what you talked about.
 
-**WARNING: This is a personal project, not a formal release. Interfaces will change without warning.**
+It talks to any OpenAI-compatible Chat Completions endpoint, hosted or local. It runs as a single Python process, and is meant to run in a container or a VM you control.
 
-## Design
+**WARNING: This is a personal project, not a formal release. Interfaces and config keys will change without warning.**
 
-[docs/prd.md](docs/prd.md) is the requirements of record: what has to be true and why. [docs/design.md](docs/design.md) is how the current tree does it.
+## What it does
 
-Three layers: a plugin system ([apluggy](https://github.com/nextline-dev/apluggy)), an agent loop, and transport plugins. Each transport converts platform-specific messages to a common Channel abstraction. The agent loop handles prompt construction and LLM interaction. The plugin system wires everything together via lifecycle hooks.
+- **Lives where you chat.** It has transports for a browser chat page, Discord, Signal, Zulip, IRC, a terminal, and editors over the Agent Client Protocol. It's one agent with one identity and one memory across all of them. Each channel can have its own prompt, token budget and tool set.
+- **Uses tools.** It has `shell`, `read_file`/`write_file`, `web_fetch`/`web_search`, a DAG runner for shell pipelines, and background subagents with their own LLM sessions. MCP servers (stdio or HTTP) add their tools at startup. Tool calls run as async tasks, so a long tool chain never blocks new messages.
+- **Remembers.** Conversations persist in SQLite and survive restarts. When a conversation nears its token budget, older turns get summarized. Long-term memory consolidates conversations into records it retrieves later, using vector search if you give it an embedding model and keyword search if you don't.
+- **Thinks about how it's doing.** Appraisal scores each exchange, critique reviews replies after the fact, and an outcome log records what happened.
+- **Acts on its own, if you let it.** It can set reminders for itself, and you can schedule jobs for it. It can keep agent-wide goals. An optional heartbeat starts a turn of its own after a quiet spell. It can also decide a message needs no reply and stay silent.
+- **Bends to fit.** Everything is a plugin, and any plugin can be switched off in config. Most config changes reload live without a restart. `corvidae scaffold` starts a new plugin for you.
 
-The distribution is split the same way. `uv sync` installs the kernel: the agent loop, persistence, compaction, tools and transports. The cognition plugins — long-term memory, appraisal, critique, the context funnel and the outcome log — are a separate package in this repository, installed with `--extra cognition` ([docs/cognition.md](docs/cognition.md)).
+## Quick start
 
-Any plugin can be switched off with `plugins.disabled` in `agent.yaml`, but plugins declare what they depend on and startup stops with an error if a dependency is missing: disabling PersistencePlugin, for instance, also means disabling SchedulerPlugin, UsageLogPlugin and the cognition plugins that need the database. The graph is in [docs/design.md](docs/design.md#current-dependency-graph). Without CompactionPlugin, history grows unbounded; without ThinkingPlugin, `<thinking>` blocks pass through to the channel.
+You need an OpenAI-compatible endpoint URL, a model name and an API key from your provider. To use a model on your own hardware instead, read this section and then [Local models](#local-models).
 
-The agent loop uses single-turn dispatch: one LLM call per queue item. Tool calls become independent async tasks. When a task completes, the result arrives as a notification that feeds back into the queue, triggering the next LLM call. Multi-turn reasoning emerges from this cycle rather than from a blocking loop. This keeps the channel queue responsive — user messages are never stuck behind a long tool chain.
+### Try it
 
-## Synopsis
+**This is a demo and development setup, not a deployment.** It runs in your terminal, as your own user, against your own files, and it stops when you close the terminal. It's the quickest way to see corvidae working. To keep it running, use [Docker](#run-it-in-docker).
+
+You need git and [uv](https://docs.astral.sh/uv/). uv fetches the Python 3.13 that corvidae needs if you don't have it. Corvidae isn't on PyPI, and the `corvidae` package you'll find there is an unrelated project, so clone it:
+
+```sh
+git clone https://github.com/schuyler/corvidae.git
+cd corvidae
+uv sync --extra cognition
+```
+
+Put this in `agent.yaml` in the checkout:
 
 ```yaml
-# agent.yaml — minimal working config
 llm:
   main:
-    base_url: http://localhost:8080
-    model: llama3
-
-daemon:
-  session_db: sessions.db
+    base_url: https://api.example.com/v1   # your provider's OpenAI-compatible endpoint
+    model: your-chat-model
+    api_key: "${LLM_API_KEY}"              # read from the environment, quotes and all
 
 agent:
-  system_prompt: "You are Corvus. You speak only in riddles."
-  max_context_tokens: 24000
+  system_prompt: "You are a helpful assistant."
+
+tools:
+  disabled: [shell, write_file]            # see "Giving it tools" below
+
+web: {}                                    # the browser chat page, on 127.0.0.1:8765
 ```
+
+Start it:
 
 ```sh
-uv run corvidae          # reads agent.yaml from cwd
+LLM_API_KEY='sk-...' uv run corvidae serve
 ```
 
-The daemon connects to configured transports, listens for messages, and runs until SIGINT or SIGTERM.
+Among the startup lines is a warning that says `web: log in at http://127.0.0.1:8765/?token=...`. Open that URL and say hello. Ctrl-C stops it. The conversation is saved in `sessions.db`, and scratch files go in `state/`, both in the current directory. Start it again and the conversation picks up where you left off.
 
-For a chat page in your browser, add a `web:` block (an empty one will do) and open the login URL the daemon logs. It listens on `127.0.0.1:8765`, and its token is shell access to the machine, so read the [`web` section](docs/configuration.md#web--browser-chat-ui) before you point it anywhere else.
+`--extra cognition` adds long-term memory, appraisal, critique, goals and the rest of the [cognition plugins](docs/cognition.md) to the kernel (the agent loop, persistence, tools and transports). Two things to know about them:
 
-For a Discord bot backed by a hosted OpenAI-compatible API, see [docs/discord-remote-api.md](docs/discord-remote-api.md). For a Zulip bot, see [docs/zulip-ops.md](docs/zulip-ops.md).
+- **They cost money.** Memory consolidation, appraisal and critique each make model calls of their own, in the background. On a metered API that adds up. To run just the core loop, copy the `plugins.disabled` list from [`agent.minimal.yaml.example`](agent.minimal.yaml.example).
+- **Without an embedding model,** memory falls back to keyword search. A startup warning about the missing embedding profile is telling you that. [Local models](#local-models) shows how to add one.
 
-## Installation
+### Run it in Docker
 
-Clone the repo — corvidae isn't published on PyPI.
+This is the recommended way to run corvidae for real. The container limits what the agent's tools can reach to the one directory you give it, and Docker restarts the daemon if it stops.
+
+There's no published image yet ([#731](https://github.com/schuyler/corvidae/issues/731)), so build one from the checkout:
 
 ```sh
-uv sync --extra cognition    # the daemon with memory, appraisal and critique
-uv run corvidae
+docker build -t corvidae .
 ```
 
-`uv sync` alone installs the kernel: the agent loop, persistence, tools and
-the transports, without the cognition plugins or sqlite-vec. Add
-`--extra discord` for the Discord transport and `--extra acp` for
-`corvidae acp`, on the same line: `uv sync` removes any extra you don't
-name.
-
-To run it in Docker instead, `docker build -t corvidae .` makes an image with
-every extra installed that runs `corvidae serve` against an `agent.yaml` you
-mount at `/data`. The web chat page, Discord and choosing extras are in
-[docs/configuration.md](docs/configuration.md#running-in-a-container).
-There's no published image yet, so you build it yourself; pulling one from
-GHCR is tracked in [#731](https://github.com/schuyler/corvidae/issues/731).
-
-For development (pytest, every extra its tests import):
+The image includes every optional plugin. It runs `corvidae serve` as uid 1000 in `/data`, which is where you mount a directory that holds `agent.yaml`. The database, memory and state files get written beside it:
 
 ```sh
-uv sync --extra dev --extra acp --extra discord --extra cognition
-uv run pytest
+mkdir -p ~/corvidae-data
 ```
+
+Copy your demo config there, and change the `web:` block:
+
+```sh
+cp agent.yaml ~/corvidae-data/agent.yaml
+```
+
+```yaml
+web:
+  host: 0.0.0.0                            # inside the container; -p below keeps it on loopback
+  allowed_origins:
+    - http://127.0.0.1:8765                # the address you'll browse to
+```
+
+Inside a container, the page has to listen on every interface for Docker's port mapping to reach it. A wildcard bind can't work out which address you'll browse to, so you name it in `allowed_origins`.
+
+Then hand the directory to the container's user and start it:
+
+```sh
+sudo chown -R 1000:1000 ~/corvidae-data
+docker run -d --name corvidae --restart unless-stopped \
+  -p 127.0.0.1:8765:8765 \
+  -e LLM_API_KEY='sk-...' \
+  -v ~/corvidae-data:/data \
+  corvidae
+docker logs corvidae 2>&1 | grep 'log in at'
+```
+
+That prints a login URL with a token in it. Open it and say hello. The token sets a cookie in your browser, so you don't paste it again. Corvidae generates a new token every time it starts, though, so a restart logs you out and you fetch the new URL the same way. [Keep your login](#keep-your-login) fixes that once you're past the first run.
+
+**The token is the agent.** Whoever has it can tell the agent to do anything its tools allow. That's why the port is published on loopback only, and why the config starts with the two most dangerous tools turned off. To reach the page from another machine, use an SSH tunnel (`ssh -L 8765:127.0.0.1:8765 yourhost`), Tailscale, or a TLS reverse proxy, and add that origin to `allowed_origins` ([details](docs/configuration.md#web--browser-chat-ui)).
+
+If it doesn't work, `docker logs corvidae` is the first place to look:
+
+| Symptom | Cause |
+|---|---|
+| The page says `403 bad host` | The address in your browser isn't in `allowed_origins`. Add it (e.g. `http://localhost:8765`) and `docker restart corvidae`. |
+| `unable to open database file` at startup | uid 1000 can't write `~/corvidae-data`. Redo the `chown`. |
+| `llm.main.api_key` error at startup | `LLM_API_KEY` is unset or empty in the container. |
+| Every reply is an error about the model | `base_url` or `model` is wrong, or the key is. `base_url` usually ends in `/v1`. |
+
+### Add Discord
+
+Corvidae logs in as a Discord bot. Follow [docs/discord-ops.md](docs/discord-ops.md) through "Find ids" to create the application, get its bot token, invite it to a server you're in, and find your own numeric user id.
+
+Add a `discord:` block to `agent.yaml`:
+
+```yaml
+discord:
+  allow:
+    - 123456789012345678    # your numeric user id, not your username
+```
+
+`allow` is default-deny, and it refuses quietly: if your id isn't on the list, the bot simply ignores you.
+
+The bot token goes in the environment, not the file. `docker restart` keeps a container's original environment, so recreate the container instead, with the same command as before plus one line:
+
+```sh
+docker rm -f corvidae
+docker run -d --name corvidae --restart unless-stopped \
+  -p 127.0.0.1:8765:8765 \
+  -e LLM_API_KEY='sk-...' \
+  -e DISCORD_TOKEN='your-bot-token' \
+  -v ~/corvidae-data:/data \
+  corvidae
+```
+
+That's a fresh start, so the web page has a new login URL in `docker logs` too. The log should also say `discord: connected as user id <id>`. Two warnings that `voice will NOT be supported` are expected. DM the bot and it answers everything you send. In a server channel it answers only messages that @-mention it, unless you change `require_mention` ([docs/discord-ops.md](docs/discord-ops.md#answering-without-a-mention-experimental)).
+
+Your conversation history moves with you: the web page and Discord are separate channels, but the agent's memory covers both.
+
+### Keep your login
+
+A generated web token lasts until the next restart. To keep your browser logged in across restarts, choose a token yourself and pass it in the environment. Corvidae then uses it instead of generating one:
+
+```sh
+TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+echo "$TOKEN"     # save it somewhere safe, like your password manager
+docker rm -f corvidae
+docker run -d --name corvidae --restart unless-stopped \
+  -p 127.0.0.1:8765:8765 \
+  -e LLM_API_KEY='sk-...' \
+  -e DISCORD_TOKEN='your-bot-token' \
+  -e CORVIDAE_WEB_TOKEN="$TOKEN" \
+  -v ~/corvidae-data:/data \
+  corvidae
+```
+
+Log in once at `http://127.0.0.1:8765/?token=<your token>`. The cookie lasts 400 days, as long as the token stays the same. Changing the token is also the only way to revoke a session, and it logs out every browser at once. Once you set a token, the daemon stops logging the login URL.
+
+### Giving it tools
+
+The quick-start config disables `shell` (which also removes `task_pipeline`) and `write_file`. Here's why both matter:
+
+- `shell` runs any command as the daemon's user, with no allowlist and no confirmation.
+- `write_file` can rewrite `agent.yaml`, which reloads within two seconds. From there the agent can turn its own tools back on, or add an MCP server that runs any command it likes.
+
+Without both, the agent can't run commands, but it can still read files and fetch URLs. So a prompt-injected agent can still read its own environment variables and send them somewhere. The [threat model](docs/threat-model.md) covers this in full; read findings 4 and 9 at least.
+
+When you're ready, remove entries from `tools.disabled`, or narrow them per channel with `channels.<id>.tools.disabled`. If you turn `write_file` back on, consider mounting the config read-only so the agent can't edit it: add `-v ~/corvidae-data/agent.yaml:/data/agent.yaml:ro` to `docker run`. A container limits what the tools can reach. It does not sandbox them from the daemon.
+
+## Local models
+
+Corvidae doesn't care what serves the model, as long as it speaks OpenAI's Chat Completions API. The common local options:
+
+| Server | `base_url` from the host |
+|---|---|
+| llama.cpp's `llama-server` | `http://127.0.0.1:8080/v1` |
+| Ollama | `http://127.0.0.1:11434/v1` |
+| vLLM | `http://127.0.0.1:8000/v1` |
+
+Local servers usually need no `api_key`, so leave it out.
+
+**Reaching the host from Docker.** Inside a container, `127.0.0.1` is the container itself. You have two options:
+
+- **Share the host's network.** Run with `--network host` in place of the `-p` line. Use the `127.0.0.1` URLs above, and write the web block as plain `web: {}`. The defaults bind loopback, and the wildcard plus `allowed_origins` would expose the page on every host address.
+- **Keep the bridge network.** Add `--add-host host.docker.internal:host-gateway` and use `http://host.docker.internal:8080/v1`. On Linux, that address is the Docker bridge, so a model server listening only on `127.0.0.1` can't be reached through it. Make it listen on an address the container can reach, and mind your firewall.
+
+**Single-slot servers.** Memory, appraisal and critique make model calls in the background. On a server that handles one request at a time, those calls queue behind your chat turns. Either give the server more slots, or point those stages at a second, smaller model with `llm.stages` ([docs/configuration.md](docs/configuration.md#stages)).
+
+**An embedding model** turns on vector search for memory. Add a second profile:
+
+```yaml
+llm:
+  main:
+    base_url: http://127.0.0.1:8080/v1
+    model: your-chat-model
+  embedding:
+    kind: embedding
+    base_url: http://127.0.0.1:8081/v1   # llama-server with --embeddings, or the same Ollama
+    model: your-embedding-model
+    dimensions: 1024                     # must match the model exactly
+```
+
+Get `dimensions` right before the first start. Corvidae records the model and dimensions in its database. If you change either one later, vector memory switches off until you put the old values back. [docs/discord-remote-api.md](docs/discord-remote-api.md#measure-the-embedding-dimensions) shows how to ask the endpoint for the number.
+
+## Installing without Docker
+
+This is [Try it](#try-it) made permanent: a dedicated user, every plugin, and a systemd unit. It also works as a recipe for a fresh Debian or Ubuntu LXC container or VM, which gives you most of Docker's containment without Docker. Run this part as root:
+
+```sh
+apt-get update && apt-get install -y git curl ca-certificates
+useradd --create-home --shell /bin/bash corvidae
+su - corvidae
+```
+
+Then, as `corvidae`:
+
+```sh
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.local/bin/env
+git clone https://github.com/schuyler/corvidae.git
+cd corvidae
+uv sync --extra discord --extra cognition --extra restart --extra timepiece
+cp agent.yaml.example agent.yaml       # or start from the Try it config
+$EDITOR agent.yaml
+LLM_API_KEY='sk-...' uv run corvidae serve
+```
+
+`uv sync` installs exactly the extras you name and removes any you don't. Running `uv sync --extra discord` after the line above would uninstall the cognition plugins. Always list every extra you want on one line. A bare `uv sync` is the kernel: the agent loop, persistence, tools and the transports, minus the Discord and ACP SDKs. The full list of extras is in `[project.optional-dependencies]` in [`pyproject.toml`](pyproject.toml).
+
+To run it as a service, put the secrets in a mode-0600 env file, one `NAME=value` per line, with no `export` and no quotes. Then add a unit:
+
+```ini
+# /etc/systemd/system/corvidae.service
+[Unit]
+Description=corvidae
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=corvidae
+WorkingDirectory=/home/corvidae/corvidae
+EnvironmentFile=/etc/corvidae/corvidae.env
+ExecStart=/home/corvidae/corvidae/.venv/bin/corvidae serve
+Restart=always
+RestartSec=5
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`systemctl enable --now corvidae`, then `journalctl -u corvidae -f` to watch it come up. `WorkingDirectory` is where `agent.yaml`, `sessions.db` and `state/` live.
+
+The LXC container, like the Docker one, limits what the agent's tools can reach. That's the main reason to run corvidae in one. Everything in [Giving it tools](#giving-it-tools) applies here too.
 
 ## Configuration
 
-Corvidae reads `agent.yaml` from the current working directory. The file configures the LLM backend, daemon settings, agent defaults, transports, and per-channel overrides. `agent.yaml.example` covers every built-in plugin; `agent.minimal.yaml.example` disables the memory/appraisal/critique plugins and runs just the core agent loop.
+Corvidae reads `agent.yaml` from its working directory. Two annotated examples ship in the repo:
 
-See [docs/configuration.md](docs/configuration.md) for the full reference.
+- [`agent.yaml.example`](agent.yaml.example) covers every built-in plugin, with most keys commented out at their defaults.
+- [`agent.minimal.yaml.example`](agent.minimal.yaml.example) is just the core loop, with the cognition plugins disabled.
 
-Key sections:
+The shape of a typical config:
 
-- `llm` — model profiles; `llm.main` is required unless `llm.defaults.chat` names another default, and every profile needs `base_url` and `model` (an embedding profile also needs `kind: embedding` and `dimensions`). `llm.stages` maps individual stages to other profiles.
-- `daemon` — SQLite path, task worker count
-- `agent` — system prompt, token budget, compaction, tool result limits
-- `irc` — omit entirely to disable IRC
-- `channels` — per-channel overrides keyed by `transport:scope` (e.g., `irc:#general`, `cli:local`)
-- `mcp` — MCP server connections (optional)
-- `scheduler` — reminder timezone, per-channel reminder cap, and operator jobs (optional)
-- `heartbeat` — seconds of system-wide quiet before the agent starts a turn of its own (optional; asleep without it)
-- `logging` — simplified options (`level`, `file`); see docs/configuration.md
+```yaml
+llm:                                  # model profiles; main is the default chat model
+  main:
+    base_url: https://api.example.com/v1
+    model: your-chat-model
+    api_key: "${LLM_API_KEY}"
 
-Before pointing the bot at a channel with people you don't trust, read
-[docs/threat-model.md](docs/threat-model.md). The built-in tools run
-unsandboxed as the daemon user, and prompt injection is the threat, not
-other tenants.
+agent:
+  system_prompt: "You are Corvus. You speak only in riddles."
+  max_context_tokens: 64000           # compaction kicks in as history nears this
 
-## Features
+tools:
+  disabled: [shell, write_file]       # tools no channel gets
 
-- IRC transport via pydle; CLI transport (stdin/stdout) built in
-- Multi-turn tool-calling loop: tool calls run as async tasks, results trigger the next turn
-- Context window management: estimates token count, compacts (summarizes) when nearing the budget
-- SQLite conversation persistence with an append-only message log
-- `<thinking>` block handling: stripped from display, optionally retained in DB
-- MCP (Model Context Protocol) client: connects to external tool servers over stdio or SSE
-- One identity on every channel, with a per-channel register (chat-app defaults ship for Signal, Discord, Zulip and IRC); per-channel token budget, turn limits, and more
-- Runtime settings tool: the LLM can adjust its own parameters mid-session (with optional immutable keys)
-- Plugin system via apluggy (async pluggy) with setuptools entry points
+web: {}                               # transports: present means on
+discord:
+  allow: [123456789012345678]
 
-## Included plugins
+channels:                             # per-channel overrides, keyed transport:scope
+  discord:*:                          # every Discord channel
+    max_context_tokens: 32000
+  web:main:
+    register_prompt: "This is a browser chat; longer, structured answers are fine."
 
-### Kernel plugins
+plugins:
+  disabled: [critique, appraisal]     # entry-point names of plugins to skip
+```
 
-| Plugin | Purpose |
-|--------|---------|
-| PersistencePlugin | SQLite database lifecycle and per-channel conversation initialization |
-| ShellToolPlugin | Registers `shell` and `task_pipeline` |
-| FileToolsPlugin | Registers `read_file` and `write_file` |
-| WebToolsPlugin | Registers `web_fetch` and `web_search` |
-| CLIPlugin | stdin/stdout transport (routes to `cli:local`) |
-| IRCPlugin | IRC transport via pydle with reconnect backoff |
-| TaskPlugin | Async task queue for tool call dispatch, configurable concurrency |
-| SubagentPlugin | Launches background agents with their own LLM sessions |
-| McpClientPlugin | Connects to external MCP servers and exposes their tools |
-| CompactionPlugin | Summarizes older messages when nearing the token budget |
-| ThinkingPlugin | Strips `<thinking>` blocks from display, optionally from prompt history |
-| RuntimeSettingsPlugin | Lets the LLM adjust its own per-channel parameters mid-session |
-| SchedulerPlugin | Reminders the agent sets with `remind_me` and operator-scheduled jobs, fired into channels on the clock |
-| SignalPlugin | Signal transport via a running `signal-cli` daemon |
-| DiscordPlugin | Discord transport (needs `--extra discord`) |
-| ZulipPlugin | Zulip transport: channels (answered in the topic of the latest message) and DMs; no extra needed, see [docs/zulip-ops.md](docs/zulip-ops.md) |
-| WebPlugin | Browser chat UI on localhost |
-| WebhookPlugin | Webhook ingress: routes `POST /hook/<endpoint>` events to subscribing plugins |
-| AcpPlugin | Agent Client Protocol over stdio for editors (`corvidae acp`, needs `--extra acp`) |
+A few things that aren't obvious from the example:
 
-### Cognition plugins (`--extra cognition`)
+- **Channel IDs are `transport:scope`:** `web:main`, `discord:<channel id>`, `discord:dm:<user id>`, `irc:#general`, `cli:local`. They're the keys for history and memory, and they show up in the logs.
+- **Every transport that takes messages from other people is default-deny.** Discord, Signal, Zulip and IRC all need an `allow` list.
+- **Most changes apply live.** The daemon polls `agent.yaml` and reloads it. Changes to anything under `llm:` and to transport connection settings need a restart, and the log names each key that's waiting for one.
+- **A misspelled plugin name in `plugins.disabled` disables nothing.** It logs a warning. The `plugins loaded` line at startup shows what actually loaded.
 
-| Plugin | Purpose |
-|--------|---------|
-| MemoryPlugin | Consolidates conversation (at turn ends, on idle, and at compaction) into long-term memories and retrieves them into context |
-| MemoryToolsPlugin | `search_memory` and `recall_raw` tools |
-| FunnelPlugin | Admits retrieved context into the prompt under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
-| AppraisalPlugin | Scores each exchange as it happens |
-| CritiquePlugin | Reviews the agent's replies after the fact |
-| OutcomeLogPlugin | Records each exchange and its outcome |
-| SilencePlugin | Lets the agent end a turn with `NO_REPLY` (or an `end_turn` tool, per `silence.mode`) and send nothing; tells it so on chat channels |
-| HeartbeatPlugin | Starts a turn after a quiet spell to review recent memory, acting only when something warrants it (asleep unless `heartbeat.after` is set) |
+## Reference documentation
 
-## CLI subcommands
+For running it:
 
-`corvidae scaffold <plugin-name> [-o/--output-dir <dir>]` generates a new plugin project directory containing `pyproject.toml`, a plugin module, and a test file. The plugin name is lowercased and non-alphanumeric runs are replaced with underscores to form the package name.
+- [docs/configuration.md](docs/configuration.md) documents every `agent.yaml` key, plus hot reload and containers.
+- [docs/threat-model.md](docs/threat-model.md) covers what untrusted text can reach and what the tools can do. Read it before you add anyone else to an `allow` list.
+- [docs/discord-ops.md](docs/discord-ops.md), [docs/signal-ops.md](docs/signal-ops.md) and [docs/zulip-ops.md](docs/zulip-ops.md) are setup guides for each transport.
+- [docs/discord-remote-api.md](docs/discord-remote-api.md) walks through a Discord bot on a hosted API, including the embedding step.
+- [docs/prompt-guide.md](docs/prompt-guide.md) explains how the prompt gets assembled and how to write a system prompt for it.
+- [docs/cognition.md](docs/cognition.md) covers memory, appraisal, critique, goals, the heartbeat and the rest of the cognition set.
 
-Additional subcommands can be added by plugins via the `corvidae.commands` entry point group. See [docs/plugin-guide.md](docs/plugin-guide.md#registering-cli-subcommands) for details.
+For hacking on it:
 
-## Plugin system
+- [docs/prd.md](docs/prd.md) holds the requirements: what has to be true, and why.
+- [docs/design.md](docs/design.md) describes how the current tree does it: the architecture, hook specs and schemas.
+- [docs/plugin-guide.md](docs/plugin-guide.md) and [docs/plugin-checklist.md](docs/plugin-checklist.md) cover writing a plugin. `corvidae scaffold <name>` generates the skeleton.
 
-External plugins register via setuptools entry points under the `corvidae` group. See [docs/plugin-guide.md](docs/plugin-guide.md) for the hook API and a worked example.
+To set up a development checkout:
 
-## Built-in tools
-
-The LLM has access to these tools out of the box:
-
-- `shell` — run a shell command, capture stdout/stderr
-- `read_file` — read a file from the local filesystem
-- `write_file` — write or overwrite a file
-- `web_fetch` — fetch a URL and return the response body
-- `web_search` — DuckDuckGo search, results as title/URL/snippet
-- `task_pipeline` — run a YAML/JSON DAG of shell commands in dependency order
-- `task_status` — check status of background tasks
-- `set_settings` — adjust sampling parameters, turn and context limits, and plugin tunables (an allowlist in code; other keys configurable as immutable)
-- `subagent` — launch a background agent with its own LLM session
-
-MCP servers add their tools to this list at startup.
+```sh
+uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send \
+  --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify
+uv run pytest
+```
 
 ## Inspiration
 
