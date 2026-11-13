@@ -547,9 +547,12 @@ async def test_page_follows_runtime_budget_override(tmp_path):
         # R3: the cap binds at 220000 tokens; the default cap at 256000.
         (220_000, {"max_result_chars": 32_000}, 32_000),
         (256_000, {}, 61_440),
-        # R7: a 1500-token budget keeps the minimum page, or a lower cap.
-        (1_500, {}, 2_000),
-        (1_500, {"max_result_chars": 1_000}, 1_000),
+        # R7, revised by #752: a 1500-token budget's share (120 tokens) is
+        # smaller than the 2000-character minimum page counts, so counting cuts
+        # the page to the floor that still leaves room for the header. The cap
+        # does not bind below it.
+        (1_500, {}, 506),
+        (1_500, {"max_result_chars": 1_000}, 506),
         # R9: a configured fraction sets the page (2% x 100000 x 3.0).
         (100_000, {"read_file_window_fraction": 0.02}, 6_000),
     ],
@@ -1282,3 +1285,83 @@ def test_read_file_web_fetch_and_web_search_declare_untrusted_output():
     fns = _tool_fns(FileToolsPlugin(None)) | _tool_fns(WebToolsPlugin(None))
     for name in ("read_file", "web_fetch", "web_search"):
         assert declares_untrusted_output(fns[name]), f"{name} must declare returns_untrusted"
+
+
+# ---------------------------------------------------------------------------
+# read_file page clamp measured in tokens (#752)
+# ---------------------------------------------------------------------------
+
+# Dense content: base64-style text tokenizes near 1.4 characters per token
+# under the window's own counter, so the #578 character estimate over-sizes it.
+_DENSE = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMjM0NTY3ODkrLw=="
+
+
+def _dense_file(tmp_path, chars: int):
+    """Write about ``chars`` characters of dense (low chars/token) content."""
+    f = tmp_path / "dense.txt"
+    f.write_text((_DENSE * (chars // len(_DENSE) + 1))[:chars])
+    return f
+
+
+def _tool_message_tokens(page: str) -> int:
+    """The page's cost the way the window counts a tool result."""
+    from corvidae.context import message_tokens
+
+    return message_tokens({"role": "tool", "content": page})
+
+
+async def test_dense_page_fits_the_share_by_measurement(tmp_path):
+    """R: whatever a page contains, it takes no more than the configured share
+    of the channel's window by message_tokens."""
+    # A 24000-token channel: the share is 1920 tokens.
+    registry, channel = _channel_with_budget(24_000)
+    fn, _ = await _ranged_read_file(registry=registry)
+    ctx = _ctx_for(channel)
+    share = 0.08 * 24_000
+
+    # An unranged read of a file far longer than any page.
+    dense = _dense_file(tmp_path, 40_000)
+    first = await fn(str(dense), _ctx=ctx)
+    assert _RANGE_HEADER.match(first), first[:200]
+    assert _tool_message_tokens(first) <= share, _tool_message_tokens(first)
+
+    # The character estimate alone would have let this page exceed the share,
+    # so the measurement is what clamped it.
+    from corvidae.tools.files import page_chars
+
+    estimated_chars = page_chars(100_000, 24_000, 0.08)
+    estimated_page = str(dense.read_text()[:estimated_chars])
+    assert _tool_message_tokens(estimated_page) > share
+
+    # A line range of dense content is clamped too.
+    lines_file = tmp_path / "dense_lines.txt"
+    lines_file.write_text("".join(f"{_DENSE}\n" for _ in range(200)))
+    line_page = await fn(str(lines_file), start_line=1, _ctx=ctx)
+    assert _LINE_HEADER.match(line_page), line_page[:200]
+    assert _tool_message_tokens(line_page) <= share, _tool_message_tokens(line_page)
+
+
+async def test_dense_pages_reconstruct_the_file(tmp_path):
+    """R: the clamped page still pages the file back exactly."""
+    registry, channel = _channel_with_budget(24_000)
+    fn, _ = await _ranged_read_file(registry=registry)
+    ctx = _ctx_for(channel)
+    f = _dense_file(tmp_path, 12_000)
+    text = f.read_text()
+
+    by_chars = await _page_chain(fn, f, ctx, offset=0, length=10**6)
+
+    assert len(by_chars) > 1
+    assert "".join(by_chars) == text
+
+
+async def test_prose_page_is_not_shrunk_by_the_measurement(tmp_path):
+    """R: ordinary text keeps the #578 page; counting only refines it."""
+    registry, channel = _channel_with_budget(24_000)
+    fn, _ = await _ranged_read_file(registry=registry)
+    ctx = _ctx_for(channel)
+
+    page = await fn(str(_prose_file(tmp_path, 150_000)), offset=0, length=10**6, _ctx=ctx)
+
+    # 0.08 x 24000 x 3.0 = 5760 characters, and prose fits the share there.
+    assert 5_500 <= len(page) <= 5_760
