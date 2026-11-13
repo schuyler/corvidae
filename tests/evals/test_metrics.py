@@ -141,3 +141,51 @@ class TestFixtureSeed:
             assert memory["id"]
             assert memory["summary"]
             assert memory["channel_id"]
+
+
+class TestFalseAdmit:
+    """Negative probes: the gate should admit nothing when nothing is relevant."""
+
+    def test_no_admits_is_clean(self):
+        # All candidates are weak → no false admits.
+        from evals.metrics import false_admit
+        candidates = [
+            {"id": "m1", "band": "weak"},
+            {"id": "m2", "band": "weak"},
+        ]
+        assert false_admit(candidates, k=5) == 0.0
+
+    def test_one_strong_admit_is_failure(self):
+        from evals.metrics import false_admit
+        candidates = [
+            {"id": "m1", "band": "strong"},
+            {"id": "m2", "band": "weak"},
+        ]
+        assert false_admit(candidates, k=5) == 1.0
+
+    def test_one_moderate_admit_is_failure(self):
+        from evals.metrics import false_admit
+        candidates = [
+            {"id": "m1", "band": "moderate"},
+            {"id": "m2", "band": "weak"},
+        ]
+        assert false_admit(candidates, k=5) == 1.0
+
+    def test_k_cutoff_excludes_admit(self):
+        # The strong candidate is below the k cutoff.
+        from evals.metrics import false_admit
+        candidates = [
+            {"id": "m1", "band": "weak"},
+            {"id": "m2", "band": "weak"},
+            {"id": "m3", "band": "strong"},
+        ]
+        assert false_admit(candidates, k=2) == 0.0
+        assert false_admit(candidates, k=3) == 1.0
+
+    def test_empty_candidates_is_clean(self):
+        from evals.metrics import false_admit
+        assert false_admit([], k=5) == 0.0
+
+    def test_returns_float(self):
+        from evals.metrics import false_admit
+        assert isinstance(false_admit([], k=5), float)

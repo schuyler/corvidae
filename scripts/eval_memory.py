@@ -706,6 +706,9 @@ async def run_snapshot_evaluation(
               f"(over {len(recalls)} of {len(results)} queries)")
         print(f"📊 Mean MRR:        {fmt_metric(summary['mean_mrr'])} "
               f"(over {len(recalls)} of {len(results)} queries)")
+        if fas:
+            print(f"📊 False admits:   {summary['false_admit_rate']:.2f} "
+                  f"({sum(fas)} of {len(fas)} negative probes)")
         # Per-subset means, only worth printing when the probes are tagged.
         if any(r["subset"] for r in results):
             for name, group in summary["subsets"].items():
