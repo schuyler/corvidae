@@ -4194,7 +4194,11 @@ three failed connects, checks `/` for a 401 to detect an expired session.
 `tests/test_web_render_smoke.py` checks the sanitising and the
 unconfirmed-send restore in headless Chrome; it skips without Playwright,
 so the `web-smoke` CI job installs a pinned Playwright and Chromium and
-fails if the test is skipped. Run it locally with
+fails if the test is skipped. The job downloads Chromium but does not install
+its system libraries (`--with-deps` needs sudo); on the self-hosted runner
+those are installed once by hand with
+`uvx --from playwright==1.64.0 playwright install-deps chromium`. Run it
+locally with
 `uv run --with playwright pytest tests/test_web_render_smoke.py`.
 
 The page keeps a map of sends the server hasn't answered, keyed by `seq`,
