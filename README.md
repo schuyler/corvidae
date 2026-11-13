@@ -58,17 +58,15 @@ Then hand the directory to the container's user and start it:
 
 ```sh
 sudo chown -R 1000:1000 ~/corvidae-data
-TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 docker run -d --name corvidae --restart unless-stopped \
   -p 127.0.0.1:8765:8765 \
   -e LLM_API_KEY='sk-...' \
-  -e CORVIDAE_WEB_TOKEN="$TOKEN" \
   -v ~/corvidae-data:/data \
   corvidae
-echo "http://127.0.0.1:8765/?token=$TOKEN"
+docker logs corvidae 2>&1 | grep 'log in at'
 ```
 
-Open that URL and say hello. The token sets a cookie that lasts 400 days, so you only paste the token once. Keep it somewhere safe: as long as `CORVIDAE_WEB_TOKEN` stays the same, so does your login.
+That prints a login URL with a token in it. Open it and say hello. The token sets a cookie in your browser, so you don't paste it again. Corvidae generates a new token every time it starts, though, so a restart logs you out and you fetch the new URL the same way. To keep one token across restarts, set it yourself with `-e CORVIDAE_WEB_TOKEN=...` ([details](docs/configuration.md#web--browser-chat-ui)).
 
 Some things worth knowing before you go further:
 
@@ -106,13 +104,12 @@ docker rm -f corvidae
 docker run -d --name corvidae --restart unless-stopped \
   -p 127.0.0.1:8765:8765 \
   -e LLM_API_KEY='sk-...' \
-  -e CORVIDAE_WEB_TOKEN="$TOKEN" \
   -e DISCORD_TOKEN='your-bot-token' \
   -v ~/corvidae-data:/data \
   corvidae
 ```
 
-The log should say `discord: connected as user id <id>`. Two warnings that `voice will NOT be supported` are expected. DM the bot and it answers everything you send. In a server channel it answers only messages that @-mention it, unless you change `require_mention` ([docs/discord-ops.md](docs/discord-ops.md#answering-without-a-mention-experimental)).
+That's a fresh start, so the web page has a new login URL in `docker logs` too. The log should also say `discord: connected as user id <id>`. Two warnings that `voice will NOT be supported` are expected. DM the bot and it answers everything you send. In a server channel it answers only messages that @-mention it, unless you change `require_mention` ([docs/discord-ops.md](docs/discord-ops.md#answering-without-a-mention-experimental)).
 
 Your conversation history moves with you: the web page and Discord are separate channels, but the agent's memory covers both.
 
