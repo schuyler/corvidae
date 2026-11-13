@@ -17,23 +17,21 @@ It talks to any OpenAI-compatible Chat Completions endpoint, hosted or local. It
 
 ## Quick start
 
-This gets the browser chat page working in Docker, backed by a hosted OpenAI-compatible API. Then it adds Discord. You need Docker, git, and an endpoint URL, model name and API key from your provider. To run against a model on your own hardware instead, read this section and then [Local models](#local-models).
+You need an OpenAI-compatible endpoint URL, a model name and an API key from your provider. To use a model on your own hardware instead, read this section and then [Local models](#local-models).
 
-There's no published image yet ([#731](https://github.com/schuyler/corvidae/issues/731)), so build one:
+### Try it
+
+**This is a demo and development setup, not a deployment.** It runs in your terminal, as your own user, against your own files, and it stops when you close the terminal. It's the quickest way to see corvidae working. To keep it running, use [Docker](#run-it-in-docker).
+
+You need git and [uv](https://docs.astral.sh/uv/). uv fetches the Python 3.13 that corvidae needs if you don't have it. Corvidae isn't on PyPI, so clone it:
 
 ```sh
 git clone https://github.com/schuyler/corvidae.git
 cd corvidae
-docker build -t corvidae .
+uv sync
 ```
 
-The image includes every optional plugin. It runs `corvidae serve` as uid 1000 in `/data`, which is where you mount a directory that holds `agent.yaml`. The database, memory and state files get written beside it:
-
-```sh
-mkdir -p ~/corvidae-data
-```
-
-Put this in `~/corvidae-data/agent.yaml`:
+Put this in `agent.yaml` in the checkout:
 
 ```yaml
 llm:
@@ -48,11 +46,49 @@ agent:
 tools:
   disabled: [shell, write_file]            # see "Giving it tools" below
 
+web: {}                                    # the browser chat page, on 127.0.0.1:8765
+```
+
+Start it:
+
+```sh
+LLM_API_KEY='sk-...' uv run corvidae serve
+```
+
+Among the startup lines is a warning that says `web: log in at http://127.0.0.1:8765/?token=...`. Open that URL and say hello. Ctrl-C stops it. The conversation is saved in `sessions.db`, and scratch files go in `state/`, both in the current directory. Start it again and the conversation picks up where you left off.
+
+A bare `uv sync` installs the kernel: the agent loop, persistence, tools and transports. It leaves out long-term memory and the other cognition plugins, which keeps a first run cheap. The Docker image includes all of them. [Installing without Docker](#installing-without-docker) covers adding them to a checkout.
+
+### Run it in Docker
+
+This is the recommended way to run corvidae for real. The container limits what the agent's tools can reach to the one directory you give it, and Docker restarts the daemon if it stops.
+
+There's no published image yet ([#731](https://github.com/schuyler/corvidae/issues/731)), so build one from the checkout:
+
+```sh
+docker build -t corvidae .
+```
+
+The image includes every optional plugin. It runs `corvidae serve` as uid 1000 in `/data`, which is where you mount a directory that holds `agent.yaml`. The database, memory and state files get written beside it:
+
+```sh
+mkdir -p ~/corvidae-data
+```
+
+Copy your demo config there, and change the `web:` block:
+
+```sh
+cp agent.yaml ~/corvidae-data/agent.yaml
+```
+
+```yaml
 web:
   host: 0.0.0.0                            # inside the container; -p below keeps it on loopback
   allowed_origins:
     - http://127.0.0.1:8765                # the address you'll browse to
 ```
+
+Inside a container, the page has to listen on every interface for Docker's port mapping to reach it. A wildcard bind can't work out which address you'll browse to, so you name it in `allowed_origins`.
 
 Then hand the directory to the container's user and start it:
 
@@ -180,7 +216,7 @@ Get `dimensions` right before the first start. Corvidae records the model and di
 
 ## Installing without Docker
 
-Corvidae isn't on PyPI. Install it from a checkout with [uv](https://docs.astral.sh/uv/), which also fetches the Python 3.13 that corvidae needs if your system doesn't have it. Here's a recipe for a fresh Debian or Ubuntu LXC container or VM. Run it as root:
+This is [Try it](#try-it) made permanent: a dedicated user, every plugin, and a systemd unit. It also works as a recipe for a fresh Debian or Ubuntu LXC container or VM, which gives you most of Docker's containment without Docker. Run this part as root:
 
 ```sh
 apt-get update && apt-get install -y git curl ca-certificates
@@ -196,14 +232,12 @@ source ~/.local/bin/env
 git clone https://github.com/schuyler/corvidae.git
 cd corvidae
 uv sync --extra discord --extra cognition --extra restart --extra timepiece
-cp agent.yaml.example agent.yaml       # or start from the quick-start config above
+cp agent.yaml.example agent.yaml       # or start from the Try it config
 $EDITOR agent.yaml
 LLM_API_KEY='sk-...' uv run corvidae serve
 ```
 
-`uv sync` installs exactly the extras you name and removes any you don't. Running `uv sync --extra discord` after the line above would uninstall the cognition plugins. Always list every extra you want on one line. A bare `uv sync` is the kernel: the agent loop, persistence, tools and the transports, minus the Discord SDK. The full list of extras is in `[project.optional-dependencies]` in [`pyproject.toml`](pyproject.toml).
-
-For the quick-start config outside Docker, drop the `host` and `allowed_origins` lines from the `web:` block. The default is loopback.
+`uv sync` installs exactly the extras you name and removes any you don't. Running `uv sync --extra discord` after the line above would uninstall the cognition plugins. Always list every extra you want on one line. A bare `uv sync` is the kernel: the agent loop, persistence, tools and the transports, minus the Discord and ACP SDKs. The full list of extras is in `[project.optional-dependencies]` in [`pyproject.toml`](pyproject.toml).
 
 To run it as a service, put the secrets in a mode-0600 env file, one `NAME=value` per line, with no `export` and no quotes. Then add a unit:
 
