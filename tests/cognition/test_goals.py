@@ -489,6 +489,8 @@ async def test_g4_notify_dropped_when_origin_not_registered(env):
     result = await env.tools["set_goal_status"](gid, "blocked", _ctx=ctx)
     assert "status set to" in result
     assert env.notifications == []
+    # The state was recorded even though the notify was dropped.
+    assert (await rows(env, "SELECT status FROM goals WHERE id = ?", (gid,)))[0][0] == "blocked"
 
 
 async def test_g4_open_goals_ordered_by_position(env):
@@ -498,3 +500,88 @@ async def test_g4_open_goals_ordered_by_position(env):
     await env.tools["add_goal"]("high", position="prepend", _ctx=ctx)
     goals = await env.goals.open_goals()
     assert [g["summary"] for g in goals] == ["high", "low"]
+
+
+# ---------------------------------------------------------------------------
+# G5: review-loop test gaps (migration, notify edges, multi-prepend, no-op)
+# ---------------------------------------------------------------------------
+
+
+async def test_g5_migration_adds_columns_and_preserves_order(env):
+    """A pre-migration table (no position/origin_channel) gains the columns;
+    position = id (id order preserved), origin_channel is NULL."""
+    # Create the table first (lazy), then rebuild it without the new columns
+    # to simulate the old schema.
+    await env.goals._require_db()
+    await env.db.execute("ALTER TABLE goals RENAME TO goals_old")
+    await env.db.execute(
+        "CREATE TABLE goals (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, "
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL, retired_at REAL, "
+        "memory_id INTEGER, status TEXT NOT NULL DEFAULT 'open')"
+    )
+    now = env.clock.now()
+    for i, text in enumerate(["first", "second", "third"]):
+        await env.db.execute(
+            "INSERT INTO goals (id, text, created_at, updated_at, status) "
+            "VALUES (?, ?, ?, ?, 'open')",
+            (i + 1, text, now, now),
+        )
+    await env.db.commit()
+    env.goals._schema_ready = False  # force the migration to run
+    db = await env.goals._require_db()
+    async with db.execute("PRAGMA table_info(goals)") as cur:
+        cols = {row[1] for row in await cur.fetchall()}
+    assert "position" in cols and "origin_channel" in cols
+    data = await rows(
+        env, "SELECT id, text, position, origin_channel FROM goals ORDER BY id"
+    )
+    assert [d[1] for d in data] == ["first", "second", "third"]
+    assert [d[2] for d in data] == [1, 2, 3]  # position = id
+    assert all(d[3] is None for d in data)  # origin_channel NULL
+    goals = await env.goals.open_goals()
+    assert [g["summary"] for g in goals] == ["first", "second", "third"]
+
+
+async def test_g5_add_goal_no_ctx_no_origin_no_notify(env):
+    """add_goal with no channel context: origin_channel is NULL, and a later
+    state change does not notify (no origin to notify)."""
+    await env.tools["add_goal"]("no origin", _ctx=None)
+    assert (await rows(env, "SELECT origin_channel FROM goals"))[0][0] is None
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    env.notifications.clear()
+    await env.tools["set_goal_status"](gid, "blocked", _ctx=None)
+    assert env.notifications == []
+
+
+async def test_g5_retire_already_retired_does_not_notify(env):
+    """Retiring an already-retired goal errors and does not notify."""
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "work")
+    await env.tools["add_goal"]("do it", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    await env.tools["retire_goal"](gid, "done.", _ctx=ctx)
+    env.notifications.clear()
+    result = await env.tools["retire_goal"](gid, "again.", _ctx=ctx)
+    assert "already retired" in result
+    assert env.notifications == []
+
+
+async def test_g5_multiple_prepends_preserve_order(env):
+    """Multiple prepends: each new prepend goes to the very front."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("a", _ctx=ctx)
+    await env.tools["add_goal"]("c", position="prepend", _ctx=ctx)
+    await env.tools["add_goal"]("b", position="prepend", _ctx=ctx)
+    data = await rows(env, "SELECT text FROM goals ORDER BY position ASC, id ASC")
+    assert [d[0] for d in data] == ["b", "c", "a"]
+
+
+async def test_g5_noop_status_change_does_not_notify(env):
+    """Setting the same status does not fire a notification."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("watch", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    await env.tools["set_goal_status"](gid, "blocked", _ctx=ctx)
+    env.notifications.clear()
+    await env.tools["set_goal_status"](gid, "blocked", _ctx=ctx)  # no-op
+    assert env.notifications == []

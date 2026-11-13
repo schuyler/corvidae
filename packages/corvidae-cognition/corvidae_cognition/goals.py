@@ -190,15 +190,15 @@ class GoalsPlugin(CorvidaePlugin):
         in the table; the notify is the signal, not the record."""
         if not origin_channel_id:
             return
-        registry = get_dependency(self.pm, "registry", ChannelRegistry)
-        channel = registry.get(origin_channel_id)
-        if channel is None:
-            logger.warning(
-                "goals: origin channel %s not registered; dropping state-change notify",
-                origin_channel_id,
-            )
-            return
         try:
+            registry = get_dependency(self.pm, "registry", ChannelRegistry)
+            channel = registry.get(origin_channel_id)
+            if channel is None:
+                logger.warning(
+                    "goals: origin channel %s not registered; dropping state-change notify",
+                    origin_channel_id,
+                )
+                return
             await self.pm.ahook.on_notify(
                 channel=channel, source="goals", text=text,
                 tool_call_id=None, annotations=None,
@@ -210,7 +210,7 @@ class GoalsPlugin(CorvidaePlugin):
             )
 
     async def open_goals(self) -> list[dict]:
-        """Open goals (not retired), newest first. For the heartbeat's review.
+        """Open goals (not retired), front of the queue first. For the heartbeat's review.
 
         Each is {"id", "age_seconds", "summary"}: the goal's id, age
         since creation on the kernel clock, and its text.
@@ -415,6 +415,9 @@ class GoalsPlugin(CorvidaePlugin):
             if status not in VALID_STATUSES:
                 return f"Error: status must be one of {VALID_STATUSES}, got {status!r}"
             db = await plugin._require_db()
+            goal = await plugin._get(db, id)
+            if goal is None or goal.retired_at is not None:
+                return f"Error: no open goal with id {id}"
             now = time.time()
             async with db.execute(
                 "UPDATE goals SET status = ?, updated_at = ? WHERE id = ? AND retired_at IS NULL",
@@ -423,8 +426,8 @@ class GoalsPlugin(CorvidaePlugin):
                 if cursor.rowcount == 0:
                     return f"Error: no open goal with id {id}"
             await db.commit()
-            goal = await plugin._get(db, id)
-            if goal is not None:
+            # No notify on a no-op (setting the same status).
+            if goal.status != status:
                 await plugin._notify_origin(
                     goal.origin_channel, f"Goal #{id} status -> {status!r}"
                 )
