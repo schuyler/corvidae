@@ -308,3 +308,55 @@ class TestBareCancelBackstop:
         monkeypatch.setattr(McpClientPlugin, "_connect_server", boom)
         assert await plugin._retry_round() is False
         assert list(plugin._pending_servers) == ["down"]
+
+
+class TestThirdPartyLogsDoNotCarryTheCredential:
+    """#595: the MCP SDK and httpx log the configured URL whole, so a userinfo
+    password or a query token reaches the daemon log unless something redacts
+    records corvidae does not emit."""
+
+    PASSWORD = "hunter2-not-the-bearer"
+
+    def _url_with_userinfo(self, mcp_url: str) -> str:
+        scheme, _, rest = mcp_url.partition("://")
+        return f"{scheme}://alfred:{self.PASSWORD}@{rest}"
+
+    async def test_a_401_with_userinfo_never_logs_the_password(
+        self, mcp_url, caplog
+    ):
+        # The server refuses the request (no bearer header) after accepting the
+        # connection: the shape #595 was reported in.
+        url = self._url_with_userinfo(mcp_url)
+        with caplog.at_level(logging.DEBUG):
+            plugin = await _start({
+                "wiki": {"transport": "streamable_http", "url": url,
+                         "connect_timeout_seconds": 5},
+            })
+            try:
+                assert plugin._servers == [], "the connect should have failed"
+            finally:
+                await plugin.on_stop()
+
+        assert caplog.records, "nothing was logged, so this proves nothing"
+        leaks = [r.getMessage() for r in caplog.records if self.PASSWORD in r.getMessage()]
+        assert leaks == [], f"a log record carries the password: {leaks[0][:120]}"
+
+    async def test_a_401_with_a_query_token_never_logs_the_token(
+        self, mcp_url, caplog
+    ):
+        # The other way a credential reaches a URL, and the reason the filter is
+        # the fix rather than stripping userinfo alone.
+        token = "query-token-9d1e"
+        with caplog.at_level(logging.DEBUG):
+            plugin = await _start({
+                "wiki": {"transport": "streamable_http",
+                         "url": f"{mcp_url}?token={token}",
+                         "connect_timeout_seconds": 5},
+            })
+            try:
+                assert plugin._servers == []
+            finally:
+                await plugin.on_stop()
+
+        leaks = [r.getMessage() for r in caplog.records if token in r.getMessage()]
+        assert leaks == [], f"a log record carries the query token: {leaks[0][:120]}"

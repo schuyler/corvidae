@@ -166,6 +166,56 @@ def _one_line(text: str) -> str:
     return text.translate(_LINE_BOUNDARY_ENCODING)
 
 
+# Third-party loggers that log the configured URL whole: the MCP SDK's own
+# client, and the HTTP stack underneath it. Corvidae's warnings are redacted at
+# the call site (_server_endpoint); these are not ours to redact, so a filter
+# runs the same helpers over what they emit (#595).
+_CREDENTIAL_LOGGERS = ("mcp", "httpx", "httpcore")
+
+
+class _UrlRedactingFilter(logging.Filter):
+    """Redact credential-bearing URLs in records from the third-party clients.
+
+    A filter rather than option 2 in #595 alone (stripping userinfo before the
+    SDK sees it): this also covers a query-string token, which the SDK is
+    entitled to log and which would otherwise still reach the daemon log. It is
+    a safety net over text we do not emit, so it recognises the shapes
+    ``_redact_urls_in_text`` already knows, and leaves every other record
+    untouched.
+
+    Never raises: a log record must not become an exception.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not record.name.startswith(_CREDENTIAL_LOGGERS):
+            return True
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        if not any(marker in message for marker in _CREDENTIAL_MARKERS):
+            return True
+        try:
+            redacted = _redact_urls_in_text(_one_line(message))
+        except Exception:
+            redacted = "(could not redact this message)"
+        record.msg = redacted
+        record.args = ()
+        return True
+
+
+def _install_log_redaction() -> None:
+    """Install `_UrlRedactingFilter` once, on every root handler.
+
+    On the handlers, not the loggers: a record logged on `mcp.client.sse` is
+    propagated to the root handlers without passing through the filters of the
+    ancestor logger it propagates from, so a logger filter would miss it.
+    """
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(f, _UrlRedactingFilter) for f in handler.filters):
+            handler.addFilter(_UrlRedactingFilter())
+
+
 def _server_endpoint(cfg: dict) -> str:
     """The server's command (stdio) or url (sse, streamable_http), for logs.
 
@@ -607,6 +657,9 @@ class McpClientPlugin(CorvidaePlugin):
         self._stopping = False
         self._stop_event = asyncio.Event()
         self._clock = get_dependency(self.pm, "clock", Clock)
+        # Before the first connect: a failed handshake is exactly when a
+        # library writes the configured URL -- credentials and all -- out.
+        _install_log_redaction()
 
         try:
             for server_name, server_cfg in servers_config.items():

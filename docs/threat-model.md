@@ -92,10 +92,17 @@ Assets, roughly in order of how bad it is to lose them:
    host, port and path, and for such a server they carry the exception's
    text with every URL in it reduced the same way instead of its traceback
    (an HTTP client quotes the URL in its errors); a config-error skip
-   describes a rejected value likewise (#386). Library loggers — the MCP
-   SDK's `mcp.*` and the HTTP client's `httpx2` — are not filtered and can
-   write the URL whole (at the default WARNING level only `mcp.*` errors
-   do), so prefer a `${VAR}` header to a credential in the URL.
+   describes a rejected value likewise (#386). Library loggers are filtered
+   too (#595): when the MCP client starts, every root log handler carries a
+   filter over records from `mcp.*`, `httpx*` and `httpcore.*` that runs the
+   same URL redaction, so the SDK's `Connecting to StreamableHTTP endpoint:
+   <url>` line and its error records name the endpoint without the userinfo
+   or the query. That is a net over text corvidae does not emit, so it
+   recognises the URL shapes `_redact_url` knows and nothing more: a
+   credential a library writes in some other form — split across fields, or
+   inside a base64 `Authorization` header it echoes — is not caught, which is
+   why a `${VAR}` header is still the shape to prefer over a credential in
+   the URL.
 2. The host account corvidae runs as, and anything it can read or run.
 3. `sessions.db`, the JSONL logs, and the memory tables: plaintext copies
    of every conversation, including end-to-end-encrypted Signal ones.
