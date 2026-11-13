@@ -142,6 +142,14 @@ class RotatingAppender:
         name = self._path.name
         pid = os.getpid()
         pending = self._path.with_name(f"{name}.rotating-{pid}")
+        if pending.exists():
+            # A failed restore left live records under this name. Overwriting it
+            # would destroy them, so rotation waits for an operator to move the
+            # file back; the caller keeps appending past the cap meanwhile.
+            raise OSError(
+                f"{pending} holds records from an earlier failed rotation; move it "
+                f"back to {self._path} before rotation can continue"
+            )
         os.replace(self._path, pending)
         moved: list[tuple[Path, Path]] = []
         dropped: Path | None = None
@@ -178,12 +186,16 @@ class RotatingAppender:
                 os.replace(pending, self._path)
             except OSError:
                 # The live records are intact, but under a name the operator has
-                # to be told about: the next rotation will not touch it.
-                logger.warning(
-                    "could not restore JSONL file %s after a failed rotation; its "
-                    "records are in %s — move that file back to continue appending",
-                    self._path, pending, exc_info=True,
-                )
+                # to be told about: the next rotation will not touch it. Once per
+                # streak, like the failure warning itself — the caller retries on
+                # every write, and only the first is news.
+                if not self._rotation_failing:
+                    logger.warning(
+                        "could not restore JSONL file %s after a failed rotation; "
+                        "its records are in %s — move that file back to continue "
+                        "appending",
+                        self._path, pending, exc_info=True,
+                    )
             raise
         if dropped is not None:
             try:

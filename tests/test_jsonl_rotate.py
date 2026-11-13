@@ -260,3 +260,36 @@ def test_a_partial_rotation_heals_on_the_next_successful_one(tmp_path, monkeypat
     assert _read(path) == ["record-1"]
     assert _read(path.with_name("chan.jsonl.1"))[0] == "y" * 25
     assert _read(path.with_name("chan.jsonl.2")) == ["backup-1"]
+
+
+def test_a_failed_restore_names_the_file_holding_the_records_once_per_streak(tmp_path, caplog, monkeypatch):
+    """When even putting the live file back fails, the WARNING says where its
+    records are -- once per streak, not once per retried write."""
+    import corvidae.jsonl_rotate as mod
+
+    path = tmp_path / "chan.jsonl"
+    path.write_text("LIVE-LINE\n")
+    appender = RotatingAppender(path, max_bytes=12, backup_count=2)
+    real_replace = mod.os.replace
+
+    def deny_rotation_and_restore(src, dst, *args, **kwargs):
+        if ".rotating-" in str(src):
+            raise PermissionError(1, "Operation not permitted", str(dst))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(mod.os, "replace", deny_rotation_and_restore)
+    with caplog.at_level(logging.WARNING, logger="corvidae.jsonl_rotate"):
+        for i in range(3):
+            appender.write_line(f"record-{i}")
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+    monkeypatch.undo()
+    appender.close()
+    restored = [m for m in messages if "move that file back" in m]
+    assert len(restored) == 1, f"the restore warning repeated: {messages}"
+    # The records are not lost: they are in the file the warning names, and the
+    # next attempts keep appending rather than overwrite that file.
+    held = [p for p in tmp_path.iterdir() if ".rotating-" in p.name]
+    assert len(held) == 1 and "LIVE-LINE" in held[0].read_text()
+    assert held[0].name in restored[0]
+    assert _read(path) == ["record-0", "record-1", "record-2"]
