@@ -337,6 +337,11 @@ class GoalsPlugin(CorvidaePlugin):
             ) as cursor:
                 (msg_id,) = await cursor.fetchone()
             now = plugin._now()
+            # Guard: don't write an orphan memory for an already-retired goal.
+            if checked.retired_at is not None:
+                return (
+                    f"Error: goal #{id} is already retired; add a new goal instead"
+                )
             summary = (
                 f'I retired my goal "{checked.text}" '
                 f"(set {_day(checked.created_at)}). {conclusion}"

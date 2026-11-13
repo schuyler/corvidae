@@ -585,3 +585,62 @@ async def test_g5_noop_status_change_does_not_notify(env):
     env.notifications.clear()
     await env.tools["set_goal_status"](gid, "blocked", _ctx=ctx)  # no-op
     assert env.notifications == []
+
+
+class TestG6ReviewLoop:
+    """Second-pass review findings: notify failure, retired status-set, orphan memory."""
+
+    async def test_notify_failure_does_not_block_retirement(self, env):
+        """A raising on_notify hook must not prevent the retirement from committing."""
+        ctx = ctx_for(env.channel)
+        await add_message(env, env.channel.id, "test")
+
+        class FakeAHook:
+            async def on_notify(self, *args, **kwargs):
+                raise RuntimeError("notify failed")
+
+        # Monkeypatch the ahook
+        orig_ahook = env.pm.ahook
+        env.pm.ahook = FakeAHook()
+        try:
+            await env.tools["add_goal"]("test goal", _ctx=ctx)
+            rows_data = await rows(env, "SELECT id FROM goals WHERE retired_at IS NULL")
+            goal_id = rows_data[0][0]
+            result = await env.tools["retire_goal"](id=goal_id, conclusion="done", _ctx=ctx)
+            # Retirement should succeed despite the notify failure
+            assert "retired" in result.lower()
+        finally:
+            env.pm.ahook = orig_ahook
+
+    async def test_set_status_on_retired_goal_returns_error(self, env):
+        """Setting status on an already-retired goal must return an error."""
+        ctx = ctx_for(env.channel)
+        await add_message(env, env.channel.id, "test")
+        await env.tools["add_goal"]("test goal", _ctx=ctx)
+        rows_data = await rows(env, "SELECT id FROM goals WHERE retired_at IS NULL")
+        goal_id = rows_data[0][0]
+        await env.tools["retire_goal"](id=goal_id, conclusion="done", _ctx=ctx)
+        result = await env.tools["set_goal_status"](id=goal_id, status="blocked", _ctx=ctx)
+        assert "error" in result.lower() or "retired" in result.lower()
+
+    async def test_re_retire_does_not_write_orphan_memory(self, env):
+        """Re-retiring a goal must not write a second memory record."""
+        ctx = ctx_for(env.channel)
+        await add_message(env, env.channel.id, "test")
+        await env.tools["add_goal"]("test goal", _ctx=ctx)
+        rows_data = await rows(env, "SELECT id, memory_id FROM goals WHERE retired_at IS NULL")
+        goal_id = rows_data[0][0]
+        await env.tools["retire_goal"](id=goal_id, conclusion="done", _ctx=ctx)
+
+        # Get the original memory_id
+        rows_data = await rows(env, "SELECT memory_id FROM goals WHERE id = ?", (goal_id,))
+        original_mem_id = rows_data[0][0]
+        assert original_mem_id is not None
+
+        # Re-retire: should error
+        result = await env.tools["retire_goal"](id=goal_id, conclusion="again", _ctx=ctx)
+        assert "already retired" in result.lower()
+
+        # memory_id should be unchanged (no orphan write)
+        rows_data = await rows(env, "SELECT memory_id FROM goals WHERE id = ?", (goal_id,))
+        assert rows_data[0][0] == original_mem_id
