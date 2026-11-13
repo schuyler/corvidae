@@ -1379,6 +1379,8 @@ document intent):
 #   # Mode is not enabled by YAML alone — use `corvidae acp`.
 ```
 
+For step-by-step setup in Zed and bb, see [acp-clients.md](acp-clients.md).
+
 **bb smoke (`customAcpAgents`):**
 
 1. `uv sync --extra acp --extra dev --extra cognition` (add `--extra discord` if you use it)
