@@ -16,9 +16,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from corvidae.channel import Channel
+from corvidae.channel import Channel, ChannelRegistry
 from corvidae.context import ContextWindow
-from corvidae.hooks import create_plugin_manager
+from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.persistence import PersistencePlugin
 from corvidae_cognition.funnel import FunnelPlugin
@@ -117,9 +117,26 @@ async def env(tmp_path, monkeypatch):
     channel = Channel(transport="irc", scope="#test")
     channel.conversation = ContextWindow(channel.id)
 
+    # Registry + a recording on_notify: the goals plugin notifies the origin
+    # channel on state changes; the test captures the calls.
+    channel_registry = ChannelRegistry()
+    channel_registry.channels[channel.id] = channel
+    pm.register(channel_registry, name="registry")
+    notifications: list[dict] = []
+
+    class _NotifyRecorder(CorvidaePlugin):
+        @hookimpl
+        async def on_notify(self, channel, source, text, tool_call_id, annotations):
+            notifications.append(
+                {"channel": channel.id, "source": source, "text": text}
+            )
+
+    pm.register(_NotifyRecorder())
+
     yield SimpleNamespace(
         pm=pm, db=db, db_path=db_path, clock=clock, memory=memory,
         goals=goals, tools=tools, channel=channel,
+        registry=channel_registry, notifications=notifications,
     )
 
     await memory.on_stop()
@@ -368,3 +385,116 @@ async def test_list_goals_truncates_long_text(env):
     assert "..." in result
     # The full 200-char text should NOT appear
     assert long_text not in result
+
+
+# ---------------------------------------------------------------------------
+# G4: priority queue (prepend/append), in-progress, origin-channel, notify
+# ---------------------------------------------------------------------------
+
+
+async def test_g4_prepend_goes_to_front(env):
+    """A prepended goal sorts before appended ones (lower position = front)."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("second", _ctx=ctx)
+    await env.tools["add_goal"]("third", _ctx=ctx)
+    await env.tools["add_goal"]("first", position="prepend", _ctx=ctx)
+
+    data = await rows(
+        env, "SELECT text, position FROM goals ORDER BY position ASC, id ASC"
+    )
+    assert [t for t, _ in data] == ["first", "second", "third"]
+
+
+async def test_g4_append_is_default_and_ordered(env):
+    """Append (the default) puts new goals at the back, in order."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("a", _ctx=ctx)
+    await env.tools["add_goal"]("b", _ctx=ctx)
+    data = await rows(
+        env, "SELECT text, position FROM goals ORDER BY position ASC, id ASC"
+    )
+    assert [t for t, _ in data] == ["a", "b"]
+    assert data[0][1] < data[1][1]
+
+
+async def test_g4_position_validation(env):
+    """An invalid position is rejected; no row is written."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("valid", _ctx=ctx)  # creates the table
+    result = await env.tools["add_goal"]("x", position="sideways", _ctx=ctx)
+    assert "position must be" in result
+    assert (await rows(env, "SELECT COUNT(*) FROM goals"))[0][0] == 1
+
+
+async def test_g4_in_progress_is_a_valid_status(env):
+    """in-progress is accepted (the WIP state)."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("wip", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    result = await env.tools["set_goal_status"](gid, "in-progress", _ctx=ctx)
+    assert "status set to" in result
+    status = (await rows(env, "SELECT status FROM goals WHERE id = ?", (gid,)))[0][0]
+    assert status == "in-progress"
+
+
+async def test_g4_origin_channel_captured(env):
+    """The goal records the channel that created it."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("from signal", _ctx=ctx)
+    origin = (await rows(env, "SELECT origin_channel FROM goals"))[0][0]
+    assert origin == env.channel.id
+
+
+async def test_g4_state_change_notifies_origin(env):
+    """A status change notifies the origin channel (source='goals')."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("watch this", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    env.notifications.clear()
+    await env.tools["set_goal_status"](gid, "in-progress", _ctx=ctx)
+    assert len(env.notifications) == 1
+    n = env.notifications[0]
+    assert n["channel"] == env.channel.id
+    assert n["source"] == "goals"
+    assert f"Goal #{gid}" in n["text"] and "in-progress" in n["text"]
+
+
+async def test_g4_retire_notifies_origin(env):
+    """Retiring a goal notifies the origin channel with the conclusion."""
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "working on it")
+    await env.tools["add_goal"]("do the thing", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    env.notifications.clear()
+    await env.tools["retire_goal"](gid, "I concluded it is done.", _ctx=ctx)
+    assert len(env.notifications) == 1
+    n = env.notifications[0]
+    assert n["channel"] == env.channel.id
+    assert n["source"] == "goals"
+    assert f"Goal #{gid} retired" in n["text"]
+
+
+async def test_g4_notify_dropped_when_origin_not_registered(env):
+    """A goal whose origin channel isn't registered: state recorded, notify
+    dropped (no crash, nothing sent)."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("orphan", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    await env.db.execute(
+        "UPDATE goals SET origin_channel = ? WHERE id = ?",
+        ("signal:does-not-exist", gid),
+    )
+    await env.db.commit()
+    env.notifications.clear()
+    result = await env.tools["set_goal_status"](gid, "blocked", _ctx=ctx)
+    assert "status set to" in result
+    assert env.notifications == []
+
+
+async def test_g4_open_goals_ordered_by_position(env):
+    """open_goals() returns the queue front-first (position ASC)."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("low", _ctx=ctx)
+    await env.tools["add_goal"]("high", position="prepend", _ctx=ctx)
+    goals = await env.goals.open_goals()
+    assert [g["summary"] for g in goals] == ["high", "low"]
