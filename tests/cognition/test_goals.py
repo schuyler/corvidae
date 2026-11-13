@@ -445,33 +445,47 @@ async def test_g4_origin_channel_captured(env):
     assert origin == env.channel.id
 
 
-async def test_g4_state_change_notifies_origin(env):
-    """A status change notifies the origin channel (source='goals')."""
+async def test_g4_state_change_fires_hook(env):
+    """A status change fires on_goals_state_changed with the right args."""
+    from unittest.mock import AsyncMock, patch
     ctx = ctx_for(env.channel)
     await env.tools["add_goal"]("watch this", _ctx=ctx)
     gid = (await rows(env, "SELECT id FROM goals"))[0][0]
-    env.notifications.clear()
-    await env.tools["set_goal_status"](gid, "in-progress", _ctx=ctx)
-    assert len(env.notifications) == 1
-    n = env.notifications[0]
-    assert n["channel"] == env.channel.id
-    assert n["source"] == "goals"
-    assert f"Goal #{gid}" in n["text"] and "in-progress" in n["text"]
+    
+    with patch.object(env.pm.ahook, "on_goals_state_changed", AsyncMock()) as mock_hook:
+        await env.tools["set_goal_status"](gid, "in-progress", _ctx=ctx)
+    
+    mock_hook.assert_called_once()
+    kwargs = mock_hook.call_args.kwargs
+    assert kwargs["goal_id"] == gid
+    assert kwargs["kind"] == "status"
+    assert kwargs["old_status"] == "open"
+    assert kwargs["new_status"] == "in-progress"
+    assert kwargs["origin_channel"] == env.channel.id
+    assert kwargs["actor_channel"] == env.channel.id
+    assert kwargs["conclusion"] is None
 
 
-async def test_g4_retire_notifies_origin(env):
-    """Retiring a goal notifies the origin channel with the conclusion."""
+async def test_g4_retire_fires_hook(env):
+    """Retiring a goal fires on_goals_state_changed with the conclusion."""
+    from unittest.mock import AsyncMock, patch
     ctx = ctx_for(env.channel)
     await add_message(env, env.channel.id, "working on it")
     await env.tools["add_goal"]("do the thing", _ctx=ctx)
     gid = (await rows(env, "SELECT id FROM goals"))[0][0]
-    env.notifications.clear()
-    await env.tools["retire_goal"](gid, "I concluded it is done.", _ctx=ctx)
-    assert len(env.notifications) == 1
-    n = env.notifications[0]
-    assert n["channel"] == env.channel.id
-    assert n["source"] == "goals"
-    assert f"Goal #{gid} retired" in n["text"]
+    
+    with patch.object(env.pm.ahook, "on_goals_state_changed", AsyncMock()) as mock_hook:
+        await env.tools["retire_goal"](gid, "I concluded it is done.", _ctx=ctx)
+    
+    mock_hook.assert_called_once()
+    kwargs = mock_hook.call_args.kwargs
+    assert kwargs["goal_id"] == gid
+    assert kwargs["kind"] == "retired"
+    assert kwargs["old_status"] == "open"
+    assert kwargs["new_status"] == "retired"
+    assert kwargs["origin_channel"] == env.channel.id
+    assert kwargs["actor_channel"] == env.channel.id
+    assert kwargs["conclusion"] == "I concluded it is done."
 
 
 async def test_g4_notify_dropped_when_origin_not_registered(env):

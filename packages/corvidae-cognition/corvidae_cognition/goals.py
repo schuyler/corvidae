@@ -29,8 +29,7 @@ from pathlib import Path
 import aiosqlite
 import click
 
-from corvidae.channel import ChannelRegistry
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.tool import Tool, tool_to_schema
 from corvidae_cognition.funnel import FunnelPlugin
 from corvidae_cognition.memory import MemoryPlugin
@@ -87,10 +86,33 @@ def _day(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
 
 
+class GoalsSpec:
+    """Hooks the goals plugin owns."""
+
+    @hookspec
+    async def on_goals_state_changed(
+        self,
+        goal_id: int,
+        kind: str,
+        old_status: str,
+        new_status: str,
+        origin_channel: str | None,
+        actor_channel: str,
+        conclusion: str | None,
+    ) -> None:
+        """Fired after a goal state change commits.
+
+        `kind` is "status" or "retired". `conclusion` is None for status
+        changes. `origin_channel` is the channel that created the goal.
+        `actor_channel` is the channel whose turn made the change.
+        """
+
+
 class GoalsPlugin(CorvidaePlugin):
     """Goals table, the three goal tools, and the per-turn goals entry."""
 
-    depends_on = frozenset({"persistence", "memory", "funnel", "clock", "registry"})
+    hookspecs = GoalsSpec
+    depends_on = frozenset({"persistence", "memory", "funnel", "clock"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -184,28 +206,34 @@ class GoalsPlugin(CorvidaePlugin):
     def _now(self) -> float:
         return self.pm.get_plugin("clock").now()
 
-    async def _notify_origin(self, origin_channel_id: str | None, text: str) -> None:
-        """Notify the goal's origin channel of a state change. Dropped (with a
-        warning) if the channel isn't registered — the state is still recorded
-        in the table; the notify is the signal, not the record."""
-        if not origin_channel_id:
-            return
+    async def _fire_state_changed(
+        self,
+        goal_id: int,
+        kind: str,
+        old_status: str,
+        new_status: str,
+        origin_channel: str | None,
+        actor_channel: str,
+        conclusion: str | None,
+    ) -> None:
+        """Fire the on_goals_state_changed hook after a state change commits.
+
+        Never raises: a subscriber's exception must not undo the state change.
+        """
         try:
-            registry = get_dependency(self.pm, "registry", ChannelRegistry)
-            channel = registry.get(origin_channel_id)
-            if channel is None:
-                logger.warning(
-                    "goals: origin channel %s not registered; dropping state-change notify",
-                    origin_channel_id,
-                )
-                return
-            await self.pm.ahook.on_notify(
-                channel=channel, source="goals", text=text,
-                tool_call_id=None, annotations=None,
+            await self.pm.ahook.on_goals_state_changed(
+                goal_id=goal_id,
+                kind=kind,
+                old_status=old_status,
+                new_status=new_status,
+                origin_channel=origin_channel,
+                actor_channel=actor_channel,
+                conclusion=conclusion,
             )
         except Exception:
             logger.warning(
-                "goals: state-change notify to %s failed", origin_channel_id,
+                "goals: on_goals_state_changed subscriber failed for goal %d",
+                goal_id,
                 exc_info=True,
             )
 
@@ -376,8 +404,14 @@ class GoalsPlugin(CorvidaePlugin):
                 return (
                     f"Error: goal #{id} is already retired; add a new goal instead"
                 )
-            await plugin._notify_origin(
-                checked.origin_channel, f"Goal #{id} retired: {conclusion}"
+            await plugin._fire_state_changed(
+                goal_id=id,
+                kind="retired",
+                old_status="open",
+                new_status="retired",
+                origin_channel=checked.origin_channel,
+                actor_channel=channel_id,
+                conclusion=conclusion,
             )
             return (
                 f"Goal #{id} retired; conclusion recorded as memory #{memory_id}."
@@ -417,6 +451,7 @@ class GoalsPlugin(CorvidaePlugin):
             pursued until an external dependency is resolved. 'waiting'
             means the goal is complete but awaiting someone's review or
             decision. 'open' means the goal is actively pursuable."""
+            channel_id = _ctx.channel.id if _ctx else ""
             if status not in VALID_STATUSES:
                 return f"Error: status must be one of {VALID_STATUSES}, got {status!r}"
             db = await plugin._require_db()
@@ -433,8 +468,14 @@ class GoalsPlugin(CorvidaePlugin):
             await db.commit()
             # No notify on a no-op (setting the same status).
             if goal.status != status:
-                await plugin._notify_origin(
-                    goal.origin_channel, f"Goal #{id} status -> {status!r}"
+                await plugin._fire_state_changed(
+                    goal_id=id,
+                    kind="status",
+                    old_status=goal.status,
+                    new_status=status,
+                    origin_channel=goal.origin_channel,
+                    actor_channel=channel_id,
+                    conclusion=None,
                 )
             return f"Goal #{id} status set to {status!r}"
 
