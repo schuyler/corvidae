@@ -11,7 +11,7 @@ Timezone-aware: all calculations use a ZoneInfo.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 # Field bounds: (min, max) for each of the 5 fields.
@@ -111,31 +111,39 @@ def next_fire(
     `after` must be timezone-aware (in `tz`). Returns a timezone-aware
     datetime in `tz`.
 
+    Stepping is done in UTC to avoid the `fold` reset that wall-clock
+    `timedelta` arithmetic causes during DST transitions. Each candidate
+    is converted back to `tz` for field checks.
+
     Search bounded to 4 years ahead (covers Feb 29 edge cases).
     """
     minutes, hours, doms, months, dows = cron
 
-    # Start from the next minute.
-    t = (after + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    # Start from the next minute, in UTC.
+    t_utc = (after + timedelta(minutes=1)).replace(second=0, microsecond=0).astimezone(UTC)
 
     # Bounded search: 4 years * 366 days * 24 hours * 60 minutes ≈ 2.1M iterations
     # In practice we skip whole days/hours that don't match, so this is fast.
-    limit = t + timedelta(days=4 * 366)
+    limit_utc = t_utc + timedelta(days=4 * 366)
 
-    while t < limit:
-        if t.month not in months:
-            # Advance to the 1st of the next month.
-            if t.month == 12:
-                t = t.replace(year=t.year + 1, month=1, day=1, hour=0, minute=0)
+    while t_utc < limit_utc:
+        # Convert to local time for field checks.
+        t_local = t_utc.astimezone(tz)
+
+        if t_local.month not in months:
+            # Advance to the 1st of the next month (in local time), then back to UTC.
+            if t_local.month == 12:
+                next_local = t_local.replace(year=t_local.year + 1, month=1, day=1, hour=0, minute=0)
             else:
-                t = t.replace(month=t.month + 1, day=1, hour=0, minute=0)
+                next_local = t_local.replace(month=t_local.month + 1, day=1, hour=0, minute=0)
+            t_utc = next_local.astimezone(UTC)
             continue
 
         # Day-of-week: Python's weekday() is 0=Monday..6=Sunday;
         # cron is 0=Sunday..6=Saturday. Convert.
-        cron_dow = (t.weekday() + 1) % 7  # 0=Sun, 1=Mon, ..., 6=Sat
+        cron_dow = (t_local.weekday() + 1) % 7  # 0=Sun, 1=Mon, ..., 6=Sat
         dow_match = cron_dow in dows
-        dom_match = t.day in doms
+        dom_match = t_local.day in doms
 
         # Standard cron semantics: if both dom and dow are restricted
         # (not *), the day matches if EITHER matches. If only one is
@@ -152,18 +160,25 @@ def next_fire(
             day_match = dom_match or dow_match
 
         if not day_match:
-            t = (t + timedelta(days=1)).replace(hour=0, minute=0)
+            next_local = (t_local + timedelta(days=1)).replace(hour=0, minute=0)
+            t_utc = next_local.astimezone(UTC)
             continue
 
-        if t.hour not in hours:
-            t = (t + timedelta(hours=1)).replace(minute=0)
+        if t_local.hour not in hours:
+            next_local = (t_local + timedelta(hours=1)).replace(minute=0)
+            t_utc = next_local.astimezone(UTC)
             continue
 
-        if t.minute not in minutes:
-            t += timedelta(minutes=1)
+        if t_local.minute not in minutes:
+            t_utc += timedelta(minutes=1)
             continue
 
-        return t
+        # Guard: the result must be strictly after `after` (real time).
+        result = t_utc.astimezone(tz)
+        if result <= after:
+            t_utc += timedelta(minutes=1)
+            continue
+        return result
 
     raise CronParseError(
         f"no matching time found within 4 years of {after.isoformat()}"

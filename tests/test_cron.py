@@ -229,3 +229,53 @@ def test_description_specific():
 def test_description_range():
     desc = cron_description("0-10 * * * *")
     assert desc.startswith("0-10")
+
+
+class TestDST:
+    """Regression: next_fire must not return a time in the past during
+    the fall-back hour (fold reset bug)."""
+
+    def test_fallback_hour_no_past_result(self):
+        from zoneinfo import ZoneInfo
+        from corvidae.cron import parse_cron, next_fire
+
+        tz = ZoneInfo("America/Los_Angeles")
+        # 2026-11-01 is the fall-back day. 01:10 PST is the second pass
+        # through the repeated 01:00 hour (fold=1).
+        after = datetime(2026, 11, 1, 1, 10, tzinfo=tz).replace(fold=1)
+
+        # 30 1 * * * should fire at 01:30 PDT (the first 01:30, fold=0)
+        # which is ~40 min in the past. The fix must skip it and return
+        # a time strictly after `after`.
+        cron = parse_cron("30 1 * * *")
+        result = next_fire(cron, after, tz)
+        assert result > after, f"next_fire returned {result} which is not after {after}"
+
+    def test_fallback_hour_every_20min(self):
+        from zoneinfo import ZoneInfo
+        from corvidae.cron import parse_cron, next_fire
+
+        tz = ZoneInfo("America/Los_Angeles")
+        after = datetime(2026, 11, 1, 1, 10, tzinfo=tz).replace(fold=1)
+
+        # */20 * * * * should not return 01:20 PDT (fold=0, in the past).
+        cron = parse_cron("*/20 * * * *")
+        result = next_fire(cron, after, tz)
+        assert result > after, f"next_fire returned {result} which is not after {after}"
+
+    def test_spring_forward_still_works(self):
+        from zoneinfo import ZoneInfo
+        from corvidae.cron import parse_cron, next_fire
+
+        tz = ZoneInfo("America/Los_Angeles")
+        # 2026-03-08 is the spring-forward day. 01:30 PST.
+        after = datetime(2026, 3, 8, 1, 30, tzinfo=tz)
+
+        # 30 2 * * * should fire at 03:30 PDT (10:30Z), not 02:30 (which doesn't exist).
+        cron = parse_cron("30 2 * * *")
+        result = next_fire(cron, after, tz)
+        assert result > after
+        # 02:30 doesn't exist on spring-forward day; the next valid 02:30
+        # is on the following day (2026-03-09).
+        assert result.day == 9, f"expected day 9, got {result.day}"
+        assert result.hour == 2, f"expected hour 2, got {result.hour}"
