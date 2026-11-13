@@ -609,6 +609,20 @@ prompt is framed as the operator's. It is hot-reloaded, so it joins the
 just at the next restart. The mitigation is the one finding 4 already
 gives: keep `agent.yaml` unwritable by the daemon user.
 
+The YAML jobs file (scheduler.jobs_file) adds a second operator surface
+for scheduler jobs. The CRUD tools (add_job, update_job, remove_job,
+list_jobs) are registered on every channel and write the file as the
+daemon user. Unlike remind_me (which is scoped to its own channel and
+capped by max_reminders_per_channel), the CRUD tools accept any channel
+id and origin with no per-channel cap. A model on a channel with
+untrusted speakers can therefore schedule messages to any channel in the
+registry, including Signal contacts, and the jobs persist across restarts.
+The file-permission mitigation (keep the file unwritable by the daemon
+user) would disable the CRUD tools, so it is not a viable mitigation for
+the tool path. The real exposure is the same as for any cross-channel
+send tool (finding 15): registry membership is the whole gate. Bounding
+the tools (per-channel cap, operator opt-in) is a follow-up.
+
 `discord.send_attachment` (issue #521) and `send_signal_attachment` (issue
 #544) are the first tools that send a *file* to a channel the model chooses
 (the cross-channel `notify_other_channel` of #234 also takes a model-chosen channel,
