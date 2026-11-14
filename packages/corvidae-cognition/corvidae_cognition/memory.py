@@ -207,6 +207,11 @@ FTS_SIMILARITY_PROXY = 0.6
 # Vec KNN over-fetch factor: candidates are filtered by channel scope and
 # indexed/redacted flags after the KNN scan, so fetch more than k.
 VEC_OVERFETCH = 4
+#: sqlite-vec refuses a KNN query asking for more rows than this
+#: ("k value in knn query too large", v0.1.9). The scan is brute force and
+#: costs the same whatever k asks for, so clamping loses no work, only reach
+#: into a memory larger than the extension will scan in one call (#637).
+SQLITE_VEC_KNN_MAX = 4096
 
 
 def _exclude_clause(
@@ -1636,6 +1641,8 @@ class MemoryPlugin(CorvidaePlugin):
             )
         # Warn once per process when the relative gate falls back (#409).
         self._relative_fallback_warned = False
+        # ...and when the KNN k is clamped to sqlite-vec's limit (#637).
+        self._knn_clamp_warned = False
         self._recency_from = _retrieval_choice(
             retrieval_cfg, "recency_from", RECENCY_FROM_CHOICES
         )
@@ -3220,7 +3227,6 @@ class MemoryPlugin(CorvidaePlugin):
             try:
                 client = self._llm().get_client("embedding")
                 query_vector = (await client.embed([text], kind="query"))[0]
-                rows = await self._vec_candidates(db, query_vector, k, exclude)
             except Exception:
                 logger.warning(
                     "retrieval embedding failed; degrading to FTS5",
@@ -3228,6 +3234,17 @@ class MemoryPlugin(CorvidaePlugin):
                 )
                 degraded = True
             else:
+                try:
+                    # Its own try: a KNN refusal is not an embedding failure,
+                    # and naming it as one sends the operator to the embed
+                    # server for a fault that is in the query (#637).
+                    rows = await self._vec_candidates(db, query_vector, k, exclude)
+                except Exception:
+                    logger.warning(
+                        "retrieval KNN query failed; degrading to FTS5",
+                        exc_info=True,
+                    )
+                    rows, degraded = [], True
                 vec_ids = {row[0] for row in rows}
                 measured = set(vec_ids)
                 if self._candidates == "hybrid":
@@ -3457,6 +3474,26 @@ class MemoryPlugin(CorvidaePlugin):
             ) as cursor:
                 (excluded_count,) = await cursor.fetchone()
             knn_k += excluded_count
+        if knn_k > SQLITE_VEC_KNN_MAX:
+            # The extension refuses the query outright, and the refusal used to
+            # surface as "embedding failed; degrading to FTS5" on every turn
+            # (#637). Clamping keeps retrieval on the vector path; what is lost
+            # is the reach past the limit, which only matters for a memory
+            # bigger than the extension will scan in one call.
+            if not self._knn_clamp_warned:
+                self._knn_clamp_warned = True
+                logger.warning(
+                    "retrieval KNN k clamped to sqlite-vec's limit (%d): asked "
+                    "for %d rows (k=%d, over-fetch %d%s). Retrieval stays on "
+                    "the vector path and sees the nearest %d rows; a memory "
+                    "this large needs a bigger k only if those are not enough. "
+                    "Logged once per process.",
+                    SQLITE_VEC_KNN_MAX, knn_k, k, VEC_OVERFETCH,
+                    f", {excluded_count} in-window on {exclude[0]}"
+                    if exclude is not None else "",
+                    SQLITE_VEC_KNN_MAX,
+                )
+            knn_k = SQLITE_VEC_KNN_MAX
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at, v.distance, "
             + exclude_sql + " AS in_window "
