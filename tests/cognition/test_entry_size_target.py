@@ -85,9 +85,9 @@ async def fork_one_entry(memory, channel, ids, narrative):
 def test_default_instruction_asks_one_topic_per_entry_and_words():
     """R1: the composed default names the target in words and wants one topic
     per entry; the old 'a paragraph at most' wording is gone."""
-    text = consolidation_instruction(DEFAULT_CONSOLIDATION_FORK_PROMPT, 200)
+    text = consolidation_instruction(DEFAULT_CONSOLIDATION_FORK_PROMPT, 256)
 
-    assert "150 words" in text
+    assert "192 words" in text
     assert "one entry for each distinct stretch or topic" in " ".join(text.split())
     assert "a paragraph at most" not in DEFAULT_CONSOLIDATION_FORK_PROMPT
 
@@ -97,9 +97,9 @@ def test_default_instruction_asks_one_topic_per_entry_and_words():
 # ---------------------------------------------------------------------------
 
 
-def test_entry_target_default_is_200():
-    """R2: absent key resolves to the default 200."""
-    assert resolve_entry_target_tokens({"memory": {}}) == DEFAULT_ENTRY_TARGET_TOKENS == 200
+def test_entry_target_default_is_256():
+    """R2: absent key resolves to the default 256."""
+    assert resolve_entry_target_tokens({"memory": {}}) == DEFAULT_ENTRY_TARGET_TOKENS == 256
 
 
 def test_entry_target_set_changes_the_sentence():
@@ -119,7 +119,7 @@ def test_entry_target_rejects_non_positive_integers(bad):
     assert repr(bad) in message
     assert "positive integer" in message
     # The remedy: the default and where to fix it.
-    assert "default 200" in message
+    assert "default 256" in message
     assert "agent.yaml" in message
 
 
@@ -139,13 +139,13 @@ async def test_bad_entry_target_fails_plugin_startup():
 
 async def test_configured_target_drives_instruction_and_threshold(tmp_path, caplog):
     """R2: target 100 sends '75 words' and warns for an entry between 100 and
-    the default 200 tokens."""
+    the default 256 tokens."""
     config = config_with(EMBED_CONFIG, entry_target_tokens=100)
     memory, channel, db, ids = await fork_env(config, tmp_path)
     try:
         narrative = narrative_of(130)
-        # Over the configured 100 but under the default 200.
-        assert 100 < count_tokens(narrative) <= 200
+        # Over the configured 100 but under the default 256.
+        assert 100 < count_tokens(narrative) <= 256
         agent = _use(memory, FakeForkAgent(
             {"consolidation"}, text=entries_reply([(narrative, ["t"])]), model="m"
         ))
@@ -170,7 +170,7 @@ async def test_over_target_entry_is_stored_in_full_with_one_warning(tmp_path, ca
     try:
         narrative = narrative_of(400)
         tokens = count_tokens(narrative)
-        assert tokens > 200
+        assert tokens > 256
         with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
             await fork_one_entry(memory, channel, ids, narrative)
 
@@ -183,17 +183,17 @@ async def test_over_target_entry_is_stored_in_full_with_one_warning(tmp_path, ca
         # The human-readable line names each identifier.
         for needle in (channel.id, "mode fork", stored_hash):
             assert needle in text
-        for number in (f"memory {row['id']}", f"{tokens} tokens", "target 200"):
+        for number in (f"memory {row['id']}", f"{tokens} tokens", "target 256"):
             assert number in text, (number, text)
         # The same values ride in extra for log search.
         assert (record.channel_id, record.memory_id, record.tokens, record.target,
                 record.mode, record.prompt_hash) == (
-            channel.id, row["id"], tokens, 200, "fork", stored_hash)
+            channel.id, row["id"], tokens, 256, "fork", stored_hash)
     finally:
         await db.close()
 
 
-@pytest.mark.parametrize("words,expected", [(200, 0), (201, 1)])
+@pytest.mark.parametrize("words,expected", [(256, 0), (257, 1)])
 async def test_warning_boundary_is_the_target(tmp_path, caplog, words, expected):
     """R3/R7: exactly at the target is no warning; one token over is one
     warning (no tolerance margin)."""
@@ -271,9 +271,9 @@ def test_default_prompt_keeps_detail_clauses():
 
 
 async def test_different_targets_stamp_different_hashes(tmp_path):
-    """R5: targets 200 and 100 give different stored prompt hashes."""
+    """R5: targets 256 and 100 give different stored prompt hashes."""
     hashes = []
-    for target in (200, 100):
+    for target in (256, 100):
         config = config_with(EMBED_CONFIG, entry_target_tokens=target)
         memory, persistence, _stub, channel, db = await build_consolidation_env(
             config, db_path=str(tmp_path / f"{target}.db")
@@ -335,8 +335,8 @@ async def test_override_gets_size_sentence_stamped_and_sent(tmp_path):
         [(_, stored_hash, _mode, _model)] = await stamps_of(db)
         stored = await prompt_text(db, stored_hash)
         assert stored.startswith("CUSTOM")
-        assert stored.endswith(entry_size_sentence(200))
+        assert stored.endswith(entry_size_sentence(256))
         # Size sentence, blank line, then the range sentence.
-        assert entry_size_sentence(200) + "\n\nRecord the" in agent.calls[0]["instruction"]
+        assert entry_size_sentence(256) + "\n\nRecord the" in agent.calls[0]["instruction"]
     finally:
         await db.close()
