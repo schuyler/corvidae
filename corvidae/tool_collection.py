@@ -53,6 +53,31 @@ def _parse_seconds(key: str, value: object) -> float | None:
 # Share of a channel's context budget one read_file page may take.
 DEFAULT_READ_FILE_WINDOW_FRACTION = 0.08
 
+# How deep background agents may nest: a main turn may spawn one level, and
+# that level may spawn one more (#816). Depth 1 allows a single level.
+DEFAULT_MAX_AGENT_DEPTH = 2
+
+
+def parse_max_agent_depth(tools_config: object) -> int:
+    """Parse ``tools.max_agent_depth``; absent gives the default (2).
+
+    Raises ValueError naming the key, the rejected value and the accepted
+    values. A non-mapping ``tools`` is left to parse_tool_timeouts.
+    """
+    if not isinstance(tools_config, dict) or "max_agent_depth" not in tools_config:
+        return DEFAULT_MAX_AGENT_DEPTH
+    value = tools_config["max_agent_depth"]
+    # bool is an int subclass (int(False) == 0), so it is rejected explicitly;
+    # 2.0 is a float and not an integer depth.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            "tools.max_agent_depth must be an integer of at least 1 (how deep "
+            "background agents may nest: 1 allows a main turn to spawn one "
+            "level and no more); got "
+            f"{value!r} ({type(value).__name__})"
+        )
+    return value
+
 
 def parse_read_file_window_fraction(tools_config: object) -> float:
     """Parse ``tools.read_file_window_fraction``; absent gives the default.
@@ -150,6 +175,8 @@ class ToolCollectionPlugin(CorvidaePlugin):
         self.call_timeouts = parse_tool_timeouts(tools_config)
         # Runtime validates this key first too, so this cannot fail there.
         self.read_file_window_fraction = parse_read_file_window_fraction(tools_config)
+        # Runtime validates this key first too (#816).
+        self.max_agent_depth = parse_max_agent_depth(tools_config)
         fallback = config.get("agent", {}).get("max_tool_result_chars")
         if "max_result_chars" in tools_config:
             self.max_result_chars = tools_config["max_result_chars"]

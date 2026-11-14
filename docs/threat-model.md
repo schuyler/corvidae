@@ -396,7 +396,11 @@ least. The same list under `channels.<id>.tools.disabled` narrows a single
 channel. The rest of the daemon keeps its tools, the channel's schemas
 never show the disabled ones, dispatch refuses them even when the model
 names one anyway, and a `subagent` launched from that channel inherits
-the restriction. Cheap wins beyond that: make the dangerous tools opt-in rather than
+the restriction. A nested background agent runs with the full
+identity prompt and the spawning channel's tool set, and
+`tools.max_agent_depth` (default 2) is what bounds how far one may spawn
+another: a chain of subagents and forks is refused at that depth rather than
+each hop starting a fresh task budget. Cheap wins beyond that: make the dangerous tools opt-in rather than
 opt-out, deny private address ranges and non-HTTP schemes in `web_fetch`,
 root the file tools in a directory, and have `agent.yaml` and the prompt
 files owned by another user and read-only to the daemon (if the daemon
