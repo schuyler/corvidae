@@ -1616,6 +1616,52 @@ carry a payload. Waiting
 reactions are lost on a crash, and the tools and the event path are verified
 against fake clients and a fake signal-cli socket only (PRD §3.2.9).
 
+### 19. The agent can talk to a person without bound (#791)
+
+On 2026-11-12 the agent sent about 600 Signal messages in one night with no
+human message in between. Nothing in the kernel counted emissions per channel.
+The output gate could withhold a particular message (the silence plugin's
+`NO_REPLY`) but not bound a run, so a looping turn — or an injected instruction
+that tells the model to keep sending — could hold a channel's attention
+indefinitely, at the operator's expense and against the person on the other end.
+
+`OutboundCapPlugin` counts the messages the gate lets through on a channel
+since the last admitted human message and withholds everything after
+`outbound_cap.max_messages` until a human speaks again.
+
+Mitigations and their limits:
+
+- The counter resets on `on_message_admitted`, so a reply to a human is always
+  within the cap, and the agent cannot lock itself out of answering.
+- A channel with no limit configured is uncapped (fail open: the operator opts
+  in), and so is any channel no transport owns (for example
+  `internal:heartbeat`), because capping that would break the daemon rather
+  than protect a person. Reminders and task results notify the originating
+  transport channel, so their finals are capped.
+- Only emissions the combined gate verdict lets through count, so another
+  gate's veto (a `NO_REPLY`) spends no budget.
+- A withheld `final` is still stored as `UNSENT` with a not-sent marker, so the
+  agent can see it was held; nothing is silently lost.
+- Every withheld emission is logged, the first in a run at `WARNING` with the
+  channel, emission, trace id and limit key, so an operator can see a cap doing
+  its work rather than guessing at silence.
+
+The agent can raise or clear its own cap through `set_settings`
+(`outbound_cap.max_messages`, `outbound_cap.count_progress`), and an invalid
+override fails open, unless the operator lists those keys in
+`agent.immutable_settings`.
+
+Accepted residual: the cap bounds *messages*, not turns, so a notification
+storm still spends compute (#793). Sends that bypass the gate are uncapped —
+`send_signal_attachment`, `signal_react`, tool-status events, the restart
+notice — which is acceptable only because each is low-volume and not a reply.
+An agent-started send that is later withheld on the target channel has already
+returned success to the sending turn, which is why the log is the operator's
+signal. And a capped channel is a **self-silencing** route: an injected
+instruction can deliberately burn the budget and stop the agent from answering
+the person until they send another message, which is the same class of harm as
+the existing `NO_REPLY` route, not a new capability.
+
 ## Privilege separation
 
 There isn't any. Transports, the LLM loop, tool execution, the SQLite

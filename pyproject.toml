@@ -63,6 +63,10 @@ cognition = [
 restart = [
     "corvidae-restart",
 ]
+# Bounds the agent's messages per channel between human messages (#791).
+outbound-cap = [
+    "outbound-cap",
+]
 timepiece = [
     "corvidae-timepiece",
 ]
@@ -177,5 +181,6 @@ webhook-notify = { workspace = true }
 corvidae-restart = { workspace = true }
 corvidae-timepiece = { workspace = true }
 corvidae-inotify = { workspace = true }
+outbound-cap = { workspace = true }
     corvidae-vision = { workspace = true }
     rss-reader = { workspace = true }

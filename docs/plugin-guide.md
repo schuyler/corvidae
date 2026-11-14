@@ -1503,7 +1503,7 @@ For `firstresult=True` hooks (`resolve_compaction`, `resolve_conversation`, `res
 
 For `should_process_message` (broadcast, resolved with `resolve_reject_wins`), exceptions propagate to the call site.
 
-For `should_send_response`, the Agent catches any exception, logs it at WARNING and sends the emission anyway (fail open). Because apluggy gathers a broadcast without `return_exceptions`, one raising implementation discards every sibling's verdict for that emission, so a gate that can fail should catch and log its own errors and return None.
+For `should_send_response`, the Agent catches any exception, logs it at WARNING and sends the emission anyway (fail open). apluggy gathers a broadcast's implementations concurrently without `return_exceptions`, so one raising implementation discards every sibling's verdict for that emission; once any plugin registers a `wrapper=True` implementation on the hook (as `outbound_cap` does, to count after the combined verdict), apluggy awaits the implementations one after another instead, and a raising one stops the rest from running. Either way a gate that can fail should catch and log its own errors and return None, and a slow gate adds its latency to every emission when the hook is wrapped.
 
 For `transform_display_text`, `transform_system_prompt` and `transform_tool_result` (wrapper chain hooks), pluggy propagates exceptions from wrapper implementations to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`, and `transform_system_prompt` in `channel_system_prompt`.
 

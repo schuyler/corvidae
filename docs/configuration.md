@@ -355,6 +355,7 @@ The persona is allowed to tune its own gates by default — a deliberate operato
 | `critique.prompt.adversarial`, `critique.prompt.constrained`, `critique.prompt.predictive` | These are the critic's *system prompts*. An agent that can rewrite its own critic's instructions has no critic. |
 | `appraisal.stage2_prompt` | Same shape: the stage-2 appraisal system prompt. It is also where past claims are detected for the provenance check, so a prompt that never lists any switches the confabulation check off without touching `critique.provenance.enabled`. |
 | `gate.engagement.enforce`, `gate.send.enforce` | An injected message should not be able to silence the agent wholesale (enforce engagement with a threshold of 1.0) or un-silence it (turn the decide gate off). |
+| `outbound_cap.max_messages`, `outbound_cap.count_progress` | The runaway-send cap (#791). An agent that can raise or clear its own limit has no limit; an invalid override fails open, so it also lifts the cap. |
 | `gate.engagement.threshold`, `gate.send.min_salience` | The same lever by other means: a threshold above 1.0 rejects or withholds everything the gate covers once enforcement is on; 0 turns the gate off. |
 
 These are recommendations, not hardcoded blocks: `set_settings` writes are channel-influenceable, which is exactly the persistence-of-influence shape the design polices elsewhere — but two-process discipline (agent tunes, operator audits via the outcome log) is the accepted trade-off, with the blocklist as the per-key valve.
@@ -364,6 +365,7 @@ The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) 
 - `appraisal.novelty.no_probe_default`, `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`, `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.stage2_prompt`, `appraisal.weights.commitment`, `appraisal.weights.disagreement`, `appraisal.weights.imperative`, `appraisal.weights.novelty`, `appraisal.weights.question`
 - `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.sample_below_rate`
 - `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.enforce`, `gate.send.min_salience`
+- `outbound_cap.count_progress`, `outbound_cap.max_messages`
 
 The fork instruction keys (`appraisal.stage2_fork_prompt`, `critique.fork_prompt.<lens>`) are deliberately not on that list: they are read from config only, so they need no `immutable_settings` entry.
 
@@ -560,6 +562,23 @@ See [threat-model.md](threat-model.md#skills-directory-reaches-the-system-role-1
 |-----|------|---------|-------------|
 | `silence.instruction` | string / file / list | built-in | The paragraph `SilencePlugin` appends to a conversational channel's system prompt, telling the model it may stay silent, by replying `NO_REPLY` or, with `silence.mode` `tool` or `both`, by calling `end_turn` (see [cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)). Same resolution as `heartbeat.prompt`. Keep the literal `NO_REPLY` in any replacement in `token` or `both` mode: the veto drops any message containing that token (a containment check, not an exact match), not your wording; in `tool` or `both` mode the replacement must also mention `end_turn`. Read at startup only. |
 | `silence.mode` | string | `token` | How the agent is asked to decline a turn (#797). `token`: the instruction tells it to reply `NO_REPLY`. `tool`: `SilencePlugin` registers an `end_turn(reason)` tool and the instruction tells the model to call it. `both`: the tool first, `NO_REPLY` as a fallback. The tool works on conversational transports only and refuses on any other channel, web, CLI and ACP included. The veto of a `NO_REPLY` final is on in every mode. Any other value, or a `silence:` block that isn't a mapping, fails startup with a `Config error` naming the key, the value and what is accepted. A custom `silence.instruction` replaces the built-in text in every mode, so in `tool` or `both` mode it must mention `end_turn`. Read at startup only. |
+
+---
+
+## `outbound_cap` — bound the agent's messages per channel (#791)
+
+On 2026-11-12 the agent sent about 600 Signal messages in one night with no human message in between. Nothing counted emissions per channel, so a looping turn or an injected instruction could talk to a person indefinitely. `OutboundCapPlugin` counts, per channel, the messages the output gate lets through since the last admitted human message, and withholds every later emission until a human speaks again.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `outbound_cap.max_messages` | integer | *unset — no cap* | Messages the agent may send on a channel between admitted human messages. A positive integer at least 1; a bool, a float (even a whole one), a string, `0` or a negative fails startup with a `Config error` naming the key, the value and the range, and a reload carrying one is rejected with an ERROR that keeps the previous limit. Resolved per decision through `resolve_tunable`, so a per-channel `set_settings` override wins and a reloaded value applies on the next send. |
+| `outbound_cap.count_progress` | boolean | `false` | Whether `progress` emissions count against the limit. With `false` only `final` emissions count, so a tool-using reply that sends "let me look that up" first is not penalised. `thinking` and `error` emissions never count. When the cap is reached, every emission is withheld, progress included. |
+
+A capped channel does not lose history. A withheld `final` is stored as `UNSENT`, is not sent, and leaves a not-sent marker in the window, so the agent knows it was held. The counter resets on `on_message_admitted`, so the reply to a human message is always within the cap, and a coalesced burst of messages resets it once. Every withheld emission is logged: the first in a run at `WARNING` with the channel, emission, trace id, the running count and the key that set the limit; later ones at `INFO`; and the reset logs a `WARNING` summary saying how many were withheld.
+
+Two things are never capped: a channel with no limit configured, and a channel no transport owns (for example `internal:heartbeat`), because that is the agent talking to itself. Scheduler reminders and task results notify the channel that originated them, so on a transport channel their finals are capped like any other message. Only emissions the combined gate verdict lets through count: an emission another gate vetoes (such as `NO_REPLY`) spends no budget. A non-mapping `outbound_cap:` block (`outbound_cap: 5`) fails startup with a `Config error`.
+
+The agent can raise or clear its own cap with `set_settings` unless the keys are blocked; see `agent.immutable_settings` and the blocklist above. Known gaps, accepted for the MVP: sends that bypass the output gate (`send_signal_attachment`, `signal_react`, tool-status events, the restart notice) are not capped, and the cap bounds messages, not turns ([#793](https://github.com/schuyler/corvidae/issues/793)).
 
 ---
 
