@@ -21,7 +21,11 @@ blocklist on multi-speaker channels).
 
 import logging
 
-from corvidae.channel import INFERENCE_KEYS, parse_reasoning_history
+from corvidae.channel import (
+    INFERENCE_KEYS,
+    parse_positive_int,
+    parse_reasoning_history,
+)
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool, tool_to_schema
 
@@ -143,6 +147,20 @@ class RuntimeSettingsPlugin(CorvidaePlugin):
                 except ValueError as exc:
                     logger.warning("set_settings: invalid reasoning_history rejected: %s", exc)
                     return f"Error: {exc}"
+
+            # Same reason for the framework integers (#755): they reach
+            # resolve_config and every consumer of the budget as given, so a
+            # string or a float is stored fine and then fails the channel's
+            # first comparison with an int.
+            for int_key in ("max_turns", "max_context_tokens"):
+                if settings.get(int_key) is not None:
+                    try:
+                        parse_positive_int(settings[int_key], int_key)
+                    except ValueError as exc:
+                        logger.warning(
+                            "set_settings: invalid %s rejected: %s", int_key, exc
+                        )
+                        return f"Error: {exc}"
 
             for key, value in settings.items():
                 if value is None:

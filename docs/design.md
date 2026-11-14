@@ -256,6 +256,11 @@ Defaults: `max_context_tokens=24000`, `reasoning_history="drop"`,
 `ReasoningHistory` enum and raises `ValueError` on any other value.
 `validate_agent_config` (startup and config reload) and `load_channel_config`
 reject an invalid value or the removed `keep_thinking_in_history` key up front.
+The same holds on the override path: `set_settings` validates a
+`reasoning_history` and both framework integers (`max_turns`,
+`max_context_tokens`, through `parse_positive_int`) before it writes any
+override, since a stored bad value would reach every consumer of the budget
+as given and fail the channel's first comparison with an int (#755).
 
 **Channel** — identifies a transport + scope combination:
 

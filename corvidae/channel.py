@@ -481,6 +481,22 @@ def _short_repr(value: object) -> str:
     return text
 
 
+def parse_positive_int(value: object, key: str) -> int:
+    """Return ``value`` as a positive integer, or raise ValueError.
+
+    For a runtime override written by ``set_settings`` (#755): the value goes
+    straight to every consumer of the resolved budget, so a string or a float
+    fails at turn time, not here. Bools are rejected (``int`` subclass),
+    floats even when whole (``32000.0``), and anything below 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            f"{key} must be a positive integer (a whole number, at least 1); "
+            f"got {value!r} ({type(value).__name__})"
+        )
+    return value
+
+
 def _check_int_key(value: object, where: str) -> None:
     """Raise ValueError unless value is None or an integer (bool excluded)."""
     if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
