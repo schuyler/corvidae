@@ -479,3 +479,16 @@ async def test_invalid_throttle_config_raises(tmp_path, block, key, bad, remedy)
         await build(tmp_path, block)
     for part in (key, bad, remedy, "check agent.yaml"):
         assert part in str(exc.value)
+
+
+async def test_a_channel_listed_twice_is_notified_once(tmp_path):
+    """#568: a repeated channel id in an endpoint's list is one destination.
+
+    Without the de-duplication the same delivery would be notified twice to the
+    same channel: two rows, two spendings of the cut header, and to a reader two
+    identical messages.
+    """
+    plugin, rec, _ = await build(tmp_path, {"endpoints": {"github": ["irc:#a", "irc:#a"]}})
+    await plugin._deliver(delivery({"n": 1}))
+
+    assert [c["channel"] for c in rec.calls] == ["irc:#a"]
