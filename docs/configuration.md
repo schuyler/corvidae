@@ -1188,13 +1188,14 @@ The plugin reads and writes files under `<config_dir>/state/`:
 
 Requires the timepiece extra (`--extra timepiece` on your `uv sync` line). Without the block the plugin runs with its defaults; to turn it off, list `timepiece` in `plugins.disabled`.
 
-Before a turn, if the channel has had no stamp for `interval_minutes`, the plugin appends one CONTEXT line to the conversation, such as `The current date and time are now Monday 2026-11-09 at 17:12 PST`. Every channel that takes a turn is stamped, internal ones included. The line is persisted like any CONTEXT row. The last-stamp times are kept in memory, so the first turn on each channel after a restart is stamped. It adds no tool and starts no turn.
+Before a turn, if the channel has had no stamp for `interval_minutes`, the plugin appends one CONTEXT line to the conversation, such as `The current date and time are now Monday 2026-11-09 at 17:12 PST`. An optional `timepiece.note` string, when non-empty, is appended after the stamp in the same line. Every channel that takes a turn is stamped, internal ones included. The line is persisted like any CONTEXT row. The last-stamp times are kept in memory, so the first turn on each channel after a restart is stamped. It adds no tool and starts no turn.
 
 ```yaml
 timepiece:
   interval_minutes: 10
   timezone: America/Los_Angeles
   format: "%A %Y-%m-%d at %H:%M %Z"
+  note: ""
 ```
 
 | Key | Type | Default | Description |
@@ -1202,6 +1203,7 @@ timepiece:
 | `timepiece.interval_minutes` | number | `10` | Minimum minutes between stamps on one channel. Must be a number > 0. |
 | `timepiece.timezone` | string | daemon's local time | IANA timezone name for the stamp. Must name a known zone. |
 | `timepiece.format` | string | `"%A %Y-%m-%d at %H:%M %Z"` | `strftime` format for the time in the stamp. Must be a non-empty string. |
+| `timepiece.note` | string | `""` | Optional text appended after the stamp. Empty by default (no note). Must be a string. |
 
 A malformed key fails startup naming the key and the value. Restart to apply a change.
 

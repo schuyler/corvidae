@@ -2,13 +2,14 @@
 
 Before each LLM turn, if the channel's last stamp is older than
 ``timepiece.interval_minutes`` (default 10), a short CONTEXT marker
-(``The current date and time are now Saturday 2026-11-07 at 19:15 PST``) is appended to the
-conversation. CONTEXT entries appear in the prompt for that turn and
-are persisted by the agent's post-hook sweep (agent.py, after
-``before_agent_turn``); they survive compaction because compaction
-only summarizes MESSAGE entries. The result is ambient time awareness
-for the model: no turn is triggered, no tool is exposed, and at most
-one ~12-token line enters each channel per interval.
+(``The current date and time are now Saturday 2026-11-07 at 19:15 PST``)
+is appended to the conversation. An optional ``timepiece.note`` string,
+when non-empty, is appended after the stamp. CONTEXT entries appear in
+the prompt for that turn and are persisted by the agent's post-hook
+sweep (agent.py, after ``before_agent_turn``); they survive compaction
+because compaction only summarizes MESSAGE entries. The result is
+ambient time awareness for the model: no turn is triggered, no tool is
+exposed, and at most one short line enters each channel per interval.
 
 Config (own section; absent block = defaults):
     timepiece.interval_minutes: positive number, default 10.
@@ -16,6 +17,8 @@ Config (own section; absent block = defaults):
     timepiece.format: strftime format string, default
         "%A %Y-%m-%d at %H:%M %Z" (produces e.g. "Monday 2026-11-09
         at 17:12 PST").
+    timepiece.note: optional string, default "" (no note appended).
+        When non-empty, appended after the stamp in the same CONTEXT line.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_MINUTES = 10
 DEFAULT_FORMAT = "%A %Y-%m-%d at %H:%M %Z"
+DEFAULT_NOTE = ""
 
 
 class TimepiecePlugin(CorvidaePlugin):
@@ -75,9 +79,16 @@ class TimepiecePlugin(CorvidaePlugin):
         if not isinstance(fmt, str) or not fmt:
             raise ValueError(
                 "Config error: timepiece.format must be a non-empty "
-                f"strftime format string, got {fmt!r} \u2014 check agent.yaml"
+                f"strftime format string, got {fmt!r} — check agent.yaml"
             )
         self._format = fmt
+        note = config_value(config, "timepiece.note", DEFAULT_NOTE)
+        if not isinstance(note, str):
+            raise ValueError(
+                "Config error: timepiece.note must be a string, "
+                f"got {note!r} — check agent.yaml"
+            )
+        self._note = note
         # channel id -> wall time of the last stamp injected there.
         # In-memory only: after a restart the first turn re-stamps, which
         # is the correct behavior (the window is fresh, so is the clock).
@@ -103,7 +114,10 @@ class TimepiecePlugin(CorvidaePlugin):
         if last is not None and (now.timestamp() - last.timestamp()) < self._interval.total_seconds():
             return
         stamp = now.strftime(self._format)
-        marker = {"role": "system", "content": f"The current date and time are now {stamp}. The hour doesn't affect my capabilities; I should keep working on my goals."}
+        content = f"The current date and time are now {stamp}."
+        if self._note:
+            content += f" {self._note}"
+        marker = {"role": "system", "content": content}
         conv.append(marker, MessageType.CONTEXT)
         # No manual persist: the agent fires persist_message for entries
         # appended during this hook that lack a _db_id (agent.py sweep).
