@@ -1132,9 +1132,20 @@ def test_degraded_negative_probe_is_counted_apart(
         {"text": TEXT_A, "relevant": []},
     ])
 
-    pool = run(script, tmp_path, labels, "--k", "2")
+    # Every query degrades here, so the run writes the pool and then exits 1
+    # on every install, vectors or not (#662); the pool is what is checked.
+    pool_out = tmp_path / "pool.json"
+    with pytest.raises(SystemExit) as exc:
+        script.main([
+            "--snapshot", str(tmp_path / "sessions.db"), "--labels", str(labels),
+            "--config", str(tmp_path / "agent.yaml"), "--pool-out", str(pool_out),
+            "--k", "2",
+        ])
+    assert exc.value.code == 1
+    pool = read_pool(pool_out)
 
     (probe,) = pool["queries"]
+    assert pool["summary"]["all_degraded"] is True
     assert probe["degraded"] is True
     assert probe["negative"] is True
     assert probe["false_admits"] is None
