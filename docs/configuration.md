@@ -1217,7 +1217,7 @@ github_webhook:
 | `github_webhook.push_branches` | list of strings | `[]` | Branches whose pushes are reported. Empty reports none; push events to other branches are dropped and counted at DEBUG. |
 | `github_webhook.endpoints.<endpoint>` | list of strings, or mapping | none | Non-empty list of channel ids (`transport:scope`) for that `webhook` endpoint, or a mapping with `channels:` plus an optional `push_branches:` to override the top-level one for this endpoint. |
 
-A malformed block fails startup naming the key, the value and the accepted shape; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet is skipped with a `WARNING`. Sender-controlled text — titles, branch names, workflow names — goes only into the notification text, which the kernel fences, never into an annotation, and is cut to 120 characters; see the threat model's finding 19.
+A malformed block fails startup naming the key, the value and the accepted shape; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet is skipped with a `WARNING`. Sender-controlled text — titles, branch names, workflow names — goes only into the notification text, which the kernel fences, never into an annotation, and is cut to 120 characters; see the threat model's finding 20.
 
 ---
 
