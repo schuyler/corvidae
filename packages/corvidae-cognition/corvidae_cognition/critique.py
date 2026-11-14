@@ -104,6 +104,22 @@ NO_REPLY_MARKER = "NO_REPLY"
 # Wake-stub text for a provenance objection. Lives in the stub, not the
 # CONTEXT entry: the funnel frames CONTEXT as data, and this is an
 # instruction written by us.
+# Wake-stub text once the retention lens is on (critique.retention.root set).
+# The funnel keeps one pending stub per (channel, "critique"), so whichever
+# critique wake fires first instructs the whole drain: the note covers both
+# retention filing and the provenance rule (#742). {root} is quoted.
+RETENTION_WAKE_NOTE = (
+    "Background self-check: your critique left findings in the critique "
+    "context. For each [retention] finding, file it before you finish: read "
+    "the named file under the knowledge base root «{root}», and append the "
+    "content as a new section only if the file does not already hold it - "
+    "never rewrite the file. For claims the provenance check found that no "
+    "record supports, reply in the channel only if your earlier reply could "
+    "lead the other party to take an incorrect action; then correct it "
+    "briefly. Otherwise send nothing: reply with exactly {marker} and "
+    "nothing reaches the channel."
+)
+
 PROVENANCE_NOTE = (
     "Background self-check: the provenance check found claims in your last "
     "reply that no record supports (see the critique context). By default, "
@@ -141,6 +157,9 @@ OBJECTION_SCHEMA = {
                     "claim": {"type": "string"},
                     "objection": {"type": "string"},
                     "severity": {"type": "number"},
+                    # The retention lens names where a fact goes (#742).
+                    "file": {"type": "string"},
+                    "content": {"type": "string"},
                 },
                 "required": ["claim", "objection"],
             },
@@ -574,7 +593,13 @@ class CritiquePlugin(CorvidaePlugin):
         roots = config_value(config, "markdown_recall.roots", None)
         if roots is None:
             single = config_value(config, "markdown_recall.root", None)
-            roots = [single] if isinstance(single, str) and single.strip() else None
+            if isinstance(single, str) and single.strip():
+                roots = [single]
+            elif config_value(config, "markdown_recall", None) is not None:
+                # A block with neither key indexes recall's default root.
+                from corvidae_cognition.markdown_recall.plugin import DEFAULT_ROOT
+
+                roots = [DEFAULT_ROOT]
         if not isinstance(roots, list) or not roots:
             return  # no recall index configured: nothing to drift from
         filed = Path(root).expanduser().resolve()
@@ -741,7 +766,7 @@ class CritiquePlugin(CorvidaePlugin):
 
     @hookimpl
     async def should_send_response(self, channel, text, emission, trace_id, annotations):
-        """Veto a provenance turn's final reply when it is the no-reply marker.
+        """Veto a critique wake turn's final reply when it is the no-reply marker.
 
         Anything else is no opinion. Errors fail open: a broken check never
         silences the agent.
@@ -1312,12 +1337,24 @@ class CritiquePlugin(CorvidaePlugin):
             if objections:
                 crit["detail"] = objections
             outcome = {"critique": crit}
-            await self._record_and_register(channel, trace_id, outcome, objections, wake=False)
+            await self._record_and_register(
+                channel, trace_id, outcome, objections, wake=False,
+                wake_lenses=frozenset({"retention"}),
+            )
         finally:
             reset_attribution(token)
 
+    def _wake_stub(self) -> str:
+        """The stub for a critique wake: PROVENANCE_NOTE unless the retention
+        lens is on, then one note that also says how to file (#742)."""
+        root = config_value(self.config, "critique.retention.root", None)
+        if not isinstance(root, str) or not root.strip():
+            return PROVENANCE_NOTE
+        return RETENTION_WAKE_NOTE.format(root=quote(root), marker=NO_REPLY_MARKER)
+
     async def _record_and_register(
         self, channel, trace_id, outcome, objections, *, wake: bool,
+        wake_lenses: frozenset[str] = frozenset(),
     ) -> None:
         """Record a critique outcome and register non-empty verdicts.
 
@@ -1326,9 +1363,11 @@ class CritiquePlugin(CorvidaePlugin):
         {"gate":"rejected"} merge on the same row. Provenance records under
         its own key, so it never overwrites the stylistic run's ``critique``.
         Non-empty objections re-enter via the funnel as budgeted CONTEXT.
-        With ``wake`` (provenance) they register under origin="critique"
-        and fire a stub carrying PROVENANCE_NOTE; without it (stylistic)
-        they queue for the channel's next turn and wake nothing (#202).
+        With ``wake`` (provenance, proactivity) they register under
+        origin="critique" and fire the critique wake stub; without it
+        (stylistic) they queue for the channel's next turn and wake nothing
+        (#202), except objections whose lens is in ``wake_lenses``
+        (retention), which wake the channel so the finding is acted on now.
         """
         outcome_log = self.pm.get_plugin("outcome_log")
         if outcome_log is not None:
@@ -1347,17 +1386,26 @@ class CritiquePlugin(CorvidaePlugin):
         if funnel is None:
             logger.debug("critique verdict not delivered: funnel unavailable")
             return
-        entries = [self._format_objection(o) for o in objections]
+        # Split by delivery: what wakes the channel now, what waits.
+        if wake:
+            waking, waiting = list(objections), []
+        else:
+            waking = [o for o in objections if o.get("lens") in wake_lenses]
+            waiting = [o for o in objections if o.get("lens") not in wake_lenses]
         try:
-            # Provenance wakes the channel with the no-reply note; stylistic
-            # objections wait for the channel's next turn.
-            if wake:
+            # Waking findings fire one stub on the "critique" origin, which the
+            # NO_REPLY veto keys on; the rest wait for the channel's next turn.
+            if waking:
                 await funnel.ingest_and_wake(
                     channel, origin="critique", source="critique",
-                    entries=entries, stub_text=PROVENANCE_NOTE,
+                    entries=[self._format_objection(o) for o in waking],
+                    stub_text=self._wake_stub(),
                 )
-            else:
-                funnel.ingest(channel, source="critique", entries=entries)
+            if waiting:
+                funnel.ingest(
+                    channel, source="critique",
+                    entries=[self._format_objection(o) for o in waiting],
+                )
         except Exception:
             logger.warning(
                 "critique verdict registration failed", exc_info=True,
@@ -1503,9 +1551,16 @@ class CritiquePlugin(CorvidaePlugin):
         objection = o.get("objection", "").strip()
         lens = o.get("lens", "critique")
         head = f"[{lens}] " if lens else ""
-        if claim and objection:
-            return f"{head}{claim} — {objection}"
-        return f"{head}{claim or objection}"
+        line = f"{head}{claim} — {objection}" if claim and objection else f"{head}{claim or objection}"
+        # The retention lens says where the fact goes; without these the
+        # agent would have to guess (#742).
+        file, content = o.get("file"), o.get("content")
+        extras = []
+        if isinstance(file, str) and file.strip():
+            extras.append(f"file: {file.strip()}")
+        if isinstance(content, str) and content.strip():
+            extras.append(f"append: {content.strip()}")
+        return f"{line} ({'; '.join(extras)})" if extras else line
 
     # ------------------------------------------------------------------
     # DB helpers

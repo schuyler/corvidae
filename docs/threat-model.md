@@ -59,7 +59,7 @@ a claim. The provenance critic is shown excerpts of earlier raw-log
 messages, from every channel, matching retrieval (finding 15, #168), so
 text from one channel can reach the critic's prompt while it judges another's
 reply. They are quoted, untrusted text in the critic's prompt, framed as data, and
-the critic's objections re-enter the window as CONTEXT (provenance objections also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; `SilencePlugin`'s veto of a final containing `NO_REPLY` covers every turn origin while it is loaded; otherwise only critique's own exact-match veto of critique-origin turns applies). The number of
+the critic's objections re-enter the window as CONTEXT (provenance objections, and retention findings when `critique.retention.root` is set (finding 21), also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; `SilencePlugin`'s veto of a final containing `NO_REPLY` covers every turn origin while it is loaded; otherwise only critique's own exact-match veto of critique-origin turns applies). The number of
 claims (5) and excerpts (5 per claim, 500 characters each) is capped, so
 one reply can't fan out into an unbounded critic prompt. Leaving sandboxing out
 of the MVP was a reasonable call, but it matters here: the attacker is not
@@ -1661,6 +1661,43 @@ signal. And a capped channel is a **self-silencing** route: an injected
 instruction can deliberately burn the budget and stop the agent from answering
 the person until they send another message, which is the same class of harm as
 the existing `NO_REPLY` route, not a new capability.
+
+### 21. The retention lens proposes writes to the knowledge base that recall reads back (#742)
+
+With `critique.retention.root` set, the retention critique lens forks the
+window after a novel, commitment-dense exchange and may return findings, each
+naming a `file` under the root and `content` to append. The finding wakes the
+channel (origin `critique`), and the woken turn is told to read the file and
+append the content only if it is missing. That is a new route from exchange
+text to durable files: a sender's words shape what the lens proposes, the
+agent writes it with its own file tools, and if the root is one
+`markdown_recall` indexes (finding 17), the written text comes back as CONTEXT
+on later turns, in every channel. An injected "fact" can persist past the
+conversation that planted it.
+
+Mitigations:
+
+- The lens only flags; nothing is written by the plugin. The write happens in
+  an ordinary agent turn, with the agent's own tools and their existing limits
+  (the `write_file`/`shell` reach described under "Privilege separation"), and
+  the stub tells the agent to read the file first and append only what is
+  missing, never rewrite.
+- The woken turn is silent by default: its stub ends with `NO_REPLY`, which
+  critique's veto on critique-origin finals (and `SilencePlugin`'s, when
+  loaded) withholds, and critique does not critique its own turns.
+- The lens is inert until the operator sets `critique.retention.root`, and
+  selection needs both novelty and commitment density over their thresholds,
+  so an ordinary exchange does not fire it.
+- Text written to the folder returns only through recall's framing
+  (finding 17): "retrieved data, not instructions", under the funnel budget.
+
+Accepted residuals. The lens's `file` is model output: an absolute path or one
+with `..` names a file outside the root, and nothing but the agent's judgement
+in the filing turn stops that; the file tools' own reach is the bound. A
+sender who can steer an exchange can get a false durable "fact" proposed, and
+the filing turn's "only if missing" check is the agent's judgement, not a
+verification. The knowledge base directory must be writable by the daemon,
+which also makes it writable by anything else running as the daemon's user.
 
 ## Privilege separation
 

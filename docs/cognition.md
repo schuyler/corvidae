@@ -1544,7 +1544,12 @@ model makes both language judgments; the code only fetches evidence:
 the channel's next turn. Provenance objections wake the channel with a
 stub whose text tells the agent the default is to send nothing: reply
 exactly `NO_REPLY`, and reply in the channel only if its earlier reply
-could lead the other party to take an incorrect action. The plugin's
+could lead the other party to take an incorrect action. With
+`critique.retention.root` set, retention findings wake the channel too, and
+every critique wake (provenance included) uses one stub that adds how to
+file them: read the named file under the root and append only what is
+missing. The funnel keeps one pending stub per channel and origin, so the
+first wake's text governs everything queued behind it. The plugin's
 `should_send_response` vetoes a `final` on a critique-origin turn whose
 stripped text is `NO_REPLY`; the kernel stores it as `unsent` with the
 not-sent marker. That veto is critique's own and always on with this plugin
