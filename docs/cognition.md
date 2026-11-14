@@ -1659,7 +1659,7 @@ A `NO_REPLY` that was actually sent (say another gate's veto raised and the send
 
 **Divergences from the PRD.** The code is what runs; where it differs from [prd.md](prd.md) §3.7 (Output gate and the right to silence), this section says how, and the PRD is unchanged until the owner decides which side moves.
 
-- *A signal followed by sent text is not a decline (item 5).* In `tool` and `both` mode `end_turn` does not end the turn (the loop calls the model again), so nothing is sent only when the model then echoes `NO_REPLY`; any other follow-up is sent, and text written beside the call goes out as progress. The `tool` row is written when the tool is called, so it also exists for a turn that went on to reply: it records a call, not a decline, where the PRD says such a turn is not recorded as one. Closing this means writing the row when the final is known.
+- *A signal followed by sent text is not a decline (item 5).* In `tool` and `both` mode `end_turn` does not end the turn (the loop calls the model again), so nothing is sent only when the model then echoes `NO_REPLY`; any other follow-up is sent, and text written beside the call goes out as progress. The `tool` row is written when the tool is called, so it also exists for a turn that went on to reply: it records a call, not a decline, where the PRD says such a turn is not recorded as one. Closing this means writing the row when the final is known (#901).
 
 The containment veto also withholds a final that only quotes the token, such as a reply repeating an incoming message that contains `NO_REPLY`. The PRD accepts this (item 5): the row is stored as `unsent` and recorded as `no_reply`, and the exposure is in [threat-model.md](threat-model.md).
 
