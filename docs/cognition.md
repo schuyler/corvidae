@@ -1279,11 +1279,12 @@ order.
 | `update_goal` | `id: int`, `text: str` | Replaces the text of an open goal and bumps its `updated_at`, returning `Goal #N updated.` An unknown or retired id, or empty text, returns an error string. |
 | `retire_goal` | `id: int`, `conclusion: str` | Writes a memory record of the conclusion, then marks the goal retired, returning `Goal #N retired; conclusion recorded as memory #M.` An unknown or retired id, or an empty conclusion, returns an error string, as does a missing channel context. |
 | `set_goal_status` | `id: int`, `status: str` | Sets an open goal's status to one of `open`, `in-progress`, `blocked`, `waiting`, returning `Goal #N status set to '<status>'`. An unknown or retired id, or any other status, returns an error string. Setting the status a goal already has changes nothing and fires no hook. |
-| `list_goals` | `include_retired: bool = False` | Lists goals with their ids; retired ones only when asked. |
+| `list_goals` | `include_retired: bool = False` | Lists goals in queue order with their ids and statuses; retired ones only when asked. |
 
 **Queue, states and the state-change hook:** goals form a priority queue
 ordered by `position` (then `id`). `add_goal(position="prepend")` puts a goal
-at the front; `append`, the default, puts it at the back. A goal's status is
+at the front; `append`, the default, puts it at the back, and so does
+`corvidae goals seed`. A goal's status is
 `open`, `in-progress` (being worked, so a restart resumes it rather than
 re-picking), `blocked` (waiting on something external) or `waiting` (done,
 awaiting review); retiring sets `retired_at`. The heartbeat lists open goals
@@ -1311,9 +1312,13 @@ With open goals it reads:
 
 ```
 Open goals as of 2026-10-30 14:02:11 UTC (this list replaces any earlier goals list):
+#5 [in-progress] Learn what Schuyler wants from the wiki
 #3 Finish the migration notes
-#5 Learn what Schuyler wants from the wiki
 ```
+
+Goals are listed in queue order (`position`, then `id`), the order the
+heartbeat uses. A goal that is not plain `open` carries its status in
+brackets.
 
 With none, including when every goal is retired, it reads `No open goals as
 of … (this replaces any earlier goals list).` A database with no goal rows

@@ -172,11 +172,11 @@ class GoalsPlugin(CorvidaePlugin):
         return db
 
     async def _all_goals(self) -> list[Goal]:
-        """Every row, open and retired, in id order."""
+        """Every row, open and retired, in queue order (position, then id)."""
         db = await self._require_db()
         async with db.execute(
             "SELECT id, text, created_at, updated_at, retired_at, memory_id, status, "
-            "position, origin_channel FROM goals ORDER BY id"
+            "position, origin_channel FROM goals ORDER BY position ASC, id ASC"
         ) as cursor:
             return [Goal(*row) for row in await cursor.fetchall()]
 
@@ -423,9 +423,15 @@ class GoalsPlugin(CorvidaePlugin):
             conclusions."""
             db = await plugin._require_db()
             if include_retired:
-                query = "SELECT id, text, created_at, retired_at, memory_id, status FROM goals ORDER BY id"
+                query = (
+                    "SELECT id, text, created_at, retired_at, memory_id, status "
+                    "FROM goals ORDER BY position ASC, id ASC"
+                )
             else:
-                query = "SELECT id, text, created_at, retired_at, memory_id, status FROM goals WHERE retired_at IS NULL ORDER BY id"
+                query = (
+                    "SELECT id, text, created_at, retired_at, memory_id, status "
+                    "FROM goals WHERE retired_at IS NULL ORDER BY position ASC, id ASC"
+                )
             async with db.execute(query) as cursor:
                 rows = await cursor.fetchall()
             if not rows:
@@ -457,18 +463,28 @@ class GoalsPlugin(CorvidaePlugin):
             else:
                 channel_id = _ctx.channel.id
             if status not in VALID_STATUSES:
-                return f"Error: status must be one of {VALID_STATUSES}, got {status!r}"
+                return (
+                    f"Error: status must be one of {', '.join(VALID_STATUSES)}, "
+                    f"got {status!r}"
+                )
             db = await plugin._require_db()
             goal = await plugin._get(db, id)
             if goal is None or goal.retired_at is not None:
-                return f"Error: no open goal with id {id}"
+                return (
+                    f"Error: no open goal #{id}; "
+                    "the ids are in the latest goals entry"
+                )
             now = plugin._now()
             async with db.execute(
                 "UPDATE goals SET status = ?, updated_at = ? WHERE id = ? AND retired_at IS NULL",
                 (status, now, id),
             ) as cursor:
                 if cursor.rowcount == 0:
-                    return f"Error: no open goal with id {id}"
+                    # Retired between the read above and this write.
+                    return (
+                        f"Error: goal #{id} was retired just now; "
+                        "add a new goal instead"
+                    )
             await db.commit()
             # No notify on a no-op (setting the same status).
             if goal.status != status:
@@ -502,7 +518,12 @@ class GoalsPlugin(CorvidaePlugin):
             lines = [
                 f"Open goals as of {as_of} (this list replaces any earlier goals list):"
             ]
-            lines += [f"#{g.id} {g.text}" for g in open_goals]
+            # Queue order is pick order; in-progress, blocked and waiting
+            # goals carry their status so the model can see the queue's state.
+            lines += [
+                f"#{g.id} " + (f"[{g.status}] " if g.status != "open" else "") + g.text
+                for g in open_goals
+            ]
             entry = "\n".join(lines)
         else:
             entry = (
@@ -555,8 +576,12 @@ def _seed_cmd(ctx, text):
                 )
             await conn.execute(GOALS_DDL)
             now = time.time()
+            # A seeded goal is an appended one: position is one past the
+            # current maximum. Computed in the INSERT itself because the CLI
+            # is a second process and the daemon may append at the same time.
             cursor = await conn.execute(
-                "INSERT INTO goals (text, created_at, updated_at) VALUES (?, ?, ?)",
+                "INSERT INTO goals (text, created_at, updated_at, position) "
+                "VALUES (?, ?, ?, COALESCE((SELECT MAX(position) FROM goals), 0) + 1)",
                 (text, now, now),
             )
             await conn.commit()
