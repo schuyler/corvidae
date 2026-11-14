@@ -1793,10 +1793,12 @@ decode keeps its `role`. The sample token for the verification step comes
 back `None` for a corrupt row, so the CLI reports the FTS check as skipped
 for it instead of crashing.
 
-`--dry-run` prints affected row counts without writing. Both dry-run and
-real runs count only rows that exist and were actually touched, and the
-`message` and `range` forms print `<found> of <requested>` so a mistyped id
-is visible. A `--db` path that is not an existing file aborts with
+`--dry-run` prints affected row counts without writing, and the counts are
+the ones the real run would report: a memory record covering two redacted
+messages is one affected memory, not two, because the cascade tombstones it
+once (#680). Both dry-run and real runs count only rows that exist and were
+actually touched, and the `message` and `range` forms print
+`<found> of <requested>` so a mistyped id is visible. A `--db` path that is not an existing file aborts with
 `Database not found: <path>` before opening a connection (opening would
 silently create an empty database).
 

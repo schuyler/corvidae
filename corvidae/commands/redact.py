@@ -44,6 +44,9 @@ logger = logging.getLogger("corvidae.redact")
 
 _TOMBSTONE_TEXT = "[redacted by operator {date}]"
 _MEMORY_TOMBSTONE = "[redacted by operator]"
+#: An id no memory row can have, for a caller of _cascade_memory_ids that
+#: excludes nothing.
+_NO_SUCH_MEMORY_ID = -1
 
 
 def _iso_date() -> str:
@@ -301,17 +304,16 @@ async def redact_messages(
                 continue
             affected_messages += 1
             dry_by_channel.setdefault(ch_row[0], []).append(msg_id)
-            if not has_memory:
-                continue
-            ch = ch_row[0]
-            async with db.execute(
-                "SELECT COUNT(*) FROM memory "
-                "WHERE channel_id = ? AND msg_id_start <= ? AND msg_id_end >= ? "
-                "AND redacted = 0",
-                (ch, msg_id, msg_id),
-            ) as cursor:
-                cnt_row = await cursor.fetchone()
-            affected_memories += cnt_row[0] if cnt_row else 0
+        # Count the records, not the hits: one record covering two redacted
+        # messages is tombstoned once by the real run (its `redacted = 0`
+        # filter skips it the second time), so counting per message id would
+        # promise more than the run delivers (#680). Per channel, as the
+        # cascade is: a foreign record's range can hold these numeric ids.
+        if has_memory:
+            for ch, ids in dry_by_channel.items():
+                affected_memories += len(
+                    await _cascade_memory_ids(db, ch, ids, _NO_SUCH_MEMORY_ID)
+                )
         return {
             "affected_messages": affected_messages,
             "affected_memories": affected_memories,

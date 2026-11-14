@@ -796,6 +796,55 @@ async def test_redact_memory_form_tombstones_corrupt_row(value_sql, params):
     await db.close()
 
 
+async def test_message_form_dry_run_counts_a_shared_record_once():
+    """#680: one record over two redacted messages is one affected memory.
+
+    The dry run counted the record once per message id, so the preview said 2
+    where the real run tombstoned and reported 1.
+    """
+    db = await make_full_db()
+    channel = "irc:#electronics"
+    first = await insert_message(db, channel, "user", "first secret words")
+    second = await insert_message(db, channel, "assistant", "second secret words")
+    shared = await insert_memory(db, channel, "one entry over both messages",
+                                 first, second)
+
+    dry = await redact_messages(db, [first, second], dry_run=True)
+
+    assert dry["affected_memories"] == 1
+    assert (await get_memory(db, shared))["redacted"] == 0
+
+    real = await redact_messages(db, [first, second])
+
+    assert real["affected_memories"] == dry["affected_memories"]
+    assert (await get_memory(db, shared))["redacted"] == 1
+    await db.close()
+
+
+async def test_message_form_dry_run_counts_only_the_redacted_channel():
+    """The count is per channel, because the cascade is: message ids are global.
+
+    One record on the redacted channel and one on another whose numeric range
+    holds the same ids: the preview must promise one, not two.
+    """
+    db = await make_full_db()
+    channel_a = "irc:#electronics"
+    channel_b = "irc:#garden"
+    a1 = await insert_message(db, channel_a, "user", "kestrel station secret")
+    a2 = await insert_message(db, channel_a, "assistant", "noted the secret")
+    mine = await insert_memory(db, channel_a, "mine", a1, a2)
+    foreign = await insert_memory(db, channel_b, "garden entry", a1, a2)
+
+    dry = await redact_messages(db, [a1, a2], dry_run=True)
+
+    assert dry["affected_memories"] == 1
+    real = await redact_messages(db, [a1, a2])
+    assert real["affected_memories"] == 1
+    assert (await get_memory(db, mine))["redacted"] == 1
+    assert (await get_memory(db, foreign))["redacted"] == 0
+    await db.close()
+
+
 async def test_redact_memory_dry_run_counts_the_cascade_like_the_real_run():
     """#625: two same-channel records over overlapping ranges and one
     foreign-channel record over the same numeric ids. The dry run on the
