@@ -1380,7 +1380,7 @@ line is plain text in the result, with no kernel header at all.
   Zulip channel tells the model it may answer `NO_REPLY` to send nothing (or,
   with `silence.mode` `tool` or `both`, call `end_turn`), and
   a message that says "don't reply to this" may be enough. The worst case is
-  a missed reply. The veto is a containment check, so a reply that merely quotes the token (say, repeating an incoming message that contains `NO_REPLY`) is dropped too: untrusted text can get a reply suppressed without the model choosing silence. A decline is a row in `exchange_log` with
+  a missed reply. The veto is a containment check, so a reply that merely quotes the token (say, repeating an incoming message that contains `NO_REPLY`) is dropped too: untrusted text can get a reply suppressed without the model choosing silence. This is accepted for now, not prevented: the withheld reply is stored `unsent` and recorded as `no_reply`, the cost is one re-prompt, and an exact-match veto would instead leak the token to users whenever the model writes anything beside it. Narrowing the match without that leak is #902. A decline is a row in `exchange_log` with
   `outcomes.silence` (`no_reply` or `empty`) only when `outcome_log` is loaded
   and the turn has a trace id, so look there to find them. With
   `silence.mode: tool` or `both` the agent also has an `end_turn(reason)` tool,
