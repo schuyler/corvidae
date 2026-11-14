@@ -3307,6 +3307,19 @@ with their own ownership check.
 Reads stdin line-by-line in a background task. Prints responses to
 stdout with latency timing.
 
+The blocking read runs in a **daemon** thread that hands each line to an
+`asyncio.Queue` (`cli-stdin-reader`), not through `run_in_executor` (#759). A
+`ThreadPoolExecutor` worker blocked in `readline` is non-daemon, so both
+`asyncio.run`'s executor shutdown and interpreter exit waited for it: a SIGINT
+at a TTY, or with an open pipe that never sent a line, ended as exit 1 after
+`daemon.exit_timeout` with an exit-watchdog WARNING naming
+`ThreadPoolExecutor-0_0` — a leak report for a thread that had done nothing
+wrong. A daemon thread cannot hold the process open: it stays blocked in
+`readline` and dies with the process, which is the right shape for a read that
+has no cancel. `tests/test_cli_sigint.py` runs a real daemon in a subprocess
+with an open pipe on stdin and asserts exit 0 within the bound, with no
+watchdog line.
+
 EOF ends the session at an interactive terminal (Ctrl-D), and always
 under `corvidae cli`, which is a session by definition (`corvidae cli <
 script.txt` exits when the script runs out): SIGINT to the process for a

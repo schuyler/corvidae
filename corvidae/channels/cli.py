@@ -5,11 +5,11 @@ import logging
 import os
 import signal
 import sys
+import threading
 
 import click
 
 from corvidae.channel import ChannelRegistry
-from corvidae.trace import mint_trace_id
 from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.outbound import (
     OutboundMessage,
@@ -18,6 +18,7 @@ from corvidae.outbound import (
     OutboundToolStatus,
 )
 from corvidae.runtime import Runtime, run_daemon
+from corvidae.trace import mint_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,8 @@ class CLIPlugin(TransportPlugin):
         # Whether stdin is a terminal; the banner and "> " prompts are only
         # for a person typing, not a journal or a pipe.
         self._interactive = False
+        # Lines from stdin, filled by a daemon reader thread (#759).
+        self._lines: asyncio.Queue[str] | None = None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -60,11 +63,44 @@ class CLIPlugin(TransportPlugin):
         # leaves sys.stdin None. The CLI transport has nothing to read, but
         # the other transports still run (#53).
         if sys.stdin is None:
-            logger.warning(
-                "CLIPlugin: no stdin; cli transport disabled, daemon continues"
-            )
+            logger.warning("CLIPlugin: no stdin; cli transport disabled, daemon continues")
             return
+        self._start_reader()
         self._task = asyncio.create_task(self._read_loop(), name="cli-read-loop")
+
+    def _start_reader(self) -> None:
+        """Start the daemon thread that turns stdin lines into a queue.
+
+        Not ``run_in_executor``: an executor thread blocked in ``readline``
+        is non-daemon, so both ``asyncio.run``'s executor shutdown and
+        interpreter exit wait for it — a SIGINT at a TTY or an open pipe
+        then exits 1 after ``daemon.exit_timeout`` with a watchdog WARNING
+        naming the worker (#759). A daemon thread cannot hold the process
+        open: it stays blocked in ``readline`` and dies with the process,
+        which is the correct shape for a read that has no cancel.
+        """
+        self._lines = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def _read() -> None:
+            """Hand every line to the loop until EOF or the loop closes."""
+            while True:
+                try:
+                    line = sys.stdin.readline()
+                except (ValueError, OSError):
+                    # A closed or unreadable stdin is EOF: nothing more will
+                    # arrive, and re-raising here would only kill a daemon
+                    # thread nobody joins.
+                    line = ""
+                try:
+                    loop.call_soon_threadsafe(self._lines.put_nowait, line)
+                except RuntimeError:
+                    # The loop is closed: the process is going away.
+                    return
+                if not line:
+                    return
+
+        threading.Thread(target=_read, name="cli-stdin-reader", daemon=True).start()
 
     async def _read_loop(self) -> None:
         """Read lines from stdin and dispatch as on_message events.
@@ -72,6 +108,10 @@ class CLIPlugin(TransportPlugin):
         Always routes to the cli:local channel. CLI is single-user/single-scope
         by design — only cli:local receives stdin input.
         """
+        # on_start starts the reader; a direct caller (a test driving the
+        # loop) gets it here, so the queue is never read from unstarted.
+        if self._lines is None:
+            self._start_reader()
         channel = self._registry.get_or_create("cli", "local")
         self._interactive = sys.stdin.isatty()
         if self._interactive:
@@ -82,12 +122,9 @@ class CLIPlugin(TransportPlugin):
         # and returns immediately before the agent loop runs.
         self._prompt()
 
-        loop = asyncio.get_running_loop()
+        lines = self._lines
         while True:
-            try:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
-            except asyncio.CancelledError:
-                raise
+            line = await lines.get()
             if not line:
                 # EOF at an interactive terminal (Ctrl-D), or anywhere under
                 # `corvidae cli`, means quit: trigger graceful shutdown by
@@ -139,7 +176,9 @@ class CLIPlugin(TransportPlugin):
             logger.warning(
                 "%s: could not tell whether the final on %s was left unsent; "
                 "releasing nothing (the turn may stay open until the next final)",
-                type(self).__name__, channel.id, exc_info=True,
+                type(self).__name__,
+                channel.id,
+                exc_info=True,
                 extra={"channel": channel.id, "trace_id": trace_id},
             )
             return
@@ -155,7 +194,7 @@ class CLIPlugin(TransportPlugin):
         """
         text, latency_ms = event.text, event.latency_ms
         if latency_ms is not None:
-            print(f"\n{text}\n\033[2m({latency_ms/1000:.1f}s)\033[0m\n")
+            print(f"\n{text}\n\033[2m({latency_ms / 1000:.1f}s)\033[0m\n")
         else:
             print(f"\n{text}\n")
         self._prompt()
@@ -183,6 +222,7 @@ class CLIPlugin(TransportPlugin):
                 # Try to pretty-print JSON args, truncate
                 try:
                     import json
+
                     parsed = json.loads(args_summary)
                     args_display = " " + json.dumps(parsed, ensure_ascii=False)[:120]
                 except (json.JSONDecodeError, ValueError):
