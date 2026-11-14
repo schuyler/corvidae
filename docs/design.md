@@ -2405,7 +2405,7 @@ some view. Each segment's view is trimmed oldest-first with
 `ContextWindow.fit_to_budget` to the budget less the instruction's size, then
 put under the channel's `reasoning_history` policy (the live loop's order),
 and ends with the consolidation instruction (`memory.consolidation_fork_prompt`
-plus the range sentence). Row dicts are copied per segment so the policy's
+plus the entry size sentence and the range sentence). Row dicts are copied per segment so the policy's
 stripping can't alter rows a later segment reuses as context. Warnings, each
 naming the channel and message ids: the budget trim dropped a segment's own
 rows (they commit without reaching a view); a row was truncated; the
@@ -2419,7 +2419,7 @@ retried once, then degrades to the raw transcript, split into records that fit t
 with no dialog that is followed by another segment folds its id span into
 the next segment's record (no record or commit of its own); a no-dialog
 last segment advances the watermark without a record. Records are
-stamped `(memory.consolidation_fork_prompt, "standalone", the
+stamped `(memory.consolidation_fork_prompt + size sentence, "standalone", the
 request model)`. A view that the stage's profile rejects for length is a
 transport error: the watermark stays and the next trigger retries.
 
@@ -2459,7 +2459,7 @@ past claim and its closest earlier messages.
 (`LLMClient.request_model` of the fork's body, so an `extra_body` override
 shows). `Agent.fork` always sets it, so it is None only when a
 `ForkResult` is built without it. Consolidation stamps it on a fork record, together with
-`memory.consolidation_fork_prompt` but not the range sentence
+`memory.consolidation_fork_prompt` plus the entry size sentence (`memory.entry_target_tokens`) but not the range sentence
 ([cognition.md](cognition.md#record-stamps)).
 
 **Configuration** (`agent.forks`, validated at startup and on reload by
@@ -4630,6 +4630,7 @@ tools:
 memory:
   idle_consolidate_after: 1800  # seconds a channel must be quiet before idle consolidation
   consolidate_after_tokens: 4000  # new window tokens that start a turn consolidation (forks only)
+  entry_target_tokens: 256      # size target per consolidation entry, stated as ~192 words (#686)
   half_life_days: 30            # retrieval recency decay (e-folding time, days)
   retrieval:
     k: 8                        # KNN candidate count

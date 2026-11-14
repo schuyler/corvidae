@@ -96,11 +96,12 @@ _NARRATE = (
     "record them as if they happened now. Skip pleasantries and chatter."
 )
 _ENTRIES = (
-    "Write it as separate entries, one for each distinct stretch or topic, in "
-    "order. Each entry is a paragraph at most and must make sense read on its "
-    "own, months from now, with nothing else: name the people, projects and "
-    "things involved rather than \"he\" or \"it\". Don't attribute a fact from "
-    "one entry's topic to another's."
+    "Write one entry for each distinct stretch or topic, in order, and keep "
+    "each entry to its topic: an entry that wanders across several topics is hard to "
+    "find again. Each entry must make sense read on its own, months from "
+    "now, with nothing else: name the people, projects and things involved "
+    "rather than \"he\" or \"it\". Don't attribute a fact from one entry's "
+    "topic to another's."
 )
 _RATE = (
     "Then rate how important this stretch is to remember long-term, from 0 "

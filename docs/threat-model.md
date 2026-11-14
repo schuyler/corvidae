@@ -1004,7 +1004,7 @@ What each kind of unlock costs:
   instruction text in `memory_prompt`), so the records written under an
   edited `memory.consolidation_fork_prompt` can be found afterwards.
   Records from before the standalone prompt was removed keep their old
-  stamp; they are not migrated. The stamp records the consolidation instructions,
+  stamp; they are not migrated. The stamp records the consolidation instruction, including its entry size sentence,
   not the system prompt and window a fork runs under, so an edit to the
   system prompt isn't identifiable this way; nor does it cover the
   compaction, appraisal or critique prompts. `memory_prompt` holds

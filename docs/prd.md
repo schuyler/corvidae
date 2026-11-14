@@ -1034,7 +1034,7 @@ only through the funnel.
    double-store, in a plugin-owned task that never starts a turn.
 2. A consolidation writes one or more records. A record is a
    self-contained first-person narrative entry about one stretch or topic
-   of the range, with epistemic framing preserved and facts and opinions
+   of the range, short enough that several fit the memory admission budget, with epistemic framing preserved and facts and opinions
    kept as expressed, attributed to who expressed them; dated by when the
    conversation happened, embedded, and linked to its consolidation's
    `message_log` id range. The records of one consolidation share that

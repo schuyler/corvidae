@@ -389,7 +389,8 @@ segment's records). `--prompt-file` defaults to
 `memory.consolidation_fork_prompt` from `--config`, then to
 `DEFAULT_CONSOLIDATION_FORK_PROMPT` (the text in
 `prompts/memory_consolidation_fork.md`), as the daemon resolves it, and
-replaces that instruction for the run when given; `--trials` defaults to 1.
+replaces that instruction for the run when given; either way the replay
+appends the size sentence from `memory.entry_target_tokens` in `--config`, as the daemon does; `--trials` defaults to 1.
 
 `--config` wants the *rendered* Buster config, not a fresh one: model,
 timeout, and `extra_body` all have to match what the daemon was running, or
@@ -444,7 +445,8 @@ explicitly if you are not in the repo root):
 
 - `input.txt` — the transcript exactly as sent
 - `meta.json` — channel, the inclusive range and the resolved half-open
-  bounds, raw row and dialog counts, prompt path and sha256, model, base_url
+  bounds, raw row and dialog counts, prompt path and the sha256 of the instruction as sent (size sentence
+  included, so it matches the daemon's `prompt_hash`), model, base_url
 - `trials.jsonl` — one record per trial: raw output, parsed `entries` and `participants`, latency
 
 A malformed completion is recorded as that trial's `error` and the run

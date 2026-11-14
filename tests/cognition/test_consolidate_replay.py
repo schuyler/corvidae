@@ -283,7 +283,11 @@ async def test_replay_builds_the_daemons_catchup_request(tmp_path):
     request for the consolidation stage); the replay over the same snapshot database,
     ViewInputs and fork prompt must send the same messages and extra_body.
     If either side grows its own request builder, this fails."""
-    from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT
+    from corvidae_cognition.memory import (
+        DEFAULT_CONSOLIDATION_FORK_PROMPT,
+        DEFAULT_ENTRY_TARGET_TOKENS,
+        consolidation_instruction,
+    )
     from harness.consolidate_replay import run_replay
 
     from .test_memory_consolidation import build_consolidation_env, seed_dialog
@@ -309,7 +313,10 @@ async def test_replay_builds_the_daemons_catchup_request(tmp_path):
             channel_id=channel.id,
             after_id=0,
             through_id=ids[-1],
-            prompt_text=DEFAULT_CONSOLIDATION_FORK_PROMPT,
+            # The daemon sends the prompt plus the entry-size sentence (#686).
+            prompt_text=consolidation_instruction(
+                DEFAULT_CONSOLIDATION_FORK_PROMPT, DEFAULT_ENTRY_TARGET_TOKENS
+            ),
             trials=1,
             out_dir=tmp_path / "out",
             client=replay_client,
