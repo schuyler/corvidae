@@ -426,6 +426,45 @@ def _scrub_outcomes_detail(outcomes_json: str | None, tombstone: str) -> str | N
     return json.dumps(outcomes)
 
 
+async def _owning_trace_id(
+    db: aiosqlite.Connection, channel_id: str, msg_id: int,
+) -> str | None:
+    """The exchange a redacted message belongs to (#423).
+
+    Normally the nearest exchange at or before the message. A coalesced burst
+    (#398) breaks that: every message of the burst gets its own exchange row at
+    admission, and only the last one — the turn's owner — is ever appraised, so
+    the nearest row to an absorbed message has no appraisal and no past_claims
+    to tombstone. The turn that answered the burst is then the nearest *later*
+    row that has an appraisal.
+
+    Never an earlier one: an earlier exchange's claims were not derived from
+    this message, and tombstoning them would destroy provenance that redaction
+    has no reason to touch. Later exchanges are the direction the rest of this
+    scrubber already accepts — provenance_snapshot is cleared on every exchange
+    at or after the redacted id, because those windows may have carried its
+    text.
+    """
+    async with db.execute(
+        "SELECT trace_id, appraisal IS NOT NULL FROM exchange_log "
+        "WHERE channel_id = ? AND message_rowid IS NOT NULL "
+        "AND message_rowid <= ? ORDER BY message_rowid DESC LIMIT 1",
+        (channel_id, msg_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is not None and row[1]:
+        return row[0]
+    async with db.execute(
+        "SELECT trace_id FROM exchange_log "
+        "WHERE channel_id = ? AND message_rowid IS NOT NULL "
+        "AND message_rowid >= ? AND appraisal IS NOT NULL "
+        "ORDER BY message_rowid ASC LIMIT 1",
+        (channel_id, msg_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return row[0] if row is not None else None
+
+
 async def redact_exchange_log(
     db: aiosqlite.Connection,
     channel_id: str,
@@ -436,7 +475,9 @@ async def redact_exchange_log(
     """Scrub exchange_log text derived from redacted messages in one channel.
 
     For each redacted id X: the exchange that owns X (in the channel, the
-    largest message_rowid <= X) gets its stage-2 past_claims tombstoned.
+    largest message_rowid <= X that has an appraisal — or, for a message a
+    coalesced burst absorbed, the nearest later one; see _owning_trace_id)
+    gets its stage-2 past_claims tombstoned.
     Every exchange in the channel with message_rowid >= the smallest X loses
     its provenance_snapshot, since any later window may have carried X's
     text as CONTEXT. Exchanges with a NULL message_rowid are not reached.
@@ -459,15 +500,9 @@ async def redact_exchange_log(
     # Find each redacted id's owning exchange, once per exchange.
     owners: set[str] = set()
     for msg_id in msg_ids:
-        async with db.execute(
-            "SELECT trace_id FROM exchange_log "
-            "WHERE channel_id = ? AND message_rowid IS NOT NULL "
-            "AND message_rowid <= ? ORDER BY message_rowid DESC LIMIT 1",
-            (channel_id, msg_id),
-        ) as cursor:
-            row = await cursor.fetchone()
-        if row is not None:
-            owners.add(row[0])
+        trace_id = await _owning_trace_id(db, channel_id, msg_id)
+        if trace_id is not None:
+            owners.add(trace_id)
 
     # Tombstone the owners' past_claims and outcomes detail text.
     # Sorted so the order is stable: a corrupt row must not hide the ones

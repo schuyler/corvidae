@@ -1862,9 +1862,14 @@ creates schema; schema is daemon-owned.
   kernel doesn't know the tables. The cognition extra registers
   `exchange_log` (`corvidae_cognition.outcome_log:redact_exchange_log`),
   which scrubs the conversation text that table holds. The
-  exchange that owns a redacted id X (in that channel, the row with the
-  largest `message_rowid <= X`) has every `appraisal.stage2.past_claims`
-  claim and query replaced with the tombstone text. The number of claims
+  exchange that owns a redacted id X has every
+  `appraisal.stage2.past_claims` claim and query replaced with the
+  tombstone text. The owner is the row with the largest
+  `message_rowid <= X` — except when that row has no appraisal, which is
+  what a coalesced burst leaves behind (#398, #423): every message of the
+  burst gets a row at admission and only the turn's owner is appraised, so
+  the owner is then the nearest *later* row that has an appraisal. Never an
+  earlier one, whose claims were not derived from X. The number of claims
   and queries is kept for calibration, and the other appraisal fields are
   untouched. Every exchange in the channel with `message_rowid >=` the
   smallest redacted id has its `provenance_snapshot` set to NULL. That

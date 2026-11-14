@@ -102,6 +102,94 @@ async def _db_with_dialog(path: str | None = None):
     return db, ids
 
 
+async def _add_absorbed_row(db, trace_id: str, channel_id: str, message_rowid: int) -> None:
+    """An exchange row as admission creates it: identity columns only.
+
+    Every message of a coalesced burst gets one of these, and only the owner's
+    row is ever appraised (#398, #423).
+    """
+    await db.execute(
+        "INSERT INTO exchange_log (trace_id, channel_id, origin, message_rowid, "
+        "created_at) VALUES (?, ?, ?, ?, ?)",
+        (trace_id, channel_id, "user", message_rowid, time.time()),
+    )
+    await db.commit()
+
+
+class TestCoalescedBurst:
+    """#423: redacting an absorbed burst message reaches the turn that answered.
+
+    m1, m2 and m3 coalesce into one turn owned by m3. Each message has its own
+    row; only m3's row is appraised, so the nearest row to m1 has no claims to
+    tombstone and the owner is the nearest *later* appraised row.
+    """
+
+    async def _db_with_burst(self):
+        db = await make_full_db(None)
+        await db.execute(EXCHANGE_LOG_DDL)
+        await db.commit()
+        m1 = await insert_message(db, "irc:#a", "user", "the kestrel nests at Brannan")
+        m2 = await insert_message(db, "irc:#a", "user", "and Zebulon owes 40")
+        m3 = await insert_message(db, "irc:#a", "user", "what do you make of that")
+        reply = await insert_message(db, "irc:#a", "assistant", "I make nothing of it")
+        await _add_absorbed_row(db, "b1", "irc:#a", m1)
+        await _add_absorbed_row(db, "b2", "irc:#a", m2)
+        await _add_exchange(db, "b3", "irc:#a", m3)
+        return db, {"m1": m1, "m2": m2, "m3": m3, "reply": reply}
+
+    async def test_redacting_an_absorbed_message_scrubs_the_owner(self):
+        db, ids = await self._db_with_burst()
+        try:
+            await redact_messages(db, [ids["m1"]])
+            owner, _ = await _row(db, "b3")
+            _assert_scrubbed(owner)
+            # The absorbed rows gain nothing and lose only what the snapshot
+            # rule already takes: their message ids are at or after m1's, so
+            # their provenance goes, and they never had claims of their own.
+            async with db.execute(
+                "SELECT message_rowid, appraisal, provenance_snapshot "
+                "FROM exchange_log WHERE trace_id IN ('b1', 'b2')"
+            ) as cursor:
+                rows = await cursor.fetchall()
+            assert len(rows) == 2
+            for message_rowid, appraisal, snapshot in rows:
+                assert appraisal is None
+                assert message_rowid >= ids["m1"]
+                assert snapshot is None
+        finally:
+            await db.close()
+
+    async def test_redacting_the_owner_message_scrubs_its_own_row(self):
+        """The owning message keeps the old path: its own row has the appraisal."""
+        db, ids = await self._db_with_burst()
+        try:
+            await redact_messages(db, [ids["m3"]])
+            owner, _ = await _row(db, "b3")
+            _assert_scrubbed(owner)
+        finally:
+            await db.close()
+
+    async def test_an_absorbed_message_never_scrubs_an_earlier_exchange(self):
+        """Claims of an exchange before the burst were not derived from it.
+
+        The forward search has no earlier fallback: with no appraised row after
+        the absorbed message, the claims step changes nothing.
+        """
+        db = await make_full_db(None)
+        try:
+            await db.execute(EXCHANGE_LOG_DDL)
+            await db.commit()
+            earlier = await insert_message(db, "irc:#a", "user", "before the burst")
+            absorbed = await insert_message(db, "irc:#a", "user", "absorbed")
+            await _add_exchange(db, "t0", "irc:#a", earlier)
+            await _add_absorbed_row(db, "b1", "irc:#a", absorbed)
+            await redact_messages(db, [absorbed])
+            prior, _ = await _row(db, "t0")
+            assert prior["stage2"]["past_claims"] == CLAIMS
+        finally:
+            await db.close()
+
+
 class TestPastClaims:
     async def test_redacting_user_message_scrubs_its_exchange(self):
         db, ids = await _db_with_dialog()
