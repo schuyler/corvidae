@@ -4494,7 +4494,9 @@ Supersession is the one piece of state: an `OrderedDict` of the highest
 `run_number` per `(repository.full_name, workflow.id, head_branch)`, updated
 from every `workflow_run` event including the `requested` and `in_progress`
 ones it drops, bounded to `SUPERSESSION_KEYS` with least-recently-updated
-evicted first. A completed `cancelled` run below that mark is dropped. It is
+evicted first. The key and run number are read before anything else, because
+GitHub sends `"conclusion": null` until a run completes; only a completed run
+needs the fields its line prints. A completed `cancelled` run below that mark is dropped. It is
 in memory, so a restart can cost one extra cancelled line.
 
 Lines go through the kernel's spill service exactly as `webhook_notify`'s

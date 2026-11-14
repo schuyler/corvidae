@@ -14,7 +14,7 @@ Reported:
 |---|---|---|
 | ``workflow_run`` | ``completed`` unless superseded | ``CI <conclusion>: <workflow> on <branch> (run #<n>) <url>`` |
 | ``pull_request`` | ``opened``, ``reopened``, ``closed`` | ``PR #<n> opened/reopened/merged/closed: <title> <url>`` |
-| ``push`` | the branch is in ``push_branches`` | ``Push to <branch>: <n> commit(s), head <sha> <compare>`` |
+| ``push`` | the branch is in ``push_branches``, not deleted | ``Push to <branch>: <n> commit(s), head <sha> [<compare>]`` |
 | ``ping`` | always | not notified; one INFO naming the endpoint and the hook |
 
 Everything else — ``workflow_job``, non-terminal ``workflow_run``, other
@@ -279,21 +279,20 @@ class GithubWebhookPlugin(CorvidaePlugin):
         if not isinstance(run, dict):
             self._count("workflow_run without a run object", delivery.endpoint)
             return None
-        fields = {}
-        for name in ("conclusion", "head_branch", "run_number", "html_url", "name"):
-            fields[name] = self._field(delivery, "workflow_run", name)
-        # _field already warned for each absent one; a line needs all of them.
-        if any(value is None for value in fields.values()):
+        # The supersession key and run number come first: every event carries
+        # them, while conclusion is null until a run completes (#847 review).
+        branch = self._field(delivery, "workflow_run", "head_branch")
+        number = self._field(delivery, "workflow_run", "run_number")
+        if branch is None or number is None:
             return None
         workflow_id = self._field(delivery, "workflow", "id")
         repo = self._field(delivery, "repository", "full_name")
-        number = fields["run_number"]
         if not isinstance(number, int):
             self._count("workflow_run without a run_number", delivery.endpoint)
             return None
         # Track the highest run per workflow and branch from every event,
         # including the requested/in_progress ones otherwise dropped.
-        key = (str(repo), str(workflow_id), str(fields["head_branch"]))
+        key = (str(repo), str(workflow_id), str(branch))
         highest = self._highest_run.get(key, 0)
         if number > highest:
             self._highest_run[key] = number
@@ -303,12 +302,19 @@ class GithubWebhookPlugin(CorvidaePlugin):
         if action != "completed":
             self._count(f"workflow_run {action}", delivery.endpoint)
             return None
+        # Only a completed run needs the fields its line prints.
+        fields = {}
+        for name in ("conclusion", "html_url", "name"):
+            fields[name] = self._field(delivery, "workflow_run", name)
+        # _field already warned for each absent one; a line needs all of them.
+        if any(value is None for value in fields.values()):
+            return None
         if fields["conclusion"] == "cancelled" and number < self._highest_run[key]:
             self._count("superseded cancelled run", delivery.endpoint)
             return None
         return (
             f"CI {fields['conclusion']}: {_cut(fields['name'])} on "
-            f"{_cut(fields['head_branch'])} (run #{number}) {fields['html_url']}"
+            f"{_cut(branch)} (run #{number}) {fields['html_url']}"
         )
 
     def _line_pull_request(self, delivery: WebhookDelivery) -> str | None:
@@ -340,6 +346,16 @@ class GithubWebhookPlugin(CorvidaePlugin):
         ref = self._field(delivery, "ref")
         if ref is None:
             return None
+        # A malformed payload must not raise into the ingress worker.
+        if not isinstance(ref, str):
+            logger.warning(
+                "github_webhook: push delivery %s on endpoint %s has a ref of "
+                "type %s, not a string; skipped",
+                delivery.delivery_id,
+                delivery.endpoint,
+                type(ref).__name__,
+            )
+            return None
         branch = ref.removeprefix("refs/heads/")
         if not ref.startswith("refs/heads/"):
             self._count("push to a non-branch ref", delivery.endpoint)
@@ -347,17 +363,20 @@ class GithubWebhookPlugin(CorvidaePlugin):
         if branch not in self._targets[delivery.endpoint].push_branches:
             self._count(f"push to {branch}", delivery.endpoint)
             return None
+        # A branch deletion is a push with an all-zero head: nothing to act on.
+        if delivery.payload.get("deleted") is True:
+            self._count(f"deletion of {branch}", delivery.endpoint)
+            return None
         commits = self._field(delivery, "commits")
         head = self._field(delivery, "after")
-        compare = self._field(delivery, "compare")
+        compare = delivery.payload.get("compare")
         if not isinstance(commits, list) or not isinstance(head, str):
             self._count("push without commits or after", delivery.endpoint)
             return None
         count = len(commits)
-        return (
-            f"Push to {_cut(branch)}: {count} commit{'s' if count != 1 else ''}, "
-            f"head {head[:7]} {compare}"
-        )
+        line = f"Push to {_cut(branch)}: {count} commit{'s' if count != 1 else ''}, head {head[:7]}"
+        # The compare URL is optional: a line without it still says what moved.
+        return f"{line} {compare}" if compare else line
 
     # -- sending -----------------------------------------------------------
 

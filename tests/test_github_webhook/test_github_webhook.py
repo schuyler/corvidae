@@ -244,7 +244,8 @@ async def test_a_branch_deletion_is_not_reported_as_a_push(tmp_path):
     head; it is not a push the agent can act on."""
     block = {"endpoints": {"github": {"channels": ["irc:#a"], "push_branches": ["main"]}}}
     plugin, rec, _ = await build(tmp_path, block)
-    payload = push("main", commits=0, head="0" * 40) | {"deleted": True}
+    # commits=1 so a fix that drops every empty push cannot pass this.
+    payload = push("main", commits=1, head="0" * 40) | {"deleted": True}
     await plugin._deliver(github("push", payload))
     assert rec.calls == []
 
@@ -290,7 +291,7 @@ async def test_a_delivery_without_an_event_header_is_skipped_loudly(tmp_path, ca
     [
         (
             "workflow_run",
-            {"action": "completed", "workflow_run": {"run_number": 1}},
+            {"action": "completed", "workflow_run": {"run_number": 1, "head_branch": "main"}},
             "workflow_run.conclusion",
         ),
         ("pull_request", {"action": "opened", "pull_request": {"number": 1}}, "pull_request.title"),

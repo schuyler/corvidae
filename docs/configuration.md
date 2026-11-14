@@ -1193,7 +1193,7 @@ Requires the github-webhook extra (`--extra github-webhook` on your `uv sync` li
 |-------|---------------|------|
 | `workflow_run` | `completed`, unless superseded | `CI success: CI on main (run #6) https://…` |
 | `pull_request` | `opened`, `reopened`, `closed` (`merged: true` reads "merged") | `PR #7 merged: Fix the thing https://…` |
-| `push` | the branch is in `push_branches` | `Push to main: 3 commits, head abcdef1 https://…` |
+| `push` | the branch is in `push_branches` and the push did not delete it | `Push to main: 3 commits, head abcdef1 https://…` (the compare URL is left off when the payload has none) |
 | `ping` | always | not notified; one INFO naming the endpoint and the hook id |
 
 Everything else — `workflow_job`, non-terminal runs, other events — is dropped and counted at DEBUG. A run GitHub cancelled because a newer run replaced it is inferred from the highest `run_number` seen per `(repository, workflow, branch)` and dropped, so supersession needs the hook to send `workflow_run` events, `requested` included; the map is in memory and lost on restart, which costs at worst one extra cancelled line. A delivery with no `X-GitHub-Event` header, or one missing a field a line needs, is skipped with a `WARNING` naming the delivery.
