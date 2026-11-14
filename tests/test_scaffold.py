@@ -216,6 +216,16 @@ class TestScaffoldCommand:
         assert "plugins loaded" in result.output            # whether it was picked up
         assert "uv sync" in result.output and "removes" in result.output  # the sync caveat
 
+    def test_install_step_uses_no_deps_so_it_keeps_the_local_corvidae(self, tmp_path):
+        """The generated pyproject depends on corvidae from git; resolving it would
+        replace the operator's installed corvidae, so the install must skip deps."""
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(scaffold_command, ["Weather", "-o", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        install = [ln for ln in result.output.splitlines() if ln.strip().startswith("uv pip install")]
+        assert install and all("--no-deps" in ln for ln in install), result.output
+
 
 # ---------------------------------------------------------------------------
 # What the generated project contains (#812)

@@ -167,7 +167,12 @@ async def test_registers_tool_through_the_real_pm():
 async def test_malformed_config_names_the_key_and_the_remedy():
     pm = create_plugin_manager()
     pm.register(${class_name}(), name="${entry_point_name}")
-    with pytest.raises(ValueError, match=r"Config error: ${entry_point_name}\\.max_chars"):
+    # The message must name the key, the rejected value and the remedy.
+    with pytest.raises(
+        ValueError,
+        match=r"Config error: ${entry_point_name}\\.max_chars must be a positive "
+        r"integer, got 0 — check agent\\.yaml",
+    ):
         await pm.ahook.on_init(
             pm=pm, config={"${entry_point_name}": {"max_chars": 0}}
         )
@@ -177,7 +182,9 @@ NEXT_STEPS_TEMPLATE = string.Template("""\
 
 Next steps:
   1. Install it into the corvidae environment:
-       uv pip install --python <corvidae-venv>/bin/python -e .
+       uv pip install --no-deps --python <corvidae-venv>/bin/python -e .
+     (--no-deps keeps the corvidae already installed there instead of
+     replacing it with the git source the generated pyproject names.)
   2. Start corvidae and check that the "plugins loaded" log line names
      ${entry_point_name}. If it does not, the entry point in pyproject.toml is
      wrong and the plugin never loads.

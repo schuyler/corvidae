@@ -157,7 +157,12 @@ async def test_registers_tool_through_the_real_pm():
 async def test_malformed_config_names_the_key_and_the_remedy():
     pm = create_plugin_manager()
     pm.register(EchoPlugin(), name="echo")
-    with pytest.raises(ValueError, match=r"Config error: echo\.max_chars"):
+    # The message must name the key, the rejected value and the remedy.
+    with pytest.raises(
+        ValueError,
+        match=r"Config error: echo\.max_chars must be a positive "
+        r"integer, got 0 — check agent\.yaml",
+    ):
         await pm.ahook.on_init(
             pm=pm, config={"echo": {"max_chars": 0}}
         )
