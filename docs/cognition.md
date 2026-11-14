@@ -897,7 +897,8 @@ nothing and are admitted at the channel's next turn, whatever its origin
 
 The funnel also takes pull-path promises (#717). A provider implements
 `on_funnel_ingest` and submits, per source, an `asyncio.Future` that
-resolves to an `Ingest` (entries, plus an optional callback) or to `None`.
+resolves to an `Ingest` (entries, optional per-entry dedupe keys, plus an
+optional callback) or to `None`.
 A promise that is done when the turn sweeps it is admitted that turn; one
 still pending is admitted at the channel's next turn after it resolves,
 whatever that turn's origin. `funnel.ingest_ttl` (unset by default, so
