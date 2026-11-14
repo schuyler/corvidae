@@ -586,8 +586,12 @@ def test_config_half_life_days_changes_scores(
         assert [c["id"] for c in candidates] == ids
         scores[half_life] = candidates[0]["score"]
 
-    # A shorter half-life decays the score more.
-    assert scores[1] < scores[1000]
+    # A shorter half-life decays the score more. The ratio is determined
+    # by the decay formula: score = sim * exp(-age / half_life_days).
+    # With age=10d: ratio = exp(-10/1000) / exp(-10/1) = exp(10 - 0.01).
+    import math
+    expected_ratio = math.exp(10 * (1 - 1/1000))
+    assert scores[1000] / scores[1] == pytest.approx(expected_ratio, rel=1e-3)
 
 
 def test_snapshot_not_a_database_reports_open_error(

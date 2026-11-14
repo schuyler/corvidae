@@ -716,7 +716,7 @@ async def run_snapshot_evaluation(
                       f"(over {group['scored']} of {group['queries']} queries)")
         if degraded:
             print(f"⚠️  FTS5 fallback on {degraded} of {len(results)} queries")
-        if degraded == len(results):
+        if results and degraded == len(results):
             # #662: every query degraded — the pool file is useless for
             # calibration. Name the cause and refuse to write it.
             n = len(results)
@@ -740,7 +740,7 @@ async def run_snapshot_evaluation(
             "band_on": memory._band_on,
             "band_strong": memory._band_strong,
             "band_moderate": memory._band_moderate,
-            "encoder": encoder,
+            "encoder": encoder,  # configured encoder; None when FTS-only
         }
 
         pool_out.write_text(json.dumps(
