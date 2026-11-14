@@ -26,10 +26,11 @@ Without the funnel nothing calls ``on_funnel_ingest``, so a source does nothing;
 the mixin declares the funnel as an optional dependency so that is logged at
 DEBUG rather than as a stray hook implementation.
 
-Known limit (#726): a result that finishes after the funnel's sweep but before
-the same turn's collect is lost if the mixin submits again that turn. The mixin
-never submits while its own promise is pending, so this needs a search that
-completes inside that window.
+Same-turn admission (#726): a promise submitted already done is admitted
+before that turn's model call, and a result that finishes after the funnel's
+sweep but before the same turn's collect is carried into that turn's drain
+rather than lost when the mixin submits again. A fast local source therefore
+needs no timing cooperation from its provider.
 """
 
 from __future__ import annotations
