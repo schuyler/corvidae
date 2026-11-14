@@ -1474,6 +1474,12 @@ class TestTaskResultPersistence:
         for t in tasks:
             assert by_id[t.task_id] == f"multi-{t.description[2:]}"
 
+    # TODO: investigate if this recurs. The test is CPU-heavy by design (200k-entry
+    # deque scans plus 4000 logged enqueues) and takes ~3s locally, but it hit the
+    # global 15s timeout once on the self-hosted CI runner while the suite was
+    # running at about twice its usual speed. A longer per-test limit absorbs
+    # runner load without raising the global timeout.
+    @pytest.mark.timeout(60)
     async def test_task_result_tool_race_deque_gil_span(self, tmp_path):
         """The task_result tool must not raise when a lookup spans a GIL switch.
 
