@@ -170,6 +170,23 @@ def _build_header_stack(sections, page_title):
     return sections
 
 
+def _render_stub(section):
+    """A stub section as text for merging: its heading line, then its body.
+
+    A merged stub keeps no metadata of its own, so its heading has to survive
+    in the text: "[page > Known bugs]" is the only thing a search for the
+    heading words can then match. Without it a short section's title vanished
+    from the index entirely, which is worst exactly for the short sections that
+    carry the point (Known bugs, Status, Decision).
+    """
+    heading = section["heading"]
+    text = section["text"].strip()
+    if not heading:
+        return text
+    title = f"{'#' * max(section['level'], 1)} {heading}"
+    return f"{title}\n\n{text}" if text else title
+
+
 def _merge_stub_sections(sections):
     """Merge stub sections (text < STUB_WORDS) forward or backward.
 
@@ -195,7 +212,9 @@ def _merge_stub_sections(sections):
         else:
             # Substantial (or preamble) section — prepend any pending stubs
             if pending_stubs:
-                prefix_text = "\n\n".join(s["text"] for s in pending_stubs if s["text"])
+                prefix_text = "\n\n".join(
+                    _render_stub(s) for s in pending_stubs
+                ).strip()
                 if prefix_text:
                     section = dict(section)
                     section["text"] = (prefix_text + "\n\n" + section["text"]
@@ -205,7 +224,7 @@ def _merge_stub_sections(sections):
 
     # Any remaining pending stubs merge backward into the last substantial section
     if pending_stubs:
-        stub_text = "\n\n".join(s["text"] for s in pending_stubs if s["text"])
+        stub_text = "\n\n".join(_render_stub(s) for s in pending_stubs).strip()
         if stub_text:
             # Find last substantial non-preamble section in merged
             for idx in range(len(merged) - 1, -1, -1):

@@ -177,6 +177,27 @@ class TestSectionAwareChunking:
         assert not any(c["metadata"]["section"] == "Tail" for c in result)
         assert any("Too short." in c["text"] for c in result)
 
+    def test_a_stub_merged_forward_keeps_its_heading_in_the_text(self):
+        """The merged stub has no metadata of its own, so its heading must survive in text."""
+        long_body = " ".join([f"word{i}" for i in range(60)])
+        content = (
+            "---\ntitle: Stub Test\n---\n"
+            "# Known bugs\n\nNothing yet.\n\n"
+            f"# Long Section\n\n{long_body}"
+        )
+        text = "\n".join(c["text"] for c in chunk_page("test", content))
+        assert "Known bugs" in text and "Nothing yet." in text
+
+    def test_a_trailing_stub_merged_backward_keeps_its_heading_in_the_text(self):
+        long_body = " ".join([f"word{i}" for i in range(60)])
+        content = (
+            "---\ntitle: Trailing Stub\n---\n"
+            f"# Main Section\n\n{long_body}\n\n"
+            "# Status\n\nDone."
+        )
+        text = "\n".join(c["text"] for c in chunk_page("test", content))
+        assert "Status" in text and "Done." in text
+
     def test_page_title_falls_back_to_pagepath(self):
         content = "# Section One\n\nSome content here in the section."
         result = chunk_page("My/Wiki/Page", content)
