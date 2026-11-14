@@ -126,3 +126,69 @@ async def test_selected_candidates_read_not_admitted_without_a_funnel():
     _rid, rows = await only_retrieval(db)
     assert rows[mem]["outcome"] == "not_admitted"
     await db.close()
+
+
+async def test_the_prune_finds_old_rows_through_the_ts_index():
+    """#682: retrieval_log(ts) is indexed, and the prune's SELECT uses it.
+
+    Without the index the first prune of months of rows scans the whole table
+    while holding memory's write lock.
+    """
+    memory, _e, channel, _conv, db = await build_retrieval_env(
+        config_with_retention({"retrieval_log_max_age_days": 30})
+    )
+    async with db.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index' "
+        "AND tbl_name = 'retrieval_log'"
+    ) as cursor:
+        names = {row[0] for row in await cursor.fetchall()}
+    assert "retrieval_log_ts" in names, f"no ts index on retrieval_log: {names}"
+
+    async with db.execute(
+        "EXPLAIN QUERY PLAN SELECT id FROM retrieval_log WHERE ts < ? LIMIT ?",
+        (0.0, 10),
+    ) as cursor:
+        plan = " ".join(str(row[-1]) for row in await cursor.fetchall())
+    assert "retrieval_log_ts" in plan, f"the prune does not use the index: {plan}"
+    await db.close()
+
+
+async def test_a_large_prune_runs_in_batches(monkeypatch):
+    """#682: the backlog goes one bounded transaction at a time.
+
+    With a batch of 2, five old rows take three write transactions, and each
+    commits on its own — so a concurrent writer waits a batch, not the whole
+    backlog.
+    """
+    from corvidae_cognition import retention as retention_module
+
+    memory, _e, channel, _conv, db = await build_retrieval_env(
+        config_with_retention({"retrieval_log_max_age_days": 30})
+    )
+    mem = await seed(db, channel.id, "the rain gauge is on the north fence", 1, 2)
+    now = time.time()
+    for _ in range(5):
+        await add_retrieval(db, now - 31 * DAY, [mem])
+    new = await add_retrieval(db, now - 1 * DAY, [mem])
+
+    monkeypatch.setattr(retention_module, "RETENTION_PRUNE_BATCH", 2)
+    # The prune is the only writer here, so counting its transactions is what
+    # an interleaved writer would see as chances to commit.
+    batches = 0
+    real_write_txn = memory._write_txn
+
+    def counting_write_txn():
+        nonlocal batches
+        batches += 1
+        return real_write_txn()
+
+    monkeypatch.setattr(memory, "_write_txn", counting_write_txn)
+
+    await run_retention_job(memory, now=now)
+
+    assert await surviving(db) == ({new}, {new})
+    assert batches == 4, (
+        f"5 old rows in batches of 2 take three write transactions, plus the "
+        f"empty look that ends the loop; saw {batches}"
+    )
+    await db.close()

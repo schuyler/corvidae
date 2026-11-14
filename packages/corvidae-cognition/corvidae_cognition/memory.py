@@ -1310,6 +1310,12 @@ CREATE TABLE IF NOT EXISTS retrieval_candidate (
 ) WITHOUT ROWID
 """
 
+# The retention prune's age cutoff (#682) and every "what was retrieved when"
+# query: without it a first prune of months of rows scans the whole table.
+RETRIEVAL_LOG_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS retrieval_log_ts ON retrieval_log (ts)
+"""
+
 # Lookups by memory: "why didn't it remember X" and the redaction delete.
 RETRIEVAL_CANDIDATE_INDEX_DDL = """
 CREATE INDEX IF NOT EXISTS retrieval_candidate_memory
@@ -3892,6 +3898,7 @@ class MemoryPlugin(CorvidaePlugin):
         await db.execute(MEMORY_FTS_INSERT_TRIGGER)
         await db.execute(MEMORY_FTS_UPDATE_TRIGGER)
         await db.execute(RETRIEVAL_LOG_DDL)
+        await db.execute(RETRIEVAL_LOG_INDEX_DDL)
         # Schema upgrade: retrieval_log tables from before top_similarity
         # (#66) gain it as a nullable column; old rows read NULL.
         await add_column_if_missing(db, "retrieval_log", "top_similarity", "REAL")
