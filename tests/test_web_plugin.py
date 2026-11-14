@@ -1520,6 +1520,10 @@ class TestStopBound:
         messages = [r.getMessage() for r in caplog.records
                     if r.levelno >= logging.WARNING]
         assert any("daemon.shutdown_timeout" in m for m in messages), messages
+        # The bound is printed with two decimals (0.2 s here, not rounded) and
+        # the useless "close the tabs" advice is gone.
+        assert any("within 0.20s" in m for m in messages), messages
+        assert not any("browser tabs" in m for m in messages), messages
 
 
 class TestBackpressure:

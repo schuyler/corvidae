@@ -36,7 +36,11 @@ from urllib.parse import urlsplit
 from corvidae.clock import Clock
 from corvidae.envref import EnvRefError, expand_env_refs
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
-from corvidae.shutdown import parse_shutdown_timeouts
+from corvidae.shutdown import (
+    DEFAULT_STOP_BOUND_SECONDS,
+    parse_shutdown_timeouts,
+    stop_bound_seconds,
+)
 from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
@@ -341,31 +345,8 @@ def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
     return resolved
 
 
-# Upper bound on how long on_stop waits for owner tasks to close their
-# transports. Runtime gives the whole stop broadcast daemon.shutdown_timeout
-# (3 s by default), so this is the MCP client's share of it (#760): the
-# graceful budget less a reserve for the cancel grace below and for the rest
-# of the broadcast (other plugins' on_stop, idle.stop, clock.close). At the
-# default 3 s that is the historical 2.5 s.
-_STOP_RESERVE_SECONDS = 0.5
-# Smallest bound worth handing to asyncio.wait: a value that rounds to zero
-# turns the wait into a poll, and a config value can be arbitrarily small.
-_MIN_STOP_BOUND_SECONDS = 0.05
-# Fallback for when the config cannot be read (on_stop without on_init).
-_DEFAULT_STOP_BOUND_SECONDS = 2.5
 # After cancelling a straggler, how long to wait for it to unwind.
 _CANCEL_GRACE_SECONDS = 0.3
-
-
-def stop_bound_seconds(shutdown_timeout: float) -> float:
-    """MCP's share of the graceful phase (``daemon.shutdown_timeout``).
-
-    A reserve rather than a fraction, because the cancel grace is spent
-    *after* the bound: a bound of 80% of a 1 s budget would cancel at 0.8 s
-    and then wait up to 0.3 s more, which is the overrun this bound exists to
-    prevent (#760). Never zero, so a tiny budget still gets a real timeout.
-    """
-    return max(_MIN_STOP_BOUND_SECONDS, shutdown_timeout - _STOP_RESERVE_SECONDS)
 
 
 # Transports a server config may name.
@@ -738,13 +719,14 @@ class McpClientPlugin(CorvidaePlugin):
         Concurrent, not one after another: the SDK's stdio_client can take
         about 2 s per server to terminate a process, and Runtime allows the
         whole stop broadcast daemon.shutdown_timeout (3 s by default). An owner that has not finished within
-        the derived stop bound (80% of daemon.shutdown_timeout) is cancelled
+        the derived stop bound (daemon.shutdown_timeout less a 0.5 s reserve, see
+        ``corvidae.shutdown.stop_bound_seconds``) is cancelled
         and logged. Never raises (a cancellation of this coroutine itself
         excepted).
         """
         owners = list(self._owners.values())
         tasks = [o.task for o in owners if o.task is not None]
-        stop_bound = getattr(self, '_stop_bound', _DEFAULT_STOP_BOUND_SECONDS)
+        stop_bound = getattr(self, '_stop_bound', DEFAULT_STOP_BOUND_SECONDS)
         # Tell every owner to close its transport at the same moment.
         for owner in owners:
             owner.stop.set()

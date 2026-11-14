@@ -24,6 +24,7 @@ import pytest
 
 from corvidae import mcp_client
 from corvidae.mcp_client import McpClientPlugin
+from corvidae.shutdown import stop_bound_seconds
 
 ECHO_SERVER = str(Path(__file__).parent / "fixtures" / "mcp_echo_server.py")
 
@@ -214,13 +215,15 @@ class TestStopBudget:
 class TestStopBoundFromConfig:
     """#760: the bound follows daemon.shutdown_timeout instead of a constant."""
 
-    def test_bound_is_the_budget_less_the_reserve(self):
+    @pytest.mark.parametrize(
+        ("budget", "expected"),
+        [(3.0, 2.5), (1.0, 0.5), (0.5, 0.05), (0.01, 0.05)],
+    )
+    def test_bound_is_the_budget_less_the_reserve(self, budget, expected):
         # At the default 3 s this is the historical 2.5 s; at 1 s it must be
         # under the whole budget, which is the case the issue exists for.
-        assert mcp_client.stop_bound_seconds(3.0) == pytest.approx(2.5)
-        assert mcp_client.stop_bound_seconds(1.0) == pytest.approx(0.5)
         # Never a zero-length wait, however small the operator's budget.
-        assert mcp_client.stop_bound_seconds(0.5) == 0.05
+        assert stop_bound_seconds(budget) == pytest.approx(expected)
 
     async def test_bound_comes_from_daemon_shutdown_timeout(self):
         plugin, config = _make_plugin({"srv": _stdio_cfg()})
@@ -248,6 +251,65 @@ class TestStopBoundFromConfig:
         assert elapsed < 1.0, elapsed
         warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("srv" in m and "killed by hand" in m for m in warnings), warnings
+        assert await _wait_no_children() == []
+
+    async def test_runtime_stop_exits_normally_with_slow_server(self, caplog):
+        """Acceptance: budget 1 s, a 2 s teardown, Runtime.stop() never force-exits."""
+        import tempfile
+        from unittest.mock import AsyncMock
+
+        import yaml
+
+        from corvidae.runtime import Runtime
+
+        plugin, config = _make_plugin({"srv": _stdio_cfg()})
+        config["daemon"] = {"shutdown_timeout": 1}
+        await _start_in_own_task(plugin, config)
+
+        async def slow() -> None:
+            await asyncio.sleep(2)
+
+        plugin._owners["srv"].stack.push_async_callback(slow)
+
+        # Runtime with a mocked plugin manager whose stop broadcast runs the
+        # real MCP plugin's on_stop (as apluggy does, in its own task).
+        mock_pm = MagicMock()
+        mock_pm.ahook.on_init = AsyncMock(return_value=[])
+        mock_pm.ahook.on_start = AsyncMock(return_value=[])
+
+        async def broadcast_stop(**kwargs):
+            await asyncio.create_task(plugin.on_stop())
+            return []
+
+        mock_pm.ahook.on_stop = AsyncMock(side_effect=broadcast_stop)
+        mock_agent = MagicMock()
+        mock_agent.on_start = AsyncMock()
+        mock_agent.on_stop = AsyncMock()
+        mock_pm.get_plugin.return_value = mock_agent
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            yaml.dump({"llm": {"main": {"base_url": "http://localhost:8080",
+                                        "model": "m"}},
+                       "daemon": {"shutdown_timeout": 1}}, f)
+            config_path = f.name
+        caplog.set_level(logging.DEBUG)
+        try:
+            with patch("corvidae.runtime.create_plugin_manager", return_value=mock_pm), \
+                    patch("corvidae.runtime.validate_dependencies"), \
+                    patch("corvidae.runtime.configure_logging"), \
+                    patch("corvidae.runtime.logging.shutdown"), \
+                    patch("corvidae.runtime.os._exit") as forced_exit:
+                rt = Runtime(config_path=config_path)
+                await rt.start()
+                await rt.stop()
+        finally:
+            os.unlink(config_path)
+
+        # Normal path: no forced exit, and the slow server was cancelled by name.
+        forced_exit.assert_not_called()
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("srv" in m and "killed by hand" in m for m in warnings), warnings
+        assert not any("force-exiting" in m for m in warnings), warnings
         assert await _wait_no_children() == []
 
 

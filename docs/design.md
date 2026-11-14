@@ -2981,7 +2981,7 @@ the exception). It then waits on its `stop` event and closes the stack in the
 same task. Owners live in `self._owners` (name to owner).
 
 `on_stop` sets every owner's `stop` event at once and awaits all the tasks
-together with `asyncio.wait`, bounded by `stop_bound_seconds(...)`:
+together with `asyncio.wait`, bounded by `corvidae.shutdown.stop_bound_seconds(...)`:
 `daemon.shutdown_timeout` less 0.5 s kept for the rest of the graceful phase,
 which is the historical 2.5 s at the default 3 s. A reserve rather than a
 fraction, because the cancel grace below is spent *after* the bound, so 80% of
@@ -4173,7 +4173,7 @@ At the default 3 s that is 2.5 s, which is exactly what the stages need; an
 operator who lowers the key shortens the budget instead of pushing the daemon
 past it, and a stage still running at the bound is cancelled and logged at
 WARNING saying how many sockets and handlers may still be open and naming the
-key. The same rule sizes the MCP client's stop bound (#760).
+key. The same function, `corvidae.shutdown.stop_bound_seconds`, sizes the MCP client's stop bound (#760).
 New WebSocket handshakes during shutdown get 503. Aborting rather than
 closing matters with a peer that stopped reading (a phone asleep):
 `transport.close()` waits to flush a full buffer forever, and aiohttp's
