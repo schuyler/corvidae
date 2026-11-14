@@ -256,7 +256,7 @@ Each stage has a fork instruction:
 | Key | Default copy | Notes |
 |-----|--------------|-------|
 | `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | Appended to the dropped prefix. |
-| `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | Followed by a sentence naming where the range starts. Restart-only, like the rest of `memory.*`. The output schema is fixed in code: an override must still ask for the reply shape: `entries` (each with a `narrative` and `topic_tags`), `participants` and `importance`. A legacy `summary` reply is still read as one entry. |
+| `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | Followed by a size sentence (`memory.entry_target_tokens`) and a sentence naming where the range starts. Restart-only, like the rest of `memory.*`. The output schema is fixed in code: an override must still ask for the reply shape: `entries` (each with a `narrative` and `topic_tags`), `participants` and `importance`. A legacy `summary` reply is still read as one entry. |
 | `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
 | `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits and the CONTEXT snapshot. An override must ask for its per-claim verdicts format or every run skips. |
 
@@ -363,7 +363,7 @@ These are recommendations, not hardcoded blocks: `set_settings` writes are chann
 The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) as of this writing:
 
 - `appraisal.novelty.no_probe_default`, `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`, `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.stage2_prompt`, `appraisal.weights.commitment`, `appraisal.weights.disagreement`, `appraisal.weights.imperative`, `appraisal.weights.novelty`, `appraisal.weights.question`
-- `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.sample_below_rate`
+- `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.lens.novelty`, `critique.lens.retention`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.sample_below_rate`
 - `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.enforce`, `gate.send.min_salience`
 - `outbound_cap.count_progress`, `outbound_cap.max_messages`
 
@@ -392,6 +392,20 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 `critique.provenance.enabled` (default `true`) switches the provenance check. It has no other tunables; its instruction is the static `critique.fork_prompt.provenance`. Stage-2 appraisal detects the past claims and a fork of the window judges them, so the check needs the `appraisal` plugin and `agent.forks` covering `critique`. See [cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy).
 
 *(The `critique.*` tunable keys are not individually tabulated here; the complete list is under "Runtime-tunable gate parameters" above.)*
+
+### The retention lens (#742)
+
+A knowledge base root turns on a critique lens that asks a different question from the three stylistic ones: the exchange carried something durable — a fact about a person, system or domain, a belief the agent formed, a behaviour worth keeping — and is it filed in the agent's knowledge base? The root is `critique.retention.root` when set, and otherwise markdown_recall's root (the first of `markdown_recall.roots`, else `markdown_recall.root`, else recall's default `state/markdown_recall` when the `markdown_recall` block is present and the plugin is not disabled), so facts are filed where recall reads them. That means **configuring markdown_recall turns the lens on**. The lens is **inert when neither gives a root**: with no knowledge base there is nothing to check an exchange against, and the lens never fires.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `critique.retention.root` | string | markdown_recall's first root, else none | The knowledge base directory, named in the lens's fork instruction so the model can point at a file inside it (for example `values/`). Not read from the disk by the plugin: the agent reads it with its own file tools when the finding arrives. Static config, not a runtime tunable. |
+| `critique.lens.novelty` | float | `0.6` | Novelty at or above which the retention lens may fire (the appraisal stage-1 novelty, 1 − familiarity with the probe). Both thresholds must be crossed. |
+| `critique.lens.retention` | float | `0.5` | Commitment density at or above which the retention lens may fire, alongside `critique.lens.novelty`. |
+
+The lens flags, it does not file. Each objection carries the `file` it belongs in and the `content` to append, and a retention finding wakes the channel: the critique turn's stub names the root and tells the agent to read the file and append the content as a new section only if it is missing, then reply `NO_REPLY` (withheld, so the turn is silent by default). Stylistic findings from the same run are queued without a wake and admitted on the channel's next turn of any origin, which is usually this filing turn, so the agent sees them where it is told to stay silent rather than on its next reply; findings queued before a provenance wake behave the same way, and changing that is [#889](https://github.com/schuyler/corvidae/issues/889). With the lens on, the provenance check's wake uses the same stub, because one stub governs a channel's pending critique findings whichever wake fires first. The agent files in that turn after reading the file and deciding the fact is really missing — the check is why a lens is the mechanism rather than an automatic write. Updates are additive (a section to append to, never a rewrite), the knowledge base directory must be writable by the daemon, and the lens inherits the `critique` stage's profile and fork settings like the other lenses. Set the two thresholds high enough that an ordinary exchange does not fire it: the lens costs a fork per selection, and its findings cost a turn.
+
+Leave `critique.retention.root` unset to file into recall's root. An explicit value wins; pointing it at a directory recall does not index is legal, and `CritiquePlugin` logs one `WARNING` at startup naming both, because facts filed where recall cannot look are written down and then re-learned. The check runs at `on_init`, so a `set_settings`-style hot change of either key is not covered by it.
 
 #### `gate.*` — engagement and decide gates
 
@@ -434,9 +448,10 @@ A record's `created_at` is the `sessions.db` timestamp of the last message in it
 |-----|------|---------|-------------|
 | `memory.idle_consolidate_after` | float | `1800` | Seconds a channel must be quiet before idle consolidation runs on its un-consolidated tail, and the period between repeat runs while it stays quiet. A channel that never goes quiet is consolidated at turn ends (`memory.consolidate_after_tokens`, forks on) and through compaction instead. Also how long the turn trigger backs off after three consecutive failed turn forks on a channel (#620), unless a consolidation moves the watermark sooner, so raising it makes both idle runs and turn-fork retries rarer. Must be a positive finite number; zero, negative or non-finite values fail at startup naming this key. Takes effect at restart. |
 | `memory.consolidate_after_tokens` | integer | `4000` | Window tokens of new conversation that start a turn consolidation. At the end of each turn (a final reply with no tool calls pending), consolidation forks the live window once the messages above the watermark, minus admitted memories, summaries and unsent (gate-vetoed) messages, add up to this many tokens by the window's own estimate. Only matters with `agent.forks` on for `consolidation`; with forks off the turn trigger never runs and compaction and idle do the work. Raise it for fewer, larger consolidations (each one is a fork: the cached window prefix plus the consolidation decode). Three consecutive failed turn forks on a channel back the turn trigger off for `memory.idle_consolidate_after` seconds or until a consolidation moves the watermark (#620). Must be a positive integer; `0`, negatives, floats, strings, `true`/`false` and `null` fail at startup with `memory.consolidate_after_tokens: got <value>; expected a positive integer number of window tokens (default 4000) — check agent.yaml`. Takes effect at restart. |
+| `memory.entry_target_tokens` | integer | `256` | Size target for one consolidation entry's narrative, in tokens. Consolidation appends a sentence to the instruction (the default or a `memory.consolidation_fork_prompt` override) asking for entries of about `round(target × 0.75)` words or fewer (192 by default) and, for a longer topic, consecutive entries rather than one long one. An entry that comes out over the target is still stored in full; a warning naming the channel, memory id, tokens, target, mode and prompt hash is logged after the write commits (fork and standalone entries; tokens by the kernel's tiktoken counter, an approximation of the serving model's tokenizer). Because the sentence is part of the stamped instruction, changing the target changes `prompt_hash`, and an override's hash is no longer sha256 of its config text ([cognition.md](cognition.md#record-stamps)). Must be a positive integer; `0`, negatives, floats, strings, `true`/`false` fail at startup with `memory.entry_target_tokens: got <value>; expected a positive integer number of tokens (default 256) — check agent.yaml`. Takes effect at restart. |
 | `memory.half_life_days` | float | `30` | Recency decay constant of the retrieval score (`similarity × exp(-age_days / half_life)`). It is an e-folding time: the factor is `1/e`, not `1/2`, at `half_life_days`. |
 | `memory.retrieval.k` | integer | `8` | Memories returned per retrieval. The KNN, and the FTS side under `candidates: hybrid`, each fetch `k × 4` candidates to rank. |
-| `memory.retrieval.candidates` | `hybrid` \| `vector` | `hybrid` | Where vector-path candidates come from (#666). `hybrid` joins the KNN with an FTS5 search over `memory_fts` (common English words left out) and ranks them together by reciprocal rank fusion, so a record that names a person, project or identifier is found even when the embedding doesn't place it near the query. A record only FTS found bands on its measured cosine like any other, and one with no stored vector isn't admitted passively (#409). `vector` is the KNN alone, as before #666. FTS-degraded retrieval is unaffected. `scripts/eval_memory.py --snapshot --candidates` scores either against the same snapshot. Any other value logs a warning and uses `hybrid`. |
+| `memory.retrieval.candidates` | `hybrid` \| `vector` | `hybrid` | Where vector-path candidates come from (#666). `hybrid` joins the KNN with an FTS5 search over `memory_fts` (common English words left out) and ranks them together by reciprocal rank fusion, so a record that names a person, project or identifier is found even when the embedding doesn't place it near the query. A record only FTS found bands on its measured cosine like any other, and one with no stored vector isn't admitted passively (#409): it is scored from the FTS proxy rather than from the query and ranked below every measured candidate, so it cannot take a top-`k` slot from a record that has a real similarity — it still appears in `retrieval_candidate`, usually `cut` (#705). `vector` is the KNN alone, as before #666. FTS-degraded retrieval is unaffected. `scripts/eval_memory.py --snapshot --candidates` scores either against the same snapshot. Any other value logs a warning and uses `hybrid`. |
 | `memory.retrieval.bands.strong` | float | `4.5` under `relative`, `0.75` otherwise | Value at or above which a retrieved memory bands strong and is shown with no label. Under `band_on: relative` it is a z-score; under `score` or `similarity` it is compared against the decayed score or raw similarity. Setting `bands` without a valid `band_on` (unset or rejected) logs a startup warning, because thresholds tuned as cosine values before #409 would now be read as z-scores; set `band_on: score` to keep their meaning. |
 | `memory.retrieval.bands.moderate` | float | `3.0` under `relative`, `0.60` otherwise | Value at or above which a retrieved memory bands moderate and is shown `[marginal]`; below is weak, and a weak memory is never admitted (#409). Compared against the same quantity as `bands.strong`. |
 | `memory.retrieval.band_on` | `relative` \| `score` \| `similarity` | `relative` | What the bands are applied to. `relative` (#409) bands the z-score of a record's raw cosine against the query's cosine distribution over every indexed, unredacted, embedded record, so the gate holds across queries of different register and an off-topic message admits nothing; with fewer than 50 embedded records (a z over N records can't exceed √(N − 1)) or no spread it bands on raw similarity at 0.75 / 0.60 instead, logged once (a failed spread scan does the same, with a warning per query), and each `retrieval_candidate` row records the `z` (NULL when none was computed). `score` bands the recency-decayed score, so with the default half-life nothing older than about 9 days can be strong. `similarity` bands raw relevance, so an old, apt memory is shown bare rather than as a guess. Candidates are ranked by the decayed score under every mode (by fused rank under `candidates: hybrid`). A record only the hybrid FTS search found bands on its measured cosine, and its `retrieval_candidate.source` reads `fts`. In FTS5-degraded retrieval there is no similarity to band on: the top `k` keyword hits are admitted, each marked `[marginal]`. `retrieval_log.top_score` (and `exchange_log.retrieval_top_score`) record the top-ranked candidate's decayed score; `retrieval_log.top_similarity` (and `exchange_log.retrieval_top_similarity`) record the same candidate's raw similarity. Under `relative` these two columns are not what the bands compare: refit the z thresholds from `retrieval_candidate.z`. Under `score` or `similarity`, calibrate from whichever of the two `band_on` names. Either way, exclude `degraded_to_fts = 1` rows, whose similarity is the 0.6 proxy rather than a measurement (`exchange_log` has no such flag; join `retrieval_log` on `trace_id` to filter it). Rows written before these columns existed read NULL. Any other value logs a warning and uses `relative`. |
@@ -447,7 +462,7 @@ A record's `created_at` is the `sessions.db` timestamp of the last message in it
 
 ### `memory.retention` — Retention job
 
-The retention job runs as a silent background task on daemon startup if it is due, and then on the kernel clock every `memory.retention.interval`. When a run comes due it waits for 60 seconds of system-wide quiet, but at most `memory.retention.max_delay`, so steady traffic cannot starve it. It runs three passes: demotion (remove under-used records from the vector index), re-promotion (restore records whose access stats have risen since demotion), and backfill (embed re-promoted records that are missing vectors). With `memory.retention.retrieval_log_max_age_days` set, a pass between re-promotion and backfill also prunes old retrieval logs (#654). The backfill pass is skipped when embedding is disabled by the `embedding_meta` mismatch guard.
+The retention job runs as a silent background task on daemon startup if it is due, and then on the kernel clock every `memory.retention.interval`. When a run comes due it waits for 60 seconds of system-wide quiet, but at most `memory.retention.max_delay`, so steady traffic cannot starve it. It runs three passes: demotion (remove under-used records from the vector index), re-promotion (restore records whose access stats have risen since demotion), and backfill (embed re-promoted records that are missing vectors). With `memory.retention.retrieval_log_max_age_days` set, a pass between re-promotion and backfill also prunes old retrieval logs (#654), a batch at a time (#682). The backfill pass is skipped when embedding is disabled by the `embedding_meta` mismatch guard.
 
 The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)) × exp(-age_days / half_life_days)`. All threshold and shape constants are the config keys documented below.
 
@@ -459,7 +474,7 @@ The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)
 | `memory.retention.half_life_days` | float | `90` | Recency half-life for the retention score. Distinct from `memory.half_life_days` (retrieval scoring, default 30). The longer retention half-life gives passive retrieval time to re-warm a record before it demotes. |
 | `memory.retention.interval` | float | `21600` | Seconds between retention job runs (default 6 hours); the period of the clock timer. The last-run timestamp is persisted in the `retention_meta` table so daemon restarts do not reset the interval. A daemon idle longer than `interval` since its last run will still run the job on next start (zero-traffic guarantee). Takes effect at restart. |
 | `memory.retention.max_delay` | float | `3600` | Longest a due run waits for system quiet, in seconds. A run starts when the system has been quiet 60 seconds or when this much time has passed since it came due, whichever is first. Takes effect at restart. |
-| `memory.retention.retrieval_log_max_age_days` | float | unset (off) | Age in days after which the retention job deletes `retrieval_log` rows and their `retrieval_candidate` rows (#654). Unset or `null` keeps every row; the log then grows by about 35 candidate rows (~1.5 KB) per user turn. These tables are the calibration stream behind `scripts/eval_memory.py` and threshold tuning, so pick an age that covers the period you want to measure. Must be a positive finite number; `0`, negatives, `true`/`false`, strings and non-finite values fail at startup with `memory.retention.retrieval_log_max_age_days: got <value>; expected a positive number of days, or leave it unset to keep every retrieval_log row — check agent.yaml`. Takes effect at restart. |
+| `memory.retention.retrieval_log_max_age_days` | float | unset (off) | Age in days after which the retention job deletes `retrieval_log` rows and their `retrieval_candidate` rows (#654). Unset or `null` keeps every row; the log then grows by about 35 candidate rows (~1.5 KB) per user turn. These tables are the calibration stream behind `scripts/eval_memory.py` and threshold tuning, so pick an age that covers the period you want to measure. The prune reads `retrieval_log(ts)`, which is indexed, and deletes the backlog 1000 rows per write transaction, so turning it on against an existing deployment does not hold memory's write lock for the whole first prune (#682). Must be a positive finite number; `0`, negatives, `true`/`false`, strings and non-finite values fail at startup with `memory.retention.retrieval_log_max_age_days: got <value>; expected a positive number of days, or leave it unset to keep every retrieval_log row — check agent.yaml`. Takes effect at restart. |
 | `memory.retention.backfill_batch` | integer | `32` | Maximum number of unembedded indexed records the retention job embeds per run (backfill pass). Bounds embedding API usage when many records need vectors, such as after a re-promotion wave or a period during which embedding was disabled. |
 
 ---
@@ -987,6 +1002,7 @@ For `transport: stdio`, the required keys are `command` and optionally `args` an
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| `mcp.servers.<name>.tools` | mapping | none | Narrows which of that server's tools reach the registry; see below. `include` keeps only the tools whose own name matches one of its globs, then `exclude` drops from that set. Absent keeps every tool, and the block is static config (not hot-reloaded). |
 | `mcp.servers.<name>.headers` | map of string to string | none | HTTP headers sent on every request to the server (`streamable_http` and `sse` only). A value may contain `${VAR}`, replaced at connect time from the daemon's environment; put secrets there, not in `agent.yaml`. If a referenced variable is unset, empty, or contains a newline or NUL (a trailing newline from a secrets file, say), that server is skipped with one WARNING naming the server, the header and the variable, and it is not retried, since the environment can't change without a restart. Only the braced `${VAR}` form is substituted. Header values are never logged. |
 
 **A credential in the `url` is redacted, but a `${VAR}` header is the shape to prefer.** A token in the query string, or a `user:pass@` userinfo, is dropped from corvidae's own MCP warnings (#386) and from the log records the MCP SDK and HTTP client emit (#595): when the client starts, every root log handler gains a filter over `mcp.*`, `httpx.*`, `httpx2.*`, `httpcore.*` and `httpcore2.*` that reduces every URL in a library record that carries a credential marker to scheme, host, port and path, so an innocent URL in the same record loses its query too (`https://api.example/x?page=2` becomes `https://api.example/x?…`). That filter is a net over text corvidae does not emit, so it catches the URL shapes it knows and nothing else — a library that wrote the credential in some other form, a handler attached to a descendant logger, or a logger outside that list (`asyncio`, `anyio`) would still get through. The filter sits on the root handlers present when the client starts, so a later logging reconfiguration that replaces them drops it.
@@ -1002,6 +1018,9 @@ mcp:
       env:                     # optional environment variables (stdio only)
         NODE_ENV: production
       tool_prefix: "fs"        # optional; defaults to server name
+      tools:                   # optional; keep a few of a large server's tools (#529)
+        include: ["read_*", "list_*"]   # only these, if present
+        exclude: ["*_delete_*"]         # dropped after include
       timeout_seconds: 30      # optional; per tool call; default 30 (above tools.call_timeout, the call is cut at call_timeout)
       connect_timeout_seconds: 30  # optional; connect + initialize + list_tools; default 30
 
@@ -1019,6 +1038,21 @@ mcp:
       tool_prefix: "remote"            # optional; defaults to server name
       timeout_seconds: 30              # optional; per tool call; default 30 (above tools.call_timeout, the call is cut at call_timeout)
 ```
+
+`mcp.servers.<name>.tools` narrows a server's tool list before it reaches the
+registry, which matters because every tool schema is prefill on every call
+whether or not the agent uses it: a server exposing dozens of tools that the
+operator wants three of otherwise costs the rest on every turn. Patterns are
+`fnmatch` globs (`*`, `?`, `[seq]`) matched against the server's **own** tool
+name — not the `<tool_prefix>__` name the agent sees — so a pattern keeps
+working when `tool_prefix` changes. `include`, when present, keeps only the
+matching tools; `exclude` then drops from that set, so a tool matching both is
+dropped. One INFO line per connection says how many tools the filter kept, and
+each pattern that matched no tool logs a WARNING naming it, since the failure a
+typo causes (a tool silently absent from the prompt) is otherwise invisible. A
+filtered-out tool cannot be called by the agent at all: the schema is what tells
+it the tool exists. Out of scope, deliberately: changing the filter during a run
+(#530) and per-channel narrowing, which is `channels.<id>.tools.disabled`.
 
 `connect_timeout_seconds` bounds each server's startup handshake (transport
 open, `initialize`, `list_tools`); it must be positive. A server that does not
@@ -1038,7 +1072,9 @@ a mapping, an unknown `transport`, a missing or null (or non-string) `command`/`
 `args` that is not a list of strings, `env` that is not a mapping, `headers`
 that is not a mapping, a `timeout_seconds` or `connect_timeout_seconds` that is
 not a finite number (`.nan`, `.inf`, a string or a list), a non-positive
-`connect_timeout_seconds`, and an unset `${VAR}` in `headers`. A malformed
+`connect_timeout_seconds`, a `tools` block that is not a mapping or that names
+a key other than `include`/`exclude`, a `tools.include` or `tools.exclude` that
+is not a list of non-empty glob strings, and an unset `${VAR}` in `headers`. A malformed
 block as a whole fails startup with a `Config error` naming the key and value:
 `mcp` that is not a mapping, or `mcp.servers` that is neither null nor a mapping
 (`mcp: null` and `servers: null` just mean no servers). The `mcp` section itself
@@ -1093,7 +1129,7 @@ again.
 | `web.host`, `web.port`, `web.allowed_origins`, adding or removing the `web` block | The listener is bound at startup. A reload logs `restart to apply` and keeps serving with the old values. |
 | Existing exact entries in `channels:` | Channels already registered retain their original `ChannelConfig` until restart, except `tools.disabled` (above). Transport-wide entries are live (above). |
 | `llm.*` (every profile, including `llm.main`, plus `llm.defaults` and `llm.stages`) | Read at startup. A reload that changes any of it logs a restart-only warning per changed key and `llm config changed; LLM profiles, llm.stages and llm.defaults apply on restart` and keeps the running clients. A malformed `llm:` section still refuses the whole reload. A reload is not checked against the registered stages, so a `llm.stages` entry of the wrong kind passes the reload and fails the next startup. |
-| `memory.*` (including `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after`, `memory.consolidate_after_tokens` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts, and the token threshold is read once then. |
+| `memory.*` (including `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after`, `memory.consolidate_after_tokens`, `memory.entry_target_tokens` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts, and the token threshold is read once then. |
 | `heartbeat.after` | `HeartbeatPlugin` reads it at init and registers its idle watch at start. Putting the heartbeat to sleep or waking it takes a restart. |
 | `timepiece.*` | `TimepiecePlugin` reads its section in `on_init` and has no reload hook. |
 | `daemon.shutdown_timeout`, `daemon.exit_timeout` | Read once at startup by the runtime. Validated on every reload: a bad value refuses the whole reload (one ERROR naming the key and the value, the running config unchanged), so a typo is caught when it is saved rather than at the next restart. A valid change logs the restart-only warning and applies on restart (the restart tool's pre-flight checks it too). |
@@ -1181,7 +1217,43 @@ webhook_notify:
 | `webhook_notify.defaults.max_buffered` | integer | `500` | Deliveries an endpoint may buffer, in an ordinary window as well as while its flush is held. Whenever the buffer exceeds it the oldest is dropped, counted and reported. Must be an integer ≥ 1. |
 | `webhook_notify.endpoints.<endpoint>` | list of strings, or mapping | none | Either a non-empty list of channel ids (`transport:scope`) notified of the endpoint's digests, or a mapping with `channels:` plus any of the four throttle keys to override `defaults` for this endpoint. Repeated ids are notified once. All of an endpoint's channels receive the same digest, so the window and the cap are per endpoint; give a channel its own limits by routing it through its own endpoint. |
 
-A malformed block fails startup naming the key, the value and the accepted range, including an unknown key under `defaults` or under an endpoint; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet (Discord or Signal before they start) is skipped with a `WARNING` naming the endpoint and how many deliveries the digest carried. Buffered deliveries are lost at shutdown, with a `WARNING` naming the endpoint and the count. For GitHub, filter events in the webhook's own settings: payloads such as `pull_request` and `check_run` are large and are cut at the cap, with the rest in a spill file.
+A malformed block fails startup naming the key, the value and the accepted range, including an unknown key under `defaults` or under an endpoint; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet (Discord or Signal before they start) is skipped with a `WARNING` naming the endpoint and how many deliveries the digest carried. Buffered deliveries are lost at shutdown, with a `WARNING` naming the endpoint and the count. For GitHub, filter events in the webhook's own settings: payloads such as `pull_request` and `check_run` are large and are cut at the cap, with the rest in a spill file. Better, for a repository whose events you want to *act* on: use `github_webhook` below instead of this plugin for that endpoint, because it reports terminal outcomes rather than one notification per job-status change.
+
+---
+
+## `github_webhook` — GitHub events as terminal outcomes
+
+Requires the github-webhook extra (`--extra github-webhook` on your `uv sync` line) and the `webhook` ingress. GitHub emits a `workflow_job` event for every job status change and a `workflow_run` event for each run's `requested`, `in_progress` and `completed` states, so a single push through a multi-job workflow is a dozen notifications and a morning of merges produces hundreds. This plugin subscribes to the endpoint itself and reports only what the agent can act on:
+
+| Event | Reported when | Line |
+|-------|---------------|------|
+| `workflow_run` | `completed`, unless superseded | `CI success: CI on main (run #6) https://…` |
+| `pull_request` | `opened`, `reopened`, `closed` (`merged: true` reads "merged") | `PR #7 merged: Fix the thing https://…` |
+| `push` | the branch is in `push_branches` and the push did not delete it | `Push to main: 3 commits, head abcdef1 https://…` (the compare URL is left off when the payload has none) |
+| `ping` | always | not notified; one INFO naming the endpoint and the hook id |
+
+Everything else — `workflow_job`, non-terminal runs, other events — is dropped and counted at DEBUG. A run GitHub cancelled because a newer run replaced it is inferred from the highest `run_number` seen per `(repository, workflow, branch)` and dropped, so supersession needs the hook to send `workflow_run` events, `requested` included; the map is in memory and lost on restart, which costs at worst one extra cancelled line. A delivery with no `X-GitHub-Event` header, or one missing a field a line needs, is skipped with a `WARNING` naming the delivery.
+
+`github_webhook` **owns** its endpoints. Every subscriber to an endpoint receives every delivery, so do not list the same endpoint here and in `webhook_notify.endpoints`: startup logs a `WARNING` naming it, and every delivery would be notified twice.
+
+```yaml
+github_webhook:
+  max_payload_chars: 2000        # same meaning as webhook_notify's key
+  push_branches: []              # push events reported only for these; empty = none
+  endpoints:
+    github: [signal:+15551234567]      # bare list: these channels
+    # alerts:                          # or a mapping, with its own branches
+    #   channels: [irc:#corvidae]
+    #   push_branches: [main]
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `github_webhook.max_payload_chars` | integer | `2000` | Longest line passed inline, in characters. A longer one is cut and spilled as in `webhook_notify`. Must be an integer ≥ 1. |
+| `github_webhook.push_branches` | list of strings | `[]` | Branches whose pushes are reported. Empty reports none; push events to other branches are dropped and counted at DEBUG. |
+| `github_webhook.endpoints.<endpoint>` | list of strings, or mapping | none | Non-empty list of channel ids (`transport:scope`) for that `webhook` endpoint, or a mapping with `channels:` plus an optional `push_branches:` to override the top-level one for this endpoint. |
+
+A malformed block fails startup naming the key, the value and the accepted shape; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet is skipped with a `WARNING`. Sender-controlled text — titles, branch names, workflow names — goes only into the notification text, which the kernel fences, never into an annotation, and is cut to 120 characters; see the threat model's finding 20.
 
 ---
 

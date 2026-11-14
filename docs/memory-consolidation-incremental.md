@@ -171,6 +171,8 @@ after it and the JSON template:
 
 followed by the JSON template above.
 
+*Note: #686 replaced the "a paragraph at most" sentence above with a per-topic instruction and a size sentence from `memory.entry_target_tokens`; see `prompts/memory_consolidation_fork.md` for the current text.*
+
 The range sentence `MemoryPlugin` appends ("Record the conversation above
 from the message that begins «…» onward...") is unchanged. It quotes the
 first user or assistant text in the range, falling back to the first row

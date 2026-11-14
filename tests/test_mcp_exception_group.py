@@ -83,3 +83,115 @@ async def test_a_real_cancel_wrapped_in_a_group_propagates_and_stops_owners():
     with pytest.raises(BaseExceptionGroup):
         await task
     assert stopped == [True]
+
+
+# ---------------------------------------------------------------------------
+# #604: a shutdown mixed with connect errors, and a bare KeyboardInterrupt,
+# must both still close the owners.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_cancel_mixed_with_connect_errors_closes_the_owners():
+    """A cancel arriving while a connect's task group holds child errors raises
+    a group of Exceptions and re-arms the cancel. That is a shutdown: the
+    owners are closed before it propagates, and no later code runs."""
+    entered = asyncio.Event()
+    stopped: list[bool] = []
+    reached_end: list[bool] = []
+
+    async def connect(name, cfg):
+        entered.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError as cancel:
+            # What asyncio.TaskGroup does in 3.13: the child error and the
+            # cancel together, as an ExceptionGroup, with the cancel re-armed.
+            raise ExceptionGroup(
+                "unhandled errors in a TaskGroup", [ConnectionError("refused")]
+            ) from cancel
+
+    async def stop_owners():
+        stopped.append(True)
+
+    plugin = await _plugin({"first": SERVERS["first"]}, connect)
+    plugin._stop_owners = stop_owners
+
+    async def rebuild(*args, **kwargs):
+        reached_end.append(True)
+
+    plugin._rebuild_shared_registry = rebuild
+    task = asyncio.create_task(plugin.on_start({"mcp": {"servers": SERVERS}}))
+    await entered.wait()
+    task.cancel()
+
+    with pytest.raises(BaseException):
+        await task
+    assert stopped == [True], "a mixed shutdown must still close the owners"
+    assert reached_end == [], "nothing after the try may run in a shutdown"
+
+
+async def test_a_bare_keyboard_interrupt_closes_the_owners():
+    """The same shutdown without a group around it: the owners still close."""
+    stopped: list[bool] = []
+
+    async def connect(name, cfg):
+        raise KeyboardInterrupt()
+
+    async def stop_owners():
+        stopped.append(True)
+
+    plugin = await _plugin({"first": SERVERS["first"]}, connect)
+    plugin._stop_owners = stop_owners
+
+    with pytest.raises(KeyboardInterrupt):
+        await plugin.on_start({"mcp": {"servers": SERVERS}})
+    assert stopped == [True]
+
+
+async def test_a_bare_system_exit_closes_the_owners():
+    stopped: list[bool] = []
+
+    async def connect(name, cfg):
+        raise SystemExit(1)
+
+    async def stop_owners():
+        stopped.append(True)
+
+    plugin = await _plugin({"first": SERVERS["first"]}, connect)
+    plugin._stop_owners = stop_owners
+
+    with pytest.raises(SystemExit):
+        await plugin.on_start({"mcp": {"servers": SERVERS}})
+    assert stopped == [True]
+
+
+async def test_a_connect_error_while_cancelling_is_a_shutdown_not_a_skip():
+    """The rule itself: an ordinary Exception stops being a failed connect once
+    this task is being cancelled (#604)."""
+    assert mcp_client_mod._is_connect_failure(ConnectionError("refused")) is True
+    assert mcp_client_mod._is_connect_failure(
+        ExceptionGroup("g", [ConnectionError("refused")])
+    ) is True
+
+    judged: list[bool] = []
+
+    async def victim():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            # cancelling() is nonzero here: this task is being shut down.
+            judged.append(mcp_client_mod._is_connect_failure(ConnectionError("refused")))
+            judged.append(
+                mcp_client_mod._is_connect_failure(
+                    ExceptionGroup("g", [ConnectionError("refused")])
+                )
+            )
+            raise
+
+    task = asyncio.create_task(victim())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert judged == [False, False], "a connect error during a cancel must propagate"

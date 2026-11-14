@@ -854,7 +854,7 @@ class Agent(CorvidaePlugin):
                 )
                 remedy += ", shorten the system prompt"
             else:
-                newest_tokens = message_tokens(conv.messages[-1]) if conv.messages else 0
+                newest_tokens = message_tokens(conv.messages[-1], conv.fence_key) if conv.messages else 0
                 what += (
                     f"; still over budget: system prompt {sys_tokens} tokens, "
                     f"newest row {newest_tokens} tokens, budget {max_ctx}; sent as is"

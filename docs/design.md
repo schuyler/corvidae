@@ -845,6 +845,10 @@ All operations are synchronous; no database access:
   counted accurately. It never raises on a row's content (§3.1.18.1, #392):
   a value JSON cannot encode is counted by its `str()`, and a row that is not
   a mapping is counted by its `repr`, so both still contribute to the budget.
+  A row with a provenance record that renders into a header and fence is
+  counted as it renders (`provenance.sent_form`, #577), because the record is
+  far smaller than the framing it used to stand in for; a person row's header
+  is a separate message and is not counted here.
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.
@@ -2401,7 +2405,7 @@ some view. Each segment's view is trimmed oldest-first with
 `ContextWindow.fit_to_budget` to the budget less the instruction's size, then
 put under the channel's `reasoning_history` policy (the live loop's order),
 and ends with the consolidation instruction (`memory.consolidation_fork_prompt`
-plus the range sentence). Row dicts are copied per segment so the policy's
+plus the entry size sentence and the range sentence). Row dicts are copied per segment so the policy's
 stripping can't alter rows a later segment reuses as context. Warnings, each
 naming the channel and message ids: the budget trim dropped a segment's own
 rows (they commit without reaching a view); a row was truncated; the
@@ -2415,7 +2419,7 @@ retried once, then degrades to the raw transcript, split into records that fit t
 with no dialog that is followed by another segment folds its id span into
 the next segment's record (no record or commit of its own); a no-dialog
 last segment advances the watermark without a record. Records are
-stamped `(memory.consolidation_fork_prompt, "standalone", the
+stamped `(memory.consolidation_fork_prompt + size sentence, "standalone", the
 request model)`. A view that the stage's profile rejects for length is a
 transport error: the watermark stays and the next trigger retries.
 
@@ -2455,7 +2459,7 @@ past claim and its closest earlier messages.
 (`LLMClient.request_model` of the fork's body, so an `extra_body` override
 shows). `Agent.fork` always sets it, so it is None only when a
 `ForkResult` is built without it. Consolidation stamps it on a fork record, together with
-`memory.consolidation_fork_prompt` but not the range sentence
+`memory.consolidation_fork_prompt` plus the entry size sentence (`memory.entry_target_tokens`) but not the range sentence
 ([cognition.md](cognition.md#record-stamps)).
 
 **Configuration** (`agent.forks`, validated at startup and on reload by
@@ -4292,8 +4296,14 @@ three failed connects, checks `/` for a 401 to detect an expired session.
 `tests/test_web_render_smoke.py` checks the sanitising and the
 unconfirmed-send restore in headless Chrome; it skips without Playwright,
 so the `web-smoke` CI job installs a pinned Playwright and Chromium and
-fails if the test is skipped. Run it locally with
-`uv run --with playwright pytest tests/test_web_render_smoke.py`.
+fails if the test is skipped. It downloads the browser only: `--with-deps`
+would run `sudo apt-get`, and the self-hosted runner has no passwordless
+sudo (it executes PR code, so sudo there would hand root to any PR). Chromium's
+system libraries are a one-time runner prerequisite, reinstalled by hand when
+the pinned Playwright version changes with
+`uvx --from playwright==1.64.0 playwright install-deps chromium`; a runner
+missing them fails the smoke step rather than skipping it. Run the test
+locally with `uv run --with playwright pytest tests/test_web_render_smoke.py`.
 
 The page keeps a map of sends the server hasn't answered, keyed by `seq`,
 and clears the composer on send. `sent` removes the entry. An `error` for a
@@ -4479,6 +4489,37 @@ there too. The plugin depends on
 `"spill"`. Configuration is in
 [configuration.md](configuration.md#webhook_notify--webhook-deliveries-as-notifications).
 
+### GitHub events (`github-webhook` package)
+
+`GithubWebhookPlugin` subscribes one handler to each endpoint in
+`github_webhook.endpoints` and keeps at most one line per delivery: no
+`workflow_job` churn, no non-terminal runs, nothing for an event it does not
+know. `WebhookDelivery.event_type` (the `X-GitHub-Event` header, #807) selects
+a `_line_<event>` method, so an unknown event costs one DEBUG count rather
+than a branch in a chain. The line is built in code from payload fields read
+through `_field`, which warns and returns None for an absent one instead of
+raising into the ingress worker.
+
+Supersession is the one piece of state: an `OrderedDict` of the highest
+`run_number` per `(repository.full_name, workflow.id, head_branch)`, updated
+from every `workflow_run` event including the `requested` and `in_progress`
+ones it drops, bounded to `SUPERSESSION_KEYS` with least-recently-updated
+evicted first. The key and run number are read before anything else, because
+GitHub sends `"conclusion": null` until a run completes; only a completed run
+needs the fields its line prints. A completed `cancelled` run below that mark is dropped. It is
+in memory, so a restart can cost one extra cancelled line.
+
+Lines go through the kernel's spill service exactly as `webhook_notify`'s
+payloads do (`limit=max_payload_chars`, `origin=webhook:<endpoint>`), so the
+kernel fences and cuts them; the plugin adds no annotation beyond `origin`,
+because a PR title or branch name in an annotation would land outside the
+fence. Sender-controlled fields are cut to 120 characters with newlines
+collapsed. At `on_init` an endpoint listed in both this plugin and
+`webhook_notify.endpoints` is warned about: every subscriber to an endpoint
+receives every delivery, so such an endpoint would be notified twice.
+Configuration is in
+[configuration.md](configuration.md#github_webhook--github-events-as-terminal-outcomes).
+
 ### ACP (`channels/acp.py`)
 
 `AcpPlugin` + `corvidae acp` — Agent Client Protocol **v1** over stdio for
@@ -4589,6 +4630,7 @@ tools:
 memory:
   idle_consolidate_after: 1800  # seconds a channel must be quiet before idle consolidation
   consolidate_after_tokens: 4000  # new window tokens that start a turn consolidation (forks only)
+  entry_target_tokens: 256      # size target per consolidation entry, stated as ~192 words (#686)
   half_life_days: 30            # retrieval recency decay (e-folding time, days)
   retrieval:
     k: 8                        # KNN candidate count

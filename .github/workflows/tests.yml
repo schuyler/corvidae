@@ -47,9 +47,9 @@ jobs:
           import importlib.util
           present = [m for m in ("sqlite_vec", "discord", "corvidae_cognition",
                                  "cross_channel_send", "corvidae_restart",
-                                 "webhook_notify", "context_panel",
-                                 "corvidae_timepiece", "corvidae_inotify",
-                                 "emoji", "outbound_cap")
+                                 "webhook_notify", "context_panel", "corvidae_timepiece",
+                                 "corvidae_inotify", "emoji", "outbound_cap",
+                                 "github_webhook")
                      if importlib.util.find_spec(m) is not None]
           assert not present, f"kernel install has optional packages: {present}"
           import corvidae.channels.discord  # must import without its SDK
@@ -58,7 +58,7 @@ jobs:
           PY
 
       - name: Run kernel tests
-        run: uv run --no-sync pytest -q --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/corvidae-vision/tests --ignore=packages/rss-reader/tests
+        run: uv run --no-sync pytest -q --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/corvidae-vision/tests --ignore=packages/rss-reader/tests --ignore=tests/test_github_webhook
 
       # Advisory until the tree is clean (#111, #455): the output is in the
       # log, but a finding does not fail the run. Drop continue-on-error in
@@ -88,7 +88,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies (all extras)
-        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap
+        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra github-webhook
 
       # About 26 test sites skip when sqlite-vec can't load, and the Discord
       # tests skip without the SDK, as do the Signal tests without `emoji`, which would turn them into silent skips
@@ -167,7 +167,12 @@ jobs:
       - name: Install dependencies (kernel and context panel)
         run: uv sync --locked --extra dev --extra acp --extra context-panel
 
-      # Chromium plus the system libraries it needs on the runner.
+      # The Chromium download only. No --with-deps: that runs `sudo apt-get`,
+      # and the self-hosted runner user has no passwordless sudo (it executes
+      # PR code, so sudo there would hand root to any PR). Chromium's system
+      # libraries are a one-time runner prerequisite:
+      #   uvx --from playwright==1.64.0 playwright install-deps chromium
+      # Re-run that by hand when the pinned Playwright version changes.
       - name: Install Playwright Chromium
         run: uv run --no-sync --with playwright==1.64.0 playwright install chromium
 

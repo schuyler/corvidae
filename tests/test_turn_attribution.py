@@ -165,3 +165,32 @@ class TestSenderNameCache:
         remember_sender_name(names, "newcomer", "renamed")
         assert names["newcomer"] == "renamed"
         assert len(names) == SENDER_NAME_CACHE_MAX
+
+
+def test_a_sender_who_speaks_again_is_evicted_last():
+    """#515: eviction follows recency, not first-seen order.
+
+    Re-stating a name moves it to the newest end, so the person who talks most
+    is not the first evicted for having been seen first. The discriminating
+    case is a *middle* entry speaking again: with a plain FIFO the cache is
+    full, so re-stating it evicts the oldest — someone who has not been
+    evicted by anything — and the cache loses an entry for an update.
+    """
+    from corvidae.channels.discord import SENDER_NAME_CACHE_MAX, remember_sender_name
+
+    names: dict[str, str] = {}
+    for i in range(SENDER_NAME_CACHE_MAX):
+        remember_sender_name(names, str(i), f"person {i}")
+
+    # A sender from the middle of the cache says something.
+    remember_sender_name(names, "128", "person 128")
+
+    assert len(names) == SENDER_NAME_CACHE_MAX, "an update evicts nobody"
+    assert "0" in names, "the least recently seen entry is not the price of an update"
+    assert list(names)[-1] == "128", "the sender who just spoke is the newest entry"
+
+    # Now a newcomer does evict, and takes the least recently seen with it.
+    remember_sender_name(names, "newcomer", "someone new")
+    assert "0" not in names, "the least recently seen entry goes"
+    assert "128" in names
+    assert list(names)[-1] == "newcomer"
