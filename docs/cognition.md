@@ -1773,17 +1773,20 @@ traffic that never stops it never beats; that is accepted until #214.
 **What a beat is.** The plugin reads `MemoryPlugin.recent(heartbeat.memory_limit)` (default 20),
 re-checks that the system is still quiet (a message may have landed
 during the read), and calls `on_notify` on `internal:heartbeat` with
-`source="heartbeat"` and `annotations={"origin": "heartbeat"}`. The text is the
-heartbeat prompt (`DEFAULT_HEARTBEAT_PROMPT`, overridable with
-`heartbeat.prompt`; documented copy in `prompts/heartbeat.md`, and the key's
-resolution in [configuration.md](configuration.md#heartbeat--a-turn-on-system-idle))
-followed by the memories, framed as the agent's own
-summaries and as data, or `(none)`. When the goals plugin is loaded, the
-text then carries `GOALS_INSTRUCTION` (overridable with
-`heartbeat.goals_instruction`; same reference) and the conclusions of up to
+`source="heartbeat"` and `annotations={"origin": "heartbeat"}`. Without the
+goals plugin the text is the memories, framed as the agent's own summaries and
+as data (or `(none)`), followed by the heartbeat prompt
+(`DEFAULT_HEARTBEAT_PROMPT`, overridable with `heartbeat.prompt`; documented
+copy in `prompts/heartbeat.md`, and the key's resolution in
+[configuration.md](configuration.md#heartbeat--a-turn-on-system-idle)). When
+the goals plugin is loaded, the beat leads with the conclusions of up to
 `heartbeat.retired_goal_limit` retired goals (default 20,
-`GoalsPlugin.retired_goals`), framed as data, or `(none)`;
-without it, no goals text appears. A failed memory or retired-goals read
+`GoalsPlugin.retired_goals`), framed as data, then the open goals front of the
+queue first, each not plainly open marked `[in-progress]`, `[blocked]` or
+`[waiting]`; then the memories and the prompt; and it ends with
+`GOALS_INSTRUCTION`, the queue's pick rule (overridable with
+`heartbeat.goals_instruction`; documented copy in `prompts/heartbeat-goals.md`),
+so the call-to-action is last. `prompts/heartbeat.md` shows a full beat. A failed memory or retired-goals read
 skips the beat, which is retried after one period. The turn then runs the
 ordinary notification pipeline with the agent's normal tools. The `heartbeat`
 origin keeps the existing conventions: critique doesn't review it, the
