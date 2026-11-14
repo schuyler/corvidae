@@ -293,6 +293,12 @@ class TestStopBoundFromConfig:
                        "daemon": {"shutdown_timeout": 1}}, f)
             config_path = f.name
         caplog.set_level(logging.DEBUG)
+        # Keep the owner tasks: on a regression Runtime.stop() cancels them
+        # without awaiting and clears _owners, and the patched os._exit
+        # returns instead of killing the process, so the cleanup below must
+        # reach them itself or pytest-asyncio's teardown hangs (no timeout
+        # runs once a test has failed).
+        owner_tasks = [o.task for o in plugin._owners.values() if o.task]
         try:
             with patch("corvidae.runtime.create_plugin_manager", return_value=mock_pm), \
                     patch("corvidae.runtime.validate_dependencies"), \
@@ -304,6 +310,12 @@ class TestStopBoundFromConfig:
                 await rt.stop()
         finally:
             os.unlink(config_path)
+            # Bounded cleanup so a failing run fails instead of hanging:
+            # wait out the owner tasks, then kill any stdio server left over.
+            if owner_tasks:
+                await asyncio.wait(owner_tasks, timeout=5)
+            for pid in _child_pids():
+                os.kill(pid, signal.SIGKILL)
 
         # Normal path: no forced exit, and the slow server was cancelled by name.
         forced_exit.assert_not_called()
