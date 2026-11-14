@@ -407,7 +407,7 @@ class TestSetSettingsPositiveInts:
     """A framework integer override is validated before it is stored (#755)."""
 
     @pytest.mark.parametrize("key", ["max_turns", "max_context_tokens"])
-    @pytest.mark.parametrize("value", ["32000", True, 0, -5, 32000.5])
+    @pytest.mark.parametrize("value", ["32000", True, 0, -5, 32000.5, 32000.0])
     async def test_bad_value_refused_without_mutation(self, key, value):
         set_settings = _get_set_settings_fn()
         channel = _make_channel()
@@ -421,6 +421,7 @@ class TestSetSettingsPositiveInts:
         assert key in result
         assert repr(value) in result, "the refusal must name the rejected value"
         assert "positive integer" in result, "the refusal must say what is accepted"
+        assert "Nothing was changed; retry" in result, "the refusal must state the remedy"
         assert channel.runtime_overrides == {}, "nothing may be written"
 
     @pytest.mark.parametrize("key", ["max_turns", "max_context_tokens"])

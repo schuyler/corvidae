@@ -160,7 +160,10 @@ class RuntimeSettingsPlugin(CorvidaePlugin):
                         logger.warning(
                             "set_settings: invalid %s rejected: %s", int_key, exc
                         )
-                        return f"Error: {exc}"
+                        return (
+                            f"Error: {exc}. Nothing was changed; retry with a "
+                            f"whole number such as 32000."
+                        )
 
             for key, value in settings.items():
                 if value is None:
