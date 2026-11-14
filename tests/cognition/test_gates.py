@@ -491,6 +491,12 @@ class TestWithheldStillCritiqued:
         # at all under this fixture: an exempt-everything gate would pass it
         # vacuously.
         assert withheld, "no origin was withheld, so the property is untested"
+        # The same guard on the other half: a broken _eligible that returned
+        # False for everything would satisfy the assertion above silently.
+        assert any(
+            critique._eligible("t1", {"origin": origin})
+            for origin in ("reminder", "user", "critique", "heartbeat", "task")
+        ), "no origin was eligible, so the property is untested"
 
 class _FakePM:
     def __init__(self, **plugins):
