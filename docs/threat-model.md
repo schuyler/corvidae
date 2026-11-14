@@ -396,7 +396,12 @@ least. The same list under `channels.<id>.tools.disabled` narrows a single
 channel. The rest of the daemon keeps its tools, the channel's schemas
 never show the disabled ones, dispatch refuses them even when the model
 names one anyway, and a `subagent` launched from that channel inherits
-the restriction. Cheap wins beyond that: make the dangerous tools opt-in rather than
+the restriction. A nested background agent runs with the spawning
+channel's tool set (a nested `fork` carries the window's identity prompt;
+a nested `subagent` keeps its persona-neutral prompt, PRD §3.5.7), and
+`tools.max_agent_depth` (default 2) is what bounds how far one may spawn
+another: a chain of subagents and forks is refused at that depth, which caps
+how many fresh task budgets one chain can start. Cheap wins beyond that: make the dangerous tools opt-in rather than
 opt-out, deny private address ranges and non-HTTP schemes in `web_fetch`,
 root the file tools in a directory, and have `agent.yaml` and the prompt
 files owned by another user and read-only to the daemon (if the daemon
@@ -1194,7 +1199,11 @@ don't bound its total.
 On a metered endpoint, set a spend limit with the provider, and keep
 inbound allowlists tight on any channel with untrusted participants:
 inbound admission is the main control on total cost the tree has. Filtering
-floods at the transport is a future improvement (#296).
+floods at the transport is a future improvement (#296), with one exception
+since #793: `webhook_notify` caps its own deliveries at
+`max_notifications` per `per_seconds` per endpoint (10 per hour by default),
+so a webhook flood costs at most that many turns per target channel per
+window, drop reports included, rather than one turn per delivery (finding 16).
 
 ### 15. One identity across channels (by design)
 
@@ -1322,8 +1331,19 @@ to no conversation. What each auth mode gives:
 The `webhook-notify` package is the concrete path from a payload to a prompt:
 each delivery on a configured endpoint is injected into every target channel
 as a fenced notification, so whoever can post to the endpoint chooses text the
-model reads there. Each delivery spends one main-model turn per target
-channel, and provider-side event filtering is the only volume control.
+model reads there. Provider-side event filtering is no longer the only volume
+control: `webhook_notify` throttles per endpoint (#793), on by default. A
+sender now costs at most `max_notifications` turns per `per_seconds` per
+target channel — 10 per hour out of the box — drop reports counting against the same cap, and the
+digest inside a single notification is bounded by `max_payload_chars` inline
+and the spill cap on disk, as before. Two residual risks remain. A flood can
+still push real events out of the buffer, because the policy is drop-oldest:
+the drops are counted, logged and reported to the model, but the event itself
+is gone. And the cap protects the turn budget, not the disk: a held buffer
+keeps up to `max_buffered` payloads, each of which may spill
+`daemon.notification_spill_max_chars` when it flushes, so the spill growth in
+the next finding still applies at the capped rate rather than at the sender's
+rate.
 
 A payload longer than `max_payload_chars` is cut, and the kernel's
 notification spill service writes the full text to a file
@@ -1556,12 +1576,14 @@ Mitigations:
 
 - The emoji must be **one emoji in a real RGI table** (#780), not merely a
   match for a hand-written shape: `_is_single_emoji` asks the `emoji` package
-  whether the whole string is one emoji, and anything else — a tag sequence
+  whether the whole string is one emoji (after stripping one trailing VS16 when
+  what precedes it is itself a table entry, so `👍️` and `👍🏽️` stay accepted),
+  and anything else — a tag sequence
   carrying hidden ASCII, enclosed letters joined by ZWJ, a regional-indicator
   word, a non-RGI ZWJ join, two emoji in one string, a trailing newline — is
   dropped with a WARNING naming the sender. Two grammars were tried before this
   and each had a hole, which is why the check is a membership test now. The
-  table ships as the `signal` extra and is imported lazily; the transport
+  table ships as the `signal` extra and is a guarded import at module load; the transport
   refuses to start without it rather than dropping reactions at run time.
 - Every other part of the row is built in code: the whose-message word comes
   from a UUID comparison, and the time from an integer that must be positive and
@@ -1574,8 +1596,8 @@ Mitigations:
 
 Accepted residual: the sender is already allowlisted and can send arbitrary text
 through the normal path, so the row adds no capability a sender lacks. What it
-adds is a route around the header and the funnel for one symbol. The accepted
-set is now wider than one symbol — flags, keycaps, ZWJ sequences — and that was
+adds is a route around the header and the funnel for one emoji. The accepted
+set is now wider than one pictograph — flags, keycaps, ZWJ sequences — and that was
 widened through a real table, as this entry asked, rather than a longer regex.
 What still holds is the property the mitigation depends on: the accepted string
 is a single sequence from a published table, so it cannot spell a sentence or

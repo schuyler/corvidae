@@ -256,6 +256,11 @@ Defaults: `max_context_tokens=24000`, `reasoning_history="drop"`,
 `ReasoningHistory` enum and raises `ValueError` on any other value.
 `validate_agent_config` (startup and config reload) and `load_channel_config`
 reject an invalid value or the removed `keep_thinking_in_history` key up front.
+The same holds on the override path: `set_settings` validates a
+`reasoning_history` and both framework integers (`max_turns`,
+`max_context_tokens`, through `parse_positive_int`) before it writes any
+override, since a stored bad value would reach every consumer of the budget
+as given and fail the channel's first comparison with an int (#755).
 
 **Channel** — identifies a transport + scope combination:
 
@@ -324,7 +329,11 @@ not on every poll. Anything not declared is restart-only by default, so a
 plugin that forgets to declare a key produces a spurious warning rather than a
 silent pending change. A test in `tests/test_config_watcher.py` reads each
 reload hook's source and fails if it reads a key its class does not declare, so
-the registry cannot drift from the code.
+the registry cannot drift from the code. These restart-only keys are still
+validated before the reload is applied: `tools.call_timeout`, `tools.timeouts`,
+`tools.read_file_window_fraction`, `tools.max_agent_depth` and both `daemon`
+shutdown bounds are parsed in step 3e, so a reload carrying a bad value is refused as a whole (`ERROR`
+naming the key and the value, nothing applied) instead of parking a value that fails the next startup (#758).
 
 **System prompt layers (#316).** A conversation's system prompt is the
 identity (`agent.system_prompt`, never set per channel; a channel-level
@@ -506,8 +515,8 @@ hooks with the client's profile (a key under `llm:`, such as `main`) and the
 current attribution snapshot.
 
 **Attribution.** `attribution.py` holds a single ContextVar dict
-(`stage`, `channel_id`, `trace_id`, `annotations`, plus stage-specific
-extras such as `trigger` on consolidation calls). Callers set it at the
+(`stage`, `channel_id`, `trace_id`, `annotations`, `agent_depth`, plus
+stage-specific extras such as `trigger` on consolidation calls). Callers set it at the
 top of a logical operation and reset in a `finally`: the Agent turn loop
 (`stage="turn"`), CompactionPlugin around its summary call
 (`stage="compaction"`, shadowing the turn), and the subagent work loop
@@ -519,6 +528,21 @@ time and TaskQueue workers are created once at startup, so `Task`
 captures `contextvars.copy_context()` at creation and the worker runs
 `task.work()` inside that context via
 `asyncio.create_task(task.work(), context=task.ctx)`.
+
+**Nested agents.** `agent_depth` is the kernel's bound on recursion (#816).
+A main turn runs at depth 0; `next_agent_depth(tools.max_agent_depth)` in
+`attribution.py` returns `depth + 1` for a spawn, or `None` at the limit, and
+`agent_depth_refusal()` is the refusal both tools return
+(`Error: nested agent depth 2 reached (tools.max_agent_depth); do this work in
+the current task instead.`). `SubagentPlugin._launch` and
+`ForkToolPlugin._launch` both ask it before building a Task and set the depth
+they were given in their `work()` attribution, so a subagent that calls
+`fork` (or the reverse) is bounded by the same rule rather than by each tool
+excluding itself from the set. The value rides the contextvars snapshot into
+every Task a spawned loop creates, so no tool signature carries it. The key is
+`tools.max_agent_depth` (positive integer, default 2), validated at startup
+and on reload by `parse_max_agent_depth`. Width is not bounded: depth 2 with
+ten children per level is still many tasks.
 
 **Sinks.** `metrics.py` provides `MetricsPlugin` (translates
 `on_llm_response` into `on_metrics` events: `llm.tokens.*`,
@@ -1632,20 +1656,35 @@ behind a header naming the next offset, so reading a
 spill file back never returns a result that is cut and spilled again. A `cat`
 through `shell` is not clamped, and a long one spills a copy.
 
-**Page size.** A `read_file` page is
+**Page size.** A `read_file` page is first estimated at
 `min(tools.max_result_chars, max(2000, fraction x max_context_tokens x 3.0))`
 characters, where `fraction` is `tools.read_file_window_fraction` (default
 0.08, `0 < value <= 1`) and `max_context_tokens` is the calling channel's
 resolved budget, so per-channel overrides apply. A call with no channel, or
 with no registry plugin, uses `tools.max_result_chars`. A subagent's reads
 are sized to its calling channel's budget. The 3.0 characters per token is an
-estimate for ordinary text. Observed under the window's own counter, real
-tool results run about 3.0 or more characters per token for json, code and
-markdown (p10 about 3.0 to 3.3; the median 3.4 to 3.9), and fewer for web and
-shell output. One page at 8% of the window fits inside the headroom to the
-compaction trigger observed at the 90th percentile of main turns (0.085 to
-0.18 of the window). The 2000-character minimum can make a page larger than
-that share below about 8300 tokens of budget.
+estimate for ordinary text, and only an estimate: it bounds nothing (#752).
+
+**Page size by measurement.** When a channel budget is known, the page that
+estimate sized is then *counted* — the page as the tool-result message it
+becomes, through the window's own `message_tokens` — and while it costs more
+than `fraction x max_context_tokens` the read is repeated with a smaller
+character page, scaled from the measured overrun, up to three reads. So a
+page takes no more than that share whatever it contains, not only when it is
+ordinary text. Only the content is scaled; the header's cost is fixed, so a
+page never shrinks below its header plus 4 characters of content. The one
+case the share cannot be met is a share smaller than even that page costs:
+measured on dense text the smallest page is about 56 tokens, so below roughly
+a 700-token budget a page is its header and a few characters and can exceed
+its share. A page that comes back unchanged or without content stops the
+loop, so a read always makes progress and always names where to continue.
+
+Characters per token, measured under the window's counter: ordinary prose 4.5;
+minified json 1.7; hex 1.8; base64 1.4; escape-heavy json 1.4; CJK 0.29; emoji
+0.14. The estimate is right for prose and up to four times too generous for
+the rest, which is why counting is what decides. One page at 8% of the window
+fits inside the headroom to the compaction trigger observed at the 90th
+percentile of main turns (0.085 to 0.18 of the window).
 
 **Configuration** (`daemon`, applied at restart):
 
@@ -1898,7 +1937,13 @@ over the cap rotates on its first write and an external `copytruncate` still
 works. A lock serialises writers, since one appender can be written from
 several worker threads at once. A rotation that fails (a read-only directory)
 is logged once per streak at WARNING, naming the file, and the file keeps
-growing past the cap until rotation works again. `parse_rotation` validates
+growing past the cap until rotation works again; finding the file under the cap
+on a later write ends the streak, so a later failure warns again. The renames
+are recoverable at every step (#606): the live file is moved aside first, under
+a pid-suffixed `.rotating-<pid>` name, the oldest backup is moved aside rather
+than overwritten, and a failure part way through replays the renames already
+made in reverse, so `.1`–`.N` still hold what they held before. If restoring
+the live file fails too, the WARNING names the `.rotating` file holding it. `parse_rotation` validates
 the two keys in `on_init`; a bad value is a config error. Nothing reads a
 rotated segment; `message_log` is the durable record (principle 4).
 
@@ -2707,6 +2752,10 @@ setup.
   `parse_tool_timeouts` into `call_timeouts`. `Runtime.start` and the config
   watcher validate the same keys first, so a bad value is a `Config error` at
   startup and a refused reload.
+  The watcher's step 3e validates `tools.call_timeout`, `tools.timeouts`,
+  `tools.read_file_window_fraction` and `tools.max_agent_depth` on every reload
+  (along with `daemon.shutdown_timeout` and `daemon.exit_timeout`); all stay
+  restart-only, so a good change waits for a restart.
 
 ### Tool access
 
@@ -3416,8 +3465,8 @@ a reconnect reads as backlog rather than as current.
 
 **Outbound files.** `register_tools` offers `send_signal_attachment` when a
 `signal:` block is present. It takes a `signal:<aci>` channel the registry
-knows, a path and an optional caption, and sends one `send` RPC with the
-file as a data URI (`data:<type>;filename=<name>;base64,<payload>`; the type is
+knows, a path, an optional caption and an optional `voice_note` flag, and
+sends one `send` RPC with the file as a data URI (`data:<type>;filename=<name>;base64,<payload>`; the type is
 guessed from the file name, falling back to `application/octet-stream`, and
 `filename=` is the file's name; read and encoded in one thread call) under
 `attachments` and the caption as `message`
@@ -3425,8 +3474,12 @@ guessed from the file name, falling back to `application/octet-stream`, and
 `signal-cli-jsonrpc(5)`). The path is resolved and refused if it lands
 outside `signal.send_attachment_root` (default `state`), and the file is refused
 above `signal.max_attachment_size`; the jail runs before any existence
-check, so a missing path outside the root gets the root error. The
-caption splits like any reply, the first piece riding with the file; the rest go
+check, so a missing path outside the root gets the root error.
+`voice_note=True` adds `voiceNote: true` to that RPC (#772, signal-cli 0.14.2
+and later), which is what makes a client render the file as a voice-note bubble
+instead of a file card; the flag is omitted, not sent as false, when a call
+leaves it at its default. The caption splits like any reply, the first piece
+riding with the file; the rest go
 out through `_send_rpc`, not `_deliver`, because `_deliver` logs and swallows a
 failure and the tool must not report success for a lost caption. A failure
 returns a "Could not send:" string that says how far the send got: the file
@@ -3644,7 +3697,8 @@ a hole — tag characters in a subdivision flag carry hidden ASCII, and
 ZWJ-joined enclosed letters or regional-indicator pairs spell words — so the
 check is no longer a grammar. `_is_single_emoji` asks the `emoji` package
 whether the *whole string* is one emoji (`emoji.is_emoji`, a whole-string test
-in the 2.x series): a flag (🇯🇵), a keycap (1️⃣), a ZWJ sequence (❤️‍🔥, 🤷‍♀️,
+in the 2.x series, after stripping one trailing VS16 when what precedes it is
+itself a table entry, so `👍️` and `👍🏽️` stay accepted): a flag (🇯🇵), a keycap (1️⃣), a ZWJ sequence (❤️‍🔥, 🤷‍♀️,
 🏳️‍🌈, the family) and the three RGI subdivision flags pass, while a tag
 sequence carrying hidden ASCII, enclosed letters joined by ZWJ, a
 regional-indicator word, a non-RGI ZWJ join, two emoji in one string and a
@@ -4363,17 +4417,30 @@ config.
 ### Webhook notifications (`webhook-notify` package)
 
 `WebhookNotifyPlugin` subscribes one handler to each endpoint in
-`webhook_notify.endpoints`. For a delivery it serialises the payload as compact
-JSON (`ensure_ascii=False`), resolves each target channel at delivery with
+`webhook_notify.endpoints`. Deliveries are buffered per endpoint and flushed
+as one digest per window (#793): a delivery on an endpoint with no open window
+opens one for `batch_seconds`, and on close the buffer becomes one
+notification — the payload itself when a single delivery arrived, a compact
+JSON array in arrival order (`ensure_ascii=False`) when more did. A flush over
+the endpoint's rate cap (`max_notifications` per `per_seconds`) is held and
+retried when a slot frees, and past `max_buffered` the oldest delivery is
+dropped, counted, logged at `WARNING` with the running total, and reported to
+the model as a `dropped=<n>` annotation on the next flush that gets through
+(a drop-only notification exists as a defensive path but deliveries cannot
+reach it). The flush timer is at most one
+`asyncio.Task` per endpoint (a re-armed retry replaces the old one), cancelled in `on_stop` with a `WARNING` naming
+how much was lost. At flush the plugin resolves each target channel with
 `resolve_persisted_channel` (a `ChannelNotReady` target is skipped with a
-`WARNING`) and makes one `spill.notify` call with the resolved channels and
-`limit=max_payload_chars`. The service cuts a longer payload, writes the full
+`WARNING` naming the endpoint and the digest size) and makes one
+`spill.notify` call with the resolved channels and `limit=max_payload_chars`. The service cuts a longer payload, writes the full
 text to a spill file where a channel can read it, and notifies each channel
 ([Notification spill](#notification-spill-spillpy)); the plugin writes no cut
 marker. The notification carries `source` and `annotations["origin"]` set to
-`webhook:<endpoint>` (minted by the ingress); `origin` is declared
-model-visible, so the kernel renders it in the header outside the payload
-fence, and a cut payload gets its cut line there too. The plugin depends on
+`webhook:<endpoint>` (minted by the ingress); `origin`, `deliveries` and
+`dropped` are declared model-visible, so the kernel renders them in the header
+outside the payload fence — the counts never enter the fenced text, where they
+would read as sender-controlled data — and a cut payload gets its cut line
+there too. The plugin depends on
 `"spill"`. Configuration is in
 [configuration.md](configuration.md#webhook_notify--webhook-deliveries-as-notifications).
 

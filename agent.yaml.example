@@ -182,6 +182,8 @@ agent:
 #   web_max_response_bytes: 50000   # max bytes of HTTP response body
 #   max_file_read_bytes: 1048576    # max file size for unranged read_file (1 MB)
 #   read_file_window_fraction: 0.08 # share of a channel's max_context_tokens one read_file page may take
+#   max_agent_depth: 2              # how deep background agents may nest: a main turn may
+#                                   # spawn one level, and that level one more; a third is refused
 #   disabled: []                    # tool names to drop entirely, e.g. [shell, write_file]
 #                                   # or [set_settings]; shell and task_pipeline go
 #                                   # together; see docs/threat-model.md
@@ -291,9 +293,18 @@ agent:
 # webhook-notify extra and the webhook block above); docs/configuration.md.
 # webhook_notify:
 #   max_payload_chars: 8000            # longer payloads are cut, the rest spilled to a file
+#   defaults:                          # throttle every endpoint inherits (#793)
+#     batch_seconds: 60                # one digest per window; 0 delivers on arrival
+#     max_notifications: 10            # flushes per endpoint per per_seconds
+#     per_seconds: 3600
+#     max_buffered: 500                # held deliveries before the oldest is dropped
 #   endpoints:
 #     github: [irc:#corvidae]          # endpoint name -> channel ids
 #     siri: [signal:+15551234567]
+#     # mapping form, to override the throttle for one endpoint:
+#     # alerts:
+#     #   channels: [irc:#corvidae]
+#     #   max_notifications: 20
 
 # Scheduler: reminders (remind_me tool) and operator jobs (optional;
 # without this block the tools still work, in UTC, with these defaults).

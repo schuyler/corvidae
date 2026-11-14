@@ -91,14 +91,15 @@ jobs:
         run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap
 
       # About 26 test sites skip when sqlite-vec can't load, and the Discord
-      # tests skip without the SDK, which would turn them into silent skips
+      # tests skip without the SDK, as do the Signal tests without `emoji`, which would turn them into silent skips
       # on a green run. Fail here instead.
-      - name: Check sqlite-vec and discord load
+      - name: Check sqlite-vec, discord and emoji load
         run: |
           uv run --no-sync python - <<'PY'
           import sqlite3
           import sqlite_vec
           import discord
+          import emoji
 
           conn = sqlite3.connect(":memory:")
           conn.enable_load_extension(True)

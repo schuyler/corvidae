@@ -29,7 +29,7 @@ from pathlib import Path
 import aiosqlite
 import click
 
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.tool import Tool, tool_to_schema
 from corvidae_cognition.funnel import FunnelPlugin
 from corvidae_cognition.memory import MemoryPlugin
@@ -48,12 +48,14 @@ CREATE TABLE IF NOT EXISTS goals (
     updated_at REAL NOT NULL,
     retired_at REAL,
     memory_id INTEGER,
-    status TEXT NOT NULL DEFAULT 'open'
+    status TEXT NOT NULL DEFAULT 'open',
+    position REAL NOT NULL DEFAULT 0,
+    origin_channel TEXT
 )
 """
 
 #: Valid status values for an open goal.
-VALID_STATUSES = ("open", "blocked", "waiting")
+VALID_STATUSES = ("open", "in-progress", "blocked", "waiting")
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,8 @@ class Goal:
     retired_at: float | None
     memory_id: int | None
     status: str = "open"
+    position: float = 0.0
+    origin_channel: str | None = None
 
 
 def _collapse(text: str) -> str:
@@ -82,15 +86,46 @@ def _day(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
 
 
+class GoalsSpec:
+    """Hooks the goals plugin owns."""
+
+    @hookspec
+    async def on_goals_state_changed(
+        self,
+        goal_id: int,
+        kind: str,
+        old_status: str,
+        new_status: str,
+        origin_channel: str | None,
+        actor_channel: str,
+        conclusion: str | None,
+    ) -> None:
+        """Fired after a goal state change commits.
+
+        `kind` is "status" or "retired". `conclusion` is None for status
+        changes. `origin_channel` is the channel that created the goal.
+        `actor_channel` is the channel whose turn made the change.
+        """
+
+
 class GoalsPlugin(CorvidaePlugin):
     """Goals table, the three goal tools, and the per-turn goals entry."""
 
+    hookspecs = GoalsSpec
     depends_on = frozenset({"persistence", "memory", "funnel", "clock"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
             self.pm = pm
         self._schema_ready = False
+        # Serializes the read-check-write of a goal's state: retire_goal and
+        # set_goal_status take it from their check through their UPDATE, so two
+        # racing calls can't both pass the check (an orphan retirement record, or
+        # two changes reporting the same old_status). Hooks fire after release.
+        # shortcut: one lock for every goal, and retire_goal holds it across the
+        # embedding call in write_record; retirements are rare, so move to a
+        # per-goal lock if they ever become frequent.
+        self._state_lock = asyncio.Lock()
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -124,6 +159,16 @@ class GoalsPlugin(CorvidaePlugin):
                     "ALTER TABLE goals ADD COLUMN status TEXT NOT NULL DEFAULT 'open'"
                 )
                 logger.info("goals: migrated existing table (added status column)")
+            if "position" not in cols:
+                # Existing goals keep id order: position = id.
+                await db.execute(
+                    "ALTER TABLE goals ADD COLUMN position REAL NOT NULL DEFAULT 0"
+                )
+                await db.execute("UPDATE goals SET position = id WHERE position = 0")
+                logger.info("goals: migrated existing table (added position column)")
+            if "origin_channel" not in cols:
+                await db.execute("ALTER TABLE goals ADD COLUMN origin_channel TEXT")
+                logger.info("goals: migrated existing table (added origin_channel column)")
             await db.commit()
             self._schema_ready = True
         return db
@@ -135,18 +180,18 @@ class GoalsPlugin(CorvidaePlugin):
         return db
 
     async def _all_goals(self) -> list[Goal]:
-        """Every row, open and retired, in id order."""
+        """Every row, open and retired, in queue order (position, then id)."""
         db = await self._require_db()
         async with db.execute(
-            "SELECT id, text, created_at, updated_at, retired_at, memory_id, status "
-            "FROM goals ORDER BY id"
+            "SELECT id, text, created_at, updated_at, retired_at, memory_id, status, "
+            "position, origin_channel FROM goals ORDER BY position ASC, id ASC"
         ) as cursor:
             return [Goal(*row) for row in await cursor.fetchall()]
 
     async def _get(self, db: aiosqlite.Connection, goal_id: int) -> Goal | None:
         async with db.execute(
-            "SELECT id, text, created_at, updated_at, retired_at, memory_id "
-            "FROM goals WHERE id = ?",
+            "SELECT id, text, created_at, updated_at, retired_at, memory_id, status, "
+            "position, origin_channel FROM goals WHERE id = ?",
             (goal_id,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -169,8 +214,39 @@ class GoalsPlugin(CorvidaePlugin):
     def _now(self) -> float:
         return self.pm.get_plugin("clock").now()
 
+    async def _fire_state_changed(
+        self,
+        goal_id: int,
+        kind: str,
+        old_status: str,
+        new_status: str,
+        origin_channel: str | None,
+        actor_channel: str,
+        conclusion: str | None,
+    ) -> None:
+        """Fire the on_goals_state_changed hook after a state change commits.
+
+        Never raises: a subscriber's exception must not undo the state change.
+        """
+        try:
+            await self.pm.ahook.on_goals_state_changed(
+                goal_id=goal_id,
+                kind=kind,
+                old_status=old_status,
+                new_status=new_status,
+                origin_channel=origin_channel,
+                actor_channel=actor_channel,
+                conclusion=conclusion,
+            )
+        except Exception:
+            logger.warning(
+                "goals: on_goals_state_changed subscriber failed for goal %d",
+                goal_id,
+                exc_info=True,
+            )
+
     async def open_goals(self) -> list[dict]:
-        """Open goals (not retired), newest first. For the heartbeat's review.
+        """Open goals (not retired), front of the queue first. For the heartbeat's review.
 
         Each is {"id", "age_seconds", "summary"}: the goal's id, age
         since creation on the kernel clock, and its text.
@@ -178,14 +254,14 @@ class GoalsPlugin(CorvidaePlugin):
         db = await self._require_db()
         now = self._now()
         async with db.execute(
-            "SELECT id, text, created_at FROM goals "
+            "SELECT id, text, created_at, status FROM goals "
             "WHERE retired_at IS NULL "
-            "ORDER BY created_at DESC, id DESC"
+            "ORDER BY position ASC, id ASC"
         ) as cursor:
             rows = await cursor.fetchall()
         return [
-            {"id": gid, "age_seconds": max(0.0, now - created_at), "summary": text}
-            for gid, text, created_at in rows
+            {"id": gid, "age_seconds": max(0.0, now - created_at), "summary": text, "status": status}
+            for gid, text, created_at, status in rows
         ]
 
     async def retired_goals(self, limit: int) -> list[dict]:
@@ -215,18 +291,35 @@ class GoalsPlugin(CorvidaePlugin):
     def register_tools(self, tool_registry: list) -> None:
         plugin = self
 
-        async def add_goal(text: str, _ctx=None) -> str:
-            """Add an open goal. Open goals appear, with ids, in the latest goals
-            CONTEXT entry in your window."""
+        async def add_goal(text: str, position: str = "append", _ctx=None) -> str:
+            """Add an open goal. position is 'prepend' (front of the queue,
+            high priority) or 'append' (back, the default). Open goals appear,
+            with ids, in the latest goals CONTEXT entry in your window."""
             text = _collapse(text)
             if not text:
                 return "Error: text is empty; say what the goal is"
+            if position not in ("prepend", "append"):
+                return f"Error: position must be 'prepend' or 'append', got {position!r}"
             db = await plugin._require_db()
             now = plugin._now()
+            origin_channel = (
+                _ctx.channel.id if _ctx is not None and _ctx.channel is not None else None
+            )
             async with plugin._memory()._db_lock:
+                if position == "prepend":
+                    async with db.execute("SELECT MIN(position) FROM goals") as cur:
+                        row = await cur.fetchone()
+                    min_pos = row[0] if row and row[0] is not None else 0.0
+                    new_pos = min_pos - 1.0
+                else:
+                    async with db.execute("SELECT MAX(position) FROM goals") as cur:
+                        row = await cur.fetchone()
+                    max_pos = row[0] if row and row[0] is not None else 0.0
+                    new_pos = max_pos + 1.0
                 cursor = await db.execute(
-                    "INSERT INTO goals (text, created_at, updated_at) VALUES (?, ?, ?)",
-                    (text, now, now),
+                    "INSERT INTO goals (text, created_at, updated_at, position, origin_channel) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (text, now, now, new_pos, origin_channel),
                 )
                 await db.commit()
             return f"Goal #{cursor.lastrowid} added."
@@ -267,53 +360,63 @@ class GoalsPlugin(CorvidaePlugin):
                 return (
                     "Error: conclusion is empty; say what you concluded and why"
                 )
-            db = await plugin._require_db()
-            checked = await plugin._check_open(db, id)
-            if isinstance(checked, str):
-                return checked
-            channel_id = _ctx.channel.id
-            # Link the record to the newest real message on this channel.
-            async with db.execute(
-                "SELECT MAX(id) FROM message_log "
-                "WHERE channel_id = ? AND message_type = 'message'",
-                (channel_id,),
-            ) as cursor:
-                (msg_id,) = await cursor.fetchone()
-            now = plugin._now()
-            summary = (
-                f'I retired my goal "{checked.text}" '
-                f"(set {_day(checked.created_at)}). {conclusion}"
+            async with plugin._state_lock:
+                db = await plugin._require_db()
+                checked = await plugin._check_open(db, id)
+                if isinstance(checked, str):
+                    return checked
+                channel_id = _ctx.channel.id
+                # Link the record to the newest real message on this channel.
+                async with db.execute(
+                    "SELECT MAX(id) FROM message_log "
+                    "WHERE channel_id = ? AND message_type = 'message'",
+                    (channel_id,),
+                ) as cursor:
+                    (msg_id,) = await cursor.fetchone()
+                now = plugin._now()
+                summary = (
+                    f'I retired my goal "{checked.text}" '
+                    f"(set {_day(checked.created_at)}). {conclusion}"
+                )
+                # The record goes first: no goal is retired without its record.
+                try:
+                    memory_id = await plugin._memory().write_record(
+                        channel_id=channel_id,
+                        summary=summary,
+                        created_at=now,
+                        importance=RETIRED_GOAL_IMPORTANCE,
+                        msg_id_start=msg_id,
+                        msg_id_end=msg_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "retirement record for goal %d failed", id, exc_info=True
+                    )
+                    return (
+                        f"Error: couldn't record the conclusion for goal #{id} "
+                        f"({type(exc).__name__}); the goal is still open, try again"
+                    )
+                # write_record released the lock; take it for the state change only.
+                async with plugin._memory()._db_lock:
+                    cursor = await db.execute(
+                        "UPDATE goals SET retired_at = ?, updated_at = ?, memory_id = ? "
+                        "WHERE id = ? AND retired_at IS NULL",
+                        (now, now, memory_id, id),
+                    )
+                    await db.commit()
+                if cursor.rowcount == 0:
+                    return (
+                        f"Error: goal #{id} is already retired; add a new goal instead"
+                    )
+            await plugin._fire_state_changed(
+                goal_id=id,
+                kind="retired",
+                old_status=checked.status,
+                new_status="retired",
+                origin_channel=checked.origin_channel,
+                actor_channel=channel_id,
+                conclusion=conclusion,
             )
-            # The record goes first: no goal is retired without its record.
-            try:
-                memory_id = await plugin._memory().write_record(
-                    channel_id=channel_id,
-                    summary=summary,
-                    created_at=now,
-                    importance=RETIRED_GOAL_IMPORTANCE,
-                    msg_id_start=msg_id,
-                    msg_id_end=msg_id,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "retirement record for goal %d failed", id, exc_info=True
-                )
-                return (
-                    f"Error: couldn't record the conclusion for goal #{id} "
-                    f"({type(exc).__name__}); the goal is still open, try again"
-                )
-            # write_record released the lock; take it for the state change only.
-            async with plugin._memory()._db_lock:
-                cursor = await db.execute(
-                    "UPDATE goals SET retired_at = ?, updated_at = ?, memory_id = ? "
-                    "WHERE id = ? AND retired_at IS NULL",
-                    (now, now, memory_id, id),
-                )
-                await db.commit()
-            if cursor.rowcount == 0:
-                return (
-                    f"Error: goal #{id} is already retired; add a new goal instead"
-                )
             return (
                 f"Goal #{id} retired; conclusion recorded as memory #{memory_id}."
             )
@@ -324,9 +427,15 @@ class GoalsPlugin(CorvidaePlugin):
             conclusions."""
             db = await plugin._require_db()
             if include_retired:
-                query = "SELECT id, text, created_at, retired_at, memory_id, status FROM goals ORDER BY id"
+                query = (
+                    "SELECT id, text, created_at, retired_at, memory_id, status "
+                    "FROM goals ORDER BY position ASC, id ASC"
+                )
             else:
-                query = "SELECT id, text, created_at, retired_at, memory_id, status FROM goals WHERE retired_at IS NULL ORDER BY id"
+                query = (
+                    "SELECT id, text, created_at, retired_at, memory_id, status "
+                    "FROM goals WHERE retired_at IS NULL ORDER BY position ASC, id ASC"
+                )
             async with db.execute(query) as cursor:
                 rows = await cursor.fetchall()
             if not rows:
@@ -348,21 +457,51 @@ class GoalsPlugin(CorvidaePlugin):
 
         async def set_goal_status(id: int, status: str, _ctx=None) -> str:
             """Set the status of an open goal. Status must be one of:
-            open, blocked, waiting. 'blocked' means the goal cannot be
+            open, in-progress, blocked, waiting. 'in-progress' means you are
+            actively working on it. 'blocked' means the goal cannot be
             pursued until an external dependency is resolved. 'waiting'
             means the goal is complete but awaiting someone's review or
             decision. 'open' means the goal is actively pursuable."""
+            if _ctx is None or _ctx.channel is None:
+                channel_id = ""
+            else:
+                channel_id = _ctx.channel.id
             if status not in VALID_STATUSES:
-                return f"Error: status must be one of {VALID_STATUSES}, got {status!r}"
-            db = await plugin._require_db()
-            now = time.time()
-            async with db.execute(
-                "UPDATE goals SET status = ?, updated_at = ? WHERE id = ? AND retired_at IS NULL",
-                (status, now, id),
-            ) as cursor:
-                if cursor.rowcount == 0:
-                    return f"Error: no open goal with id {id}"
-            await db.commit()
+                return (
+                    f"Error: status must be one of {', '.join(VALID_STATUSES)}, "
+                    f"got {status!r}"
+                )
+            async with plugin._state_lock:
+                db = await plugin._require_db()
+                goal = await plugin._get(db, id)
+                if goal is None or goal.retired_at is not None:
+                    return (
+                        f"Error: no open goal #{id}; "
+                        "the ids are in the latest goals entry"
+                    )
+                now = plugin._now()
+                async with db.execute(
+                    "UPDATE goals SET status = ?, updated_at = ? WHERE id = ? AND retired_at IS NULL",
+                    (status, now, id),
+                ) as cursor:
+                    if cursor.rowcount == 0:
+                        # Retired between the read above and this write.
+                        return (
+                            f"Error: goal #{id} was retired just now; "
+                            "add a new goal instead"
+                        )
+                await db.commit()
+            # No notify on a no-op (setting the same status).
+            if goal.status != status:
+                await plugin._fire_state_changed(
+                    goal_id=id,
+                    kind="status",
+                    old_status=goal.status,
+                    new_status=status,
+                    origin_channel=goal.origin_channel,
+                    actor_channel=channel_id,
+                    conclusion=None,
+                )
             return f"Goal #{id} status set to {status!r}"
 
         for fn in (add_goal, update_goal, retire_goal, list_goals, set_goal_status):
@@ -384,7 +523,12 @@ class GoalsPlugin(CorvidaePlugin):
             lines = [
                 f"Open goals as of {as_of} (this list replaces any earlier goals list):"
             ]
-            lines += [f"#{g.id} {g.text}" for g in open_goals]
+            # Queue order is pick order; in-progress, blocked and waiting
+            # goals carry their status so the model can see the queue's state.
+            lines += [
+                f"#{g.id} " + (f"[{g.status}] " if g.status != "open" else "") + g.text
+                for g in open_goals
+            ]
             entry = "\n".join(lines)
         else:
             entry = (
@@ -437,10 +581,34 @@ def _seed_cmd(ctx, text):
                 )
             await conn.execute(GOALS_DDL)
             now = time.time()
-            cursor = await conn.execute(
-                "INSERT INTO goals (text, created_at, updated_at) VALUES (?, ?, ?)",
-                (text, now, now),
-            )
+            # Has the daemon migrated this table yet? An operator may seed first.
+            async with conn.execute("PRAGMA table_info(goals)") as cursor:
+                columns = {r[1] for r in await cursor.fetchall()}
+            if "position" in columns:
+                # A seeded goal is an appended one: position is one past the
+                # current maximum. Computed in the INSERT itself because the CLI
+                # is a second process and the daemon may append at the same time.
+                cursor = await conn.execute(
+                    "INSERT INTO goals (text, created_at, updated_at, position) "
+                    "VALUES (?, ?, ?, COALESCE((SELECT MAX(position) FROM goals), 0) + 1)",
+                    (text, now, now),
+                )
+            else:
+                # Rescue: the table predates the queue. Insert as before; the
+                # daemon's migration on its next start sets position = id, which
+                # puts this goal behind the older ones. Logged so the fallback
+                # never hides that the database has not been migrated.
+                # shortcut: relies on the migration's position = id rule; drop
+                # this branch once no pre-queue database is still in use.
+                logger.warning(
+                    "goals seed: %s has no position column yet; seeding without "
+                    "it — start the corvidae daemon once to migrate the table",
+                    db_path,
+                )
+                cursor = await conn.execute(
+                    "INSERT INTO goals (text, created_at, updated_at) VALUES (?, ?, ?)",
+                    (text, now, now),
+                )
             await conn.commit()
             click.echo(
                 f"Seeded goal #{cursor.lastrowid}; "

@@ -369,7 +369,7 @@ The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) 
 
 The fork instruction keys (`appraisal.stage2_fork_prompt`, `critique.fork_prompt.<lens>`) are deliberately not on that list: they are read from config only, so they need no `immutable_settings` entry.
 
-Any *dotted* key not on that list is operator-only: it is read once at init or reload, and while `set_settings` can write it into `runtime_overrides`, nothing reads the override. Undotted keys are allowlisted in code: `set_settings` accepts only the inference parameters `temperature`, `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `max_tokens` and `seed`, which go into the LLM request body, and the framework keys `max_turns`, `max_context_tokens` and `reasoning_history`. Any other undotted key (`messages`, `model`, `tools`, `tool_choice`, …) rejects the whole call; see [threat-model.md](threat-model.md), finding 1. If you don't need agent self-tuning, `tools.disabled: [set_settings]` removes the surface altogether.
+Any *dotted* key not on that list is operator-only: it is read once at init or reload, and while `set_settings` can write it into `runtime_overrides`, nothing reads the override. Undotted keys are allowlisted in code: `set_settings` accepts only the inference parameters `temperature`, `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `max_tokens` and `seed`, which go into the LLM request body, and the framework keys `max_turns`, `max_context_tokens` and `reasoning_history`. `max_turns` and `max_context_tokens` must be positive integers (a string, a float, a boolean, zero or a negative number rejects the whole call, naming the key and the value). Any other undotted key (`messages`, `model`, `tools`, `tool_choice`, …) rejects the whole call; see [threat-model.md](threat-model.md), finding 1. If you don't need agent self-tuning, `tools.disabled: [set_settings]` removes the surface altogether.
 
 #### `appraisal.*` — stage-1 appraisal
 
@@ -622,7 +622,8 @@ The built-in tool keys are read by the plugin that owns the tool: `shell_timeout
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `tools.max_result_chars` | integer | `100000` | Longest tool result kept whole. A longer one reaches the model as its first `max_result_chars` characters behind the kernel's cut line (`[metadata: cut to the first N of M characters; the full text is in <path>]`), and its full text is written to a spill file under the `daemon.notification_spill_*` settings, where the channel has a tool that reads spill files. A subagent's results get the same words as a plain-text line. A background task's result that answers no tool call is cut and spilled the same way, by `TaskPlugin`. Read by `ToolCollectionPlugin`. The legacy key `agent.max_tool_result_chars` is accepted but deprecated; use `tools.max_result_chars` instead. |
-| `tools.read_file_window_fraction` | number | `0.08` | The fraction of the channel's `max_context_tokens` one `read_file` page may take. A page is `min(tools.max_result_chars, max(2000, fraction x max_context_tokens x 3.0))` characters, so it never exceeds `tools.max_result_chars`; a call with no channel, or with no channel registry loaded, uses `tools.max_result_chars`. Must be a number with `0 < value <= 1`; any other value is a config error at startup and refuses a reload. Read by `ToolCollectionPlugin`. |
+| `tools.max_agent_depth` | integer | `2` | How deep background agents may nest. A main turn runs at depth 0; a `subagent` or `fork` it launches runs at depth 1, and a spawn from that loop at depth 2; a spawn from a depth-2 loop is refused with `Error: nested agent depth N reached (tools.max_agent_depth); do this work in the current task instead.` instead of enqueuing a task. Must be an integer of at least 1 (booleans, floats, strings, `0` and null are rejected; a bad value fails startup and refuses a reload, naming the key and the value). Bounds depth only, not fan-out: depth 2 with ten children per level is still many tasks. Read by `ToolCollectionPlugin`. Restart to apply. |
+| `tools.read_file_window_fraction` | number | `0.08` | The fraction of the channel's `max_context_tokens` one `read_file` page may take. A page is first estimated at `min(tools.max_result_chars, max(2000, fraction x max_context_tokens x 3.0))` characters, so it never exceeds `tools.max_result_chars`, and is then counted: while the page costs more than `fraction x max_context_tokens` tokens it is re-read smaller, up to three reads, so the share holds whatever the file contains (dense text such as base64, escapes, CJK or emoji tokenizes far below the 3.0-characters-per-token the estimate assumes). A call with no channel, or with no channel registry loaded, uses `tools.max_result_chars`. Must be a number with `0 < value <= 1`; any other value is a config error at startup and refuses a reload. Read by `ToolCollectionPlugin`. |
 | `tools.shell_timeout` | integer | `30` | Seconds before a `shell` command is killed. |
 | `tools.web_fetch_timeout` | integer | `15` | Seconds before a `web_fetch` HTTP request is aborted. |
 | `tools.web_max_response_bytes` | integer | `50000` | Maximum bytes of HTTP response body returned by `web_fetch`. Content beyond this limit is truncated with `[truncated]`. This limit is independent of `tools.max_result_chars`. |
@@ -881,7 +882,8 @@ Advertised ACP session capabilities: `loadSession`, `list`, `resume`,
 
 **bb:** register Corvidae under `customAcpAgents` with command
 `uv run corvidae acp` (from a checkout with the `acp` extra). See
-[plugin-guide.md](plugin-guide.md#acp-transport) for the smoke checklist.
+[plugin-guide.md](plugin-guide.md#acp-transport) for the smoke checklist, or
+[acp-clients.md](acp-clients.md) for Zed and bb setup.
 
 ---
 
@@ -1092,7 +1094,7 @@ again.
 | `memory.*` (including `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after`, `memory.consolidate_after_tokens` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts, and the token threshold is read once then. |
 | `heartbeat.after` | `HeartbeatPlugin` reads it at init and registers its idle watch at start. Putting the heartbeat to sleep or waking it takes a restart. |
 | `timepiece.*` | `TimepiecePlugin` reads its section in `on_init` and has no reload hook. |
-| `daemon.shutdown_timeout`, `daemon.exit_timeout` | Read once at startup by the runtime. A reload that changes either logs the restart-only warning and does not validate the value; a bad value fails the next startup (and the restart tool's pre-flight). |
+| `daemon.shutdown_timeout`, `daemon.exit_timeout` | Read once at startup by the runtime. Validated on every reload: a bad value refuses the whole reload (one ERROR naming the key and the value, the running config unchanged), so a typo is caught when it is saved rather than at the next restart. A valid change logs the restart-only warning and applies on restart (the restart tool's pre-flight checks it too). |
 | `tools.max_result_chars`, `tools.read_file_window_fraction`, `tools.shell_timeout`, `tools.web_fetch_timeout`, `tools.call_timeout`, `tools.timeouts` | Deferred; not currently implemented in hot-reload path. A bad `tools.call_timeout`, `tools.timeouts` or `tools.read_file_window_fraction` value still refuses the whole reload (see Error handling). |
 
 ### Error handling
@@ -1109,8 +1111,8 @@ nested too deeply to load says to reduce the nesting.
 
 - **Invalid YAML**: logged at `ERROR`; reload is skipped and the running config is unchanged.
 - **Not valid UTF-8, or YAML nested too deeply**: logged at `ERROR` naming the file, the cause (with the byte offset for UTF-8) and the remedy; reload is skipped and the running config stays in force.
-- **Rejected value in `agent:`, `daemon:` or `channels:`** (e.g. a malformed `channels.<id>.tools`): logged at `ERROR` naming the file. For `channels:` the message also names the key and the value and says "reload skipped"; for `agent:` and `daemon:` the key is in the logged traceback. The reload is skipped whole: no section is applied and no plugin receives `on_config_reload`, so a typo in one `channels:` entry cannot change `agent:` values.
-- **Rejected `tools.call_timeout`, `tools.timeouts` or `tools.read_file_window_fraction`**: logged at `ERROR` naming the key and the value, with "reload skipped"; the running config is unchanged.
+- **Rejected value in `agent:`, `daemon:` or `channels:`** (e.g. a malformed `channels.<id>.tools`): logged at `ERROR` naming the file. For `channels:` the message also names the key and the value and says "reload skipped"; for `agent:` and other `daemon:` keys the key is in the logged traceback (`daemon.shutdown_timeout` and `daemon.exit_timeout` are named in the message; see the next item). The reload is skipped whole: no section is applied and no plugin receives `on_config_reload`, so a typo in one `channels:` entry cannot change `agent:` values.
+- **Rejected `tools.call_timeout`, `tools.timeouts`, `tools.read_file_window_fraction`, `daemon.shutdown_timeout` or `daemon.exit_timeout`**: logged at `ERROR` naming the key and the value, with "reload skipped"; the running config is unchanged.
 - **Malformed `llm:` section** (an unknown `extends` base, an `extends` cycle, an unknown `kind`, an embedding profile with no `dimensions`, no default chat profile, an `llm.stages` entry naming a missing profile, and so on): logged at `ERROR` naming the key, with "reload skipped"; the running config is unchanged.
 - **Config file deleted**: logged at `WARNING`; polling continues. The file may reappear.
 - **Per-plugin failure in `on_config_reload`**: logged at `ERROR`; other plugins still receive the reload.
@@ -1125,7 +1127,7 @@ The `logging` section is optional. Omitting it applies defaults (INFO level; fil
 |-----|------|---------|-------------|
 | `logging.level` | string | `INFO` | Minimum log level. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. Case-insensitive. |
 | `logging.file` | string | none (CLI: `corvidae.log`) | Path to a rotating log file (10 MB, 5 backups). When set, logs go to this file. When absent, logs go to stderr. In CLI mode, defaults to `corvidae.log`. |
-| `logging.jsonl.max_bytes` | integer | `10485760` | Size cap, in bytes, for each JSONL file: every per-channel transcript under `daemon.jsonl_log_dir` and the metrics log `daemon.metrics_jsonl`. A write that would pass it first rotates the file to `<name>.1` (the previous `.1` becomes `.2`, and so on). `0` never rotates. Restart-only. |
+| `logging.jsonl.max_bytes` | integer | `10485760` | Size cap, in bytes, for each JSONL file: every per-channel transcript under `daemon.jsonl_log_dir` and the metrics log `daemon.metrics_jsonl`. A write that would pass it first rotates the file to `<name>.1` (the previous `.1` becomes `.2`, and so on). The live file is moved aside under `<name>.rotating-<pid>` while the renames happen, so a failed rotation leaves the backups as they were; a failure is logged once per streak at WARNING. `0` never rotates. Restart-only. |
 | `logging.jsonl.backup_count` | integer | `5` | How many rotated files each JSONL sink keeps; the oldest is deleted. `0` keeps none, so the live file simply starts over. Restart-only. |
 
 The JSONL files are a debugging aid; `message_log` in `sessions.db` is the durable record. Rotation is in-process, so no external `logrotate` is needed; a file already over the cap when the daemon starts rotates on its first write. Each file is capped separately, so the worst case on disk is the number of channels times `(1 + backup_count) * max_bytes`, plus the metrics log. If a rotation fails (a read-only directory, a full disk), the daemon logs one warning naming the file and keeps appending past the cap until rotation works again, rather than dropping records. A value that is not an integer of 0 or greater is a startup config error naming the key.
@@ -1148,22 +1150,36 @@ Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv 
 
 ## `webhook_notify` — webhook deliveries as notifications
 
-Requires the webhook-notify extra (`--extra webhook-notify` on your `uv sync` line) and the `webhook` ingress. Each delivery on a listed endpoint is sent to every channel listed for it as a notification: the payload as compact JSON, fenced, with `origin=webhook:<endpoint>` in the header; an over-long payload is cut and spilled to a file (see `daemon.notification_spill_*`). Each delivery costs one turn per target channel. Restart to apply a change.
+Requires the webhook-notify extra (`--extra webhook-notify` on your `uv sync` line) and the `webhook` ingress. Deliveries on a listed endpoint are sent to every channel listed for it as notifications: the payload as compact JSON, fenced, with `origin=webhook:<endpoint>` in the header; an over-long payload is cut and spilled to a file (see `daemon.notification_spill_*`). Restart to apply a change.
+
+**Throttling is on by default (#793).** A delivery on an endpoint with no open window opens one for `batch_seconds`, and everything that arrives in the window is sent as **one** notification: a single delivery as before, more than one as a compact JSON array in arrival order with a `deliveries=<n>` annotation. A burst of forty CI events therefore costs one turn per target channel, not forty. On top of that, at most `max_notifications` flushes go out per endpoint per `per_seconds`; a flush over the cap is held and its deliveries stay buffered up to `max_buffered`, beyond which the oldest are dropped. The next flush that gets through carries `dropped=<n>`, so a drop reaches the model and not just the log (a drop count always rides on a flush that carries deliveries; a drop-only notification exists only as a defensive path); every drop also logs a `WARNING` naming the endpoint and the running count. To restore the pre-#793 behaviour, set `batch_seconds: 0` and a high `max_notifications`.
 
 ```yaml
 webhook_notify:
   max_payload_chars: 8000
+  defaults:                 # every endpoint inherits these; these are the built-in values
+    batch_seconds: 60
+    max_notifications: 10
+    per_seconds: 3600
+    max_buffered: 500
   endpoints:
-    github: [irc:#corvidae, discord:123456789]
-    siri: [signal:+15551234567]
+    github:                 # mapping form: channels plus overrides
+      channels: [irc:#corvidae, discord:123456789]
+      max_notifications: 20
+    siri: [signal:+15551234567]   # bare-list form: these channels, the defaults
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `webhook_notify.max_payload_chars` | integer | `8000` | Longest compact-JSON payload passed inline, in characters. A longer one is cut, and the header says it was cut to the first N of M characters. Where a channel's tools can read spill files, the full text goes to a file the header names (see `daemon.notification_spill_*`). Must be an integer ≥ 1. |
-| `webhook_notify.endpoints.<endpoint>` | list of strings | none | Non-empty list of channel ids (`transport:scope`) notified of each delivery on that `webhook` endpoint. Repeated ids are notified once. |
+| `webhook_notify.defaults.<key>` | see the four keys below | the values above | The throttle every endpoint inherits unless it overrides it. |
+| `webhook_notify.defaults.batch_seconds` | number | `60` | Length of an endpoint's digest window, in seconds. `0` turns batching off and delivers on arrival. Must be ≥ 0. |
+| `webhook_notify.defaults.max_notifications` | integer | `10` | Flushes allowed per endpoint per `per_seconds`. A flush over the cap is held, not dropped. Must be an integer ≥ 1. |
+| `webhook_notify.defaults.per_seconds` | number | `3600` | The window the cap counts over, in seconds. Must be > 0. |
+| `webhook_notify.defaults.max_buffered` | integer | `500` | Deliveries an endpoint may buffer, in an ordinary window as well as while its flush is held. Whenever the buffer exceeds it the oldest is dropped, counted and reported. Must be an integer ≥ 1. |
+| `webhook_notify.endpoints.<endpoint>` | list of strings, or mapping | none | Either a non-empty list of channel ids (`transport:scope`) notified of the endpoint's digests, or a mapping with `channels:` plus any of the four throttle keys to override `defaults` for this endpoint. Repeated ids are notified once. All of an endpoint's channels receive the same digest, so the window and the cap are per endpoint; give a channel its own limits by routing it through its own endpoint. |
 
-A malformed block fails startup naming the key and the value; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet (Discord or Signal before they start) is skipped with a `WARNING` for that delivery. For GitHub, filter events in the webhook's own settings: payloads such as `pull_request` and `check_run` are large and are cut at the cap, with the rest in a spill file.
+A malformed block fails startup naming the key, the value and the accepted range, including an unknown key under `defaults` or under an endpoint; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet (Discord or Signal before they start) is skipped with a `WARNING` naming the endpoint and how many deliveries the digest carried. Buffered deliveries are lost at shutdown, with a `WARNING` naming the endpoint and the count. For GitHub, filter events in the webhook's own settings: payloads such as `pull_request` and `check_run` are large and are cut at the cap, with the rest in a spill file.
 
 ---
 
@@ -1209,13 +1225,14 @@ The plugin reads and writes files under `<config_dir>/state/`:
 
 Requires the timepiece extra (`--extra timepiece` on your `uv sync` line). Without the block the plugin runs with its defaults; to turn it off, list `timepiece` in `plugins.disabled`.
 
-Before a turn, if the channel has had no stamp for `interval_minutes`, the plugin appends one CONTEXT line to the conversation, such as `The current date and time are now Monday 2026-11-09 at 17:12 PST`. Every channel that takes a turn is stamped, internal ones included. The line is persisted like any CONTEXT row. The last-stamp times are kept in memory, so the first turn on each channel after a restart is stamped. It adds no tool and starts no turn.
+Before a turn, if the channel has had no stamp for `interval_minutes`, the plugin appends one CONTEXT line to the conversation, such as `The current date and time are now Monday 2026-11-09 at 17:12 PST`. An optional `timepiece.note` string, when non-empty, is appended after the stamp in the same line. Every channel that takes a turn is stamped, internal ones included. The line is persisted like any CONTEXT row. The last-stamp times are kept in memory, so the first turn on each channel after a restart is stamped. It adds no tool and starts no turn.
 
 ```yaml
 timepiece:
   interval_minutes: 10
   timezone: America/Los_Angeles
   format: "%A %Y-%m-%d at %H:%M %Z"
+  note: ""
 ```
 
 | Key | Type | Default | Description |
@@ -1223,6 +1240,7 @@ timepiece:
 | `timepiece.interval_minutes` | number | `10` | Minimum minutes between stamps on one channel. Must be a number > 0. |
 | `timepiece.timezone` | string | daemon's local time | IANA timezone name for the stamp. Must name a known zone. |
 | `timepiece.format` | string | `"%A %Y-%m-%d at %H:%M %Z"` | `strftime` format for the time in the stamp. Must be a non-empty string. |
+| `timepiece.note` | string | `""` | Optional text appended after the stamp. Empty by default (no note). Must be a string. |
 
 A malformed key fails startup naming the key and the value. Restart to apply a change.
 

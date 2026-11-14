@@ -295,7 +295,7 @@ Other things worth knowing when it misbehaves:
 ## Sending files
 
 The agent has one tool for sending a file to a Signal contact:
-`send_signal_attachment(channel_id, path, caption)`. It exists whenever the
+`send_signal_attachment(channel_id, path, caption, voice_note)`. It exists whenever the
 `signal:` block is configured. (Discord's tool is `send_attachment`; the names
 differ so both transports can run in one agent.)
 
@@ -304,6 +304,9 @@ differ so both transports can run in one agent.)
   under that root, and a path that lands outside it is refused.
 - **How big.** `signal.max_attachment_size` caps a file in both directions;
   a larger one is refused before anything is sent.
+- **Voice notes.** `voice_note=True` sends the file as a voice note (a voice
+  bubble in the client rather than a file card). It needs signal-cli 0.14.2
+  or later; left at its default, the flag is not sent at all.
 - **To whom.** A `signal:<id>` channel corvidae holds in its registry. That
   is, for example, an allowlisted sender who has written since corvidae started, a channel
   you list under `channels:` in `agent.yaml`, or one a reminder or scheduled
