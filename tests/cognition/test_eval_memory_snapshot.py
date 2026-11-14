@@ -176,6 +176,22 @@ def read_pool(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
+def run_snapshot(script: ModuleType, argv: list[str]) -> None:
+    """Invoke the script, tolerating the #662 refusal on an FTS-only install.
+
+    The `cognition-fts` job deliberately has no sqlite-vec, so there every
+    query degrades and a snapshot run now exits 1 by design. The pool is still
+    written and every test here asserts what is in it, so on that path the
+    exit is tolerated; with vectors present the run must succeed outright.
+    """
+    if HAS_VEC:
+        script.main(argv)
+        return
+    with pytest.raises(SystemExit) as exc:
+        script.main(argv)
+    assert exc.value.code == 1
+
+
 def test_snapshot_copy_leaves_source_bytes_and_includes_wal_rows(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
@@ -234,7 +250,7 @@ def test_snapshot_copy_leaves_source_bytes_and_includes_wal_rows(
     pool_out = tmp_path / "pool.json"
     before = (sha256(image_db), sha256(image_wal))
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(image_db), "--labels", str(labels),
         "--config", str(config), "--pool-out", str(pool_out),
     ])
@@ -275,7 +291,7 @@ def test_snapshot_scores_known_ranking(
     ])
     pool_out = tmp_path / "pool.json"
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
         "--pool-out", str(pool_out), "--k", "2",
     ])
@@ -344,6 +360,7 @@ def test_snapshot_reports_fts_fallback_on_encoder_mismatch(
     assert "different encoder or dimensions" in captured.err
 
 
+@needs_vec
 def test_all_degraded_run_names_the_embedding_failure(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
@@ -378,6 +395,7 @@ def test_all_degraded_run_names_the_embedding_failure(
     assert "different encoder" not in err
 
 
+@needs_vec
 def test_some_degraded_queries_still_exit_0(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
@@ -451,7 +469,7 @@ def test_snapshot_names_unreachable_label_ids(
     ])
     pool_out = tmp_path / "pool.json"
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels),
         "--config", str(config), "--pool-out", str(pool_out),
     ])
@@ -509,7 +527,7 @@ def test_snapshot_never_calls_chat_or_embeds_documents(
         {"text": query_texts[1], "relevant": [ids[1]]},
     ])
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
         "--pool-out", str(tmp_path / "pool.json"),
     ])
@@ -600,7 +618,7 @@ def test_snapshot_pool_json_holds_whole_pool(
     labels = write_labels(tmp_path / "labels.json", [{"text": TEXT_A, "relevant": [ids[0]]}])
     pool_out = tmp_path / "pool.json"
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
         "--pool-out", str(pool_out), "--k", "1",
     ])
@@ -690,7 +708,7 @@ def test_snapshot_not_a_database_reports_open_error(
 def run(script: ModuleType, tmp_path: Path, labels: Path, *extra: str) -> dict:
     """Run snapshot mode over tmp_path/sessions.db and return the pool JSON."""
     pool_out = tmp_path / "pool.json"
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(tmp_path / "sessions.db"), "--labels", str(labels),
         "--config", str(tmp_path / "agent.yaml"), "--pool-out", str(pool_out),
         *extra,
