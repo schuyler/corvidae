@@ -458,35 +458,32 @@ class TestTunableFlips:
 
 
 class TestWithheldStillCritiqued:
-    async def test_withheld_reminder_final_is_critiqued(self, make_env):
-        """WP2.7's deferred assertion: a withheld response stays eligible."""
+    """WP2.7's deferred assertion is now unreachable, and this says why.
+
+    Critique is eligible only for ``reminder`` origin and for admitted ``user``
+    traces; a user final is never withheld, so the one origin that could be both
+    withheld and eligible was the reminder. Exempting reminders from the gate
+    (the change above) removed the last vehicle, and a test that constructs an
+    impossible combination would assert nothing. Kept as a class so the next
+    reader finds the reasoning rather than a gap: if a new origin becomes
+    eligible *and* withholdable, this is where its test goes.
+    """
+
+    async def test_no_origin_is_both_withheld_and_eligible(self, make_env):
         from corvidae_cognition.critique import CritiquePlugin
 
-        env = await make_env(
-            config={"gate": {"send": {"min_salience": 1.0}}, "critique": {"sample_below_rate": 1.0}},
-            responses=[_make_text_response("stretch time.")],
-        )
+        env = await make_env(config={"gate": {"send": {"min_salience": 1.0}}})
         critique = CritiquePlugin()
         env.pm.register(critique, name="critique")
         await critique.on_init(pm=env.pm, config=env.config)
-        critique._run_critique = AsyncMock()
 
-        await _notify(env, "time to stretch", annotations={"origin": "reminder"})
-        await drain_task_queue(env.plugin)
-
-        rows = await env.rows_by_type()
-        assert [t for m, t in rows if m.get("role") == "assistant"] == ["unsent"]
-        critique._run_critique.assert_awaited_once()
-        args = critique._run_critique.await_args.args
-        assert "stretch time." in args
-
-
-
-
-# ---------------------------------------------------------------------------
-# Unit tests: GatePlugin against stub appraisal and outcome-log plugins
-# ---------------------------------------------------------------------------
-
+        for origin in ("reminder", "user", "critique", "heartbeat", "task"):
+            eligible = critique._eligible("t1", {"origin": origin})
+            verdict = await env.gates.should_send_response(
+                channel=env.channel, text="x", emission="final",
+                trace_id="t1", annotations={"origin": origin},
+            )
+            assert not (eligible and verdict is False), origin
 
 class _FakePM:
     def __init__(self, **plugins):
@@ -564,8 +561,13 @@ class TestDecisionTable:
             # Shadow mode: would veto, sends.
             ({"origin": "heartbeat"}, 0.1, {"gate": {"send": {"enforce": False}}}, None,
              {"vetoed": False, "would_veto": True, "enforced": False}),
-            # annotations["origin"] is used as-is.
-            ({"origin": "reminder"}, 0.1, {}, False, {"origin": "reminder", "vetoed": True}),
+            # A reminder is text the operator scheduled: never withheld, and the
+            # record says why rather than blaming the threshold.
+            ({"origin": "reminder"}, 0.1, {}, None,
+             {"origin": "reminder", "vetoed": False, "reason": "reminder_origin"}),
+            # annotations["origin"] is used as-is, and every other origin still
+            # takes the threshold.
+            ({"origin": "critique"}, 0.1, {}, False, {"origin": "critique", "vetoed": True}),
             # User origin is never withheld, at any threshold.
             ({"origin": "user"}, 0.0, {"gate": {"send": {"min_salience": 1.0}}}, None,
              {"vetoed": False, "reason": "user_origin"}),
@@ -576,6 +578,21 @@ class TestDecisionTable:
         assert await _final(gate, channel, annotations) is verdict
         send = log.writes[-1]["outcomes"]["send"]
         assert {k: send[k] for k in record} == record
+
+    @pytest.mark.parametrize("salience", [0.0, 0.05, 0.147])
+    async def test_a_reminder_is_never_withheld(self, salience):
+        """38 reminder finals were dropped in three days, scored 0.05-0.15.
+
+        Salience is a guess about whether text is worth saying; a reminder is
+        text the operator asked for at a time they chose, so the gate has no
+        business overruling it (#see PR)."""
+        gate, log, channel = await _gate(
+            {"gate": {"send": {"min_salience": 0.15}}}, appraisal=_StubAppraisal(salience)
+        )
+        assert await _final(gate, channel, {"origin": "reminder"}) is None
+        send = log.writes[-1]["outcomes"]["send"]
+        assert send["vetoed"] is False and send["reason"] == "reminder_origin"
+        assert send["salience"] == salience
 
     async def test_user_final_skips_advisory_reads(self):
         gate, log, channel = await _gate(appraisal=_StubAppraisal(0.0))
