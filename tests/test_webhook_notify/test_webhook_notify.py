@@ -365,7 +365,9 @@ async def test_a_drop_reaches_the_model_with_no_later_flush(tmp_path):
 
 
 async def test_a_drop_report_is_sent_when_the_buffer_emptied(tmp_path):
-    """The only case with nothing to carry: a drop with an empty buffer."""
+    """Defensive path, not reachable through deliveries: a pending drop count
+    normally rides on the next allowed flush. Forced here by emptying the buffer
+    by hand to prove the branch still reports the count rather than losing it."""
     plugin, rec, _ = await build(tmp_path, {
         "defaults": {"batch_seconds": 0.05, "max_buffered": 1},
         "endpoints": {"github": {"channels": ["irc:#a"], "max_notifications": 1,
@@ -410,9 +412,52 @@ async def test_batch_seconds_zero_delivers_immediately(tmp_path):
     assert [c["text"] for c in rec.calls] == ['{"n":0}']
 
 
+async def test_held_deliveries_leave_one_flush_timer_and_on_stop_cancels_it(tmp_path):
+    """`batch_seconds: 0` over the cap re-arms the retry; it must not leak tasks."""
+    plugin, rec, _ = await build(tmp_path, {
+        "defaults": {"batch_seconds": 0},
+        "endpoints": {"github": {"channels": ["irc:#a"], "max_notifications": 1,
+                                 "per_seconds": 30}},
+    })
+    for n in range(6):
+        await plugin._deliver(delivery({"n": n}))
+    # The first went out; the other five are held, still counted as buffered.
+    assert len(rec.calls) == 1
+    assert len(plugin._state["github"].buffer) == 5
+    timers = lambda: [t for t in asyncio.all_tasks()
+                      if t.get_name().startswith("webhook-notify-flush-") and not t.done()]
+    await asyncio.sleep(0)  # let superseded timers finish cancelling
+    assert len(timers()) == 1, "each held delivery must replace, not add, the retry timer"
+    await plugin.on_stop()
+    await asyncio.sleep(0)  # let the cancellations land
+    assert timers() == []
+
+
+async def test_a_failing_timer_flush_is_logged_with_endpoint_and_size(tmp_path, caplog):
+    """An exception in the timer's flush is logged, naming endpoint and digest."""
+    plugin, rec, _ = await build(tmp_path, {
+        "defaults": {"batch_seconds": 0.05},
+        "endpoints": {"github": ["irc:#a"]},
+    })
+
+    async def boom(*a, **kw):
+        raise RuntimeError("spill exploded")
+
+    plugin._spill.notify = boom
+    await plugin._deliver(delivery({"n": 0}))
+    await plugin._deliver(delivery({"n": 1}))
+    await settle()
+    errs = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errs and "github" in errs[0].getMessage()
+    assert "2 deliveries" in errs[0].getMessage()
+    assert errs[0].exc_info is not None
+
+
 @pytest.mark.parametrize(("block", "key", "bad", "remedy"), [
     ({"defaults": {"batch_seconds": -1}}, "webhook_notify.defaults.batch_seconds",
      "-1", ">= 0"),
+    ({"defaults": {"batch_seconds": float("inf")}}, "webhook_notify.defaults.batch_seconds",
+     "inf", "number of seconds >= 0"),
     ({"defaults": {"max_notifications": 0}}, "webhook_notify.defaults.max_notifications",
      "0", "positive integer"),
     ({"defaults": {"per_seconds": 0}}, "webhook_notify.defaults.per_seconds", "0", "> 0"),

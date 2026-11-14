@@ -16,10 +16,11 @@ Volume control (#793), per endpoint, in two layers, both on by default:
 - **A rate cap.** At most ``max_notifications`` flushes per endpoint per
   ``per_seconds``. A flush over the cap is held, and its deliveries stay
   buffered up to ``max_buffered``; beyond that the oldest are dropped and
-  counted. The next flush that gets through carries ``dropped=<n>``, and a
-  window that dropped deliveries and is followed by no flush still sends one
-  notification carrying only ``dropped=<n>`` — the count reaches the model
-  rather than only the log. Every drop is a WARNING naming the endpoint and
+  counted. The next flush that gets through carries ``dropped=<n>``: a
+  pending drop count always rides on it (a
+  defensive drop-only notification exists for a flush with nothing buffered,
+  but deliveries cannot produce one) — the count reaches the model rather
+  than only the log. Every drop is a WARNING naming the endpoint and
   the running count.
 
 Both counts travel as annotations the plugin declares in
@@ -46,6 +47,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -151,7 +153,7 @@ class WebhookNotifyPlugin(CorvidaePlugin):
         if isinstance(value, bool):
             raise _bad(key, value, "use a number, not true/false")
         if name == "batch_seconds":
-            if not isinstance(value, (int, float)) or value < 0:
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise _bad(
                     key, value, "use a number of seconds >= 0 (0 turns batching off)"
                 )
@@ -161,7 +163,7 @@ class WebhookNotifyPlugin(CorvidaePlugin):
                 raise _bad(key, value, "use a positive integer")
             return value
         # per_seconds
-        if not isinstance(value, (int, float)) or value <= 0:
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise _bad(key, value, "use a number of seconds > 0")
         return float(value)
 
@@ -280,14 +282,26 @@ class WebhookNotifyPlugin(CorvidaePlugin):
     async def _after(self, endpoint: str, delay: float) -> None:
         """Wait out the window (or the cap), then flush."""
         await asyncio.sleep(delay)
-        self._state[endpoint].window = None
-        await self._flush(endpoint)
+        state = self._state[endpoint]
+        state.window = None
+        # The ingress's logger.exception no longer covers this task, so a
+        # failing flush (spill, channel resolution) is logged here.
+        # The digest size is read first: a flush empties the buffer before it sends.
+        size = len(state.buffer)
+        try:
+            await self._flush(endpoint)
+        except Exception:
+            logger.exception(
+                "webhook_notify: endpoint %s timer flush failed (digest of %d "
+                "deliveries, %d dropped and unreported); check the spill service "
+                "and the endpoint's channels",
+                endpoint, size, state.pending_dropped,
+            )
 
     async def _flush(self, endpoint: str) -> None:
         """Send what the endpoint has buffered, if the rate cap allows it."""
         limit = self._targets[endpoint]
         state = self._state[endpoint]
-        state.window = None
         now = asyncio.get_running_loop().time()
         while state.flushes and now - state.flushes[0] >= limit.per_seconds:
             state.flushes.popleft()
@@ -299,7 +313,10 @@ class WebhookNotifyPlugin(CorvidaePlugin):
         if state.buffer:
             deliveries, state.buffer = state.buffer, []
         elif state.pending_dropped:
-            deliveries = []  # a drop report: nothing survived this window
+            # Defensive path: every flush clears buffer and pending_dropped
+            # together, so deliveries cannot reach here; a drop report is kept
+            # rather than lose the count if a future change breaks that.
+            deliveries = []
         else:
             return
         dropped, state.pending_dropped = state.pending_dropped, 0

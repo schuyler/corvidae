@@ -1197,8 +1197,8 @@ inbound admission is the main control on total cost the tree has. Filtering
 floods at the transport is a future improvement (#296), with one exception
 since #793: `webhook_notify` caps its own deliveries at
 `max_notifications` per `per_seconds` per endpoint (10 per hour by default),
-so a webhook flood costs that many turns per target channel plus one drop
-report, rather than one turn per delivery (finding 16).
+so a webhook flood costs at most that many turns per target channel per
+window, drop reports included, rather than one turn per delivery (finding 16).
 
 ### 15. One identity across channels (by design)
 
@@ -1329,7 +1329,7 @@ as a fenced notification, so whoever can post to the endpoint chooses text the
 model reads there. Provider-side event filtering is no longer the only volume
 control: `webhook_notify` throttles per endpoint (#793), on by default. A
 sender now costs at most `max_notifications` turns per `per_seconds` per
-target channel — 10 per hour out of the box — plus one drop report, and the
+target channel — 10 per hour out of the box — drop reports counting against the same cap, and the
 digest inside a single notification is bounded by `max_payload_chars` inline
 and the spill cap on disk, as before. Two residual risks remain. A flood can
 still push real events out of the buffer, because the policy is drop-oldest:

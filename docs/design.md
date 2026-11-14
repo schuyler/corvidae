@@ -4362,9 +4362,10 @@ JSON array in arrival order (`ensure_ascii=False`) when more did. A flush over
 the endpoint's rate cap (`max_notifications` per `per_seconds`) is held and
 retried when a slot frees, and past `max_buffered` the oldest delivery is
 dropped, counted, logged at `WARNING` with the running total, and reported to
-the model as a `dropped=<n>` annotation on the next flush — or on a
-notification of its own when no flush follows. The flush timer is one
-`asyncio.Task` per endpoint, cancelled in `on_stop` with a `WARNING` naming
+the model as a `dropped=<n>` annotation on the next flush that gets through
+(a drop-only notification exists as a defensive path but deliveries cannot
+reach it). The flush timer is at most one
+`asyncio.Task` per endpoint (a re-armed retry replaces the old one), cancelled in `on_stop` with a `WARNING` naming
 how much was lost. At flush the plugin resolves each target channel with
 `resolve_persisted_channel` (a `ChannelNotReady` target is skipped with a
 `WARNING` naming the endpoint and the digest size) and makes one
