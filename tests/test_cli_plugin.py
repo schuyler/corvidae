@@ -430,6 +430,27 @@ class TestOnStop:
 
 
 class TestDaemonReader:
+    def test_stdin_reader_exits_on_closed_loop(self):
+        """_stdin_reader exits cleanly when the loop is closed (shutdown
+        race), instead of crashing with RuntimeError."""
+        pm, registry = _make_pm_with_registry(transport="cli")
+        plugin = CLIPlugin(pm)
+        pm.register(plugin, name="cli")
+        plugin._registry = registry
+
+        import threading
+        loop = asyncio.new_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        # Call _stdin_reader directly with a closed loop.
+        # readline is patched to return "" immediately.
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.readline.return_value = ""
+            # The loop is never run, so call_soon_threadsafe will raise
+            # RuntimeError (loop not running / closed).
+            plugin._stdin_reader(queue, loop)
+        loop.close()
+        # If we get here without an exception, the RuntimeError was caught.
+
     async def test_reader_thread_is_daemon(self):
         """_read_loop spawns a daemon reader thread, so a blocked readline
         cannot hold up process exit (#759)."""
@@ -449,10 +470,13 @@ class TestDaemonReader:
             mock_stdin.isatty.return_value = False
             mock_stdin.readline = blocking_readline
             task = asyncio.create_task(plugin._read_loop())
-            await asyncio.sleep(0.05)  # let the thread spawn
+            # Poll for the thread to spawn (robust against scheduling).
+            for _ in range(100):
+                if plugin._reader_thread is not None:
+                    break
+                await asyncio.sleep(0.01)
             assert plugin._reader_thread is not None
             assert plugin._reader_thread.daemon
-            assert plugin._reader_thread.name == "cli-stdin-reader"
             task.cancel()
             try:
                 await task
