@@ -23,6 +23,6 @@ cd "${CLAUDE_PROJECT_DIR:-$(pwd)}"
 # This is CI's full job; the kernel alone is --extra dev --extra acp.
 # uv sync is idempotent and reuses its cache.
 echo "session-start: installing dependencies with uv"
-uv sync --extra dev --extra acp --extra discord --extra cognition
+uv sync --extra dev --extra acp --extra discord --extra cognition --extra signal
 
 echo "session-start: dependencies ready"

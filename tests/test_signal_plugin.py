@@ -41,6 +41,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+# The reaction check is a table lookup (#780), and SignalPlugin.on_init
+# refuses a configured transport without the table, so this file needs the
+# `signal` extra. Same arrangement as the Discord tests: the kernel job
+# installs no extras and skips the file.
+pytest.importorskip("emoji")
+
 from corvidae.channel import ChannelRegistry, load_channel_config
 from corvidae.hooks import (
     create_plugin_manager,

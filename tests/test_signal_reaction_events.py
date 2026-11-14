@@ -18,6 +18,12 @@ from datetime import datetime, timezone
 
 import pytest
 
+# The reaction check is a table lookup (#780), and SignalPlugin.on_init
+# refuses a configured transport without the table, so this file needs the
+# `signal` extra. Same arrangement as the Discord tests: the kernel job
+# installs no extras and skips the file.
+pytest.importorskip("emoji")
+
 from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import hookimpl
 from tests.test_signal_plugin import (
@@ -143,6 +149,35 @@ async def test_allowlisted_reaction_becomes_context_row_without_a_turn(
         await _stop_plugin(h)
 
 
+@pytest.mark.parametrize(
+    "emoji",
+    [
+        pytest.param("\U0001f1ef\U0001f1f5", id="flag-japan"),
+        pytest.param("1\ufe0f\u20e3", id="keycap-one"),
+        pytest.param("\u2764\ufe0f\u200d\U0001f525", id="zwj-heart-on-fire"),
+        pytest.param("\U0001f937\u200d\u2640\ufe0f", id="zwj-woman-shrugging"),
+        pytest.param("\U0001f3f3\ufe0f\u200d\U0001f308", id="zwj-rainbow-flag"),
+        pytest.param(
+            "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f",
+            id="subdivision-flag-england",
+        ),
+    ],
+)
+async def test_compound_reaction_reaches_the_agent_as_a_row(tmp_path, emoji):
+    """#780: a flag, a keycap and a ZWJ sequence arrive the way 👍 does —
+    one context row carrying the emoji the sender picked."""
+    h, spy = await _start(tmp_path)
+    try:
+        channel = _channel_with_conversation(h)
+        await h.plugin._handle_notification("receive", _reaction_params(emoji=emoji))
+        assert _no_turn_started(h, spy)
+        rows = await _drain(h, channel)
+        assert len(rows) == 1
+        assert rows[0]["content"].startswith(f"[reaction: {emoji} on ")
+    finally:
+        await _stop_plugin(h)
+
+
 # ---------------------------------------------------------------------------
 # (2) per-channel scoping and drain-once
 # ---------------------------------------------------------------------------
@@ -242,47 +277,102 @@ async def test_reaction_removal_is_dropped(tmp_path, caplog):
 TAGS_16 = "".join(chr(0xE0020 + i) for i in range(16))
 
 ACCEPTED_EMOJI = [
+    # Single pictographs, with and without a skin tone or VS16.
     "👍",
     "❤️",
     "👍🏽",
-    "👍🏽️",
     "‼️",
     "ℹ️",
     "\U0001fae9",
+    # Compound sequences that are one RGI emoji (#780).
+    pytest.param("\U0001f1ef\U0001f1f5", id="flag-japan"),
+    pytest.param("1\ufe0f\u20e3", id="keycap-one"),
+    pytest.param("\u2764\ufe0f\u200d\U0001f525", id="zwj-heart-on-fire"),
+    pytest.param("\U0001f937\u200d\u2640\ufe0f", id="zwj-woman-shrugging"),
+    pytest.param("\U0001f3f3\ufe0f\u200d\U0001f308", id="zwj-rainbow-flag"),
+    pytest.param("\U0001f468\u200d\U0001f469\u200d\U0001f467", id="zwj-family"),
+    pytest.param(
+        "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f",
+        id="subdivision-flag-england",
+    ),
+    pytest.param(
+        "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f",
+        id="subdivision-flag-scotland",
+    ),
+    pytest.param(
+        "\U0001f3f4\U000e0067\U000e0062\U000e0077\U000e006c\U000e0073\U000e007f",
+        id="subdivision-flag-wales",
+    ),
 ]
 
 REJECTED_EMOJI = [
     pytest.param("ignore", id="word"),
     pytest.param("^^^^", id="carets"),
     pytest.param("###", id="hashes"),
+    pytest.param("", id="empty"),
     pytest.param("ⓘⓖⓝ", id="enclosed-letters"),
     pytest.param(TAGS_16, id="sixteen-tag-chars"),
     pytest.param("\U0001f3f4" + TAGS_16 + "\U000e007f", id="tag-sequence-flag-payload"),
     pytest.param("ⓘ‍ⓖ‍ⓝ", id="enclosed-letters-zwj"),
     pytest.param("👍\n", id="trailing-newline"),
-    pytest.param("\U0001f1ef\U0001f1f5", id="regional-indicator-pair"),
-    pytest.param("1️⃣", id="keycap"),
-    pytest.param("\U0001f468‍\U0001f469‍\U0001f467", id="zwj-family"),
-    pytest.param("\U0001f3fd", id="lone-skin-tone"),
+    pytest.param("👍👍", id="two-emoji"),
+    # A regional-indicator word: AB is not a country code, so not a flag.
+    pytest.param("\U0001f1e6\U0001f1e7", id="regional-indicator-word"),
+    pytest.param("\u2764\ufe0f\u200d\U0001f525\u200d\u26a1", id="non-rgi-zwj-join"),
     pytest.param("\U0001f3fd\U0001f3fd", id="modifier-modifier"),
 ]
 
 
 @pytest.mark.parametrize("emoji", ACCEPTED_EMOJI)
-def test_is_plain_emoji_accepts_single_symbols(emoji):
-    """A single pictograph, optional skin tone, optional VS16 passes."""
-    # Imported here so the file collects before the predicate exists.
-    from corvidae.channels.signal import _is_plain_emoji
+def test_is_single_emoji_accepts_one_emoji(emoji):
+    """A single symbol, a skin tone, a flag, a keycap or a ZWJ sequence passes."""
+    from corvidae.channels.signal import _is_single_emoji
 
-    assert _is_plain_emoji(emoji) is True, repr(emoji)
+    assert _is_single_emoji(emoji) is True, repr(emoji)
 
 
 @pytest.mark.parametrize("emoji", REJECTED_EMOJI)
-def test_is_plain_emoji_rejects_everything_else(emoji):
-    """Words, symbols, tag payloads, compounds and stray modifiers fail."""
-    from corvidae.channels.signal import _is_plain_emoji
+def test_is_single_emoji_rejects_everything_else(emoji):
+    """Words, hidden text, non-RGI joins and stray modifiers fail."""
+    from corvidae.channels.signal import _is_single_emoji
 
-    assert _is_plain_emoji(emoji) is False, repr(emoji)
+    assert _is_single_emoji(emoji) is False, repr(emoji)
+
+
+def test_the_table_is_what_decides():
+    """The check is a membership test against the RGI table (#780): the
+    emoji the previous regex dropped are the ones it now accepts, and the
+    sequences it must still refuse are refused by the table, not by a rule
+    written here.
+    """
+    import emoji as table
+
+    from corvidae.channels.signal import _is_single_emoji
+
+    assert table.is_emoji("\U0001f937\u200d\u2640\ufe0f") is True
+    assert _is_single_emoji("\U0001f937\u200d\u2640\ufe0f") is True
+    # Whole-string semantics: one emoji wrapped in anything else fails.
+    assert _is_single_emoji(" \U0001f937\u200d\u2640\ufe0f") is False
+
+
+async def test_configured_transport_without_the_table_fails_on_init():
+    """A signal: block and no emoji package is refused at startup, naming the
+    package and the install line, rather than dropping every reaction later."""
+    from corvidae.channels import signal as signal_module
+    from corvidae.channels.signal import SignalPlugin
+    from tests.test_signal_config import _malformed_config
+
+    original = signal_module._emoji
+    signal_module._emoji = None
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            await SignalPlugin(pm=None).on_init(None, _malformed_config())
+    finally:
+        signal_module._emoji = original
+
+    message = str(excinfo.value)
+    assert "emoji" in message, message
+    assert "uv sync --extra signal" in message, message
 
 
 @pytest.mark.parametrize("emoji", REJECTED_EMOJI)

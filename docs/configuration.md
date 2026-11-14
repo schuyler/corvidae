@@ -636,6 +636,8 @@ The `irc` section is optional. If absent, `IRCPlugin` does not connect.
 
 The `signal` section is optional. If absent, `SignalPlugin` loads but stays inert: no socket, no channels, nothing logged above `DEBUG`. If present, it must be well-formed — a missing `socket` or `account`, or an `allow` that is not a list, raises at startup naming the offending field.
 
+The transport needs the `emoji` package for its reaction check (#780), which comes from the `signal` extra: `uv sync --extra signal`, naming your other extras too, since `uv sync` removes extras you don't name. A `signal` section configured without it fails at startup with a message naming the package and that install line; without a `signal` section the package is not needed at all.
+
 corvidae talks JSON-RPC to a `signal-cli daemon` that is already running; it does not start or supervise one. Registering the bot's number and running the daemon are covered in [signal-ops.md](signal-ops.md).
 
 | Key | Type | Default | Description |
