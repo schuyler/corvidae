@@ -383,3 +383,43 @@ async def test_no_event_type_header_is_none(start):
         assert resp.status == 202
     await wait_until(lambda: deliveries)
     assert deliveries[0].event_type is None
+
+
+async def test_the_dedupe_window_holds_exactly_the_last_32_ids(start):
+    """#567: the window is 32 ids wide, and both edges of it are pinned.
+
+    The existing eviction test re-sends an id that 32 later deliveries have
+    pushed out, which passes for any window smaller than 32 too. This pins the
+    size from both sides: the 32nd id is still a duplicate, the 33rd pushes the
+    first one out, and the id after it is still held.
+
+    The width is written as a literal on purpose. Reading it from the module
+    would make the test agree with whatever the code says and pin nothing —
+    which is the fault this test exists to fix.
+    """
+    from corvidae.channels.webhook import DEDUPE_IDS
+
+    assert DEDUPE_IDS == 32, "the documented window width; change both if it moves"
+
+    http, base = await start({"open": [recorder()[1]]})
+
+    async def post(delivery_id: str) -> int:
+        async with http.post(
+            f"{base}/open", json={}, headers={"X-GitHub-Delivery": delivery_id}
+        ) as resp:
+            return resp.status
+
+    # A full window's worth of ids are all held: the oldest and the newest.
+    for i in range(32):
+        assert await post(f"id-{i}") == 202
+    assert await post("id-0") == 200, "the oldest id in a full window is still held"
+    assert await post("id-31") == 200, "the newest id is held"
+
+    # One more evicts exactly the oldest, and no more than that. The held
+    # checks come before the evicted one is re-sent: a re-send that is
+    # *accepted* is itself a new id in the window, and would evict the next
+    # oldest on its own.
+    assert await post("id-again") == 202
+    assert await post("id-1") == 200, "the second oldest must still be held"
+    assert await post("id-again") == 200, "the newcomer is now held"
+    assert await post("id-0") == 202, "the oldest id must have been evicted"
