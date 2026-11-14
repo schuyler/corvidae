@@ -508,7 +508,16 @@ async def label_status(db: aiosqlite.Connection, ids: set[int]) -> dict[int, str
 
 
 def candidate_entries(pool: RetrievalPool) -> list[dict]:
-    """The pool's whole ranked list as the pool JSON's ``candidates``."""
+    """The pool's whole ranked list as the pool JSON's ``candidates``.
+
+    ``z`` is the relative band's own statistic -- how far this record's
+    similarity stands out from the query's spread over the whole memory --
+    or null when no spread was computed (a memory under
+    ``RELATIVE_MIN_RECORDS``, or the similarity/score band). It is recorded
+    here so the z thresholds can be fitted offline against the labelled
+    queries (#704) instead of deploying a change and reading
+    ``retrieval_candidate.z`` from live traffic.
+    """
     return [
         {
             "id": cand["id"],
@@ -516,6 +525,7 @@ def candidate_entries(pool: RetrievalPool) -> list[dict]:
             "similarity": cand["similarity"],
             "score": cand["score"],
             "band": cand["band"],
+            "z": cand["z"],
             "source": cand["source"],
         }
         for rank, cand in enumerate(pool.ranked, start=1)

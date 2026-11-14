@@ -654,9 +654,9 @@ The pool file is written once, after the last query:
       "mrr": 0.5,
       "candidates": [
         {"id": 398, "rank": 1, "similarity": 0.81, "score": 0.77, "band": "strong",
-         "source": "both"},
+         "z": 2.4, "source": "both"},
         {"id": 412, "rank": 2, "similarity": 0.79, "score": 0.74, "band": "moderate",
-         "source": "vec"}
+         "z": 1.1, "source": "vec"}
       ]
     }
   ],
@@ -674,7 +674,12 @@ before it drops weak-band entries (all of them, so an all-weak pool admits
 nothing, #409; a degraded pool keeps its top k) and the funnel admits them,
 with no window exclusion. It holds ids and scores but
 no memory text beyond the labels' own `text`, `context` and `query`; look the
-ids up in the source. `run_at` is the wall-clock
+ids up in the source. `z` is the statistic a `band_on: relative` band came
+from — how far this record's similarity stands out from the query's spread
+over the whole memory — so the z thresholds can be fitted offline instead of
+reading `retrieval_candidate.z` from live traffic (#704). It is `null` when no
+spread was computed: a memory under `RELATIVE_MIN_RECORDS` (50) embedded
+records, or a run banded on `similarity`/`score`. `run_at` is the wall-clock
 time the run started. The means are `null` when no query was scored.
 
 Operator notes:
