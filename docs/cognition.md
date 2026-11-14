@@ -389,7 +389,16 @@ argument applied before the cut to k: the degraded FTS5 path filters it in
 `WHERE` ahead of its `LIMIT`, and the vector path selects it as a flag (#407)
 over a KNN that fetches `k × 4` plus a `COUNT(*)` of the excluded records,
 then sets the flagged rows aside, so in-window records can't take every
-slot. The hybrid FTS side does the same over its own `k × 4` rows. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
+slot. That `k` is clamped to sqlite-vec's ceiling of 4096 rows
+(`SQLITE_VEC_KNN_MAX`), which the extension enforces by refusing the query
+outright: a large `k` or a long window used to come back as an embedding
+failure and a fall back to FTS5 on every turn. Now the clamp keeps the
+vector path, logs one WARNING per process naming the limit, the `k`, the
+over-fetch and the channel's in-window count, and reads only the nearest
+4096 rows (#637). A KNN failure for any other reason logs `retrieval KNN
+query failed; degrading to FTS5`, separate from the embedding warning, so
+the operator is not sent to the embed server for a fault in the query.
+The hybrid FTS side does the same over its own `k × 4` rows. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
 and `search_memory` see everything. It is not a scope: other channels'
 records, and this channel's once their rows leave the window, are
 retrieved normally. Known limit: the bound assumes the window is a
