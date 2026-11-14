@@ -198,26 +198,16 @@ class TestTransportCallSites:
     async def test_cli_passes_trace_id(self):
         """O1: the CLI read loop passes a minted trace_id."""
         from corvidae.channels.cli import CLIPlugin
-        from test_cli_plugin import _make_pm_with_registry
+        from test_cli_plugin import _make_plugin_with_lines
 
-        pm, registry = _make_pm_with_registry(transport="cli")
-        plugin = CLIPlugin(pm)
-        pm.register(plugin, name="cli")
-        plugin._registry = registry  # bypass on_start
-
-        lines = iter(["hello world\n", ""])
-        loop = asyncio.get_running_loop()
-
-        async def fake_executor(executor, fn, *args):
-            return fn(*args)
-
-        # Drive one line then EOF, as test_read_loop_dispatches_on_message does.
-        with patch.object(loop, "run_in_executor", side_effect=fake_executor), \
-             patch("sys.stdin") as mock_stdin, \
+        plugin, pm, registry, queue = _make_plugin_with_lines(
+            ["hello world\n", ""],
+        )
+        with patch("sys.stdin") as mock_stdin, \
              patch("sys.stdout"), \
              patch("corvidae.channels.cli.os.kill"):
-            mock_stdin.readline = lambda: next(lines)
-            await plugin._read_loop()
+            mock_stdin.isatty.return_value = False
+            await plugin._read_loop(queue)
 
         _assert_minted(pm.ahook.on_message.await_args.kwargs)
 
