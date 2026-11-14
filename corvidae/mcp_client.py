@@ -75,7 +75,13 @@ def _is_connect_failure(exc: BaseException) -> bool:
     False means it must propagate. One rule serves ``on_start`` and
     ``_retry_round`` so the two cannot drift apart (#596):
 
-    - An ``Exception`` is a failed connect.
+    - An ``Exception`` is a failed connect — unless this task is being
+      cancelled. Python 3.13 raises a cancel that arrives while a task group
+      holds child errors as a group of ``Exception`` leaves and re-arms the
+      cancel; calling that group a failed connect let the loop carry on, and
+      the re-armed cancel then fired in ``_rebuild_shared_registry``, past the
+      ``try`` that closes the owners (#604). The cancel count is checked
+      first, so no shape of connect error can hide a shutdown.
     - A ``CancelledError`` is a failed connect only when nobody is cancelling
       this task; a cancel of the task itself is a shutdown (#385).
     - A ``BaseExceptionGroup`` follows its leaves: any leaf that is neither an
@@ -84,13 +90,15 @@ def _is_connect_failure(exc: BaseException) -> bool:
       cancel is. A group is not an ``Exception`` when a member is a
       ``BaseException``, which is how it slipped past the old handlers.
     """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        return False
     if isinstance(exc, Exception):
         return True
     leaves = _leaf_exceptions(exc)
     if any(not isinstance(leaf, (Exception, asyncio.CancelledError)) for leaf in leaves):
         return False
-    task = asyncio.current_task()
-    return not (task is not None and task.cancelling())
+    return True
 
 
 def _failure_log_parts(exc: BaseException, cfg: dict) -> tuple[str, bool]:
@@ -788,11 +796,13 @@ class McpClientPlugin(CorvidaePlugin):
                 # process lifetime.
                 if not any(server.name == server_name for server in self._servers):
                     self._pending_servers[server_name] = server_cfg
-        except (asyncio.CancelledError, BaseExceptionGroup):
+        except (asyncio.CancelledError, BaseExceptionGroup, KeyboardInterrupt, SystemExit):
             # Interrupted mid-connect: the servers already connected have
             # owner tasks that nothing else will stop, so close them before
-            # the cancellation continues. A group reaches here only when the
-            # inner handler decided it must propagate (#596).
+            # the shutdown continues. A group reaches here only when the inner
+            # handler decided it must propagate (#596), and a bare
+            # KeyboardInterrupt or SystemExit is the same shutdown without the
+            # group around it (#604) — the inner handler lets both through.
             await self._stop_owners()
             raise
 
