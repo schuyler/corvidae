@@ -114,7 +114,7 @@ def parse_max_messages_per_window(value: object, key: str = MAX_MESSAGES_PER_WIN
 
 
 def parse_window_seconds(value: object, key: str = WINDOW_SECONDS_KEY) -> int | None:
-    """Validate a ``window_seconds`` value; ``None`` means no window cap."""
+    """Validate a ``window_seconds`` value; ``None`` means "use the default"."""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -140,6 +140,8 @@ class OutboundCapPlugin(CorvidaePlugin):
         self._window_timestamps: dict[str, list[float]] = {}
         # channel ids that have already logged their first window WARNING
         self._window_warned: set[str] = set()
+        # channel id -> messages withheld by the window limit since last reset
+        self._window_withheld: dict[str, int] = {}
         # The clock, injectable for tests
         self._clock = time.monotonic
         # Validate at startup so a bad value names itself here rather than
@@ -205,6 +207,7 @@ class OutboundCapPlugin(CorvidaePlugin):
         # The window is NOT reset by a human message (#821), but the warning
         # flag is, so the next window veto logs its first WARNING again.
         self._window_warned.discard(channel_id)
+        self._window_withheld.pop(channel_id, None)
 
     def _transport_owned(self, channel) -> bool:
         """Whether some transport plugin delivers to ``channel``.
@@ -300,6 +303,13 @@ class OutboundCapPlugin(CorvidaePlugin):
             )
             return 60
 
+    def _prune_window(self, channel_id: str, now: float, window_seconds: int) -> list[float]:
+        """Drop timestamps older than the window; write back the pruned list."""
+        cutoff = now - window_seconds
+        active = [t for t in self._window_timestamps.get(channel_id, []) if t > cutoff]
+        self._window_timestamps[channel_id] = active
+        return active
+
     @hookimpl
     async def should_send_response(
         self, channel, text: str, emission: str, trace_id, annotations
@@ -352,36 +362,35 @@ class OutboundCapPlugin(CorvidaePlugin):
             win_limit, win_key = self._window_limit(channel)
             if win_limit is not None:
                 now = self._clock()
-                timestamps = self._window_timestamps.get(channel_id, [])
-                # Drop timestamps older than the window
                 window_seconds = self._window_seconds(channel)
-                cutoff = now - window_seconds
-                active = [t for t in timestamps if t > cutoff]
-                # Write back the pruned list so stale entries don't linger
-                self._window_timestamps[channel_id] = active
+                active = self._prune_window(channel_id, now, window_seconds)
                 if len(active) >= win_limit:
+                    window_withheld = self._window_withheld.get(channel_id, 0) + 1
+                    self._window_withheld[channel_id] = window_withheld
                     if channel_id not in self._window_warned:
                         self._window_warned.add(channel_id)
                         logger.warning(
                             "outbound_cap: withholding the %s emission for %s on %s: "
-                            "window limit %d per %ds reached (set by %s)",
+                            "window limit %d per %ds reached, %d withheld (set by %s)",
                             emission,
                             trace_id,
                             channel_id,
                             win_limit,
                             window_seconds,
+                            window_withheld,
                             win_key,
                             extra={"channel": channel_id, "trace_id": trace_id},
                         )
                     else:
                         logger.info(
                             "outbound_cap: withheld the %s emission for %s on %s "
-                            "(window limit %d per %ds)",
+                            "(window limit %d per %ds, %d withheld)",
                             emission,
                             trace_id,
                             channel_id,
                             win_limit,
                             window_seconds,
+                            window_withheld,
                             extra={"channel": channel_id, "trace_id": trace_id},
                         )
                     return False
@@ -426,12 +435,9 @@ class OutboundCapPlugin(CorvidaePlugin):
                     if win_limit is not None:
                         now = self._clock()
                         window_seconds = self._window_seconds(channel)
-                        cutoff = now - window_seconds
-                        timestamps = self._window_timestamps.get(channel.id, [])
-                        # Drop old timestamps and append the new one
-                        self._window_timestamps[channel.id] = [
-                            t for t in timestamps if t > cutoff
-                        ] + [now]
+                        active = self._prune_window(channel.id, now, window_seconds)
+                        active.append(now)
+                        self._window_timestamps[channel.id] = active
         except Exception:
             logger.warning(
                 "outbound_cap: counting the %s emission of %s failed; it was sent uncounted",
