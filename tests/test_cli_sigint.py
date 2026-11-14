@@ -81,32 +81,52 @@ async def test_the_stdin_reader_is_a_daemon_thread_and_stop_is_prompt(monkeypatc
 
     plugin = CLIPlugin(pm=pm)
     await plugin.on_start({})
+    # Whatever the body asserts, the reader must be unblocked and the plugin
+    # stopped before the test returns: a reader left blocked in readline is a
+    # non-daemon executor thread under the pre-#759 code, and asyncio.run's
+    # executor shutdown would then wait on it forever, past pytest's timeout
+    # (#898). Closing the write end gives readline EOF, which frees any reader.
+    write_open = True
+    stopped = False
+    try:
+        reader = next(
+            (t for t in threading.enumerate() if t.name == "cli-stdin-reader"), None
+        )
+        assert reader is not None, "no cli-stdin-reader thread"
+        assert reader.daemon, "the stdin reader must not hold the process open"
 
-    reader = next((t for t in threading.enumerate() if t.name == "cli-stdin-reader"), None)
-    assert reader is not None, "no cli-stdin-reader thread"
-    assert reader.daemon, "the stdin reader must not hold the process open"
+        # A line still flows through the thread to the read loop, which passes
+        # it to on_message exactly as before.
+        received: list[str] = []
 
-    # A line still flows through the thread to the read loop, which passes
-    # it to on_message exactly as before.
-    received: list[str] = []
+        class Recorder:
+            @hookimpl
+            async def on_message(self, channel, sender, text, trace_id) -> None:
+                received.append(text)
 
-    class Recorder:
-        @hookimpl
-        async def on_message(self, channel, sender, text, trace_id) -> None:
-            received.append(text)
+        pm.register(Recorder(), name="recorder")
+        os.write(write_end, b"hello\n")
+        for _ in range(40):
+            if received:
+                break
+            await asyncio.sleep(0.05)
+        assert received == ["hello"], received
 
-    pm.register(Recorder(), name="recorder")
-    os.write(write_end, b"hello\n")
-    for _ in range(40):
-        if received:
-            break
-        await asyncio.sleep(0.05)
-    assert received == ["hello"], received
-
-    # on_stop must not hang even though the thread is blocked in readline.
-    await asyncio.wait_for(plugin.on_stop(), timeout=2)
-    os.close(write_end)
-    stdin.close()
+        # on_stop must not hang even though the thread is blocked in readline:
+        # the write end is still open here, so the reader has no EOF to see.
+        await asyncio.wait_for(plugin.on_stop(), timeout=2)
+        stopped = True
+    finally:
+        # Unblock the reader first, so neither on_stop nor loop teardown can
+        # wait on it.
+        if write_open:
+            os.close(write_end)
+            write_open = False
+        # On a failure path the body never stopped the plugin; stop it now,
+        # bounded, so its read task does not outlive the test.
+        if not stopped:
+            await asyncio.wait_for(plugin.on_stop(), timeout=2)
+        stdin.close()
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +191,11 @@ def _write_config(tmp_path: Path) -> Path:
     return path
 
 
+# The child's own deadlines (READY_DEADLINE + EXIT_DEADLINE, 18 s) exceed the
+# global 15 s timeout; this test's bound sits above them so a slow child ends in
+# the diagnostic pytest.fail and child.kill(), not pytest-timeout's os._exit
+# (#898).
+@pytest.mark.timeout(30)
 def test_sigint_at_an_open_pipe_exits_0_without_the_watchdog(tmp_path):
     """#759: SIGINT with stdin an open pipe exits 0 within the bound.
 
