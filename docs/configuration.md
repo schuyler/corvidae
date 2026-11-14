@@ -1181,7 +1181,43 @@ webhook_notify:
 | `webhook_notify.defaults.max_buffered` | integer | `500` | Deliveries an endpoint may buffer, in an ordinary window as well as while its flush is held. Whenever the buffer exceeds it the oldest is dropped, counted and reported. Must be an integer ≥ 1. |
 | `webhook_notify.endpoints.<endpoint>` | list of strings, or mapping | none | Either a non-empty list of channel ids (`transport:scope`) notified of the endpoint's digests, or a mapping with `channels:` plus any of the four throttle keys to override `defaults` for this endpoint. Repeated ids are notified once. All of an endpoint's channels receive the same digest, so the window and the cap are per endpoint; give a channel its own limits by routing it through its own endpoint. |
 
-A malformed block fails startup naming the key, the value and the accepted range, including an unknown key under `defaults` or under an endpoint; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet (Discord or Signal before they start) is skipped with a `WARNING` naming the endpoint and how many deliveries the digest carried. Buffered deliveries are lost at shutdown, with a `WARNING` naming the endpoint and the count. For GitHub, filter events in the webhook's own settings: payloads such as `pull_request` and `check_run` are large and are cut at the cap, with the rest in a spill file.
+A malformed block fails startup naming the key, the value and the accepted range, including an unknown key under `defaults` or under an endpoint; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet (Discord or Signal before they start) is skipped with a `WARNING` naming the endpoint and how many deliveries the digest carried. Buffered deliveries are lost at shutdown, with a `WARNING` naming the endpoint and the count. For GitHub, filter events in the webhook's own settings: payloads such as `pull_request` and `check_run` are large and are cut at the cap, with the rest in a spill file. Better, for a repository whose events you want to *act* on: use `github_webhook` below instead of this plugin for that endpoint, because it reports terminal outcomes rather than one notification per job-status change.
+
+---
+
+## `github_webhook` — GitHub events as terminal outcomes
+
+Requires the github-webhook extra (`--extra github-webhook` on your `uv sync` line) and the `webhook` ingress. GitHub emits a `workflow_job` event for every job status change and a `workflow_run` event for each run's `requested`, `in_progress` and `completed` states, so a single push through a multi-job workflow is a dozen notifications and a morning of merges produces hundreds. This plugin subscribes to the endpoint itself and reports only what the agent can act on:
+
+| Event | Reported when | Line |
+|-------|---------------|------|
+| `workflow_run` | `completed`, unless superseded | `CI success: CI on main (run #6) https://…` |
+| `pull_request` | `opened`, `reopened`, `closed` (`merged: true` reads "merged") | `PR #7 merged: Fix the thing https://…` |
+| `push` | the branch is in `push_branches` | `Push to main: 3 commits, head abcdef1 https://…` |
+| `ping` | always | not notified; one INFO naming the endpoint and the hook id |
+
+Everything else — `workflow_job`, non-terminal runs, other events — is dropped and counted at DEBUG. A run GitHub cancelled because a newer run replaced it is inferred from the highest `run_number` seen per `(repository, workflow, branch)` and dropped, so supersession needs the hook to send `workflow_run` events, `requested` included; the map is in memory and lost on restart, which costs at worst one extra cancelled line. A delivery with no `X-GitHub-Event` header, or one missing a field a line needs, is skipped with a `WARNING` naming the delivery.
+
+`github_webhook` **owns** its endpoints. Every subscriber to an endpoint receives every delivery, so do not list the same endpoint here and in `webhook_notify.endpoints`: startup logs a `WARNING` naming it, and every delivery would be notified twice.
+
+```yaml
+github_webhook:
+  max_payload_chars: 2000        # same meaning as webhook_notify's key
+  push_branches: []              # push events reported only for these; empty = none
+  endpoints:
+    github: [signal:+15551234567]      # bare list: these channels
+    # alerts:                          # or a mapping, with its own branches
+    #   channels: [irc:#corvidae]
+    #   push_branches: [main]
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `github_webhook.max_payload_chars` | integer | `2000` | Longest line passed inline, in characters. A longer one is cut and spilled as in `webhook_notify`. Must be an integer ≥ 1. |
+| `github_webhook.push_branches` | list of strings | `[]` | Branches whose pushes are reported. Empty reports none; push events to other branches are dropped and counted at DEBUG. |
+| `github_webhook.endpoints.<endpoint>` | list of strings, or mapping | none | Non-empty list of channel ids (`transport:scope`) for that `webhook` endpoint, or a mapping with `channels:` plus an optional `push_branches:` to override the top-level one for this endpoint. |
+
+A malformed block fails startup naming the key, the value and the accepted shape; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet is skipped with a `WARNING`. Sender-controlled text — titles, branch names, workflow names — goes only into the notification text, which the kernel fences, never into an annotation, and is cut to 120 characters; see the threat model's finding 19.
 
 ---
 

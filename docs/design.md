@@ -4479,6 +4479,35 @@ there too. The plugin depends on
 `"spill"`. Configuration is in
 [configuration.md](configuration.md#webhook_notify--webhook-deliveries-as-notifications).
 
+### GitHub events (`github-webhook` package)
+
+`GithubWebhookPlugin` subscribes one handler to each endpoint in
+`github_webhook.endpoints` and keeps at most one line per delivery: no
+`workflow_job` churn, no non-terminal runs, nothing for an event it does not
+know. `WebhookDelivery.event_type` (the `X-GitHub-Event` header, #807) selects
+a `_line_<event>` method, so an unknown event costs one DEBUG count rather
+than a branch in a chain. The line is built in code from payload fields read
+through `_field`, which warns and returns None for an absent one instead of
+raising into the ingress worker.
+
+Supersession is the one piece of state: an `OrderedDict` of the highest
+`run_number` per `(repository.full_name, workflow.id, head_branch)`, updated
+from every `workflow_run` event including the `requested` and `in_progress`
+ones it drops, bounded to `SUPERSESSION_KEYS` with least-recently-updated
+evicted first. A completed `cancelled` run below that mark is dropped. It is
+in memory, so a restart can cost one extra cancelled line.
+
+Lines go through the kernel's spill service exactly as `webhook_notify`'s
+payloads do (`limit=max_payload_chars`, `origin=webhook:<endpoint>`), so the
+kernel fences and cuts them; the plugin adds no annotation beyond `origin`,
+because a PR title or branch name in an annotation would land outside the
+fence. Sender-controlled fields are cut to 120 characters with newlines
+collapsed. At `on_init` an endpoint listed in both this plugin and
+`webhook_notify.endpoints` is warned about: every subscriber to an endpoint
+receives every delivery, so such an endpoint would be notified twice.
+Configuration is in
+[configuration.md](configuration.md#github_webhook--github-events-as-terminal-outcomes).
+
 ### ACP (`channels/acp.py`)
 
 `AcpPlugin` + `corvidae acp` — Agent Client Protocol **v1** over stdio for
