@@ -2030,6 +2030,41 @@ class TestPanels:
         with pytest.raises(pluggy.PluginValidationError, match="badpanel"):
             await make_env(extra_plugins={"badpanel": bad})
 
+    @pytest.mark.parametrize("path,expected", [
+        ("data", "does not start with '/'"),
+        ("/", "panel's own page"),
+        ("/static/app.js", "panel's assets"),
+        ("/../escape", "walks up out of the panel"),
+    ])
+    async def test_unreachable_panel_route_fails_startup_naming_plugin(
+        self, make_env, tmp_path, path, expected,
+    ):
+        """#692: a route aiohttp would mount somewhere its author can't reach."""
+        async def handler(request):
+            return web.json_response({})
+
+        bad = PanelPlugin("Bad", tmp_path, [web.get(path, handler)])
+        with pytest.raises(pluggy.PluginValidationError, match=expected) as exc:
+            await make_env(extra_plugins={"badpanel": bad})
+        # The message names the plugin, so the author knows whose on_init to fix.
+        assert "badpanel" in str(exc.value)
+
+    async def test_two_panels_from_one_plugin_fails_startup(self, make_env, tmp_path):
+        """A second Panel fights the first for the same prefix and asset mount."""
+        first = PanelPlugin("First", tmp_path, [])
+        second = PanelPlugin("Second", tmp_path, [])
+
+        class TwoPanels(CorvidaePlugin):
+            optional_depends_on = frozenset({"web"})
+
+            @hookimpl
+            async def on_web_console_init(self, panels) -> None:
+                panels.append(Panel(self, first.title, first.static_dir, first.routes))
+                panels.append(Panel(self, second.title, second.static_dir, second.routes))
+
+        with pytest.raises(pluggy.PluginValidationError, match="more than one panel"):
+            await make_env(extra_plugins={"twopanels": TwoPanels()})
+
     async def test_chat_page_has_a_section_and_assets_per_panel(self, make_env, tmp_path):
         first = PanelPlugin("First Panel", tmp_path, [])
         second = PanelPlugin("Second Panel", tmp_path, [])
