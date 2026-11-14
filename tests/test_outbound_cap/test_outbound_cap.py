@@ -15,9 +15,13 @@ import pytest
 from outbound_cap import (
     COUNT_PROGRESS_KEY,
     MAX_MESSAGES_KEY,
+    MAX_MESSAGES_PER_WINDOW_KEY,
+    WINDOW_SECONDS_KEY,
     OutboundCapPlugin,
     parse_count_progress,
     parse_max_messages,
+    parse_max_messages_per_window,
+    parse_window_seconds,
 )
 
 from corvidae.channel import ChannelRegistry
@@ -418,16 +422,6 @@ async def test_a_broken_channel_object_fails_open(caplog):
 # #821: sliding window limit
 # ---------------------------------------------------------------------------
 
-import time
-from unittest.mock import patch
-
-from outbound_cap import (
-    MAX_MESSAGES_PER_WINDOW_KEY,
-    WINDOW_SECONDS_KEY,
-    parse_max_messages_per_window,
-    parse_window_seconds,
-)
-
 
 class FakeClock:
     """A controllable clock for window tests."""
@@ -457,7 +451,7 @@ class WindowHarness:
 
     async def init(self, config: dict | None = None) -> None:
         await self.plugin.on_init(self.pm, config or {})
-        # Inject the fake clock after init (init sets self._clock = time.monotonic)
+        # Inject the fake clock (on_init sets self._clock = time.monotonic)
         self.plugin._clock = self.clock
 
     def channel(self, channel_id: str):
@@ -606,6 +600,47 @@ class TestSlidingWindow:
 
         # 11th is vetoed by M limit
         assert await h.send(ch, trace_id="t10") is False
+
+
+    @pytest.mark.asyncio
+    async def test_m_limit_lower_than_window(self):
+        """When M < N, the M limit vetoes first."""
+        h = WindowHarness()
+        await h.init({
+            "outbound_cap": {
+                "max_messages": 2,
+                "max_messages_per_window": 5,
+                "window_seconds": 60,
+            }
+        })
+        ch = h.channel("signal:aci1")
+
+        # M limit (2) is reached before window limit (5)
+        assert await h.send(ch, trace_id="t1") is True
+        assert await h.send(ch, trace_id="t2") is True
+        assert await h.send(ch, trace_id="t3") is False  # M veto
+
+    @pytest.mark.asyncio
+    async def test_channels_do_not_share_window(self):
+        """Each channel has its own independent window."""
+        h = WindowHarness()
+        await h.init({
+            "outbound_cap": {
+                "max_messages_per_window": 2,
+                "window_seconds": 60,
+            }
+        })
+        ch1 = h.channel("signal:aci1")
+        ch2 = h.channel("signal:aci2")
+
+        # Fill ch1's window
+        assert await h.send(ch1, trace_id="t1") is True
+        assert await h.send(ch1, trace_id="t2") is True
+        assert await h.send(ch1, trace_id="t3") is False  # ch1 vetoed
+
+        # ch2 is unaffected
+        assert await h.send(ch2, trace_id="t4") is True
+        assert await h.send(ch2, trace_id="t5") is True
 
 
 class TestWindowConfig:

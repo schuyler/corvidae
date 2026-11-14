@@ -154,6 +154,10 @@ class OutboundCapPlugin(CorvidaePlugin):
         if isinstance(block, dict):
             parse_max_messages(block.get("max_messages"), MAX_MESSAGES_KEY)
             parse_count_progress(block.get("count_progress"), COUNT_PROGRESS_KEY)
+            parse_max_messages_per_window(
+                block.get("max_messages_per_window"), MAX_MESSAGES_PER_WINDOW_KEY
+            )
+            parse_window_seconds(block.get("window_seconds"), WINDOW_SECONDS_KEY)
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
@@ -198,6 +202,9 @@ class OutboundCapPlugin(CorvidaePlugin):
                 extra={"channel": channel_id},
             )
         self._warned.discard(channel_id)
+        # The window is NOT reset by a human message (#821), but the warning
+        # flag is, so the next window veto logs its first WARNING again.
+        self._window_warned.discard(channel_id)
 
     def _transport_owned(self, channel) -> bool:
         """Whether some transport plugin delivers to ``channel``.
@@ -278,9 +285,13 @@ class OutboundCapPlugin(CorvidaePlugin):
 
     def _window_seconds(self, channel) -> int:
         """The channel's window duration in seconds."""
+        overrides = getattr(channel, "runtime_overrides", None) or {}
+        key = WINDOW_SECONDS_KEY
         raw = resolve_tunable(channel, self._config, WINDOW_SECONDS_KEY, 60)
+        if overrides and WINDOW_SECONDS_KEY in overrides:
+            key = f"runtime override {WINDOW_SECONDS_KEY}"
         try:
-            return parse_window_seconds(raw, WINDOW_SECONDS_KEY) or 60
+            return parse_window_seconds(raw, key) or 60
         except ValueError as exc:
             logger.warning(
                 "outbound_cap: ignoring window_seconds; %s",
@@ -346,6 +357,8 @@ class OutboundCapPlugin(CorvidaePlugin):
                 window_seconds = self._window_seconds(channel)
                 cutoff = now - window_seconds
                 active = [t for t in timestamps if t > cutoff]
+                # Write back the pruned list so stale entries don't linger
+                self._window_timestamps[channel_id] = active
                 if len(active) >= win_limit:
                     if channel_id not in self._window_warned:
                         self._window_warned.add(channel_id)
