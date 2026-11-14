@@ -15,6 +15,7 @@ subprocess with an open pipe on stdin and sends SIGINT.
 from __future__ import annotations
 
 import asyncio
+import logging
 import signal
 import subprocess
 import sys
@@ -30,6 +31,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 CHILD = Path(__file__).parent / "cli_sigint_child.py"
+
+logger = logging.getLogger(__name__)
 
 # The minimal profile's disabled list: the cognition set, offline-safe.
 MINIMAL_DISABLED = [
@@ -86,7 +89,6 @@ async def test_the_stdin_reader_is_a_daemon_thread_and_stop_is_prompt(monkeypatc
     # non-daemon executor thread under the pre-#759 code, and asyncio.run's
     # executor shutdown would then wait on it forever, past pytest's timeout
     # (#898). Closing the write end gives readline EOF, which frees any reader.
-    write_open = True
     stopped = False
     try:
         reader = next(
@@ -112,21 +114,40 @@ async def test_the_stdin_reader_is_a_daemon_thread_and_stop_is_prompt(monkeypatc
             await asyncio.sleep(0.05)
         assert received == ["hello"], received
 
-        # on_stop must not hang even though the thread is blocked in readline:
+        # on_stop must be prompt even though the thread is blocked in readline:
         # the write end is still open here, so the reader has no EOF to see.
+        # Prompt means it cancels the read task itself, well inside the bound;
+        # wait_for's own cancellation at the bound would also end the task, so
+        # finishing under the bound alone would not prove on_stop cancelled it.
+        read_task = plugin._task
+        assert read_task is not None, "on_start did not start the read loop"
+        started = time.monotonic()
         await asyncio.wait_for(plugin.on_stop(), timeout=2)
+        elapsed = time.monotonic() - started
         stopped = True
+        assert read_task.done(), "on_stop returned with the read task still running"
+        assert elapsed < 1.0, f"on_stop took {elapsed:.2f}s with the reader blocked"
     finally:
         # Unblock the reader first, so neither on_stop nor loop teardown can
         # wait on it.
-        if write_open:
-            os.close(write_end)
-            write_open = False
-        # On a failure path the body never stopped the plugin; stop it now,
-        # bounded, so its read task does not outlive the test.
-        if not stopped:
-            await asyncio.wait_for(plugin.on_stop(), timeout=2)
-        stdin.close()
+        os.close(write_end)
+        try:
+            # On a failure path the body never stopped the plugin; stop it now,
+            # bounded, so its read task does not outlive the test. The body has
+            # already failed here, so a cleanup failure is logged rather than
+            # raised: raising would replace the assertion that says what broke.
+            if not stopped:
+                try:
+                    await asyncio.wait_for(plugin.on_stop(), timeout=2)
+                except Exception:
+                    logger.warning(
+                        "CLIPlugin.on_stop failed during cleanup after the test "
+                        "body failed; the body's failure is the one reported",
+                        exc_info=True,
+                    )
+        finally:
+            # Close the read end whatever cleanup did.
+            stdin.close()
 
 
 # ---------------------------------------------------------------------------
