@@ -1264,17 +1264,45 @@ reads from outside (an MCP tool, a folder) records its own entry in
 Keeps the agent's open goals in SQLite and shows them in the window. Entry
 point name: `"goals"`; `depends_on = frozenset({"persistence", "memory",
 "funnel", "clock"})`. Owns the `goals` table in `sessions.db` (`id`, `text`,
-`created_at`, `updated_at`, `retired_at`, `memory_id`), created in
-`on_start` when the DB is open and on first use otherwise.
+`created_at`, `updated_at`, `retired_at`, `memory_id`, `status`,
+`position`, `origin_channel`), created in `on_start` when the DB is open
+and on first use otherwise. An existing table gains the three newer
+columns on first use, with `position = id`, so the queue keeps its old
+order.
 
 **Tools:** one per verb, so a channel can disable creation alone with
 `channels.<id>.tools.disabled`.
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
-| `add_goal` | `text: str` | Inserts an open goal and returns `Goal #N added.` Whitespace runs in `text`, newlines included, collapse to one space; empty text returns an error string. |
+| `add_goal` | `text: str`, `position: str = "append"` | Inserts an open goal and returns `Goal #N added.` `position` is `prepend` (front of the queue) or `append` (back); anything else returns an error string. The goal records the channel whose turn created it as its origin. Whitespace runs in `text`, newlines included, collapse to one space; empty text returns an error string. |
 | `update_goal` | `id: int`, `text: str` | Replaces the text of an open goal and bumps its `updated_at`, returning `Goal #N updated.` An unknown or retired id, or empty text, returns an error string. |
 | `retire_goal` | `id: int`, `conclusion: str` | Writes a memory record of the conclusion, then marks the goal retired, returning `Goal #N retired; conclusion recorded as memory #M.` An unknown or retired id, or an empty conclusion, returns an error string, as does a missing channel context. |
+| `set_goal_status` | `id: int`, `status: str` | Sets an open goal's status to one of `open`, `in-progress`, `blocked`, `waiting`, returning `Goal #N status set to '<status>'`. An unknown or retired id, or any other status, returns an error string. Setting the status a goal already has changes nothing and fires no hook. |
+| `list_goals` | `include_retired: bool = False` | Lists goals with their ids; retired ones only when asked. |
+
+**Queue, states and the state-change hook:** goals form a priority queue
+ordered by `position` (then `id`). `add_goal(position="prepend")` puts a goal
+at the front; `append`, the default, puts it at the back. A goal's status is
+`open`, `in-progress` (being worked, so a restart resumes it rather than
+re-picking), `blocked` (waiting on something external) or `waiting` (done,
+awaiting review); retiring sets `retired_at`. The heartbeat lists open goals
+front of the queue first, marks every goal that is not plain `open` with its
+status, and its goals instruction tells the model to resume an in-progress
+goal, otherwise take the first goal that is neither blocked nor waiting. That
+pick rule is a prompt, not a framework rule, and the heartbeat still decides
+whether a beat warrants action at all.
+
+The plugin owns a hook spec (`GoalsSpec`, as the funnel owns `FunnelSpec`):
+`on_goals_state_changed(goal_id, kind, old_status, new_status,
+origin_channel, actor_channel, conclusion)`. It fires after a status change
+or a retirement commits, outside the database lock, and not for a no-op
+status change or an already-retired goal. `kind` is `"status"` or
+`"retired"`; `conclusion` is `None` for a status change; `actor_channel` is
+`""` when the turn has no channel (a background turn). A subscriber's
+exception is logged at WARNING and never undoes the change. Nothing in the
+tree subscribes yet, so state changes are silent; routing them to the origin
+channel is a follow-up (#841).
 
 **Goals entry:** `before_agent_turn` admits one CONTEXT entry through the
 funnel under the source `goals` (budget `funnel.budgets.goals`, falling

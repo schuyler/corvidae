@@ -658,3 +658,21 @@ class TestG6ReviewLoop:
         # memory_id should be unchanged (no orphan write)
         rows_data = await rows(env, "SELECT memory_id FROM goals WHERE id = ?", (goal_id,))
         assert rows_data[0][0] == original_mem_id
+
+
+async def test_set_goal_status_on_background_turn_fires_hook_with_empty_actor(env):
+    """A background turn has ToolContext.channel = None; the tool must not
+    raise, and the hook reports 'no channel' with the same sentinel ("")
+    that a missing context uses."""
+    from unittest.mock import AsyncMock, patch
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("bg work", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    bg_ctx = SimpleNamespace(channel=None)
+
+    with patch.object(env.pm.ahook, "on_goals_state_changed", AsyncMock()) as mock_hook:
+        result = await env.tools["set_goal_status"](gid, "blocked", _ctx=bg_ctx)
+
+    assert "blocked" in result
+    assert mock_hook.call_args.kwargs["actor_channel"] == ""
+    assert mock_hook.call_args.kwargs["origin_channel"] == env.channel.id

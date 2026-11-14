@@ -239,3 +239,44 @@ async def test_beat_obeys_retired_goal_limit(make_env, monkeypatch):
     retired_section = text[retired_start:retired_end]
     assert "New conclusion: the schedule holds." in retired_section
     assert "Old conclusion: it ran every night." not in retired_section
+
+
+# --- #808: the open-goals list is the queue the pick rule works from ---------
+
+
+def _queue() -> list[dict]:
+    """Three open goals in queue order, one per status the pick rule cares about."""
+    return [
+        {"id": 7, "age_seconds": 60.0, "summary": "front goal", "status": "open"},
+        {"id": 3, "age_seconds": 120.0, "summary": "wip goal", "status": "in-progress"},
+        {"id": 9, "age_seconds": 180.0, "summary": "stuck goal", "status": "blocked"},
+    ]
+
+
+def test_open_goals_header_says_front_of_queue_first():
+    """The list is rendered in queue order, so its header must say so; a
+    model told 'newest first' would read the front goal as the newest."""
+    text = heartbeat.frame_beat([], [], open_goals=_queue())
+    assert "Open goals, front of the queue first:" in text
+    assert "newest first" not in text.split("Goals you retired")[0]
+
+
+def test_open_goals_list_shows_status_for_non_open_goals():
+    """in-progress and blocked are states the model can set; the list it
+    reads must show them or the pick rule has nothing to act on."""
+    text = heartbeat.frame_beat([], [], open_goals=_queue())
+    lines = {int(m.group(1)): m.group(0) for m in re.finditer(r"#(\d+)\).*", text)}
+    assert "in-progress" in lines[3]
+    assert "blocked" in lines[9]
+    # An open goal needs no label: open is the default.
+    assert "open" not in lines[7].split("front goal")[0]
+
+
+def test_goals_instruction_states_the_pick_rule():
+    """#808: resume an in-progress goal, else take the first goal that is
+    neither blocked nor waiting; and the sentence must read as a sentence."""
+    text = heartbeat.GOALS_INSTRUCTION
+    assert "in-progress" in text
+    assert "blocked" in text and "waiting" in text
+    # A leftover fragment from an earlier wording ("... next. do it.").
+    assert ". do it" not in text

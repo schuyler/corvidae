@@ -73,9 +73,10 @@ DEFAULT_RETIRED_GOAL_LIMIT = 5
 
 #: Appended when the goals plugin is loaded (PRD §3.7 Goals and Heartbeat).
 GOALS_INSTRUCTION = (
-    "Goals are your work queue. Work the front of the queue: the first "
-    "open goal is what to advance next. "
-    "do it. If a goal is done, retire it. Don't take up again a goal you "
+    "Goals are your work queue, listed front of the queue first. Work the "
+    "front: if a goal is marked in-progress, resume it; otherwise take the "
+    "first goal that is neither blocked nor waiting, and advance it. "
+    "If a goal is done, retire it. Don't take up again a goal you "
     "retired unless something new has changed. Otherwise act only when the "
     "assessment warrants it — a beat with nothing to advance is fine."
 )
@@ -235,12 +236,16 @@ def frame_beat(
     # call-to-action references them.
     open_goals_text = ""
     if open_goals:
+        # Queue order is the pick order. A plain open goal needs no label;
+        # in-progress, blocked and waiting are marked so the pick rule can act.
         og_lines = [
-            f"- ({_format_age(g['age_seconds'])}, #{g['id']}) {g['summary']}"
+            f"- ({_format_age(g['age_seconds'])}, #{g['id']}) "
+            + (f"[{g['status']}] " if g.get("status", "open") != "open" else "")
+            + g["summary"]
             for g in open_goals
         ]
         open_goals_text = (
-            "\n\nOpen goals, newest first:\n" + "\n".join(og_lines)
+            "\n\nOpen goals, front of the queue first:\n" + "\n".join(og_lines)
         )
     elif open_goals is not None:
         open_goals_text = "\n\nOpen goals: (none)"
