@@ -20,7 +20,14 @@ from corvidae.fork import build_fork_prompt
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.llm import defang_control_tokens
 from corvidae.llm_plugin import LLMPlugin
-from corvidae.provenance import PROVENANCE_KEY, ItemMetadata, decode, encode, load_fence_key
+from corvidae.provenance import (
+    PROVENANCE_KEY,
+    ItemMetadata,
+    decode,
+    encode,
+    frame,
+    load_fence_key,
+)
 from corvidae.scheduler import SchedulerPlugin
 from corvidae.tool import DEFAULT_TOOL_TIMEOUTS
 from corvidae.tool_collection import ToolCollectionPlugin
@@ -680,3 +687,121 @@ async def test_a_read_file_result_of_a_spill_file_renders_fenced(started):
     _, rendered = frame(msg, {"role": "tool", "content": "spilled text"}, channel.id, KEY)
     assert rendered["content"].startswith(
         f"[metadata: result of your own read_file call call_1; untrusted outside content, {OWN}]\n[payload ")
+
+
+# ---------------------------------------------------------------------------
+# #577: the token estimate counts a fenced row as it renders, not as the
+# provenance record that stands in for it.
+# ---------------------------------------------------------------------------
+
+
+def fenced_tool_row(content: str = "the weather is fine") -> dict:
+    """An untrusted tool result as it is stored, record included."""
+    return {
+        "role": "tool",
+        "tool_call_id": "call_abc",
+        "content": content,
+        "corvidae_provenance": encode(
+            ItemMetadata(tool="web_fetch", target="example.com/x", untrusted=True), {}
+        ),
+    }
+
+
+def rendered_tokens(msg: dict, key: bytes = KEY) -> int:
+    """The estimate of the row exactly as ``frame`` sends it."""
+    from corvidae.context import count_tokens
+
+    _, rendered = frame(msg, {k: v for k, v in msg.items() if not k.startswith("_")}, CH, key)
+    return count_tokens(json.dumps(rendered, default=str))
+
+
+def test_a_fenced_rows_estimate_is_its_rendered_size() -> None:
+    """#577: the record is not what is sent, so it cannot stand in for the fence.
+
+    A small untrusted result renders about 30 tokens larger than its stored
+    record: counting the record left a window full of them under-counted, and
+    compaction fired late.
+    """
+    from corvidae.context import count_tokens, message_tokens
+
+    msg = fenced_tool_row()
+    stored = count_tokens(
+        json.dumps({k: v for k, v in msg.items() if not k.startswith("_")}, default=str)
+    )
+    estimate = message_tokens(msg, KEY)
+
+    assert estimate == rendered_tokens(msg), (
+        f"estimate {estimate} should match the rendered form {rendered_tokens(msg)}"
+    )
+    assert estimate >= stored + 20, (
+        f"the old stored-record estimate was {stored}; the fenced row renders to "
+        f"{estimate}, so the record cannot stand in for the fence"
+    )
+
+
+def test_the_fenced_estimate_is_a_pure_function_of_the_row() -> None:
+    """Same row, same answer — a reload cannot change the count."""
+    from corvidae.context import message_tokens
+
+    msg = fenced_tool_row()
+    saved = {**msg, "_db_id": 4711}
+    loaded = json.loads(json.dumps(saved))
+    assert message_tokens(saved, KEY) == message_tokens(loaded, KEY)
+
+
+def test_an_estimate_before_a_fence_key_exists_still_counts_the_fence() -> None:
+    """The runtime fills the key in later; the estimate must not wait for it.
+
+    The nonce's own bytes cost the same handful of tokens whatever they are,
+    so a None key costs a token or two of accuracy, not the whole fence.
+    """
+    from corvidae.context import message_tokens
+
+    msg = fenced_tool_row()
+    with_key = message_tokens(msg, KEY)
+    without = message_tokens(msg, None)
+    assert abs(without - with_key) <= 4, (without, with_key)
+
+
+def test_a_plain_row_is_estimated_as_before() -> None:
+    """No record, no change: this fix only touches rows that render."""
+    from corvidae.context import count_tokens, message_tokens
+
+    msg = {"role": "assistant", "content": "the rain gauge is on the north fence"}
+    assert message_tokens(msg, KEY) == count_tokens(
+        json.dumps(msg, default=str)
+    )
+
+
+def test_a_notification_row_is_counted_with_its_header_and_fence() -> None:
+    """A notification renders a metadata line and a fence around its content."""
+    from corvidae.context import message_tokens
+
+    msg = {
+        "role": "system",
+        "content": "a subagent finished",
+        "corvidae_provenance": encode(
+            ItemMetadata(origin_channel="discord:1", origin_trace="t-1"), {}
+        ),
+    }
+    assert message_tokens(msg, KEY) == rendered_tokens(msg)
+
+
+def test_a_person_rows_header_is_still_not_counted() -> None:
+    """Known residual, pinned: the header is a separate message (#577).
+
+    ``sent_form`` declines a person row because its header is emitted as its
+    own message, and the estimate counts messages one at a time. The record
+    still stands in for that header — a smaller gap than the fence's, and
+    unchanged by this fix.
+    """
+    from corvidae.provenance import sent_form
+
+    msg = {
+        "role": "user",
+        "content": "where is the rain gauge",
+        "corvidae_provenance": encode(
+            ItemMetadata(sender="u1", sender_name="Yoz", channel_name="home"), {}
+        ),
+    }
+    assert sent_form(msg, KEY) is None

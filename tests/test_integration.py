@@ -1168,9 +1168,11 @@ class TestGroupDMultiChannel:
 
         import json as _json
 
-        def _message_tokens(msg: dict) -> int:
+        def _message_tokens(msg: dict, fence_key=None) -> int:
             # Mirrors message_tokens(): JSON length of the visible (non
             # "_"-prefixed) message dict, with count_tokens mocked to len(t).
+            # fence_key is accepted and ignored: these rows carry no provenance
+            # record, so nothing renders differently (#577).
             visible = {k: v for k, v in msg.items() if not k.startswith("_")}
             return len(_json.dumps(visible))
 
