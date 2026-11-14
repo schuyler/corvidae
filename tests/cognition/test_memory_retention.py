@@ -969,3 +969,56 @@ class TestBackfillAttribution:
                 f"got {attr!r}"
             )
         await db.close()
+
+
+class TestBackfillBatchCap:
+    """#681: a server that caps the batch must not stop the backfill."""
+
+    async def test_backfill_halves_a_rejected_batch_instead_of_failing(self):
+        """N rows awaiting backfill against a server rejecting more than M:
+        one retention run embeds all of them."""
+        cap = 2
+        rows = 8
+
+        class CappedEmbedClient:
+            """Rejects any batch over ``cap``, like a server-side batch limit."""
+
+            def __init__(self):
+                self.largest_batch = 0
+
+            async def embed(self, texts, kind=None):
+                self.largest_batch = max(self.largest_batch, len(texts))
+                if len(texts) > cap:
+                    raise RuntimeError(
+                        f"batch of {len(texts)} exceeds the server limit of {cap}"
+                    )
+                return [bow_embed(t) for t in texts]
+
+            async def chat(self, messages, tools=None, extra_body=None):
+                raise AssertionError("retention tests must not call chat()")
+
+        memory, _embedder, channel, db = await build_retention_env()
+        if not memory._vec_available:
+            pytest.skip("sqlite-vec unavailable")
+        capped = CappedEmbedClient()
+        memory._llm()._clients["embedding"] = capped
+        for n in range(rows):
+            await seed_memory_row(
+                db, channel.id, f"unembedded record {n} awaiting a vector",
+                indexed=1, embedded=0, vec_available=False,
+            )
+
+        await run_retention_job(memory)
+
+        # The first request is the configured batch (8 here); the retry halves
+        # it until the server accepts, so the largest accepted batch is the cap.
+        assert capped.largest_batch == rows, "the pass starts with one full batch"
+        async with db.execute(
+            "SELECT COUNT(*) FROM memory WHERE embedded = 0"
+        ) as cursor:
+            (still_unembedded,) = await cursor.fetchone()
+        assert still_unembedded == 0, (
+            "every row backfilled in one run; a capped server must not leave "
+            "rows at embedded = 0"
+        )
+        await db.close()
