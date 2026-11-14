@@ -748,10 +748,23 @@ class TestRetentionDelivery:
         """AC2a: an action turn, silent by default, that reads before it appends."""
         env = await self._run_retention(tmp_path, "kwake")
         env.funnel.ingest_and_wake.assert_awaited_once()
-        stub = env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+        kwargs = env.funnel.ingest_and_wake.await_args.kwargs
+        # The NO_REPLY veto keys on this origin: anything else would post it.
+        assert kwargs["origin"] == "critique"
+        stub = kwargs["stub_text"]
         assert "NO_REPLY" in stub, stub
         assert "read" in stub.lower() and "append" in stub.lower(), stub
-        env.funnel.ingest.assert_not_called()
+        assert "values/" in stub, "the filing turn must not guess the root"
+        assert all(e.startswith("[retention]") for e in kwargs["entries"]), kwargs["entries"]
+        await _teardown(env)
+
+    async def test_stylistic_findings_in_the_same_run_do_not_wake(self, tmp_path):
+        """AC2c: the fixture's run is constrained + retention; only the
+        retention finding wakes, the constrained one waits for the next turn."""
+        env = await self._run_retention(tmp_path, "kmixed")
+        env.funnel.ingest.assert_called_once()
+        stylistic = env.funnel.ingest.call_args.kwargs["entries"]
+        assert stylistic and all(e.startswith("[constrained]") for e in stylistic), stylistic
         await _teardown(env)
 
 
@@ -775,7 +788,7 @@ async def test_retention_root_warns_against_recalls_default_root(tmp_path, caplo
     )
     warnings = [r.getMessage() for r in caplog.records
                 if r.levelname == "WARNING" and "critique.retention.root" in r.getMessage()]
-    assert warnings, "expected a WARNING against recall's default root"
+    assert len(warnings) == 1, warnings
     assert "values" in warnings[0] and "state/markdown_recall" in warnings[0], warnings[0]
     await _teardown(env)
 
@@ -1236,6 +1249,25 @@ class TestProvenanceCritic:
             assert kwargs["origin"] == "critique"
             assert kwargs["entries"][0].startswith("[provenance]")
             assert kwargs["stub_text"] == PROVENANCE_NOTE
+        finally:
+            await _teardown(env)
+
+    async def test_with_a_retention_root_the_provenance_stub_also_files(self, tmp_path):
+        """AC2d: one stub governs a channel's critique drain, whichever wake
+        fires first, so with the lens on it must cover retention filing too."""
+        from corvidae_cognition.critique import PROVENANCE_NOTE
+
+        env = await _provenance_env(tmp_path, with_funnel=True)
+        env.plugin.config.setdefault("critique", {})["retention"] = {"root": "values/"}
+        env.funnel.ingest_and_wake = AsyncMock()
+        agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
+        try:
+            await _provenance_exchange(env, agent, trace_id="kfr")
+            await _run_provenance(env, "kfr")
+            stub = env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+            assert stub != PROVENANCE_NOTE
+            assert "values/" in stub and "append" in stub.lower(), stub
+            assert "NO_REPLY" in stub
         finally:
             await _teardown(env)
 
