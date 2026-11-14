@@ -517,6 +517,7 @@ def candidate_entries(pool: RetrievalPool) -> list[dict]:
             "score": cand["score"],
             "band": cand["band"],
             "source": cand["source"],
+            "z": cand.get("z"),  # #704: relative-gate z, or None when not computed
         }
         for rank, cand in enumerate(pool.ranked, start=1)
     ]
@@ -715,9 +716,28 @@ async def run_snapshot_evaluation(
                       f"(over {group['scored']} of {group['queries']} queries)")
         if degraded:
             print(f"⚠️  FTS5 fallback on {degraded} of {len(results)} queries")
+        if degraded == len(results):
+            # #662: every query degraded — the pool file is useless for
+            # calibration. Name the cause and refuse to write it.
+            cause = "embedding server unreachable" if memory._embedding_cfg else                     "no embedding profile in config"
+            fail(f"eval_memory: all {len(results)} queries degraded to FTS5 "
+                 f"({cause}); the pool file would hold FTS5's constant 0.6 "
+                 f"similarity for every candidate and is useless for "
+                 f"calibration. Fix the embedding path and re-run.")
+
+        # #661: record the effective settings that produced this pool.
+        encoder = memory._embedding_cfg.get("model") if memory._embedding_cfg else None
+        pool_settings = {
+            "half_life_days": memory._half_life_days,
+            "recency_from": memory._recency_from,
+            "band_on": memory._band_on,
+            "band_strong": memory._band_strong,
+            "band_moderate": memory._band_moderate,
+            "encoder": encoder,
+        }
 
         pool_out.write_text(json.dumps(
-            {"run_at": run_at, "k": effective_k, "queries": results, "summary": summary},
+            {"run_at": run_at, "k": effective_k, "settings": pool_settings, "queries": results, "summary": summary},
             indent=2,
         ), encoding="utf-8")
         print(f"\nPool written to {pool_out}")
