@@ -94,7 +94,7 @@ Assets, roughly in order of how bad it is to lose them:
    (an HTTP client quotes the URL in its errors); a config-error skip
    describes a rejected value likewise (#386). Library loggers are filtered
    too (#595): when the MCP client starts, every root log handler carries a
-   filter over records from `mcp.*`, `httpx.*`, `httpx2.*` and `httpcore.*` that runs the
+   filter over records from `mcp.*`, `httpx.*`, `httpx2.*`, `httpcore.*` and `httpcore2.*` that runs the
    same URL redaction, so the SDK's `Connecting to StreamableHTTP endpoint:
    <url>` line, its error records, their tracebacks and stack traces name the endpoint without the userinfo
    or the query. That is a net over text corvidae does not emit, so it
@@ -102,7 +102,11 @@ Assets, roughly in order of how bad it is to lose them:
    credential a library writes in some other form — split across fields, broken by a raw newline inside the URL, or
    inside a base64 `Authorization` header it echoes — is not caught, which is
    why a `${VAR}` header is still the shape to prefer over a credential in
-   the URL.
+   the URL. The filter sits on the root handlers present when the client
+   starts, so a handler added to a descendant logger, or a root reconfigured
+   later, is not covered; and loggers outside those listed (`asyncio`'s "Task
+   exception was never retrieved", `anyio`) can still write a URL an HTTP
+   error quotes.
 2. The host account corvidae runs as, and anything it can read or run.
 3. `sessions.db`, the JSONL logs, and the memory tables: plaintext copies
    of every conversation, including end-to-end-encrypted Signal ones.

@@ -170,9 +170,9 @@ def _one_line(text: str) -> str:
 # client, and the HTTP stack underneath it. Corvidae's warnings are redacted at
 # the call site (_server_endpoint); these are not ours to redact, so a filter
 # runs the same helpers over what they emit (#595).
-# `httpx2` is the HTTP client's logger name in this tree; `httpx` covers the
-# upstream name. Matched on a dot boundary, so each spelling is listed.
-_CREDENTIAL_LOGGERS = ("mcp", "httpx", "httpx2", "httpcore")
+# `httpx2` and `httpcore2` are the HTTP client's logger names in this tree;
+# `httpx` and `httpcore` cover the upstream names. Matched on a dot boundary, so each spelling is listed.
+_CREDENTIAL_LOGGERS = ("mcp", "httpx", "httpx2", "httpcore", "httpcore2")
 
 
 def _redact_multiline_text(text: str) -> str:
@@ -232,9 +232,13 @@ class _UrlRedactingFilter(logging.Filter):
             message = record.getMessage()
         except Exception:
             logger.warning(
-                "could not format a %s log record to redact it", record.name,
-                exc_info=True,
+                "could not format a %s log record to redact it; its text is "
+                "withheld", record.name, exc_info=True,
             )
+            # Fail closed: a handler's own error report would otherwise print
+            # the raw template and arguments, credentials and all.
+            record.msg = f"(unformattable {record.name} log record withheld)"
+            record.args = ()
             return True
         if not any(marker in message for marker in _CREDENTIAL_MARKERS):
             return True

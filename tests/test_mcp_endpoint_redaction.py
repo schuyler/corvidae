@@ -808,3 +808,47 @@ def test_the_httpx2_logger_is_filtered():
         lambda logger: logger.error("HTTP Request: POST http://u:HTTPXPW@h.example/m"),
     )
     assert "HTTPXPW" not in out and "h.example/m" in out
+
+
+def test_the_httpcore2_logger_is_filtered():
+    """The HTTP client's transport logs as `httpcore2` in this tree (#595)."""
+    out = _format_record(
+        "httpcore2.http11",
+        lambda logger: logger.error("send to http://u:CORE2PW@h.example/m"),
+    )
+    assert "CORE2PW" not in out and "h.example/m" in out
+
+
+def test_an_unformattable_record_is_withheld_not_passed_through():
+    """If the message cannot be formatted it must not reach a handler raw."""
+
+    class Bad:
+        def __str__(self) -> str:
+            raise ValueError("no str")
+
+    record = logging.LogRecord(
+        "mcp.x", logging.WARNING, "f", 1, "c %s http://u:BADPW@h/", (Bad(),), None
+    )
+    assert mcp_client_mod._UrlRedactingFilter().filter(record) is True
+    # Neither the raw template nor the raw args survive on the record.
+    assert "BADPW" not in str(record.msg) and record.args == ()
+    assert "mcp.x" in str(record.msg)
+
+
+def test_install_log_redaction_adds_one_filter_per_root_handler():
+    """The installer covers every root handler, once, however often it runs."""
+    root = logging.getLogger()
+    first, second = logging.NullHandler(), logging.NullHandler()
+    saved = list(root.handlers)
+    root.handlers = [first, second]
+    try:
+        mcp_client_mod._install_log_redaction()
+        mcp_client_mod._install_log_redaction()
+        for handler in (first, second):
+            ours = [
+                f for f in handler.filters
+                if isinstance(f, mcp_client_mod._UrlRedactingFilter)
+            ]
+            assert len(ours) == 1
+    finally:
+        root.handlers = saved
