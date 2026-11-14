@@ -557,12 +557,11 @@ remains a pass-through hook.
 
 **What is fenced and what is not.** Fenced as untrusted outside content: the
 results of `read_file` (spill files read back included), `web_fetch`,
-`web_search` and every MCP tool. A tool declares this for itself
+`web_search`, `shell` and `task_pipeline`, and every MCP tool. A tool declares this for itself
 (`returns_untrusted`, read when the call is dispatched and stored on the
 result), so a result of a tool no plugin declares is unfenced unless it acts on
 another channel. Result rows stored before #557 carry no flag and stay
 unfenced on reload. Unfenced today:
-`shell` and `task_pipeline` output, including a `cat` of a spill file (#580);
 `recall_raw` and `search_memory` replays of earlier content, which can carry
 text that was untrusted when it first arrived; the results inside a
 subagent's own loop, which reach the subagent's model with no frame; and the
@@ -1372,7 +1371,7 @@ back is fenced: the header's pointer is kernel text, and the file's contents
 arrive as a `read_file` result under the untrusted-output header and nonce
 fence (#571), though not the notification's own fence, and the header names
 the source recorded when the content was spilled, if the log row survives
-(#576). A `cat` of the file through `shell` arrives unfenced
+(#576), and a `cat` of the file through `shell` is fenced the same way
 (#580). The spill directory is not inside any tool root
 (`read_file` has none until #444), so the file is reachable the same way any
 other path is, and the agent can read it whether or not a header pointed at

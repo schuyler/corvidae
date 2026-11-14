@@ -680,3 +680,65 @@ async def test_a_read_file_result_of_a_spill_file_renders_fenced(started):
     _, rendered = frame(msg, {"role": "tool", "content": "spilled text"}, channel.id, KEY)
     assert rendered["content"].startswith(
         f"[metadata: result of your own read_file call call_1; untrusted outside content, {OWN}]\n[payload ")
+
+
+# ---------------------------------------------------------------------------
+# #580: ``shell`` and ``task_pipeline`` declare untrusted output, so a command's
+# output — including a ``cat`` of a spill file — arrives fenced.
+# ---------------------------------------------------------------------------
+
+
+def test_shell_and_task_pipeline_declare_untrusted_output():
+    """R1: the two tools that can print a spill file's contents declare it."""
+    from corvidae.tool import declares_untrusted_output
+    from corvidae.tools import ShellToolPlugin
+
+    registry: list = []
+    ShellToolPlugin(None).register_tools(tool_registry=registry)
+    fns = {t.name: t.fn for t in registry}
+    for name in ("shell", "task_pipeline"):
+        assert declares_untrusted_output(fns[name]), f"{name} must declare returns_untrusted"
+
+
+async def test_a_shell_result_renders_fenced(started):
+    """R2: a shell call's result is stamped and renders under the payload fence."""
+    from corvidae.provenance import frame
+    from corvidae.tools import ShellToolPlugin
+
+    registry: list = []
+    ShellToolPlugin(None).register_tools(tool_registry=registry)
+    shell_fn = next(t.fn for t in registry if t.name == "shell")
+    call = {"id": "call_sh", "type": "function", "function": {
+        "name": "shell", "arguments": json.dumps({"command": "cat spill.txt"})}}
+    plugin, channel, _db, _persisted = await started()
+    _window_with(channel, call)
+    item = await _dispatch_and_notify(plugin, channel, call, {"shell": shell_fn})
+
+    assert item.metadata.untrusted is True, "a shell result carries the declaration it ran under"
+    msg = row("tool", "spilled text", 9, item.metadata, tool_call_id="call_sh")
+    _, rendered = frame(msg, {"role": "tool", "content": "spilled text"}, channel.id, KEY)
+    assert rendered["content"].startswith(
+        f"[metadata: result of your own shell call call_sh; untrusted outside content, {OWN}]\n[payload ")
+    assert rendered["content"].endswith("[payload " + nonce(9) + " ends]")
+
+
+async def test_a_task_pipeline_result_renders_fenced(started):
+    """R3: task_pipeline is shell by another name, and its report quotes output."""
+    from corvidae.provenance import frame
+    from corvidae.tools import ShellToolPlugin
+
+    registry: list = []
+    ShellToolPlugin(None).register_tools(tool_registry=registry)
+    pipeline_fn = next(t.fn for t in registry if t.name == "task_pipeline")
+    call = {"id": "call_tp", "type": "function", "function": {
+        "name": "task_pipeline", "arguments": json.dumps({"definition": "tasks: []"})}}
+    plugin, channel, _db, _persisted = await started()
+    _window_with(channel, call)
+    item = await _dispatch_and_notify(plugin, channel, call, {"task_pipeline": pipeline_fn})
+
+    assert item.metadata.untrusted is True
+    msg = row("tool", "Pipeline complete", 10, item.metadata, tool_call_id="call_tp")
+    _, rendered = frame(msg, {"role": "tool", "content": "Pipeline complete"}, channel.id, KEY)
+    assert rendered["content"].startswith(
+        "[metadata: result of your own task_pipeline call call_tp; "
+        f"untrusted outside content, {OWN}]\n[payload ")
