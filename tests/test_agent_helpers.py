@@ -693,6 +693,40 @@ class TestQueueItemTimingPromptTokens:
 
 
 # ===========================================================================
+# #469: the item's stage run logs its start, paired with the timing line
+# ===========================================================================
+
+
+class TestQueueItemStartLine:
+    async def test_start_and_timing_carry_the_same_trace_id(
+        self, plugin_and_channel, caplog
+    ):
+        """The start record and "queue item timing" share a trace id and a
+        channel, so one item's duration is derivable from the log alone."""
+        plugin, channel, db = plugin_and_channel
+        response = _make_text_response("hi")
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=response)
+        plugin._client = mock_client
+        plugin._mark_started()
+        trace_id = mint_trace_id()
+
+        with caplog.at_level(logging.INFO, logger="corvidae.agent"):
+            await plugin.on_message(
+                channel=channel, sender="user", text="hi", trace_id=trace_id
+            )
+            await drain(plugin, channel)
+
+        starts = [r for r in caplog.records if r.getMessage() == "queue item start"]
+        timings = [r for r in caplog.records if r.getMessage() == "queue item timing"]
+        assert starts, "expected a 'queue item start' log record"
+        assert timings, "expected a 'queue item timing' log record"
+        assert starts[0].trace_id == trace_id
+        assert timings[0].trace_id == trace_id
+        assert starts[0].channel == timings[0].channel == channel.id
+
+
+# ===========================================================================
 # Default LLM error message: names the failure class and tells the user what
 # to do next. The message must stay calm and must not leak Python type names.
 # ===========================================================================

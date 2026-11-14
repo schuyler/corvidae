@@ -1418,6 +1418,17 @@ class Agent(CorvidaePlugin):
                 return
         _t0 = time.monotonic()
         _phases: dict[str, float] = {}
+        # The start of the item's stage run (#469): "queue item timing" below
+        # closes it, and the trace id pairs the two even when two channels'
+        # items interleave. Same record shape as the completion, one line.
+        logger.info(
+            "queue item start",
+            extra={
+                "channel": item.channel.id,
+                "trace_id": item.trace_id,
+                "role": item.role.value,
+            },
+        )
 
         # Build the conversation message based on item role
         msg_result = self._build_conversation_message(item)
@@ -1679,6 +1690,7 @@ class Agent(CorvidaePlugin):
             "queue item timing",
             extra={
                 "channel": item.channel.id,
+                "trace_id": item.trace_id,
                 "role": item.role.value,
                 "total_ms": round(_total * 1000),
                 **{f"{k}_ms": round(v * 1000) for k, v in _phases.items()},
@@ -1858,23 +1870,50 @@ class Agent(CorvidaePlugin):
 
         # The client was bound above, so a plugin stop that clears LLMPlugin's
         # clients during the await can't change the model this stamp names.
+        # Every forked stage passes through here, so this is where each one
+        # gets its start line and duration (#469); the kernel must not name
+        # them (vocabulary rule), so the records say only `stage`. The trace
+        # id is the turn's, taken before the fork's own attribution replaces
+        # the mode, so a stage pairs with the turn that caused it.
+        trace_id = get_attribution().get("trace_id")
+        started = time.monotonic()
+        logger.info(
+            "stage start",
+            extra={"channel": channel.id, "stage": stage, "trace_id": trace_id},
+        )
         token = set_attribution(channel_id=channel.id, mode="fork")
+        # ok means the fork produced a result: a refusal is a stage that ran and
+        # cost its time without producing one, so it is not ok either.
+        ok = False
         try:
             # The channel's own schemas: a fork must share the turn's prefix.
             response = await client.chat(
                 messages, tools=self._tool_view(channel).schemas or None, extra_body=body
             )
+            message = response["choices"][0]["message"]
+            if message.get("tool_calls"):
+                raise ForkRefused(
+                    f"fork on {channel.id} answered with "
+                    f"{len(message['tool_calls'])} tool call(s)"
+                )
+            if looks_like_tool_call(message.get("content") or ""):
+                raise ForkRefused(f"fork on {channel.id} wrote a tool call as text")
+            ok = True
         finally:
             reset_attribution(token)
-
-        message = response["choices"][0]["message"]
-        if message.get("tool_calls"):
-            raise ForkRefused(
-                f"fork on {channel.id} answered with "
-                f"{len(message['tool_calls'])} tool call(s)"
+            # One line per fork, whatever it did: a refusal or a transport
+            # error still took its time and should be measurable.
+            logger.info(
+                "stage done",
+                extra={
+                    "channel": channel.id,
+                    "stage": stage,
+                    "trace_id": trace_id,
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                    "ok": ok,
+                },
             )
-        if looks_like_tool_call(message.get("content") or ""):
-            raise ForkRefused(f"fork on {channel.id} wrote a tool call as text")
+
         return ForkResult(
             text=message.get("content") or "",
             message=message,

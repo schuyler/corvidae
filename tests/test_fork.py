@@ -7,9 +7,11 @@ persists, fires and dispatches nothing.
 
 from unittest.mock import AsyncMock, MagicMock
 
+import logging
+
 import pytest
 
-from corvidae.attribution import get_attribution
+from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.context import ContextWindow, MessageType
 from corvidae.fork import (
     ForkRefused,
@@ -597,3 +599,55 @@ async def test_fork_renders_a_snapshot_not_the_live_window(forking_agent):
 
     assert client.chat.call_args.args[0] == expected
     assert channel.conversation.messages == after
+
+class TestStageLogLines:
+    """#469: every stage fork logs its start and its duration.
+
+    The fork is the one place appraisal, the critique lenses and consolidation
+    run, so one pair of records per call makes each stage measurable, named by
+    stage and channel and paired with the turn that caused it by trace id.
+    """
+
+    @staticmethod
+    def _records(caplog, channel_id):
+        start = [r for r in caplog.records if r.getMessage() == "stage start"]
+        done = [r for r in caplog.records if r.getMessage() == "stage done"]
+        assert len(start) == 1, f"expected one start record; got {len(start)}"
+        assert len(done) == 1, f"expected one done record; got {len(done)}"
+        assert start[0].channel == channel_id
+        assert done[0].channel == channel_id
+        return start[0], done[0]
+
+    async def test_a_fork_logs_start_and_done_under_the_turns_trace(
+        self, forking_agent, caplog
+    ):
+        plugin, channel, client = forking_agent
+        client.chat = AsyncMock(return_value=_make_text_response("fork says hi"))
+        token = set_attribution(trace_id="trace-469")
+        try:
+            with caplog.at_level(logging.INFO, logger="corvidae.agent"):
+                await plugin.fork(channel, INSTRUCTION, stage="consolidation")
+        finally:
+            reset_attribution(token)
+
+        start, done = self._records(caplog, channel.id)
+        assert start.stage == "consolidation"
+        assert done.stage == "consolidation"
+        assert start.trace_id == done.trace_id == "trace-469"
+        assert done.ok is True
+        assert isinstance(done.duration_ms, int) and done.duration_ms >= 0
+
+    async def test_a_refused_fork_still_logs_its_done_line(
+        self, forking_agent, caplog
+    ):
+        """A refusal took real time, so it is measurable too — and says so."""
+        plugin, channel, client = forking_agent
+        client.chat = AsyncMock(return_value=_make_tool_call_response([_call("c1")]))
+        with caplog.at_level(logging.INFO, logger="corvidae.agent"):
+            with pytest.raises(ForkRefused):
+                await plugin.fork(channel, INSTRUCTION, stage="appraisal")
+
+        start, done = self._records(caplog, channel.id)
+        assert start.stage == "appraisal"
+        assert done.ok is False
+        assert done.duration_ms >= 0

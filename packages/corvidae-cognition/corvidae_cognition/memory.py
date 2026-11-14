@@ -93,7 +93,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import aiosqlite
 
-from corvidae.attribution import reset_attribution, set_attribution
+from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.prompts import resolve_prompt
 from corvidae.context import ContextWindow, MessageType, count_tokens, message_tokens
 from corvidae.fork import (
@@ -2365,6 +2365,17 @@ class MemoryPlugin(CorvidaePlugin):
         # The message-id range and what is already stored, for the failure log.
         range_desc = f"up to {range_end}"
         stored = "nothing was stored"
+        # The start of the consolidation stage (#469): "memory consolidated"
+        # below closes it, and the channel, trigger and range pair the two.
+        logger.info(
+            "memory consolidation start",
+            extra={
+                "channel_id": channel_id,
+                "trigger": trigger,
+                "range_end": range_end,
+                "trace_id": get_attribution().get("trace_id"),
+            },
+        )
         try:
             # Compaction lets an in-flight turn or idle consolidation finish
             # first and takes only what lies past it (#621).

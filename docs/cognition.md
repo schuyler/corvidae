@@ -311,7 +311,10 @@ that started the run (`"compaction"`, `"idle"` or `"turn"`; `"eval"` from
 attribution snapshot for that call, into `MetricsPlugin`'s emitted tags,
 the `usage_log.trigger` column, and the `memory consolidated` completion
 log line, which carries `memory_ids`, `entries` (their count), `embedded`
-(how many were stored with a vector), the message range and `trigger`.
+(how many were stored with a vector), the message range and `trigger`. A
+`memory consolidation start` record, naming the same channel, `trigger` and
+`range_end`, opens the stage at `_consolidate_range`'s entry, so its duration
+is the gap between the two (#469).
 
 ### Corrupt `exchange_log` rows
 

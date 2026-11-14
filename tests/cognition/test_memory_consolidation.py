@@ -504,6 +504,56 @@ def find_consolidated_record(caplog):
     return matches[0]
 
 
+class TestConsolidationStageLogLines:
+    """#469: consolidation logs its start, so its duration is derivable.
+
+    "memory consolidated" closes the stage; this record opens it, and the
+    channel, trigger and range pair the two.
+    """
+
+    async def test_idle_consolidation_logs_its_start(self, caplog):
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            with caplog.at_level(logging.INFO):
+                await drive_idle_consolidation(memory, persistence, channel, db)
+
+            starts = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation start"
+            ]
+            assert len(starts) == 1, (
+                f"expected one start record; got {[r.getMessage() for r in caplog.records]!r}"
+            )
+            start = starts[0]
+            assert start.channel_id == channel.id
+            assert start.trigger == "idle"
+            # The completion the start pairs with carries the same channel and
+            # trigger, which is how a reader measures the stage without a clock.
+            done = find_consolidated_record(caplog)
+            assert done.channel_id == channel.id
+            assert done.trigger == "idle"
+        finally:
+            await db.close()
+
+    async def test_compaction_consolidation_start_names_its_trigger(self, caplog):
+        """The start line says which trigger opened the stage, so a compaction
+        consolidation is not mistaken for an idle one in the log."""
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            with caplog.at_level(logging.INFO):
+                await drive_compaction_consolidation(memory, persistence, channel)
+            starts = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation start"
+            ]
+            assert starts, "expected a start record for the compaction trigger"
+            assert starts[0].trigger == "compaction"
+            assert starts[0].channel_id == channel.id
+            assert starts[0].range_end == find_consolidated_record(caplog).msg_id_end
+        finally:
+            await db.close()
+
+
 class TestConsolidationTriggerAttribution:
     """The initiating trigger rides the attribution contextvar in-flight.
 
