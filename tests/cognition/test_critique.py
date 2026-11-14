@@ -420,8 +420,10 @@ class TestLensSelection:
         appraisal = FakeAppraisal(
             stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
         )
-        env = await build_critique(tmp_path, appraisal=appraisal,
-                                   chat_text=EMPTY_VERDICT)
+        env = await build_critique(
+            tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
+            config={"critique": {"retention": {"root": "values/"}}},
+        )
         await _fire(env, "kret", origin="user")
         await _run_next_task(env.task)
         outcomes = await _read_outcomes(env.db, "kret")
@@ -469,7 +471,10 @@ class TestLensSelection:
         )
         env = await build_critique(
             tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
-            config={"critique": {"lens": {"novelty": 0.95}}},
+            config={
+                "critique": {"retention": {"root": "values/"},
+                             "lens": {"novelty": 0.95}},
+            },
         )
         await _fire(env, "ktune", origin="user")
         await _run_next_task(env.task)
@@ -487,6 +492,117 @@ class TestLensSelection:
         # commitment alone selects constrained, not retention
         assert "constrained" in outcomes["critique"]["lenses"]
         assert "retention" not in outcomes["critique"]["lenses"]
+        await _teardown(env)
+
+    async def test_retention_inert_without_a_knowledge_base(self, tmp_path):
+        """#742: no critique.retention.root means nowhere to file, so no lens.
+
+        Novelty and commitment both clear their thresholds, which selects
+        retention in the test above; the only difference here is the missing
+        root. Flagging a fact the agent cannot place is not a critique.
+        """
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
+        )
+        env = await build_critique(tmp_path, appraisal=appraisal,
+                                   chat_text=EMPTY_VERDICT)
+        await _fire(env, "knoroot", origin="user")
+        await _run_next_task(env.task)
+        outcomes = await _read_outcomes(env.db, "knoroot")
+        lenses = outcomes.get("critique", {}).get("lenses", [])
+        assert "retention" not in lenses
+        await _teardown(env)
+
+    async def test_retention_threshold_tunable(self, tmp_path):
+        """critique.lens.retention raises the commitment bar on its own.
+
+        Retention used to share critique.lens.commitment with the constrained
+        lens, so an operator could not make one fire without the other.
+        """
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.6}, stage2={"novelty": 0.9},
+        )
+        env = await build_critique(
+            tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
+            config={
+                "critique": {"retention": {"root": "values/"},
+                             "lens": {"retention": 0.95}},
+            },
+        )
+        await _fire(env, "kretune", origin="user")
+        await _run_next_task(env.task)
+        outcomes = await _read_outcomes(env.db, "kretune")
+        assert "retention" not in outcomes["critique"]["lenses"]
+        await _teardown(env)
+
+    async def test_retention_prompt_asks_for_file_and_content(self):
+        """The objection has to name where the fact goes and what to write."""
+        from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, DEFAULT_PROMPTS
+
+        for prompt in (DEFAULT_PROMPTS["retention"], DEFAULT_FORK_PROMPTS["retention"]):
+            assert '"file": "..."' in prompt
+            assert '"content": "..."' in prompt
+
+    async def test_retention_fork_names_the_knowledge_base_root(self, tmp_path):
+        """The lens can only name a file if it knows the directory."""
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
+        )
+        env = await build_critique(
+            tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
+            config={"critique": {"retention": {"root": "values/"}}},
+        )
+        await _fire(env, "kroot", origin="user")
+        await _run_next_task(env.task)
+        instructions = [c["instruction"] for c in env.fork_agent.calls]
+        assert any("values/" in text for text in instructions), instructions
+        # The root is named, not implied: the model has to name a path under it.
+        assert any("knowledge base root is" in text for text in instructions)
+        await _teardown(env)
+
+    async def test_retention_root_not_indexed_by_recall_warns(self, tmp_path, caplog):
+        """A root recall does not index is a silent data-loss path, so say it."""
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.0}, stage2={"novelty": 0.0},
+        )
+        env = await build_critique(
+            tmp_path, appraisal=appraisal,
+            config={
+                "critique": {"retention": {"root": "notes/"}},
+                "markdown_recall": {"roots": ["values/"]},
+            },
+        )
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelname == "WARNING" and "critique.retention.root" in r.getMessage()]
+        assert warnings, "expected a WARNING naming the misconfigured root"
+        assert "notes" in warnings[0] and "values" in warnings[0]
+        await _teardown(env)
+
+    async def test_retention_root_matching_recall_is_quiet(self, tmp_path, caplog):
+        """No warning when the two agree, or when recall is not configured."""
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.0}, stage2={"novelty": 0.0},
+        )
+        env = await build_critique(
+            tmp_path, appraisal=appraisal,
+            config={
+                "critique": {"retention": {"root": "values/"}},
+                "markdown_recall": {"roots": ["values/"]},
+            },
+        )
+        assert not [r for r in caplog.records
+                    if r.levelname == "WARNING" and "critique.retention.root" in r.getMessage()]
+        await _teardown(env)
+        caplog.clear()
+        # No recall config at all: nothing to drift from, so quiet.
+        other = tmp_path / "norecall"
+        other.mkdir()
+        env = await build_critique(
+            other, appraisal=appraisal,
+            config={"critique": {"retention": {"root": "nobody-indexes-this/"}}},
+        )
+        assert not [r for r in caplog.records
+                    if r.levelname == "WARNING" and "critique.retention.root" in r.getMessage()]
         await _teardown(env)
 
     async def test_below_threshold_no_task_when_not_sampled(self, tmp_path):

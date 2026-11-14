@@ -80,7 +80,8 @@ LENS_AMBIGUITY_DEFAULT = 0.6        # critique.lens.ambiguity → predictive
 LENS_COMMITMENT_DEFAULT = 0.5       # critique.lens.commitment → constrained, retention
 LENS_NEG_VALENCE_DEFAULT = 0.3      # critique.lens.neg_valence ∧ disagreement → adversarial
 LENS_DISAGREEMENT_DEFAULT = 0.6     # critique.lens.disagreement
-LENS_NOVELTY_DEFAULT = 0.6          # critique.lens.novelty → retention
+LENS_NOVELTY_DEFAULT = 0.6          # critique.lens.novelty ∧ critique.lens.retention
+LENS_RETENTION_DEFAULT = 0.5        #   → retention (#742)
 SAMPLE_BELOW_RATE_DEFAULT = 0.05    # critique.sample_below_rate (false-negative bound)
 PROVENANCE_ENABLED_DEFAULT = True   # critique.provenance.enabled
 PROACTIVITY_ENABLED_DEFAULT = True  # critique.proactivity.enabled
@@ -257,10 +258,11 @@ _PROMPT_RETENTION = (
     "specific (name, value, rule, preference), and not already in the "
     "knowledge base. An empty objections list is a good outcome, not a "
     "failure.\n\n"
-    "For each fact to file, specify the target file path and the content "
-    "to append.\n\n"
+    "For each fact to file, name the file it belongs in and the content to "
+    "append, as a section to add rather than a rewrite.\n\n"
     "Respond with a single JSON object, nothing else:\n"
-    '{"objections": [{"claim": "...", "objection": "File in <path>: <content>", "severity": 0.5}]}'
+    '{"objections": [{"claim": "...", "objection": "...", "file": "...", '
+    '"content": "...", "severity": 0.5}]}'
 )
 DEFAULT_PROMPTS = {
     "predictive": _PROMPT_PREDICTIVE,
@@ -399,10 +401,11 @@ _FORK_PROMPT_RETENTION = (
     "- Is this fact already in your knowledge base?\n\n"
     "Only flag facts that are durable, specific, and not already filed. "
     "An empty objections list is a good outcome.\n\n"
-    "For each fact to file, specify the target file path and the content "
-    "to append.\n\n"
+    "For each fact to file, name the file it belongs in and the exact "
+    "content to append, as a section to add rather than a rewrite.\n\n"
     "Respond with a single JSON object, nothing else:\n"
-    '{"objections": [{"claim": "...", "objection": "File in <path>: <content>", "severity": 0.5}]}'
+    '{"objections": [{"claim": "...", "objection": "...", "file": "...", '
+    '"content": "...", "severity": 0.5}]}'
 )
 DEFAULT_FORK_PROMPTS = {
     "predictive": _FORK_PROMPT_PREDICTIVE,
@@ -552,6 +555,38 @@ class CritiquePlugin(CorvidaePlugin):
         await super().on_init(pm, config)
         self.config = config
         self._fork_prompts = self._resolve_fork_prompts(config)
+        self._warn_if_retention_root_is_not_indexed(config)
+
+    @staticmethod
+    def _warn_if_retention_root_is_not_indexed(config: dict) -> None:
+        """One WARNING when the retention lens files where recall cannot look.
+
+        The lens and markdown_recall are configured separately, so an operator
+        can point the lens at a directory the recall plugin does not index: the
+        facts get filed and never surface. Not an error - recall is optional and
+        the lens works without it - but the two drifting apart is silent
+        otherwise, and the symptom (an agent that keeps re-learning what it has
+        already written down) is hard to trace back to a config typo.
+        """
+        root = config_value(config, "critique.retention.root", None)
+        if not isinstance(root, str) or not root.strip():
+            return
+        roots = config_value(config, "markdown_recall.roots", None)
+        if roots is None:
+            single = config_value(config, "markdown_recall.root", None)
+            roots = [single] if isinstance(single, str) and single.strip() else None
+        if not isinstance(roots, list) or not roots:
+            return  # no recall index configured: nothing to drift from
+        filed = Path(root).expanduser().resolve()
+        indexed = {Path(r).expanduser().resolve() for r in roots if isinstance(r, str)}
+        if filed not in indexed:
+            logger.warning(
+                "critique.retention.root is %s, which markdown_recall does not "
+                "index (its roots are: %s); facts the retention lens files there "
+                "will not be recalled later - point both keys at the same "
+                "directory",
+                root, ", ".join(sorted(str(p) for p in indexed)),
+            )
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
@@ -911,14 +946,20 @@ class CritiquePlugin(CorvidaePlugin):
         ):
             lenses.append("adversarial")
 
+        # Retention (#742): a durable fact is worth filing only when the
+        # exchange was both novel and commitment-dense, and only when there is
+        # a knowledge base to file it in. Inert without critique.retention.root:
+        # with nowhere to file, the lens could only flag what it cannot place.
+        root = config_value(self.config, "critique.retention.root", None)
         novelty = dims.get("novelty")
         commitment = dims.get("commitment_density")
         if (
-            novelty is not None and commitment is not None
+            isinstance(root, str) and root.strip()
+            and novelty is not None and commitment is not None
             and novelty >= resolve_tunable(
                 channel, self.config, "critique.lens.novelty", LENS_NOVELTY_DEFAULT)
             and commitment >= resolve_tunable(
-                channel, self.config, "critique.lens.commitment", LENS_COMMITMENT_DEFAULT)
+                channel, self.config, "critique.lens.retention", LENS_RETENTION_DEFAULT)
         ):
             lenses.append("retention")
         return lenses
@@ -1380,6 +1421,13 @@ class CritiquePlugin(CorvidaePlugin):
             f"«{quote(originating_text)}», and the response you sent began "
             f"«{quote(response_text)}»."
         )
+        if lens == "retention":
+            # The lens has to name a file, so it has to know where they live.
+            root = config_value(self.config, "critique.retention.root", "")
+            instruction += (
+                f"\n\nThe knowledge base root is «{quote(str(root))}»: every "
+                "file you name is a path under it."
+            )
         # Containment check; a string is the reason the lens must skip.
         agent = self._fork_target(channel, trace_id)
         if isinstance(agent, str):
