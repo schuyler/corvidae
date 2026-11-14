@@ -455,7 +455,7 @@ def test_pool_records_its_pinned_now_and_the_settings_that_scored_it(
     pool_out = tmp_path / "pool.json"
     pinned = 1_700_000_000.0
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
         "--pool-out", str(pool_out), "--now", str(pinned),
     ])
@@ -504,7 +504,7 @@ def test_two_runs_on_different_days_agree_when_now_is_pinned(
         """One run with the wall clock pinned to `day`."""
         monkeypatch.setattr(time, "time", lambda: day)
         pool_out = tmp_path / f"pool-{int(day)}.json"
-        script.main([
+        run_snapshot(script, [
             "--snapshot", str(source), "--labels", str(labels),
             "--config", str(config), "--pool-out", str(pool_out),
             "--now", str(created + 86400.0),
