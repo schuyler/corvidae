@@ -363,7 +363,7 @@ These are recommendations, not hardcoded blocks: `set_settings` writes are chann
 The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) as of this writing:
 
 - `appraisal.novelty.no_probe_default`, `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`, `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.stage2_prompt`, `appraisal.weights.commitment`, `appraisal.weights.disagreement`, `appraisal.weights.imperative`, `appraisal.weights.novelty`, `appraisal.weights.question`
-- `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.sample_below_rate`
+- `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.lens.novelty`, `critique.lens.retention`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.sample_below_rate`
 - `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.enforce`, `gate.send.min_salience`
 - `outbound_cap.count_progress`, `outbound_cap.max_messages`
 
@@ -392,6 +392,20 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 `critique.provenance.enabled` (default `true`) switches the provenance check. It has no other tunables; its instruction is the static `critique.fork_prompt.provenance`. Stage-2 appraisal detects the past claims and a fork of the window judges them, so the check needs the `appraisal` plugin and `agent.forks` covering `critique`. See [cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy).
 
 *(The `critique.*` tunable keys are not individually tabulated here; the complete list is under "Runtime-tunable gate parameters" above.)*
+
+### The retention lens (#742)
+
+`critique.retention.root` turns on a critique lens that asks a different question from the three stylistic ones: the exchange carried something durable — a fact about a person, system or domain, a belief the agent formed, a behaviour worth keeping — and is it filed in the agent's knowledge base? The lens is **inert while this key is unset**: with no knowledge base there is nothing to check an exchange against, and the lens never fires.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `critique.retention.root` | string | none | The knowledge base directory, named in the lens's fork instruction so the model can point at a file inside it (for example `values/`). Not read from the disk by the plugin: the agent reads it with its own file tools when the finding arrives. Static config, not a runtime tunable. |
+| `critique.lens.novelty` | float | `0.6` | Novelty at or above which the retention lens may fire (the appraisal stage-1 novelty, 1 − familiarity with the probe). Both thresholds must be crossed. |
+| `critique.lens.retention` | float | `0.5` | Commitment density at or above which the retention lens may fire, alongside `critique.lens.novelty`. |
+
+The lens flags, it does not file. Each objection carries the `file` it belongs in and the `content` to append, and a retention finding wakes the channel: the critique turn's stub names the root and tells the agent to read the file and append the content as a new section only if it is missing, then reply `NO_REPLY` (withheld, so the turn is silent by default). Stylistic findings from the same run still wait for the channel's next turn. With the lens on, the provenance check's wake uses the same stub, because one stub governs a channel's pending critique findings whichever wake fires first. The agent files in that turn after reading the file and deciding the fact is really missing — the check is why a lens is the mechanism rather than an automatic write. Updates are additive (a section to append to, never a rewrite), the knowledge base directory must be writable by the daemon, and the lens inherits the `critique` stage's profile and fork settings like the other lenses. Set the two thresholds high enough that an ordinary exchange does not fire it: the lens costs a fork per selection, and its findings cost a turn.
+
+Point `critique.retention.root` at one of `markdown_recall.roots` (or at `markdown_recall.root` before the multi-root form): a directory recall does not index is legal, and `CritiquePlugin` logs one `WARNING` at startup naming both, because facts filed where recall cannot look are written down and then re-learned. The check runs at `on_init`, so a `set_settings`-style hot change of either key is not covered by it.
 
 #### `gate.*` — engagement and decide gates
 

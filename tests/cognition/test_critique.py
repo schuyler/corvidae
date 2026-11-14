@@ -420,8 +420,10 @@ class TestLensSelection:
         appraisal = FakeAppraisal(
             stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
         )
-        env = await build_critique(tmp_path, appraisal=appraisal,
-                                   chat_text=EMPTY_VERDICT)
+        env = await build_critique(
+            tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
+            config={"critique": {"retention": {"root": "values/"}}},
+        )
         await _fire(env, "kret", origin="user")
         await _run_next_task(env.task)
         outcomes = await _read_outcomes(env.db, "kret")
@@ -469,7 +471,10 @@ class TestLensSelection:
         )
         env = await build_critique(
             tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
-            config={"critique": {"lens": {"novelty": 0.95}}},
+            config={
+                "critique": {"retention": {"root": "values/"},
+                             "lens": {"novelty": 0.95}},
+            },
         )
         await _fire(env, "ktune", origin="user")
         await _run_next_task(env.task)
@@ -487,6 +492,117 @@ class TestLensSelection:
         # commitment alone selects constrained, not retention
         assert "constrained" in outcomes["critique"]["lenses"]
         assert "retention" not in outcomes["critique"]["lenses"]
+        await _teardown(env)
+
+    async def test_retention_inert_without_a_knowledge_base(self, tmp_path):
+        """#742: no critique.retention.root means nowhere to file, so no lens.
+
+        Novelty and commitment both clear their thresholds, which selects
+        retention in the test above; the only difference here is the missing
+        root. Flagging a fact the agent cannot place is not a critique.
+        """
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
+        )
+        env = await build_critique(tmp_path, appraisal=appraisal,
+                                   chat_text=EMPTY_VERDICT)
+        await _fire(env, "knoroot", origin="user")
+        await _run_next_task(env.task)
+        outcomes = await _read_outcomes(env.db, "knoroot")
+        lenses = outcomes.get("critique", {}).get("lenses", [])
+        assert "retention" not in lenses
+        await _teardown(env)
+
+    async def test_retention_threshold_tunable(self, tmp_path):
+        """critique.lens.retention raises the commitment bar on its own.
+
+        Retention used to share critique.lens.commitment with the constrained
+        lens, so an operator could not make one fire without the other.
+        """
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.6}, stage2={"novelty": 0.9},
+        )
+        env = await build_critique(
+            tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
+            config={
+                "critique": {"retention": {"root": "values/"},
+                             "lens": {"retention": 0.95}},
+            },
+        )
+        await _fire(env, "kretune", origin="user")
+        await _run_next_task(env.task)
+        outcomes = await _read_outcomes(env.db, "kretune")
+        assert "retention" not in outcomes["critique"]["lenses"]
+        await _teardown(env)
+
+    async def test_retention_prompt_asks_for_file_and_content(self):
+        """The objection has to name where the fact goes and what to write."""
+        from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, DEFAULT_PROMPTS
+
+        for prompt in (DEFAULT_PROMPTS["retention"], DEFAULT_FORK_PROMPTS["retention"]):
+            assert '"file": "..."' in prompt
+            assert '"content": "..."' in prompt
+
+    async def test_retention_fork_names_the_knowledge_base_root(self, tmp_path):
+        """The lens can only name a file if it knows the directory."""
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
+        )
+        env = await build_critique(
+            tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
+            config={"critique": {"retention": {"root": "values/"}}},
+        )
+        await _fire(env, "kroot", origin="user")
+        await _run_next_task(env.task)
+        instructions = [c["instruction"] for c in env.fork_agent.calls]
+        assert any("values/" in text for text in instructions), instructions
+        # The root is named, not implied: the model has to name a path under it.
+        assert any("knowledge base root is" in text for text in instructions)
+        await _teardown(env)
+
+    async def test_retention_root_not_indexed_by_recall_warns(self, tmp_path, caplog):
+        """A root recall does not index is a silent data-loss path, so say it."""
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.0}, stage2={"novelty": 0.0},
+        )
+        env = await build_critique(
+            tmp_path, appraisal=appraisal,
+            config={
+                "critique": {"retention": {"root": "notes/"}},
+                "markdown_recall": {"roots": ["values/"]},
+            },
+        )
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelname == "WARNING" and "critique.retention.root" in r.getMessage()]
+        assert warnings, "expected a WARNING naming the misconfigured root"
+        assert "notes" in warnings[0] and "values" in warnings[0]
+        await _teardown(env)
+
+    async def test_retention_root_matching_recall_is_quiet(self, tmp_path, caplog):
+        """No warning when the two agree, or when recall is not configured."""
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.0}, stage2={"novelty": 0.0},
+        )
+        env = await build_critique(
+            tmp_path, appraisal=appraisal,
+            config={
+                "critique": {"retention": {"root": "values/"}},
+                "markdown_recall": {"roots": ["values/"]},
+            },
+        )
+        assert not [r for r in caplog.records
+                    if r.levelname == "WARNING" and "critique.retention.root" in r.getMessage()]
+        await _teardown(env)
+        caplog.clear()
+        # No recall config at all: nothing to drift from, so quiet.
+        other = tmp_path / "norecall"
+        other.mkdir()
+        env = await build_critique(
+            other, appraisal=appraisal,
+            config={"critique": {"retention": {"root": "nobody-indexes-this/"}}},
+        )
+        assert not [r for r in caplog.records
+                    if r.levelname == "WARNING" and "critique.retention.root" in r.getMessage()]
         await _teardown(env)
 
     async def test_below_threshold_no_task_when_not_sampled(self, tmp_path):
@@ -591,6 +707,90 @@ class TestExecution:
         )
         assert "no record says Friday" in context_text
         await _teardown(env)
+
+
+RETENTION_VERDICT = json.dumps({"objections": [
+    {"claim": "Yoz runs ARDC tech", "objection": "not filed",
+     "file": "people/yoz.md", "content": "- runs ARDC tech", "severity": 0.5},
+]})
+
+
+class TestRetentionDelivery:
+    """#742 via #857: a retention finding reaches the agent with the file and
+    the content, and wakes the channel so the fact is filed now."""
+
+    async def _run_retention(self, tmp_path, key):
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
+        )
+        env = await build_critique(
+            tmp_path, appraisal=appraisal, chat_text=RETENTION_VERDICT,
+            with_funnel=True,
+            config={"critique": {"retention": {"root": "values/"}}},
+        )
+        env.pm.ahook.on_notify = AsyncMock()
+        env.funnel.ingest = Mock(wraps=env.funnel.ingest)
+        env.funnel.ingest_and_wake = AsyncMock()
+        await _fire(env, key, origin="user")
+        await _run_next_task(env.task)
+        return env
+
+    async def test_the_file_and_the_content_reach_the_agent(self, tmp_path):
+        """AC1: the funnel entry, not just the outcome record, carries both."""
+        env = await self._run_retention(tmp_path, "kdeliver")
+        calls = env.funnel.ingest_and_wake.await_args_list + env.funnel.ingest.call_args_list
+        entries = "\n".join(e for c in calls for e in c.kwargs["entries"])
+        assert "people/yoz.md" in entries, entries
+        assert "- runs ARDC tech" in entries, entries
+        await _teardown(env)
+
+    async def test_a_retention_finding_wakes_the_channel_to_file_it(self, tmp_path):
+        """AC2a: an action turn, silent by default, that reads before it appends."""
+        env = await self._run_retention(tmp_path, "kwake")
+        env.funnel.ingest_and_wake.assert_awaited_once()
+        kwargs = env.funnel.ingest_and_wake.await_args.kwargs
+        # The NO_REPLY veto keys on this origin: anything else would post it.
+        assert kwargs["origin"] == "critique"
+        stub = kwargs["stub_text"]
+        assert "NO_REPLY" in stub, stub
+        assert "read" in stub.lower() and "append" in stub.lower(), stub
+        assert "values/" in stub, "the filing turn must not guess the root"
+        assert all(e.startswith("[retention]") for e in kwargs["entries"]), kwargs["entries"]
+        await _teardown(env)
+
+    async def test_stylistic_findings_in_the_same_run_do_not_wake(self, tmp_path):
+        """AC2c: the fixture's run is constrained + retention; only the
+        retention finding wakes, the constrained one waits for the next turn."""
+        env = await self._run_retention(tmp_path, "kmixed")
+        env.funnel.ingest.assert_called_once()
+        stylistic = env.funnel.ingest.call_args.kwargs["entries"]
+        assert stylistic and all(e.startswith("[constrained]") for e in stylistic), stylistic
+        await _teardown(env)
+
+
+def test_objection_schema_allows_file_and_content():
+    """AC3: a server that honours the schema can return the retention fields."""
+    from corvidae_cognition.critique import OBJECTION_SCHEMA
+
+    item = OBJECTION_SCHEMA["properties"]["objections"]["items"]
+    assert item["properties"]["file"] == {"type": "string"}
+    assert item["properties"]["content"] == {"type": "string"}
+    assert item["required"] == ["claim", "objection"]
+
+
+async def test_retention_root_warns_against_recalls_default_root(tmp_path, caplog):
+    """AC6: a markdown_recall block with neither roots nor root indexes
+    state/markdown_recall, so a different retention root is drift too."""
+    appraisal = FakeAppraisal(stage1={"commitment_density": 0.0}, stage2={"novelty": 0.0})
+    env = await build_critique(
+        tmp_path, appraisal=appraisal,
+        config={"critique": {"retention": {"root": "values/"}}, "markdown_recall": {}},
+    )
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelname == "WARNING" and "critique.retention.root" in r.getMessage()]
+    assert len(warnings) == 1, warnings
+    assert "values" in warnings[0] and "state/markdown_recall" in warnings[0], warnings[0]
+    await _teardown(env)
 
 
 def test_parse_json_block_error_names_critique_phase_and_long_text():
@@ -1049,6 +1249,25 @@ class TestProvenanceCritic:
             assert kwargs["origin"] == "critique"
             assert kwargs["entries"][0].startswith("[provenance]")
             assert kwargs["stub_text"] == PROVENANCE_NOTE
+        finally:
+            await _teardown(env)
+
+    async def test_with_a_retention_root_the_provenance_stub_also_files(self, tmp_path):
+        """AC2d: one stub governs a channel's critique drain, whichever wake
+        fires first, so with the lens on it must cover retention filing too."""
+        from corvidae_cognition.critique import PROVENANCE_NOTE
+
+        env = await _provenance_env(tmp_path, with_funnel=True)
+        env.plugin.config.setdefault("critique", {})["retention"] = {"root": "values/"}
+        env.funnel.ingest_and_wake = AsyncMock()
+        agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
+        try:
+            await _provenance_exchange(env, agent, trace_id="kfr")
+            await _run_provenance(env, "kfr")
+            stub = env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+            assert stub != PROVENANCE_NOTE
+            assert "values/" in stub and "append" in stub.lower(), stub
+            assert "NO_REPLY" in stub
         finally:
             await _teardown(env)
 
@@ -1692,3 +1911,50 @@ class TestProactivityExecution:
         assert outcomes["critique"]["objections"] == 1
         assert outcomes["proactivity"]["objections"] == 1
         await _teardown(env)
+
+
+class TestRetentionWakeNeedsARoot:
+    """#742 via #857: a retention finding wakes only while there is a root.
+
+    The lens cannot run without one, but the wake rule is written where it is
+    read, so the pairing is pinned here rather than left to the lens's
+    selection: a wake whose stub says "stay silent and file nothing" spends a
+    turn to do nothing.
+    """
+
+    @staticmethod
+    async def _register(env, *, root):
+        if root is not None:
+            env.plugin.config.setdefault("critique", {})["retention"] = {"root": root}
+        env.funnel.ingest = Mock()
+        env.funnel.ingest_and_wake = AsyncMock()
+        objection = {
+            "claim": "Yoz runs ARDC tech", "objection": "not filed", "lens": "retention",
+            "file": "people/yoz.md", "content": "- runs ARDC tech",
+        }
+        await env.plugin._record_and_register(
+            env.channel, "kwr", {"critique": {"lenses": ["retention"], "objections": 1}},
+            [objection], wake=False,
+        )
+
+    async def test_with_a_root_the_finding_wakes_the_channel(self, tmp_path):
+        appraisal = FakeAppraisal(stage1={}, stage2={})
+        env = await build_critique(tmp_path, appraisal=appraisal, with_funnel=True)
+        try:
+            await self._register(env, root="values/")
+            env.funnel.ingest_and_wake.assert_awaited_once()
+            assert "values/" in env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+            env.funnel.ingest.assert_not_called()
+        finally:
+            await _teardown(env)
+
+    async def test_without_a_root_the_finding_waits_for_the_next_turn(self, tmp_path):
+        appraisal = FakeAppraisal(stage1={}, stage2={})
+        env = await build_critique(tmp_path, appraisal=appraisal, with_funnel=True)
+        try:
+            await self._register(env, root=None)
+            env.funnel.ingest_and_wake.assert_not_awaited()
+            [entry] = env.funnel.ingest.call_args.kwargs["entries"]
+            assert entry.startswith("[retention]") and "people/yoz.md" in entry, entry
+        finally:
+            await _teardown(env)

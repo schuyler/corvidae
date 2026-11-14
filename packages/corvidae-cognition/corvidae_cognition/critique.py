@@ -80,7 +80,8 @@ LENS_AMBIGUITY_DEFAULT = 0.6        # critique.lens.ambiguity → predictive
 LENS_COMMITMENT_DEFAULT = 0.5       # critique.lens.commitment → constrained, retention
 LENS_NEG_VALENCE_DEFAULT = 0.3      # critique.lens.neg_valence ∧ disagreement → adversarial
 LENS_DISAGREEMENT_DEFAULT = 0.6     # critique.lens.disagreement
-LENS_NOVELTY_DEFAULT = 0.6          # critique.lens.novelty → retention
+LENS_NOVELTY_DEFAULT = 0.6          # critique.lens.novelty ∧ critique.lens.retention
+LENS_RETENTION_DEFAULT = 0.5        #   → retention (#742)
 SAMPLE_BELOW_RATE_DEFAULT = 0.05    # critique.sample_below_rate (false-negative bound)
 PROVENANCE_ENABLED_DEFAULT = True   # critique.provenance.enabled
 PROACTIVITY_ENABLED_DEFAULT = True  # critique.proactivity.enabled
@@ -103,6 +104,22 @@ NO_REPLY_MARKER = "NO_REPLY"
 # Wake-stub text for a provenance objection. Lives in the stub, not the
 # CONTEXT entry: the funnel frames CONTEXT as data, and this is an
 # instruction written by us.
+# Wake-stub text once the retention lens is on (critique.retention.root set).
+# The funnel keeps one pending stub per (channel, "critique"), so whichever
+# critique wake fires first instructs the whole drain: the note covers both
+# retention filing and the provenance rule (#742). {root} is quoted.
+RETENTION_WAKE_NOTE = (
+    "Background self-check: your critique left findings in the critique "
+    "context. For each [retention] finding, file it before you finish: read "
+    "the named file under the knowledge base root «{root}», and append the "
+    "content as a new section only if the file does not already hold it - "
+    "never rewrite the file. For claims the provenance check found that no "
+    "record supports, reply in the channel only if your earlier reply could "
+    "lead the other party to take an incorrect action; then correct it "
+    "briefly. Otherwise send nothing: reply with exactly {marker} and "
+    "nothing reaches the channel."
+)
+
 PROVENANCE_NOTE = (
     "Background self-check: the provenance check found claims in your last "
     "reply that no record supports (see the critique context). By default, "
@@ -140,6 +157,9 @@ OBJECTION_SCHEMA = {
                     "claim": {"type": "string"},
                     "objection": {"type": "string"},
                     "severity": {"type": "number"},
+                    # The retention lens names where a fact goes (#742).
+                    "file": {"type": "string"},
+                    "content": {"type": "string"},
                 },
                 "required": ["claim", "objection"],
             },
@@ -257,10 +277,11 @@ _PROMPT_RETENTION = (
     "specific (name, value, rule, preference), and not already in the "
     "knowledge base. An empty objections list is a good outcome, not a "
     "failure.\n\n"
-    "For each fact to file, specify the target file path and the content "
-    "to append.\n\n"
+    "For each fact to file, name the file it belongs in and the content to "
+    "append, as a section to add rather than a rewrite.\n\n"
     "Respond with a single JSON object, nothing else:\n"
-    '{"objections": [{"claim": "...", "objection": "File in <path>: <content>", "severity": 0.5}]}'
+    '{"objections": [{"claim": "...", "objection": "...", "file": "...", '
+    '"content": "...", "severity": 0.5}]}'
 )
 DEFAULT_PROMPTS = {
     "predictive": _PROMPT_PREDICTIVE,
@@ -399,10 +420,11 @@ _FORK_PROMPT_RETENTION = (
     "- Is this fact already in your knowledge base?\n\n"
     "Only flag facts that are durable, specific, and not already filed. "
     "An empty objections list is a good outcome.\n\n"
-    "For each fact to file, specify the target file path and the content "
-    "to append.\n\n"
+    "For each fact to file, name the file it belongs in and the exact "
+    "content to append, as a section to add rather than a rewrite.\n\n"
     "Respond with a single JSON object, nothing else:\n"
-    '{"objections": [{"claim": "...", "objection": "File in <path>: <content>", "severity": 0.5}]}'
+    '{"objections": [{"claim": "...", "objection": "...", "file": "...", '
+    '"content": "...", "severity": 0.5}]}'
 )
 DEFAULT_FORK_PROMPTS = {
     "predictive": _FORK_PROMPT_PREDICTIVE,
@@ -552,6 +574,44 @@ class CritiquePlugin(CorvidaePlugin):
         await super().on_init(pm, config)
         self.config = config
         self._fork_prompts = self._resolve_fork_prompts(config)
+        self._warn_if_retention_root_is_not_indexed(config)
+
+    @staticmethod
+    def _warn_if_retention_root_is_not_indexed(config: dict) -> None:
+        """One WARNING when the retention lens files where recall cannot look.
+
+        The lens and markdown_recall are configured separately, so an operator
+        can point the lens at a directory the recall plugin does not index: the
+        facts get filed and never surface. Not an error - recall is optional and
+        the lens works without it - but the two drifting apart is silent
+        otherwise, and the symptom (an agent that keeps re-learning what it has
+        already written down) is hard to trace back to a config typo.
+        """
+        root = config_value(config, "critique.retention.root", None)
+        if not isinstance(root, str) or not root.strip():
+            return
+        roots = config_value(config, "markdown_recall.roots", None)
+        if roots is None:
+            single = config_value(config, "markdown_recall.root", None)
+            if isinstance(single, str) and single.strip():
+                roots = [single]
+            elif config_value(config, "markdown_recall", None) is not None:
+                # A block with neither key indexes recall's default root.
+                from corvidae_cognition.markdown_recall.plugin import DEFAULT_ROOT
+
+                roots = [DEFAULT_ROOT]
+        if not isinstance(roots, list) or not roots:
+            return  # no recall index configured: nothing to drift from
+        filed = Path(root).expanduser().resolve()
+        indexed = {Path(r).expanduser().resolve() for r in roots if isinstance(r, str)}
+        if filed not in indexed:
+            logger.warning(
+                "critique.retention.root is %s, which markdown_recall does not "
+                "index (its roots are: %s); facts the retention lens files there "
+                "will not be recalled later - point both keys at the same "
+                "directory",
+                root, ", ".join(sorted(str(p) for p in indexed)),
+            )
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
@@ -706,7 +766,7 @@ class CritiquePlugin(CorvidaePlugin):
 
     @hookimpl
     async def should_send_response(self, channel, text, emission, trace_id, annotations):
-        """Veto a provenance turn's final reply when it is the no-reply marker.
+        """Veto a critique wake turn's final reply when it is the no-reply marker.
 
         Anything else is no opinion. Errors fail open: a broken check never
         silences the agent.
@@ -911,14 +971,20 @@ class CritiquePlugin(CorvidaePlugin):
         ):
             lenses.append("adversarial")
 
+        # Retention (#742): a durable fact is worth filing only when the
+        # exchange was both novel and commitment-dense, and only when there is
+        # a knowledge base to file it in. Inert without critique.retention.root:
+        # with nowhere to file, the lens could only flag what it cannot place.
+        root = config_value(self.config, "critique.retention.root", None)
         novelty = dims.get("novelty")
         commitment = dims.get("commitment_density")
         if (
-            novelty is not None and commitment is not None
+            isinstance(root, str) and root.strip()
+            and novelty is not None and commitment is not None
             and novelty >= resolve_tunable(
                 channel, self.config, "critique.lens.novelty", LENS_NOVELTY_DEFAULT)
             and commitment >= resolve_tunable(
-                channel, self.config, "critique.lens.commitment", LENS_COMMITMENT_DEFAULT)
+                channel, self.config, "critique.lens.retention", LENS_RETENTION_DEFAULT)
         ):
             lenses.append("retention")
         return lenses
@@ -1271,9 +1337,39 @@ class CritiquePlugin(CorvidaePlugin):
             if objections:
                 crit["detail"] = objections
             outcome = {"critique": crit}
-            await self._record_and_register(channel, trace_id, outcome, objections, wake=False)
+            await self._record_and_register(
+                channel, trace_id, outcome, objections, wake=False,
+            )
         finally:
             reset_attribution(token)
+
+    def _retention_root(self) -> str | None:
+        """The configured knowledge base root, or None when the lens is off."""
+        root = config_value(self.config, "critique.retention.root", None)
+        if not isinstance(root, str) or not root.strip():
+            return None
+        return root.strip()
+
+    def _wake_stub(self) -> str:
+        """The stub for a critique wake: PROVENANCE_NOTE unless the retention
+        lens is on, then one note that also says how to file (#742)."""
+        root = self._retention_root()
+        if root is None:
+            return PROVENANCE_NOTE
+        return RETENTION_WAKE_NOTE.format(root=quote(root), marker=NO_REPLY_MARKER)
+
+    def _retention_wake_lenses(self) -> frozenset[str]:
+        """The lenses whose findings wake the channel by themselves.
+
+        Retention does — but only while a knowledge base is configured, which
+        is also the only condition under which the lens runs. Tied to
+        ``_wake_stub``'s condition rather than remembered separately: a
+        retention finding that woke with no root would get the provenance
+        stub, which tells it to stay silent and says nothing about filing, and
+        the wake would spend a turn to do nothing. Without a root the finding
+        waits like a stylistic one and is read at the channel's next turn.
+        """
+        return frozenset({"retention"}) if self._retention_root() is not None else frozenset()
 
     async def _record_and_register(
         self, channel, trace_id, outcome, objections, *, wake: bool,
@@ -1285,9 +1381,11 @@ class CritiquePlugin(CorvidaePlugin):
         {"gate":"rejected"} merge on the same row. Provenance records under
         its own key, so it never overwrites the stylistic run's ``critique``.
         Non-empty objections re-enter via the funnel as budgeted CONTEXT.
-        With ``wake`` (provenance) they register under origin="critique"
-        and fire a stub carrying PROVENANCE_NOTE; without it (stylistic)
-        they queue for the channel's next turn and wake nothing (#202).
+        With ``wake`` (provenance, proactivity) they register under
+        origin="critique" and fire the critique wake stub; without it
+        (stylistic) they queue for the channel's next turn and wake nothing
+        (#202), except the lenses ``_retention_wake_lenses`` names, whose
+        findings wake the channel so the fact is filed now.
         """
         outcome_log = self.pm.get_plugin("outcome_log")
         if outcome_log is not None:
@@ -1306,17 +1404,27 @@ class CritiquePlugin(CorvidaePlugin):
         if funnel is None:
             logger.debug("critique verdict not delivered: funnel unavailable")
             return
-        entries = [self._format_objection(o) for o in objections]
+        # Split by delivery: what wakes the channel now, what waits.
+        if wake:
+            waking, waiting = list(objections), []
+        else:
+            wake_lenses = self._retention_wake_lenses()
+            waking = [o for o in objections if o.get("lens") in wake_lenses]
+            waiting = [o for o in objections if o.get("lens") not in wake_lenses]
         try:
-            # Provenance wakes the channel with the no-reply note; stylistic
-            # objections wait for the channel's next turn.
-            if wake:
+            # Waking findings fire one stub on the "critique" origin, which the
+            # NO_REPLY veto keys on; the rest wait for the channel's next turn.
+            if waking:
                 await funnel.ingest_and_wake(
                     channel, origin="critique", source="critique",
-                    entries=entries, stub_text=PROVENANCE_NOTE,
+                    entries=[self._format_objection(o) for o in waking],
+                    stub_text=self._wake_stub(),
                 )
-            else:
-                funnel.ingest(channel, source="critique", entries=entries)
+            if waiting:
+                funnel.ingest(
+                    channel, source="critique",
+                    entries=[self._format_objection(o) for o in waiting],
+                )
         except Exception:
             logger.warning(
                 "critique verdict registration failed", exc_info=True,
@@ -1380,6 +1488,13 @@ class CritiquePlugin(CorvidaePlugin):
             f"«{quote(originating_text)}», and the response you sent began "
             f"«{quote(response_text)}»."
         )
+        if lens == "retention":
+            # The lens has to name a file, so it has to know where they live.
+            root = config_value(self.config, "critique.retention.root", "")
+            instruction += (
+                f"\n\nThe knowledge base root is «{quote(str(root))}»: every "
+                "file you name is a path under it."
+            )
         # Containment check; a string is the reason the lens must skip.
         agent = self._fork_target(channel, trace_id)
         if isinstance(agent, str):
@@ -1455,9 +1570,16 @@ class CritiquePlugin(CorvidaePlugin):
         objection = o.get("objection", "").strip()
         lens = o.get("lens", "critique")
         head = f"[{lens}] " if lens else ""
-        if claim and objection:
-            return f"{head}{claim} — {objection}"
-        return f"{head}{claim or objection}"
+        line = f"{head}{claim} — {objection}" if claim and objection else f"{head}{claim or objection}"
+        # The retention lens says where the fact goes; without these the
+        # agent would have to guess (#742).
+        file, content = o.get("file"), o.get("content")
+        extras = []
+        if isinstance(file, str) and file.strip():
+            extras.append(f"file: {file.strip()}")
+        if isinstance(content, str) and content.strip():
+            extras.append(f"append: {content.strip()}")
+        return f"{line} ({'; '.join(extras)})" if extras else line
 
     # ------------------------------------------------------------------
     # DB helpers
