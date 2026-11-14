@@ -36,6 +36,31 @@ class ShutdownTimeouts:
 DEFAULT_SHUTDOWN_TIMEOUTS = ShutdownTimeouts(graceful=3.0, exit=5.0)
 
 
+# Upper bound on how long a plugin's on_stop may take. Runtime gives the whole
+# stop broadcast daemon.shutdown_timeout (3 s by default), so each slow plugin
+# (MCP client, web transport) takes the graceful budget less a reserve for the
+# rest of the broadcast (other plugins' on_stop, idle.stop, clock.close) and,
+# for MCP, the cancel grace spent after the bound (#760). At the default 3 s
+# that is the historical 2.5 s.
+STOP_RESERVE_SECONDS = 0.5
+# Smallest bound worth handing to a timeout: a value that rounds to zero turns
+# the wait into a poll, and a config value can be arbitrarily small.
+MIN_STOP_BOUND_SECONDS = 0.05
+# Fallback for when the config cannot be read (on_stop without on_init).
+DEFAULT_STOP_BOUND_SECONDS = 2.5
+
+
+def stop_bound_seconds(shutdown_timeout: float) -> float:
+    """A plugin's share of the graceful phase (``daemon.shutdown_timeout``).
+
+    A reserve rather than a fraction, because a cancel grace is spent *after*
+    the bound: a bound of 80% of a 1 s budget would cancel at 0.8 s and then
+    wait up to 0.3 s more, which is the overrun this bound exists to prevent
+    (#760). Never zero, so a tiny budget still gets a real timeout.
+    """
+    return max(MIN_STOP_BOUND_SECONDS, shutdown_timeout - STOP_RESERVE_SECONDS)
+
+
 def parse_shutdown_timeouts(daemon: object) -> ShutdownTimeouts:
     """Parse ``daemon.shutdown_timeout`` and ``daemon.exit_timeout``.
 

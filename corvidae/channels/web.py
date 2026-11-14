@@ -55,6 +55,11 @@ from corvidae.outbound import (
     OutboundThinking,
     OutboundToolStatus,
 )
+from corvidae.shutdown import (
+    DEFAULT_STOP_BOUND_SECONDS,
+    parse_shutdown_timeouts,
+    stop_bound_seconds,
+)
 from corvidae.thinking import strip_thinking
 
 logger = logging.getLogger(__name__)
@@ -77,6 +82,11 @@ _MESSAGE_TYPES = frozenset(t.value for t in MessageType)
 _SUMMARY_CHARS = 200
 _CLOSE_TIMEOUT = 1.0
 _HANDLER_WAIT = 0.5
+# The whole of on_stop is bounded by the web transport's share of
+# daemon.shutdown_timeout (#760): that phase is shared with every other
+# plugin's on_stop, the idle tracker and the clock, so it keeps a reserve.
+# The stages above add up to about 2.5 s, which is exactly the share a default
+# 3 s budget gives. DEFAULT_STOP_BOUND_SECONDS covers on_stop without on_init.
 _HEARTBEAT = 30.0  # seconds; module-level so tests can shorten it
 _TOKEN_HINT = 'generate one with: python -c "import secrets; print(secrets.token_urlsafe(32))"'
 
@@ -430,6 +440,13 @@ class WebPlugin(TransportPlugin):
         if "web" not in config:
             logger.debug("web: no web block; transport disabled")
             return
+        # Size this transport's shutdown against daemon.shutdown_timeout (#760):
+        # a lower budget has to shorten the stages below too, or this one
+        # plugin spends the whole graceful phase and the daemon is force-exited
+        # mid-broadcast.
+        self._stop_bound = stop_bound_seconds(
+            parse_shutdown_timeouts(config.get("daemon")).graceful
+        )
         raw = config["web"]
         settings = _parse_block(raw)
         token, generated = _resolve_token(raw or {})
@@ -518,6 +535,21 @@ class WebPlugin(TransportPlugin):
         if not self._enabled:
             return
         self._stopping = True
+        # Bound all three stages together: a socket, a handler or the listener
+        # that hangs must not run past this transport's share of the budget.
+        bound = getattr(self, "_stop_bound", DEFAULT_STOP_BOUND_SECONDS)
+        try:
+            async with asyncio.timeout(bound):
+                await self._stop_sockets_and_listener()
+        except TimeoutError:
+            logger.warning(
+                "web: shutdown did not finish within %.2fs; %d socket(s) and "
+                "%d handler(s) may still be open — raise daemon.shutdown_timeout",
+                bound, len(self._clients), len(self._handlers),
+            )
+
+    async def _stop_sockets_and_listener(self) -> None:
+        """Close sockets, cancel handlers and stop the listener (bounded)."""
         # Stop following settle events.
         if self._idle_watch is not None:
             self._idle_watch.cancel()
