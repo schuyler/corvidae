@@ -664,7 +664,7 @@ async def run_snapshot_evaluation(
             scored = bool(reachable)
             recall = recall_at_k(top_ids, reachable, pool.k) if scored else None
             reciprocal = mrr(top_ids, reachable) if scored else None
-            fa = false_admit(candidate_entries(pool), pool.k) if not query.relevant else None
+            fa = false_admit(candidate_entries(pool), effective_k) if not query.relevant else None
             results.append({
                 "index": query.index,
                 "text": query.text,

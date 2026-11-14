@@ -272,6 +272,7 @@ def test_snapshot_scores_known_ranking(
         {"text": TEXT_A, "relevant": [id_b, id_c]},
         {"text": TEXT_C, "relevant": [id_c]},
         {"text": TEXT_A, "relevant": [id_c]},
+        {"text": TEXT_A, "relevant": []},
     ])
     pool_out = tmp_path / "pool.json"
 
@@ -288,7 +289,7 @@ def test_snapshot_scores_known_ranking(
     exp3_r = recall_at_k([id_a, id_b], [id_c], 2)
     exp3_m = mrr([id_a, id_b], [id_c])
     pool = read_pool(pool_out)
-    q1, q2, q3 = pool["queries"]
+    q1, q2, q3, q4 = pool["queries"]
     assert q1["recall_at_k"] == pytest.approx(exp1_r) == pytest.approx(0.5)
     assert q1["mrr"] == pytest.approx(exp1_m) == pytest.approx(0.5)
     assert q2["recall_at_k"] == pytest.approx(exp2_r) == pytest.approx(1.0)
@@ -300,6 +301,11 @@ def test_snapshot_scores_known_ranking(
         (exp1_r + exp2_r + exp3_r) / 3
     )
     assert pool["summary"]["mean_mrr"] == pytest.approx((exp1_m + exp2_m + exp3_m) / 3)
+    # Query 4 is a negative probe (relevant: []): false_admit is 1.0 if any
+    # candidate in the top-k has band strong/moderate.
+    q4 = pool["queries"][3]
+    assert q4["false_admit"] in (0.0, 1.0)
+    assert pool["summary"]["false_admit_rate"] is not None
     assert pool["summary"]["scored"] == 3
 
 
