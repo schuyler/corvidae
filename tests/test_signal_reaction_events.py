@@ -281,6 +281,9 @@ ACCEPTED_EMOJI = [
     "👍",
     "❤️",
     "👍🏽",
+    # Skin tone plus VS16, and base plus VS16: one trailing VS16 is stripped.
+    "👍🏽\ufe0f",
+    "👍\ufe0f",
     "‼️",
     "ℹ️",
     "\U0001fae9",
@@ -320,6 +323,10 @@ REJECTED_EMOJI = [
     pytest.param("\U0001f1e6\U0001f1e7", id="regional-indicator-word"),
     pytest.param("\u2764\ufe0f\u200d\U0001f525\u200d\u26a1", id="non-rgi-zwj-join"),
     pytest.param("\U0001f3fd\U0001f3fd", id="modifier-modifier"),
+    # Only one trailing VS16 is stripped, and only after a table entry.
+    pytest.param("👍\ufe0f\ufe0f", id="double-vs16"),
+    pytest.param("a\ufe0f", id="text-vs16"),
+    pytest.param("\ufe0f", id="lone-vs16"),
 ]
 
 

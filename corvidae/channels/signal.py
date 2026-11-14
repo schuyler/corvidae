@@ -233,12 +233,24 @@ def _is_single_emoji(value: str) -> bool:
     hidden ASCII, enclosed letters joined by ZWJ, a regional-indicator word, a
     non-RGI ZWJ join or a trailing newline do not.
 
+    One normalisation precedes the lookup: a single trailing U+FE0F (VS16) is
+    stripped when what precedes it is itself a table entry, so a base or a
+    base plus skin tone followed by VS16 (``👍️``, ``👍🏽️``) is accepted as
+    it was before the table. Nothing else is normalised: a string ending in
+    two VS16, or a VS16 after text, still fails.
+
     ``emoji.is_emoji`` is what the 2.x series makes it: the *whole string* is
     one emoji, so this is a membership test rather than a scan.
-    ``tests/test_signal_emoji.py`` pins that semantics, so a version bump that
-    changed it fails there instead of quietly widening what reaches the prompt.
+    ``tests/test_signal_reaction_events.py::test_the_table_is_what_decides``
+    pins that semantics, so a version bump that changed it fails there instead
+    of quietly widening what reaches the prompt.
     """
-    return _emoji is not None and _emoji.is_emoji(value)
+    if _emoji is None:
+        return False
+    # Strip one trailing VS16 only when the remainder is itself a table entry.
+    if value.endswith("\ufe0f") and _emoji.is_emoji(value[:-1]):
+        return True
+    return _emoji.is_emoji(value)
 
 
 def _format_reaction_time(timestamp_ms: int) -> str:
@@ -349,7 +361,7 @@ class SignalPlugin(TransportPlugin):
         # A configured transport needs the emoji table for its reaction check
         # (#780). Refused here, at startup, rather than dropping every
         # reaction at run time: silence is for absence, not for a missing
-        # install. Not cached, so an install can gain the package.
+        # install. Bound once at import, so installing the package needs a restart.
         if emoji_table_missing():
             raise RuntimeError(
                 "SignalPlugin: agent.yaml has a signal: block, but the 'emoji' "
@@ -866,7 +878,7 @@ class SignalPlugin(TransportPlugin):
         # Append each row before removing it, so a failure loses nothing.
         # shortcut: the row bypasses the cognition trust quarantine and has
         # no kernel provenance header (PRD 3.3.11); safe only because the
-        # accepted emoji is one symbol and the rest of the row is built here.
+        # accepted emoji is one table entry and the rest of the row is built here.
         # The allowlist check is the transport's own, not should_process_message.
         # The Agent persists rows appended here that lack a _db_id.
         while pending:

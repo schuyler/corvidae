@@ -1556,12 +1556,14 @@ Mitigations:
 
 - The emoji must be **one emoji in a real RGI table** (#780), not merely a
   match for a hand-written shape: `_is_single_emoji` asks the `emoji` package
-  whether the whole string is one emoji, and anything else — a tag sequence
+  whether the whole string is one emoji (after stripping one trailing VS16 when
+  what precedes it is itself a table entry, so `👍️` and `👍🏽️` stay accepted),
+  and anything else — a tag sequence
   carrying hidden ASCII, enclosed letters joined by ZWJ, a regional-indicator
   word, a non-RGI ZWJ join, two emoji in one string, a trailing newline — is
   dropped with a WARNING naming the sender. Two grammars were tried before this
   and each had a hole, which is why the check is a membership test now. The
-  table ships as the `signal` extra and is imported lazily; the transport
+  table ships as the `signal` extra and is a guarded import at module load; the transport
   refuses to start without it rather than dropping reactions at run time.
 - Every other part of the row is built in code: the whose-message word comes
   from a UUID comparison, and the time from an integer that must be positive and
@@ -1574,8 +1576,8 @@ Mitigations:
 
 Accepted residual: the sender is already allowlisted and can send arbitrary text
 through the normal path, so the row adds no capability a sender lacks. What it
-adds is a route around the header and the funnel for one symbol. The accepted
-set is now wider than one symbol — flags, keycaps, ZWJ sequences — and that was
+adds is a route around the header and the funnel for one emoji. The accepted
+set is now wider than one pictograph — flags, keycaps, ZWJ sequences — and that was
 widened through a real table, as this entry asked, rather than a longer regex.
 What still holds is the property the mitigation depends on: the accepted string
 is a single sequence from a published table, so it cannot spell a sentence or

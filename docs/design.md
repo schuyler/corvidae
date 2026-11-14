@@ -3644,7 +3644,8 @@ a hole — tag characters in a subdivision flag carry hidden ASCII, and
 ZWJ-joined enclosed letters or regional-indicator pairs spell words — so the
 check is no longer a grammar. `_is_single_emoji` asks the `emoji` package
 whether the *whole string* is one emoji (`emoji.is_emoji`, a whole-string test
-in the 2.x series): a flag (🇯🇵), a keycap (1️⃣), a ZWJ sequence (❤️‍🔥, 🤷‍♀️,
+in the 2.x series, after stripping one trailing VS16 when what precedes it is
+itself a table entry, so `👍️` and `👍🏽️` stay accepted): a flag (🇯🇵), a keycap (1️⃣), a ZWJ sequence (❤️‍🔥, 🤷‍♀️,
 🏳️‍🌈, the family) and the three RGI subdivision flags pass, while a tag
 sequence carrying hidden ASCII, enclosed letters joined by ZWJ, a
 regional-indicator word, a non-RGI ZWJ join, two emoji in one string and a
