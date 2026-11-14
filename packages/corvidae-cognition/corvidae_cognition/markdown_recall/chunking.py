@@ -170,12 +170,38 @@ def _build_header_stack(sections, page_title):
     return sections
 
 
+def _heading_line(section):
+    """Render a section's heading as a markdown line (e.g. '## Known bugs')."""
+    if not section.get("heading"):
+        return ""
+    return "#" * section["level"] + " " + section["heading"]
+
+
+def _stub_text(section):
+    """The text to contribute when a stub section is merged into a neighbour.
+
+    Includes the heading line so the stub's title survives for FTS and
+    embedding (#863). Without it, a short section like '## Known bugs /
+    Nothing yet.' becomes invisible — the merged chunk is titled after
+    the absorbing section and the stub's words are gone.
+    """
+    parts = []
+    h = _heading_line(section)
+    if h:
+        parts.append(h)
+    if section["text"]:
+        parts.append(section["text"])
+    return "\n".join(parts)
+
+
 def _merge_stub_sections(sections):
     """Merge stub sections (text < STUB_WORDS) forward or backward.
 
     Only non-preamble (level > 0) sections are candidates for merging.
     Returns new list of section dicts with stubs merged.
     Uses a single O(n) forward pass — no list.pop() inside loops.
+    Stub headings are rendered into the merged text so they survive
+    for FTS and embedding (#863).
     """
     if not sections:
         return sections
@@ -195,7 +221,9 @@ def _merge_stub_sections(sections):
         else:
             # Substantial (or preamble) section — prepend any pending stubs
             if pending_stubs:
-                prefix_text = "\n\n".join(s["text"] for s in pending_stubs if s["text"])
+                prefix_text = "\n\n".join(
+                    _stub_text(s) for s in pending_stubs if _stub_text(s)
+                )
                 if prefix_text:
                     section = dict(section)
                     section["text"] = (prefix_text + "\n\n" + section["text"]
@@ -205,7 +233,9 @@ def _merge_stub_sections(sections):
 
     # Any remaining pending stubs merge backward into the last substantial section
     if pending_stubs:
-        stub_text = "\n\n".join(s["text"] for s in pending_stubs if s["text"])
+        stub_text = "\n\n".join(
+            _stub_text(s) for s in pending_stubs if _stub_text(s)
+        )
         if stub_text:
             # Find last substantial non-preamble section in merged
             for idx in range(len(merged) - 1, -1, -1):

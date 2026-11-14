@@ -238,3 +238,40 @@ class TestSectionAwareChunking:
         # First chunk of Section B should NOT start with overlap from Section A
         overlap_str = " ".join(last_a_words)
         assert not first_b_text.startswith(f"[Overlap Test > Section B] {overlap_str}")
+
+
+class TestStubHeadingPreservation:
+    """#863: a merged stub section must retain its heading in the chunk text."""
+
+    def test_forward_merge_preserves_stub_heading(self):
+        """A stub section merged forward into the next section keeps its heading."""
+        # "Known bugs" is a stub (under 50 words), "Long section" is substantial.
+        long_text = " ".join(f"word{i}" for i in range(100))
+        content = (
+            "## Known bugs\n"
+            "Nothing yet.\n"
+            "## Long section\n"
+            + long_text
+        )
+        result = chunk_page("test/page", content)
+        # The merged chunk should contain "Known bugs" (the stub's heading)
+        # so that an FTS search for "known bugs" can match.
+        all_text = " ".join(c["text"] for c in result)
+        assert "Known bugs" in all_text, (
+            f"Stub heading 'Known bugs' missing from merged chunk text: {all_text[:200]}"
+        )
+
+    def test_backward_merge_preserves_stub_heading(self):
+        """A trailing stub section merged backward keeps its heading."""
+        long_text = " ".join(f"word{i}" for i in range(100))
+        content = (
+            "## Long section\n"
+            + long_text + "\n"
+            "## Status\n"
+            "In progress."
+        )
+        result = chunk_page("test/page", content)
+        all_text = " ".join(c["text"] for c in result)
+        assert "Status" in all_text, (
+            f"Stub heading 'Status' missing from merged chunk text: {all_text[:200]}"
+        )
