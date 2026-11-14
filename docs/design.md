@@ -1632,20 +1632,35 @@ behind a header naming the next offset, so reading a
 spill file back never returns a result that is cut and spilled again. A `cat`
 through `shell` is not clamped, and a long one spills a copy.
 
-**Page size.** A `read_file` page is
+**Page size.** A `read_file` page is first estimated at
 `min(tools.max_result_chars, max(2000, fraction x max_context_tokens x 3.0))`
 characters, where `fraction` is `tools.read_file_window_fraction` (default
 0.08, `0 < value <= 1`) and `max_context_tokens` is the calling channel's
 resolved budget, so per-channel overrides apply. A call with no channel, or
 with no registry plugin, uses `tools.max_result_chars`. A subagent's reads
 are sized to its calling channel's budget. The 3.0 characters per token is an
-estimate for ordinary text. Observed under the window's own counter, real
-tool results run about 3.0 or more characters per token for json, code and
-markdown (p10 about 3.0 to 3.3; the median 3.4 to 3.9), and fewer for web and
-shell output. One page at 8% of the window fits inside the headroom to the
-compaction trigger observed at the 90th percentile of main turns (0.085 to
-0.18 of the window). The 2000-character minimum can make a page larger than
-that share below about 8300 tokens of budget.
+estimate for ordinary text, and only an estimate: it bounds nothing (#752).
+
+**Page size by measurement.** When a channel budget is known, the page that
+estimate sized is then *counted* — the page as the tool-result message it
+becomes, through the window's own `message_tokens` — and while it costs more
+than `fraction x max_context_tokens` the read is repeated with a smaller
+character page, scaled from the measured overrun, up to three reads. So a
+page takes no more than that share whatever it contains, not only when it is
+ordinary text. Only the content is scaled; the header's cost is fixed, so a
+page never shrinks below its header plus 4 characters of content. The one
+case the share cannot be met is a share smaller than even that page costs:
+measured on dense text the smallest page is about 56 tokens, so below roughly
+a 700-token budget a page is its header and a few characters and can exceed
+its share. A page that comes back unchanged or without content stops the
+loop, so a read always makes progress and always names where to continue.
+
+Characters per token, measured under the window's counter: ordinary prose 4.5;
+minified json 1.7; hex 1.8; base64 1.4; escape-heavy json 1.4; CJK 0.29; emoji
+0.14. The estimate is right for prose and up to four times too generous for
+the rest, which is why counting is what decides. One page at 8% of the window
+fits inside the headroom to the compaction trigger observed at the 90th
+percentile of main turns (0.085 to 0.18 of the window).
 
 **Configuration** (`daemon`, applied at restart):
 
