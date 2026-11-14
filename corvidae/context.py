@@ -19,7 +19,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from corvidae.provenance import frame
+from corvidae.provenance import frame, sent_form
 
 if TYPE_CHECKING:
     from corvidae.tool_policy import ToolView
@@ -199,12 +199,19 @@ def result_call_id(msg: object) -> str | None:
     return call_id if isinstance(call_id, str) and call_id else None
 
 
-def message_tokens(msg: dict) -> int:
+def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
     """Token count of a message the way it actually gets sent: the
     JSON-serialized visible dict, not just `content`. Catches size hiding in
     `tool_calls` and `reasoning_content` that content-only counting misses.
     Accepts messages in tagged or already-clean form — `_visible()` strips
     any `_`-prefixed keys itself, and is a no-op on a dict with none.
+
+    A row that renders into a header and fence is counted as it renders
+    (#577), not by the provenance record that stands in for it: the record is
+    about 20 tokens and a fenced tool result's framing about 60, so counting
+    the record under-counted a window full of small untrusted results. A
+    person row's header is a separate message and is not counted here, as
+    before.
 
     Never raises on a row's content (PRD §3.1.18.1): ``default=str`` counts a
     value JSON cannot encode by its text, and a row that is not a mapping at
@@ -212,7 +219,8 @@ def message_tokens(msg: dict) -> int:
     """
     if not isinstance(msg, dict):
         return count_tokens(repr(msg))
-    return count_tokens(json.dumps(_visible(msg), default=str))
+    sent = sent_form(msg, fence_key)
+    return count_tokens(json.dumps(sent if sent is not None else _visible(msg), default=str))
 
 
 class ContextWindow:
@@ -476,7 +484,7 @@ class ContextWindow:
         """
         total = count_tokens(self.system_prompt)
         for msg in self.messages:
-            total += message_tokens(msg)
+            total += message_tokens(msg, self.fence_key)
         return total
 
     def fit_to_budget(self, max_tokens: int) -> tuple[list[dict], bool]:
@@ -503,7 +511,7 @@ class ContextWindow:
         from corvidae.fork import snap_cut_forward
 
         fixed = count_tokens(self.system_prompt)
-        toks = [message_tokens(m) for m in self.messages]
+        toks = [message_tokens(m, self.fence_key) for m in self.messages]
         n = len(self.messages)
 
         # Smallest head cut whose tail fits; never cut away the newest row.
@@ -531,7 +539,7 @@ class ContextWindow:
         # as it is and the caller reports the overage (#392).
         truncated = False
         newest = self.messages[-1]
-        if isinstance(newest, dict) and fixed + message_tokens(newest) > max_tokens:
+        if isinstance(newest, dict) and fixed + message_tokens(newest, self.fence_key) > max_tokens:
             content = str(newest.get("content") or "")
             total = len(content)
             room = max_tokens - fixed
@@ -546,11 +554,11 @@ class ContextWindow:
 
             # Binary search the largest k measured to fit; lo always holds a
             # k already known to fit, since token counts are not monotone in k.
-            if message_tokens(candidate(0)) <= room:
+            if message_tokens(candidate(0), self.fence_key) <= room:
                 lo, hi = 0, total
                 while lo < hi - 1:
                     mid = (lo + hi) // 2
-                    if message_tokens(candidate(mid)) <= room:
+                    if message_tokens(candidate(mid), self.fence_key) <= room:
                         lo = mid
                     else:
                         hi = mid

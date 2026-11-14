@@ -33,7 +33,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
-| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss) and the provenance check |
+| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), and the provenance check |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
@@ -249,7 +249,10 @@ passes (demotion, re-promotion, retrieval-log pruning when
 `memory.retention.retrieval_log_max_age_days` is set (#654), vec backfill;
 a pruning failure is logged and leaves backfill to run): each batch commits whole
 or rolls back whole, and the backfill's embeddings are computed before the
-transaction opens. Each pass selects its candidates before its transaction,
+transaction opens. The prune takes `RETENTION_PRUNE_BATCH` (1000) rows per
+transaction and releases the lock between them (#682), so enabling it against
+a large existing log cannot push another memory write past its busy timeout;
+`retrieval_log(ts)` is indexed so each batch's cutoff lookup does not scan. Each pass selects its candidates before its transaction,
 so every write re-checks the selection: demotion skips a row redacted,
 already demoted or retrieved since the SELECT; re-promotion never
 re-indexes a row superseded or redacted meanwhile; the backfill writes no
@@ -588,7 +591,9 @@ What it does:
   path fetches `k × 4` candidates, so a different k changes the pool too.
   `--candidates hybrid|vector` overrides `memory.retrieval.candidates`
   (#666), so the fused pool can be scored against the KNN alone; each pool
-  candidate records its `source`.
+  candidate records its `source`. `--now EPOCH` pins the clock decay is
+  measured against (#661), so the same snapshot scores identically on two
+  run dates; each pool records the pin it used, or `null` for the wall clock.
 - **Names labelled ids it can't reach.** A labelled id is reachable when its
   row exists with `indexed = 1` and `redacted = 0`, the filter both searches
   apply. Anything else is listed by id with its status, checked in this
@@ -658,7 +663,12 @@ The pool file is written once, after the last query:
 ```json
 {
   "run_at": 1762700000.0,
+  "now": 1762700000.0,
   "k": 8,
+  "settings": {"half_life_days": 7, "recency_from": "created",
+               "band_on": "relative", "band_strong": 4.5,
+               "band_moderate": 3.0, "k": 8,
+               "encoder": "nomic-embed-text", "dimensions": 768},
   "queries": [
     {
       "index": 0,
@@ -675,9 +685,9 @@ The pool file is written once, after the last query:
       "mrr": 0.5,
       "candidates": [
         {"id": 398, "rank": 1, "similarity": 0.81, "score": 0.77, "band": "strong",
-         "source": "both", "admitted": true},
+         "z": 2.4, "source": "both", "admitted": true},
         {"id": 412, "rank": 2, "similarity": 0.79, "score": 0.74, "band": "moderate",
-         "source": "vec", "admitted": true}
+         "z": 1.1, "source": "vec", "admitted": true}
       ]
     }
   ],
@@ -705,7 +715,12 @@ keeps the top k on a degraded pool; the funnel then admits the survivors,
 with no window exclusion. A negative probe carries its `false_admits` counts
 and `null` metrics. It holds ids and scores but
 no memory text beyond the labels' own `text`, `context` and `query`; look the
-ids up in the source. `run_at` is the wall-clock
+ids up in the source. `z` is the statistic a `band_on: relative` band came
+from — how far this record's similarity stands out from the query's spread
+over the whole memory — so the z thresholds can be fitted offline instead of
+reading `retrieval_candidate.z` from live traffic (#704). It is `null` when no
+spread was computed: a memory under `RELATIVE_MIN_RECORDS` (50) embedded
+records, or a run banded on `similarity`/`score`. `run_at` is the wall-clock
 time the run started. The means are `null` when no query was scored.
 
 Operator notes:
@@ -716,14 +731,18 @@ Operator notes:
   environment even though no chat request is made. If it isn't, the run
   stops with `Config error: llm.<profile>.api_key references ${VAR}, which
   is not set … — check <config>`.
-- **Scores drift with the run date; rankings don't.** Decay runs against
-  the wall clock at query time, not a time taken from the snapshot. Scoring
-  the same snapshot a month later multiplies every score by the same
-  factor, so the order, Recall@k and MRR are unchanged, but absolute
+- **Scores drift with the run date unless `--now` pins it.** Decay runs
+  against the clock at query time, not a time taken from the snapshot, so
+  scoring the same snapshot a month later multiplies every score by the
+  same factor: the order, Recall@k and MRR are unchanged, but absolute
   scores are lower, and so are bands under `band_on: score` (bands under
-  `relative` and `similarity` don't use decay). `run_at` records the
-  date. shortcut: no pinned "now"; add one before comparing pool files
-  scored on different days.
+  `relative` and `similarity` don't use decay). Pass `--now <epoch>` to
+  pin it; two runs with the same pin produce identical scores and bands
+  whatever day they ran, which is what makes pool files comparable. The
+  file records both the pin (`now`) and the settings that scored it
+  (`settings`: half-life, `recency_from`, `band_on` and its thresholds, k,
+  and the encoder identity and dimensions), so a comparison never has to
+  assume the config behind a pool.
 - **An unreachable embedding server turns every query into FTS5.** Each
   query's embedding call fails after the client's retries (slow), logs a
   `retrieval embedding failed; degrading to FTS5` warning with a traceback
@@ -762,8 +781,8 @@ across several compactions or a long unsummarized history yields several consoli
 view is trimmed oldest-first to the budget, put under the channel's
 `reasoning_history`, headed by the channel's system prompt (identity and
 register, from `Agent.view_inputs`, which also resolves the channel after a
-restart) and ends with `memory.consolidation_fork_prompt` plus the range
-sentence. It goes on the `consolidation` stage's profile with no tools and the reply
+restart) and ends with `memory.consolidation_fork_prompt` plus the entry size
+sentence and the range sentence. It goes on the `consolidation` stage's profile with no tools and the reply
 schema. Each segment is its own consolidation (one or more entries) and its own watermark advance; a
 failure leaves earlier segments stored and retries the rest. A segment
 with no dialog that is followed by another folds its id span into the next
@@ -774,12 +793,24 @@ the record is its private memory, not a message to anyone on the channel.
 `memory.consolidation_prompt` is removed: a config that still sets it logs a
 startup warning naming `memory.consolidation_fork_prompt`.
 
+**Entry size target** (plugin-defined, #686). `memory.entry_target_tokens`
+(default 256) feeds a sentence appended to the consolidation instruction,
+default or override, asking for about `round(target × 0.75)` words per
+entry (192 by default) and consecutive entries for a longer topic. It sits
+after the instruction and before the range sentence. An entry whose
+narrative exceeds the target by the kernel's tiktoken `count_tokens` (not
+the serving model's tokenizer) is stored in full, with no truncation and no
+schema limit; after the write commits a warning names the channel, memory
+id, tokens, target, mode and prompt hash (fork and standalone entries).
+Whether the target holds in practice is unmeasured (#885).
+
 Every record says how it was made (#299, #633, PRD §3.7 Memory 2), in four
 nullable `memory` columns:
 
 - `prompt_hash`: sha256 of the UTF-8 instruction text the call used. The
   text itself is stored once per hash in `memory_prompt`, however many
-  records share it. An empty prompt is still a prompt and is stored as `''`.
+  records share it. An empty `memory.consolidation_fork_prompt` is still a
+  prompt: it is stored as a blank line plus the entry size sentence.
 - `mode`: `fork`, `standalone` (the view call on the `consolidation` stage's profile),
   `raw` (a catch-up range stored as its transcript after both view-call
   replies were unusable, #626; the prompt hash, model and trigger are the
@@ -803,19 +834,23 @@ What each path stamps:
 
 | Path | `mode` | Instruction text | `model` |
 |---|---|---|---|
-| Fork of the live window (compaction, idle or turn) | `fork` | `memory.consolidation_fork_prompt` | `ForkResult.model` |
-| Catch-up: the rebuilt view on the `consolidation` stage's profile | `standalone` | `memory.consolidation_fork_prompt` | `LLMClient.request_model` of that profile's client |
-| Raw-transcript fallback after two unusable replies | `standalone` | `memory.consolidation_fork_prompt` | as above (the call was sent; only its reply was unusable) |
+| Fork of the live window (compaction, idle or turn) | `fork` | `memory.consolidation_fork_prompt` + size sentence | `ForkResult.model` |
+| Catch-up: the rebuilt view on the `consolidation` stage's profile | `standalone` | `memory.consolidation_fork_prompt` + size sentence | `LLMClient.request_model` of that profile's client |
+| Raw-transcript fallback after two unusable replies | `raw` | `memory.consolidation_fork_prompt` + size sentence | as above (the call was sent; only its reply was unusable) |
 | `write_record` (goal retirement) | `direct` | none: `prompt_hash` NULL, no `memory_prompt` row | NULL (`trigger` NULL too) |
 
 Catch-up records written before the view was introduced carry the removed
 `memory.consolidation_prompt` as their stamp; they are not migrated, so the
-records that prompt wrote stay findable by its hash. A fork's or view's instruction also carries a code-generated sentence naming where
+records that prompt wrote stay findable by its hash. The stamped instruction is `memory.consolidation_fork_prompt` plus the
+entry size sentence (`memory.entry_target_tokens`, a static value), so the
+hash covers both: changing the target changes the hash, and an override's
+hash is not sha256 of its config text. A fork's or view's instruction also
+carries a code-generated sentence naming where
 the range starts, which can quote the first new message. That sentence is
 left out of the stamp: `memory_prompt` is outside `corvidae redact`'s
 cascade, so storing conversation text there would put it where redaction
 can't reach (PRD §3.7 Memory 8). `memory_prompt` holds configured
-instructions only. The stamp is the consolidation instruction, not the
+instructions plus the static size sentence only. The stamp is the consolidation instruction, not the
 agent's system prompt and window that frame a fork.
 
 A `direct` record was written by no consolidation call, so it has nothing
@@ -1008,8 +1043,8 @@ Two kernel registrations replace the old `on_idle` hook:
   re-arms the same way.
 
 Changes to `memory.idle_consolidate_after`,
-`memory.consolidate_after_tokens` and `memory.retention.*` take effect at
-restart.
+`memory.consolidate_after_tokens`, `memory.entry_target_tokens` and
+`memory.retention.*` take effect at restart.
 
 The importance prior is pluggable (`MemoryPlugin.importance_prior`,
 default `RubricPrior`); `AppraisalPlugin` wraps it in `AppraisalPrior`
@@ -1575,7 +1610,12 @@ model makes both language judgments; the code only fetches evidence:
 the channel's next turn. Provenance objections wake the channel with a
 stub whose text tells the agent the default is to send nothing: reply
 exactly `NO_REPLY`, and reply in the channel only if its earlier reply
-could lead the other party to take an incorrect action. The plugin's
+could lead the other party to take an incorrect action. With a
+retention root (`critique.retention.root`, else markdown_recall's root), retention findings wake the channel too, and
+every critique wake (provenance included) uses one stub that adds how to
+file them: read the named file under the root and append only what is
+missing. The funnel keeps one pending stub per channel and origin, so the
+first wake's text governs everything queued behind it. The plugin's
 `should_send_response` vetoes a `final` on a critique-origin turn whose
 stripped text is `NO_REPLY`; the kernel stores it as `unsent` with the
 not-sent marker. That veto is critique's own and always on with this plugin
