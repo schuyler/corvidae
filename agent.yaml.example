@@ -291,9 +291,18 @@ agent:
 # webhook-notify extra and the webhook block above); docs/configuration.md.
 # webhook_notify:
 #   max_payload_chars: 8000            # longer payloads are cut, the rest spilled to a file
+#   defaults:                          # throttle every endpoint inherits (#793)
+#     batch_seconds: 60                # one digest per window; 0 delivers on arrival
+#     max_notifications: 10            # flushes per endpoint per per_seconds
+#     per_seconds: 3600
+#     max_buffered: 500                # held deliveries before the oldest is dropped
 #   endpoints:
 #     github: [irc:#corvidae]          # endpoint name -> channel ids
 #     siri: [signal:+15551234567]
+#     # mapping form, to override the throttle for one endpoint:
+#     # alerts:
+#     #   channels: [irc:#corvidae]
+#     #   max_notifications: 20
 
 # Scheduler: reminders (remind_me tool) and operator jobs (optional;
 # without this block the tools still work, in UTC, with these defaults).

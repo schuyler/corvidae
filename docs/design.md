@@ -4379,17 +4379,30 @@ config.
 ### Webhook notifications (`webhook-notify` package)
 
 `WebhookNotifyPlugin` subscribes one handler to each endpoint in
-`webhook_notify.endpoints`. For a delivery it serialises the payload as compact
-JSON (`ensure_ascii=False`), resolves each target channel at delivery with
+`webhook_notify.endpoints`. Deliveries are buffered per endpoint and flushed
+as one digest per window (#793): a delivery on an endpoint with no open window
+opens one for `batch_seconds`, and on close the buffer becomes one
+notification — the payload itself when a single delivery arrived, a compact
+JSON array in arrival order (`ensure_ascii=False`) when more did. A flush over
+the endpoint's rate cap (`max_notifications` per `per_seconds`) is held and
+retried when a slot frees, and past `max_buffered` the oldest delivery is
+dropped, counted, logged at `WARNING` with the running total, and reported to
+the model as a `dropped=<n>` annotation on the next flush that gets through
+(a drop-only notification exists as a defensive path but deliveries cannot
+reach it). The flush timer is at most one
+`asyncio.Task` per endpoint (a re-armed retry replaces the old one), cancelled in `on_stop` with a `WARNING` naming
+how much was lost. At flush the plugin resolves each target channel with
 `resolve_persisted_channel` (a `ChannelNotReady` target is skipped with a
-`WARNING`) and makes one `spill.notify` call with the resolved channels and
-`limit=max_payload_chars`. The service cuts a longer payload, writes the full
+`WARNING` naming the endpoint and the digest size) and makes one
+`spill.notify` call with the resolved channels and `limit=max_payload_chars`. The service cuts a longer payload, writes the full
 text to a spill file where a channel can read it, and notifies each channel
 ([Notification spill](#notification-spill-spillpy)); the plugin writes no cut
 marker. The notification carries `source` and `annotations["origin"]` set to
-`webhook:<endpoint>` (minted by the ingress); `origin` is declared
-model-visible, so the kernel renders it in the header outside the payload
-fence, and a cut payload gets its cut line there too. The plugin depends on
+`webhook:<endpoint>` (minted by the ingress); `origin`, `deliveries` and
+`dropped` are declared model-visible, so the kernel renders them in the header
+outside the payload fence — the counts never enter the fenced text, where they
+would read as sender-controlled data — and a cut payload gets its cut line
+there too. The plugin depends on
 `"spill"`. Configuration is in
 [configuration.md](configuration.md#webhook_notify--webhook-deliveries-as-notifications).
 
