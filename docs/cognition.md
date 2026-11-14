@@ -1411,7 +1411,7 @@ appears on every channel at its next turn.
 
 **Heartbeat review.** A beat's turn carries the goals entry like any other
 turn. When this plugin is loaded, the heartbeat also asks
-`retired_goals(heartbeat.retired_goal_limit)` (default 20) for the newest
+`retired_goals(heartbeat.retired_goal_limit)` (default 5) for the newest
 retirement records (agent-wide, newest
 first, each with its age) and appends them to the beat with an instruction
 to take a next step on an open goal or retire a finished one, and not to
@@ -1770,7 +1770,7 @@ any channel cancels the pending beat. The result is at most one beat per
 `after` seconds, never two at once, and none during a conversation. Under
 traffic that never stops it never beats; that is accepted until #214.
 
-**What a beat is.** The plugin reads `MemoryPlugin.recent(heartbeat.memory_limit)` (default 20),
+**What a beat is.** The plugin reads `MemoryPlugin.recent(heartbeat.memory_limit)` (default 5),
 re-checks that the system is still quiet (a message may have landed
 during the read), and calls `on_notify` on `internal:heartbeat` with
 `source="heartbeat"` and `annotations={"origin": "heartbeat"}`. Without the
@@ -1780,7 +1780,7 @@ as data (or `(none)`), followed by the heartbeat prompt
 copy in `prompts/heartbeat.md`, and the key's resolution in
 [configuration.md](configuration.md#heartbeat--a-turn-on-system-idle)). When
 the goals plugin is loaded, the beat leads with the conclusions of up to
-`heartbeat.retired_goal_limit` retired goals (default 20,
+`heartbeat.retired_goal_limit` retired goals (default 5,
 `GoalsPlugin.retired_goals`), framed as data, then the open goals front of the
 queue first, each not plainly open marked `[in-progress]`, `[blocked]` or
 `[waiting]`; then the memories and the prompt; and it ends with

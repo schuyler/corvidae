@@ -17,8 +17,8 @@ per ``after`` seconds of quiet, and none during traffic.
 Config:
     heartbeat:
       after: 3600    # seconds of system-wide quiet; absent = asleep
-      memory_limit: 20        # recent memories a beat reviews; 0 = none
-      retired_goal_limit: 20  # retired goals a beat reviews; 0 = none
+      memory_limit: 5         # recent memories a beat reviews; 0 = none
+      retired_goal_limit: 5   # retired goals a beat reviews; 0 = none
 
 Sleep is durable because it lives in agent.yaml: without
 ``heartbeat.after`` the plugin registers nothing, at every start.
