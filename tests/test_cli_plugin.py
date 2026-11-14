@@ -417,3 +417,42 @@ class TestOnStop:
         assert plugin._task is None
         # Should not raise.
         await plugin.on_stop()
+
+
+# ---------------------------------------------------------------------------
+# Section 7 — #759: daemon executor for stdin readline
+# ---------------------------------------------------------------------------
+
+
+class TestDaemonExecutor:
+    def test_executor_uses_daemon_threads(self):
+        """_DaemonExecutor threads are daemons, so a blocked readline
+        cannot hold up process exit (#759)."""
+        from corvidae.channels.cli import _DaemonExecutor
+
+        ex = _DaemonExecutor(max_workers=1)
+        # Submit a no-op to trigger thread creation.
+        ex.submit(lambda: None).result(timeout=5)
+        # The executor's internal thread set should contain only daemons.
+        for t in ex._threads:
+            assert t.daemon, f"executor thread {t.name} is not a daemon"
+        ex.shutdown(wait=True)
+
+    async def test_on_stop_shuts_down_executor(self):
+        """on_stop shuts down the executor so no threads linger."""
+        pm, registry = _make_pm_with_registry(transport="cli")
+        plugin = CLIPlugin(pm)
+        pm.register(plugin, name="cli")
+        plugin._registry = registry
+
+        async def fake_read_loop():
+            await asyncio.Event().wait()  # block forever
+
+        plugin._read_loop = fake_read_loop
+        await plugin.on_start(config=BASE_CONFIG)
+        assert plugin._task is not None
+        assert plugin._executor is not None
+
+        await plugin.on_stop()
+        assert plugin._task is None
+        assert plugin._executor is None

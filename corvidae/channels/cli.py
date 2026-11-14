@@ -1,6 +1,8 @@
 # corvidae/channels/cli.py
 
 import asyncio
+import concurrent.futures
+import threading
 import logging
 import os
 import signal
@@ -20,6 +22,39 @@ from corvidae.outbound import (
 from corvidae.runtime import Runtime, run_daemon
 
 logger = logging.getLogger(__name__)
+
+
+class _DaemonExecutor(concurrent.futures.ThreadPoolExecutor):
+    """ThreadPoolExecutor whose threads are daemons (#759).
+
+    A daemon thread is killed when the process exits, so a thread blocked
+    in ``sys.stdin.readline`` cannot hold up shutdown. The default
+    executor uses non-daemon threads; ``asyncio.run`` joins them on exit,
+    which is the hang this class prevents.
+    """
+
+    def _adjust_thread_count(self) -> None:  # noqa: N802
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+        import weakref as _weakref
+        from concurrent.futures.thread import _worker, _threads_queues
+
+        def _weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            t = threading.Thread(
+                name=f"DaemonExecutor-{num_threads}",
+                target=_worker,
+                args=(_weakref.ref(self, _weakref_cb),
+                      self._create_worker_context(),
+                      self._work_queue),
+                daemon=True,
+            )
+            t.start()
+            self._threads.add(t)
+            _threads_queues[t] = self._work_queue
 
 
 class CLIPlugin(TransportPlugin):
@@ -43,6 +78,9 @@ class CLIPlugin(TransportPlugin):
         # Whether stdin is a terminal; the banner and "> " prompts are only
         # for a person typing, not a journal or a pipe.
         self._interactive = False
+        # Daemon-thread executor for the stdin readline (#759): a blocked
+        # readline cannot hold up process exit.
+        self._executor: _DaemonExecutor | None = None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -64,6 +102,7 @@ class CLIPlugin(TransportPlugin):
                 "CLIPlugin: no stdin; cli transport disabled, daemon continues"
             )
             return
+        self._executor = _DaemonExecutor(max_workers=1)
         self._task = asyncio.create_task(self._read_loop(), name="cli-read-loop")
 
     async def _read_loop(self) -> None:
@@ -85,7 +124,7 @@ class CLIPlugin(TransportPlugin):
         loop = asyncio.get_running_loop()
         while True:
             try:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                line = await loop.run_in_executor(self._executor, sys.stdin.readline)
             except asyncio.CancelledError:
                 raise
             if not line:
@@ -203,7 +242,11 @@ class CLIPlugin(TransportPlugin):
 
     @hookimpl
     async def on_stop(self) -> None:
-        """Cancel the read loop and await its cancellation."""
+        """Cancel the read loop and await its cancellation.
+
+        The executor's threads are daemons (#759), so a readline blocked
+        on an open TTY cannot hold up process exit.
+        """
         if self._task is None:
             return
         self._task.cancel()
@@ -214,6 +257,9 @@ class CLIPlugin(TransportPlugin):
         except Exception:
             logger.exception("CLIPlugin read loop raised unexpected exception")
         self._task = None
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
 
 
 @click.command("cli")
