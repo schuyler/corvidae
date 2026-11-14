@@ -36,6 +36,11 @@ from urllib.parse import urlsplit
 from corvidae.clock import Clock
 from corvidae.envref import EnvRefError, expand_env_refs
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.shutdown import (
+    DEFAULT_STOP_BOUND_SECONDS,
+    parse_shutdown_timeouts,
+    stop_bound_seconds,
+)
 from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
@@ -164,6 +169,131 @@ def _one_line(text: str) -> str:
     configured value held an odd character. Never raises.
     """
     return text.translate(_LINE_BOUNDARY_ENCODING)
+
+
+# Third-party loggers that log the configured URL whole: the MCP SDK's own
+# client, and the HTTP stack underneath it. Corvidae's warnings are redacted at
+# the call site (_server_endpoint); these are not ours to redact, so a filter
+# runs the same helpers over what they emit (#595).
+# `httpx2` and `httpcore2` are the HTTP client's logger names in this tree;
+# `httpx` and `httpcore` cover the upstream names. Matched on a dot boundary, so each spelling is listed.
+_CREDENTIAL_LOGGERS = ("mcp", "httpx", "httpx2", "httpcore", "httpcore2")
+
+
+def _redact_multiline_text(text: str) -> str:
+    """``text`` with credential URLs redacted, line breaks preserved.
+
+    One pass over the whole text: ``_URL_IN_TEXT`` stops at any whitespace,
+    ``\\r`` and ``\\n`` included, so a URL never swallows the line after it
+    and a CRLF traceback is redacted like an LF one.
+
+    shortcut: a URL broken by a raw newline keeps the part after the break --
+    a newline inside a URL token cannot be told from two independent lines,
+    so joining them leaks or garbles ordinary tracebacks. The HTTP client
+    percent-encodes URLs in its errors, so the shape is not known to occur;
+    upgrade if a client is seen emitting one.
+    """
+    # Only text carrying a URL marker can hold a credential URL.
+    if not any(marker in text for marker in _CREDENTIAL_MARKERS):
+        return text
+    return _redact_urls_in_text(text)
+
+
+class _UrlRedactingFilter(logging.Filter):
+    """Redact credential-bearing URLs in records from the third-party clients.
+
+    A filter rather than option 2 in #595 alone (stripping userinfo before the
+    SDK sees it): this also covers a query-string token, which the SDK is
+    entitled to log and which would otherwise still reach the daemon log. It is
+    a safety net over text we do not emit, so it recognises the shapes
+    ``_redact_urls_in_text`` already knows, and leaves every other record
+    untouched.
+
+    Never raises: a log record must not become an exception.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Only the third-party loggers, matched on a dot boundary so that an
+        # unrelated `mcprouter` logger is left alone.
+        if not any(
+            record.name == prefix or record.name.startswith(prefix + ".")
+            for prefix in _CREDENTIAL_LOGGERS
+        ):
+            return True
+        # Redact the traceback first: an HTTP client quotes the URL in its
+        # exception text, and the formatter appends that text after the message.
+        self._redact_exception(record)
+        # `stack_info` is source text the formatter appends the same way.
+        if record.stack_info:
+            try:
+                record.stack_info = _redact_multiline_text(record.stack_info)
+            except Exception:
+                logger.warning(
+                    "could not redact the stack of a %s log record",
+                    record.name, exc_info=True,
+                )
+                record.stack_info = "(stack omitted: could not redact it)"
+        try:
+            message = record.getMessage()
+        except Exception:
+            logger.warning(
+                "could not format a %s log record to redact it; its text is "
+                "omitted", record.name, exc_info=True,
+            )
+            # Fail closed: a handler's own error report would otherwise print
+            # the raw template and arguments, credentials and all.
+            record.msg = f"(unformattable {record.name} log record omitted)"
+            record.args = ()
+            return True
+        if not any(marker in message for marker in _CREDENTIAL_MARKERS):
+            return True
+        try:
+            redacted = _one_line(_redact_urls_in_text(message))
+        except Exception:
+            logger.warning(
+                "could not redact a %s log record", record.name, exc_info=True
+            )
+            redacted = "(could not redact this message)"
+        record.msg = redacted
+        record.args = ()
+        return True
+
+    @staticmethod
+    def _redact_exception(record: logging.LogRecord) -> None:
+        """Replace `exc_info` with its redacted rendering in `exc_text`.
+
+        The formatter uses a cached `exc_text` in preference to `exc_info`, so
+        setting it and dropping `exc_info` keeps the traceback while making
+        every handler write the redacted text.
+        """
+        if not record.exc_info and not record.exc_text:
+            return
+        try:
+            text = record.exc_text or logging.Formatter().formatException(
+                record.exc_info
+            )
+            # Redact URLs, keeping the traceback's own line breaks.
+            record.exc_text = _redact_multiline_text(text)
+            record.exc_info = None
+        except Exception:
+            logger.warning(
+                "could not redact the traceback of a %s log record",
+                record.name, exc_info=True,
+            )
+            record.exc_text = "(traceback omitted: could not redact it)"
+            record.exc_info = None
+
+
+def _install_log_redaction() -> None:
+    """Install `_UrlRedactingFilter` once, on every root handler.
+
+    On the handlers, not the loggers: a record logged on `mcp.client.sse` is
+    propagated to the root handlers without passing through the filters of the
+    ancestor logger it propagates from, so a logger filter would miss it.
+    """
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(f, _UrlRedactingFilter) for f in handler.filters):
+            handler.addFilter(_UrlRedactingFilter())
 
 
 def _server_endpoint(cfg: dict) -> str:
@@ -340,13 +470,6 @@ def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
     return resolved
 
 
-# Upper bound on how long on_stop waits for owner tasks to close their
-# transports. Runtime gives the whole stop broadcast daemon.shutdown_timeout
-# (3 s by default), so stay under it.
-# The stop bound is derived from daemon.shutdown_timeout at init time
-# (see McpClientPlugin._stop_bound). The default of 2.5 s is a fallback
-# for when the config is unavailable.
-_DEFAULT_STOP_BOUND_SECONDS = 2.5
 # After cancelling a straggler, how long to wait for it to unwind.
 _CANCEL_GRACE_SECONDS = 0.3
 
@@ -588,12 +711,10 @@ class McpClientPlugin(CorvidaePlugin):
         self._servers_config = validate_mcp_config(config)
         # Derive the stop bound from daemon.shutdown_timeout so an operator
         # who lowers that value doesn't turn every shutdown with a slow stdio
-        # MCP server into a forced os._exit(1) mid-broadcast. We use 80% of
-        # the graceful timeout to leave room for the rest of the stop
-        # broadcast (clock close, channel drain).
-        daemon_cfg = config.get("daemon") or {}
-        shutdown_timeout = float(daemon_cfg.get("shutdown_timeout", 3.0))
-        self._stop_bound = max(1.0, shutdown_timeout * 0.8)
+        # MCP server into a forced os._exit(1) mid-broadcast.
+        self._stop_bound = stop_bound_seconds(
+            parse_shutdown_timeouts(config.get("daemon")).graceful
+        )
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -607,6 +728,9 @@ class McpClientPlugin(CorvidaePlugin):
         self._stopping = False
         self._stop_event = asyncio.Event()
         self._clock = get_dependency(self.pm, "clock", Clock)
+        # Before the first connect: a failed handshake is exactly when a
+        # library writes the configured URL -- credentials and all -- out.
+        _install_log_redaction()
 
         try:
             for server_name, server_cfg in servers_config.items():
@@ -723,13 +847,14 @@ class McpClientPlugin(CorvidaePlugin):
         Concurrent, not one after another: the SDK's stdio_client can take
         about 2 s per server to terminate a process, and Runtime allows the
         whole stop broadcast daemon.shutdown_timeout (3 s by default). An owner that has not finished within
-        the derived stop bound (80% of daemon.shutdown_timeout) is cancelled
+        the derived stop bound (daemon.shutdown_timeout less a 0.5 s reserve, see
+        ``corvidae.shutdown.stop_bound_seconds``) is cancelled
         and logged. Never raises (a cancellation of this coroutine itself
         excepted).
         """
         owners = list(self._owners.values())
         tasks = [o.task for o in owners if o.task is not None]
-        stop_bound = getattr(self, '_stop_bound', _DEFAULT_STOP_BOUND_SECONDS)
+        stop_bound = getattr(self, '_stop_bound', DEFAULT_STOP_BOUND_SECONDS)
         # Tell every owner to close its transport at the same moment.
         for owner in owners:
             owner.stop.set()

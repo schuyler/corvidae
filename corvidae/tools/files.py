@@ -3,7 +3,9 @@
 import asyncio
 import os
 import pathlib
+import re
 
+from corvidae.context import message_tokens
 from corvidae.tool import MAX_TOOL_RESULT_CHARS
 
 # Characters per token assumed when sizing a page from a token budget: the
@@ -13,8 +15,17 @@ CHARS_PER_TOKEN_ESTIMATE = 3.0
 # Smallest page: leaves room for the range header and some content.
 MIN_PAGE_CHARS = 2000
 
+# Content a fitted page keeps beyond its header: a page that named where to
+# continue without carrying anything to read would page nowhere, so the header
+# plus this many characters is the smallest page counting will cut to (#752).
+MIN_PAGE_CONTENT_CHARS = 4
+
 # Characters read per call when skipping to an offset or counting the rest.
 _CHUNK = 64 * 1024
+
+# Reads of one page allowed when fitting it to a token share: the character
+# estimate is the first try, and each retry scales it by the measured overrun.
+_FIT_ATTEMPTS = 3
 
 
 def page_chars(max_result_chars: int, budget: int | None, fraction: float) -> int:
@@ -30,6 +41,64 @@ def page_chars(max_result_chars: int, budget: int | None, fraction: float) -> in
     return min(max_result_chars, max(MIN_PAGE_CHARS, share))
 
 
+def page_message_tokens(page: str) -> int:
+    """Tokens one page costs the window, counted as the tool result it becomes."""
+    return message_tokens({"role": "tool", "content": page})
+
+
+# The header a ranged read writes, which is what makes a page a page.
+PAGE_HEADER_RE = re.compile(r"\[(?:characters|lines) \d+-\d+ of \d+ in ")
+
+
+def page_body(page: str) -> str:
+    """The page's content: a ranged page's text after its header, else all of it."""
+    head, sep, rest = page.partition("\n")
+    return rest if sep and PAGE_HEADER_RE.match(head) else page
+
+
+def page_header_chars(page: str) -> int:
+    """Characters the page's header costs, or 0 for a page without one."""
+    return len(page) - len(page_body(page))
+
+
+def page_header_tokens(page: str) -> int:
+    """Tokens the page's header costs, or 0 for a page without one."""
+    header = page_header_chars(page)
+    return page_message_tokens(page[:header]) if header else 0
+
+
+def fit_page_chars(page: str, max_chars: int, max_tokens: int) -> int | None:
+    """The character page to retry with when ``page`` is over ``max_tokens``.
+
+    None when the page already fits, or when it cannot shrink further: the
+    header plus ``MIN_PAGE_CONTENT_CHARS`` is the smallest page that still
+    carries something to read, and a share below that is one no page meets.
+    """
+    used = page_message_tokens(page)
+    # Fitting costs nothing; over the share the page is re-read smaller.
+    if used <= max_tokens:
+        return None
+    # The header's cost is fixed whatever the content, so only the content is
+    # scaled by the overrun, and a margin covers what the ratio mispredicts.
+    header = page_header_chars(page)
+    header_tokens = page_header_tokens(page)
+    # The page's own length, not the budget it was read with: a short file
+    # comes back whole and bare, and scaling by a budget it never used would
+    # only ask for the page it already has.
+    content_chars = len(page) - header
+    content_tokens = used - header_tokens
+    # The floor keeps content, so the header is never a page on its own.
+    smallest = header + MIN_PAGE_CONTENT_CHARS
+    if max_chars <= smallest or content_tokens <= 0:
+        return None
+    share_content = max_tokens - header_tokens
+    if share_content <= 0:
+        # The header alone is over the share: only the floor is left.
+        return smallest if smallest < max_chars else None
+    scaled = int(content_chars * share_content / content_tokens * 0.95)
+    return max(smallest, min(max_chars - 1, header + scaled))
+
+
 async def read_file(
     path: str,
     max_size: int = 1024 * 1024,
@@ -38,12 +107,34 @@ async def read_file(
     max_chars: int = MAX_TOOL_RESULT_CHARS,
     start_line: int | None = None,
     end_line: int | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     """Read a file, a character range of it (offset, length) or a line range
-    of it (start_line, end_line)."""
-    return await asyncio.to_thread(
+    of it (start_line, end_line).
+
+    ``max_chars`` sizes the page from a character estimate; ``max_tokens``,
+    when given, is the share of the window the page may take, and the page is
+    re-read smaller until its counted cost fits it (#752).
+    """
+    page = await asyncio.to_thread(
         _read_file_sync, path, max_size, offset, length, max_chars, start_line, end_line
     )
+    for _ in range(_FIT_ATTEMPTS):
+        if max_tokens is None:
+            break
+        smaller = fit_page_chars(page, max_chars, max_tokens)
+        if smaller is None:
+            break
+        # A page that came back without content pages nowhere, and one that
+        # came back unchanged was not cut by its size at all: keep the page
+        # that read, so a read always makes progress.
+        fitted = await asyncio.to_thread(
+            _read_file_sync, path, max_size, offset, length, smaller, start_line, end_line
+        )
+        if not page_body(fitted) or fitted == page:
+            break
+        max_chars, page = smaller, fitted
+    return page
 
 
 def _read_file_sync(

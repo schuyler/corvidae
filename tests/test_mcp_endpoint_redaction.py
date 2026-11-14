@@ -678,3 +678,188 @@ def test_server_endpoint_encodes_a_separator_on_every_path():
     creds = _server_endpoint({"transport": "sse", "url": "https://u:pw@h.example/a\u2029b"})
     assert plain == "localhost:8080/a%E2%80%A8b"
     assert len(creds.splitlines()) == 1 and "pw" not in creds
+
+
+# --- #595: the third-party log filter covers tracebacks and exact prefixes ---
+
+
+def _formatted_through_filter(name: str, raise_text: str | None) -> str:
+    """Log one record on `name` through the redacting filter; return the
+    text a handler would write, traceback included."""
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(mcp_client_mod._UrlRedactingFilter())
+    logger = logging.getLogger(name)
+    logger.addHandler(handler)
+    try:
+        # A traceback is where an HTTP client's quoted URL ends up.
+        try:
+            if raise_text is not None:
+                raise RuntimeError(raise_text)
+            logger.error("plain failure")
+        except RuntimeError:
+            logger.exception("sse reader failed: %s", raise_text)
+    finally:
+        logger.removeHandler(handler)
+    return stream.getvalue()
+
+
+def test_a_traceback_from_a_library_logger_carries_no_credential():
+    """The exception text of a library error record is redacted too (#595)."""
+    out = _formatted_through_filter(
+        "mcp.client.sse",
+        "Client error '401' for url "
+        "'http://alfred:SECRETPW@host.example/mcp?token=SECRETTOK'",
+    )
+    assert "SECRETPW" not in out and "SECRETTOK" not in out
+    # The record still names the endpoint and keeps its traceback.
+    assert "host.example/mcp" in out and "Traceback" in out
+
+
+def test_the_filter_matches_a_logger_prefix_on_a_dot_boundary():
+    """`mcprouter` is not an `mcp` logger, so its records pass untouched."""
+    out = _formatted_through_filter(
+        "mcprouter.app", "see http://u:KEEPME@host.example/x"
+    )
+    assert "KEEPME" in out
+
+
+def _format_record(name: str, log) -> str:
+    """Run `log(logger)` through the redacting filter on a handler; return
+    exactly what that handler writes."""
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(mcp_client_mod._UrlRedactingFilter())
+    logger = logging.getLogger(name)
+    logger.addHandler(handler)
+    try:
+        log(logger)
+    finally:
+        logger.removeHandler(handler)
+    return stream.getvalue()
+
+
+def _raise_and_format(message: str) -> str:
+    """Log an exception carrying `message` on a filtered library logger."""
+
+    def log(logger: logging.Logger) -> None:
+        try:
+            raise RuntimeError(message)
+        except RuntimeError:
+            logger.exception("reader failed")
+
+    return _format_record("mcp.client.sse", log)
+
+
+def test_an_unindented_line_after_a_url_line_is_kept_whole():
+    """A URL ending a line must not swallow the next line (#595)."""
+    out = _raise_and_format("msg http://u:SECRETPW@host.example/x\nRuntimeError: boom")
+    assert "SECRETPW" not in out
+    assert "\nRuntimeError: boom" in out
+
+
+def test_a_url_on_the_next_line_is_redacted_on_its_own():
+    """Two URLs on adjacent lines are each redacted, not glued together."""
+    out = _raise_and_format("see http://h.example/\nhttp://u:SECRETPW@h2.example/ end")
+    assert "SECRETPW" not in out and "h2.example" in out and " end" in out
+
+
+def test_a_crlf_traceback_is_redacted():
+    """A `\\r\\n` line ending does not hide a URL from the filter."""
+    out = _raise_and_format("x http://u:SECRETPW@host.example/a?t=SECRETTOK\r\nnext")
+    assert "SECRETPW" not in out and "SECRETTOK" not in out and "next" in out
+
+
+def test_stack_info_from_a_library_logger_carries_no_credential():
+    """`stack_info=True` appends source text, which can quote a URL (#595)."""
+    def log(logger: logging.Logger) -> None:
+        # The executing source line is what stack_info prints, so the URL
+        # literal sits on this very line.
+        logger.error("go http://alfred:SECRETPW@host.example/m?token=SECRETTOK", stack_info=True)
+
+    out = _format_record("mcp.client.sse", log)
+    assert "SECRETPW" not in out and "SECRETTOK" not in out
+    assert "host.example/m" in out and "Stack (most recent call last)" in out
+
+
+def test_a_chained_exception_is_redacted_in_both_sections():
+    """The __cause__ section of a traceback is redacted like the outer one."""
+
+    def log(logger: logging.Logger) -> None:
+        try:
+            try:
+                raise ValueError("inner for http://u:CAUSEPW@host.example/a")
+            except ValueError as exc:
+                raise RuntimeError("outer for http://u:OUTERPW@host.example/b") from exc
+        except RuntimeError:
+            logger.exception("reader failed")
+
+    out = _format_record("httpcore.connection", log)
+    assert "CAUSEPW" not in out and "OUTERPW" not in out
+    assert "direct cause" in out
+
+
+def test_the_httpx2_logger_is_filtered():
+    """The HTTP client logs as `httpx2`, so it must be on the prefix list."""
+    out = _format_record(
+        "httpx2",
+        lambda logger: logger.error("HTTP Request: POST http://u:HTTPXPW@h.example/m"),
+    )
+    assert "HTTPXPW" not in out and "h.example/m" in out
+
+
+def test_the_httpcore2_logger_is_filtered():
+    """The HTTP client's transport logs as `httpcore2` in this tree (#595)."""
+    out = _format_record(
+        "httpcore2.http11",
+        lambda logger: logger.error("send to http://u:CORE2PW@h.example/m"),
+    )
+    assert "CORE2PW" not in out and "h.example/m" in out
+
+
+def test_an_unformattable_record_is_withheld_not_passed_through():
+    """If the message cannot be formatted it must not reach a handler raw."""
+
+    class Bad:
+        def __str__(self) -> str:
+            raise ValueError("no str")
+
+    record = logging.LogRecord(
+        "mcp.x", logging.WARNING, "f", 1, "c %s http://u:BADPW@h/", (Bad(),), None
+    )
+    assert mcp_client_mod._UrlRedactingFilter().filter(record) is True
+    # Neither the raw template nor the raw args survive on the record.
+    assert "BADPW" not in str(record.msg) and record.args == ()
+    assert "mcp.x" in str(record.msg)
+
+
+def test_install_log_redaction_adds_one_filter_per_root_handler():
+    """The installer covers every root handler, once, however often it runs."""
+    root = logging.getLogger()
+    first, second = logging.NullHandler(), logging.NullHandler()
+    saved = list(root.handlers)
+    root.handlers = [first, second]
+    try:
+        mcp_client_mod._install_log_redaction()
+        mcp_client_mod._install_log_redaction()
+        for handler in (first, second):
+            ours = [
+                f for f in handler.filters
+                if isinstance(f, mcp_client_mod._UrlRedactingFilter)
+            ]
+            assert len(ours) == 1
+    finally:
+        root.handlers = saved
+
+
+def test_a_url_after_a_raw_newline_is_redacted_before_lines_are_joined():
+    """Line breaks must not splice two URLs into one token the redactor
+    mis-parses: redact first, then flatten to one line."""
+    record = logging.LogRecord(
+        "mcp.x", logging.WARNING, "f", 1,
+        "see http://h.example/\nhttp://u:PW1@h2.example/ end", (), None,
+    )
+    assert mcp_client_mod._UrlRedactingFilter().filter(record) is True
+    assert "PW1" not in record.getMessage()

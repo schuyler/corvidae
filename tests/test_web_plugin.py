@@ -1481,6 +1481,51 @@ async def _timed_stop(env) -> float:
     return time.monotonic() - t0
 
 
+class TestStopBound:
+    """The web transport's shutdown budget follows daemon.shutdown_timeout (#760)."""
+
+    async def test_bound_is_the_budget_less_the_reserve(self, make_env):
+        env = await make_env(extra_config={"daemon": {"shutdown_timeout": 1}})
+        # 1 s graceful phase, 0.5 s kept for the rest of the broadcast.
+        assert env.plugin._stop_bound == pytest.approx(0.5)
+
+    async def test_default_budget_keeps_the_historical_worst_case(self, make_env):
+        env = await make_env()
+        assert env.plugin._stop_bound == pytest.approx(2.5)
+
+    async def test_handler_that_ignores_cancellation_is_cut_off_and_logged(
+            self, make_env, caplog):
+        env = await make_env()
+        env.plugin._stop_bound = 0.2
+
+        async def stubborn() -> None:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                await asyncio.sleep(60)  # a handler that will not die
+
+        task = asyncio.create_task(stubborn())
+        await asyncio.sleep(0)  # let it reach its first await, so a cancel hits it
+        env.plugin._handlers.add(task)
+        caplog.set_level(logging.DEBUG)
+        try:
+            started = time.monotonic()
+            await env.plugin.on_stop()
+            elapsed = time.monotonic() - started
+        finally:
+            task.cancel()
+            env.plugin._handlers.discard(task)
+
+        assert elapsed < 0.5, elapsed  # cut off by the bound, not by the runner
+        messages = [r.getMessage() for r in caplog.records
+                    if r.levelno >= logging.WARNING]
+        assert any("daemon.shutdown_timeout" in m for m in messages), messages
+        # The bound is printed with two decimals (0.2 s here, not rounded) and
+        # the useless "close the tabs" advice is gone.
+        assert any("within 0.20s" in m for m in messages), messages
+        assert not any("browser tabs" in m for m in messages), messages
+
+
 class TestBackpressure:
 
     async def test_stop_with_peer_that_never_reads(self, make_env):

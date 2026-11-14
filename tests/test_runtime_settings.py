@@ -403,6 +403,37 @@ class TestSetSettingsReasoningHistory:
         assert channel.runtime_overrides == {}
 
 
+class TestSetSettingsPositiveInts:
+    """A framework integer override is validated before it is stored (#755)."""
+
+    @pytest.mark.parametrize("key", ["max_turns", "max_context_tokens"])
+    @pytest.mark.parametrize("value", ["32000", True, 0, -5, 32000.5, 32000.0])
+    async def test_bad_value_refused_without_mutation(self, key, value):
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+
+        result = await set_settings(
+            settings={"temperature": 0.3, key: value},
+            _ctx=_make_tool_context(channel),
+        )
+
+        assert result.startswith("Error")
+        assert key in result
+        assert repr(value) in result, "the refusal must name the rejected value"
+        assert "positive integer" in result, "the refusal must say what is accepted"
+        assert "Nothing was changed; retry" in result, "the refusal must state the remedy"
+        assert channel.runtime_overrides == {}, "nothing may be written"
+
+    @pytest.mark.parametrize("key", ["max_turns", "max_context_tokens"])
+    async def test_a_valid_integer_is_stored(self, key):
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+
+        await set_settings(settings={key: 32000}, _ctx=_make_tool_context(channel))
+
+        assert channel.runtime_overrides[key] == 32000
+
+
 class TestSetSettingsValid:
     async def test_valid_settings_applied_to_runtime_overrides(self):
         """Valid settings must be merged into channel.runtime_overrides."""

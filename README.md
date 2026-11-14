@@ -323,7 +323,7 @@ For hacking on it:
 
 - [docs/prd.md](docs/prd.md) holds the requirements: what has to be true, and why.
 - [docs/design.md](docs/design.md) describes how the current tree does it: the architecture, hook specs and schemas.
-- [docs/plugin-guide.md](docs/plugin-guide.md) and [docs/plugin-checklist.md](docs/plugin-checklist.md) cover writing a plugin. `corvidae scaffold <name>` generates the skeleton.
+- [docs/plugin-guide.md](docs/plugin-guide.md) and [docs/plugin-checklist.md](docs/plugin-checklist.md) cover writing a plugin. `corvidae scaffold <name>` generates a working skeleton: the checklist's §3 plugin (config validation, a registered tool) and its test through the real plugin manager, with the corvidae dependency declared from git — you cannot get it from PyPI. It prints how to install the plugin and how to check the `plugins loaded` line picked it up.
 
 To set up a development checkout:
 

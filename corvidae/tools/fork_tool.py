@@ -21,7 +21,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from corvidae.attribution import reset_attribution, set_attribution
+from corvidae.attribution import (
+    agent_depth_refusal,
+    next_agent_depth,
+    reset_attribution,
+    set_attribution,
+)
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.task import Task
 from corvidae.thinking import strip_thinking
@@ -34,6 +39,7 @@ from corvidae.tools.subagent import (
     parse_subagent_max_turns,
     run_agent_loop,
 )
+from corvidae.tool_collection import DEFAULT_MAX_AGENT_DEPTH
 
 if TYPE_CHECKING:
     from corvidae.channel import Channel
@@ -48,7 +54,7 @@ class ForkToolPlugin(CorvidaePlugin):
     Mirrors SubagentPlugin, but the system prompt is the agent's own identity
     (via ``Agent.channel_system_prompt``), not a generic subagent prompt. The
     fork runs the subagent's multi-turn loop with the full tool set (minus the
-    fork tool itself, to prevent recursion) and is enqueued as a background
+    fork tool itself; nesting is bounded by tools.max_agent_depth) and is enqueued as a background
     Task, result delivered via TaskPlugin -> on_notify -> Agent.
 
     Depends on "llm" (shared client), "tools" (registry), and "agent"
@@ -116,7 +122,7 @@ class ForkToolPlugin(CorvidaePlugin):
         agent = get_dependency(self.pm, "agent", Agent)
         my_prompt = await agent.channel_system_prompt(channel)
 
-        # The full tool set, minus the fork tool itself (no recursion) and
+        # The full tool set, minus the fork tool itself (nesting is bounded by depth) and
         # minus any the calling channel has disabled.
         from corvidae.tool_policy import disabled_on
         from corvidae.tool_collection import ToolCollectionPlugin
@@ -126,6 +132,14 @@ class ForkToolPlugin(CorvidaePlugin):
         registry = tools_plugin.get_registry().exclude("fork", *disabled_on(channel))
         max_result_chars = tools_plugin.max_result_chars
         call_timeouts = tools_plugin.call_timeouts
+        max_agent_depth = getattr(
+            tools_plugin, "max_agent_depth", DEFAULT_MAX_AGENT_DEPTH
+        )
+        # Same kernel bound as the subagent: a fork may spawn one more level,
+        # up to tools.max_agent_depth (#816).
+        depth = next_agent_depth(max_agent_depth)
+        if depth is None:
+            return agent_depth_refusal(max_agent_depth)
         tools_dict = registry.as_dict()
         tool_schemas = registry.schemas()
 
@@ -141,7 +155,9 @@ class ForkToolPlugin(CorvidaePlugin):
 
         async def work():
             # Attribute the fork's LLM calls to the fork stage.
-            attribution_token = set_attribution(stage="fork", channel_id=channel.id)
+            attribution_token = set_attribution(
+                stage="fork", channel_id=channel.id, agent_depth=depth
+            )
             try:
                 result = await run_agent_loop(
                     client, messages, tools_dict, tool_schemas,

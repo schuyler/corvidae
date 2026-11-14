@@ -16,9 +16,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from corvidae.channel import Channel
+from corvidae.channel import Channel, ChannelRegistry
 from corvidae.context import ContextWindow
-from corvidae.hooks import create_plugin_manager
+from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.persistence import PersistencePlugin
 from corvidae_cognition.funnel import FunnelPlugin
@@ -117,9 +117,31 @@ async def env(tmp_path, monkeypatch):
     channel = Channel(transport="irc", scope="#test")
     channel.conversation = ContextWindow(channel.id)
 
+    # Registry + a real pluggy subscriber for on_goals_state_changed, so the
+    # tests see exactly what a subscriber plugin would receive.
+    channel_registry = ChannelRegistry()
+    channel_registry.channels[channel.id] = channel
+    pm.register(channel_registry, name="registry")
+    state_changes: list[dict] = []
+
+    class _StateChangeRecorder(CorvidaePlugin):
+        @hookimpl
+        async def on_goals_state_changed(
+            self, goal_id, kind, old_status, new_status,
+            origin_channel, actor_channel, conclusion,
+        ):
+            state_changes.append(dict(
+                goal_id=goal_id, kind=kind, old_status=old_status,
+                new_status=new_status, origin_channel=origin_channel,
+                actor_channel=actor_channel, conclusion=conclusion,
+            ))
+
+    pm.register(_StateChangeRecorder())
+
     yield SimpleNamespace(
         pm=pm, db=db, db_path=db_path, clock=clock, memory=memory,
         goals=goals, tools=tools, channel=channel,
+        registry=channel_registry, state_changes=state_changes,
     )
 
     await memory.on_stop()
@@ -368,3 +390,465 @@ async def test_list_goals_truncates_long_text(env):
     assert "..." in result
     # The full 200-char text should NOT appear
     assert long_text not in result
+
+
+# ---------------------------------------------------------------------------
+# G4: priority queue (prepend/append), in-progress, origin-channel, notify
+# ---------------------------------------------------------------------------
+
+
+async def test_g4_prepend_goes_to_front(env):
+    """A prepended goal sorts before appended ones (lower position = front)."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("second", _ctx=ctx)
+    await env.tools["add_goal"]("third", _ctx=ctx)
+    await env.tools["add_goal"]("first", position="prepend", _ctx=ctx)
+
+    data = await rows(
+        env, "SELECT text, position FROM goals ORDER BY position ASC, id ASC"
+    )
+    assert [t for t, _ in data] == ["first", "second", "third"]
+
+
+async def test_g4_append_is_default_and_ordered(env):
+    """Append (the default) puts new goals at the back, in order."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("a", _ctx=ctx)
+    await env.tools["add_goal"]("b", _ctx=ctx)
+    data = await rows(
+        env, "SELECT text, position FROM goals ORDER BY position ASC, id ASC"
+    )
+    assert [t for t, _ in data] == ["a", "b"]
+    assert data[0][1] < data[1][1]
+
+
+async def test_g4_position_validation(env):
+    """An invalid position is rejected; no row is written."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("valid", _ctx=ctx)  # creates the table
+    result = await env.tools["add_goal"]("x", position="sideways", _ctx=ctx)
+    assert "position must be" in result
+    assert (await rows(env, "SELECT COUNT(*) FROM goals"))[0][0] == 1
+
+
+async def test_g4_in_progress_is_a_valid_status(env):
+    """in-progress is accepted (the WIP state)."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("wip", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    result = await env.tools["set_goal_status"](gid, "in-progress", _ctx=ctx)
+    assert "status set to" in result
+    status = (await rows(env, "SELECT status FROM goals WHERE id = ?", (gid,)))[0][0]
+    assert status == "in-progress"
+
+
+async def test_g4_origin_channel_captured(env):
+    """The goal records the channel that created it."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("from signal", _ctx=ctx)
+    origin = (await rows(env, "SELECT origin_channel FROM goals"))[0][0]
+    assert origin == env.channel.id
+
+
+async def test_g4_state_change_fires_hook(env):
+    """A status change fires on_goals_state_changed with the right args."""
+    from unittest.mock import AsyncMock, patch
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("watch this", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    
+    with patch.object(env.pm.ahook, "on_goals_state_changed", AsyncMock()) as mock_hook:
+        await env.tools["set_goal_status"](gid, "in-progress", _ctx=ctx)
+    
+    mock_hook.assert_called_once()
+    kwargs = mock_hook.call_args.kwargs
+    assert kwargs["goal_id"] == gid
+    assert kwargs["kind"] == "status"
+    assert kwargs["old_status"] == "open"
+    assert kwargs["new_status"] == "in-progress"
+    assert kwargs["origin_channel"] == env.channel.id
+    assert kwargs["actor_channel"] == env.channel.id
+    assert kwargs["conclusion"] is None
+
+
+async def test_g4_retire_fires_hook(env):
+    """Retiring a goal fires on_goals_state_changed with the conclusion."""
+    from unittest.mock import AsyncMock, patch
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "working on it")
+    await env.tools["add_goal"]("do the thing", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    
+    with patch.object(env.pm.ahook, "on_goals_state_changed", AsyncMock()) as mock_hook:
+        await env.tools["retire_goal"](gid, "I concluded it is done.", _ctx=ctx)
+    
+    mock_hook.assert_called_once()
+    kwargs = mock_hook.call_args.kwargs
+    assert kwargs["goal_id"] == gid
+    assert kwargs["kind"] == "retired"
+    assert kwargs["old_status"] == "open"
+    assert kwargs["new_status"] == "retired"
+    assert kwargs["origin_channel"] == env.channel.id
+    assert kwargs["actor_channel"] == env.channel.id
+    assert kwargs["conclusion"] == "I concluded it is done."
+
+
+async def test_g4_unregistered_origin_still_records_and_fires_hook(env):
+    """A goal whose origin channel isn't registered: the state change is
+    recorded and the hook still fires, naming that origin. Whether the origin
+    can be reached is a subscriber's concern, not the goals plugin's."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("orphan", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    await env.db.execute(
+        "UPDATE goals SET origin_channel = ? WHERE id = ?",
+        ("signal:does-not-exist", gid),
+    )
+    await env.db.commit()
+    env.state_changes.clear()
+    result = await env.tools["set_goal_status"](gid, "blocked", _ctx=ctx)
+    assert "status set to" in result
+    assert [c["origin_channel"] for c in env.state_changes] == ["signal:does-not-exist"]
+    assert (await rows(env, "SELECT status FROM goals WHERE id = ?", (gid,)))[0][0] == "blocked"
+
+
+async def test_g4_open_goals_ordered_by_position(env):
+    """open_goals() returns the queue front-first (position ASC)."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("low", _ctx=ctx)
+    await env.tools["add_goal"]("high", position="prepend", _ctx=ctx)
+    goals = await env.goals.open_goals()
+    assert [g["summary"] for g in goals] == ["high", "low"]
+
+
+# ---------------------------------------------------------------------------
+# G5: review-loop test gaps (migration, notify edges, multi-prepend, no-op)
+# ---------------------------------------------------------------------------
+
+
+async def test_g5_migration_adds_columns_and_preserves_order(env):
+    """A pre-migration table (no position/origin_channel) gains the columns;
+    position = id (id order preserved), origin_channel is NULL."""
+    # Create the table first (lazy), then rebuild it without the new columns
+    # to simulate the old schema.
+    await env.goals._require_db()
+    await env.db.execute("ALTER TABLE goals RENAME TO goals_old")
+    await env.db.execute(
+        "CREATE TABLE goals (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, "
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL, retired_at REAL, "
+        "memory_id INTEGER, status TEXT NOT NULL DEFAULT 'open')"
+    )
+    now = env.clock.now()
+    for i, text in enumerate(["first", "second", "third"]):
+        await env.db.execute(
+            "INSERT INTO goals (id, text, created_at, updated_at, status) "
+            "VALUES (?, ?, ?, ?, 'open')",
+            (i + 1, text, now, now),
+        )
+    await env.db.commit()
+    env.goals._schema_ready = False  # force the migration to run
+    db = await env.goals._require_db()
+    async with db.execute("PRAGMA table_info(goals)") as cur:
+        cols = {row[1] for row in await cur.fetchall()}
+    assert "position" in cols and "origin_channel" in cols
+    data = await rows(
+        env, "SELECT id, text, position, origin_channel FROM goals ORDER BY id"
+    )
+    assert [d[1] for d in data] == ["first", "second", "third"]
+    assert [d[2] for d in data] == [1, 2, 3]  # position = id
+    assert all(d[3] is None for d in data)  # origin_channel NULL
+    goals = await env.goals.open_goals()
+    assert [g["summary"] for g in goals] == ["first", "second", "third"]
+
+
+async def test_g5_add_goal_no_ctx_has_no_origin_and_hook_reports_it(env):
+    """add_goal with no channel context: origin_channel is NULL. A later state
+    change still fires the hook, with origin None and the "" actor sentinel;
+    a subscriber has no origin to route to and skips it."""
+    await env.tools["add_goal"]("no origin", _ctx=None)
+    assert (await rows(env, "SELECT origin_channel FROM goals"))[0][0] is None
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    env.state_changes.clear()
+    await env.tools["set_goal_status"](gid, "blocked", _ctx=None)
+    assert len(env.state_changes) == 1
+    assert env.state_changes[0]["origin_channel"] is None
+    assert env.state_changes[0]["actor_channel"] == ""
+
+
+async def test_g5_retire_already_retired_does_not_fire_hook(env):
+    """Retiring an already-retired goal errors and fires no hook."""
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "work")
+    await env.tools["add_goal"]("do it", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    await env.tools["retire_goal"](gid, "done.", _ctx=ctx)
+    env.state_changes.clear()
+    result = await env.tools["retire_goal"](gid, "again.", _ctx=ctx)
+    assert "already retired" in result
+    assert env.state_changes == []
+
+
+async def test_g5_multiple_prepends_preserve_order(env):
+    """Multiple prepends: each new prepend goes to the very front."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("a", _ctx=ctx)
+    await env.tools["add_goal"]("c", position="prepend", _ctx=ctx)
+    await env.tools["add_goal"]("b", position="prepend", _ctx=ctx)
+    data = await rows(env, "SELECT text FROM goals ORDER BY position ASC, id ASC")
+    assert [d[0] for d in data] == ["b", "c", "a"]
+
+
+async def test_g5_noop_status_change_does_not_fire_hook(env):
+    """Setting the same status fires no hook."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("watch", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    await env.tools["set_goal_status"](gid, "blocked", _ctx=ctx)
+    env.state_changes.clear()
+    await env.tools["set_goal_status"](gid, "blocked", _ctx=ctx)  # no-op
+    assert env.state_changes == []
+
+
+class TestG6ReviewLoop:
+    """Second-pass review findings: notify failure, retired status-set, orphan memory."""
+
+    async def test_subscriber_failure_does_not_undo_retirement(self, env, caplog):
+        """A subscriber that raises, dispatched through pluggy, must not undo a
+        committed retirement; the failure is logged at WARNING naming the goal."""
+        import logging
+
+        class _Raiser(CorvidaePlugin):
+            @hookimpl
+            async def on_goals_state_changed(
+                self, goal_id, kind, old_status, new_status,
+                origin_channel, actor_channel, conclusion,
+            ):
+                raise RuntimeError("subscriber failed")
+
+        env.pm.register(_Raiser())
+        ctx = ctx_for(env.channel)
+        await add_message(env, env.channel.id, "test")
+        await env.tools["add_goal"]("test goal", _ctx=ctx)
+        goal_id = (await rows(env, "SELECT id FROM goals WHERE retired_at IS NULL"))[0][0]
+
+        with caplog.at_level(logging.WARNING):
+            result = await env.tools["retire_goal"](id=goal_id, conclusion="done", _ctx=ctx)
+
+        assert "retired" in result.lower()
+        assert (await rows(env, "SELECT retired_at FROM goals WHERE id = ?", (goal_id,)))[0][0] is not None
+        assert any(
+            r.levelno == logging.WARNING and f"goal {goal_id}" in r.getMessage()
+            for r in caplog.records
+        )
+
+    async def test_set_status_on_retired_goal_returns_error(self, env):
+        """Setting status on an already-retired goal must return an error."""
+        ctx = ctx_for(env.channel)
+        await add_message(env, env.channel.id, "test")
+        await env.tools["add_goal"]("test goal", _ctx=ctx)
+        rows_data = await rows(env, "SELECT id FROM goals WHERE retired_at IS NULL")
+        goal_id = rows_data[0][0]
+        await env.tools["retire_goal"](id=goal_id, conclusion="done", _ctx=ctx)
+        result = await env.tools["set_goal_status"](id=goal_id, status="blocked", _ctx=ctx)
+        assert "error" in result.lower() or "retired" in result.lower()
+
+    async def test_re_retire_does_not_write_orphan_memory(self, env):
+        """Re-retiring a goal must not write a second memory record."""
+        ctx = ctx_for(env.channel)
+        await add_message(env, env.channel.id, "test")
+        await env.tools["add_goal"]("test goal", _ctx=ctx)
+        rows_data = await rows(env, "SELECT id, memory_id FROM goals WHERE retired_at IS NULL")
+        goal_id = rows_data[0][0]
+        await env.tools["retire_goal"](id=goal_id, conclusion="done", _ctx=ctx)
+
+        # Get the original memory_id
+        rows_data = await rows(env, "SELECT memory_id FROM goals WHERE id = ?", (goal_id,))
+        original_mem_id = rows_data[0][0]
+        assert original_mem_id is not None
+
+        # Re-retire: should error
+        result = await env.tools["retire_goal"](id=goal_id, conclusion="again", _ctx=ctx)
+        assert "already retired" in result.lower()
+
+        # memory_id should be unchanged (no orphan write)
+        rows_data = await rows(env, "SELECT memory_id FROM goals WHERE id = ?", (goal_id,))
+        assert rows_data[0][0] == original_mem_id
+
+
+async def test_set_goal_status_on_background_turn_fires_hook_with_empty_actor(env):
+    """A background turn has ToolContext.channel = None; the tool must not
+    raise, and the hook reports 'no channel' with the same sentinel ("")
+    that a missing context uses."""
+    from unittest.mock import AsyncMock, patch
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("bg work", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    bg_ctx = SimpleNamespace(channel=None)
+
+    with patch.object(env.pm.ahook, "on_goals_state_changed", AsyncMock()) as mock_hook:
+        result = await env.tools["set_goal_status"](gid, "blocked", _ctx=bg_ctx)
+
+    assert "blocked" in result
+    assert mock_hook.call_args.kwargs["actor_channel"] == ""
+    assert mock_hook.call_args.kwargs["origin_channel"] == env.channel.id
+
+
+async def test_seed_cli_appends_behind_existing_goals(env):
+    """A CLI-seeded goal is an appended goal: it goes behind the whole queue,
+    prepended goals and appended goals alike."""
+    from click.testing import CliRunner
+
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("appended one", _ctx=ctx)
+    await env.tools["add_goal"]("appended two", _ctx=ctx)
+    await env.tools["add_goal"]("prepended", position="prepend", _ctx=ctx)
+
+    result = await asyncio.to_thread(
+        CliRunner().invoke, goals_command,
+        ["--db", env.db_path, "seed", "operator seeded"],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+
+    order = [t for (t,) in await rows(env, "SELECT text FROM goals ORDER BY position ASC, id ASC")]
+    assert order == ["prepended", "appended one", "appended two", "operator seeded"]
+
+
+async def test_list_goals_follows_queue_order(env):
+    """list_goals shows the queue in pick order, so a prepended goal looks prepended."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("back", _ctx=ctx)
+    await env.tools["add_goal"]("front", position="prepend", _ctx=ctx)
+    lines = (await env.tools["list_goals"](_ctx=ctx)).splitlines()
+    assert "front" in lines[0] and "back" in lines[1]
+
+
+async def test_goals_entry_follows_queue_order_and_marks_status(env):
+    """The per-turn goals entry matches the heartbeat's list: queue order, and
+    a goal that is not plain open carries its status."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("back", _ctx=ctx)
+    await env.tools["add_goal"]("front", position="prepend", _ctx=ctx)
+    front_id = (await rows(env, "SELECT id FROM goals WHERE text = 'front'"))[0][0]
+    await env.tools["set_goal_status"](front_id, "in-progress", _ctx=ctx)
+    await turn(env, env.channel)
+
+    entry_lines = goals_messages(env.channel)[0].splitlines()
+    goal_lines = [ln for ln in entry_lines if ln.startswith("#")]
+    assert "front" in goal_lines[0] and "[in-progress]" in goal_lines[0]
+    assert "back" in goal_lines[1] and "[" not in goal_lines[1]
+
+
+async def test_set_goal_status_unknown_id_names_the_remedy(env):
+    """An unknown id names the id and says where the valid ids are."""
+    result = await env.tools["set_goal_status"](99, "blocked", _ctx=ctx_for(env.channel))
+    assert "#99" in result and "latest goals entry" in result
+
+
+async def test_set_goal_status_bad_status_lists_accepted_values(env):
+    """A bad status names the rejected value and lists the accepted ones plainly."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("x", _ctx=ctx)
+    result = await env.tools["set_goal_status"](1, "done", _ctx=ctx)
+    assert "'done'" in result
+    assert "open, in-progress, blocked, waiting" in result
+
+
+async def test_concurrent_retire_writes_exactly_one_memory_record(env):
+    """Two retire_goal calls racing on one goal: one wins, and the loser must
+    not leave an orphan memory record behind."""
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "work")
+    await env.tools["add_goal"]("race me", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+
+    results = await asyncio.gather(
+        env.tools["retire_goal"](gid, "I concluded A.", _ctx=ctx),
+        env.tools["retire_goal"](gid, "I concluded B.", _ctx=ctx),
+    )
+
+    assert sorted("already retired" in r for r in results) == [False, True]
+    assert (await rows(env, "SELECT COUNT(*) FROM memory"))[0][0] == 1
+    assert len([c for c in env.state_changes if c["kind"] == "retired"]) == 1
+
+
+async def test_concurrent_status_changes_report_a_consistent_chain(env):
+    """Racing set_goal_status calls: each hook's old_status is the previous
+    change's new_status, so a subscriber never sees two changes from 'open'."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("flip", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    env.state_changes.clear()
+
+    await asyncio.gather(
+        env.tools["set_goal_status"](gid, "blocked", _ctx=ctx),
+        env.tools["set_goal_status"](gid, "waiting", _ctx=ctx),
+        env.tools["set_goal_status"](gid, "in-progress", _ctx=ctx),
+    )
+
+    seen = [(c["old_status"], c["new_status"]) for c in env.state_changes]
+    assert len(seen) == 3
+    assert seen[0][0] == "open"
+    for (_, prev_new), (next_old, _) in zip(seen, seen[1:]):
+        assert next_old == prev_new
+
+
+async def test_seed_cli_works_before_the_daemon_has_migrated_the_table(env):
+    """An operator may seed before the upgraded daemon has started: the table
+    has no position column yet. The seed must still work, and the daemon's
+    migration then places the seeded goal behind the older ones (position = id)."""
+    from click.testing import CliRunner
+
+    # Rebuild the table as the old schema: no position, no origin_channel.
+    await env.goals._require_db()
+    await env.db.execute("ALTER TABLE goals RENAME TO goals_old")
+    await env.db.execute(
+        "CREATE TABLE goals (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, "
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL, retired_at REAL, "
+        "memory_id INTEGER, status TEXT NOT NULL DEFAULT 'open')"
+    )
+    now = env.clock.now()
+    await env.db.execute(
+        "INSERT INTO goals (text, created_at, updated_at) VALUES ('older', ?, ?)",
+        (now, now),
+    )
+    await env.db.commit()
+
+    result = await asyncio.to_thread(
+        CliRunner().invoke, goals_command,
+        ["--db", env.db_path, "seed", "operator seeded"],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+
+    # The daemon starts: the migration runs and orders by id.
+    env.goals._schema_ready = False
+    await env.goals._require_db()
+    order = [g["summary"] for g in await env.goals.open_goals()]
+    assert order == ["older", "operator seeded"]
+
+
+async def test_hook_fires_outside_the_goals_lock(env):
+    """A subscriber that calls a goal tool from inside the hook must not
+    deadlock: the hook fires after the goals lock and the memory lock are
+    released (#808)."""
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "work")
+    await env.tools["add_goal"]("first", _ctx=ctx)
+    await env.tools["add_goal"]("second", _ctx=ctx)
+    first_id, second_id = [r[0] for r in await rows(env, "SELECT id FROM goals ORDER BY id")]
+
+    class _Reentrant(CorvidaePlugin):
+        @hookimpl
+        async def on_goals_state_changed(
+            self, goal_id, kind, old_status, new_status,
+            origin_channel, actor_channel, conclusion,
+        ):
+            # Only react to the retirement; the change we make fires the hook again.
+            if kind == "retired":
+                await env.tools["set_goal_status"](second_id, "blocked", _ctx=ctx)
+
+    env.pm.register(_Reentrant())
+    await asyncio.wait_for(
+        env.tools["retire_goal"](first_id, "I concluded it is done.", _ctx=ctx), timeout=5
+    )
+
+    assert (await rows(env, "SELECT status FROM goals WHERE id = ?", (second_id,)))[0][0] == "blocked"

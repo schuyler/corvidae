@@ -308,3 +308,108 @@ class TestBareCancelBackstop:
         monkeypatch.setattr(McpClientPlugin, "_connect_server", boom)
         assert await plugin._retry_round() is False
         assert list(plugin._pending_servers) == ["down"]
+
+
+class TestThirdPartyLogsDoNotCarryTheCredential:
+    """#595: the MCP SDK and httpx log the configured URL whole, so a userinfo
+    password or a query token reaches the daemon log unless something redacts
+    records corvidae does not emit."""
+
+    PASSWORD = "hunter2-not-the-bearer"
+
+    def _url_with_userinfo(self, mcp_url: str) -> str:
+        scheme, _, rest = mcp_url.partition("://")
+        return f"{scheme}://alfred:{self.PASSWORD}@{rest}"
+
+    async def test_a_401_with_userinfo_never_logs_the_password(
+        self, mcp_url, caplog
+    ):
+        # The server refuses the request (no bearer header) after accepting the
+        # connection: the shape #595 was reported in.
+        url = self._url_with_userinfo(mcp_url)
+        with caplog.at_level(logging.DEBUG):
+            plugin = await _start({
+                "wiki": {"transport": "streamable_http", "url": url,
+                         "connect_timeout_seconds": 5},
+            })
+            try:
+                assert plugin._servers == [], "the connect should have failed"
+            finally:
+                await plugin.on_stop()
+
+        assert caplog.records, "nothing was logged, so this proves nothing"
+        leaks = [r.getMessage() for r in caplog.records if self.PASSWORD in r.getMessage()]
+        assert leaks == [], f"a log record carries the password: {leaks[0][:120]}"
+        # caplog.text renders tracebacks too, where the SDK quotes the URL.
+        assert self.PASSWORD not in caplog.text
+
+    async def test_a_401_with_a_query_token_never_logs_the_token(
+        self, mcp_url, caplog
+    ):
+        # The other way a credential reaches a URL, and the reason the filter is
+        # the fix rather than stripping userinfo alone.
+        token = "query-token-9d1e"
+        with caplog.at_level(logging.DEBUG):
+            plugin = await _start({
+                "wiki": {"transport": "streamable_http",
+                         "url": f"{mcp_url}?token={token}",
+                         "connect_timeout_seconds": 5},
+            })
+            try:
+                assert plugin._servers == []
+            finally:
+                await plugin.on_stop()
+
+        assert caplog.records, "nothing was logged, so this proves nothing"
+        leaks = [r.getMessage() for r in caplog.records if token in r.getMessage()]
+        assert leaks == [], f"a log record carries the query token: {leaks[0][:120]}"
+        # caplog.text renders tracebacks too, where the SDK quotes the URL.
+        assert token not in caplog.text
+
+    async def test_an_sse_401_after_connect_never_logs_the_password(
+        self, caplog
+    ):
+        # The #595 scenario proper: the SSE stream is accepted, then the POST
+        # that follows is refused with 401. The SDK logs that at ERROR
+        # ("Error in post_writer") with the credential in the traceback, not
+        # the message, so the whole rendered log text is checked.
+        import uvicorn
+        from mcp.server.mcpserver import MCPServer
+
+        inner = MCPServer("echo-sse").sse_app()
+
+        async def refuse_posts(scope, receive, send):
+            # GET (the SSE stream) and lifespan pass; any POST gets a 401.
+            if scope["type"] == "http" and scope["method"] == "POST":
+                await send({"type": "http.response.start", "status": 401,
+                            "headers": []})
+                await send({"type": "http.response.body", "body": b""})
+                return
+            await inner(scope, receive, send)
+
+        # Port 0: the OS picks a free port at bind time.
+        server = uvicorn.Server(uvicorn.Config(
+            refuse_posts, host="127.0.0.1", port=0, log_level="warning",
+            lifespan="on"))
+        serve_task = asyncio.create_task(server.serve())
+        async with asyncio.timeout(5):
+            while not server.started:
+                await asyncio.sleep(0.02)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        url = f"http://alfred:{self.PASSWORD}@127.0.0.1:{port}/sse"
+        try:
+            with caplog.at_level(logging.DEBUG):
+                plugin = await _start({
+                    "old": {"transport": "sse", "url": url,
+                            "connect_timeout_seconds": 3},
+                })
+                try:
+                    assert plugin._servers == [], "the connect should have failed"
+                finally:
+                    await plugin.on_stop()
+        finally:
+            server.should_exit = True
+            await serve_task
+
+        assert caplog.records, "nothing was logged, so this proves nothing"
+        assert self.PASSWORD not in caplog.text

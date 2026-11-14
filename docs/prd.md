@@ -811,7 +811,7 @@ Per transport:
 
 1. Built-in tools: `shell`, `read_file`, `write_file`, `web_fetch`,
    `web_search`, `task_pipeline`, `task_status`, `set_settings`,
-   `subagent`, the scheduler's `remind_me`/`list_reminders`/
+   `subagent`, `fork`, the scheduler's `remind_me`/`list_reminders`/
    `cancel_reminder`, memory's `search_memory`/`recall_raw`, and the
    send, note and read tools (§3.5.9–11). Schemas
    are generated from type hints and docstrings; `_`-prefixed parameters
@@ -890,6 +890,13 @@ Per transport:
    persona-neutral prompt as shipped, which is one of the agent's prompts
    under principle 15; it returns a task id at once and its result arrives
    as a notification like any other tool.
+   Nested background agents are allowed — a subagent may launch a
+   `fork` and a fork a `subagent` — and their depth is bounded by
+   `tools.max_agent_depth` (default 2: a main turn may spawn one level, and
+   that level one more; a third is refused), so recursion cannot exhaust the daemon. Past the bound
+   the spawn is refused with an error naming the key and saying to do the
+   work in the current task (principle 5), and no task is enqueued. The
+   bound is depth only; width is not capped.
 8. MCP servers connect at startup over any transport the client
    supports, fail-soft per server. A server that fails recovers without a
    restart or a triggering tool call, and its tools reach the running
@@ -1397,7 +1404,9 @@ design, not requirement. The requirements are outcomes:
    written by a fork of that pre-compaction copy when one was taken, and a replay sends the request the running
    agent would. Seeding and imports have no window and run standalone (a windowless call,
    unlike the view call, which is also `mode = standalone` in `usage_log`).
-   Subagents never fork.
+   A subagent's own calls are never forks of the window, so they are
+   `standalone`; a subagent that launches a background agent is a nested
+   agent, bounded by `tools.max_agent_depth` (§3.5.7), not a fork.
 6. How much of each fork's prompt came from cache is recorded per stage and
    profile (§3.13.10). A stage whose forks keep missing the cached prefix
    the window's main turns keep reusing is reported, naming the stage and
@@ -1738,6 +1747,7 @@ record that holds the reasoning.
 | Operator-seeded goals allowed | §3.7 Goals; diverges from the Persyn spec |
 | Memory poisoning answered on the write side with trust tagging (trust plugin) | §3.7 Trust; an addition to the Persyn spec |
 | No sandbox; the subagent/MCP seam is where one would attach | principle 9; §3.5.3, §3.5.5; diverges from the Persyn spec's sandboxed execution |
+| Nesting is bounded, not prohibited: background agents may spawn one another down to `tools.max_agent_depth` (default 2) | operator decision, 2026-11-13; #816 |
 | No distributed infrastructure | principle 8; diverges from the Persyn spec |
 | Signal keys on ACI; E.164 resolved forward once per connect; no reverse resolution | principle 10; §3.2 Signal |
 | Discord: no privileged intent unless a channel answers unaddressed (the transport default or any per-channel override); outbound mentions disabled; threads own their history | #80; #512 |

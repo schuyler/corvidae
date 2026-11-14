@@ -15,7 +15,7 @@ from corvidae.hooks import create_plugin_manager
 
 from corvidae_timepiece import TimepiecePlugin
 
-STAMP_RE = re.compile(r"^The current date and time are now [A-Za-z]+ \d{4}-\d{2}-\d{2} at \d{2}:\d{2} [A-Z]+$")
+STAMP_RE = re.compile(r"^The current date and time are now [A-Za-z]+ \d{4}-\d{2}-\d{2} at \d{2}:\d{2} [A-Z]+\.")
 FIXED_TZ = ZoneInfo("UTC")
 T0 = datetime(2026, 11, 7, 19, 15, tzinfo=FIXED_TZ)
 
@@ -61,6 +61,8 @@ class TestStampInjection:
         assert STAMP_RE.match(entries[0]["content"]), entries[0]["content"]
         # The fixed clock reads 19:15 UTC on a Saturday.
         assert "Saturday 2026-11-07 at 19:15 UTC" in entries[0]["content"]
+        # No note by default: the line ends at the period after the time.
+        assert entries[0]["content"].endswith("UTC.")
 
     async def test_no_stamp_within_interval(self):
         plugin = await make_plugin({})
@@ -100,6 +102,49 @@ class TestStampInjection:
         channel.conversation = None
         await turn(plugin, channel)  # must not raise
         assert plugin._last.get(channel.id) is None
+
+
+class TestNote:
+    async def test_note_appended_after_stamp(self):
+        plugin = await make_plugin(
+            {"timepiece": {"note": "The hour doesn't affect my capabilities."}}
+        )
+        channel = FakeChannel()
+        await turn(plugin, channel)
+        content = context_entries(channel)[0]["content"]
+        assert "Saturday 2026-11-07 at 19:15 UTC." in content
+        assert "The hour doesn't affect my capabilities." in content
+        # Note comes after the stamp, separated by a space.
+        assert content == (
+            "The current date and time are now Saturday 2026-11-07 "
+            "at 19:15 UTC. The hour doesn't affect my capabilities."
+        )
+
+    async def test_empty_note_omitted(self):
+        plugin = await make_plugin({"timepiece": {"note": ""}})
+        channel = FakeChannel()
+        await turn(plugin, channel)
+        content = context_entries(channel)[0]["content"]
+        assert content.endswith("UTC.")
+
+    async def test_note_default_empty(self):
+        plugin = await make_plugin({})
+        channel = FakeChannel()
+        await turn(plugin, channel)
+        content = context_entries(channel)[0]["content"]
+        assert content.endswith("UTC.")
+
+    async def test_non_string_note_rejected(self):
+        pm = create_plugin_manager()
+        plugin = TimepiecePlugin()
+        pm.register(plugin, name="timepiece")
+        import pytest
+
+        with pytest.raises(ValueError) as exc:
+            await pm.ahook.on_init(
+                pm=pm, config={"timepiece": {"note": 123}}
+            )
+        assert "timepiece.note" in str(exc.value)
 
 
 class TestConfig:
@@ -185,7 +230,6 @@ class TestConfig:
             )
         assert "timepiece.format" in str(exc.value)
 
-
     async def test_zero_interval_rejected(self):
         pm = create_plugin_manager()
         plugin = TimepiecePlugin()
@@ -240,7 +284,6 @@ class TestConfig:
                 pm=pm, config={"timepiece": {"timezone": ""}}
             )
         assert "timepiece.timezone" in str(exc.value)
-
 
     async def test_oversized_interval_rejected(self):
         pm = create_plugin_manager()

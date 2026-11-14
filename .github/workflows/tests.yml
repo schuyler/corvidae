@@ -48,10 +48,12 @@ jobs:
           present = [m for m in ("sqlite_vec", "discord", "corvidae_cognition",
                                  "cross_channel_send", "corvidae_restart",
                                  "webhook_notify", "context_panel",
-                                 "corvidae_timepiece", "corvidae_inotify")
+                                 "corvidae_timepiece", "corvidae_inotify",
+                                 "emoji")
                      if importlib.util.find_spec(m) is not None]
           assert not present, f"kernel install has optional packages: {present}"
           import corvidae.channels.discord  # must import without its SDK
+          import corvidae.channels.signal  # must import without its table
           print("kernel install: no optional packages")
           PY
 
@@ -86,17 +88,18 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies (all extras)
-        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss
+        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal
 
       # About 26 test sites skip when sqlite-vec can't load, and the Discord
-      # tests skip without the SDK, which would turn them into silent skips
+      # tests skip without the SDK, as do the Signal tests without `emoji`, which would turn them into silent skips
       # on a green run. Fail here instead.
-      - name: Check sqlite-vec and discord load
+      - name: Check sqlite-vec, discord and emoji load
         run: |
           uv run --no-sync python - <<'PY'
           import sqlite3
           import sqlite_vec
           import discord
+          import emoji
 
           conn = sqlite3.connect(":memory:")
           conn.enable_load_extension(True)

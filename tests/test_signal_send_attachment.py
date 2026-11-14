@@ -22,6 +22,12 @@ from pathlib import Path
 
 import pytest
 
+# The reaction check is a table lookup (#780), and SignalPlugin.on_init
+# refuses a configured transport without the table, so this file needs the
+# `signal` extra. Same arrangement as the Discord tests: the kernel job
+# installs no extras and skips the file.
+pytest.importorskip("emoji")
+
 from corvidae.channel import Channel
 from corvidae.tool import Tool
 from tests.test_signal_plugin import (

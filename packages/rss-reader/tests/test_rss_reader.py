@@ -114,6 +114,7 @@ def _make_plugin(config: dict) -> RSSPlugin:
     plugin._spill = MagicMock()
     plugin._spill.notify = AsyncMock()
     plugin.pm = MagicMock()
+    plugin._prompt = ""
     return plugin
 
 
@@ -651,3 +652,69 @@ async def test_items_beyond_cap_arrive_next_cycle(tmp_path: Path):
             seen_after_second = plugin._load_seen()
             total_second = sum(len(v) for v in seen_after_second.values())
             assert total_second == 4
+
+
+@pytest.mark.asyncio
+async def test_prompt_prepended_to_each_item(tmp_path: Path):
+    """When prompt is set, each delivered item's text starts with the prompt."""
+    from rss_reader import RSSPlugin
+    plugin = _make_plugin({"rss": {"prompt": "Summarise in two sentences."}})
+    plugin._feeds = ["https://example.com/feed"]
+    plugin._targets = ("signal:+1",)
+    plugin._max_items = 500
+    plugin._state_path = tmp_path / "seen.json"
+    plugin._max_chars = 2000
+    plugin._poll_secs = 1800
+
+    feed = _sample_feed(2)
+    resp = MagicMock()
+    resp.content = feed
+    resp.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    mock_channel = MagicMock()
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=mock_channel)):
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            await plugin._poll_once()
+
+    # Each notification should start with the prompt
+    for call in mock_channel.notify.call_args_list:
+        text = call.kwargs.get("text") or call.args[0] if call.args else call.kwargs["text"]
+        assert text.startswith("Summarise in two sentences.\n\n")
+
+
+@pytest.mark.asyncio
+async def test_no_prompt_when_absent(tmp_path: Path):
+    """When prompt is absent, delivered text is unchanged (no prepend)."""
+    from rss_reader import RSSPlugin
+    plugin = _make_plugin({})
+    plugin._feeds = ["https://example.com/feed"]
+    plugin._targets = ("signal:+1",)
+    plugin._max_items = 500
+    plugin._state_path = tmp_path / "seen.json"
+    plugin._max_chars = 2000
+    plugin._poll_secs = 1800
+
+    feed = _sample_feed(2)
+    resp = MagicMock()
+    resp.content = feed
+    resp.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    mock_channel = MagicMock()
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=mock_channel)):
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            await plugin._poll_once()
+
+    # No prompt: text should not start with any framing
+    for call in mock_channel.notify.call_args_list:
+        text = call.kwargs.get("text") or call.args[0] if call.args else call.kwargs["text"]
+        assert not text.startswith("Summarise")

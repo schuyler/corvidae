@@ -44,7 +44,11 @@ from corvidae.shutdown import (
     parse_shutdown_timeouts,
 )
 from corvidae.spill import NotificationSpill
-from corvidae.tool_collection import parse_read_file_window_fraction, parse_tool_timeouts
+from corvidae.tool_collection import (
+    parse_max_agent_depth,
+    parse_read_file_window_fraction,
+    parse_tool_timeouts,
+)
 from corvidae.tools.subagent import parse_subagent_max_turns
 
 logger = logging.getLogger(__name__)
@@ -278,6 +282,8 @@ class Runtime:
             parse_tool_timeouts(config.get("tools"))
             # tools.read_file_window_fraction: reject a bad value at startup.
             parse_read_file_window_fraction(config.get("tools"))
+            # tools.max_agent_depth: a bad nesting bound fails startup too (#816).
+            parse_max_agent_depth(config.get("tools"))
             # subagent.max_turns: reject a non-positive-integer budget at
             # startup (int(False) == 0 would no-op every subagent silently).
             parse_subagent_max_turns(config)
