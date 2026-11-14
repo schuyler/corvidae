@@ -136,6 +136,21 @@ with `DISCORD_TOKEN` set in the environment, or `token:` added. Restart
 corvidae; `discord:` is read at startup. On success the log shows
 `discord: connected as user id <id>`.
 
+`allow` takes either shape: a list of ids, or a map of alias to id. The alias is
+for whoever edits the file — it is never matched, never shown to the model:
+
+```yaml
+discord:
+  allow:
+    schuyler: 123456789012345678
+    yoz: 987654321098765432
+```
+
+A map value has to be the id alone — digits, no `discord:` prefix, no leading
+zeros — because anything else silently matches nobody, and default-deny turns
+that into a user who simply never gets an answer. The error names the alias you
+typed, so the typo is findable.
+
 `allow` is default-deny. An empty or missing list means nobody can use the
 bot, and it will not tell them so.
 

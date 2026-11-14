@@ -429,11 +429,37 @@ class TestConfig:
         finally:
             await h.plugin.on_stop()
 
-    @pytest.mark.parametrize("bad", ["123", 123, {"a": 1}])
-    async def test_allow_not_a_list_raises(self, bad):
-        """`allow` must be a list; the error names the field."""
-        with pytest.raises(ValueError, match="allow"):
+    @pytest.mark.parametrize("bad", ["123", 123])
+    async def test_allow_neither_list_nor_map_raises(self, bad):
+        """`allow` must be a list or an alias->id map; the error names both."""
+        with pytest.raises(ValueError, match="allow") as excinfo:
             await _start_plugin(discord_overrides={"allow": bad}, wait_connect=False)
+        assert "list of user ids" in str(excinfo.value)
+        assert "mapping of alias to user id" in str(excinfo.value)
+
+    async def test_allow_map_form_is_accepted(self):
+        """`allow: {alias: id}` admits the map's values, and only those (#702)."""
+        h = await _start_plugin(
+            discord_overrides={"allow": {"schuyler": AUTH_ID, "yoz": str(OTHER_ID)}}
+        )
+        try:
+            ch = h.registry.get_or_create("discord", f"dm:{AUTH_ID}")
+            assert await _drive_gate(h.pm, channel=ch, sender=str(AUTH_ID), text="x") is True
+            assert await _drive_gate(h.pm, channel=ch, sender=str(OTHER_ID), text="x") is True
+            assert await _drive_gate(h.pm, channel=ch, sender="1", text="x") is False
+        finally:
+            await h.plugin.on_stop()
+
+    @pytest.mark.parametrize(
+        "bad", ["discord:408709225498542081", "0408709225498542081", 408709225498542081.0]
+    )
+    async def test_allow_map_value_that_is_not_an_id_names_its_alias(self, bad):
+        """A bad value names the alias the editor typed, not just the id (#702)."""
+        with pytest.raises(ValueError, match="allow.schuyler") as excinfo:
+            await _start_plugin(
+                discord_overrides={"allow": {"schuyler": bad}}, wait_connect=False
+            )
+        assert "no leading zeros and no prefix" in str(excinfo.value)
 
     @pytest.mark.parametrize("bad", ["false", 0, None])
     async def test_require_mention_not_a_bool_raises(self, bad):

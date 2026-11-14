@@ -313,6 +313,32 @@ def _attachment_kind(att: Any) -> str:
     return "document"
 
 
+def _allow_list_from_map(allow: dict) -> list[str]:
+    """The ids from an ``allow: {alias: id}`` map, validating each as an id.
+
+    The alias is documentation for whoever edits agent.yaml: it is never used
+    for matching and never reaches the model. Only the value matters, so only
+    the value is validated -- and a bad one names its own alias, because the
+    person who typed ``schuyler: 4087O9225...`` (letter O) needs to know which
+    line to look at, not which id was rejected.
+    """
+    ids: list[str] = []
+    for alias, value in allow.items():
+        text = str(value)
+        # A nested mapping or list stringifies to braces or brackets and fails
+        # here too, with the same sentence naming the fix.
+        if not re.fullmatch(r"[1-9][0-9]*", text):
+            raise ValueError(
+                "discord: config entry 'allow."
+                f"{alias}' is not a Discord user id; use the number alone, as "
+                "it appears after `discord:` in the agent's logs — "
+                "123456789012345678, digits only, quoted or not, no leading "
+                "zeros and no prefix — in the discord: block of agent.yaml"
+            )
+        ids.append(text)
+    return ids
+
+
 class DiscordPlugin(TransportPlugin):
     """Transport plugin for Discord DMs, server channels, and threads."""
 
@@ -401,8 +427,20 @@ class DiscordPlugin(TransportPlugin):
             )
 
         allow = block.get("allow", [])
-        if not isinstance(allow, list):
-            raise ValueError("discord: config field 'allow' must be a list")
+        if isinstance(allow, dict):
+            # {alias: user id}: the alias is for humans, the value is what
+            # matches. A typo in a bare snowflake silently denies that user
+            # (default-deny), so a map value gets the same discipline as the
+            # channels: override keys (#512, #702): digits alone, no prefix,
+            # no leading zeros.
+            allow = _allow_list_from_map(allow)
+        elif not isinstance(allow, list):
+            raise ValueError(
+                "discord: config field 'allow' must be a list of user ids or a "
+                f"mapping of alias to user id, got {allow!r}; write `allow: "
+                '[123456789012345678]` or `allow: {schuyler: '
+                "123456789012345678}` in the discord: block of agent.yaml"
+            )
 
         chunk_size = block.get("message_chunk_size", DISCORD_MESSAGE_LIMIT)
         if (

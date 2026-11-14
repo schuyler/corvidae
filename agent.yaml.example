@@ -230,8 +230,10 @@ agent:
 # allowed user and needs the Message Content intent enabled in the portal.
 # discord:
 #   token: "..."                       # bot token; or set DISCORD_TOKEN instead
-#   allow:                             # Discord user ids (numeric); default-deny
-#     - 123456789012345678
+#   allow:                             # Discord user ids (numeric); default-deny.
+#     - 123456789012345678             # Either a list of ids, or an alias->id map
+#                                      # (the alias is for humans only, never matched):
+#                                      #   allow: {schuyler: 123456789012345678}
 #   message_chunk_size: 2000           # max UTF-8 bytes per message, 100-2000
 #   require_mention: true              # false: answer allowed users without an @-mention
 #   channels:                          # per-channel override; the key is the
