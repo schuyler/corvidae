@@ -227,17 +227,17 @@ class _UrlRedactingFilter(logging.Filter):
                     "could not redact the stack of a %s log record",
                     record.name, exc_info=True,
                 )
-                record.stack_info = "(stack withheld: could not redact it)"
+                record.stack_info = "(stack omitted: could not redact it)"
         try:
             message = record.getMessage()
         except Exception:
             logger.warning(
                 "could not format a %s log record to redact it; its text is "
-                "withheld", record.name, exc_info=True,
+                "omitted", record.name, exc_info=True,
             )
             # Fail closed: a handler's own error report would otherwise print
             # the raw template and arguments, credentials and all.
-            record.msg = f"(unformattable {record.name} log record withheld)"
+            record.msg = f"(unformattable {record.name} log record omitted)"
             record.args = ()
             return True
         if not any(marker in message for marker in _CREDENTIAL_MARKERS):
@@ -275,7 +275,7 @@ class _UrlRedactingFilter(logging.Filter):
                 "could not redact the traceback of a %s log record",
                 record.name, exc_info=True,
             )
-            record.exc_text = "(traceback withheld: could not redact it)"
+            record.exc_text = "(traceback omitted: could not redact it)"
             record.exc_info = None
 
 
