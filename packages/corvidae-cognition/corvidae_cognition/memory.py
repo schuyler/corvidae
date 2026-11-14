@@ -1310,6 +1310,12 @@ CREATE TABLE IF NOT EXISTS retrieval_candidate (
 ) WITHOUT ROWID
 """
 
+# The retention prune's age cutoff (#682) and every "what was retrieved when"
+# query: without it a first prune of months of rows scans the whole table.
+RETRIEVAL_LOG_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS retrieval_log_ts ON retrieval_log (ts)
+"""
+
 # Lookups by memory: "why didn't it remember X" and the redaction delete.
 RETRIEVAL_CANDIDATE_INDEX_DDL = """
 CREATE INDEX IF NOT EXISTS retrieval_candidate_memory
@@ -3194,6 +3200,7 @@ class MemoryPlugin(CorvidaePlugin):
     async def _retrieve_pool(
         self, text: str, k: int | None = None,
         exclude: tuple[str, int] | None = None,
+        now: float | None = None,
     ) -> RetrievalPool:
         """Score the whole candidate pool for a query text (#407).
 
@@ -3201,12 +3208,17 @@ class MemoryPlugin(CorvidaePlugin):
         logs the whole pool. ``excluded`` lists in-window records whose
         score would have placed them in the top k (vec path only; the FTS
         path reports only their count).
+
+        ``now`` pins the clock the decay and the ages are measured against,
+        so a scoring run is reproducible: two runs on different days with the
+        same pinned ``now`` produce the same scores and bands (#661). Passive
+        retrieval leaves it None and uses the wall clock.
         """
         db = await self._ensure_schema()
         k = k or self._retrieval_k
         if db is None:
             return RetrievalPool([], [], None, False, k)
-        now = time.time()
+        now = time.time() if now is None else now
 
         rows: list[CandidateRow] = []
         degraded = False
@@ -3327,6 +3339,11 @@ class MemoryPlugin(CorvidaePlugin):
                 "z": z,
                 "age_seconds": age_seconds,
                 "source": source,
+                # Measured means the vector side gave this record a real
+                # cosine: a KNN hit, or an FTS hit whose stored vector was
+                # read back. An unmeasured candidate is scored from
+                # FTS_SIMILARITY_PROXY, not from the query (#705).
+                "measured": memory_id in measured,
             })
         # Split off the in-window rows; the rest is the ranked pool.
         pool_rows = [c for c, w in zip(candidates, in_window_flags) if not w]
@@ -3338,6 +3355,17 @@ class MemoryPlugin(CorvidaePlugin):
             # Vec-only or degraded: rank by the decayed score, as before #666.
             keys = {c["id"]: (c["score"],) for c in candidates}
         ranked = sorted(pool_rows, key=lambda c: keys[c["id"]], reverse=True)
+        # A candidate with no measured similarity cannot be admitted on its
+        # own relevance — its band comes from FTS_SIMILARITY_PROXY, not from
+        # the query — so it must not take a top-k slot from one that can
+        # (#705). Measured candidates keep their fused order, then the
+        # unmeasured ones follow in theirs: they stay in the pool, and so in
+        # the candidate log, but they cannot push a measured record past the
+        # cut. On the degraded path nothing is measured and this is a no-op.
+        ranked = (
+            [c for c in ranked if c["measured"]]
+            + [c for c in ranked if not c["measured"]]
+        )
         # Each in-window record is judged alone: would it have made top k?
         excluded: list[tuple[int, dict]] = []
         for e in in_window_rows:
@@ -3895,6 +3923,7 @@ class MemoryPlugin(CorvidaePlugin):
         await db.execute(MEMORY_FTS_INSERT_TRIGGER)
         await db.execute(MEMORY_FTS_UPDATE_TRIGGER)
         await db.execute(RETRIEVAL_LOG_DDL)
+        await db.execute(RETRIEVAL_LOG_INDEX_DDL)
         # Schema upgrade: retrieval_log tables from before top_similarity
         # (#66) gain it as a nullable column; old rows read NULL.
         await add_column_if_missing(db, "retrieval_log", "top_similarity", "REAL")

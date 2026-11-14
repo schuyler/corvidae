@@ -33,7 +33,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
-| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss) and the provenance check |
+| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), and the provenance check |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
@@ -249,7 +249,10 @@ passes (demotion, re-promotion, retrieval-log pruning when
 `memory.retention.retrieval_log_max_age_days` is set (#654), vec backfill;
 a pruning failure is logged and leaves backfill to run): each batch commits whole
 or rolls back whole, and the backfill's embeddings are computed before the
-transaction opens. Each pass selects its candidates before its transaction,
+transaction opens. The prune takes `RETENTION_PRUNE_BATCH` (1000) rows per
+transaction and releases the lock between them (#682), so enabling it against
+a large existing log cannot push another memory write past its busy timeout;
+`retrieval_log(ts)` is indexed so each batch's cutoff lookup does not scan. Each pass selects its candidates before its transaction,
 so every write re-checks the selection: demotion skips a row redacted,
 already demoted or retrieved since the SELECT; re-promotion never
 re-indexes a row superseded or redacted meanwhile; the backfill writes no
@@ -588,7 +591,9 @@ What it does:
   path fetches `k × 4` candidates, so a different k changes the pool too.
   `--candidates hybrid|vector` overrides `memory.retrieval.candidates`
   (#666), so the fused pool can be scored against the KNN alone; each pool
-  candidate records its `source`.
+  candidate records its `source`. `--now EPOCH` pins the clock decay is
+  measured against (#661), so the same snapshot scores identically on two
+  run dates; each pool records the pin it used, or `null` for the wall clock.
 - **Names labelled ids it can't reach.** A labelled id is reachable when its
   row exists with `indexed = 1` and `redacted = 0`, the filter both searches
   apply. Anything else is listed by id with its status, checked in this
@@ -639,7 +644,12 @@ The pool file is written once, after the last query:
 ```json
 {
   "run_at": 1762700000.0,
+  "now": 1762700000.0,
   "k": 8,
+  "settings": {"half_life_days": 7, "recency_from": "created",
+               "band_on": "relative", "band_strong": 4.5,
+               "band_moderate": 3.0, "k": 8,
+               "encoder": "nomic-embed-text", "dimensions": 768},
   "queries": [
     {
       "index": 0,
@@ -654,9 +664,9 @@ The pool file is written once, after the last query:
       "mrr": 0.5,
       "candidates": [
         {"id": 398, "rank": 1, "similarity": 0.81, "score": 0.77, "band": "strong",
-         "source": "both"},
+         "z": 2.4, "source": "both"},
         {"id": 412, "rank": 2, "similarity": 0.79, "score": 0.74, "band": "moderate",
-         "source": "vec"}
+         "z": 1.1, "source": "vec"}
       ]
     }
   ],
@@ -674,7 +684,12 @@ before it drops weak-band entries (all of them, so an all-weak pool admits
 nothing, #409; a degraded pool keeps its top k) and the funnel admits them,
 with no window exclusion. It holds ids and scores but
 no memory text beyond the labels' own `text`, `context` and `query`; look the
-ids up in the source. `run_at` is the wall-clock
+ids up in the source. `z` is the statistic a `band_on: relative` band came
+from — how far this record's similarity stands out from the query's spread
+over the whole memory — so the z thresholds can be fitted offline instead of
+reading `retrieval_candidate.z` from live traffic (#704). It is `null` when no
+spread was computed: a memory under `RELATIVE_MIN_RECORDS` (50) embedded
+records, or a run banded on `similarity`/`score`. `run_at` is the wall-clock
 time the run started. The means are `null` when no query was scored.
 
 Operator notes:
@@ -685,14 +700,18 @@ Operator notes:
   environment even though no chat request is made. If it isn't, the run
   stops with `Config error: llm.<profile>.api_key references ${VAR}, which
   is not set … — check <config>`.
-- **Scores drift with the run date; rankings don't.** Decay runs against
-  the wall clock at query time, not a time taken from the snapshot. Scoring
-  the same snapshot a month later multiplies every score by the same
-  factor, so the order, Recall@k and MRR are unchanged, but absolute
+- **Scores drift with the run date unless `--now` pins it.** Decay runs
+  against the clock at query time, not a time taken from the snapshot, so
+  scoring the same snapshot a month later multiplies every score by the
+  same factor: the order, Recall@k and MRR are unchanged, but absolute
   scores are lower, and so are bands under `band_on: score` (bands under
-  `relative` and `similarity` don't use decay). `run_at` records the
-  date. shortcut: no pinned "now"; add one before comparing pool files
-  scored on different days.
+  `relative` and `similarity` don't use decay). Pass `--now <epoch>` to
+  pin it; two runs with the same pin produce identical scores and bands
+  whatever day they ran, which is what makes pool files comparable. The
+  file records both the pin (`now`) and the settings that scored it
+  (`settings`: half-life, `recency_from`, `band_on` and its thresholds, k,
+  and the encoder identity and dimensions), so a comparison never has to
+  assume the config behind a pool.
 - **An unreachable embedding server turns every query into FTS5.** Each
   query's embedding call fails after the client's retries (slow), logs a
   `retrieval embedding failed; degrading to FTS5` warning with a traceback
@@ -1544,7 +1563,12 @@ model makes both language judgments; the code only fetches evidence:
 the channel's next turn. Provenance objections wake the channel with a
 stub whose text tells the agent the default is to send nothing: reply
 exactly `NO_REPLY`, and reply in the channel only if its earlier reply
-could lead the other party to take an incorrect action. The plugin's
+could lead the other party to take an incorrect action. With a
+retention root (`critique.retention.root`, else markdown_recall's root), retention findings wake the channel too, and
+every critique wake (provenance included) uses one stub that adds how to
+file them: read the named file under the root and append only what is
+missing. The funnel keeps one pending stub per channel and origin, so the
+first wake's text governs everything queued behind it. The plugin's
 `should_send_response` vetoes a `final` on a critique-origin turn whose
 stripped text is `NO_REPLY`; the kernel stores it as `unsent` with the
 not-sent marker. That veto is critique's own and always on with this plugin

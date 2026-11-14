@@ -603,9 +603,14 @@ Per transport:
 
 1. Each channel has a token budget (`max_context_tokens`), estimated with
    tiktoken over the JSON-serialized visible fields of every message
-   (tool-call arguments, reasoning and the stored provenance record
-   included; the record stands in for the header and fence it renders
-   into), with a character-based fallback.
+   (tool-call arguments and reasoning included), with a character-based
+   fallback. A row whose provenance record renders into a `metadata:` header
+   and a payload fence is estimated as it renders, not by the record: the
+   record is roughly a fifth of the framing's size, so counting it
+   under-counted a window full of small untrusted results and compaction
+   fired late (#577). A person row is the one exception — its header goes out
+   as a separate message, and the estimate counts messages one at a time, so
+   its record still stands in for that header.
 2. Compaction runs when the estimate passes `compaction_threshold`
    (default 80%), retains the most recent messages that fit
    `compaction_retention` (default 50%), and skips windows of

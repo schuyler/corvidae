@@ -24,6 +24,11 @@ logger = logging.getLogger("corvidae.retention")
 # §6-tunable: raise to weight recall traffic more heavily in the score.
 RETRIEVAL_BOOST: float = 0.5
 
+#: retrieval_log rows deleted per write transaction (#682). Bounds how long the
+#: prune holds memory's write lock, so a first prune of a large backlog cannot
+#: push another writer past its busy timeout.
+RETENTION_PRUNE_BATCH: int = 1000
+
 
 def retention_score(
     importance: float,
@@ -177,29 +182,49 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
     max_age_days = memory._retrieval_log_max_age_days
     if max_age_days is not None:
         cutoff = now - max_age_days * 86400.0
+        pruned_log = pruned_candidates = 0
         try:
-            async with memory._db_lock, memory._write_txn() as wdb:
-                # Children first, then the parents they belong to.
-                cand_cursor = await wdb.execute(
-                    "DELETE FROM retrieval_candidate WHERE retrieval_id IN "
-                    "(SELECT id FROM retrieval_log WHERE ts < ?)",
-                    (cutoff,),
-                )
-                log_cursor = await wdb.execute(
-                    "DELETE FROM retrieval_log WHERE ts < ?", (cutoff,)
-                )
-            if log_cursor.rowcount:
+            # One batch per transaction (#682): a first prune of months of rows
+            # used to delete them all while holding memory's write lock, and
+            # other writers timed out behind it. Between batches the lock is
+            # released, so a writer waits at most one batch. The cutoff is a
+            # fixed instant, so batching cannot miss a row: what a batch leaves
+            # is still past it next time round.
+            while True:
+                async with memory._db_lock, memory._write_txn() as wdb:
+                    # Children first, then the parents they belong to: the
+                    # id list is what both deletes key on.
+                    async with wdb.execute(
+                        "SELECT id FROM retrieval_log WHERE ts < ? LIMIT ?",
+                        (cutoff, RETENTION_PRUNE_BATCH),
+                    ) as cursor:
+                        ids = [row[0] for row in await cursor.fetchall()]
+                    if not ids:
+                        break
+                    marks = ", ".join("?" * len(ids))
+                    cand_cursor = await wdb.execute(
+                        f"DELETE FROM retrieval_candidate WHERE retrieval_id IN ({marks})",
+                        ids,
+                    )
+                    log_cursor = await wdb.execute(
+                        f"DELETE FROM retrieval_log WHERE id IN ({marks})", ids
+                    )
+                pruned_candidates += cand_cursor.rowcount
+                pruned_log += log_cursor.rowcount
+            if pruned_log:
                 logger.info(
                     "retention: pruned %d retrieval_log rows and %d "
-                    "retrieval_candidate rows older than %g days",
-                    log_cursor.rowcount, cand_cursor.rowcount, max_age_days,
+                    "retrieval_candidate rows older than %g days, in batches "
+                    "of %d",
+                    pruned_log, pruned_candidates, max_age_days,
+                    RETENTION_PRUNE_BATCH,
                 )
         except Exception as exc:
             logger.warning(
                 "retention: pruning retrieval_log rows older than %g days "
-                "(memory.retention.retrieval_log_max_age_days) failed and was "
-                "rolled back (%s); the next retention run retries",
-                max_age_days, type(exc).__name__, exc_info=True,
+                "(memory.retention.retrieval_log_max_age_days) failed after "
+                "%d rows (%s); the next retention run retries",
+                max_age_days, pruned_log, type(exc).__name__, exc_info=True,
             )
 
     # ------------------------------------------------------------------

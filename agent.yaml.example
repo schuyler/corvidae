@@ -159,6 +159,11 @@ agent:
 # critique:
 #   fork_prompt:
 #     provenance: "..."               # prompts/critique_<lens>_fork.md
+#   retention:                        # #742: defaults to markdown_recall's root
+#     root: values/                   # the knowledge base the lens files into; inert with neither
+#   lens:
+#     novelty: 0.6                    # both thresholds must be crossed
+#     retention: 0.5
 
 # Engagement and decide gates (optional; cognition extra, see
 # docs/configuration.md "gate.*"). Runtime-tunable per channel via set_settings.
@@ -306,6 +311,15 @@ agent:
 #     #   channels: [irc:#corvidae]
 #     #   max_notifications: 20
 
+# GitHub events as terminal outcomes (#792): one line per completed run, PR
+# transition or selected push, instead of one per job-status change. Owns its
+# endpoints — do not list the same endpoint here and in webhook_notify.
+# github_webhook:
+#   max_payload_chars: 2000            # longer lines are cut, the rest spilled
+#   push_branches: [main]              # push events reported only for these
+#   endpoints:
+#     github: [signal:+15551234567]
+
 # Scheduler: reminders (remind_me tool) and operator jobs (optional;
 # without this block the tools still work, in UTC, with these defaults).
 # A job can target any channel; see docs/threat-model.md finding 7.
@@ -380,6 +394,9 @@ agent:
 #     wiki:
 #       transport: streamable_http       # MCP's current HTTP transport
 #       url: http://localhost:8090/mcp
+#       tools:                           # optional; keep a few of a large server's tools
+#         include: ["read_*", "list_*"]  # only these, if present
+#         exclude: ["*_delete_*"]        # dropped after include; globs match the server's own names
 #       headers:                         # sse and streamable_http; ${VAR} comes from the environment
 #         Authorization: "Bearer ${OTTERWIKI_MCP_TOKEN}"
 

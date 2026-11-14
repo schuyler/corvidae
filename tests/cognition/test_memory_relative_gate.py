@@ -257,7 +257,11 @@ class TestRelativeBanding:
         assert rows[loose_id]["source"] == "fts"
         assert rows[loose_id]["z"] is None
         assert rows[loose_id]["band"] == "weak"
-        assert rows[loose_id]["outcome"] == "dropped_weak"
+        # Since #705 an unmeasured hit ranks below every measured one, so at
+        # k=1 it is cut by rank before the gate ever judges it. Either way it
+        # is not admitted; `cut` is the more accurate record, because the
+        # reason is its place in the pool and not its band.
+        assert rows[loose_id]["outcome"] == "cut"
         assert loose not in recalled(conv)
 
     async def test_z_is_logged_on_candidate_rows(self, env):

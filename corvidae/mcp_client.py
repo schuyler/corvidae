@@ -25,6 +25,7 @@ Config (top-level 'mcp:' key in agent.yaml):
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import inspect
 import logging
 import math
@@ -75,7 +76,13 @@ def _is_connect_failure(exc: BaseException) -> bool:
     False means it must propagate. One rule serves ``on_start`` and
     ``_retry_round`` so the two cannot drift apart (#596):
 
-    - An ``Exception`` is a failed connect.
+    - An ``Exception`` is a failed connect — unless this task is being
+      cancelled. Python 3.13 raises a cancel that arrives while a task group
+      holds child errors as a group of ``Exception`` leaves and re-arms the
+      cancel; calling that group a failed connect let the loop carry on, and
+      the re-armed cancel then fired in ``_rebuild_shared_registry``, past the
+      ``try`` that closes the owners (#604). The cancel count is checked
+      first, so no shape of connect error can hide a shutdown.
     - A ``CancelledError`` is a failed connect only when nobody is cancelling
       this task; a cancel of the task itself is a shutdown (#385).
     - A ``BaseExceptionGroup`` follows its leaves: any leaf that is neither an
@@ -84,13 +91,15 @@ def _is_connect_failure(exc: BaseException) -> bool:
       cancel is. A group is not an ``Exception`` when a member is a
       ``BaseException``, which is how it slipped past the old handlers.
     """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        return False
     if isinstance(exc, Exception):
         return True
     leaves = _leaf_exceptions(exc)
     if any(not isinstance(leaf, (Exception, asyncio.CancelledError)) for leaf in leaves):
         return False
-    task = asyncio.current_task()
-    return not (task is not None and task.cancelling())
+    return True
 
 
 def _failure_log_parts(exc: BaseException, cfg: dict) -> tuple[str, bool]:
@@ -499,6 +508,46 @@ _BACKOFF_MULTIPLIER = 2
 _BACKOFF_CAP = 300
 
 
+@dataclass(frozen=True)
+class _ToolFilter:
+    """Which of a server's tools reach the registry (#529).
+
+    Matched with :func:`fnmatch.fnmatchcase` against the server's **own** tool
+    name, not the prefixed one, so a pattern does not change when
+    ``tool_prefix`` does. ``include`` selects, then ``exclude`` drops from that
+    selection; with only one of them set the other is not consulted. An empty
+    filter keeps everything, which is also what an absent ``tools`` block means.
+    """
+
+    include: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+
+    def active(self) -> bool:
+        return bool(self.include or self.exclude)
+
+    def keeps(self, tool_name: str) -> bool:
+        if self.include and not any(
+            fnmatch.fnmatchcase(tool_name, pattern) for pattern in self.include
+        ):
+            return False
+        return not any(
+            fnmatch.fnmatchcase(tool_name, pattern) for pattern in self.exclude
+        )
+
+    def unmatched(self, tool_names: "list[str]") -> list[str]:
+        """The patterns that matched no tool, in config order.
+
+        A pattern that matches nothing is a typo far more often than it is a
+        filter for a tool the server may add later, and the failure it causes —
+        a tool silently absent from the prompt — is invisible otherwise.
+        """
+        return [
+            pattern
+            for pattern in (*self.include, *self.exclude)
+            if not any(fnmatch.fnmatchcase(name, pattern) for name in tool_names)
+        ]
+
+
 @dataclass
 class _ServerSettings:
     """A server's validated config values, read before anything opens."""
@@ -508,6 +557,7 @@ class _ServerSettings:
     timeout: float
     connect_timeout: float
     headers: dict[str, str] | None
+    tools: _ToolFilter = _ToolFilter()
 
 
 def _as_seconds(name: str, cfg: dict, key: str) -> float:
@@ -628,9 +678,49 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
             f"mcp.servers.{name}.headers must be a mapping of header names "
             f"to values, got {_describe_config_value(raw_headers, secret_bearing=True)}"
         )
+    tools = _parse_tool_filter(name, cfg.get("tools"))
     # Resolve ${VAR} references: a missing variable raises McpHeaderEnvError.
     headers = _resolve_headers(name, cfg.get("headers"))
-    return _ServerSettings(transport, prefix, timeout, connect_timeout, headers)
+    return _ServerSettings(transport, prefix, timeout, connect_timeout, headers, tools)
+
+
+def _parse_tool_filter(name: str, block) -> _ToolFilter:
+    """Read ``mcp.servers.<name>.tools`` into a :class:`_ToolFilter` (#529).
+
+    Absent or null means no filter. Anything else must be a mapping naming only
+    ``include`` and ``exclude``, each a list of non-empty glob strings; the
+    error names the key to fix and the rejected value, like the other server
+    keys, and is raised before any transport opens so it is a config error (skip
+    and never retry) rather than a connect failure (retried forever).
+    """
+    if block is None:
+        return _ToolFilter()
+    if not isinstance(block, dict):
+        raise ValueError(
+            f"mcp.servers.{name}.tools must be a mapping with include and/or "
+            f"exclude, got {_describe_config_value(block)}"
+        )
+    unknown = sorted(set(block) - {"include", "exclude"})
+    if unknown:
+        raise ValueError(
+            f"mcp.servers.{name}.tools has unknown key {unknown[0]!r}; "
+            f"use include or exclude"
+        )
+    patterns: dict[str, tuple[str, ...]] = {}
+    for key in ("include", "exclude"):
+        value = block.get(key)
+        if value is None:
+            patterns[key] = ()
+            continue
+        if not isinstance(value, list) or not all(
+            isinstance(p, str) and p.strip() for p in value
+        ):
+            raise ValueError(
+                f"mcp.servers.{name}.tools.{key} must be a list of non-empty "
+                f"glob strings, got {_describe_config_value(value)}"
+            )
+        patterns[key] = tuple(p.strip() for p in value)
+    return _ToolFilter(include=patterns["include"], exclude=patterns["exclude"])
 
 
 @dataclass
@@ -657,6 +747,11 @@ class _McpServerState:
     prefix: str
     timeout_seconds: float
     mcp_tools: list          # list[mcp.types.Tool]
+    #: Which of ``mcp_tools`` reach the registry (#529); empty keeps all.
+    tools: _ToolFilter = _ToolFilter()
+    #: Set once the filter's INFO/WARNING pair is logged for this connection,
+    #: so a rebuild of the cached tool list does not repeat them.
+    filter_logged: bool = False
 
 
 class McpClientPlugin(CorvidaePlugin):
@@ -788,11 +883,13 @@ class McpClientPlugin(CorvidaePlugin):
                 # process lifetime.
                 if not any(server.name == server_name for server in self._servers):
                     self._pending_servers[server_name] = server_cfg
-        except (asyncio.CancelledError, BaseExceptionGroup):
+        except (asyncio.CancelledError, BaseExceptionGroup, KeyboardInterrupt, SystemExit):
             # Interrupted mid-connect: the servers already connected have
             # owner tasks that nothing else will stop, so close them before
-            # the cancellation continues. A group reaches here only when the
-            # inner handler decided it must propagate (#596).
+            # the shutdown continues. A group reaches here only when the inner
+            # handler decided it must propagate (#596), and a bare
+            # KeyboardInterrupt or SystemExit is the same shutdown without the
+            # group around it (#604) — the inner handler lets both through.
             await self._stop_owners()
             raise
 
@@ -1061,6 +1158,7 @@ class McpClientPlugin(CorvidaePlugin):
             self._run_owner(
                 owner, cfg, headers, connect_timeout, ready,
                 transport=transport, prefix=prefix, timeout=timeout,
+                tools=settings.tools,
             ),
             name=f"mcp-owner-{name}",
         )
@@ -1121,6 +1219,7 @@ class McpClientPlugin(CorvidaePlugin):
         transport: str,
         prefix: str,
         timeout: float,
+        tools: _ToolFilter = _ToolFilter(),
     ) -> None:
         """Body of a server's owner task: connect, serve, close.
 
@@ -1237,6 +1336,7 @@ class McpClientPlugin(CorvidaePlugin):
             prefix=prefix,
             timeout_seconds=timeout,
             mcp_tools=result.tools,
+            tools=tools,
         ))
         try:
             await owner.stop.wait()
@@ -1279,7 +1379,7 @@ class McpClientPlugin(CorvidaePlugin):
         tools = []
         seen: dict[str, str] = {}  # tool_name -> server_name
         for server in self._servers:
-            for mcp_tool in server.mcp_tools:
+            for mcp_tool in _kept_tools(server):
                 tool = _make_tool(server, mcp_tool, self)
                 if tool.name in seen:
                     logger.warning(
@@ -1291,6 +1391,38 @@ class McpClientPlugin(CorvidaePlugin):
                 seen[tool.name] = server.name
                 tools.append(tool)
         return tools
+
+
+def _kept_tools(server: _McpServerState) -> list:
+    """The server's tools that survive its configuration filter (#529).
+
+    Logged once per connection: an INFO line with how many tools and patterns
+    dropped, and one WARNING per pattern that matched no tool. The raw list
+    stays on the server state, so a filter is re-applied to what the server
+    actually offers rather than to what a previous filter kept.
+    """
+    filt = server.tools
+    if not filt.active():
+        return server.mcp_tools
+    names = [tool.name for tool in server.mcp_tools]
+    kept = [tool for tool in server.mcp_tools if filt.keeps(tool.name)]
+    if not server.filter_logged:
+        server.filter_logged = True
+        dropped = len(names) - len(kept)
+        if dropped:
+            logger.info(
+                "MCP server %r: tool filter kept %d of %d tools",
+                server.name, len(kept), len(names),
+                extra={"server": server.name},
+            )
+        for pattern in filt.unmatched(names):
+            logger.warning(
+                "MCP server %r: tool filter pattern %r matched no tool "
+                "(it has %d); check mcp.servers.%s.tools",
+                server.name, pattern, len(names), server.name,
+                extra={"server": server.name},
+            )
+    return kept
 
 
 def _make_tool(server: _McpServerState, mcp_tool, plugin=None) -> Tool:

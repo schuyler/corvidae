@@ -163,6 +163,39 @@ def _nonce(msg: dict, content: str, fence_key: bytes | None) -> str:
     return hmac.new(fence_key, subject.encode(errors="surrogatepass"), hashlib.sha256).hexdigest()[:16]
 
 
+def sent_form(msg: dict, fence_key: bytes | None) -> dict | None:
+    """``msg`` as it goes to the model when that is not its stored form (#577).
+
+    The token estimate counts a row's stored fields, and PRD §3.3.1 said the
+    provenance record stands in for the header and fence it renders into. It
+    does not: the record is about 20 tokens and a fenced tool result's framing
+    about 60, so a window full of small untrusted results was under-counted.
+    This returns the rendered row — header line, fence and content — for the
+    rows whose rendering differs from what is stored, so the estimate can count
+    what is actually sent.
+
+    Returns None when the row's rendering is its stored form (no record, a
+    record that does not decode, or a record that only says where the row came
+    from), and for a person row, whose header is a separate message the caller
+    estimates as it always has.
+
+    ``fence_key`` only sets the nonce's bytes; the count does not depend on its
+    value beyond the few tokens any 16 hex characters cost, so a None key (an
+    estimate taken before the runtime has one) still gives a faithful count.
+    """
+    if not isinstance(msg, dict) or PROVENANCE_KEY not in msg:
+        return None
+    if decode(msg[PROVENANCE_KEY]) is None:
+        return None
+    rendered = {k: v for k, v in msg.items() if not k.startswith("_")}
+    header, framed = frame(msg, rendered, "", fence_key or b"")
+    if header is not None:
+        return None
+    if framed.get("content") == rendered.get("content"):
+        return None
+    return framed
+
+
 def _person_header(meta: ItemMetadata, channel_id: str) -> str | None:
     """The #513 wording behind a ``metadata:`` label, or None with no names
     and no addressing."""

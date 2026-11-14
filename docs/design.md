@@ -845,6 +845,10 @@ All operations are synchronous; no database access:
   counted accurately. It never raises on a row's content (§3.1.18.1, #392):
   a value JSON cannot encode is counted by its `str()`, and a row that is not
   a mapping is counted by its `repr`, so both still contribute to the budget.
+  A row with a provenance record that renders into a header and fence is
+  counted as it renders (`provenance.sent_form`, #577), because the record is
+  far smaller than the framing it used to stand in for; a person row's header
+  is a separate message and is not counted here.
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.
@@ -4292,8 +4296,14 @@ three failed connects, checks `/` for a 401 to detect an expired session.
 `tests/test_web_render_smoke.py` checks the sanitising and the
 unconfirmed-send restore in headless Chrome; it skips without Playwright,
 so the `web-smoke` CI job installs a pinned Playwright and Chromium and
-fails if the test is skipped. Run it locally with
-`uv run --with playwright pytest tests/test_web_render_smoke.py`.
+fails if the test is skipped. It downloads the browser only: `--with-deps`
+would run `sudo apt-get`, and the self-hosted runner has no passwordless
+sudo (it executes PR code, so sudo there would hand root to any PR). Chromium's
+system libraries are a one-time runner prerequisite, reinstalled by hand when
+the pinned Playwright version changes with
+`uvx --from playwright==1.64.0 playwright install-deps chromium`; a runner
+missing them fails the smoke step rather than skipping it. Run the test
+locally with `uv run --with playwright pytest tests/test_web_render_smoke.py`.
 
 The page keeps a map of sends the server hasn't answered, keyed by `seq`,
 and clears the composer on send. `sent` removes the entry. An `error` for a
@@ -4478,6 +4488,37 @@ would read as sender-controlled data — and a cut payload gets its cut line
 there too. The plugin depends on
 `"spill"`. Configuration is in
 [configuration.md](configuration.md#webhook_notify--webhook-deliveries-as-notifications).
+
+### GitHub events (`github-webhook` package)
+
+`GithubWebhookPlugin` subscribes one handler to each endpoint in
+`github_webhook.endpoints` and keeps at most one line per delivery: no
+`workflow_job` churn, no non-terminal runs, nothing for an event it does not
+know. `WebhookDelivery.event_type` (the `X-GitHub-Event` header, #807) selects
+a `_line_<event>` method, so an unknown event costs one DEBUG count rather
+than a branch in a chain. The line is built in code from payload fields read
+through `_field`, which warns and returns None for an absent one instead of
+raising into the ingress worker.
+
+Supersession is the one piece of state: an `OrderedDict` of the highest
+`run_number` per `(repository.full_name, workflow.id, head_branch)`, updated
+from every `workflow_run` event including the `requested` and `in_progress`
+ones it drops, bounded to `SUPERSESSION_KEYS` with least-recently-updated
+evicted first. The key and run number are read before anything else, because
+GitHub sends `"conclusion": null` until a run completes; only a completed run
+needs the fields its line prints. A completed `cancelled` run below that mark is dropped. It is
+in memory, so a restart can cost one extra cancelled line.
+
+Lines go through the kernel's spill service exactly as `webhook_notify`'s
+payloads do (`limit=max_payload_chars`, `origin=webhook:<endpoint>`), so the
+kernel fences and cuts them; the plugin adds no annotation beyond `origin`,
+because a PR title or branch name in an annotation would land outside the
+fence. Sender-controlled fields are cut to 120 characters with newlines
+collapsed. At `on_init` an endpoint listed in both this plugin and
+`webhook_notify.endpoints` is warned about: every subscriber to an endpoint
+receives every delivery, so such an endpoint would be notified twice.
+Configuration is in
+[configuration.md](configuration.md#github_webhook--github-events-as-terminal-outcomes).
 
 ### ACP (`channels/acp.py`)
 

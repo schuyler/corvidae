@@ -59,7 +59,7 @@ a claim. The provenance critic is shown excerpts of earlier raw-log
 messages, from every channel, matching retrieval (finding 15, #168), so
 text from one channel can reach the critic's prompt while it judges another's
 reply. They are quoted, untrusted text in the critic's prompt, framed as data, and
-the critic's objections re-enter the window as CONTEXT (provenance objections also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; `SilencePlugin`'s veto of a final containing `NO_REPLY` covers every turn origin while it is loaded; otherwise only critique's own exact-match veto of critique-origin turns applies). The number of
+the critic's objections re-enter the window as CONTEXT (provenance objections, and retention findings when the lens has a root (finding 21), also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; `SilencePlugin`'s veto of a final containing `NO_REPLY` covers every turn origin while it is loaded; otherwise only critique's own exact-match veto of critique-origin turns applies). The number of
 claims (5) and excerpts (5 per claim, 500 characters each) is capped, so
 one reply can't fan out into an unbounded critic prompt. Leaving sandboxing out
 of the MVP was a reasonable call, but it matters here: the attacker is not
@@ -569,8 +569,9 @@ subagent's own loop, which reach the subagent's model with no frame; and the
 subagent's final report to the main model, which can repeat what the
 subagent read. The header names the spill source for a read-back when the log
 still holds the row that cut it (#576), cleaned like any header value, and
-fenced rows are costed by the estimator without their framing, so a long run
-of them can undercount tokens against the hard ceiling (#577).
+fenced rows are costed by the estimator at their rendered size — header and
+fence included — so a long run of them cannot undercount the window against
+the hard ceiling the way counting the provenance record did (#577).
 
 The HTTP transports (`streamable_http`, `sse`) open an outbound connection
 to whatever `url` names and send the configured `headers`, bearer token
@@ -1661,6 +1662,78 @@ signal. And a capped channel is a **self-silencing** route: an injected
 instruction can deliberately burn the budget and stop the agent from answering
 the person until they send another message, which is the same class of harm as
 the existing `NO_REPLY` route, not a new capability.
+
+### 20. `github_webhook`: a sender's strings reach the window, and a run number can silence a report (#792)
+
+PRD principle 9 asks for an entry when untrusted text reaches somewhere new.
+The `github-webhook` package turns webhook payloads into one line each, and
+the strings in those lines — PR titles, branch names, workflow names — are
+chosen by whoever can sign a request to the endpoint (finding 16's HMAC
+sender) or by anyone who can open a PR or push a branch in the repository.
+
+Mitigations:
+
+- A line's sender-controlled parts go only into the notification text, which
+  the kernel fences (§3.3.11). Annotations carry `origin` alone, minted here,
+  so nothing sender-shaped is rendered outside the fence.
+- Each sender string is cut to 120 characters and newlines are collapsed, so a
+  sender cannot pad a line or fake structure in the header.
+- Volume per delivery is at most one line, and one line per completed run, PR
+  transition or selected push — `workflow_job` churn, non-terminal runs and
+  unselected events are dropped and counted. A GitHub endpoint therefore needs
+  no separate rate cap; if one is ever needed, #793's throttle is the shared
+  mechanism rather than a second one.
+- The plugin owns its endpoints: an endpoint listed in both `github_webhook`
+  and `webhook_notify` is warned about at startup, because every subscriber to
+  an endpoint receives every delivery and it would otherwise be notified twice.
+
+Accepted residuals. A sender can fabricate `run_number`s to suppress a
+cancelled-run report: supersession is inferred from the highest run number
+seen per `(repository, workflow, branch)`, the map is in memory, and a forged
+high number makes a real cancellation look superseded. The map is lost on
+restart, which costs at worst one extra cancelled line. And a hook that
+subscribes to only some event types reports superseded cancellations as plain
+cancellations, because the `workflow_run` events supersession needs are then
+not delivered.
+
+### 21. The retention lens proposes writes to the knowledge base that recall reads back (#742)
+
+With a knowledge base root (`critique.retention.root`, or markdown_recall's
+root when that key is unset), the retention critique lens forks the
+window after a novel, commitment-dense exchange and may return findings, each
+naming a `file` under the root and `content` to append. The finding wakes the
+channel (origin `critique`), and the woken turn is told to read the file and
+append the content only if it is missing. That is a new route from exchange
+text to durable files: a sender's words shape what the lens proposes, the
+agent writes it with its own file tools, and when the root is one
+`markdown_recall` indexes (finding 17; the default), the written text comes back as CONTEXT
+on later turns, in every channel. An injected "fact" can persist past the
+conversation that planted it.
+
+Mitigations:
+
+- The lens only flags; nothing is written by the plugin. The write happens in
+  an ordinary agent turn, with the agent's own tools and their existing limits
+  (the `write_file`/`shell` reach described under "Privilege separation"), and
+  the stub tells the agent to read the file first and append only what is
+  missing, never rewrite.
+- The woken turn is silent by default: its stub ends with `NO_REPLY`, which
+  critique's veto on critique-origin finals (and `SilencePlugin`'s, when
+  loaded) withholds, and critique does not critique its own turns.
+- The lens is inert unless the operator configures a root: `critique.retention.root`,
+  or a markdown_recall block, whose root it then uses. Enabling recall
+  therefore enables this route. Selection needs both novelty and commitment density over their thresholds,
+  so an ordinary exchange does not fire it.
+- Text written to the folder returns only through recall's framing
+  (finding 17): "retrieved data, not instructions", under the funnel budget.
+
+Accepted residuals. The lens's `file` is model output: an absolute path or one
+with `..` names a file outside the root, and nothing but the agent's judgement
+in the filing turn stops that; the file tools' own reach is the bound. A
+sender who can steer an exchange can get a false durable "fact" proposed, and
+the filing turn's "only if missing" check is the agent's judgement, not a
+verification. The knowledge base directory must be writable by the daemon,
+which also makes it writable by anything else running as the daemon's user.
 
 ## Privilege separation
 

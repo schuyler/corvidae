@@ -537,3 +537,44 @@ class TestRedactCorruptRows:
             f"SELECT CAST({value_sql} AS BLOB)", params
         ).fetchone()[0]
         assert _extract_sample_token(raw) is None
+
+
+async def _db_with_one_memory_over_two_messages(tmp_path):
+    """A WAL DB with two messages on one channel and one memory covering both."""
+    db = await aiosqlite.connect(str(tmp_path / "overlap.db"))
+    await db.execute("PRAGMA journal_mode = WAL")
+    await init_db(db)
+    # The memory table lives in the cognition package, which the kernel suite
+    # does not install, so the columns the cascade reads are created here.
+    await db.execute(
+        "CREATE TABLE memory (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "channel_id TEXT NOT NULL, created_at REAL NOT NULL, summary TEXT NOT NULL, "
+        "importance REAL NOT NULL, msg_id_start INTEGER NOT NULL, "
+        "msg_id_end INTEGER NOT NULL, redacted INTEGER NOT NULL DEFAULT 0, "
+        "indexed INTEGER NOT NULL DEFAULT 1, embedded INTEGER NOT NULL DEFAULT 0)"
+    )
+    first = await insert_message(db, "irc:#a", "user", "one secret")
+    second = await insert_message(db, "irc:#a", "assistant", "another secret")
+    await db.execute(
+        "INSERT INTO memory (channel_id, created_at, summary, importance, "
+        "msg_id_start, msg_id_end) VALUES (?, ?, ?, ?, ?, ?)",
+        ("irc:#a", time.time(), "a summary of both", 0.5, first, second),
+    )
+    await db.commit()
+    return db, [first, second]
+
+
+class TestDryRunCountsWhatTheRealRunWouldChange:
+    """#680: the dry run counted an overlapping record once per redacted id."""
+
+    async def test_one_record_over_two_messages_is_counted_once(self, tmp_path):
+        db, ids = await _db_with_one_memory_over_two_messages(tmp_path)
+        try:
+            dry = await redact_messages(db, ids, dry_run=True)
+            real = await redact_messages(db, ids)
+        finally:
+            await db.close()
+
+        assert dry["affected_messages"] == 2 and real["affected_messages"] == 2
+        assert dry["affected_memories"] == 1, "the preview over-reports"
+        assert real["affected_memories"] == 1
