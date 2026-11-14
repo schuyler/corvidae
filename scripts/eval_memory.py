@@ -90,7 +90,7 @@ logger = logging.getLogger("eval_memory")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 
-from evals.metrics import mrr, recall_at_k, tokens_of  # noqa: E402
+from evals.metrics import false_admit, mrr, recall_at_k, tokens_of  # noqa: E402
 
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures"
 DEFAULT_FIXTURE = FIXTURE_DIR / "memory_retrieval_basic.json"
@@ -664,6 +664,7 @@ async def run_snapshot_evaluation(
             scored = bool(reachable)
             recall = recall_at_k(top_ids, reachable, pool.k) if scored else None
             reciprocal = mrr(top_ids, reachable) if scored else None
+            fa = false_admit(candidate_entries(pool), effective_k) if not query.relevant else None
             results.append({
                 "index": query.index,
                 "text": query.text,
@@ -675,6 +676,7 @@ async def run_snapshot_evaluation(
                 "degraded": pool.degraded,
                 "recall_at_k": recall,
                 "mrr": reciprocal,
+                "false_admit": fa,
                 "candidates": candidate_entries(pool),
             })
             print(f"\nQ: {query.text}")
@@ -692,12 +694,14 @@ async def run_snapshot_evaluation(
         recalls = [r["recall_at_k"] for r in results if r["recall_at_k"] is not None]
         mrrs = [r["mrr"] for r in results if r["mrr"] is not None]
         degraded = sum(1 for r in results if r["degraded"])
+        fas = [r["false_admit"] for r in results if r["false_admit"] is not None]
         summary = {
             "queries": len(results),
             "scored": len(recalls),
             "degraded": degraded,
             "mean_recall_at_k": mean(recalls),
             "mean_mrr": mean(mrrs),
+            "false_admit_rate": mean(fas) if fas else None,
             "query_context": memory._query_context,
             "candidates": memory._candidates,
             "subsets": subset_summary(results),
@@ -706,6 +710,9 @@ async def run_snapshot_evaluation(
               f"(over {len(recalls)} of {len(results)} queries)")
         print(f"📊 Mean MRR:        {fmt_metric(summary['mean_mrr'])} "
               f"(over {len(recalls)} of {len(results)} queries)")
+        if fas:
+            print(f"📊 False admits@{effective_k}:   {summary['false_admit_rate']:.2f} "
+                  f"({sum(fas)} of {len(fas)} negative probes)")
         # Per-subset means, only worth printing when the probes are tagged.
         if any(r["subset"] for r in results):
             for name, group in summary["subsets"].items():

@@ -81,3 +81,17 @@ def tokens_of(entries: Sequence, encoder) -> int:
         if isinstance(text, str) and text:
             total += len(encoder.encode(text))
     return total
+
+
+def false_admit(candidates: list[dict], k: int) -> float:
+    """1.0 if any candidate in the top-k would be admitted by the gate.
+
+    A candidate is admitted when its band is "strong" or "moderate"
+    (the gate drops "weak" records). For negative probes (no relevant
+    items), any admit is a false admit. Returns 0.0 when no candidate
+    in the top-k is admitted.
+    """
+    if k <= 0:
+        return 0.0
+    top_k = candidates[:k]
+    return 1.0 if any(c.get("band") in ("strong", "moderate") for c in top_k) else 0.0
