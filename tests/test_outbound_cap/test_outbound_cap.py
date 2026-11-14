@@ -412,3 +412,279 @@ async def test_a_broken_channel_object_fails_open(caplog):
         assert await harness.gate.send(Broken()) is True
 
     assert any("failed" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# #821: a second limit, N messages per sliding window
+# ---------------------------------------------------------------------------
+
+from fake_clock import FakeClock  # noqa: E402
+from outbound_cap import (  # noqa: E402
+    WINDOW_LIMIT_KEY,
+    WINDOW_SECONDS_KEY,
+    parse_window_limit,
+    parse_window_seconds,
+)
+
+WINDOWED = {"outbound_cap": {"max_messages_per_window": 3, "window_seconds": 60}}
+
+
+class WindowHarness(Harness):
+    """A Harness with a fake kernel clock the window can be slid on."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.clock = FakeClock()
+        self.pm.register(self.clock, name="clock")
+
+
+@pytest.fixture
+async def w():
+    harness = WindowHarness()
+    await harness.init(WINDOWED)
+    return harness
+
+
+async def test_the_window_fills_then_the_next_emission_is_vetoed(w):
+    """Three emissions inside the window, then the fourth is withheld."""
+    channel = w.channel("signal:aci1")
+    for _ in range(3):
+        assert await w.gate.send(channel) is True
+    assert await w.gate.send(channel) is False
+
+
+async def test_the_window_slides_open(w):
+    """Once the oldest emissions age out, sending resumes."""
+    channel = w.channel("signal:aci1")
+    for _ in range(3):
+        await w.gate.send(channel)
+    assert await w.gate.send(channel) is False
+
+    # Half the window later, nothing has aged out yet.
+    await w.clock.advance(30)
+    assert await w.gate.send(channel) is False
+
+    # Past the window, all three are gone and the channel can send again.
+    await w.clock.advance(31)
+    assert await w.gate.send(channel) is True
+    assert await w.gate.send(channel) is True
+    assert await w.gate.send(channel) is True
+    assert await w.gate.send(channel) is False
+
+
+async def test_a_human_message_does_not_reset_the_window(w):
+    """#821 requirement 2: the window is not a between-human counter."""
+    channel = w.channel("signal:aci1")
+    for _ in range(3):
+        await w.gate.send(channel)
+
+    await w.admitted(channel)
+    assert await w.gate.send(channel) is False
+
+
+async def test_each_channel_has_its_own_window(w):
+    """One channel's window does not withhold another's messages."""
+    first = w.channel("signal:aci1")
+    second = w.channel("signal:aci2")
+    for _ in range(3):
+        await w.gate.send(first)
+    assert await w.gate.send(first) is False
+    assert await w.gate.send(second) is True
+
+
+async def test_an_internal_channel_has_no_window(w):
+    """A channel no transport owns is exempt from this limit too."""
+    channel = w.channel("internal:heartbeat")
+    for _ in range(10):
+        assert await w.gate.send(channel) is True
+
+
+async def test_the_window_alone_withholds_and_says_so(w, caplog):
+    """The M limit is unset here: the window is the only reason for the veto,
+    and the line names its own key."""
+    channel = w.channel("signal:aci1")
+    for _ in range(3):
+        await w.gate.send(channel)
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="corvidae.outbound_cap"):
+        await w.gate.send(channel, trace_id="trace-w")
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, warnings
+    assert "signal:aci1" in warnings[0]
+    assert "trace-w" in warnings[0]
+    assert WINDOW_LIMIT_KEY in warnings[0]
+    assert "window limit 3 in 60s" in warnings[0], warnings[0]
+    assert "1 withheld" in warnings[0], warnings[0]
+
+
+async def test_the_between_human_limit_alone_says_so(h, caplog):
+    """With no window configured, the line names the M key and not the N one."""
+    channel = h.channel("signal:aci1")
+    for _ in range(2):
+        await h.gate.send(channel)
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="corvidae.outbound_cap"):
+        await h.gate.send(channel)
+
+    [warning] = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert f"set by {MAX_MESSAGES_KEY}" in warning
+    assert f"set by {WINDOW_LIMIT_KEY})" not in warning
+
+
+async def test_both_limits_reached_names_both(caplog):
+    """With both at their threshold the line names both, so neither veto is
+    mistaken for the other."""
+    harness = WindowHarness()
+    await harness.init({"outbound_cap": {
+        "max_messages": 2, "max_messages_per_window": 5, "window_seconds": 60,
+    }})
+    channel = harness.channel("signal:aci1")
+    # Two emissions reach the M limit; the window limit of 5 is untouched, so
+    # M is what withholds.
+    for _ in range(2):
+        await harness.gate.send(channel)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="corvidae.outbound_cap"):
+        assert await harness.gate.send(channel) is False
+
+    [warning] = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert f"set by {MAX_MESSAGES_KEY}" in warning
+    assert f"set by {WINDOW_LIMIT_KEY})" not in warning
+
+    # A window of 1 with M at 2: the window is reached first, at one emission.
+    harness2 = WindowHarness()
+    await harness2.init({"outbound_cap": {
+        "max_messages": 2, "max_messages_per_window": 1, "window_seconds": 60,
+    }})
+    channel2 = harness2.channel("signal:aci1")
+    assert await harness2.gate.send(channel2) is True
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="corvidae.outbound_cap"):
+        assert await harness2.gate.send(channel2) is False
+    [warning2] = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert f"set by {WINDOW_LIMIT_KEY}" in warning2
+    assert f"set by {MAX_MESSAGES_KEY})" not in warning2
+
+    # A window of 1 with M at 1: both are reached, and both are named.
+    harness3 = WindowHarness()
+    await harness3.init({"outbound_cap": {
+        "max_messages": 1, "max_messages_per_window": 1, "window_seconds": 60,
+    }})
+    channel3 = harness3.channel("signal:aci1")
+    assert await harness3.gate.send(channel3) is True
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="corvidae.outbound_cap"):
+        assert await harness3.gate.send(channel3) is False
+    [warning3] = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert f"set by {MAX_MESSAGES_KEY}" in warning3 and f"set by {WINDOW_LIMIT_KEY}" in warning3, warning3
+
+
+async def test_reopening_the_window_summarises_what_it_held(w, caplog):
+    """When the window slides open, one WARNING says how many it withheld."""
+    channel = w.channel("signal:aci1")
+    for _ in range(3):
+        await w.gate.send(channel)
+    for _ in range(2):
+        await w.gate.send(channel)  # two withheld
+
+    await w.clock.advance(61)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="corvidae.outbound_cap"):
+        assert await w.gate.send(channel) is True
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, warnings
+    assert "signal:aci1" in warnings[0]
+    assert "2 messages were withheld" in warnings[0], warnings[0]
+    assert WINDOW_LIMIT_KEY in warnings[0]
+
+
+async def test_progress_counts_toward_the_window_when_configured(caplog):
+    """The window counts the same emissions the M counter does."""
+    harness = WindowHarness()
+    await harness.init({"outbound_cap": {
+        "max_messages_per_window": 2, "window_seconds": 60, "count_progress": True,
+    }})
+    channel = harness.channel("signal:aci1")
+    assert await harness.gate.send(channel, emission="progress") is True
+    assert await harness.gate.send(channel, emission="progress") is True
+    assert await harness.gate.send(channel) is False
+
+
+async def test_progress_does_not_count_toward_the_window_by_default(w):
+    """A progress emission is not a message unless count_progress says so."""
+    channel = w.channel("signal:aci1")
+    for _ in range(5):
+        assert await w.gate.send(channel, emission="progress") is True
+    assert await w.gate.send(channel) is True
+
+
+async def test_an_emission_another_gate_vetoes_spends_no_window(w):
+    """The wrapper counts only what the combined verdict lets through."""
+    w.pm.register(NoReplyGate(), name="no_reply")
+    channel = w.channel("signal:aci1")
+    for _ in range(5):
+        await w.gate.send(channel, text="NO_REPLY")
+    assert await w.gate.send(channel) is True
+    assert await w.gate.send(channel) is True
+    assert await w.gate.send(channel) is True
+    assert await w.gate.send(channel) is False
+
+
+async def test_a_per_channel_window_override_beats_the_global(w):
+    """set_settings writes runtime_overrides, which win for both keys."""
+    channel = w.channel("signal:aci1")
+    other = w.channel("signal:aci2")
+    channel.runtime_overrides[WINDOW_LIMIT_KEY] = 1
+
+    assert await w.gate.send(channel) is True
+    assert await w.gate.send(channel) is False
+    assert await w.gate.send(other) is True
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "3", [], {}])
+def test_bad_window_values_are_rejected(value):
+    """A bad window limit or length names its own key and range."""
+    for parse, key in ((parse_window_limit, WINDOW_LIMIT_KEY),
+                       (parse_window_seconds, WINDOW_SECONDS_KEY)):
+        with pytest.raises(ValueError) as excinfo:
+            parse(value)
+        message = str(excinfo.value)
+        assert key in message, message
+        assert repr(value) in message, message
+
+
+def test_absent_window_values_mean_no_window():
+    """Either half unset is off, and an unset window caps nothing."""
+    assert parse_window_limit(None) is None
+    assert parse_window_seconds(None) is None
+
+
+async def test_a_window_limit_without_a_window_fails_at_startup():
+    """A limit with no window would have to invent one: refuse it, loudly."""
+    harness = WindowHarness()
+    with pytest.raises(ValueError) as excinfo:
+        await harness.init({"outbound_cap": {"max_messages_per_window": 3}})
+
+    message = str(excinfo.value)
+    assert WINDOW_SECONDS_KEY in message, message
+    assert WINDOW_LIMIT_KEY in message, message
+    assert "3" in message, message
+
+
+async def test_a_bad_window_reload_is_logged_and_the_old_limit_kept(w, caplog):
+    """A reload carrying a bad window keeps running and says so at ERROR."""
+    channel = w.channel("signal:aci1")
+    with caplog.at_level(logging.DEBUG, logger="corvidae.outbound_cap"):
+        await w.plugin.on_config_reload({"outbound_cap": {"max_messages_per_window": 0}})
+
+    [error] = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert WINDOW_LIMIT_KEY in error
+
+    # The window from init still holds: three messages, then a veto.
+    for _ in range(3):
+        assert await w.gate.send(channel) is True
+    assert await w.gate.send(channel) is False

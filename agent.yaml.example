@@ -353,6 +353,12 @@ agent:
 # reload both apply.
 # outbound_cap:
 #   max_messages: 6     # messages since the last human message, at least 1
+#   # The second limit (#821): at most this many messages per window, sliding,
+#   # whatever the humans do. Unset = off. It CAN withhold a direct reply to a
+#   # person who sends that many messages inside the window, which is why it is
+#   # off by default; set both keys or neither.
+#   max_messages_per_window: 20
+#   window_seconds: 3600
 #   count_progress: false   # count "let me look that up" progress lines too
 
 # ACP stdio transport (optional — does not enable ACP by itself).

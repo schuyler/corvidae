@@ -1627,7 +1627,12 @@ indefinitely, at the operator's expense and against the person on the other end.
 
 `OutboundCapPlugin` counts the messages the gate lets through on a channel
 since the last admitted human message and withholds everything after
-`outbound_cap.max_messages` until a human speaks again.
+`outbound_cap.max_messages` until a human speaks again. Since #821 it also
+enforces an optional sliding window — `outbound_cap.max_messages_per_window`
+in `outbound_cap.window_seconds`, off unless configured — which bounds the
+cases the between-human counter does not: a channel where a human keeps
+talking, or one whose counter keeps being reset. A human message does not
+reset the window.
 
 Mitigations and their limits:
 
@@ -1643,11 +1648,14 @@ Mitigations and their limits:
 - A withheld `final` is still stored as `UNSENT` with a not-sent marker, so the
   agent can see it was held; nothing is silently lost.
 - Every withheld emission is logged, the first in a run at `WARNING` with the
-  channel, emission, trace id and limit key, so an operator can see a cap doing
-  its work rather than guessing at silence.
+  channel, emission, trace id and the limit key that fired, so an operator can
+  see a cap doing its work rather than guessing at silence; a message held while
+  both limits are reached names both, and the window logs one `WARNING` summary
+  when it slides open again.
 
 The agent can raise or clear its own cap through `set_settings`
-(`outbound_cap.max_messages`, `outbound_cap.count_progress`), and an invalid
+(`outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`,
+`outbound_cap.window_seconds`, `outbound_cap.count_progress`), and an invalid
 override fails open, unless the operator lists those keys in
 `agent.immutable_settings`.
 
