@@ -3450,9 +3450,9 @@ class MemoryPlugin(CorvidaePlugin):
             keys = {c["id"]: (c["score"],) for c in candidates}
         ranked = sorted(pool_rows, key=lambda c: keys[c["id"]], reverse=True)
         # A candidate with no measured similarity cannot be admitted on its
-        # own relevance — its band comes from FTS_SIMILARITY_PROXY, not from
-        # the query — so it must not take a top-k slot from one that can
-        # (#705). Measured candidates keep their fused order, then the
+        # own relevance — it bands weak (#409: no keyword-only floor), its
+        # score coming from FTS_SIMILARITY_PROXY rather than the query — so
+        # it must not take a top-k slot from one that can (#705). Measured candidates keep their fused order, then the
         # unmeasured ones follow in theirs: they stay in the pool, and so in
         # the candidate log, but they cannot push a measured record past the
         # cut. On the degraded path nothing is measured and this is a no-op.
@@ -3462,8 +3462,22 @@ class MemoryPlugin(CorvidaePlugin):
         )
         # Each in-window record is judged alone: would it have made top k?
         excluded: list[tuple[int, dict]] = []
+        # It is judged against the pool's own measured-first order: a measured
+        # record competes only with measured rows; an unmeasured one ranks
+        # behind every measured row, then among the unmeasured by key.
+        measured_ahead = sum(1 for c in ranked if c["measured"])
         for e in in_window_rows:
-            would_be_rank = 1 + sum(1 for c in ranked if keys[c["id"]] >= keys[e["id"]])
+            if e["measured"]:
+                ahead = sum(
+                    1 for c in ranked
+                    if c["measured"] and keys[c["id"]] >= keys[e["id"]]
+                )
+            else:
+                ahead = measured_ahead + sum(
+                    1 for c in ranked
+                    if not c["measured"] and keys[c["id"]] >= keys[e["id"]]
+                )
+            would_be_rank = 1 + ahead
             if would_be_rank <= k:
                 excluded.append((would_be_rank, e))
         # The exclusion count: flagged rows (vec) or one COUNT query (FTS).

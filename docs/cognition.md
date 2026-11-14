@@ -502,7 +502,11 @@ similarity and the rows returned are unchanged.
 
 `excluded_in_window` rows carry a would-be rank: one plus the number of
 not-excluded candidates ranking at least as high (under fusion, its
-fused value is computed from the ranks it would have had in each list). It can therefore equal a
+fused value is computed from the ranks it would have had in each list).
+"At least as high" follows the pool's measured-first order (#705): a record
+with a measured cosine counts only measured candidates, and one without a
+stored vector counts every measured candidate plus the unmeasured ones at
+least as high. It can therefore equal a
 returned row's rank. Each excluded record is judged alone against the
 ranked pool, not against the other excluded records, so two excluded rows
 may share a would-be rank, and an excluded record that would not have made
