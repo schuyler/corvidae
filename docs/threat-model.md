@@ -99,7 +99,7 @@ Assets, roughly in order of how bad it is to lose them:
    <url>` line, its error records, their tracebacks and stack traces name the endpoint without the userinfo
    or the query. That is a net over text corvidae does not emit, so it
    recognises the URL shapes `_redact_url` knows and nothing more: a
-   credential a library writes in some other form — split across fields, or
+   credential a library writes in some other form — split across fields, broken by a raw newline inside the URL, or
    inside a base64 `Authorization` header it echoes — is not caught, which is
    why a `${VAR}` header is still the shape to prefer over a credential in
    the URL.

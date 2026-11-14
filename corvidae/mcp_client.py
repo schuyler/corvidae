@@ -178,36 +178,20 @@ _CREDENTIAL_LOGGERS = ("mcp", "httpx", "httpx2", "httpcore")
 def _redact_multiline_text(text: str) -> str:
     """``text`` with credential URLs redacted, line breaks preserved.
 
-    A URL may be broken across lines (an exception message with an embedded
-    newline), and ``_URL_IN_TEXT`` stops at whitespace, so redacting line by
-    line would leave the tail -- a query token -- readable. When a line ends
-    inside a URL, the next line's leading token is joined to it first, so the
-    whole URL is redacted as one.
+    One pass over the whole text: ``_URL_IN_TEXT`` stops at any whitespace,
+    ``\\r`` and ``\\n`` included, so a URL never swallows the line after it
+    and a CRLF traceback is redacted like an LF one.
 
-    shortcut: only the next line's first token is joined, so a URL broken
-    twice with no whitespace between keeps its far tail; upgrade if a library
-    is seen to do that.
+    shortcut: a URL broken by a raw newline keeps the part after the break --
+    a newline inside a URL token cannot be told from two independent lines,
+    so joining them leaks or garbles ordinary tracebacks. The HTTP client
+    percent-encodes URLs in its errors, so the shape is not known to occur;
+    upgrade if a client is seen emitting one.
     """
-    lines = text.split("\n")
-    out: list[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        # Join continuation tokens while the line still ends inside a URL.
-        while index + 1 < len(lines):
-            matches = list(_URL_IN_TEXT.finditer(line))
-            nxt = lines[index + 1]
-            token = nxt.split(None, 1)[0] if nxt and not nxt[0].isspace() else ""
-            if not matches or matches[-1].end() != len(line) or not token:
-                break
-            line += token
-            lines[index + 1] = nxt[len(token):]
-        # Redact only lines that carry a marker; the rest pass untouched.
-        if any(marker in line for marker in _CREDENTIAL_MARKERS):
-            line = _redact_urls_in_text(line)
-        out.append(line)
-        index += 1
-    return "\n".join(out)
+    # Only text carrying a URL marker can hold a credential URL.
+    if not any(marker in text for marker in _CREDENTIAL_MARKERS):
+        return text
+    return _redact_urls_in_text(text)
 
 
 class _UrlRedactingFilter(logging.Filter):

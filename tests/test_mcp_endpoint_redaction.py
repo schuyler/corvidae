@@ -741,34 +741,35 @@ def _format_record(name: str, log) -> str:
     return stream.getvalue()
 
 
-def test_a_url_split_across_traceback_lines_leaks_no_tail():
-    """A line break inside a quoted URL must not hide its query token (#595)."""
+def _raise_and_format(message: str) -> str:
+    """Log an exception carrying `message` on a filtered library logger."""
 
     def log(logger: logging.Logger) -> None:
         try:
-            raise RuntimeError(
-                "failed for url 'http://alfred:SECRETPW@host.example/\n"
-                "mcp?token=SECRETTOK'"
-            )
+            raise RuntimeError(message)
         except RuntimeError:
             logger.exception("reader failed")
 
-    out = _format_record("mcp.client.sse", log)
-    assert "SECRETPW" not in out and "SECRETTOK" not in out
-    assert "host.example" in out and "Traceback" in out
+    return _format_record("mcp.client.sse", log)
 
 
-def test_the_exception_text_after_a_url_line_is_kept():
-    """Joining a continuation must not eat an unrelated following line."""
+def test_an_unindented_line_after_a_url_line_is_kept_whole():
+    """A URL ending a line must not swallow the next line (#595)."""
+    out = _raise_and_format("msg http://u:SECRETPW@host.example/x\nRuntimeError: boom")
+    assert "SECRETPW" not in out
+    assert "\nRuntimeError: boom" in out
 
-    def log(logger: logging.Logger) -> None:
-        try:
-            raise RuntimeError("see http://u:SECRETPW@host.example/x\n\nthen more")
-        except RuntimeError:
-            logger.exception("reader failed")
 
-    out = _format_record("mcp.client.sse", log)
-    assert "SECRETPW" not in out and "then more" in out
+def test_a_url_on_the_next_line_is_redacted_on_its_own():
+    """Two URLs on adjacent lines are each redacted, not glued together."""
+    out = _raise_and_format("see http://h.example/\nhttp://u:SECRETPW@h2.example/ end")
+    assert "SECRETPW" not in out and "h2.example" in out and " end" in out
+
+
+def test_a_crlf_traceback_is_redacted():
+    """A `\\r\\n` line ending does not hide a URL from the filter."""
+    out = _raise_and_format("x http://u:SECRETPW@host.example/a?t=SECRETTOK\r\nnext")
+    assert "SECRETPW" not in out and "SECRETTOK" not in out and "next" in out
 
 
 def test_stack_info_from_a_library_logger_carries_no_credential():
