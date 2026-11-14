@@ -177,6 +177,48 @@ class TestSectionAwareChunking:
         assert not any(c["metadata"]["section"] == "Tail" for c in result)
         assert any("Too short." in c["text"] for c in result)
 
+    def test_merged_stub_keeps_its_heading_in_the_text(self):
+        """#863: the short sections that carry the point stay searchable.
+
+        The merged chunk's metadata names the absorbing section, so a stub's
+        heading line is the only place its title can survive; without it a
+        search for "known bugs" could not match the page at all.
+        """
+        long_body = " ".join([f"word{i}" for i in range(60)])
+        content = (
+            f"---\ntitle: Widget notes\n---\n## Known bugs\n\nNothing yet."
+            f"\n\n## Long section\n\n{long_body}"
+        )
+        result = chunk_page("Widgets/Widget notes.md", content)
+        merged = [c for c in result if "Nothing yet." in c["text"]]
+        assert len(merged) == 1
+        assert "Known bugs" in merged[0]["text"]
+        # The metadata still names the section that absorbed it, as before.
+        assert merged[0]["metadata"]["section"] == "Long section"
+        assert merged[0]["metadata"]["section_path"] == "Widget notes > Long section"
+
+    def test_trailing_stub_keeps_its_heading_too(self):
+        """The backward merge renders the heading as well as the forward one."""
+        long_body = " ".join([f"word{i}" for i in range(60)])
+        content = (
+            f"---\ntitle: Widget notes\n---\n## Main section\n\n{long_body}"
+            f"\n\n## Open questions\n\nWho owns the widget?"
+        )
+        result = chunk_page("Widgets/Widget notes.md", content)
+        merged = [c for c in result if "Who owns the widget?" in c["text"]]
+        assert len(merged) == 1
+        assert "Open questions" in merged[0]["text"]
+        assert merged[0]["metadata"]["section"] == "Main section"
+
+    def test_a_heading_with_no_body_survives_the_merge(self):
+        """A stub that is only a title is still a section someone will search."""
+        long_body = " ".join([f"word{i}" for i in range(60)])
+        content = (
+            f"---\ntitle: Widget notes\n---\n## Status\n\n## Long section\n\n{long_body}"
+        )
+        result = chunk_page("Widgets/Widget notes.md", content)
+        assert any("Status" in c["text"] for c in result), [c["text"][:60] for c in result]
+
     def test_page_title_falls_back_to_pagepath(self):
         content = "# Section One\n\nSome content here in the section."
         result = chunk_page("My/Wiki/Page", content)
