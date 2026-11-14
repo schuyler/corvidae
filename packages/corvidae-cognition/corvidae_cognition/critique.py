@@ -1339,22 +1339,40 @@ class CritiquePlugin(CorvidaePlugin):
             outcome = {"critique": crit}
             await self._record_and_register(
                 channel, trace_id, outcome, objections, wake=False,
-                wake_lenses=frozenset({"retention"}),
             )
         finally:
             reset_attribution(token)
 
+    def _retention_root(self) -> str | None:
+        """The configured knowledge base root, or None when the lens is off."""
+        root = config_value(self.config, "critique.retention.root", None)
+        if not isinstance(root, str) or not root.strip():
+            return None
+        return root.strip()
+
     def _wake_stub(self) -> str:
         """The stub for a critique wake: PROVENANCE_NOTE unless the retention
         lens is on, then one note that also says how to file (#742)."""
-        root = config_value(self.config, "critique.retention.root", None)
-        if not isinstance(root, str) or not root.strip():
+        root = self._retention_root()
+        if root is None:
             return PROVENANCE_NOTE
         return RETENTION_WAKE_NOTE.format(root=quote(root), marker=NO_REPLY_MARKER)
 
+    def _retention_wake_lenses(self) -> frozenset[str]:
+        """The lenses whose findings wake the channel by themselves.
+
+        Retention does — but only while a knowledge base is configured, which
+        is also the only condition under which the lens runs. Tied to
+        ``_wake_stub``'s condition rather than remembered separately: a
+        retention finding that woke with no root would get the provenance
+        stub, which tells it to stay silent and says nothing about filing, and
+        the wake would spend a turn to do nothing. Without a root the finding
+        waits like a stylistic one and is read at the channel's next turn.
+        """
+        return frozenset({"retention"}) if self._retention_root() is not None else frozenset()
+
     async def _record_and_register(
         self, channel, trace_id, outcome, objections, *, wake: bool,
-        wake_lenses: frozenset[str] = frozenset(),
     ) -> None:
         """Record a critique outcome and register non-empty verdicts.
 
@@ -1366,8 +1384,8 @@ class CritiquePlugin(CorvidaePlugin):
         With ``wake`` (provenance, proactivity) they register under
         origin="critique" and fire the critique wake stub; without it
         (stylistic) they queue for the channel's next turn and wake nothing
-        (#202), except objections whose lens is in ``wake_lenses``
-        (retention), which wake the channel so the finding is acted on now.
+        (#202), except the lenses ``_retention_wake_lenses`` names, whose
+        findings wake the channel so the fact is filed now.
         """
         outcome_log = self.pm.get_plugin("outcome_log")
         if outcome_log is not None:
@@ -1390,6 +1408,7 @@ class CritiquePlugin(CorvidaePlugin):
         if wake:
             waking, waiting = list(objections), []
         else:
+            wake_lenses = self._retention_wake_lenses()
             waking = [o for o in objections if o.get("lens") in wake_lenses]
             waiting = [o for o in objections if o.get("lens") not in wake_lenses]
         try:

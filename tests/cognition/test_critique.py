@@ -1911,3 +1911,50 @@ class TestProactivityExecution:
         assert outcomes["critique"]["objections"] == 1
         assert outcomes["proactivity"]["objections"] == 1
         await _teardown(env)
+
+
+class TestRetentionWakeNeedsARoot:
+    """#742 via #857: a retention finding wakes only while there is a root.
+
+    The lens cannot run without one, but the wake rule is written where it is
+    read, so the pairing is pinned here rather than left to the lens's
+    selection: a wake whose stub says "stay silent and file nothing" spends a
+    turn to do nothing.
+    """
+
+    @staticmethod
+    async def _register(env, *, root):
+        if root is not None:
+            env.plugin.config.setdefault("critique", {})["retention"] = {"root": root}
+        env.funnel.ingest = Mock()
+        env.funnel.ingest_and_wake = AsyncMock()
+        objection = {
+            "claim": "Yoz runs ARDC tech", "objection": "not filed", "lens": "retention",
+            "file": "people/yoz.md", "content": "- runs ARDC tech",
+        }
+        await env.plugin._record_and_register(
+            env.channel, "kwr", {"critique": {"lenses": ["retention"], "objections": 1}},
+            [objection], wake=False,
+        )
+
+    async def test_with_a_root_the_finding_wakes_the_channel(self, tmp_path):
+        appraisal = FakeAppraisal(stage1={}, stage2={})
+        env = await build_critique(tmp_path, appraisal=appraisal, with_funnel=True)
+        try:
+            await self._register(env, root="values/")
+            env.funnel.ingest_and_wake.assert_awaited_once()
+            assert "values/" in env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+            env.funnel.ingest.assert_not_called()
+        finally:
+            await _teardown(env)
+
+    async def test_without_a_root_the_finding_waits_for_the_next_turn(self, tmp_path):
+        appraisal = FakeAppraisal(stage1={}, stage2={})
+        env = await build_critique(tmp_path, appraisal=appraisal, with_funnel=True)
+        try:
+            await self._register(env, root=None)
+            env.funnel.ingest_and_wake.assert_not_awaited()
+            [entry] = env.funnel.ingest.call_args.kwargs["entries"]
+            assert entry.startswith("[retention]") and "people/yoz.md" in entry, entry
+        finally:
+            await _teardown(env)
