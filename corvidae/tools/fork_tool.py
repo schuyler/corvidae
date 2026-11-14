@@ -21,7 +21,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from corvidae.attribution import reset_attribution, set_attribution
+from corvidae.attribution import (
+    reset_attribution,
+    set_attribution,
+    next_agent_depth,
+    parse_max_agent_depth,
+)
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.task import Task
 from corvidae.thinking import strip_thinking
@@ -65,6 +70,7 @@ class ForkToolPlugin(CorvidaePlugin):
     async def on_start(self, config: dict) -> None:
         # Reuse the subagent's tool-round budget: a fork is a subagent variant.
         self._max_turns = parse_subagent_max_turns(config)
+        self._max_agent_depth = parse_max_agent_depth(config)
         logger.debug("ForkToolPlugin started")
 
     @hookimpl
@@ -96,6 +102,12 @@ class ForkToolPlugin(CorvidaePlugin):
         The messages list is ``[my prompt, the task]`` — a fresh window with no
         channel history. That's the freshness that gives the fork fresh eyes.
         """
+        # Depth limit: refuse if we are at the max nesting depth.
+        try:
+            depth = next_agent_depth(self._max_agent_depth)
+        except ValueError as exc:
+            return str(exc)
+
         task_queue = ctx.task_queue
         if task_queue is None:
             return (
@@ -141,7 +153,10 @@ class ForkToolPlugin(CorvidaePlugin):
 
         async def work():
             # Attribute the fork's LLM calls to the fork stage.
-            attribution_token = set_attribution(stage="fork", channel_id=channel.id)
+            attribution_token = set_attribution(
+                stage="fork", channel_id=channel.id,
+                agent_depth=depth,
+            )
             try:
                 result = await run_agent_loop(
                     client, messages, tools_dict, tool_schemas,

@@ -80,3 +80,91 @@ class TestTaskIsolation:
         reset_attribution(token)
 
         assert observed == {"stage": "turn", "channel_id": "c1"}
+
+
+class TestNextAgentDepth:
+    def test_main_turn_returns_one(self):
+        from corvidae.attribution import next_agent_depth
+        # Main turn has no agent_depth in attribution (defaults to 0)
+        assert next_agent_depth(2) == 1
+
+    def test_depth_one_returns_two(self):
+        from corvidae.attribution import next_agent_depth, set_attribution, reset_attribution
+        token = set_attribution(agent_depth=1)
+        try:
+            assert next_agent_depth(2) == 2
+        finally:
+            reset_attribution(token)
+
+    def test_refuses_at_limit(self):
+        from corvidae.attribution import next_agent_depth, set_attribution, reset_attribution
+        token = set_attribution(agent_depth=2)
+        try:
+            try:
+                next_agent_depth(2)
+                assert False, "should have raised"
+            except ValueError as exc:
+                assert "nested agent depth 2 reached" in str(exc)
+                assert "tools.max_agent_depth=2" in str(exc)
+                assert "do this work in the current task instead" in str(exc)
+        finally:
+            reset_attribution(token)
+
+    def test_refuses_above_limit(self):
+        from corvidae.attribution import next_agent_depth, set_attribution, reset_attribution
+        token = set_attribution(agent_depth=5)
+        try:
+            try:
+                next_agent_depth(2)
+                assert False, "should have raised"
+            except ValueError:
+                pass
+        finally:
+            reset_attribution(token)
+
+
+class TestParseMaxAgentDepth:
+    def test_default_is_two(self):
+        from corvidae.attribution import parse_max_agent_depth
+        assert parse_max_agent_depth({}) == 2
+
+    def test_explicit_value(self):
+        from corvidae.attribution import parse_max_agent_depth
+        assert parse_max_agent_depth({"tools": {"max_agent_depth": 3}}) == 3
+
+    def test_rejects_zero(self):
+        from corvidae.attribution import parse_max_agent_depth
+        try:
+            parse_max_agent_depth({"tools": {"max_agent_depth": 0}})
+            assert False, "should have raised"
+        except ValueError as exc:
+            assert "tools.max_agent_depth" in str(exc)
+
+    def test_rejects_negative(self):
+        from corvidae.attribution import parse_max_agent_depth
+        try:
+            parse_max_agent_depth({"tools": {"max_agent_depth": -1}})
+            assert False, "should have raised"
+        except ValueError:
+            pass
+
+    def test_rejects_string(self):
+        from corvidae.attribution import parse_max_agent_depth
+        try:
+            parse_max_agent_depth({"tools": {"max_agent_depth": "2"}})
+            assert False, "should have raised"
+        except ValueError:
+            pass
+
+    def test_rejects_bool(self):
+        from corvidae.attribution import parse_max_agent_depth
+        try:
+            parse_max_agent_depth({"tools": {"max_agent_depth": True}})
+            assert False, "should have raised"
+        except ValueError:
+            pass
+
+    def test_tools_not_a_dict(self):
+        from corvidae.attribution import parse_max_agent_depth
+        # tools is not a dict: falls back to default
+        assert parse_max_agent_depth({"tools": "bad"}) == 2

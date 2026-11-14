@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING, Callable
 
 from corvidae.prompts import resolve_prompt
 from corvidae.turn import run_agent_turn
-from corvidae.attribution import reset_attribution, set_attribution
+from corvidae.attribution import (
+    reset_attribution,
+    set_attribution,
+    next_agent_depth,
+    parse_max_agent_depth,
+)
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm import LLMClient
 from corvidae.provenance import cut_text
@@ -216,6 +221,7 @@ class SubagentPlugin(CorvidaePlugin):
         # rejected at startup with a one-line config error (runtime step 7
         # calls the parser; on_start re-parses like every other plugin).
         self._max_turns = parse_subagent_max_turns(config)
+        self._max_agent_depth = parse_max_agent_depth(config)
         logger.debug("SubagentPlugin started")
 
     @hookimpl
@@ -255,6 +261,12 @@ class SubagentPlugin(CorvidaePlugin):
             Confirmation string with the enqueued task ID, or an error string
             if the task queue or channel context is unavailable.
         """
+        # Depth limit: refuse if we are at the max nesting depth.
+        try:
+            depth = next_agent_depth(self._max_agent_depth)
+        except ValueError as exc:
+            return str(exc)
+
         task_queue = ctx.task_queue
         if task_queue is None:
             # Name the internal dependency and the operator action that fixes it.
@@ -298,7 +310,8 @@ class SubagentPlugin(CorvidaePlugin):
             # Attribute the subagent's LLM calls to the subagent stage,
             # shadowing whatever attribution the enqueuing turn captured.
             attribution_token = set_attribution(
-                stage="subagent", channel_id=channel.id
+                stage="subagent", channel_id=channel.id,
+                agent_depth=depth,
             )
             try:
                 result = await run_agent_loop(
