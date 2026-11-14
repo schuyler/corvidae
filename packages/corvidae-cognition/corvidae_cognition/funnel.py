@@ -209,6 +209,10 @@ class Ingest:
     entries: list[str]
     # Called with the Admission of each drain attempt, if given (sync).
     on_admitted: Callable[[Admission], None] | None = None
+    # Optional stable identity per entry (#725), one per entry or None. With
+    # keys, an entry already carried in this source's CONTEXT rows is deduped
+    # even when it renders differently now (an age, a score, a rank).
+    keys: list[str] | None = None
 
 
 @dataclass
@@ -223,6 +227,8 @@ class _Payload:
     created: float
     # Callback for the drain attempts, from the Ingest that produced it.
     on_admitted: Callable[[Admission], None] | None = None
+    # Dedupe keys from the Ingest, one per entry or None (#725).
+    keys: list[str] | None = None
 
 
 @dataclass
@@ -233,6 +239,21 @@ class _Pending:
     promise: asyncio.Future[Ingest | None]
     # The funnel's clock when the provider submitted it (its TTL age starts here).
     created: float
+
+
+def _check_keys(source: str, entries: list[str], keys: list[str] | None) -> None:
+    """Reject a key list that does not pair one key with each entry (#725).
+
+    One message for both callers — ``admit_detailed`` raising it, and the
+    sweep logging it for a promise whose keys arrived late — so a source's
+    author reads the same sentence whichever path caught it.
+    """
+    if keys is not None and len(keys) != len(entries):
+        raise ValueError(
+            f"funnel.admit_detailed for source {source!r} got "
+            f"{len(keys)} keys for {len(entries)} entries; pass one key "
+            f"per entry, or no keys"
+        )
 
 
 class FunnelSpec:
@@ -512,9 +533,24 @@ class FunnelPlugin(CorvidaePlugin):
             # Finished: take its result (None when it admits nothing or failed).
             result = self._discard(channel_id, source, pending)
             if result is not None:
+                keys = result.keys
+                try:
+                    _check_keys(source, result.entries, keys)
+                except ValueError as exc:
+                    # The keys arrived inside a promise, so there is no caller
+                    # to raise at: log the same message admit_detailed would
+                    # have raised, and admit the entries unkeyed rather than
+                    # drop a result the turn is waiting for.
+                    logger.warning(
+                        "%s; admitting the %s result for %s without keys",
+                        exc, source, channel_id,
+                        extra={"channel_id": channel_id, "source": source},
+                    )
+                    keys = None
                 self._next_turn.setdefault(channel_id, []).append(
                     _Payload(
-                        source, list(result.entries), pending.created, result.on_admitted,
+                        source, list(result.entries), pending.created,
+                        result.on_admitted, keys,
                     )
                 )
 
@@ -704,6 +740,7 @@ class FunnelPlugin(CorvidaePlugin):
             try:
                 admission = await self.admit_detailed(
                     channel, conv, payload.source, payload.entries,
+                    keys=payload.keys,
                 )
             except Exception:
                 # Admission failed — keep the whole payload registered for
@@ -737,24 +774,38 @@ class FunnelPlugin(CorvidaePlugin):
                 for msg in conv.messages
                 if msg.get("_message_type") == MessageType.CONTEXT
             ]
-            leftover = [
-                entry for entry in payload.entries
-                if entry not in admission.admitted
-                and not any(entry in existing for existing in window_context)
-            ]
-            # An entry larger than the source's whole budget can never be
-            # admitted, so drop it now with a warning instead of re-queueing
-            # it on every drain forever (#623).
-            leftover = self._drop_unadmittable(channel.id, payload.source, leftover)
+            # Keys travel with their entries: a leftover keeps the key of the
+            # entry it belongs to, or the next drain's pairing is wrong (#725).
+            pairs = list(zip(payload.entries, payload.keys or [None] * len(payload.entries)))
+            leftover = self._drop_unadmittable(
+                channel.id,
+                payload.source,
+                [
+                    (entry, key) for entry, key in pairs
+                    if entry not in admission.admitted
+                    and not any(entry in existing for existing in window_context)
+                ],
+            )
             if leftover:
-                # Re-queue the leftovers under the original creation time and callback.
-                remaining.append(replace(payload, entries=leftover))
+                # Re-queue the leftovers under the original creation time and
+                # callback, with their keys still one per entry.
+                remaining.append(
+                    replace(
+                        payload,
+                        entries=[entry for entry, _key in leftover],
+                        keys=(
+                            [key for _entry, key in leftover]
+                            if payload.keys is not None
+                            else None
+                        ),
+                    )
+                )
         return remaining
 
     def _drop_unadmittable(
-        self, channel_id: str, source: str, entries: list[str]
-    ) -> list[str]:
-        """Return ``entries`` minus any larger than the source's budget or cap.
+        self, channel_id: str, source: str, pairs: list[tuple[str, str | None]]
+    ) -> list[tuple[str, str | None]]:
+        """Return ``pairs`` minus any entry larger than the source's budget or cap.
 
         Each dropped entry is logged at warning level with the channel, the
         source, its token count, the budget and the config key that fixes it.
@@ -764,8 +815,8 @@ class FunnelPlugin(CorvidaePlugin):
         """
         budget = self._budgets.get(source, self._default_budget)
         cap = self._window_budgets.get(source)
-        kept: list[str] = []
-        for entry in entries:
+        kept: list[tuple[str, str | None]] = []
+        for entry, key in pairs:
             entry_tokens = count_tokens(entry)
             # Larger than the whole window cap: no compaction makes room.
             if cap is not None and entry_tokens > cap:
@@ -787,7 +838,7 @@ class FunnelPlugin(CorvidaePlugin):
                     extra={"channel_id": channel_id, "source": source},
                 )
                 continue
-            kept.append(entry)
+            kept.append((entry, key))
         return kept
 
     async def admit(
@@ -842,12 +893,7 @@ class FunnelPlugin(CorvidaePlugin):
                 ``entries``'s.
         """
         # A key list must pair one key with each entry.
-        if keys is not None and len(keys) != len(entries):
-            raise ValueError(
-                f"funnel.admit_detailed for source {source!r} got "
-                f"{len(keys)} keys for {len(entries)} entries; pass one key "
-                f"per entry, or no keys"
-            )
+        _check_keys(source, entries, keys)
         if budget_tokens is None:
             budget_tokens = self._budgets.get(source, self._default_budget)
 

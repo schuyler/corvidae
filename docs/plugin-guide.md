@@ -317,6 +317,16 @@ class RecallPlugin(CorvidaePlugin):
 - `on_admitted`, if given, is a sync callable. The funnel calls it with the
   `Admission` (`admitted` and `duplicate` lists) after each admission attempt
   that completes. A raise is logged and does not stop the drain.
+- `keys=`, if given, is one stable identity per entry (#725), the same
+  argument `admit()` takes. With keys, an entry is a duplicate when its key
+  already appears in this source's CONTEXT rows, so a page that re-renders
+  with a new age or score is not admitted twice. The match is containment, so
+  render the key into the line you admit (memory renders its record id;
+  a folder source can carry `<!--notes/page.md#intro-->`). A key list that is
+  not one per entry is rejected with a warning naming the source, both
+  lengths and the remedy, and the entries are admitted unkeyed: a promise has
+  no caller to raise at, and a result the turn is waiting for should not be
+  dropped over its keys.
 - A promise that is done when the turn starts is admitted that turn. One
   still pending is admitted at the channel's next turn after it resolves,
   whatever that turn's origin. Nothing wakes the channel for it.
