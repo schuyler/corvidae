@@ -243,7 +243,7 @@ class _UrlRedactingFilter(logging.Filter):
         if not any(marker in message for marker in _CREDENTIAL_MARKERS):
             return True
         try:
-            redacted = _redact_urls_in_text(_one_line(message))
+            redacted = _one_line(_redact_urls_in_text(message))
         except Exception:
             logger.warning(
                 "could not redact a %s log record", record.name, exc_info=True

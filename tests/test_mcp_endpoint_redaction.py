@@ -852,3 +852,14 @@ def test_install_log_redaction_adds_one_filter_per_root_handler():
             assert len(ours) == 1
     finally:
         root.handlers = saved
+
+
+def test_a_url_after_a_raw_newline_is_redacted_before_lines_are_joined():
+    """Line breaks must not splice two URLs into one token the redactor
+    mis-parses: redact first, then flatten to one line."""
+    record = logging.LogRecord(
+        "mcp.x", logging.WARNING, "f", 1,
+        "see http://h.example/\nhttp://u:PW1@h2.example/ end", (), None,
+    )
+    assert mcp_client_mod._UrlRedactingFilter().filter(record) is True
+    assert "PW1" not in record.getMessage()
