@@ -1442,6 +1442,91 @@ async def test_reload_with_bad_read_file_window_fraction_is_rejected(tmp_path, c
     assert "reload skipped" in caplog.text
 
 
+async def test_reload_with_bad_exit_timeout_is_rejected(tmp_path, caplog):
+    """#758: a reload carrying daemon.exit_timeout: -1 is skipped, with an
+    ERROR naming the key and the value, and nothing is dispatched."""
+    from corvidae.channel import ChannelRegistry
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "daemon:\n  exit_timeout: -1\n"
+    )
+
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    pm.get_plugin.return_value = ChannelRegistry({})
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+        },
+    )
+
+    dispatched = []
+
+    async def capture_dispatch(config: dict) -> None:
+        dispatched.append(config)
+
+    plugin._dispatch_config_reload = capture_dispatch
+
+    with caplog.at_level(logging.ERROR, logger="corvidae.config_watcher"):
+        await plugin._reload_config()
+
+    assert not dispatched, "a rejected daemon section must not dispatch"
+    assert "daemon.exit_timeout" in caplog.text
+    assert "got -1 (int)" in caplog.text
+    assert "reload skipped" in caplog.text
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1, "the refusal is one ERROR line"
+
+
+async def test_reload_with_bad_shutdown_timeout_is_rejected(tmp_path, caplog):
+    """#758: daemon.shutdown_timeout: 0 is refused on reload the same way."""
+    from corvidae.channel import ChannelRegistry
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "daemon:\n  shutdown_timeout: 0\n"
+    )
+
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    pm.get_plugin.return_value = ChannelRegistry({})
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+        },
+    )
+
+    dispatched = []
+
+    async def capture_dispatch(config: dict) -> None:
+        dispatched.append(config)
+
+    plugin._dispatch_config_reload = capture_dispatch
+
+    with caplog.at_level(logging.ERROR, logger="corvidae.config_watcher"):
+        await plugin._reload_config()
+
+    assert not dispatched, "a rejected daemon section must not dispatch"
+    assert "daemon.shutdown_timeout" in caplog.text
+    assert "got 0 (int)" in caplog.text
+    assert "reload skipped" in caplog.text
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1, "the refusal is one ERROR line"
+
+
 # ---------------------------------------------------------------------------
 # #408: a restart-only key that changes must be reported, and a plugin's
 # declared live keys must be the ones its reload hook actually re-reads.

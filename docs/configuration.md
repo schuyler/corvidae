@@ -1073,7 +1073,7 @@ again.
 | `memory.*` (including `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after`, `memory.consolidate_after_tokens` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts, and the token threshold is read once then. |
 | `heartbeat.after` | `HeartbeatPlugin` reads it at init and registers its idle watch at start. Putting the heartbeat to sleep or waking it takes a restart. |
 | `timepiece.*` | `TimepiecePlugin` reads its section in `on_init` and has no reload hook. |
-| `daemon.shutdown_timeout`, `daemon.exit_timeout` | Read once at startup by the runtime. A reload that changes either logs the restart-only warning and does not validate the value; a bad value fails the next startup (and the restart tool's pre-flight). |
+| `daemon.shutdown_timeout`, `daemon.exit_timeout` | Read once at startup by the runtime. Validated on every reload: a bad value refuses the whole reload (one ERROR naming the key and the value, the running config unchanged), so a typo is caught when it is saved rather than at the next restart. A valid change logs the restart-only warning and applies on restart (the restart tool's pre-flight checks it too). |
 | `tools.max_result_chars`, `tools.read_file_window_fraction`, `tools.shell_timeout`, `tools.web_fetch_timeout`, `tools.call_timeout`, `tools.timeouts` | Deferred; not currently implemented in hot-reload path. A bad `tools.call_timeout`, `tools.timeouts` or `tools.read_file_window_fraction` value still refuses the whole reload (see Error handling). |
 
 ### Error handling
@@ -1090,8 +1090,8 @@ nested too deeply to load says to reduce the nesting.
 
 - **Invalid YAML**: logged at `ERROR`; reload is skipped and the running config is unchanged.
 - **Not valid UTF-8, or YAML nested too deeply**: logged at `ERROR` naming the file, the cause (with the byte offset for UTF-8) and the remedy; reload is skipped and the running config stays in force.
-- **Rejected value in `agent:`, `daemon:` or `channels:`** (e.g. a malformed `channels.<id>.tools`): logged at `ERROR` naming the file. For `channels:` the message also names the key and the value and says "reload skipped"; for `agent:` and `daemon:` the key is in the logged traceback. The reload is skipped whole: no section is applied and no plugin receives `on_config_reload`, so a typo in one `channels:` entry cannot change `agent:` values.
-- **Rejected `tools.call_timeout`, `tools.timeouts` or `tools.read_file_window_fraction`**: logged at `ERROR` naming the key and the value, with "reload skipped"; the running config is unchanged.
+- **Rejected value in `agent:`, `daemon:` or `channels:`** (e.g. a malformed `channels.<id>.tools`): logged at `ERROR` naming the file. For `channels:` the message also names the key and the value and says "reload skipped"; for `agent:` and other `daemon:` keys the key is in the logged traceback (`daemon.shutdown_timeout` and `daemon.exit_timeout` are named in the message; see the next item). The reload is skipped whole: no section is applied and no plugin receives `on_config_reload`, so a typo in one `channels:` entry cannot change `agent:` values.
+- **Rejected `tools.call_timeout`, `tools.timeouts`, `tools.read_file_window_fraction`, `daemon.shutdown_timeout` or `daemon.exit_timeout`**: logged at `ERROR` naming the key and the value, with "reload skipped"; the running config is unchanged.
 - **Malformed `llm:` section** (an unknown `extends` base, an `extends` cycle, an unknown `kind`, an embedding profile with no `dimensions`, no default chat profile, an `llm.stages` entry naming a missing profile, and so on): logged at `ERROR` naming the key, with "reload skipped"; the running config is unchanged.
 - **Config file deleted**: logged at `WARNING`; polling continues. The file may reappear.
 - **Per-plugin failure in `on_config_reload`**: logged at `ERROR`; other plugins still receive the reload.

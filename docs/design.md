@@ -324,7 +324,11 @@ not on every poll. Anything not declared is restart-only by default, so a
 plugin that forgets to declare a key produces a spurious warning rather than a
 silent pending change. A test in `tests/test_config_watcher.py` reads each
 reload hook's source and fails if it reads a key its class does not declare, so
-the registry cannot drift from the code.
+the registry cannot drift from the code. These restart-only keys are still
+validated before the reload is applied: `tools.call_timeout`, `tools.timeouts`,
+`tools.read_file_window_fraction`, `tools.max_agent_depth` and both `daemon`
+shutdown bounds are parsed in step 3e, so a reload carrying a bad value is refused as a whole (`ERROR`
+naming the key and the value, nothing applied) instead of parking a value that fails the next startup (#758).
 
 **System prompt layers (#316).** A conversation's system prompt is the
 identity (`agent.system_prompt`, never set per channel; a channel-level
@@ -2744,8 +2748,9 @@ setup.
   watcher validate the same keys first, so a bad value is a `Config error` at
   startup and a refused reload.
   The watcher's step 3e validates `tools.call_timeout`, `tools.timeouts`,
-  `tools.read_file_window_fraction` and `tools.max_agent_depth` on every reload;
-  all four stay restart-only, so a good change waits for a restart.
+  `tools.read_file_window_fraction` and `tools.max_agent_depth` on every reload
+  (along with `daemon.shutdown_timeout` and `daemon.exit_timeout`); all stay
+  restart-only, so a good change waits for a restart.
 
 ### Tool access
 
