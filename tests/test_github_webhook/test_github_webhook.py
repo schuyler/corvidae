@@ -68,15 +68,23 @@ def github(
     )
 
 
+#: Marks "no conclusion given": the fixture then picks what GitHub sends.
+_DEFAULT = object()
+
+
 def workflow_run(
     action="completed",
     number=6,
-    conclusion="success",
+    conclusion=_DEFAULT,
     branch="main",
     workflow_id=42,
     repo="o/r",
     name="CI",
 ) -> dict:
+    # GitHub sends "conclusion": null until a run completes (#847 review), so a
+    # non-terminal fixture carries None unless a test says otherwise.
+    if conclusion is _DEFAULT:
+        conclusion = "success" if action == "completed" else None
     return {
         "action": action,
         "workflow_run": {
@@ -229,6 +237,35 @@ async def test_a_tag_push_is_dropped(tmp_path):
         github("push", {"ref": "refs/tags/v1", "after": "a" * 40, "commits": [], "compare": "x"})
     )
     assert rec.calls == []
+
+
+async def test_a_branch_deletion_is_not_reported_as_a_push(tmp_path):
+    """A push that deletes a listed branch carries no commits and an all-zero
+    head; it is not a push the agent can act on."""
+    block = {"endpoints": {"github": {"channels": ["irc:#a"], "push_branches": ["main"]}}}
+    plugin, rec, _ = await build(tmp_path, block)
+    payload = push("main", commits=0, head="0" * 40) | {"deleted": True}
+    await plugin._deliver(github("push", payload))
+    assert rec.calls == []
+
+
+async def test_a_push_with_a_non_string_ref_is_skipped(tmp_path):
+    """A malformed payload must not raise into the ingress worker."""
+    block = {"endpoints": {"github": {"channels": ["irc:#a"], "push_branches": ["main"]}}}
+    plugin, rec, _ = await build(tmp_path, block)
+    await plugin._deliver(github("push", push("main") | {"ref": 123}))
+    assert rec.calls == []
+
+
+async def test_a_push_without_compare_does_not_print_none(tmp_path):
+    block = {"endpoints": {"github": {"channels": ["irc:#a"], "push_branches": ["main"]}}}
+    plugin, rec, _ = await build(tmp_path, block)
+    payload = push("main", commits=2)
+    del payload["compare"]
+    await plugin._deliver(github("push", payload))
+    [call] = rec.calls
+    assert "None" not in call["text"], call["text"]
+    assert call["text"].startswith("Push to main: 2 commits, head abcdef1"), call["text"]
 
 
 async def test_ping_is_logged_and_not_notified(tmp_path, caplog):
