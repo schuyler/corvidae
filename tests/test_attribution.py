@@ -244,6 +244,54 @@ class TestSpawnToolRefusal:
             reset_attribution(token)
 
     @pytest.mark.asyncio
+    async def test_fork_allows_below_limit(self):
+        from corvidae.attribution import set_attribution, reset_attribution
+        from corvidae.tools.fork_tool import ForkToolPlugin
+
+        plugin = ForkToolPlugin.__new__(ForkToolPlugin)
+        plugin._max_agent_depth = 2
+        plugin._max_turns = 10
+        plugin.pm = None
+
+        token = set_attribution(agent_depth=1)
+        try:
+            result = await plugin._launch(
+                "do something",
+                type("Ctx", (), {"task_queue": None, "channel": None})()
+            )
+            assert "nested agent depth" not in result
+        finally:
+            reset_attribution(token)
+
+    def test_max_depth_one_refuses_at_one(self):
+        from corvidae.attribution import next_agent_depth, set_attribution, reset_attribution
+        token = set_attribution(agent_depth=1)
+        try:
+            try:
+                next_agent_depth(1)
+                assert False, "should have raised"
+            except ValueError as exc:
+                assert "nested agent depth 1 reached" in str(exc)
+        finally:
+            reset_attribution(token)
+
+    def test_max_depth_one_allows_from_zero(self):
+        from corvidae.attribution import next_agent_depth, set_attribution, reset_attribution
+        token = set_attribution(agent_depth=0)
+        try:
+            assert next_agent_depth(1) == 1
+        finally:
+            reset_attribution(token)
+
+    @pytest.mark.asyncio
+    async def test_on_start_wires_max_agent_depth(self):
+        from corvidae.tools.subagent import SubagentPlugin
+        plugin = SubagentPlugin.__new__(SubagentPlugin)
+        plugin.pm = None
+        await plugin.on_start({"tools": {"max_agent_depth": 3}})
+        assert plugin._max_agent_depth == 3
+
+    @pytest.mark.asyncio
     async def test_depth_propagates_into_work(self):
         """Verify that set_attribution merges agent_depth correctly."""
         from corvidae.attribution import (
