@@ -42,8 +42,9 @@ retrieval degrades to FTS5; the run says so per query and in the summary (on an
 install without sqlite-vec memory logs a load warning with a traceback).
 
 LABELS_JSON (queries, and the snapshot's integer memory ids they should find;
-an empty "relevant" list is a negative probe: its pool is written but it is
-not scored; "description" and "note" are free text and unused):
+an empty "relevant" list is a negative probe: recall and MRR stay null, and
+what the gate admitted is scored as false admits (#802); "description" and
+"note" are free text and unused):
     {"queries": [{"text": "what did we decide about the battery?",
                   "relevant": [412, 415]}]}
 A query may also carry "context", the agent reply it followed (#665), and
@@ -58,10 +59,14 @@ the fused pool against vec KNN alone.
 POOL_JSON is written once after all queries: run_at, k, one entry per query
 (index, text, context, subset, query (the text actually retrieved with),
 relevant, unscorable ids with their status absent / redacted /
-superseded / not_indexed, degraded, recall_at_k, mrr, and every scored
-candidate as id, rank, similarity, score, band, source) and a summary (with
-query_context, candidates and per-subset means). It holds no memory text beyond the
-labels' own; look the ids up in the source.
+superseded / not_indexed, degraded, negative, false_admits (its strong and
+marginal counts on a negative probe, null otherwise), recall_at_k, mrr, and
+every scored candidate as id, rank, similarity, score, band, source, admitted
+(the daemon's gate, on every probe)) and a summary (with query_context,
+candidates, the false-admit counts — negative_probes, negative_scored,
+false_admit_rate, mean_false_admits, strong_false_admits — and per-subset
+means with the same counts). It holds no memory text beyond the labels' own;
+look the ids up in the source.
 """
 
 from __future__ import annotations
@@ -507,8 +512,13 @@ async def label_status(db: aiosqlite.Connection, ids: set[int]) -> dict[int, str
     return status
 
 
-def candidate_entries(pool: RetrievalPool) -> list[dict]:
-    """The pool's whole ranked list as the pool JSON's ``candidates``."""
+def candidate_entries(pool: RetrievalPool, admitted_ids: set[int]) -> list[dict]:
+    """The pool's whole ranked list as the pool JSON's ``candidates``.
+
+    ``admitted`` is the gate's verdict, from the daemon's own rule (#802); a
+    candidate outside the top k was never offered to the gate, so it is not
+    admitted.
+    """
     return [
         {
             "id": cand["id"],
@@ -517,9 +527,24 @@ def candidate_entries(pool: RetrievalPool) -> list[dict]:
             "score": cand["score"],
             "band": cand["band"],
             "source": cand["source"],
+            "admitted": cand["id"] in admitted_ids,
         }
         for rank, cand in enumerate(pool.ranked, start=1)
     ]
+
+
+def false_admits(admitted: list[dict]) -> dict[str, int]:
+    """Split a negative probe's admits by the band that showed them (#802).
+
+    Every admit on a probe with nothing relevant is false: ``strong`` is shown
+    bare and ``moderate`` is shown ``[marginal]``, so the split is what a
+    threshold change would move. A weak-banded candidate cannot be admitted
+    unless the pool degraded, and degraded probes are not scored.
+    """
+    return {
+        "strong": sum(1 for c in admitted if c["band"] == "strong"),
+        "marginal": sum(1 for c in admitted if c["band"] != "strong"),
+    }
 
 
 def probe_query(query: LabelQuery, query_context: str) -> str:
@@ -542,6 +567,28 @@ def probe_query(query: LabelQuery, query_context: str) -> str:
 UNTAGGED = "(untagged)"
 
 
+def false_admit_summary(results: list[dict]) -> dict[str, int | float | None]:
+    """The false-admit counts over one group of results (#802).
+
+    ``negative_probes`` counts the probes labelled ``"relevant": []``;
+    ``negative_scored`` those whose pool did not degrade — the only ones where
+    the gate ran. ``false_admit_rate`` is the share of those that admitted
+    anything, ``mean_false_admits`` the mean count of admits per scored probe,
+    and ``strong_false_admits`` the total shown bare (a marginal admit is
+    already marked ``[marginal]``). None where nothing was scored.
+    """
+    negatives = [r for r in results if r.get("negative")]
+    scored = [r for r in negatives if r.get("false_admits") is not None]
+    admits = [r["false_admits"]["strong"] + r["false_admits"]["marginal"] for r in scored]
+    return {
+        "negative_probes": len(negatives),
+        "negative_scored": len(scored),
+        "false_admit_rate": mean([1.0 if n else 0.0 for n in admits]),
+        "mean_false_admits": mean([float(n) for n in admits]),
+        "strong_false_admits": sum(r["false_admits"]["strong"] for r in scored),
+    }
+
+
 def subset_summary(results: list[dict]) -> dict[str, dict]:
     """Scored count and mean Recall@k / MRR per subset tag, untagged grouped."""
     groups: dict[str, list[dict]] = {}
@@ -556,8 +603,41 @@ def subset_summary(results: list[dict]) -> dict[str, dict]:
             "scored": len(scored_recalls),
             "mean_recall_at_k": mean(scored_recalls),
             "mean_mrr": mean(scored_mrrs),
+            **false_admit_summary(members),
         }
     return summary
+
+
+def plural(count: int, one: str, many: str | None = None) -> str:
+    """``count`` with the matching noun, so a message reads "1 probe"."""
+    return f"{count} {one if count == 1 else (many or one + 's')}"
+
+
+def false_admit_line(group: dict) -> str:
+    """The false-admit summary line for the run or one subset (#802).
+
+    With no negative probes the metrics print n/a, as recall does; a degraded
+    negative probe is named apart, since the gate never ran on it.
+    """
+    label = "📊 False admits:   " if group["negative_probes"] else "📊 False admits:   n/a"
+    if not group["negative_probes"]:
+        return f"{label} (no negative probes)"
+    if not group["negative_scored"]:
+        return (
+            f"{label} n/a ({plural(group['negative_probes'], 'negative probe')}, "
+            f"all degraded, not scored)"
+        )
+    rate = group["false_admit_rate"]
+    line = (
+        f"📊 False admits:   {rate * 100:.0f}% of "
+        f"{plural(group['negative_scored'], 'negative probe')} admitted something "
+        f"(mean {group['mean_false_admits']:.2f}, "
+        f"{group['strong_false_admits']} strong)"
+    )
+    degraded = group["negative_probes"] - group["negative_scored"]
+    if degraded:
+        line += f" ({degraded} degraded, not scored)"
+    return line
 
 
 def fail(message: str) -> NoReturn:
@@ -626,6 +706,9 @@ async def run_snapshot_evaluation(
             memory = MemoryPlugin()
             pm.register(memory, name="memory")
             await memory.on_init(pm=pm, config=config)
+            # The daemon's own admission rule (#802), imported where the run
+            # builds the plugins so the eval cannot score a different gate.
+            from corvidae_cognition.memory import admitted_candidates
 
             llm = LLMPlugin()
             pm.register(llm, name="llm")
@@ -653,6 +736,11 @@ async def run_snapshot_evaluation(
               f"query_context={memory._query_context}, "
               f"candidates={memory._candidates}")
         for query in queries:
+            # An explicitly empty "relevant" list is a negative probe (#802):
+            # the gate should admit nothing, and what it does admit is scored
+            # below. An empty list because every labelled id is unreachable is
+            # not one — a right answer existed and was lost.
+            negative = not query.relevant
             reachable = [i for i in query.relevant if i not in statuses]
             unscorable = [
                 {"id": i, "status": statuses[i]} for i in query.relevant if i in statuses
@@ -660,7 +748,17 @@ async def run_snapshot_evaluation(
             text = probe_query(query, memory._query_context)
             pool = await memory._retrieve_pool(text, k=k, exclude=None)
             # Top k is the expression retrieve() returns.
-            top_ids = [c["id"] for c in pool.ranked[: pool.k]]
+            top = pool.ranked[: pool.k]
+            top_ids = [c["id"] for c in top]
+            # The gate is the daemon's (#802), so a threshold fitted here is
+            # the one before_agent_turn applies.
+            admitted = admitted_candidates(top, pool.degraded)
+            admitted_ids = {c["id"] for c in admitted}
+            # False admits are measured only where the gate ran: a degraded
+            # pool admits its top k without one, so it is counted apart.
+            probe_false_admits = (
+                false_admits(admitted) if negative and not pool.degraded else None
+            )
             scored = bool(reachable)
             recall = recall_at_k(top_ids, reachable, pool.k) if scored else None
             reciprocal = mrr(top_ids, reachable) if scored else None
@@ -673,9 +771,11 @@ async def run_snapshot_evaluation(
                 "relevant": query.relevant,
                 "unscorable": unscorable,
                 "degraded": pool.degraded,
+                "negative": negative,
+                "false_admits": probe_false_admits,
                 "recall_at_k": recall,
                 "mrr": reciprocal,
-                "candidates": candidate_entries(pool),
+                "candidates": candidate_entries(pool, admitted_ids),
             })
             print(f"\nQ: {query.text}")
             print(
@@ -685,7 +785,21 @@ async def run_snapshot_evaluation(
             if unscorable:
                 named = ", ".join(f"{u['id']} ({u['status']})" for u in unscorable)
                 print(f"   unscorable: {named}")
-            if not scored:
+            if negative:
+                if pool.degraded:
+                    print("   negative probe: degraded, not scored")
+                elif not admitted:
+                    print("   negative probe: nothing admitted")
+                else:
+                    counts = probe_false_admits
+                    ids = ", ".join(str(c["id"]) for c in admitted)
+                    print(
+                        f"   negative probe: "
+                        f"{plural(counts['strong'] + counts['marginal'], 'false admit')} "
+                        f"({counts['strong']} strong, "
+                        f"{counts['marginal']} marginal) ids=[{ids}]"
+                    )
+            elif not scored:
                 print("   not scored: no reachable relevant id")
 
         # Summary over the scored queries; FTS5 fallback counted separately.
@@ -700,12 +814,14 @@ async def run_snapshot_evaluation(
             "mean_mrr": mean(mrrs),
             "query_context": memory._query_context,
             "candidates": memory._candidates,
+            **false_admit_summary(results),
             "subsets": subset_summary(results),
         }
         print(f"\n📊 Mean recall@{effective_k}: {fmt_metric(summary['mean_recall_at_k'])} "
               f"(over {len(recalls)} of {len(results)} queries)")
         print(f"📊 Mean MRR:        {fmt_metric(summary['mean_mrr'])} "
               f"(over {len(recalls)} of {len(results)} queries)")
+        print(false_admit_line(summary))
         # Per-subset means, only worth printing when the probes are tagged.
         if any(r["subset"] for r in results):
             for name, group in summary["subsets"].items():
@@ -713,6 +829,8 @@ async def run_snapshot_evaluation(
                       f"{fmt_metric(group['mean_recall_at_k'])}  "
                       f"mrr={fmt_metric(group['mean_mrr'])}  "
                       f"(over {group['scored']} of {group['queries']} queries)")
+                if group["negative_probes"]:
+                    print("   " + false_admit_line(group).replace("📊 False admits:   ", "false admits: "))
         if degraded:
             print(f"⚠️  FTS5 fallback on {degraded} of {len(results)} queries")
 

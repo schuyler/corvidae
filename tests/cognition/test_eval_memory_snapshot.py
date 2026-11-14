@@ -525,7 +525,9 @@ def test_snapshot_pool_json_holds_whole_pool(
     assert [c["rank"] for c in candidates] == [1, 2, 3]
     assert [c["id"] for c in candidates] == ids
     for cand in candidates:
-        assert set(cand) == {"id", "rank", "similarity", "score", "band", "source"}
+        assert set(cand) == {
+            "id", "rank", "similarity", "score", "band", "source", "admitted",
+        }
         assert cand["band"] in {"strong", "moderate", "weak"}
     scores = [c["score"] for c in candidates]
     assert scores == sorted(scores, reverse=True)
@@ -772,3 +774,152 @@ def test_candidates_flag_needs_snapshot(
         script.main(["--candidates", "vector"])
     assert excinfo.value.code == 2
     assert "--candidates is only used with --snapshot" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# #802: negative probes are scored on false admits
+# ---------------------------------------------------------------------------
+
+
+def test_negative_probe_counts_what_the_gate_admitted(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A probe labelled ``"relevant": []`` scores the gate's admits, not recall.
+
+    The gate is the daemon's (#703): with nothing above weak it admits nothing.
+    Against the three-text fixture every record scores well above the weak
+    band, so all of the top k is admitted — which is exactly the false admit a
+    negative probe exists to expose.
+    """
+    id_a, id_b, _id_c = build_source(tmp_path / "sessions.db", [TEXT_A, TEXT_B, TEXT_C])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": []},
+        {"text": TEXT_A, "relevant": [id_a]},
+    ])
+
+    pool = run(script, tmp_path, labels, "--k", "2")
+
+    negative, positive = pool["queries"]
+    assert negative["negative"] is True
+    assert negative["recall_at_k"] is None and negative["mrr"] is None
+    # Three embedded records is under the 50 band_on: relative needs, so the
+    # gate bands on similarity (strong 0.75, moderate 0.6): A at cosine 1.0 is
+    # strong, B at 0.5 is weak and dropped. One false admit, shown bare.
+    assert negative["false_admits"] == {"strong": 1, "marginal": 0}
+    assert {c["id"] for c in negative["candidates"] if c["admitted"]} == {id_a}
+    # Every candidate carries the gate's verdict, so admission is replayable.
+    assert all(c["admitted"] is False for c in positive["candidates"] if c["rank"] > 2)
+    assert positive["negative"] is False and positive["false_admits"] is None
+    summary = pool["summary"]
+    assert summary["negative_probes"] == 1
+    assert summary["negative_scored"] == 1
+    assert summary["false_admit_rate"] == pytest.approx(1.0)
+    assert summary["mean_false_admits"] == pytest.approx(1.0)
+    assert summary["strong_false_admits"] == 1
+    out = capsys.readouterr().out
+    assert "negative probe: 1 false admit (1 strong, 0 marginal) ids=[%d]" % id_a in out
+    assert "100% of 1 negative probe admitted something (mean 1.00, 1 strong)" in out
+
+
+def test_all_unreachable_labels_are_not_a_negative_probe(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+) -> None:
+    """An empty reachable set is a labelling gap, not a negative probe (#802).
+
+    Requirement 2: a probe whose labelled ids are all unreachable stays
+    unscored and is not counted as a false admit, since a right answer existed.
+    """
+    build_source(tmp_path / "sessions.db", [TEXT_A, TEXT_B, TEXT_C])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [99_001, 99_002]},
+    ])
+
+    pool = run(script, tmp_path, labels, "--k", "2")
+
+    (probe,) = pool["queries"]
+    assert probe["negative"] is False
+    assert probe["false_admits"] is None
+    assert probe["recall_at_k"] is None
+    assert [u["status"] for u in probe["unscorable"]] == ["absent", "absent"]
+    assert pool["summary"]["negative_probes"] == 0
+    assert pool["summary"]["false_admit_rate"] is None
+
+
+def test_degraded_negative_probe_is_counted_apart(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Requirement 4: the FTS5 path admits its top k without a gate, so a
+    degraded negative probe is reported and left out of the rate."""
+    build_source(
+        tmp_path / "sessions.db", [TEXT_A, TEXT_B, TEXT_C],
+        config=FTS_CONFIG, embedded=False,
+    )
+    write_config(tmp_path / "agent.yaml", FTS_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": []},
+    ])
+
+    pool = run(script, tmp_path, labels, "--k", "2")
+
+    (probe,) = pool["queries"]
+    assert probe["degraded"] is True
+    assert probe["negative"] is True
+    assert probe["false_admits"] is None
+    summary = pool["summary"]
+    assert summary["negative_probes"] == 1
+    assert summary["negative_scored"] == 0
+    assert summary["false_admit_rate"] is None
+    assert "degraded" in capsys.readouterr().out
+
+
+def test_no_negative_probes_prints_na(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Requirement 6: with no negative probes the metrics print n/a."""
+    id_a, _id_b, _id_c = build_source(tmp_path / "sessions.db", [TEXT_A, TEXT_B, TEXT_C])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [id_a]},
+    ])
+
+    pool = run(script, tmp_path, labels, "--k", "2")
+
+    assert pool["summary"]["negative_probes"] == 0
+    out = capsys.readouterr().out
+    assert "n/a" in out and "no negative probes" in out
+
+
+def test_false_admits_are_reported_per_subset(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+) -> None:
+    """The same counts go into each subset, not only the run summary."""
+    build_source(tmp_path / "sessions.db", [TEXT_A, TEXT_B, TEXT_C])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [], "subset": "negative"},
+        {"text": TEXT_A, "relevant": [1], "subset": "positive"},
+    ])
+
+    pool = run(script, tmp_path, labels, "--k", "2")
+
+    subsets = pool["summary"]["subsets"]
+    assert subsets["negative"]["negative_probes"] == 1
+    assert subsets["negative"]["false_admit_rate"] == pytest.approx(1.0)
+    assert subsets["positive"]["negative_probes"] == 0
+    assert subsets["positive"]["false_admit_rate"] is None
+
+
+def test_false_admits_split_by_band_and_plural(script: ModuleType) -> None:
+    """The split is what a threshold change moves: strong bare, moderate marginal."""
+    assert script.false_admits([]) == {"strong": 0, "marginal": 0}
+    assert script.false_admits(
+        [{"band": "strong"}, {"band": "moderate"}, {"band": "moderate"}]
+    ) == {"strong": 1, "marginal": 2}
+    assert script.plural(1, "false admit") == "1 false admit"
+    assert script.plural(0, "false admit") == "0 false admits"
+    assert script.plural(2, "negative probe") == "2 negative probes"
