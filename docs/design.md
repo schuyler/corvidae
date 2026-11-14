@@ -324,10 +324,9 @@ not on every poll. Anything not declared is restart-only by default, so a
 plugin that forgets to declare a key produces a spurious warning rather than a
 silent pending change. A test in `tests/test_config_watcher.py` reads each
 reload hook's source and fails if it reads a key its class does not declare, so
-the registry cannot drift from the code. Restart-only keys are still validated before the reload is
-applied: `tools.call_timeout`, `tools.timeouts`,
-`tools.read_file_window_fraction`, `tools.max_agent_depth` and both
-`daemon` shutdown bounds are parsed in step 3e, so a reload carrying a bad
+the registry cannot drift from the code. These restart-only keys are still
+validated before the reload is applied: `tools.call_timeout`, `tools.timeouts`,
+`tools.read_file_window_fraction` and both `daemon` shutdown bounds are parsed in step 3e, so a reload carrying a bad
 value is refused as a whole (`ERROR` naming the key and the value, nothing
 applied) instead of parking a value that fails the next startup (#758).
 

@@ -1479,8 +1479,10 @@ async def test_reload_with_bad_exit_timeout_is_rejected(tmp_path, caplog):
 
     assert not dispatched, "a rejected daemon section must not dispatch"
     assert "daemon.exit_timeout" in caplog.text
-    assert "-1" in caplog.text
+    assert "got -1 (int)" in caplog.text
     assert "reload skipped" in caplog.text
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1, "the refusal is one ERROR line"
 
 
 async def test_reload_with_bad_shutdown_timeout_is_rejected(tmp_path, caplog):
@@ -1519,8 +1521,10 @@ async def test_reload_with_bad_shutdown_timeout_is_rejected(tmp_path, caplog):
 
     assert not dispatched, "a rejected daemon section must not dispatch"
     assert "daemon.shutdown_timeout" in caplog.text
-    assert "0" in caplog.text
+    assert "got 0 (int)" in caplog.text
     assert "reload skipped" in caplog.text
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1, "the refusal is one ERROR line"
 
 
 # ---------------------------------------------------------------------------
