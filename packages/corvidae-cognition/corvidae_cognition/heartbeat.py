@@ -73,7 +73,8 @@ DEFAULT_RETIRED_GOAL_LIMIT = 5
 
 #: Appended when the goals plugin is loaded (PRD §3.7 Goals and Heartbeat).
 GOALS_INSTRUCTION = (
-    "Goals are your work queue. If there's an open goal you can advance, "
+    "Goals are your work queue. Work the front of the queue: the first "
+    "open goal is what to advance next. "
     "do it. If a goal is done, retire it. Don't take up again a goal you "
     "retired unless something new has changed. Otherwise act only when the "
     "assessment warrants it — a beat with nothing to advance is fine."

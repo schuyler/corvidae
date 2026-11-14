@@ -246,14 +246,14 @@ class GoalsPlugin(CorvidaePlugin):
         db = await self._require_db()
         now = self._now()
         async with db.execute(
-            "SELECT id, text, created_at FROM goals "
+            "SELECT id, text, created_at, status FROM goals "
             "WHERE retired_at IS NULL "
             "ORDER BY position ASC, id ASC"
         ) as cursor:
             rows = await cursor.fetchall()
         return [
-            {"id": gid, "age_seconds": max(0.0, now - created_at), "summary": text}
-            for gid, text, created_at in rows
+            {"id": gid, "age_seconds": max(0.0, now - created_at), "summary": text, "status": status}
+            for gid, text, created_at, status in rows
         ]
 
     async def retired_goals(self, limit: int) -> list[dict]:
@@ -407,7 +407,7 @@ class GoalsPlugin(CorvidaePlugin):
             await plugin._fire_state_changed(
                 goal_id=id,
                 kind="retired",
-                old_status="open",
+                old_status=checked.status,
                 new_status="retired",
                 origin_channel=checked.origin_channel,
                 actor_channel=channel_id,
@@ -447,18 +447,22 @@ class GoalsPlugin(CorvidaePlugin):
 
         async def set_goal_status(id: int, status: str, _ctx=None) -> str:
             """Set the status of an open goal. Status must be one of:
-            open, blocked, waiting. 'blocked' means the goal cannot be
+            open, in-progress, blocked, waiting. 'in-progress' means you are
+            actively working on it. 'blocked' means the goal cannot be
             pursued until an external dependency is resolved. 'waiting'
             means the goal is complete but awaiting someone's review or
             decision. 'open' means the goal is actively pursuable."""
-            channel_id = _ctx.channel.id if _ctx else ""
+            if _ctx is None or _ctx.channel is None:
+                channel_id = ""
+            else:
+                channel_id = _ctx.channel.id
             if status not in VALID_STATUSES:
                 return f"Error: status must be one of {VALID_STATUSES}, got {status!r}"
             db = await plugin._require_db()
             goal = await plugin._get(db, id)
             if goal is None or goal.retired_at is not None:
                 return f"Error: no open goal with id {id}"
-            now = time.time()
+            now = plugin._now()
             async with db.execute(
                 "UPDATE goals SET status = ?, updated_at = ? WHERE id = ? AND retired_at IS NULL",
                 (status, now, id),

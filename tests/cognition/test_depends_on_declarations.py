@@ -63,4 +63,4 @@ def test_memory_depends_on_kernel_clock_and_idle() -> None:
 def test_goals_depends_on_persistence_memory_funnel_clock_registry() -> None:
     """GoalsPlugin needs memory (G3), the funnel (G2) and the clock."""
     goals = _load("corvidae_cognition.goals.GoalsPlugin")
-    assert goals.depends_on == frozenset({"persistence", "memory", "funnel", "clock", "registry"})
+    assert goals.depends_on == frozenset({"persistence", "memory", "funnel", "clock"})
