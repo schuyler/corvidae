@@ -237,3 +237,77 @@ class TestSpawningToolsRefuse:
         holder: dict = {}
         task.ctx.run(lambda: holder.setdefault("t", asyncio.create_task(spawn())))
         assert await holder["t"] is None, "depth 2 is the limit; the next spawn is refused"
+
+
+# ---------------------------------------------------------------------------
+# The chain, end to end (acceptance: main -> subagent -> fork works, a third
+# level is refused). Depth is not preset: it propagates through each Task's
+# captured context exactly as the queue worker would run it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [("subagent", "fork"), ("fork", "subagent")],
+    ids=["subagent-fork-subagent", "fork-subagent-fork"],
+)
+async def test_chain_spawns_two_levels_and_refuses_the_third(first, second, monkeypatch):
+    plugins = {
+        "subagent": await _started(SubagentPlugin, max_depth=2),
+        "fork": await _started(ForkToolPlugin, max_depth=2),
+    }
+    modules = {"subagent": subagent, "fork": fork_tool}
+    enqueued: list[Task] = []
+    queue = _queue()
+
+    async def _enqueue(task: Task) -> None:
+        # Capture the task as the real queue would receive it.
+        enqueued.append(task)
+
+    queue.enqueue = AsyncMock(side_effect=_enqueue)
+
+    async def launch(kind: str) -> str:
+        # Call the tool's _launch with its own signature.
+        if kind == "subagent":
+            return await plugins[kind]._launch("work", "desc", _ctx(queue))
+        return await plugins[kind]._launch("work", _ctx(queue))
+
+    loop_depths: dict[str, int] = {}
+    refusals: list[str] = []
+
+    def make_loop(kind: str, nxt: str | None):
+        async def fake_loop(*args, **kwargs):
+            # Record the depth this spawned loop runs at, then spawn onward
+            # from inside it as a tool call would.
+            loop_depths[kind] = agent_depth()
+            if nxt is not None:
+                result = await launch(nxt)
+                if "enqueued" not in result:
+                    refusals.append(result)
+            return "done"
+
+        return fake_loop
+
+    # first's loop spawns second; second's loop tries to spawn first again.
+    monkeypatch.setattr(modules[first], "run_agent_loop", make_loop(first, second))
+
+    async def second_loop(*args, **kwargs):
+        loop_depths[second] = agent_depth()
+        refusals.append(await launch(first))
+        return "done"
+
+    monkeypatch.setattr(modules[second], "run_agent_loop", second_loop)
+
+    async def run_task(task: Task) -> None:
+        # Run work() in the Task's captured context so propagation is real.
+        await task.ctx.run(asyncio.create_task, task.work())
+
+    # Main turn (depth 0) spawns the first agent, then run each task in turn.
+    assert "enqueued" in await launch(first)
+    await run_task(enqueued[0])
+    assert len(enqueued) == 2, "the first loop's spawn must have enqueued the second"
+    await run_task(enqueued[1])
+
+    assert loop_depths == {first: 1, second: 2}
+    assert refusals == [agent_depth_refusal(2)]
+    assert len(enqueued) == 2, "the third level must not enqueue a task"

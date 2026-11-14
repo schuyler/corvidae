@@ -199,7 +199,8 @@ class SubagentPlugin(CorvidaePlugin):
 
     Launches background agents via run_agent_loop. All subagents share the
     LLMClient LLMPlugin resolves for the subagent stage and the full tool set
-    minus the subagent tool itself (to prevent recursion).
+    minus the subagent tool itself; nesting is bounded by depth
+    (tools.max_agent_depth).
 
     Depends on "llm" (LLMPlugin) to access the shared LLM client,
     and on "tools" (ToolCollectionPlugin) to read the tool registry and
@@ -277,7 +278,8 @@ class SubagentPlugin(CorvidaePlugin):
                 "tool from an agent turn that has a channel, then retry."
             )
 
-        # Get tools, excluding subagent itself to prevent recursion
+        # Get tools, excluding subagent itself (a subagent never lists itself;
+        # nesting through other tools is bounded by depth below)
         from corvidae.tool_policy import disabled_on
         from corvidae.tool_collection import ToolCollectionPlugin
         from corvidae.llm_plugin import LLMPlugin

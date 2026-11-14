@@ -2743,6 +2743,9 @@ setup.
   `parse_tool_timeouts` into `call_timeouts`. `Runtime.start` and the config
   watcher validate the same keys first, so a bad value is a `Config error` at
   startup and a refused reload.
+  The watcher's step 3e validates `tools.call_timeout`, `tools.timeouts`,
+  `tools.read_file_window_fraction` and `tools.max_agent_depth` on every reload;
+  all four stay restart-only, so a good change waits for a restart.
 
 ### Tool access
 

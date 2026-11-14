@@ -892,8 +892,8 @@ Per transport:
    as a notification like any other tool.
    Nested background agents are allowed — a subagent may launch a
    `fork` and a fork a `subagent` — and their depth is bounded by
-   `tools.max_agent_depth` (default 2: a main turn, one level below it,
-   and no further), so recursion cannot exhaust the daemon. Past the bound
+   `tools.max_agent_depth` (default 2: a main turn may spawn one level, and
+   that level one more; a third is refused), so recursion cannot exhaust the daemon. Past the bound
    the spawn is refused with an error naming the key and saying to do the
    work in the current task (principle 5), and no task is enqueued. The
    bound is depth only; width is not capped.

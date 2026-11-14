@@ -396,8 +396,9 @@ least. The same list under `channels.<id>.tools.disabled` narrows a single
 channel. The rest of the daemon keeps its tools, the channel's schemas
 never show the disabled ones, dispatch refuses them even when the model
 names one anyway, and a `subagent` launched from that channel inherits
-the restriction. A nested background agent runs with the full
-identity prompt and the spawning channel's tool set, and
+the restriction. A nested background agent runs with the spawning
+channel's tool set (a nested `fork` carries the window's identity prompt;
+a nested `subagent` keeps its persona-neutral prompt, PRD §3.5.7), and
 `tools.max_agent_depth` (default 2) is what bounds how far one may spawn
 another: a chain of subagents and forks is refused at that depth rather than
 each hop starting a fresh task budget. Cheap wins beyond that: make the dangerous tools opt-in rather than

@@ -54,7 +54,7 @@ class ForkToolPlugin(CorvidaePlugin):
     Mirrors SubagentPlugin, but the system prompt is the agent's own identity
     (via ``Agent.channel_system_prompt``), not a generic subagent prompt. The
     fork runs the subagent's multi-turn loop with the full tool set (minus the
-    fork tool itself, to prevent recursion) and is enqueued as a background
+    fork tool itself; nesting is bounded by tools.max_agent_depth) and is enqueued as a background
     Task, result delivered via TaskPlugin -> on_notify -> Agent.
 
     Depends on "llm" (shared client), "tools" (registry), and "agent"
@@ -122,7 +122,7 @@ class ForkToolPlugin(CorvidaePlugin):
         agent = get_dependency(self.pm, "agent", Agent)
         my_prompt = await agent.channel_system_prompt(channel)
 
-        # The full tool set, minus the fork tool itself (no recursion) and
+        # The full tool set, minus the fork tool itself (nesting is bounded by depth) and
         # minus any the calling channel has disabled.
         from corvidae.tool_policy import disabled_on
         from corvidae.tool_collection import ToolCollectionPlugin
