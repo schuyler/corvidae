@@ -438,3 +438,79 @@ class TestIngestTtlConfig:
         env.clock.t = 1000.0
         await turn(env)
         assert "second" in text_of(env.conv)
+
+
+class _ResolveThenSubmit(Provider):
+    """Resolves the channel's previous promise, then submits the next one.
+
+    This is the window #726 is about: a search finishes after the funnel swept
+    the turn, and the source submits again in the same turn's collect.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # (source, Ingest) to resolve the previous promise with, once.
+        self.resolve_previous: list[tuple[str, object]] = []
+        # The future last submitted per (channel id, source).
+        self.promises: dict[tuple[str, str], asyncio.Future] = {}
+
+    @hookimpl
+    async def on_funnel_ingest(self, channel, trace_id, annotations, submit) -> None:
+        self.calls += 1
+        for source, ingest in self.resolve_previous:
+            future = self.promises.pop((channel.id, source), None)
+            if future is not None and not future.done():
+                future.set_result(ingest)
+        self.resolve_previous = []
+        mine = [o for o in self.offers if o[0] == channel.id]
+        self.offers = [o for o in self.offers if o[0] != channel.id]
+        for _, source, future in mine:
+            self.promises[(channel.id, source)] = future
+            submit(source, future)
+
+
+class TestSameTurnAdmission:
+    """#726: a fast source's result reaches the window on the turn that asked."""
+
+    async def test_a_promise_submitted_already_done_is_admitted_that_turn(self, build):
+        env = await build()
+        env.provider.offer(env.channel.id, "markdown_recall", resolved("ready now"))
+        await turn(env)
+        # One turn only: the entry is in the window before that turn's model call.
+        assert "ready now" in text_of(env.conv)
+
+    async def test_submitting_over_a_finished_predecessor_admits_its_result(self, build):
+        """The result that lands between the sweep and the collect is not lost."""
+        env = await build()
+        env.pm.unregister(name="provider")
+        provider = _ResolveThenSubmit()
+        env.pm.register(provider, name="resolver")
+        env.provider = provider
+
+        first = pending()
+        provider.offer(env.channel.id, "markdown_recall", first)
+        await turn(env)
+        assert text_of(env.conv) == ""
+
+        # Turn two: the first search finishes during this turn's collect, and the
+        # source submits a second promise in the same collect.
+        provider.resolve_previous = [
+            ("markdown_recall", funnel_mod.Ingest(entries=["late result"]))
+        ]
+        provider.offer(env.channel.id, "markdown_recall", pending())
+        await turn(env)
+        assert "late result" in text_of(env.conv)
+
+    async def test_a_newer_unresolved_promise_still_supersedes_an_unresolved_one(self, build):
+        env = await build()
+        first = pending()
+        env.provider.offer(env.channel.id, "markdown_recall", first)
+        await turn(env)
+        second = pending()
+        env.provider.offer(env.channel.id, "markdown_recall", second)
+        await turn(env)
+        # The older promise is cancelled by the supersede, and nothing was admitted.
+        assert first.cancelled() and text_of(env.conv) == ""
+        second.set_result(funnel_mod.Ingest(entries=["only the second"]))
+        await turn(env)
+        assert "only the second" in text_of(env.conv)

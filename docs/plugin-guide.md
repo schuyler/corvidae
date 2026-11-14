@@ -323,9 +323,11 @@ class RecallPlugin(CorvidaePlugin):
 - `funnel.ingest_ttl`, when set, drops a queued stub-less payload (`ingest`) or a pending promise
   older than it; an unresolved promise is cancelled, so your work should
   tolerate cancellation. Shutdown cancels pending promises.
-- A promise that finishes during a turn, after the funnel's sweep, is lost
-  if you submit again in that same turn. The funnel does not admit such a
-  result on re-submit yet.
+- A promise submitted already done is admitted in that same turn, before the
+  model call, rather than waiting for the next sweep (#726). A promise that
+  finishes during a turn, after the funnel's sweep, is carried into that
+  turn's drain even if you submit again in the same collect: the finished
+  predecessor's result is admitted, not cancelled and replaced.
 
 ### Writing a recall source
 
