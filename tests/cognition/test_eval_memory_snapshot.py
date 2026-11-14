@@ -781,6 +781,7 @@ def test_candidates_flag_needs_snapshot(
 # ---------------------------------------------------------------------------
 
 
+@needs_vec
 def test_negative_probe_counts_what_the_gate_admitted(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -894,6 +895,7 @@ def test_no_negative_probes_prints_na(
     assert "n/a" in out and "no negative probes" in out
 
 
+@needs_vec
 def test_false_admits_are_reported_per_subset(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
 ) -> None:
