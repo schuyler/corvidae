@@ -396,9 +396,10 @@ least. The same list under `channels.<id>.tools.disabled` narrows a single
 channel. The rest of the daemon keeps its tools, the channel's schemas
 never show the disabled ones, dispatch refuses them even when the model
 names one anyway, and a `subagent` launched from that channel inherits
-the restriction. A nested agent (subagent or fork) runs with the full
-identity prompt and tool set; `tools.max_agent_depth` (default 2) is the
-control that bounds the chain. Cheap wins beyond that: make the dangerous tools opt-in rather than
+the restriction. A nested agent (subagent or fork) inherits the calling
+channel's tool set (minus the spawning tool) and, for a fork, the agent's
+own identity prompt; `tools.max_agent_depth` (default 2) is the control
+that bounds the chain. Cheap wins beyond that: make the dangerous tools opt-in rather than
 opt-out, deny private address ranges and non-HTTP schemes in `web_fetch`,
 root the file tools in a directory, and have `agent.yaml` and the prompt
 files owned by another user and read-only to the daemon (if the daemon

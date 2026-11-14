@@ -1,6 +1,7 @@
 """Tests for corvidae.attribution — the call-attribution contextvar module."""
 
 import asyncio
+import pytest
 
 from corvidae.attribution import (
     get_attribution,
@@ -84,9 +85,13 @@ class TestTaskIsolation:
 
 class TestNextAgentDepth:
     def test_main_turn_returns_one(self):
-        from corvidae.attribution import next_agent_depth
-        # Main turn has no agent_depth in attribution (defaults to 0)
-        assert next_agent_depth(2) == 1
+        from corvidae.attribution import next_agent_depth, set_attribution, reset_attribution
+        # Ensure clean context: explicitly set depth to 0
+        token = set_attribution(agent_depth=0)
+        try:
+            assert next_agent_depth(2) == 1
+        finally:
+            reset_attribution(token)
 
     def test_depth_one_returns_two(self):
         from corvidae.attribution import next_agent_depth, set_attribution, reset_attribution
@@ -168,3 +173,86 @@ class TestParseMaxAgentDepth:
         from corvidae.attribution import parse_max_agent_depth
         # tools is not a dict: falls back to default
         assert parse_max_agent_depth({"tools": "bad"}) == 2
+
+
+class TestSpawnToolRefusal:
+    """Test that the subagent and fork tools refuse at the depth limit."""
+
+    @pytest.mark.asyncio
+    async def test_subagent_refuses_at_limit(self):
+        from corvidae.attribution import set_attribution, reset_attribution
+        from corvidae.tools.subagent import SubagentPlugin
+
+        plugin = SubagentPlugin.__new__(SubagentPlugin)
+        plugin._max_agent_depth = 2
+        plugin._max_turns = 10
+        plugin._system_prompt = "test"
+        plugin.pm = None
+
+        token = set_attribution(agent_depth=2)
+        try:
+            result = await plugin._launch(
+                "do something", "test task",
+                type("Ctx", (), {"task_queue": None, "channel": None})()
+            )
+            assert "nested agent depth 2 reached" in result
+            assert "tools.max_agent_depth=2" in result
+        finally:
+            reset_attribution(token)
+
+    @pytest.mark.asyncio
+    async def test_subagent_allows_below_limit(self):
+        from corvidae.attribution import set_attribution, reset_attribution
+        from corvidae.tools.subagent import SubagentPlugin
+
+        plugin = SubagentPlugin.__new__(SubagentPlugin)
+        plugin._max_agent_depth = 2
+        plugin._max_turns = 10
+        plugin._system_prompt = "test"
+        plugin.pm = None
+
+        token = set_attribution(agent_depth=1)
+        try:
+            result = await plugin._launch(
+                "do something", "test task",
+                type("Ctx", (), {"task_queue": None, "channel": None})()
+            )
+            assert "nested agent depth" not in result
+            assert "task queue not available" in result
+        finally:
+            reset_attribution(token)
+
+    @pytest.mark.asyncio
+    async def test_fork_refuses_at_limit(self):
+        from corvidae.attribution import set_attribution, reset_attribution
+        from corvidae.tools.fork_tool import ForkToolPlugin
+
+        plugin = ForkToolPlugin.__new__(ForkToolPlugin)
+        plugin._max_agent_depth = 2
+        plugin._max_turns = 10
+        plugin.pm = None
+
+        token = set_attribution(agent_depth=2)
+        try:
+            result = await plugin._launch(
+                "do something",
+                type("Ctx", (), {"task_queue": None, "channel": None})()
+            )
+            assert "nested agent depth 2 reached" in result
+            assert "tools.max_agent_depth=2" in result
+        finally:
+            reset_attribution(token)
+
+    @pytest.mark.asyncio
+    async def test_depth_propagates_into_work(self):
+        """Verify that set_attribution merges agent_depth correctly."""
+        from corvidae.attribution import (
+            set_attribution, reset_attribution, get_attribution
+        )
+
+        # Simulate what work() does: set_attribution with agent_depth
+        token = set_attribution(stage="subagent", agent_depth=1)
+        try:
+            assert get_attribution().get("agent_depth") == 1
+        finally:
+            reset_attribution(token)
