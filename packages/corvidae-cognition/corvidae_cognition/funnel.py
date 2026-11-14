@@ -538,16 +538,36 @@ class FunnelPlugin(CorvidaePlugin):
         """Call ``on_funnel_ingest`` so implementers submit promises for ``channel``."""
         cid = channel.id
 
+        # Results that finished after this turn's sweep, carried to this turn's
+        # drain rather than lost to a supersede or replaced by a newer submit.
+        carried: list[_Payload] = []
+
         def submit(source: str, promise: asyncio.Future) -> None:
-            # Store the promise under (channel, source); an older pending one for the source is cancelled.
+            # Store the promise under (channel, source); an older one for the
+            # source is superseded. A predecessor that already finished hands
+            # over its result instead of losing it (#726).
             old = self._pending.get(cid, {}).get(source)
             if old is not None:
-                logger.debug(
-                    "superseding the pending %s promise for %s: the newer submit cancels it",
-                    source, cid, extra={"channel_id": cid, "source": source},
-                )
-                self._discard(cid, source, old)
-            self._pending.setdefault(cid, {})[source] = _Pending(promise, self._now())
+                result = self._discard(cid, source, old)
+                if result is not None:
+                    carried.append(_Payload(
+                        source, list(result.entries), old.created, result.on_admitted,
+                    ))
+                else:
+                    logger.debug(
+                        "superseding the pending %s promise for %s: the newer submit cancels it",
+                        source, cid, extra={"channel_id": cid, "source": source},
+                    )
+            entry = _Pending(promise, self._now())
+            self._pending.setdefault(cid, {})[source] = entry
+            # A promise submitted already done is admitted this turn: waiting a
+            # turn for a result the source had in hand is the latency #726 removes.
+            if promise.done():
+                result = self._discard(cid, source, entry)
+                if result is not None:
+                    carried.append(_Payload(
+                        source, list(result.entries), entry.created, result.on_admitted,
+                    ))
 
         # Ask every implementer to submit; a raising one is logged, and the others' submissions stand.
         try:
@@ -561,6 +581,12 @@ class FunnelPlugin(CorvidaePlugin):
                 cid, exc_info=True,
                 extra={"channel_id": cid, "trace_id": trace_id},
             )
+        # Admit the carried results now: collection is the last step of
+        # before_agent_turn, so this is still before the turn's model call.
+        if carried:
+            remaining = await self._drain(channel, carried)
+            if remaining:
+                self._next_turn.setdefault(cid, []).extend(remaining)
 
     def _discard(self, channel_id: str, source: str, pending: _Pending) -> Ingest | None:
         """Remove ``pending`` from ``_pending``; return its ``Ingest`` if it finished with one.
