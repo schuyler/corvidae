@@ -731,8 +731,8 @@ across several compactions or a long unsummarized history yields several consoli
 view is trimmed oldest-first to the budget, put under the channel's
 `reasoning_history`, headed by the channel's system prompt (identity and
 register, from `Agent.view_inputs`, which also resolves the channel after a
-restart) and ends with `memory.consolidation_fork_prompt` plus the range
-sentence. It goes on the `consolidation` stage's profile with no tools and the reply
+restart) and ends with `memory.consolidation_fork_prompt` plus the entry size
+sentence and the range sentence. It goes on the `consolidation` stage's profile with no tools and the reply
 schema. Each segment is its own consolidation (one or more entries) and its own watermark advance; a
 failure leaves earlier segments stored and retries the rest. A segment
 with no dialog that is followed by another folds its id span into the next
@@ -743,12 +743,24 @@ the record is its private memory, not a message to anyone on the channel.
 `memory.consolidation_prompt` is removed: a config that still sets it logs a
 startup warning naming `memory.consolidation_fork_prompt`.
 
+**Entry size target** (plugin-defined, #686). `memory.entry_target_tokens`
+(default 256) feeds a sentence appended to the consolidation instruction,
+default or override, asking for about `round(target × 0.75)` words per
+entry (192 by default) and consecutive entries for a longer topic. It sits
+after the instruction and before the range sentence. An entry whose
+narrative exceeds the target by the kernel's tiktoken `count_tokens` (not
+the serving model's tokenizer) is stored in full, with no truncation and no
+schema limit; after the write commits a warning names the channel, memory
+id, tokens, target, mode and prompt hash (fork and standalone entries).
+Whether the target holds in practice is unmeasured (#885).
+
 Every record says how it was made (#299, #633, PRD §3.7 Memory 2), in four
 nullable `memory` columns:
 
 - `prompt_hash`: sha256 of the UTF-8 instruction text the call used. The
   text itself is stored once per hash in `memory_prompt`, however many
-  records share it. An empty prompt is still a prompt and is stored as `''`.
+  records share it. An empty `memory.consolidation_fork_prompt` is still a
+  prompt: it is stored as a blank line plus the entry size sentence.
 - `mode`: `fork`, `standalone` (the view call on the `consolidation` stage's profile),
   `raw` (a catch-up range stored as its transcript after both view-call
   replies were unusable, #626; the prompt hash, model and trigger are the
@@ -772,19 +784,23 @@ What each path stamps:
 
 | Path | `mode` | Instruction text | `model` |
 |---|---|---|---|
-| Fork of the live window (compaction, idle or turn) | `fork` | `memory.consolidation_fork_prompt` | `ForkResult.model` |
-| Catch-up: the rebuilt view on the `consolidation` stage's profile | `standalone` | `memory.consolidation_fork_prompt` | `LLMClient.request_model` of that profile's client |
-| Raw-transcript fallback after two unusable replies | `standalone` | `memory.consolidation_fork_prompt` | as above (the call was sent; only its reply was unusable) |
+| Fork of the live window (compaction, idle or turn) | `fork` | `memory.consolidation_fork_prompt` + size sentence | `ForkResult.model` |
+| Catch-up: the rebuilt view on the `consolidation` stage's profile | `standalone` | `memory.consolidation_fork_prompt` + size sentence | `LLMClient.request_model` of that profile's client |
+| Raw-transcript fallback after two unusable replies | `raw` | `memory.consolidation_fork_prompt` + size sentence | as above (the call was sent; only its reply was unusable) |
 | `write_record` (goal retirement) | `direct` | none: `prompt_hash` NULL, no `memory_prompt` row | NULL (`trigger` NULL too) |
 
 Catch-up records written before the view was introduced carry the removed
 `memory.consolidation_prompt` as their stamp; they are not migrated, so the
-records that prompt wrote stay findable by its hash. A fork's or view's instruction also carries a code-generated sentence naming where
+records that prompt wrote stay findable by its hash. The stamped instruction is `memory.consolidation_fork_prompt` plus the
+entry size sentence (`memory.entry_target_tokens`, a static value), so the
+hash covers both: changing the target changes the hash, and an override's
+hash is not sha256 of its config text. A fork's or view's instruction also
+carries a code-generated sentence naming where
 the range starts, which can quote the first new message. That sentence is
 left out of the stamp: `memory_prompt` is outside `corvidae redact`'s
 cascade, so storing conversation text there would put it where redaction
 can't reach (PRD §3.7 Memory 8). `memory_prompt` holds configured
-instructions only. The stamp is the consolidation instruction, not the
+instructions plus the static size sentence only. The stamp is the consolidation instruction, not the
 agent's system prompt and window that frame a fork.
 
 A `direct` record was written by no consolidation call, so it has nothing
@@ -977,8 +993,8 @@ Two kernel registrations replace the old `on_idle` hook:
   re-arms the same way.
 
 Changes to `memory.idle_consolidate_after`,
-`memory.consolidate_after_tokens` and `memory.retention.*` take effect at
-restart.
+`memory.consolidate_after_tokens`, `memory.entry_target_tokens` and
+`memory.retention.*` take effect at restart.
 
 The importance prior is pluggable (`MemoryPlugin.importance_prior`,
 default `RubricPrior`); `AppraisalPlugin` wraps it in `AppraisalPrior`

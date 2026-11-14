@@ -111,6 +111,9 @@ agent:
 # memory:
 #   consolidate_after_tokens: 4000    # new window tokens that start a consolidation fork at the end of a
 #                                     # turn (agent.forks on for consolidation; positive integer; restart)
+#   entry_target_tokens: 256          # size target for one consolidation entry, in tokens: asked for as
+#                                     # round(n*0.75) words; overruns are stored in full and logged
+#                                     # (positive integer; changes prompt_hash; restart)
 #   half_life_days: 30                # retrieval recency decay (e-folding time, days)
 #   rubric_prompt: "Rate importance"  # or a file path; the importance rubric
 #   retrieval:

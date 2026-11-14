@@ -66,8 +66,8 @@ Config:
       consolidation_fork_prompt: ... # instruction for forked consolidation
                                      # (agent.forks, #51); static config
 
-Changes to ``idle_consolidate_after``, ``consolidate_after_tokens`` and
-``retention.*`` take effect at restart: the idle watch and retention timer
+Changes to ``idle_consolidate_after``, ``consolidate_after_tokens``,
+``entry_target_tokens`` and ``retention.*`` take effect at restart: the idle watch and retention timer
 are set when the plugin starts, and ``consolidate_after_tokens`` is read
 once at startup.
 A channel that never goes quiet is consolidated at turn ends (forks on)
