@@ -3446,8 +3446,8 @@ a reconnect reads as backlog rather than as current.
 
 **Outbound files.** `register_tools` offers `send_signal_attachment` when a
 `signal:` block is present. It takes a `signal:<aci>` channel the registry
-knows, a path and an optional caption, and sends one `send` RPC with the
-file as a data URI (`data:<type>;filename=<name>;base64,<payload>`; the type is
+knows, a path, an optional caption and an optional `voice_note` flag, and
+sends one `send` RPC with the file as a data URI (`data:<type>;filename=<name>;base64,<payload>`; the type is
 guessed from the file name, falling back to `application/octet-stream`, and
 `filename=` is the file's name; read and encoded in one thread call) under
 `attachments` and the caption as `message`
@@ -3455,8 +3455,12 @@ guessed from the file name, falling back to `application/octet-stream`, and
 `signal-cli-jsonrpc(5)`). The path is resolved and refused if it lands
 outside `signal.send_attachment_root` (default `state`), and the file is refused
 above `signal.max_attachment_size`; the jail runs before any existence
-check, so a missing path outside the root gets the root error. The
-caption splits like any reply, the first piece riding with the file; the rest go
+check, so a missing path outside the root gets the root error.
+`voice_note=True` adds `voiceNote: true` to that RPC (#772, signal-cli 0.14.2
+and later), which is what makes a client render the file as a voice-note bubble
+instead of a file card; the flag is omitted, not sent as false, when a call
+leaves it at its default. The caption splits like any reply, the first piece
+riding with the file; the rest go
 out through `_send_rpc`, not `_deliver`, because `_deliver` logs and swallows a
 failure and the tool must not report success for a lost caption. A failure
 returns a "Could not send:" string that says how far the send got: the file
