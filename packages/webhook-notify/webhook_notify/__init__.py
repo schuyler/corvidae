@@ -286,8 +286,11 @@ class WebhookNotifyPlugin(CorvidaePlugin):
         state.window = None
         # The ingress's logger.exception no longer covers this task, so a
         # failing flush (spill, channel resolution) is logged here.
-        # The digest size is read first: a flush empties the buffer before it sends.
+        # Both counts are read first: a flush empties the buffer and zeroes the
+        # drop tally before it sends, so reading them in the handler would report
+        # the digest as it is after the loss rather than as it was when it failed.
         size = len(state.buffer)
+        dropped = state.pending_dropped
         try:
             await self._flush(endpoint)
         except Exception:
@@ -295,7 +298,7 @@ class WebhookNotifyPlugin(CorvidaePlugin):
                 "webhook_notify: endpoint %s timer flush failed (digest of %d "
                 "deliveries, %d dropped and unreported); check the spill service "
                 "and the endpoint's channels",
-                endpoint, size, state.pending_dropped,
+                endpoint, size, dropped,
             )
 
     async def _flush(self, endpoint: str) -> None:

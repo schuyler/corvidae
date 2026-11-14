@@ -48,6 +48,11 @@ context-panel = [
 webhook-notify = [
     "webhook-notify",
 ]
+# GitHub webhook events as terminal outcomes, not job-status churn
+# (packages/github-webhook).
+github-webhook = [
+    "github-webhook",
+]
 # RSS/Atom feed polling and notification delivery (packages/rss-reader).
 rss = [
     "rss-reader",
@@ -178,6 +183,7 @@ corvidae-cognition = { workspace = true }
 cross-channel-send = { workspace = true }
 context-panel = { workspace = true }
 webhook-notify = { workspace = true }
+github-webhook = { workspace = true }
 corvidae-restart = { workspace = true }
 corvidae-timepiece = { workspace = true }
 corvidae-inotify = { workspace = true }

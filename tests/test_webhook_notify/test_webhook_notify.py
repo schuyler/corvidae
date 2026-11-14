@@ -453,6 +453,29 @@ async def test_a_failing_timer_flush_is_logged_with_endpoint_and_size(tmp_path, 
     assert errs[0].exc_info is not None
 
 
+async def test_a_failed_flush_reports_the_drops_it_was_carrying(tmp_path, caplog):
+    """The drop count in a failed flush's ERROR is the one the flush consumed.
+
+    `_flush` zeroes `pending_dropped` before it sends, so reading it from the
+    handler logs 0 for a flush that was carrying drops — a WARNING whose number
+    is wrong is worse than one without."""
+    plugin, rec, _ = await build(tmp_path, {
+        "defaults": {"batch_seconds": 0.05, "max_buffered": 1},
+        "endpoints": {"github": ["irc:#a"]},
+    })
+
+    async def boom(*a, **kw):
+        raise RuntimeError("spill exploded")
+
+    plugin._spill.notify = boom
+    for n in range(3):
+        await plugin._deliver(delivery({"n": n}))
+    assert plugin._state["github"].pending_dropped == 2
+    await settle()
+    errs = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errs and "2 dropped" in errs[0].getMessage(), errs[0].getMessage()
+
+
 @pytest.mark.parametrize(("block", "key", "bad", "remedy"), [
     ({"defaults": {"batch_seconds": -1}}, "webhook_notify.defaults.batch_seconds",
      "-1", ">= 0"),
