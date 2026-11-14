@@ -101,9 +101,6 @@ RECORD_MESSAGE_TYPES = ("message", "summary")
 # (#202); should_send_response vetoes a final that is exactly this.
 NO_REPLY_MARKER = "NO_REPLY"
 
-# Wake-stub text for a provenance objection. Lives in the stub, not the
-# CONTEXT entry: the funnel frames CONTEXT as data, and this is an
-# instruction written by us.
 # Wake-stub text once the retention lens is on (critique.retention.root set).
 # The funnel keeps one pending stub per (channel, "critique"), so whichever
 # critique wake fires first instructs the whole drain: the note covers both
@@ -120,6 +117,9 @@ RETENTION_WAKE_NOTE = (
     "nothing reaches the channel."
 )
 
+# Wake-stub text for a provenance objection. Lives in the stub, not the
+# CONTEXT entry: the funnel frames CONTEXT as data, and this is an
+# instruction written by us.
 PROVENANCE_NOTE = (
     "Background self-check: the provenance check found claims in your last "
     "reply that no record supports (see the critique context). By default, "
