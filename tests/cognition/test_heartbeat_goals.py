@@ -132,6 +132,7 @@ async def make_env(tmp_path, monkeypatch):
         tools = {t.name: t.fn for t in registry}
         return SimpleNamespace(
             pm=pm, clock=clock, agent=agent, tools=tools, db=persistence.db,
+            goals=goals, registry=pm.get_plugin("registry"),
         )
 
     yield make
@@ -194,6 +195,73 @@ async def test_beat_turn_carries_the_open_goals_entry(make_env):
     ]
     assert len(entries) == 1
     assert "Watch the kestrel nest" in entries[0]
+
+
+async def test_a_blocked_goal_is_marked_in_the_beat_list(make_env):
+    """#773: the beat's open-goals list says which goals are not pursuable.
+
+    Without the marker a beat cannot tell an open goal from one waiting on
+    someone else, which is how it ends up picking a goal it cannot advance
+    and spinning on it.
+    """
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    await add_message(env, "irc:#test", "two jobs and a question")
+    await env.tools["add_goal"]("Watch the kestrel nest", _ctx=ctx)
+    await env.tools["add_goal"]("Ask Schuyler about the wiki backup", _ctx=ctx)
+    await env.tools["set_goal_status"](2, "waiting", _ctx=ctx)
+
+    await env.clock.advance(AFTER)
+    text = env.agent.calls[0]["text"]
+
+    assert "[waiting] Ask Schuyler about the wiki backup" in text, text
+    # An open goal stays unmarked: that is the ordinary case.
+    assert "[open] Watch the kestrel nest" not in text, text
+    assert "Watch the kestrel nest" in text
+    # The instruction tells the beat what the marker means.
+    assert "[blocked] or [waiting]" in text
+
+
+async def test_the_beat_list_carries_every_status(make_env):
+    """A blocked goal and a waiting goal are both marked, and open_goals
+    reports the status the tools set."""
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    for text in ("One", "Two", "Three"):
+        await env.tools["add_goal"](text, _ctx=ctx)
+    await env.tools["set_goal_status"](1, "blocked", _ctx=ctx)
+    await env.tools["set_goal_status"](2, "waiting", _ctx=ctx)
+
+    goals = await env.goals.open_goals()
+    by_id = {g["id"]: g["status"] for g in goals}
+    assert by_id == {1: "blocked", 2: "waiting", 3: "open"}
+
+    await env.clock.advance(AFTER)
+    text = env.agent.calls[0]["text"]
+    assert "[blocked] One" in text, text
+    assert "[waiting] Two" in text, text
+    assert "[open] Three" not in text, text
+
+
+async def test_the_per_turn_goals_entry_marks_a_blocked_goal(make_env):
+    """The goals entry in a normal channel's window says which goals cannot
+    move, so a turn does not spend itself on one either."""
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    await add_message(env, "irc:#test", "what is left")
+    await env.tools["add_goal"]("Watch the kestrel nest", _ctx=ctx)
+    await env.tools["add_goal"]("Ask Schuyler about the wiki backup", _ctx=ctx)
+    await env.tools["set_goal_status"](2, "waiting", _ctx=ctx)
+
+    # Force the entry to be rebuilt after the status change.
+    channel = env.registry.get_or_create("irc", "#test")
+    channel.conversation = ContextWindow(channel.id)
+    await env.goals.before_agent_turn(channel, "t1", {})
+
+    contents = [m["content"] for m in channel.conversation.messages]
+    entry = next(c for c in contents if "replaces any earlier goals list" in c)
+    assert "#2 [waiting] Ask Schuyler about the wiki backup" in entry, entry
+    assert "#1 Watch the kestrel nest" in entry, entry
 
 
 async def test_beat_without_goals_plugin_carries_no_goals_text(make_env):

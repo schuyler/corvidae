@@ -1264,8 +1264,9 @@ reads from outside (an MCP tool, a folder) records its own entry in
 Keeps the agent's open goals in SQLite and shows them in the window. Entry
 point name: `"goals"`; `depends_on = frozenset({"persistence", "memory",
 "funnel", "clock"})`. Owns the `goals` table in `sessions.db` (`id`, `text`,
-`created_at`, `updated_at`, `retired_at`, `memory_id`), created in
-`on_start` when the DB is open and on first use otherwise.
+`created_at`, `updated_at`, `retired_at`, `memory_id`, `status`), created in
+`on_start` when the DB is open and on first use otherwise; a table from
+before #773 gains the `status` column by `ALTER TABLE` on first use.
 
 **Tools:** one per verb, so a channel can disable creation alone with
 `channels.<id>.tools.disabled`.
@@ -1275,6 +1276,8 @@ point name: `"goals"`; `depends_on = frozenset({"persistence", "memory",
 | `add_goal` | `text: str` | Inserts an open goal and returns `Goal #N added.` Whitespace runs in `text`, newlines included, collapse to one space; empty text returns an error string. |
 | `update_goal` | `id: int`, `text: str` | Replaces the text of an open goal and bumps its `updated_at`, returning `Goal #N updated.` An unknown or retired id, or empty text, returns an error string. |
 | `retire_goal` | `id: int`, `conclusion: str` | Writes a memory record of the conclusion, then marks the goal retired, returning `Goal #N retired; conclusion recorded as memory #M.` An unknown or retired id, or an empty conclusion, returns an error string, as does a missing channel context. |
+| `list_goals` | `include_retired: bool = False` | Lists goals with their ids and status, one per line (`#3 [open since 2026-11-02]: Finish the migration notes`, `#5 [waiting]: …`, `#7 [retired 2026-11-01]: …`). Open goals only unless `include_retired=true`. Text over 120 characters is truncated. |
+| `set_goal_status` | `id: int`, `status: str` | Sets an open goal's status to `open`, `blocked` or `waiting` (#773). `blocked`: it cannot move until an external dependency is resolved. `waiting`: it is done but awaiting someone's review or decision. Any other value, or an unknown or retired id, returns an error string. |
 
 **Goals entry:** `before_agent_turn` admits one CONTEXT entry through the
 funnel under the source `goals` (budget `funnel.budgets.goals`, falling
@@ -1284,8 +1287,13 @@ With open goals it reads:
 ```
 Open goals as of 2026-10-30 14:02:11 UTC (this list replaces any earlier goals list):
 #3 Finish the migration notes
-#5 Learn what Schuyler wants from the wiki
+#5 [waiting] Learn what Schuyler wants from the wiki
 ```
+
+A goal whose status is not `open` carries it in brackets (#773), so a turn —
+and the heartbeat's review, which lists the same goals — can tell a goal it can
+advance from one it cannot. An `open` goal stays unmarked: that is the ordinary
+case.
 
 With none, including when every goal is retired, it reads `No open goals as
 of … (this replaces any earlier goals list).` A database with no goal rows
@@ -1695,7 +1703,10 @@ resolution in [configuration.md](configuration.md#heartbeat--a-turn-on-system-id
 followed by the memories, framed as the agent's own
 summaries and as data, or `(none)`. When the goals plugin is loaded, the
 text then carries `GOALS_INSTRUCTION` (overridable with
-`heartbeat.goals_instruction`; same reference) and the conclusions of up to
+`heartbeat.goals_instruction`; same reference), which tells the beat that a
+goal marked `[blocked]` or `[waiting]` is not pursuable — not to spend a beat
+on it, and to set it back to `open` once what it waits on has happened — and
+the conclusions of up to
 `heartbeat.retired_goal_limit` retired goals (default 20,
 `GoalsPlugin.retired_goals`), framed as data, or `(none)`;
 without it, no goals text appears. A failed memory or retired-goals read

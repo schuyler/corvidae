@@ -172,20 +172,28 @@ class GoalsPlugin(CorvidaePlugin):
     async def open_goals(self) -> list[dict]:
         """Open goals (not retired), newest first. For the heartbeat's review.
 
-        Each is {"id", "age_seconds", "summary"}: the goal's id, age
-        since creation on the kernel clock, and its text.
+        Each is {"id", "age_seconds", "summary", "status"}: the goal's id,
+        age since creation on the kernel clock, its text, and whether it is
+        pursuable (#773). The status is what lets a beat tell an open goal
+        from one that is blocked or waiting, instead of picking a goal it
+        cannot advance and spinning on it.
         """
         db = await self._require_db()
         now = self._now()
         async with db.execute(
-            "SELECT id, text, created_at FROM goals "
+            "SELECT id, text, created_at, status FROM goals "
             "WHERE retired_at IS NULL "
             "ORDER BY created_at DESC, id DESC"
         ) as cursor:
             rows = await cursor.fetchall()
         return [
-            {"id": gid, "age_seconds": max(0.0, now - created_at), "summary": text}
-            for gid, text, created_at in rows
+            {
+                "id": gid,
+                "age_seconds": max(0.0, now - created_at),
+                "summary": text,
+                "status": status,
+            }
+            for gid, text, created_at, status in rows
         ]
 
     async def retired_goals(self, limit: int) -> list[dict]:
@@ -384,7 +392,15 @@ class GoalsPlugin(CorvidaePlugin):
             lines = [
                 f"Open goals as of {as_of} (this list replaces any earlier goals list):"
             ]
-            lines += [f"#{g.id} {g.text}" for g in open_goals]
+            # A status other than "open" is stated, so a turn (and the beat)
+            # does not spend itself on a goal that cannot move (#773). An
+            # open goal stays unmarked: that is the ordinary case.
+            lines += [
+                f"#{g.id} {g.text}"
+                if g.status == "open"
+                else f"#{g.id} [{g.status}] {g.text}"
+                for g in open_goals
+            ]
             entry = "\n".join(lines)
         else:
             entry = (

@@ -74,9 +74,12 @@ DEFAULT_RETIRED_GOAL_LIMIT = 5
 #: Appended when the goals plugin is loaded (PRD §3.7 Goals and Heartbeat).
 GOALS_INSTRUCTION = (
     "Goals are your work queue. If there's an open goal you can advance, "
-    "do it. If a goal is done, retire it. Don't take up again a goal you "
-    "retired unless something new has changed. Otherwise act only when the "
-    "assessment warrants it — a beat with nothing to advance is fine."
+    "do it. A goal marked [blocked] or [waiting] is not pursuable: don't "
+    "spend a beat on it, and don't take it up again until what it waits on "
+    "has happened (then set its status back to open). If a goal is done, "
+    "retire it. Don't take up again a goal you retired unless something new "
+    "has changed. Otherwise act only when the assessment warrants it — a "
+    "beat with nothing to advance is fine."
 )
 
 #: Heads the retired-goals list that follows the goals instruction.
@@ -172,6 +175,14 @@ def parse_after(config: dict) -> float | None:
     return float(value)
 
 
+def _goal_line(goal: dict) -> str:
+    """One open goal for the beat's list, with its status when not "open"."""
+    status = goal.get("status", "open")
+    if status == "open":
+        return goal["summary"]
+    return f"[{status}] {goal['summary']}"
+
+
 def frame_beat(
     memories: list[dict],
     retired: list[dict] | None = None,
@@ -234,8 +245,10 @@ def frame_beat(
     # call-to-action references them.
     open_goals_text = ""
     if open_goals:
+        # A status other than "open" is stated (#773) so the instruction's
+        # "[blocked]" / "[waiting]" markers point at something visible.
         og_lines = [
-            f"- ({_format_age(g['age_seconds'])}, #{g['id']}) {g['summary']}"
+            f"- ({_format_age(g['age_seconds'])}, #{g['id']}) {_goal_line(g)}"
             for g in open_goals
         ]
         open_goals_text = (

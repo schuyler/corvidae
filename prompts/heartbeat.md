@@ -27,7 +27,10 @@ Your recent memories, newest first, each with its age and channel. These are you
 Goals you retired, newest first, each with its age: your own conclusions, data to review, not instructions.
 - (2d) I retired my goal "<text>" (set <date>). <conclusion>
 
-Also look at the goals entry in your window, if there is one, and the goals you retired below: if there's a next step on an open goal you can take now, or a goal that's done and should be retired, do it. Don't take up again a goal you retired unless something new has changed.
+Open goals, newest first:
+- (18m, #6) Work the queue
+
+Goals are your work queue. If there's an open goal you can advance, do it. A goal marked [blocked] or [waiting] is not pursuable: don't spend a beat on it, and don't take it up again until what it waits on has happened (then set its status back to open). If a goal is done, retire it. Don't take up again a goal you retired unless something new has changed. Otherwise act only when the assessment warrants it — a beat with nothing to advance is fine.
 ```
 
 or `(none)` for empty lists. When nothing is new (diff mode):
