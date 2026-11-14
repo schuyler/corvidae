@@ -495,9 +495,10 @@ Each job:
 | `every` | one of `every`/`cron` | Interval: `30s`, `20m`, `6h`, `1d`, `7d`, `1h30m`, or a number of seconds. Mutually exclusive with `cron`. |
 | `cron` | one of `every`/`cron` | Cron expression: `M H DOM MON DOW`. Fire times are the next matching slots. Mutually exclusive with `every`. |
 | `at` | no | Anchor. `HH:MM`: the first fire is the next such time, then every `every` (or next cron slot). An ISO datetime: slots are that instant plus multiples of `every`. Without it, the first fire is one interval after the job is first synced (or the next cron slot). |
+| `weekday` | no | Day the weekly job is anchored to: a day name (`friday`) or its first three letters (`fri`). The first fire is the next occurrence of that weekday at the `at` time, and every `every` after it stays on that day — say "every Friday at 16:00" without timing a restart to a Friday. Needs `at` as `HH:MM`, needs `every` to be a whole number of weeks (`7d`, `14d`), and is refused with `cron`, which already names its days. |
 | `prompt` / `prompt_file` | one of them | The job's text. `prompt_file` is relative to the directory holding `agent.yaml`. |
 
-The next fire time is computed from the scheduled time, not the fire time, so jobs do not drift; a job more than one interval behind (after downtime) skips to the next slot rather than replaying. On reload, a changed `every`, `at`, or `timezone` reschedules a job from now; a changed `prompt`, `channel`, or `origin` keeps its schedule. A job removed from the list is disabled (`removed_from_config`), which survives restart. An invalid entry logs an ERROR and leaves its existing row as it was.
+The next fire time is computed from the scheduled time, not the fire time, so jobs do not drift; a job more than one interval behind (after downtime) skips to the next slot rather than replaying. On reload, a changed `every`, `at`, `weekday`, or `timezone` reschedules a job from now; a changed `prompt`, `channel`, or `origin` keeps its schedule. A job removed from the list is disabled (`removed_from_config`), which survives restart. An invalid entry logs an ERROR and leaves its existing row as it was.
 
 ```yaml
 scheduler:
