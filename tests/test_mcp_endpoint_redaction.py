@@ -723,3 +723,87 @@ def test_the_filter_matches_a_logger_prefix_on_a_dot_boundary():
         "mcprouter.app", "see http://u:KEEPME@host.example/x"
     )
     assert "KEEPME" in out
+
+
+def _format_record(name: str, log) -> str:
+    """Run `log(logger)` through the redacting filter on a handler; return
+    exactly what that handler writes."""
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(mcp_client_mod._UrlRedactingFilter())
+    logger = logging.getLogger(name)
+    logger.addHandler(handler)
+    try:
+        log(logger)
+    finally:
+        logger.removeHandler(handler)
+    return stream.getvalue()
+
+
+def test_a_url_split_across_traceback_lines_leaks_no_tail():
+    """A line break inside a quoted URL must not hide its query token (#595)."""
+
+    def log(logger: logging.Logger) -> None:
+        try:
+            raise RuntimeError(
+                "failed for url 'http://alfred:SECRETPW@host.example/\n"
+                "mcp?token=SECRETTOK'"
+            )
+        except RuntimeError:
+            logger.exception("reader failed")
+
+    out = _format_record("mcp.client.sse", log)
+    assert "SECRETPW" not in out and "SECRETTOK" not in out
+    assert "host.example" in out and "Traceback" in out
+
+
+def test_the_exception_text_after_a_url_line_is_kept():
+    """Joining a continuation must not eat an unrelated following line."""
+
+    def log(logger: logging.Logger) -> None:
+        try:
+            raise RuntimeError("see http://u:SECRETPW@host.example/x\n\nthen more")
+        except RuntimeError:
+            logger.exception("reader failed")
+
+    out = _format_record("mcp.client.sse", log)
+    assert "SECRETPW" not in out and "then more" in out
+
+
+def test_stack_info_from_a_library_logger_carries_no_credential():
+    """`stack_info=True` appends source text, which can quote a URL (#595)."""
+    def log(logger: logging.Logger) -> None:
+        # The executing source line is what stack_info prints, so the URL
+        # literal sits on this very line.
+        logger.error("go http://alfred:SECRETPW@host.example/m?token=SECRETTOK", stack_info=True)
+
+    out = _format_record("mcp.client.sse", log)
+    assert "SECRETPW" not in out and "SECRETTOK" not in out
+    assert "host.example/m" in out and "Stack (most recent call last)" in out
+
+
+def test_a_chained_exception_is_redacted_in_both_sections():
+    """The __cause__ section of a traceback is redacted like the outer one."""
+
+    def log(logger: logging.Logger) -> None:
+        try:
+            try:
+                raise ValueError("inner for http://u:CAUSEPW@host.example/a")
+            except ValueError as exc:
+                raise RuntimeError("outer for http://u:OUTERPW@host.example/b") from exc
+        except RuntimeError:
+            logger.exception("reader failed")
+
+    out = _format_record("httpcore.connection", log)
+    assert "CAUSEPW" not in out and "OUTERPW" not in out
+    assert "direct cause" in out
+
+
+def test_the_httpx2_logger_is_filtered():
+    """The HTTP client logs as `httpx2`, so it must be on the prefix list."""
+    out = _format_record(
+        "httpx2",
+        lambda logger: logger.error("HTTP Request: POST http://u:HTTPXPW@h.example/m"),
+    )
+    assert "HTTPXPW" not in out and "h.example/m" in out

@@ -96,7 +96,7 @@ Assets, roughly in order of how bad it is to lose them:
    too (#595): when the MCP client starts, every root log handler carries a
    filter over records from `mcp.*`, `httpx.*`, `httpx2.*` and `httpcore.*` that runs the
    same URL redaction, so the SDK's `Connecting to StreamableHTTP endpoint:
-   <url>` line, its error records and their tracebacks name the endpoint without the userinfo
+   <url>` line, its error records, their tracebacks and stack traces name the endpoint without the userinfo
    or the query. That is a net over text corvidae does not emit, so it
    recognises the URL shapes `_redact_url` knows and nothing more: a
    credential a library writes in some other form — split across fields, or

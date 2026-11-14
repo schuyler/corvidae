@@ -175,6 +175,41 @@ def _one_line(text: str) -> str:
 _CREDENTIAL_LOGGERS = ("mcp", "httpx", "httpx2", "httpcore")
 
 
+def _redact_multiline_text(text: str) -> str:
+    """``text`` with credential URLs redacted, line breaks preserved.
+
+    A URL may be broken across lines (an exception message with an embedded
+    newline), and ``_URL_IN_TEXT`` stops at whitespace, so redacting line by
+    line would leave the tail -- a query token -- readable. When a line ends
+    inside a URL, the next line's leading token is joined to it first, so the
+    whole URL is redacted as one.
+
+    shortcut: only the next line's first token is joined, so a URL broken
+    twice with no whitespace between keeps its far tail; upgrade if a library
+    is seen to do that.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        # Join continuation tokens while the line still ends inside a URL.
+        while index + 1 < len(lines):
+            matches = list(_URL_IN_TEXT.finditer(line))
+            nxt = lines[index + 1]
+            token = nxt.split(None, 1)[0] if nxt and not nxt[0].isspace() else ""
+            if not matches or matches[-1].end() != len(line) or not token:
+                break
+            line += token
+            lines[index + 1] = nxt[len(token):]
+        # Redact only lines that carry a marker; the rest pass untouched.
+        if any(marker in line for marker in _CREDENTIAL_MARKERS):
+            line = _redact_urls_in_text(line)
+        out.append(line)
+        index += 1
+    return "\n".join(out)
+
+
 class _UrlRedactingFilter(logging.Filter):
     """Redact credential-bearing URLs in records from the third-party clients.
 
@@ -199,6 +234,16 @@ class _UrlRedactingFilter(logging.Filter):
         # Redact the traceback first: an HTTP client quotes the URL in its
         # exception text, and the formatter appends that text after the message.
         self._redact_exception(record)
+        # `stack_info` is source text the formatter appends the same way.
+        if record.stack_info:
+            try:
+                record.stack_info = _redact_multiline_text(record.stack_info)
+            except Exception:
+                logger.warning(
+                    "could not redact the stack of a %s log record",
+                    record.name, exc_info=True,
+                )
+                record.stack_info = "(stack withheld: could not redact it)"
         try:
             message = record.getMessage()
         except Exception:
@@ -234,13 +279,8 @@ class _UrlRedactingFilter(logging.Filter):
             text = record.exc_text or logging.Formatter().formatException(
                 record.exc_info
             )
-            # Redact URLs line by line, keeping the traceback's own breaks.
-            record.exc_text = "\n".join(
-                _redact_urls_in_text(line)
-                if any(m in line for m in _CREDENTIAL_MARKERS)
-                else line
-                for line in text.split("\n")
-            )
+            # Redact URLs, keeping the traceback's own line breaks.
+            record.exc_text = _redact_multiline_text(text)
             record.exc_info = None
         except Exception:
             logger.warning(
