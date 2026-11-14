@@ -38,6 +38,7 @@ async def _run(config_path: str) -> int:
             # Close whatever load_plugins built; returns at once if it
             # never created a plugin manager.
             await runtime._cleanup_failed_start()
+        return 0
     except SystemExit as exc:
         # The kernel already wrote its one-line Config error to stderr.
         return exc.code if isinstance(exc.code, int) else 1
@@ -50,15 +51,17 @@ async def _run(config_path: str) -> int:
             file=sys.stderr,
         )
         return 1
-
-    # _cleanup_failed_start is best effort: a plugin that leaked a non-daemon
-    # thread during on_init used to hold this process open until the restart
-    # tool's preflight_timeout killed it (default 120 s) (#757). Arm the same
-    # bound the daemon uses — armed here, inside the coroutine, because the
-    # wait it bounds happens after this returns, when asyncio shuts down and
-    # the interpreter joins non-daemon threads.
-    runtime.arm_exit_bound()
-    return 0
+    finally:
+        # _cleanup_failed_start is best effort: a plugin that leaked a
+        # non-daemon thread during on_init, whether the load then succeeded
+        # or raised, used to hold this process open until the restart tool's
+        # preflight_timeout killed it (default 120 s) (#757). Arm the same
+        # bound the daemon uses on every path — armed here, inside the
+        # coroutine, because the wait it bounds happens after this returns,
+        # when asyncio shuts down and the interpreter joins non-daemon
+        # threads. shutdown_timeouts holds the defaults until load_plugins
+        # parses the config, so an early failure is bounded too.
+        runtime.arm_exit_bound()
 
 
 def main() -> int:
@@ -74,13 +77,13 @@ def main() -> int:
     logging.disable(logging.CRITICAL)
 
     code = asyncio.run(_run(args.config))
-    if code != 0:
-        return code
     # Any non-daemon thread still running now is a plugin's: asyncio has
     # joined its own executor, which is what a check inside the coroutine
     # would have caught instead. Name it directly — kernel logging is off
     # here, so the watchdog's own WARNING would go nowhere the operator can
     # see — and refuse the restart, because the daemon would leak it too.
+    # This runs on the failure path as well, after the failure's own stderr
+    # line, so a leak that preceded a failure is named too.
     survivors = [
         t.name
         for t in threading.enumerate()
@@ -95,6 +98,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    # A failed pre-flight already said why on stderr; only success reports OK.
+    if code != 0:
+        return code
     print("pre-flight OK", file=sys.stderr)
     return 0
 

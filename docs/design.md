@@ -2018,10 +2018,11 @@ requires exit 1 within the bound with the thread named.
 
 The **restart pre-flight** (`corvidae_restart.preflight`, a separate process
 that never calls `run()`) arms the same bound through
-`Runtime.arm_exit_bound()` before its coroutine returns,
-which is what covers both `asyncio.run`'s executor join and the
+`Runtime.arm_exit_bound()` before its coroutine returns, on the success
+and the failure path alike (a plugin that opens a connection and then raises
+is bounded too), which is what covers both `asyncio.run`'s executor join and the
 interpreter's thread join, and then names any non-daemon survivor on stderr
-and exits 1 — refusing the restart, because the daemon would leak it too. It
+(after the failure's own line, when there is one) and exits 1 — refusing the restart, because the daemon would leak it too. It
 does that check **after** `asyncio.run` returns, not inside the coroutine:
 inside, the loop's own default executor thread is alive and legitimate
 (`asyncio_0`), which made a first draft refuse every valid config. It prints

@@ -63,7 +63,9 @@ def test_a_leak_in_the_preflight_is_bounded_and_named(tmp_path: Path) -> None:
         [sys.executable, "-P", str(LEAK_CHILD), str(path)],
         capture_output=True,
         text=True,
-        timeout=60,
+        # The test's own deadline: subprocess.run kills the child on expiry,
+        # so a regression fails here instead of outliving the pytest timeout.
+        timeout=LEAK_DEADLINE,
     )
     elapsed = time.monotonic() - started
 
@@ -74,6 +76,34 @@ def test_a_leak_in_the_preflight_is_bounded_and_named(tmp_path: Path) -> None:
     assert "daemon.exit_timeout" in result.stderr, result.stderr
     assert "on_init" in result.stderr and "on_stop" in result.stderr, result.stderr
     # And it does not claim success on the way out.
+    assert "pre-flight OK" not in result.stderr, result.stderr
+
+
+def test_a_leak_before_a_failed_preflight_is_bounded_and_named(tmp_path: Path) -> None:
+    """#757: a plugin that opens a connection and then raises cannot hold it.
+
+    The failure path used to return 1 without arming the exit bound, so the
+    leaked connection's non-daemon thread kept the interpreter alive. It now
+    keeps its own failure line, names the survivor, and exits within
+    ``daemon.exit_timeout``.
+    """
+    path = write_config(tmp_path, "daemon:\n  exit_timeout: 0.5\n")
+
+    # subprocess.run kills the child when LEAK_DEADLINE expires.
+    result = subprocess.run(
+        [sys.executable, "-P", str(LEAK_CHILD), str(path), "raise"],
+        capture_output=True,
+        text=True,
+        timeout=LEAK_DEADLINE,
+    )
+
+    assert result.returncode == 1, result.stderr
+    # The failure's own line survives.
+    assert "pre-flight failed:" in result.stderr, result.stderr
+    assert "plugin failed after opening a connection" in result.stderr, result.stderr
+    # And the leaked thread is named, with the remedy.
+    assert "still running after the plugins were stopped" in result.stderr, result.stderr
+    assert "daemon.exit_timeout" in result.stderr, result.stderr
     assert "pre-flight OK" not in result.stderr, result.stderr
 
 
