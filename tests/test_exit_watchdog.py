@@ -168,6 +168,44 @@ def test_leaked_thread_forces_exit_1_with_warning(tmp_path, raise_on_stop):
         child.kill()
 
 
+def test_a_failed_start_that_leaks_still_exits_within_the_bound(tmp_path):
+    """#757: a leak taken before start() raised cannot hold the process open.
+
+    The plugin opens an aiosqlite connection in on_start and then raises, and
+    its on_stop closes nothing. _cleanup_failed_start is best effort, so the
+    connection's non-daemon worker thread survives the failed boot; the
+    watchdog must still end the process within daemon.exit_timeout, and the
+    WARNING must name the thread.
+    """
+    config = _write_config(tmp_path, {"exit_timeout": 0.5})
+    child = _spawn(tmp_path, config, "--raise-in-start")
+    try:
+        if not child.wait_for_text(
+            "leaker: on_start failed on purpose", READY_DEADLINE
+        ):
+            pytest.fail(
+                f"child never reached the failing on_start (exit status "
+                f"{child.proc.poll()}); output:\n{child.output}"
+            )
+        try:
+            status = child.proc.wait(timeout=EXIT_DEADLINE)
+        except subprocess.TimeoutExpired:
+            pytest.fail(
+                f"process still alive {EXIT_DEADLINE}s after a failed start "
+                f"that leaked a thread (watchdog not armed on the failure "
+                f"path?); output:\n{child.output}"
+            )
+        child._reader.join(timeout=2)
+        output = child.output
+
+        assert status == 1, f"expected exit status 1, got {status}; output:\n{output}"
+        assert "daemon.exit_timeout" in output, output
+        # The survivor is named, so an operator can find the plugin.
+        assert "_connection_worker_thread" in output, output
+    finally:
+        child.kill()
+
+
 def test_clean_shutdown_exits_0_without_watchdog(tmp_path):
     """R4: no leak, default exit_timeout -> status 0, promptly, no watchdog line."""
     config = _write_config(tmp_path, {})

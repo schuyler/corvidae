@@ -2054,8 +2054,34 @@ The watchdog is armed only through `corvidae.runtime.run_daemon(runtime)`,
 which `serve`, `cli` and `acp` call. `run()` defaults the flag off because
 tests drive `run()` and `stop()` in-process, where a watchdog would end
 the pytest process. Worst case after SIGTERM:
-`shutdown_timeout + exit_timeout`. The restart pre-flight and a failed
-`start()` are not covered.
+`shutdown_timeout + exit_timeout`. It is armed on a **failed `start()`** too
+(#757): `_cleanup_failed_start` is best effort, so a plugin that leaked a
+non-daemon thread before raising would otherwise hold interpreter exit open
+with nothing watching. `tests/test_exit_watchdog.py` spawns a daemon whose
+plugin opens an aiosqlite connection in `on_start` and then raises, and
+requires exit 1 within the bound with the thread named.
+
+The **restart pre-flight** (`corvidae_restart.preflight`, a separate process
+that never calls `run()`) arms the same bound through
+`Runtime.arm_exit_bound()` before its coroutine returns, on the success
+and the failure path alike (a plugin that opens a connection and then raises
+is bounded too), which is what covers both `asyncio.run`'s executor join and the
+interpreter's thread join, and then names any non-daemon survivor on stderr
+(after the failure's own line, when there is one) and exits 1 — refusing the restart, because the daemon would leak it too. It
+does that check **after** `asyncio.run` returns, not inside the coroutine:
+inside, the loop's own default executor thread is alive and legitimate
+(`asyncio_0`), which made a first draft refuse every valid config. It prints
+the survivor itself rather than relying on the watchdog's WARNING, because
+the pre-flight disables kernel logging to keep stderr to its one line.
+
+`Runtime.arm_exit_bound()` exists for that second caller rather than the
+pre-flight importing `corvidae.shutdown`, which would put a kernel-internal
+module in a package's imports and break `tests/test_kernel_boundary.py`.
+Tests never arm the watchdog in-process: an autouse fixture in
+`tests/conftest.py` patches the runtime's reference to a no-op, because the
+acp CLI tests reach the armed path through `run_daemon` and a failed start
+then ends the whole pytest run with no failing test to point at. The
+watchdog is exercised where it belongs, in subprocesses.
 
 **Failed start.** If `Runtime.start()` raises anything, `BaseException`
 included (a `CancelledError` leaked from a plugin's `on_start`, #282; a

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Minimal llm section: Runtime.start requires a default chat profile.
@@ -37,6 +38,73 @@ def write_config(tmp_path: Path, extra: str = "") -> Path:
     path = tmp_path / "agent.yaml"
     path.write_text(MINIMAL_LLM + extra, encoding="utf-8")
     return path
+
+
+# How long the leak case may take: daemon.exit_timeout (0.5) plus a boot,
+# far below the 120 s preflight_timeout the restart tool would otherwise wait.
+LEAK_DEADLINE = 10.0
+
+# The child that injects a leaking plugin into the real pre-flight.
+LEAK_CHILD = Path(__file__).parent.parent / "preflight_leak_child.py"
+
+
+def test_a_leak_in_the_preflight_is_bounded_and_named(tmp_path: Path) -> None:
+    """#757: a plugin that leaks a thread during the pre-flight cannot hold it.
+
+    The pre-flight used to sit alive with the leaked connection's non-daemon
+    worker thread until the restart tool's ``preflight_timeout_seconds``
+    (default 120 s) killed the process group. It now names the survivor,
+    refuses the restart, and exits within ``daemon.exit_timeout``.
+    """
+    path = write_config(tmp_path, "daemon:\n  exit_timeout: 0.5\n")
+
+    started = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-P", str(LEAK_CHILD), str(path)],
+        capture_output=True,
+        text=True,
+        # The test's own deadline: subprocess.run kills the child on expiry,
+        # so a regression fails here instead of outliving the pytest timeout.
+        timeout=LEAK_DEADLINE,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 1, result.stderr
+    assert elapsed < LEAK_DEADLINE, f"took {elapsed:.1f}s; stderr:\n{result.stderr}"
+    # It says what is holding the process, not just that something is.
+    assert "still running after the plugins were stopped" in result.stderr, result.stderr
+    assert "daemon.exit_timeout" in result.stderr, result.stderr
+    assert "on_init" in result.stderr and "on_stop" in result.stderr, result.stderr
+    # And it does not claim success on the way out.
+    assert "pre-flight OK" not in result.stderr, result.stderr
+
+
+def test_a_leak_before_a_failed_preflight_is_bounded_and_named(tmp_path: Path) -> None:
+    """#757: a plugin that opens a connection and then raises cannot hold it.
+
+    The failure path used to return 1 without arming the exit bound, so the
+    leaked connection's non-daemon thread kept the interpreter alive. It now
+    keeps its own failure line, names the survivor, and exits within
+    ``daemon.exit_timeout``.
+    """
+    path = write_config(tmp_path, "daemon:\n  exit_timeout: 0.5\n")
+
+    # subprocess.run kills the child when LEAK_DEADLINE expires.
+    result = subprocess.run(
+        [sys.executable, "-P", str(LEAK_CHILD), str(path), "raise"],
+        capture_output=True,
+        text=True,
+        timeout=LEAK_DEADLINE,
+    )
+
+    assert result.returncode == 1, result.stderr
+    # The failure's own line survives.
+    assert "pre-flight failed:" in result.stderr, result.stderr
+    assert "plugin failed after opening a connection" in result.stderr, result.stderr
+    # And the leaked thread is named, with the remedy.
+    assert "still running after the plugins were stopped" in result.stderr, result.stderr
+    assert "daemon.exit_timeout" in result.stderr, result.stderr
+    assert "pre-flight OK" not in result.stderr, result.stderr
 
 
 def test_valid_minimal_config_passes(tmp_path: Path) -> None:

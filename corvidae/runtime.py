@@ -488,6 +488,18 @@ class Runtime:
         except Exception:
             logger.warning("cleanup after failed startup raised", exc_info=True)
 
+    def arm_exit_bound(self) -> None:
+        """Arm the exit watchdog with the configured ``daemon.exit_timeout``.
+
+        For a process that has finished its work but whose exit is not
+        ``run()``'s to bound: the restart plugin's pre-flight, which loads
+        plugins through ``on_init`` and returns (#757). Kept here rather than
+        letting the pre-flight import ``corvidae.shutdown`` so a package
+        still depends only on the documented kernel API
+        (``tests/test_kernel_boundary.py``).
+        """
+        arm_exit_watchdog(self.shutdown_timeouts.exit)
+
     async def run(self, *, exit_watchdog: bool = False) -> None:
         """start(), wait for SIGINT/SIGTERM, then stop().
 
@@ -500,8 +512,11 @@ class Runtime:
         process at once.
 
         With ``exit_watchdog`` true, the exit watchdog is armed once stop()
-        returns or raises (see ``corvidae.shutdown``). Off by default so
-        in-process callers (tests) are never force-exited.
+        returns or raises (see ``corvidae.shutdown``), and on a failed
+        start() as well (#757): a plugin that leaked a non-daemon thread
+        before raising would otherwise leave the process alive and silent
+        under systemd. Off by default so in-process callers (tests) are
+        never force-exited.
         """
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -540,6 +555,11 @@ class Runtime:
             # plugin's on_start skipped this cleanup and left the process
             # alive and silent under systemd (#282).
             await self._cleanup_failed_start()
+            # The cleanup is best effort: a plugin that leaked a non-daemon
+            # thread before raising would still hold interpreter exit open,
+            # so arm the same bound as the shutdown path (#757).
+            if exit_watchdog:
+                arm_exit_watchdog(self.shutdown_timeouts.exit)
             raise
         _starting = False
         loop.add_signal_handler(signal.SIGTERM, _handle_stop_signal)

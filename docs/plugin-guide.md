@@ -912,7 +912,7 @@ line in this guide.
 | `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |
 | `corvidae.idle` | `IdleTracker`, `IdleWatch` |
 | `corvidae.spill` | `NotificationSpill` (see [Spilling a long notification](#spilling-a-long-notification)) |
-| `corvidae.runtime` | `Runtime`: `load_config`, `setup_logging` and `load_plugins`, the startup steps the daemon and the restart pre-flight share. For tools that check a config the way the daemon boots, not for ordinary plugins |
+| `corvidae.runtime` | `Runtime`: `load_config`, `setup_logging` and `load_plugins`, the startup steps the daemon and the restart pre-flight share, plus `arm_exit_bound()` — the exit watchdog with the configured `daemon.exit_timeout`, for a process whose exit is not `run()`'s to bound (the restart pre-flight, #757). For tools that check a config the way the daemon boots, not for ordinary plugins |
 | `corvidae.outbound` | `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus`, `OutboundProgress` (for senders and transports) |
 
 The kernel never imports a plugin outside it. A plugin that needs another
