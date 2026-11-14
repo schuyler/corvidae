@@ -709,6 +709,77 @@ class TestExecution:
         await _teardown(env)
 
 
+RETENTION_VERDICT = json.dumps({"objections": [
+    {"claim": "Yoz runs ARDC tech", "objection": "not filed",
+     "file": "people/yoz.md", "content": "- runs ARDC tech", "severity": 0.5},
+]})
+
+
+class TestRetentionDelivery:
+    """#742 via #857: a retention finding reaches the agent with the file and
+    the content, and wakes the channel so the fact is filed now."""
+
+    async def _run_retention(self, tmp_path, key):
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
+        )
+        env = await build_critique(
+            tmp_path, appraisal=appraisal, chat_text=RETENTION_VERDICT,
+            with_funnel=True,
+            config={"critique": {"retention": {"root": "values/"}}},
+        )
+        env.pm.ahook.on_notify = AsyncMock()
+        env.funnel.ingest = Mock(wraps=env.funnel.ingest)
+        env.funnel.ingest_and_wake = AsyncMock()
+        await _fire(env, key, origin="user")
+        await _run_next_task(env.task)
+        return env
+
+    async def test_the_file_and_the_content_reach_the_agent(self, tmp_path):
+        """AC1: the funnel entry, not just the outcome record, carries both."""
+        env = await self._run_retention(tmp_path, "kdeliver")
+        calls = env.funnel.ingest_and_wake.await_args_list + env.funnel.ingest.call_args_list
+        entries = "\n".join(e for c in calls for e in c.kwargs["entries"])
+        assert "people/yoz.md" in entries, entries
+        assert "- runs ARDC tech" in entries, entries
+        await _teardown(env)
+
+    async def test_a_retention_finding_wakes_the_channel_to_file_it(self, tmp_path):
+        """AC2a: an action turn, silent by default, that reads before it appends."""
+        env = await self._run_retention(tmp_path, "kwake")
+        env.funnel.ingest_and_wake.assert_awaited_once()
+        stub = env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+        assert "NO_REPLY" in stub, stub
+        assert "read" in stub.lower() and "append" in stub.lower(), stub
+        env.funnel.ingest.assert_not_called()
+        await _teardown(env)
+
+
+def test_objection_schema_allows_file_and_content():
+    """AC3: a server that honours the schema can return the retention fields."""
+    from corvidae_cognition.critique import OBJECTION_SCHEMA
+
+    item = OBJECTION_SCHEMA["properties"]["objections"]["items"]
+    assert item["properties"]["file"] == {"type": "string"}
+    assert item["properties"]["content"] == {"type": "string"}
+    assert item["required"] == ["claim", "objection"]
+
+
+async def test_retention_root_warns_against_recalls_default_root(tmp_path, caplog):
+    """AC6: a markdown_recall block with neither roots nor root indexes
+    state/markdown_recall, so a different retention root is drift too."""
+    appraisal = FakeAppraisal(stage1={"commitment_density": 0.0}, stage2={"novelty": 0.0})
+    env = await build_critique(
+        tmp_path, appraisal=appraisal,
+        config={"critique": {"retention": {"root": "values/"}}, "markdown_recall": {}},
+    )
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelname == "WARNING" and "critique.retention.root" in r.getMessage()]
+    assert warnings, "expected a WARNING against recall's default root"
+    assert "values" in warnings[0] and "state/markdown_recall" in warnings[0], warnings[0]
+    await _teardown(env)
+
+
 def test_parse_json_block_error_names_critique_phase_and_long_text():
     """The critique JSON parse error names its phase and keeps >200 chars."""
     from corvidae_cognition.critique import _parse_json_block
