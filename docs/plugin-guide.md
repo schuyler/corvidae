@@ -1617,7 +1617,7 @@ Registered by `SubagentPlugin` (entry point name: `subagent`).
 |------|------------|--------------|
 | `subagent` | `instructions: str`, `description: str`, `_ctx: ToolContext` | Enqueues a background task that runs a full agent loop with `instructions` as its prompt. Returns immediately with the enqueued task ID. Results are delivered via `on_notify` when the task completes. |
 
-`subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry to prevent recursion. The subagent calls the model as the `subagent` stage, a `chat` stage, so it uses `llm.stages.subagent`, else the default chat profile (`llm.main` by default).
+`subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry; nesting through other tools is bounded by `tools.max_agent_depth`. The subagent calls the model as the `subagent` stage, a `chat` stage, so it uses `llm.stages.subagent`, else the default chat profile (`llm.main` by default).
 
 ### RuntimeSettingsPlugin tools
 

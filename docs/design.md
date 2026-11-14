@@ -331,8 +331,8 @@ silent pending change. A test in `tests/test_config_watcher.py` reads each
 reload hook's source and fails if it reads a key its class does not declare, so
 the registry cannot drift from the code. These restart-only keys are still
 validated before the reload is applied: `tools.call_timeout`, `tools.timeouts`,
-`tools.read_file_window_fraction` and both `daemon` shutdown bounds are parsed
-in step 3e, so a reload carrying a bad value is refused as a whole (`ERROR`
+`tools.read_file_window_fraction`, `tools.max_agent_depth` and both `daemon`
+shutdown bounds are parsed in step 3e, so a reload carrying a bad value is refused as a whole (`ERROR`
 naming the key and the value, nothing applied) instead of parking a value that fails the next startup (#758).
 
 **System prompt layers (#316).** A conversation's system prompt is the
@@ -515,8 +515,8 @@ hooks with the client's profile (a key under `llm:`, such as `main`) and the
 current attribution snapshot.
 
 **Attribution.** `attribution.py` holds a single ContextVar dict
-(`stage`, `channel_id`, `trace_id`, `annotations`, plus stage-specific
-extras such as `trigger` on consolidation calls). Callers set it at the
+(`stage`, `channel_id`, `trace_id`, `annotations`, `agent_depth`, plus
+stage-specific extras such as `trigger` on consolidation calls). Callers set it at the
 top of a logical operation and reset in a `finally`: the Agent turn loop
 (`stage="turn"`), CompactionPlugin around its summary call
 (`stage="compaction"`, shadowing the turn), and the subagent work loop
@@ -528,6 +528,21 @@ time and TaskQueue workers are created once at startup, so `Task`
 captures `contextvars.copy_context()` at creation and the worker runs
 `task.work()` inside that context via
 `asyncio.create_task(task.work(), context=task.ctx)`.
+
+**Nested agents.** `agent_depth` is the kernel's bound on recursion (#816).
+A main turn runs at depth 0; `next_agent_depth(tools.max_agent_depth)` in
+`attribution.py` returns `depth + 1` for a spawn, or `None` at the limit, and
+`agent_depth_refusal()` is the refusal both tools return
+(`Error: nested agent depth 2 reached (tools.max_agent_depth); do this work in
+the current task instead.`). `SubagentPlugin._launch` and
+`ForkToolPlugin._launch` both ask it before building a Task and set the depth
+they were given in their `work()` attribution, so a subagent that calls
+`fork` (or the reverse) is bounded by the same rule rather than by each tool
+excluding itself from the set. The value rides the contextvars snapshot into
+every Task a spawned loop creates, so no tool signature carries it. The key is
+`tools.max_agent_depth` (positive integer, default 2), validated at startup
+and on reload by `parse_max_agent_depth`. Width is not bounded: depth 2 with
+ten children per level is still many tasks.
 
 **Sinks.** `metrics.py` provides `MetricsPlugin` (translates
 `on_llm_response` into `on_metrics` events: `llm.tokens.*`,
@@ -2737,6 +2752,10 @@ setup.
   `parse_tool_timeouts` into `call_timeouts`. `Runtime.start` and the config
   watcher validate the same keys first, so a bad value is a `Config error` at
   startup and a refused reload.
+  The watcher's step 3e validates `tools.call_timeout`, `tools.timeouts`,
+  `tools.read_file_window_fraction` and `tools.max_agent_depth` on every reload
+  (along with `daemon.shutdown_timeout` and `daemon.exit_timeout`); all stay
+  restart-only, so a good change waits for a restart.
 
 ### Tool access
 

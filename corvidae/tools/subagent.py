@@ -14,13 +14,19 @@ from typing import TYPE_CHECKING, Callable
 
 from corvidae.prompts import resolve_prompt
 from corvidae.turn import run_agent_turn
-from corvidae.attribution import reset_attribution, set_attribution
+from corvidae.attribution import (
+    agent_depth_refusal,
+    next_agent_depth,
+    reset_attribution,
+    set_attribution,
+)
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm import LLMClient
 from corvidae.provenance import cut_text
 from corvidae.spill import Cut, NotificationSpill
 from corvidae.task import Task
 from corvidae.thinking import strip_thinking
+from corvidae.tool_collection import DEFAULT_MAX_AGENT_DEPTH
 from corvidae.tool import (
     DEFAULT_TOOL_TIMEOUTS,
     MAX_TOOL_RESULT_CHARS,
@@ -193,7 +199,8 @@ class SubagentPlugin(CorvidaePlugin):
 
     Launches background agents via run_agent_loop. All subagents share the
     LLMClient LLMPlugin resolves for the subagent stage and the full tool set
-    minus the subagent tool itself (to prevent recursion).
+    minus the subagent tool itself; nesting is bounded by depth
+    (tools.max_agent_depth).
 
     Depends on "llm" (LLMPlugin) to access the shared LLM client,
     and on "tools" (ToolCollectionPlugin) to read the tool registry and
@@ -271,7 +278,8 @@ class SubagentPlugin(CorvidaePlugin):
                 "tool from an agent turn that has a channel, then retry."
             )
 
-        # Get tools, excluding subagent itself to prevent recursion
+        # Get tools, excluding subagent itself (a subagent never lists itself;
+        # nesting through other tools is bounded by depth below)
         from corvidae.tool_policy import disabled_on
         from corvidae.tool_collection import ToolCollectionPlugin
         from corvidae.llm_plugin import LLMPlugin
@@ -282,6 +290,15 @@ class SubagentPlugin(CorvidaePlugin):
         registry = tools_plugin.get_registry().exclude("subagent", *disabled_on(channel))
         max_result_chars = tools_plugin.max_result_chars
         call_timeouts = tools_plugin.call_timeouts
+        max_agent_depth = getattr(
+            tools_plugin, "max_agent_depth", DEFAULT_MAX_AGENT_DEPTH
+        )
+        # Nesting is bounded by the kernel, not by excluding this tool from the
+        # set: a subagent may spawn a fork, and a fork may spawn a subagent,
+        # up to tools.max_agent_depth (#816).
+        depth = next_agent_depth(max_agent_depth)
+        if depth is None:
+            return agent_depth_refusal(max_agent_depth)
         tools_dict = registry.as_dict()
         tool_schemas = registry.schemas()
 
@@ -298,7 +315,7 @@ class SubagentPlugin(CorvidaePlugin):
             # Attribute the subagent's LLM calls to the subagent stage,
             # shadowing whatever attribution the enqueuing turn captured.
             attribution_token = set_attribution(
-                stage="subagent", channel_id=channel.id
+                stage="subagent", channel_id=channel.id, agent_depth=depth
             )
             try:
                 result = await run_agent_loop(

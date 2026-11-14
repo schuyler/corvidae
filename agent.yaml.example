@@ -182,6 +182,8 @@ agent:
 #   web_max_response_bytes: 50000   # max bytes of HTTP response body
 #   max_file_read_bytes: 1048576    # max file size for unranged read_file (1 MB)
 #   read_file_window_fraction: 0.08 # share of a channel's max_context_tokens one read_file page may take
+#   max_agent_depth: 2              # how deep background agents may nest: a main turn may
+#                                   # spawn one level, and that level one more; a third is refused
 #   disabled: []                    # tool names to drop entirely, e.g. [shell, write_file]
 #                                   # or [set_settings]; shell and task_pipeline go
 #                                   # together; see docs/threat-model.md
