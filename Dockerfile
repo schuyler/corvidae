@@ -33,7 +33,7 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
 # Extras to install, space separated. The default is every extra in
 # pyproject.toml except `dev`; tests/test_dockerfile.py fails if this list and
 # pyproject.toml drift apart. "" builds the bare kernel.
-ARG EXTRAS="acp discord signal cognition cross-channel-send webhook-notify context-panel restart timepiece inotify vision rss"
+ARG EXTRAS="acp discord signal cognition cross-channel-send webhook-notify context-panel restart timepiece inotify vision rss outbound-cap"
 
 WORKDIR /build
 

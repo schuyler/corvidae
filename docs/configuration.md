@@ -563,6 +563,21 @@ See [threat-model.md](threat-model.md#skills-directory-reaches-the-system-role-1
 
 ---
 
+## `outbound_cap` — bound the agent's messages per channel (#791)
+
+On 2026-11-12 the agent sent about 600 Signal messages in one night with no human message in between. Nothing counted emissions per channel, so a looping turn or an injected instruction could talk to a person indefinitely. `OutboundCapPlugin` counts, per channel, the messages the output gate lets through since the last admitted human message, and withholds every later emission until a human speaks again.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `outbound_cap.max_messages` | integer | *unset — no cap* | Messages the agent may send on a channel between admitted human messages. A positive integer at least 1; a bool, a float (even a whole one), a string, `0` or a negative fails startup with a `Config error` naming the key, the value and the range, and a reload carrying one is rejected with an ERROR that keeps the previous limit. Resolved per decision through `resolve_tunable`, so a per-channel `set_settings` override wins and a reloaded value applies on the next send. |
+| `outbound_cap.count_progress` | boolean | `false` | Whether `progress` emissions count against the limit. With `false` only `final` emissions count, so a tool-using reply that sends "let me look that up" first is not penalised. `thinking` and `error` emissions never count. When the cap is reached, every emission is withheld, progress included. |
+
+A capped channel does not lose history. A withheld `final` is stored as `UNSENT`, is not sent, and leaves a not-sent marker in the window, so the agent knows it was held. The counter resets on `on_message_admitted`, so the reply to a human message is always within the cap, and a coalesced burst of messages resets it once. Every withheld emission is logged: the first in a run at `WARNING` with the channel, emission, trace id, the running count and the key that set the limit; later ones at `INFO`; and the reset logs a `WARNING` summary saying how many were withheld.
+
+Two things are never capped: a channel with no limit configured, and a channel no transport owns — `internal:heartbeat`, scheduler reminders, task results — because those are the agent talking to itself. Known gaps, accepted for the MVP: sends that bypass the output gate (`send_signal_attachment`, `signal_react`, tool-status events, the restart notice) are not capped, and the cap bounds messages, not turns ([#793](https://github.com/schuyler/corvidae/issues/793)).
+
+---
+
 ## `funnel` — context-admission funnel
 
 Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.

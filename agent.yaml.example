@@ -337,6 +337,13 @@ agent:
 #   instruction: {file: prompts/silence.md}   # or an inline string; absent = built-in
 #   mode: token   # token (reply NO_REPLY) | tool (end_turn tool) | both; read at startup
 
+# Outbound cap (#791): bound the agent's messages per channel between human
+# messages. Absent = no cap. Resolved per decision, so set_settings and a hot
+# reload both apply.
+# outbound_cap:
+#   max_messages: 6     # messages since the last human message, at least 1
+#   count_progress: false   # count "let me look that up" progress lines too
+
 # ACP stdio transport (optional — does not enable ACP by itself).
 # Start with: uv sync --extra acp --extra cognition && uv run corvidae acp
 # For bb: customAcpAgents → `uv run corvidae acp` (see docs/plugin-guide.md).
