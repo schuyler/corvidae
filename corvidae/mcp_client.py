@@ -170,7 +170,9 @@ def _one_line(text: str) -> str:
 # client, and the HTTP stack underneath it. Corvidae's warnings are redacted at
 # the call site (_server_endpoint); these are not ours to redact, so a filter
 # runs the same helpers over what they emit (#595).
-_CREDENTIAL_LOGGERS = ("mcp", "httpx", "httpcore")
+# `httpx2` is the HTTP client's logger name in this tree; `httpx` covers the
+# upstream name. Matched on a dot boundary, so each spelling is listed.
+_CREDENTIAL_LOGGERS = ("mcp", "httpx", "httpx2", "httpcore")
 
 
 class _UrlRedactingFilter(logging.Filter):
@@ -187,21 +189,66 @@ class _UrlRedactingFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if not record.name.startswith(_CREDENTIAL_LOGGERS):
+        # Only the third-party loggers, matched on a dot boundary so that an
+        # unrelated `mcprouter` logger is left alone.
+        if not any(
+            record.name == prefix or record.name.startswith(prefix + ".")
+            for prefix in _CREDENTIAL_LOGGERS
+        ):
             return True
+        # Redact the traceback first: an HTTP client quotes the URL in its
+        # exception text, and the formatter appends that text after the message.
+        self._redact_exception(record)
         try:
             message = record.getMessage()
         except Exception:
+            logger.warning(
+                "could not format a %s log record to redact it", record.name,
+                exc_info=True,
+            )
             return True
         if not any(marker in message for marker in _CREDENTIAL_MARKERS):
             return True
         try:
             redacted = _redact_urls_in_text(_one_line(message))
         except Exception:
+            logger.warning(
+                "could not redact a %s log record", record.name, exc_info=True
+            )
             redacted = "(could not redact this message)"
         record.msg = redacted
         record.args = ()
         return True
+
+    @staticmethod
+    def _redact_exception(record: logging.LogRecord) -> None:
+        """Replace `exc_info` with its redacted rendering in `exc_text`.
+
+        The formatter uses a cached `exc_text` in preference to `exc_info`, so
+        setting it and dropping `exc_info` keeps the traceback while making
+        every handler write the redacted text.
+        """
+        if not record.exc_info and not record.exc_text:
+            return
+        try:
+            text = record.exc_text or logging.Formatter().formatException(
+                record.exc_info
+            )
+            # Redact URLs line by line, keeping the traceback's own breaks.
+            record.exc_text = "\n".join(
+                _redact_urls_in_text(line)
+                if any(m in line for m in _CREDENTIAL_MARKERS)
+                else line
+                for line in text.split("\n")
+            )
+            record.exc_info = None
+        except Exception:
+            logger.warning(
+                "could not redact the traceback of a %s log record",
+                record.name, exc_info=True,
+            )
+            record.exc_text = "(traceback withheld: could not redact it)"
+            record.exc_info = None
 
 
 def _install_log_redaction() -> None:

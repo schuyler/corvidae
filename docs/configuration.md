@@ -964,9 +964,9 @@ For `transport: stdio`, the required keys are `command` and optionally `args` an
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-**A credential in the `url` is redacted, but a `${VAR}` header is the shape to prefer.** A token in the query string, or a `user:pass@` userinfo, is dropped from corvidae's own MCP warnings (#386) and from the log records the MCP SDK and HTTP client emit (#595): when the client starts, every root log handler gains a filter over `mcp.*`, `httpx*` and `httpcore.*` that reduces each credential-bearing URL to scheme, host, port and path. That filter is a net over text corvidae does not emit, so it catches the URL shapes it knows and nothing else — a library that wrote the credential in some other form would still get through.
-
 | `mcp.servers.<name>.headers` | map of string to string | none | HTTP headers sent on every request to the server (`streamable_http` and `sse` only). A value may contain `${VAR}`, replaced at connect time from the daemon's environment; put secrets there, not in `agent.yaml`. If a referenced variable is unset, empty, or contains a newline or NUL (a trailing newline from a secrets file, say), that server is skipped with one WARNING naming the server, the header and the variable, and it is not retried, since the environment can't change without a restart. Only the braced `${VAR}` form is substituted. Header values are never logged. |
+
+**A credential in the `url` is redacted, but a `${VAR}` header is the shape to prefer.** A token in the query string, or a `user:pass@` userinfo, is dropped from corvidae's own MCP warnings (#386) and from the log records the MCP SDK and HTTP client emit (#595): when the client starts, every root log handler gains a filter over `mcp.*`, `httpx.*`, `httpx2.*` and `httpcore.*` that reduces each credential-bearing URL to scheme, host, port and path. That filter is a net over text corvidae does not emit, so it catches the URL shapes it knows and nothing else — a library that wrote the credential in some other form would still get through.
 
 ```yaml
 mcp:

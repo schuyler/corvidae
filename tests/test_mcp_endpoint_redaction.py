@@ -678,3 +678,48 @@ def test_server_endpoint_encodes_a_separator_on_every_path():
     creds = _server_endpoint({"transport": "sse", "url": "https://u:pw@h.example/a\u2029b"})
     assert plain == "localhost:8080/a%E2%80%A8b"
     assert len(creds.splitlines()) == 1 and "pw" not in creds
+
+
+# --- #595: the third-party log filter covers tracebacks and exact prefixes ---
+
+
+def _formatted_through_filter(name: str, raise_text: str | None) -> str:
+    """Log one record on `name` through the redacting filter; return the
+    text a handler would write, traceback included."""
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(mcp_client_mod._UrlRedactingFilter())
+    logger = logging.getLogger(name)
+    logger.addHandler(handler)
+    try:
+        # A traceback is where an HTTP client's quoted URL ends up.
+        try:
+            if raise_text is not None:
+                raise RuntimeError(raise_text)
+            logger.error("plain failure")
+        except RuntimeError:
+            logger.exception("sse reader failed: %s", raise_text)
+    finally:
+        logger.removeHandler(handler)
+    return stream.getvalue()
+
+
+def test_a_traceback_from_a_library_logger_carries_no_credential():
+    """The exception text of a library error record is redacted too (#595)."""
+    out = _formatted_through_filter(
+        "mcp.client.sse",
+        "Client error '401' for url "
+        "'http://alfred:SECRETPW@host.example/mcp?token=SECRETTOK'",
+    )
+    assert "SECRETPW" not in out and "SECRETTOK" not in out
+    # The record still names the endpoint and keeps its traceback.
+    assert "host.example/mcp" in out and "Traceback" in out
+
+
+def test_the_filter_matches_a_logger_prefix_on_a_dot_boundary():
+    """`mcprouter` is not an `mcp` logger, so its records pass untouched."""
+    out = _formatted_through_filter(
+        "mcprouter.app", "see http://u:KEEPME@host.example/x"
+    )
+    assert "KEEPME" in out
