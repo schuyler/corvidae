@@ -23,9 +23,13 @@ What is capped, and what is not
   is at least 1) and only agent messages beyond M with no human message in
   between are withheld.
 * A channel with no limit configured is never capped, and neither is a channel
-  **no transport owns** — ``internal:heartbeat``, scheduler reminders, task
-  results. Those are the agent talking to itself; capping them would break the
-  heartbeat rather than protect a person.
+  **no transport owns**, for example ``internal:heartbeat``. That is the agent
+  talking to itself; capping it would break the heartbeat rather than protect a
+  person. Scheduler reminders and task results notify the originating transport
+  channel, so those finals are capped.
+* A message counts only after the combined gate verdict: a wrapper on
+  ``should_send_response`` sees every gate's result and counts the emission
+  only if none vetoed it, so a ``NO_REPLY`` vetoed elsewhere spends no budget.
 * By default only ``final`` emissions count, so a tool-using reply that sends
   "let me look that up" (a ``progress`` emission) is not penalised.
   ``outbound_cap.count_progress`` counts those too.
@@ -44,7 +48,7 @@ from __future__ import annotations
 
 import logging
 
-from corvidae.hooks import CorvidaePlugin, TransportPlugin, hookimpl
+from corvidae.hooks import CorvidaePlugin, TransportPlugin, hookimpl, resolve_reject_wins
 from corvidae.tuning import resolve_tunable
 
 logger = logging.getLogger("corvidae.outbound_cap")
@@ -113,9 +117,16 @@ class OutboundCapPlugin(CorvidaePlugin):
         self._warned: set[str] = set()
         # Validate at startup so a bad value names itself here rather than
         # capping nothing at the first send.
-        if isinstance(config.get("outbound_cap"), dict):
-            parse_max_messages(config["outbound_cap"].get("max_messages"), MAX_MESSAGES_KEY)
-            parse_count_progress(config["outbound_cap"].get("count_progress"), COUNT_PROGRESS_KEY)
+        block = config.get("outbound_cap")
+        if block is not None and not isinstance(block, dict):
+            # `outbound_cap: 5` would otherwise silently mean "no cap".
+            raise ValueError(
+                f"Config error: outbound_cap is {block!r}; expected a mapping "
+                f"with max_messages and count_progress keys — check agent.yaml"
+            )
+        if isinstance(block, dict):
+            parse_max_messages(block.get("max_messages"), MAX_MESSAGES_KEY)
+            parse_count_progress(block.get("count_progress"), COUNT_PROGRESS_KEY)
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
@@ -164,13 +175,20 @@ class OutboundCapPlugin(CorvidaePlugin):
     def _transport_owned(self, channel) -> bool:
         """Whether some transport plugin delivers to ``channel``.
 
-        Internal channels (``internal:heartbeat``, reminders, task results)
-        have a transport name no plugin claims, and are never capped: they are
-        the agent talking to itself.
+        Internal channels (``internal:heartbeat``) have a transport name no
+        plugin claims, and are never capped: they are the agent talking to
+        itself.
         """
         try:
             plugins = self._pm.get_plugins()
         except Exception:  # pragma: no cover - a pm without get_plugins
+            # Fail open: treat the channel as owned so the cap still applies.
+            logger.warning(
+                "outbound_cap: could not list plugins to find the owner of %s; "
+                "treating it as transport-owned",
+                getattr(channel, "id", None),
+                exc_info=True,
+            )
             return True
         for plugin in plugins:
             if isinstance(plugin, TransportPlugin):
@@ -178,6 +196,13 @@ class OutboundCapPlugin(CorvidaePlugin):
                     if plugin.owns(channel):
                         return True
                 except Exception:  # pragma: no cover - a broken transport
+                    # Skip the broken transport and ask the next one.
+                    logger.warning(
+                        "outbound_cap: transport %s failed owns() for %s; skipping it",
+                        type(plugin).__name__,
+                        getattr(channel, "id", None),
+                        exc_info=True,
+                    )
                     continue
         return False
 
@@ -200,13 +225,22 @@ class OutboundCapPlugin(CorvidaePlugin):
             )
             return None, key
 
+    def _counted_kinds(self, channel) -> frozenset[str]:
+        """The emission kinds that spend budget on ``channel``."""
+        counted = parse_count_progress(
+            resolve_tunable(channel, self._config, COUNT_PROGRESS_KEY, False)
+        )
+        return COUNTED_EMISSIONS_WITH_PROGRESS if counted else COUNTED_EMISSIONS
+
     @hookimpl
     async def should_send_response(
         self, channel, text: str, emission: str, trace_id, annotations
     ) -> bool | None:
-        """Count what goes out; veto everything once the cap is reached.
+        """Veto everything once the cap is reached; count nothing here.
 
-        Fail-open: a broken counter must never silence the agent, so an
+        Counting happens in ``_count_after_verdict``, after every gate has
+        voted, so an emission another gate vetoes spends no budget.
+        Fail-open: a broken check must never silence the agent, so an
         exception logs and returns no opinion.
         """
         try:
@@ -216,10 +250,6 @@ class OutboundCapPlugin(CorvidaePlugin):
             channel_id = channel.id
             if not self._transport_owned(channel):
                 return None
-            counted = parse_count_progress(
-                resolve_tunable(channel, self._config, COUNT_PROGRESS_KEY, False)
-            )
-            kinds = COUNTED_EMISSIONS_WITH_PROGRESS if counted else COUNTED_EMISSIONS
 
             count = self._counts.get(channel_id, 0)
             if count >= limit:
@@ -229,12 +259,11 @@ class OutboundCapPlugin(CorvidaePlugin):
                     self._warned.add(channel_id)
                     logger.warning(
                         "outbound_cap: withholding the %s emission for %s on %s: "
-                        "%d message%s since the last human message, limit %d set by %s",
+                        "%d withheld since the cap was reached, limit %d set by %s",
                         emission,
                         trace_id,
                         channel_id,
-                        count,
-                        "" if count == 1 else "s",
+                        withheld,
                         limit,
                         key,
                         extra={"channel": channel_id, "trace_id": trace_id},
@@ -250,8 +279,6 @@ class OutboundCapPlugin(CorvidaePlugin):
                         extra={"channel": channel_id, "trace_id": trace_id},
                     )
                 return False
-            if emission in kinds:
-                self._counts[channel_id] = count + 1
             return None
         except Exception:
             logger.warning(
@@ -262,3 +289,36 @@ class OutboundCapPlugin(CorvidaePlugin):
                 extra={"channel": getattr(channel, "id", None), "trace_id": trace_id},
             )
             return None
+
+    @hookimpl(wrapper=True, specname="should_send_response")
+    def count_after_verdict(
+        self, channel, emission: str, trace_id
+    ):
+        """Count an emission only once the combined verdict lets it through.
+
+        A wrapper sees the result list of every gate after they ran (apluggy
+        drives it from ``_async_multicall``), so a veto from any other gate
+        keeps the emission out of the count. The results pass through
+        unchanged; a failure here logs and never changes the verdict.
+        """
+        # Let every gate vote; an exception from a gate propagates untouched
+        # so the kernel's own fail-open handling in _gate_send applies.
+        results = yield
+        try:
+            if resolve_reject_wins(results) is not False:
+                limit, _key = self._limit(channel)
+                if (
+                    limit is not None
+                    and self._transport_owned(channel)
+                    and emission in self._counted_kinds(channel)
+                ):
+                    self._counts[channel.id] = self._counts.get(channel.id, 0) + 1
+        except Exception:
+            logger.warning(
+                "outbound_cap: counting the %s emission of %s failed; it was sent uncounted",
+                emission,
+                trace_id,
+                exc_info=True,
+                extra={"channel": getattr(channel, "id", None), "trace_id": trace_id},
+            )
+        return results

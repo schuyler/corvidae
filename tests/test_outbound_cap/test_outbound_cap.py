@@ -23,6 +23,7 @@ from outbound_cap import (
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import (
     TransportPlugin,
+    hookimpl,
     create_plugin_manager,
     resolve_reject_wins,
 )
@@ -173,6 +174,26 @@ async def test_an_internal_channel_is_never_capped(h):
         assert await h.gate.send(channel) is True
 
 
+class NoReplyGate:
+    """A second gate: vetoes any emission whose text is NO_REPLY."""
+
+    @hookimpl
+    async def should_send_response(self, channel, text, emission, trace_id, annotations):
+        return False if text == "NO_REPLY" else None
+
+
+async def test_an_emission_another_gate_vetoes_does_not_spend_budget(h):
+    """#791 requirement 2: only emissions the combined verdict lets through
+    count, so a NO_REPLY vetoed by another gate leaves the budget intact."""
+    h.pm.register(NoReplyGate(), name="no_reply")
+    channel = h.channel("signal:aci1")
+    await h.admitted(channel)
+    assert await h.gate.send(channel, text="NO_REPLY") is False
+    assert await h.gate.send(channel) is True
+    assert await h.gate.send(channel) is True
+    assert await h.gate.send(channel) is False
+
+
 async def test_progress_does_not_count_by_default(h):
     """A progress emission is sent and not counted, so the cap is still two
     finals; the tool-using reply is not penalised."""
@@ -226,6 +247,8 @@ async def test_first_veto_warns_with_the_key_and_the_count(h, caplog):
     assert "trace-9" in warnings[0]
     assert MAX_MESSAGES_KEY in warnings[0]
     assert "limit 2" in warnings[0]
+    # The running withheld count since the cap was hit: 1 for the first.
+    assert "1 withheld" in warnings[0], warnings[0]
 
 
 async def test_later_vetoes_log_at_info(h, caplog):
@@ -318,6 +341,18 @@ async def test_a_bad_config_value_fails_at_startup():
 
     assert MAX_MESSAGES_KEY in str(excinfo.value)
     assert "0" in str(excinfo.value)
+
+
+async def test_a_non_dict_block_fails_at_startup():
+    """`outbound_cap: 5` must not silently mean no cap."""
+    harness = Harness()
+    with pytest.raises(ValueError) as excinfo:
+        await harness.init({"outbound_cap": 5})
+
+    message = str(excinfo.value)
+    assert message.startswith("Config error"), message
+    assert "outbound_cap" in message and "5" in message, message
+    assert "mapping" in message, message
 
 
 async def test_a_bad_reload_is_logged_and_the_old_limit_kept(h, caplog):

@@ -1601,14 +1601,22 @@ Mitigations and their limits:
 - The counter resets on `on_message_admitted`, so a reply to a human is always
   within the cap, and the agent cannot lock itself out of answering.
 - A channel with no limit configured is uncapped (fail open: the operator opts
-  in), and so is any channel no transport owns — `internal:heartbeat`,
-  reminders, task results — because capping those would break the daemon rather
-  than protect a person.
+  in), and so is any channel no transport owns (for example
+  `internal:heartbeat`), because capping that would break the daemon rather
+  than protect a person. Reminders and task results notify the originating
+  transport channel, so their finals are capped.
+- Only emissions the combined gate verdict lets through count, so another
+  gate's veto (a `NO_REPLY`) spends no budget.
 - A withheld `final` is still stored as `UNSENT` with a not-sent marker, so the
   agent can see it was held; nothing is silently lost.
 - Every withheld emission is logged, the first in a run at `WARNING` with the
   channel, emission, trace id and limit key, so an operator can see a cap doing
   its work rather than guessing at silence.
+
+The agent can raise or clear its own cap through `set_settings`
+(`outbound_cap.max_messages`, `outbound_cap.count_progress`), and an invalid
+override fails open, unless the operator lists those keys in
+`agent.immutable_settings`.
 
 Accepted residual: the cap bounds *messages*, not turns, so a notification
 storm still spends compute (#793). Sends that bypass the gate are uncapped —
