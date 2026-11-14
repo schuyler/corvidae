@@ -1284,7 +1284,9 @@ order.
 **Queue, states and the state-change hook:** goals form a priority queue
 ordered by `position` (then `id`). `add_goal(position="prepend")` puts a goal
 at the front; `append`, the default, puts it at the back, and so does
-`corvidae goals seed`. A goal's status is
+`corvidae goals seed`. (Seeding into a table the daemon has not migrated yet
+still works: the row is inserted without a position, with a warning, and
+the daemon's migration then orders it by id.) A goal's status is
 `open`, `in-progress` (being worked, so a restart resumes it rather than
 re-picking), `blocked` (waiting on something external) or `waiting` (done,
 awaiting review); retiring sets `retired_at`. The heartbeat lists open goals
@@ -1337,7 +1339,9 @@ others at their next turn; see finding 10 in
 lock from their check through their update, so two racing retirements write
 one record (the loser gets the `already retired` error) and racing status
 changes report a consistent chain of `old_status` values. The hooks fire
-after the lock is released. The lock is shared by every goal, and a
+after the lock is released, so a slow subscriber can receive two racing
+events out of commit order; a subscriber that tracks a goal's latest status
+should compare each event's `old_status` against its own state. The lock is shared by every goal, and a
 retirement holds it across the record's embedding call; retirements are rare,
 so a per-goal lock is the upgrade if they stop being.
 

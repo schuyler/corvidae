@@ -790,3 +790,65 @@ async def test_concurrent_status_changes_report_a_consistent_chain(env):
     assert seen[0][0] == "open"
     for (_, prev_new), (next_old, _) in zip(seen, seen[1:]):
         assert next_old == prev_new
+
+
+async def test_seed_cli_works_before_the_daemon_has_migrated_the_table(env):
+    """An operator may seed before the upgraded daemon has started: the table
+    has no position column yet. The seed must still work, and the daemon's
+    migration then places the seeded goal behind the older ones (position = id)."""
+    from click.testing import CliRunner
+
+    # Rebuild the table as the old schema: no position, no origin_channel.
+    await env.goals._require_db()
+    await env.db.execute("ALTER TABLE goals RENAME TO goals_old")
+    await env.db.execute(
+        "CREATE TABLE goals (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, "
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL, retired_at REAL, "
+        "memory_id INTEGER, status TEXT NOT NULL DEFAULT 'open')"
+    )
+    now = env.clock.now()
+    await env.db.execute(
+        "INSERT INTO goals (text, created_at, updated_at) VALUES ('older', ?, ?)",
+        (now, now),
+    )
+    await env.db.commit()
+
+    result = await asyncio.to_thread(
+        CliRunner().invoke, goals_command,
+        ["--db", env.db_path, "seed", "operator seeded"],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+
+    # The daemon starts: the migration runs and orders by id.
+    env.goals._schema_ready = False
+    await env.goals._require_db()
+    order = [g["summary"] for g in await env.goals.open_goals()]
+    assert order == ["older", "operator seeded"]
+
+
+async def test_hook_fires_outside_the_goals_lock(env):
+    """A subscriber that calls a goal tool from inside the hook must not
+    deadlock: the hook fires after the goals lock and the memory lock are
+    released (#808)."""
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "work")
+    await env.tools["add_goal"]("first", _ctx=ctx)
+    await env.tools["add_goal"]("second", _ctx=ctx)
+    first_id, second_id = [r[0] for r in await rows(env, "SELECT id FROM goals ORDER BY id")]
+
+    class _Reentrant(CorvidaePlugin):
+        @hookimpl
+        async def on_goals_state_changed(
+            self, goal_id, kind, old_status, new_status,
+            origin_channel, actor_channel, conclusion,
+        ):
+            # Only react to the retirement; the change we make fires the hook again.
+            if kind == "retired":
+                await env.tools["set_goal_status"](second_id, "blocked", _ctx=ctx)
+
+    env.pm.register(_Reentrant())
+    await asyncio.wait_for(
+        env.tools["retire_goal"](first_id, "I concluded it is done.", _ctx=ctx), timeout=5
+    )
+
+    assert (await rows(env, "SELECT status FROM goals WHERE id = ?", (second_id,)))[0][0] == "blocked"

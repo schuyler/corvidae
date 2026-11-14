@@ -581,14 +581,34 @@ def _seed_cmd(ctx, text):
                 )
             await conn.execute(GOALS_DDL)
             now = time.time()
-            # A seeded goal is an appended one: position is one past the
-            # current maximum. Computed in the INSERT itself because the CLI
-            # is a second process and the daemon may append at the same time.
-            cursor = await conn.execute(
-                "INSERT INTO goals (text, created_at, updated_at, position) "
-                "VALUES (?, ?, ?, COALESCE((SELECT MAX(position) FROM goals), 0) + 1)",
-                (text, now, now),
-            )
+            # Has the daemon migrated this table yet? An operator may seed first.
+            async with conn.execute("PRAGMA table_info(goals)") as cursor:
+                columns = {r[1] for r in await cursor.fetchall()}
+            if "position" in columns:
+                # A seeded goal is an appended one: position is one past the
+                # current maximum. Computed in the INSERT itself because the CLI
+                # is a second process and the daemon may append at the same time.
+                cursor = await conn.execute(
+                    "INSERT INTO goals (text, created_at, updated_at, position) "
+                    "VALUES (?, ?, ?, COALESCE((SELECT MAX(position) FROM goals), 0) + 1)",
+                    (text, now, now),
+                )
+            else:
+                # Rescue: the table predates the queue. Insert as before; the
+                # daemon's migration on its next start sets position = id, which
+                # puts this goal behind the older ones. Logged so the fallback
+                # never hides that the database has not been migrated.
+                # shortcut: relies on the migration's position = id rule; drop
+                # this branch once no pre-queue database is still in use.
+                logger.warning(
+                    "goals seed: %s has no position column yet; seeding without "
+                    "it — start the corvidae daemon once to migrate the table",
+                    db_path,
+                )
+                cursor = await conn.execute(
+                    "INSERT INTO goals (text, created_at, updated_at) VALUES (?, ?, ?)",
+                    (text, now, now),
+                )
             await conn.commit()
             click.echo(
                 f"Seeded goal #{cursor.lastrowid}; "
