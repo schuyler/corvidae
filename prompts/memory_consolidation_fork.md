@@ -9,7 +9,10 @@ window for the idle and turn triggers), followed by this text as a `user` turn
 way from a rebuilt view of it, as a plain call on the `consolidation` stage's profile. Either
 way the agent's own system prompt is above it, so "I" needs no explaining.
 
-`MemoryPlugin` appends one sentence naming where the range starts:
+`MemoryPlugin` appends a sentence stating the entry size target
+(`memory.entry_target_tokens`, as words) before the range sentence, to an
+override as well as to this text. It then appends one sentence naming where
+the range starts:
 
 - "Record the whole conversation above." when nothing precedes it;
 - "Record the conversation above that follows the summary at its top."
@@ -42,11 +45,12 @@ not their raw output. Bracketed CONTEXT blocks are things you recalled or
 were shown, not new events; don't record them as if they happened now. Skip
 pleasantries and chatter.
 
-Write it as separate entries, one for each distinct stretch or topic, in
-order. Each entry is a paragraph at most and must make sense read on its
-own, months from now, with nothing else: name the people, projects and
-things involved rather than "he" or "it". Don't attribute a fact from one
-entry's topic to another's.
+Write one entry for each distinct stretch or topic, in order, and keep
+each entry to its topic: an entry that wanders across several topics is hard to
+find again. Each entry must make sense read on its own, months from
+now, with nothing else: name the people, projects and things involved
+rather than "he" or "it". Don't attribute a fact from one entry's
+topic to another's.
 
 Then rate how important this stretch is to remember long-term, from 0
 (routine) to 1 (essential). Do not call tools.
