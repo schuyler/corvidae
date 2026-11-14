@@ -1,12 +1,11 @@
 # corvidae/channels/cli.py
 
 import asyncio
-import concurrent.futures
-import threading
 import logging
 import os
 import signal
 import sys
+import threading
 
 import click
 
@@ -22,39 +21,6 @@ from corvidae.outbound import (
 from corvidae.runtime import Runtime, run_daemon
 
 logger = logging.getLogger(__name__)
-
-
-class _DaemonExecutor(concurrent.futures.ThreadPoolExecutor):
-    """ThreadPoolExecutor whose threads are daemons (#759).
-
-    A daemon thread is killed when the process exits, so a thread blocked
-    in ``sys.stdin.readline`` cannot hold up shutdown. The default
-    executor uses non-daemon threads; ``asyncio.run`` joins them on exit,
-    which is the hang this class prevents.
-    """
-
-    def _adjust_thread_count(self) -> None:  # noqa: N802
-        if self._idle_semaphore.acquire(timeout=0):
-            return
-        import weakref as _weakref
-        from concurrent.futures.thread import _worker, _threads_queues
-
-        def _weakref_cb(_, q=self._work_queue):
-            q.put(None)
-
-        num_threads = len(self._threads)
-        if num_threads < self._max_workers:
-            t = threading.Thread(
-                name=f"DaemonExecutor-{num_threads}",
-                target=_worker,
-                args=(_weakref.ref(self, _weakref_cb),
-                      self._create_worker_context(),
-                      self._work_queue),
-                daemon=True,
-            )
-            t.start()
-            self._threads.add(t)
-            _threads_queues[t] = self._work_queue
 
 
 class CLIPlugin(TransportPlugin):
@@ -78,9 +44,9 @@ class CLIPlugin(TransportPlugin):
         # Whether stdin is a terminal; the banner and "> " prompts are only
         # for a person typing, not a journal or a pipe.
         self._interactive = False
-        # Daemon-thread executor for the stdin readline (#759): a blocked
-        # readline cannot hold up process exit.
-        self._executor: _DaemonExecutor | None = None
+        # Daemon reader thread for stdin (#759): killed at process exit,
+        # so a blocked readline cannot hold up shutdown.
+        self._reader_thread: threading.Thread | None = None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -102,14 +68,38 @@ class CLIPlugin(TransportPlugin):
                 "CLIPlugin: no stdin; cli transport disabled, daemon continues"
             )
             return
-        self._executor = _DaemonExecutor(max_workers=1)
         self._task = asyncio.create_task(self._read_loop(), name="cli-read-loop")
 
-    async def _read_loop(self) -> None:
+    def _stdin_reader(self, queue: asyncio.Queue) -> None:
+        """Daemon thread: read stdin lines into the asyncio queue.
+
+        Runs in a daemon thread so it is killed at process exit — a blocked
+        ``readline`` cannot hold up shutdown (#759). Posts each line via
+        ``loop.call_soon_threadsafe`` so the asyncio loop picks it up.
+        """
+        loop = asyncio.get_event_loop()
+        while True:
+            try:
+                line = sys.stdin.readline()
+            except (EOFError, OSError):
+                line = ""
+            # Post to the queue from the thread; call_soon_threadsafe is
+            # the thread-safe way to schedule on the loop.
+            loop.call_soon_threadsafe(queue.put_nowait, line)
+            if not line:
+                # EOF: the queue now has a "" sentinel; the read loop will
+                # see it and exit. Stop reading.
+                return
+
+    async def _read_loop(self, queue: asyncio.Queue[str] | None = None) -> None:
         """Read lines from stdin and dispatch as on_message events.
 
-        Always routes to the cli:local channel. CLI is single-user/single-scope
-        by design — only cli:local receives stdin input.
+        Uses a daemon reader thread that posts lines to an asyncio.Queue
+        (#759). The queue.get() is a native asyncio op that cancels cleanly;
+        no executor thread is left blocked in readline.
+
+        The queue parameter is for testing: pass a pre-populated queue
+        to skip the reader thread.
         """
         channel = self._registry.get_or_create("cli", "local")
         self._interactive = sys.stdin.isatty()
@@ -121,40 +111,46 @@ class CLIPlugin(TransportPlugin):
         # and returns immediately before the agent loop runs.
         self._prompt()
 
-        loop = asyncio.get_running_loop()
-        while True:
-            try:
-                line = await loop.run_in_executor(self._executor, sys.stdin.readline)
-            except asyncio.CancelledError:
-                raise
-            if not line:
-                # EOF at an interactive terminal (Ctrl-D), or anywhere under
-                # `corvidae cli`, means quit: trigger graceful shutdown by
-                # sending SIGINT to ourselves, reusing the signal handler in
-                # main().
-                if self._interactive or self._exit_on_eof:
-                    logger.info("EOF received, initiating shutdown")
-                    os.kill(os.getpid(), signal.SIGINT)
-                    return
-                # EOF on a non-interactive stdin (/dev/null under systemd,
-                # a closed pipe) ends only the CLI transport; the daemon and
-                # its other transports keep running (#53).
-                logger.warning(
-                    "CLIPlugin: stdin is not a terminal and reached EOF; "
-                    "cli transport stopped, daemon continues"
-                )
-                return
-            text = line.strip()
-            if not text:
-                self._prompt()
-                continue
-            await self.pm.ahook.on_message(
-                channel=channel,
-                sender="user",
-                text=text,
-                # Transport-minted id; the Agent uses it verbatim (#95).
-                trace_id=mint_trace_id(),
+        if queue is None:
+            queue = asyncio.Queue()
+            self._reader_thread = threading.Thread(
+                target=self._stdin_reader, args=(queue,),
+                daemon=True, name="cli-stdin-reader",
             )
+            self._reader_thread.start()
+
+        try:
+            while True:
+                line = await queue.get()
+                if not line:
+                    # EOF at an interactive terminal (Ctrl-D), or anywhere
+                    # under `corvidae cli`, means quit: trigger graceful
+                    # shutdown by sending SIGINT to ourselves.
+                    if self._interactive or self._exit_on_eof:
+                        logger.info("EOF received, initiating shutdown")
+                        os.kill(os.getpid(), signal.SIGINT)
+                        return
+                    # EOF on a non-interactive stdin (/dev/null under
+                    # systemd, a closed pipe) ends only the CLI transport;
+                    # the daemon and its other transports keep running (#53).
+                    logger.warning(
+                        "CLIPlugin: stdin is not a terminal and reached EOF; "
+                        "cli transport stopped, daemon continues"
+                    )
+                    return
+                text = line.strip()
+                if not text:
+                    self._prompt()
+                    continue
+                await self.pm.ahook.on_message(
+                    channel=channel,
+                    sender="user",
+                    text=text,
+                    # Transport-minted id; the Agent uses it verbatim (#95).
+                    trace_id=mint_trace_id(),
+                )
+        finally:
+            self._reader_thread = None
 
     @hookimpl
     async def on_agent_response(
@@ -242,11 +238,7 @@ class CLIPlugin(TransportPlugin):
 
     @hookimpl
     async def on_stop(self) -> None:
-        """Cancel the read loop and await its cancellation.
-
-        The executor's threads are daemons (#759), so a readline blocked
-        on an open TTY cannot hold up process exit.
-        """
+        """Cancel the read loop and await its cancellation."""
         if self._task is None:
             return
         self._task.cancel()
@@ -257,9 +249,6 @@ class CLIPlugin(TransportPlugin):
         except Exception:
             logger.exception("CLIPlugin read loop raised unexpected exception")
         self._task = None
-        if self._executor is not None:
-            self._executor.shutdown(wait=False, cancel_futures=True)
-            self._executor = None
 
 
 @click.command("cli")
