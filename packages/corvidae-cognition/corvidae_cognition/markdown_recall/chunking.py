@@ -221,9 +221,8 @@ def _merge_stub_sections(sections):
         else:
             # Substantial (or preamble) section — prepend any pending stubs
             if pending_stubs:
-                prefix_text = "\n\n".join(
-                    _stub_text(s) for s in pending_stubs if _stub_text(s)
-                )
+                stub_texts = [_stub_text(s) for s in pending_stubs]
+                prefix_text = "\n\n".join(t for t in stub_texts if t)
                 if prefix_text:
                     section = dict(section)
                     section["text"] = (prefix_text + "\n\n" + section["text"]
@@ -233,9 +232,8 @@ def _merge_stub_sections(sections):
 
     # Any remaining pending stubs merge backward into the last substantial section
     if pending_stubs:
-        stub_text = "\n\n".join(
-            _stub_text(s) for s in pending_stubs if _stub_text(s)
-        )
+        stub_texts = [_stub_text(s) for s in pending_stubs]
+        stub_text = "\n\n".join(t for t in stub_texts if t)
         if stub_text:
             # Find last substantial non-preamble section in merged
             for idx in range(len(merged) - 1, -1, -1):

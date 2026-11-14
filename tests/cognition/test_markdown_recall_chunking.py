@@ -257,8 +257,22 @@ class TestStubHeadingPreservation:
         # The merged chunk should contain "Known bugs" (the stub's heading)
         # so that an FTS search for "known bugs" can match.
         all_text = " ".join(c["text"] for c in result)
-        assert "Known bugs" in all_text, (
+        assert "## Known bugs" in all_text, (
             f"Stub heading 'Known bugs' missing from merged chunk text: {all_text[:200]}"
+        )
+
+    def test_heading_only_stub_preserved(self):
+        """A stub with a heading but no body text keeps its heading."""
+        long_text = " ".join(f"word{i}" for i in range(100))
+        content = (
+            "## Known bugs\n"
+            "## Long section\n"
+            + long_text
+        )
+        result = chunk_page("test/page", content)
+        all_text = " ".join(c["text"] for c in result)
+        assert "## Known bugs" in all_text, (
+            f"Heading-only stub '## Known bugs' missing: {all_text[:200]}"
         )
 
     def test_backward_merge_preserves_stub_heading(self):
@@ -272,6 +286,6 @@ class TestStubHeadingPreservation:
         )
         result = chunk_page("test/page", content)
         all_text = " ".join(c["text"] for c in result)
-        assert "Status" in all_text, (
+        assert "## Status" in all_text, (
             f"Stub heading 'Status' missing from merged chunk text: {all_text[:200]}"
         )
