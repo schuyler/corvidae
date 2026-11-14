@@ -593,10 +593,29 @@ What it does:
   row exists with `indexed = 1` and `redacted = 0`, the filter both searches
   apply. Anything else is listed by id with its status, checked in this
   order: `absent`, `redacted`, `superseded`, `not_indexed`. Unreachable ids
-  are left out of scoring. A query left with no reachable id (or labelled
-  with an empty list, a negative probe) is not scored: its metrics are
-  `null`, stdout says `not scored: no reachable relevant id`, and the means
-  say `over M of N queries`.
+  are left out of scoring. A query left with no reachable id is not
+  scored: its metrics are `null`, stdout says
+  `not scored: no reachable relevant id`, and the means say
+  `over M of N queries`.
+- **Scores negative probes on false admits** (#802). A query labelled
+  `"relevant": []` asks for the opposite of recall: it should admit
+  nothing, so what the gate does admit is counted as false admits, split by
+  the band that showed it — `strong` is shown bare, `moderate` as
+  `[marginal]`. Recall@k and MRR stay `null` for it. The gate is the
+  daemon's own, `admitted_candidates`, shared with `before_agent_turn`, so
+  a threshold fitted from these counts is the one the daemon applies: on
+  the degraded path the top k is admitted ungated, otherwise every
+  candidate above the weak band. A negative probe whose pool degraded is
+  reported apart and left out of the rate, since no gate ran. An empty
+  reachable set is *not* a negative probe: a right answer existed and was
+  lost, and counting admits there would charge the gate for a labelling
+  gap. The pool carries `negative`, per-probe `false_admits`
+  (`{"strong": n, "marginal": n}`), and `admitted` on every candidate, so
+  admission on positive probes is replayable offline; the summary and each
+  subset carry `negative_probes`, `negative_scored`, `false_admit_rate`
+  (the share of scored negative probes that admitted anything),
+  `mean_false_admits` and `strong_false_admits` (a total, not a mean, since
+  it is the count a threshold change moves first).
 - **Counts FTS5 fallback.** Each query reports `degraded`, and the summary
   prints `FTS5 fallback on D of N queries` whenever any query fell back.
 - **Writes every query's whole scored pool to `--pool-out`**, for #409's
@@ -650,29 +669,41 @@ The pool file is written once, after the last query:
       "relevant": [412, 415],
       "unscorable": [{"id": 415, "status": "superseded"}],
       "degraded": false,
+      "negative": false,
+      "false_admits": null,
       "recall_at_k": 1.0,
       "mrr": 0.5,
       "candidates": [
         {"id": 398, "rank": 1, "similarity": 0.81, "score": 0.77, "band": "strong",
-         "source": "both"},
+         "source": "both", "admitted": true},
         {"id": 412, "rank": 2, "similarity": 0.79, "score": 0.74, "band": "moderate",
-         "source": "vec"}
+         "source": "vec", "admitted": true}
       ]
     }
   ],
   "summary": {"queries": 1, "scored": 1, "degraded": 0,
               "mean_recall_at_k": 1.0, "mean_mrr": 0.5,
               "query_context": "previous_reply", "candidates": "hybrid",
+              "negative_probes": 0, "negative_scored": 0,
+              "false_admit_rate": null, "mean_false_admits": null,
+              "strong_false_admits": 0,
               "subsets": {"(untagged)": {"queries": 1, "scored": 1,
-                                         "mean_recall_at_k": 1.0, "mean_mrr": 0.5}}}
+                                         "mean_recall_at_k": 1.0, "mean_mrr": 0.5,
+                                         "negative_probes": 0, "negative_scored": 0,
+                                         "false_admit_rate": null,
+                                         "mean_false_admits": null,
+                                         "strong_false_admits": 0}}}
 }
 ```
 
 `candidates` is the ranked pool, best score first; the entries with
-`rank <= k` are `retrieve()`'s top k, what passive retrieval would hand on
-before it drops weak-band entries (all of them, so an all-weak pool admits
-nothing, #409; a degraded pool keeps its top k) and the funnel admits them,
-with no window exclusion. It holds ids and scores but
+`rank <= k` are `retrieve()`'s top k, and `admitted` is the daemon's own
+gate applied to them (`admitted_candidates`, #802). A candidate outside the
+top k was never offered to the gate, so it is not admitted. The gate drops
+weak-band entries (all of them, so an all-weak pool admits nothing, #409) and
+keeps the top k on a degraded pool; the funnel then admits the survivors,
+with no window exclusion. A negative probe carries its `false_admits` counts
+and `null` metrics. It holds ids and scores but
 no memory text beyond the labels' own `text`, `context` and `query`; look the
 ids up in the source. `run_at` is the wall-clock
 time the run started. The means are `null` when no query was scored.

@@ -973,6 +973,20 @@ def _previous_reply(messages: list[dict]) -> str | None:
     return None
 
 
+def admitted_candidates(candidates: list[dict], degraded: bool) -> list[dict]:
+    """The candidates passive retrieval admits, before the funnel (#703, #802).
+
+    The FTS5-degraded path has no relevance to gate on, so it admits what it
+    found; otherwise a candidate banded ``weak`` is dropped with no fallback
+    (#409), so a query with nothing above weak admits nothing. Shared by
+    ``before_agent_turn`` and ``scripts/eval_memory.py``, so the eval measures
+    what the daemon admits and the two cannot drift.
+    """
+    if degraded:
+        return list(candidates)
+    return [c for c in candidates if c["band"] != "weak"]
+
+
 def retrieval_query(messages: list[dict], query_context: str) -> str:
     """Build passive retrieval's query text from a window (#665).
 
@@ -3012,11 +3026,9 @@ class MemoryPlugin(CorvidaePlugin):
             # Drop weak-banded candidates, with no fallback (#409): a query
             # with nothing above weak admits nothing. The FTS5-degraded path
             # has no relevance to gate on, so it admits its top k (flagged in
-            # retrieval_log and marked marginal).
-            if degraded:
-                selected = list(candidates)
-            else:
-                selected = [c for c in candidates if c["band"] != "weak"]
+            # retrieval_log and marked marginal). The rule is shared with the
+            # eval, which measures false admits against it (#802).
+            selected = admitted_candidates(candidates, degraded)
 
             # One line per memory: "(age, memory <id>) summary", marked
             # "[marginal]" when the record banded moderate; each keyed on its
