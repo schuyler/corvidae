@@ -15,6 +15,12 @@ Config (agent.yaml)::
         - signal:+15551234567
       max_items_per_poll: 10
       state_file: state/rss/seen.json
+      prompt: "Summarise each item in two sentences."
+
+prompt (optional string) is prepended to each item's notification text,
+followed by a blank line. The prompt is cut against max_payload_chars
+along with the item content, so a long prompt reduces the space available
+for the title, link and summary. Empty by default (no prompt).
 
 Origin ``rss:<feed-url>`` in the cognition plugins:
 
@@ -169,6 +175,7 @@ class RSSPlugin(CorvidaePlugin):
             self._max_items: int = DEFAULT_MAX_ITEMS
             self._state_path: Path = Path(DEFAULT_STATE_FILE)
             self._max_chars: int = DEFAULT_MAX_CHARS
+            self._prompt: str = ""
             self._task: asyncio.Task | None = None
             return
 
@@ -208,6 +215,10 @@ class RSSPlugin(CorvidaePlugin):
         self._max_chars = block.get("max_payload_chars", DEFAULT_MAX_CHARS)
         if not isinstance(self._max_chars, int) or self._max_chars < 1:
             raise _bad("rss.max_payload_chars", self._max_chars, "use a positive integer")
+        prompt = block.get("prompt", "")
+        if not isinstance(prompt, str):
+            raise _bad("rss.prompt", prompt, "use a string")
+        self._prompt: str = prompt.strip()
 
         self._task = None
 
@@ -290,6 +301,9 @@ class RSSPlugin(CorvidaePlugin):
             text = f"[RSS] {title}\n{link}"
             if summary:
                 text += f"\n{summary}"
+            prompt = self._prompt
+            if prompt:
+                text = f"{prompt}\n\n{text}"
             origin = f"rss:{feed_url}"
             try:
                 await self._spill.notify(

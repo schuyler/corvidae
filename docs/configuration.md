@@ -604,7 +604,7 @@ The built-in tool keys are read by the plugin that owns the tool: `shell_timeout
 |-----|------|---------|-------------|
 | `tools.max_result_chars` | integer | `100000` | Longest tool result kept whole. A longer one reaches the model as its first `max_result_chars` characters behind the kernel's cut line (`[metadata: cut to the first N of M characters; the full text is in <path>]`), and its full text is written to a spill file under the `daemon.notification_spill_*` settings, where the channel has a tool that reads spill files. A subagent's results get the same words as a plain-text line. A background task's result that answers no tool call is cut and spilled the same way, by `TaskPlugin`. Read by `ToolCollectionPlugin`. The legacy key `agent.max_tool_result_chars` is accepted but deprecated; use `tools.max_result_chars` instead. |
 | `tools.max_agent_depth` | integer | `2` | How deep background agents may nest. A main turn runs at depth 0; a `subagent` or `fork` it launches runs at depth 1, and a spawn from that loop at depth 2. At the limit the spawn is refused with `Error: nested agent depth N reached (tools.max_agent_depth); do this work in the current task instead.` instead of enqueuing a task. Must be an integer of at least 1 (booleans, floats, strings, `0` and null are rejected; a bad value fails startup and refuses a reload, naming the key and the value). Bounds depth only, not fan-out: depth 2 with ten children per level is still many tasks. Read by `ToolCollectionPlugin`. Restart to apply. |
-| `tools.read_file_window_fraction` | number | `0.08` | The fraction of the channel's `max_context_tokens` one `read_file` page may take. A page is `min(tools.max_result_chars, max(2000, fraction x max_context_tokens x 3.0))` characters, so it never exceeds `tools.max_result_chars`; a call with no channel, or with no channel registry loaded, uses `tools.max_result_chars`. Must be a number with `0 < value <= 1`; any other value is a config error at startup and refuses a reload. Read by `ToolCollectionPlugin`. |
+| `tools.read_file_window_fraction` | number | `0.08` | The fraction of the channel's `max_context_tokens` one `read_file` page may take. A page is first estimated at `min(tools.max_result_chars, max(2000, fraction x max_context_tokens x 3.0))` characters, so it never exceeds `tools.max_result_chars`, and is then counted: while the page costs more than `fraction x max_context_tokens` tokens it is re-read smaller, up to three reads, so the share holds whatever the file contains (dense text such as base64, escapes, CJK or emoji tokenizes far below the 3.0-characters-per-token the estimate assumes). A call with no channel, or with no channel registry loaded, uses `tools.max_result_chars`. Must be a number with `0 < value <= 1`; any other value is a config error at startup and refuses a reload. Read by `ToolCollectionPlugin`. |
 | `tools.shell_timeout` | integer | `30` | Seconds before a `shell` command is killed. |
 | `tools.web_fetch_timeout` | integer | `15` | Seconds before a `web_fetch` HTTP request is aborted. |
 | `tools.web_max_response_bytes` | integer | `50000` | Maximum bytes of HTTP response body returned by `web_fetch`. Content beyond this limit is truncated with `[truncated]`. This limit is independent of `tools.max_result_chars`. |
@@ -861,7 +861,8 @@ Advertised ACP session capabilities: `loadSession`, `list`, `resume`,
 
 **bb:** register Corvidae under `customAcpAgents` with command
 `uv run corvidae acp` (from a checkout with the `acp` extra). See
-[plugin-guide.md](plugin-guide.md#acp-transport) for the smoke checklist.
+[plugin-guide.md](plugin-guide.md#acp-transport) for the smoke checklist, or
+[acp-clients.md](acp-clients.md) for Zed and bb setup.
 
 ---
 
@@ -1105,7 +1106,7 @@ The `logging` section is optional. Omitting it applies defaults (INFO level; fil
 |-----|------|---------|-------------|
 | `logging.level` | string | `INFO` | Minimum log level. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. Case-insensitive. |
 | `logging.file` | string | none (CLI: `corvidae.log`) | Path to a rotating log file (10 MB, 5 backups). When set, logs go to this file. When absent, logs go to stderr. In CLI mode, defaults to `corvidae.log`. |
-| `logging.jsonl.max_bytes` | integer | `10485760` | Size cap, in bytes, for each JSONL file: every per-channel transcript under `daemon.jsonl_log_dir` and the metrics log `daemon.metrics_jsonl`. A write that would pass it first rotates the file to `<name>.1` (the previous `.1` becomes `.2`, and so on). `0` never rotates. Restart-only. |
+| `logging.jsonl.max_bytes` | integer | `10485760` | Size cap, in bytes, for each JSONL file: every per-channel transcript under `daemon.jsonl_log_dir` and the metrics log `daemon.metrics_jsonl`. A write that would pass it first rotates the file to `<name>.1` (the previous `.1` becomes `.2`, and so on). The live file is moved aside under `<name>.rotating-<pid>` while the renames happen, so a failed rotation leaves the backups as they were; a failure is logged once per streak at WARNING. `0` never rotates. Restart-only. |
 | `logging.jsonl.backup_count` | integer | `5` | How many rotated files each JSONL sink keeps; the oldest is deleted. `0` keeps none, so the live file simply starts over. Restart-only. |
 
 The JSONL files are a debugging aid; `message_log` in `sessions.db` is the durable record. Rotation is in-process, so no external `logrotate` is needed; a file already over the cap when the daemon starts rotates on its first write. Each file is capped separately, so the worst case on disk is the number of channels times `(1 + backup_count) * max_bytes`, plus the metrics log. If a rotation fails (a read-only directory, a full disk), the daemon logs one warning naming the file and keeps appending past the cap until rotation works again, rather than dropping records. A value that is not an integer of 0 or greater is a startup config error naming the key.
@@ -1189,13 +1190,14 @@ The plugin reads and writes files under `<config_dir>/state/`:
 
 Requires the timepiece extra (`--extra timepiece` on your `uv sync` line). Without the block the plugin runs with its defaults; to turn it off, list `timepiece` in `plugins.disabled`.
 
-Before a turn, if the channel has had no stamp for `interval_minutes`, the plugin appends one CONTEXT line to the conversation, such as `The current date and time are now Monday 2026-11-09 at 17:12 PST`. Every channel that takes a turn is stamped, internal ones included. The line is persisted like any CONTEXT row. The last-stamp times are kept in memory, so the first turn on each channel after a restart is stamped. It adds no tool and starts no turn.
+Before a turn, if the channel has had no stamp for `interval_minutes`, the plugin appends one CONTEXT line to the conversation, such as `The current date and time are now Monday 2026-11-09 at 17:12 PST`. An optional `timepiece.note` string, when non-empty, is appended after the stamp in the same line. Every channel that takes a turn is stamped, internal ones included. The line is persisted like any CONTEXT row. The last-stamp times are kept in memory, so the first turn on each channel after a restart is stamped. It adds no tool and starts no turn.
 
 ```yaml
 timepiece:
   interval_minutes: 10
   timezone: America/Los_Angeles
   format: "%A %Y-%m-%d at %H:%M %Z"
+  note: ""
 ```
 
 | Key | Type | Default | Description |
@@ -1203,6 +1205,7 @@ timepiece:
 | `timepiece.interval_minutes` | number | `10` | Minimum minutes between stamps on one channel. Must be a number > 0. |
 | `timepiece.timezone` | string | daemon's local time | IANA timezone name for the stamp. Must name a known zone. |
 | `timepiece.format` | string | `"%A %Y-%m-%d at %H:%M %Z"` | `strftime` format for the time in the stamp. Must be a non-empty string. |
+| `timepiece.note` | string | `""` | Optional text appended after the stamp. Empty by default (no note). Must be a string. |
 
 A malformed key fails startup naming the key and the value. Restart to apply a change.
 

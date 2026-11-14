@@ -123,10 +123,17 @@ class FileToolsPlugin(CorvidaePlugin):
             # Every read is one page, sized to the calling channel's budget and
             # never above the live result cap, so it is never cut after the fact.
             tools = get_dependency(plugin.pm, "tools", ToolCollectionPlugin)
+            budget = plugin._channel_budget(_ctx)
             max_chars = page_chars(
                 tools.max_result_chars,
-                plugin._channel_budget(_ctx),
+                budget,
                 tools.read_file_window_fraction,
+            )
+            # The share in tokens, which the page is counted against: the
+            # character estimate only sizes the first try (#752).
+            max_tokens = (
+                None if budget is None
+                else int(tools.read_file_window_fraction * budget)
             )
             # An unranged read of a spill file pages from the start, so reading
             # one back never yields a result that is cut and spilled again.
@@ -135,11 +142,12 @@ class FileToolsPlugin(CorvidaePlugin):
                 offset = 0
             elif unranged:
                 return await _read_file_impl(
-                    path, max_size=plugin._max_file_read_bytes, max_chars=max_chars
+                    path, max_size=plugin._max_file_read_bytes, max_chars=max_chars,
+                    max_tokens=max_tokens,
                 )
             return await _read_file_impl(
                 path, offset=offset, length=length, max_chars=max_chars,
-                start_line=start_line, end_line=end_line,
+                start_line=start_line, end_line=end_line, max_tokens=max_tokens,
             )
 
         # read_file reads notification spill files.
