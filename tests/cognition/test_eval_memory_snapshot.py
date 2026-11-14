@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 import yaml
-from evals.metrics import mrr, recall_at_k
+from evals.metrics import false_admit, mrr, recall_at_k
 
 from corvidae.llm import LLMClient
 
@@ -303,9 +303,8 @@ def test_snapshot_scores_known_ranking(
     assert pool["summary"]["mean_mrr"] == pytest.approx((exp1_m + exp2_m + exp3_m) / 3)
     # Query 4 is a negative probe (relevant: []): false_admit is 1.0 if any
     # candidate in the top-k has band strong/moderate.
-    from evals.metrics import false_admit as _fa
     q4 = pool["queries"][3]
-    assert q4["false_admit"] == _fa(q4["candidates"], 2)
+    assert q4["false_admit"] == false_admit(q4["candidates"], 2)
     # Query 4 is the only negative probe, so the rate is exactly its score.
     assert pool["summary"]["false_admit_rate"] == pytest.approx(q4["false_admit"])
     assert pool["summary"]["scored"] == 3
