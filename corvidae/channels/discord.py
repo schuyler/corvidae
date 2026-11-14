@@ -228,6 +228,88 @@ def split_discord_message(text: str, max_len: int = DISCORD_MESSAGE_LIMIT) -> li
     return [p + b + s for p, b, s in _split_discord_segments(text, max_len)]
 
 
+# A Discord id is the number alone: no leading zero (a real snowflake never has
+# one) and no `discord:` prefix, the two shapes a reader of the logs reaches for
+# by habit and that would match no user. Same rule as the channels: override
+# keys (#512) apply to the channel id, and now to the allowlist (#702).
+_DISCORD_ID_RE = re.compile(r"[1-9][0-9]*")
+
+
+def _allow_id(value: Any, where: str) -> str:
+    """One allowlist entry as an id string, or a ValueError naming the fix."""
+    if isinstance(value, bool) or not _DISCORD_ID_RE.fullmatch(str(value)):
+        raise ValueError(
+            f"discord: config entry '{where}' is not a Discord user id, got "
+            f"{value!r}; use the number alone, as it appears after `discord:` in "
+            "the agent's logs — 123456789012345678, digits only, quoted or not, "
+            "no leading zeros and no prefix — in the discord: block of "
+            "agent.yaml"
+        )
+    return str(value)
+
+
+def _allow_alias(alias: Any, value: Any) -> str:
+    """The map form's key as a label, or a ValueError naming the fix."""
+    if not isinstance(alias, str) or not alias.strip():
+        raise ValueError(
+            "discord: config entry 'allow' has the key "
+            f"{alias!r}, which is not a label; the map's values are the ids and "
+            "its keys are labels for humans — write `allow: {schuyler: "
+            f"{value!r}}}` (quote a key that looks like a number) — in the "
+            "discord: block of agent.yaml"
+        )
+    return alias
+
+
+def parse_allow(allow: Any) -> set[str]:
+    """The allowlist as a set of id strings, from either accepted shape (#702).
+
+    ``allow: [id, id]`` is the terse form and ``allow: {alias: id, ...}`` the
+    readable one; only the values are ids, so an alias never matches anything
+    and never reaches the model. Both normalise here, so nothing downstream
+    knows which was written.
+
+    Raises:
+        ValueError: a shape, alias or id that cannot be an allowlist, with a
+            message naming the field and the fix.
+    """
+    if isinstance(allow, list):
+        return {
+            _allow_id(entry, f"allow[{index}]") for index, entry in enumerate(allow)
+        }
+    if isinstance(allow, dict):
+        ids: dict[str, str] = {}
+        for alias, value in allow.items():
+            label = _allow_alias(alias, value)
+            try:
+                identifier = _allow_id(value, f"allow.{label}")
+            except ValueError as exc:
+                # A map value that is a name is the ids written the wrong way
+                # round, so name that mistake where it is most likely made.
+                raise ValueError(
+                    f"{exc} In the map form the values are the ids and the keys "
+                    "are labels: `allow: {schuyler: 123456789012345678}`."
+                ) from None
+            if identifier in ids:
+                # Two aliases for one id is a copy-paste slip; naming both is
+                # the only way the operator can see which one they meant.
+                raise ValueError(
+                    "discord: config entries "
+                    f"'allow.{ids[identifier]}' and 'allow.{label}' are the same "
+                    f"user id {identifier}; keep one entry in the discord: block "
+                    "of agent.yaml"
+                )
+            ids[identifier] = label
+        return set(ids)
+    raise ValueError(
+        "discord: config field 'allow' must be a list of user ids or a mapping "
+        f"of alias to user id, got {allow!r}; write `allow: [123456789012345678]` "
+        "or `allow: {schuyler: 123456789012345678}` — in the map the values are "
+        "the ids and the keys are labels for humans — in the discord: block of "
+        "agent.yaml"
+    )
+
+
 def _sdk() -> ModuleType:
     """Return the discord.py module, imported on first use (see the module
     docstring for why it is not imported at load time)."""
@@ -400,9 +482,7 @@ class DiscordPlugin(TransportPlugin):
                 "or the DISCORD_TOKEN environment variable"
             )
 
-        allow = block.get("allow", [])
-        if not isinstance(allow, list):
-            raise ValueError("discord: config field 'allow' must be a list")
+        allow = parse_allow(block.get("allow", []))
 
         chunk_size = block.get("message_chunk_size", DISCORD_MESSAGE_LIMIT)
         if (
@@ -530,9 +610,9 @@ class DiscordPlugin(TransportPlugin):
         self._attachment_dir = Path(attachment_dir)
         self._max_attachment_size = max_size
         self._send_attachment_root = Path(send_root) if send_root else Path("state")
-        # Ids are compared as strings against str(author.id); YAML parses
-        # them as ints.
-        self._allow = {str(entry) for entry in allow}
+        # Ids are compared as strings against str(author.id); parse_allow has
+        # already normalised either config shape to that.
+        self._allow = allow
         self._message_chunk_size = chunk_size
         self._require_mention = require_mention
         self._allow_bots = allow_bots

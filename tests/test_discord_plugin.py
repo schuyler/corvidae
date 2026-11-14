@@ -63,6 +63,7 @@ from corvidae.channels.discord import (
     DiscordPlugin,
     _FENCE_RESERVE,
     _split_discord_segments,
+    parse_allow,
     split_discord_message,
 )
 
@@ -429,9 +430,11 @@ class TestConfig:
         finally:
             await h.plugin.on_stop()
 
-    @pytest.mark.parametrize("bad", ["123", 123, {"a": 1}])
-    async def test_allow_not_a_list_raises(self, bad):
-        """`allow` must be a list; the error names the field."""
+    @pytest.mark.parametrize("bad", ["123", 123, {"a": "discord:1"}])
+    async def test_allow_not_a_list_or_map_raises(self, bad):
+        """`allow` must be a list of ids or an alias->id map; `{"a": 1}` is a
+        legal map (alias `a` for user id 1), so the map case here is a value
+        that is not an id."""
         with pytest.raises(ValueError, match="allow"):
             await _start_plugin(discord_overrides={"allow": bad}, wait_connect=False)
 
@@ -464,6 +467,83 @@ class TestConfig:
             assert await _drive_gate(h.pm, channel=ch, sender="1", text="x") is False
         finally:
             await h.plugin.on_stop()
+
+    async def test_map_shaped_allow_grants_its_ids(self):
+        """#702: `allow: {alias: id}` admits exactly the ids it names."""
+        h = await _start_plugin(
+            discord_overrides={"allow": {"schuyler": AUTH_ID, "yoz": OTHER_ID}}
+        )
+        try:
+            ch = h.registry.get_or_create("discord", f"dm:{AUTH_ID}")
+            assert await _drive_gate(h.pm, channel=ch, sender=str(AUTH_ID), text="x") is True
+            assert await _drive_gate(h.pm, channel=ch, sender=str(OTHER_ID), text="x") is True
+            assert await _drive_gate(h.pm, channel=ch, sender="1", text="x") is False
+        finally:
+            await h.plugin.on_stop()
+
+    def test_both_shapes_normalise_to_the_same_set(self):
+        """The alias keys are for humans: the same ids in either shape give the
+        same allowlist, so nothing downstream can tell which was written."""
+        assert parse_allow([AUTH_ID, OTHER_ID]) == parse_allow(
+            {"schuyler": AUTH_ID, "yoz": OTHER_ID}
+        )
+
+    def test_a_mistyped_alias_still_admits_its_id(self):
+        """An alias never matches anything, so a typo in one cannot deny a user:
+        the map is readable without being load-bearing."""
+        assert parse_allow({"scuyler": AUTH_ID}) == {str(AUTH_ID)}
+
+    async def test_empty_map_denies_everyone(self):
+        """An empty alias map is the empty allowlist, like `allow: []`."""
+        h = await _start_plugin(discord_overrides={"allow": {}})
+        try:
+            assert h.plugin._allow == set()
+            ch = h.registry.get_or_create("discord", f"dm:{AUTH_ID}")
+            assert await _drive_gate(h.pm, channel=ch, sender=str(AUTH_ID), text="x") is False
+        finally:
+            await h.plugin.on_stop()
+
+    @pytest.mark.parametrize(
+        "bad, expected",
+        [
+            # A prefixed id is the shape a reader of the logs reaches for.
+            ({"schuyler": f"discord:{AUTH_ID}"}, "not a Discord user id"),
+            ({"schuyler": f"0{AUTH_ID}"}, "no leading zeros"),
+            # The ids and the labels swapped: the mistake the map invites.
+            ({"schuyler": "reaction_wheel"}, "values are the ids"),
+            ({"schuyler": True}, "not a Discord user id"),
+        ],
+    )
+    async def test_map_value_must_be_a_bare_id(self, bad, expected):
+        """A map value that is not an id fails at startup, naming the field."""
+        with pytest.raises(ValueError, match="allow") as excinfo:
+            await _start_plugin(discord_overrides={"allow": bad}, wait_connect=False)
+        assert expected in str(excinfo.value)
+
+    async def test_numeric_alias_is_refused(self):
+        """`{408709225498542081: 227325906333597697}` is the ids written as a
+        map; the keys must be labels, and the message says so."""
+        with pytest.raises(ValueError, match="not a label") as excinfo:
+            await _start_plugin(
+                discord_overrides={"allow": {AUTH_ID: OTHER_ID}}, wait_connect=False
+            )
+        assert "values are the ids" in str(excinfo.value)
+
+    async def test_two_aliases_for_one_id_are_refused(self):
+        """A copy-pasted entry is named at startup rather than silently kept."""
+        with pytest.raises(ValueError, match="same user id") as excinfo:
+            await _start_plugin(
+                discord_overrides={"allow": {"schuyler": AUTH_ID, "yoz": AUTH_ID}},
+                wait_connect=False,
+            )
+        assert "allow.schuyler" in str(excinfo.value) and "allow.yoz" in str(excinfo.value)
+
+    async def test_shape_error_names_both_forms(self):
+        """The error says what to write, for both accepted shapes."""
+        with pytest.raises(ValueError) as excinfo:
+            await _start_plugin(discord_overrides={"allow": 123}, wait_connect=False)
+        message = str(excinfo.value)
+        assert "list of user ids" in message and "mapping of alias to user id" in message
 
     def test_no_send_thinking_or_tool_status(self):
         """R15: like IRC/Signal, thinking and tool status are not rendered."""

@@ -139,6 +139,27 @@ corvidae; `discord:` is read at startup. On success the log shows
 `allow` is default-deny. An empty or missing list means nobody can use the
 bot, and it will not tell them so.
 
+`allow` takes either shape, and the readable one is worth using:
+
+```yaml
+discord:
+  allow:
+    - 123456789012345678     # a list of ids (terse)
+```
+
+```yaml
+discord:
+  allow:
+    schuyler: 408709225498542081   # an alias -> id map (readable)
+    yoz: 227325906333597697
+```
+
+Only the values are ids. The keys are labels for a human reading agent.yaml —
+they never match anything, are never shown to the model, and a typo in one
+therefore cannot deny a user. Ids must be the number alone: digits, no leading
+zero, no `discord:` prefix. A map whose value is not an id fails at startup
+with a message naming the entry, as does two aliases for one id.
+
 ## How the bot behaves
 
 - **DMs:** every message from an allowlisted user is answered.
@@ -200,7 +221,7 @@ channel, with no @-mention:
 ```yaml
 discord:
   allow:
-    - 123456789012345678
+    schuyler: 123456789012345678
   require_mention: false
 ```
 
