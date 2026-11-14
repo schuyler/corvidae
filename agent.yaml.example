@@ -311,6 +311,15 @@ agent:
 #     #   channels: [irc:#corvidae]
 #     #   max_notifications: 20
 
+# GitHub events as terminal outcomes (#792): one line per completed run, PR
+# transition or selected push, instead of one per job-status change. Owns its
+# endpoints — do not list the same endpoint here and in webhook_notify.
+# github_webhook:
+#   max_payload_chars: 2000            # longer lines are cut, the rest spilled
+#   push_branches: [main]              # push events reported only for these
+#   endpoints:
+#     github: [signal:+15551234567]
+
 # Scheduler: reminders (remind_me tool) and operator jobs (optional;
 # without this block the tools still work, in UTC, with these defaults).
 # A job can target any channel; see docs/threat-model.md finding 7.

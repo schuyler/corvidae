@@ -1662,6 +1662,39 @@ instruction can deliberately burn the budget and stop the agent from answering
 the person until they send another message, which is the same class of harm as
 the existing `NO_REPLY` route, not a new capability.
 
+### 20. `github_webhook`: a sender's strings reach the window, and a run number can silence a report (#792)
+
+PRD principle 9 asks for an entry when untrusted text reaches somewhere new.
+The `github-webhook` package turns webhook payloads into one line each, and
+the strings in those lines — PR titles, branch names, workflow names — are
+chosen by whoever can sign a request to the endpoint (finding 16's HMAC
+sender) or by anyone who can open a PR or push a branch in the repository.
+
+Mitigations:
+
+- A line's sender-controlled parts go only into the notification text, which
+  the kernel fences (§3.3.11). Annotations carry `origin` alone, minted here,
+  so nothing sender-shaped is rendered outside the fence.
+- Each sender string is cut to 120 characters and newlines are collapsed, so a
+  sender cannot pad a line or fake structure in the header.
+- Volume per delivery is at most one line, and one line per completed run, PR
+  transition or selected push — `workflow_job` churn, non-terminal runs and
+  unselected events are dropped and counted. A GitHub endpoint therefore needs
+  no separate rate cap; if one is ever needed, #793's throttle is the shared
+  mechanism rather than a second one.
+- The plugin owns its endpoints: an endpoint listed in both `github_webhook`
+  and `webhook_notify` is warned about at startup, because every subscriber to
+  an endpoint receives every delivery and it would otherwise be notified twice.
+
+Accepted residuals. A sender can fabricate `run_number`s to suppress a
+cancelled-run report: supersession is inferred from the highest run number
+seen per `(repository, workflow, branch)`, the map is in memory, and a forged
+high number makes a real cancellation look superseded. The map is lost on
+restart, which costs at worst one extra cancelled line. And a hook that
+subscribes to only some event types reports superseded cancellations as plain
+cancellations, because the `workflow_run` events supersession needs are then
+not delivered.
+
 ### 21. The retention lens proposes writes to the knowledge base that recall reads back (#742)
 
 With `critique.retention.root` set, the retention critique lens forks the
