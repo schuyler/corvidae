@@ -249,7 +249,10 @@ passes (demotion, re-promotion, retrieval-log pruning when
 `memory.retention.retrieval_log_max_age_days` is set (#654), vec backfill;
 a pruning failure is logged and leaves backfill to run): each batch commits whole
 or rolls back whole, and the backfill's embeddings are computed before the
-transaction opens. Each pass selects its candidates before its transaction,
+transaction opens. The prune takes `RETENTION_PRUNE_BATCH` (1000) rows per
+transaction and releases the lock between them (#682), so enabling it against
+a large existing log cannot push another memory write past its busy timeout;
+`retrieval_log(ts)` is indexed so each batch's cutoff lookup does not scan. Each pass selects its candidates before its transaction,
 so every write re-checks the selection: demotion skips a row redacted,
 already demoted or retrieved since the SELECT; re-promotion never
 re-indexes a row superseded or redacted meanwhile; the backfill writes no
