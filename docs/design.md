@@ -506,8 +506,11 @@ hooks with the client's profile (a key under `llm:`, such as `main`) and the
 current attribution snapshot.
 
 **Attribution.** `attribution.py` holds a single ContextVar dict
-(`stage`, `channel_id`, `trace_id`, `annotations`, plus stage-specific
-extras such as `trigger` on consolidation calls). Callers set it at the
+(`stage`, `channel_id`, `trace_id`, `annotations`, `agent_depth`,
+plus stage-specific extras such as `trigger` on consolidation calls).
+`agent_depth` (0 for a main turn) is incremented by
+`next_agent_depth()` when a subagent or fork spawns; a spawn at
+`tools.max_agent_depth` (default 2) is refused. Callers set it at the
 top of a logical operation and reset in a `finally`: the Agent turn loop
 (`stage="turn"`), CompactionPlugin around its summary call
 (`stage="compaction"`, shadowing the turn), and the subagent work loop

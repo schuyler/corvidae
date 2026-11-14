@@ -185,6 +185,7 @@ agent:
 #   disabled: []                    # tool names to drop entirely, e.g. [shell, write_file]
 #                                   # or [set_settings]; shell and task_pipeline go
 #                                   # together; see docs/threat-model.md
+#   max_agent_depth: 2              # max nesting depth for subagent/fork (int >= 1)
 #   subagent:
 #     system_prompt: "You are..."  # or a file path; the subagent's system prompt
 

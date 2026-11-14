@@ -811,7 +811,7 @@ Per transport:
 
 1. Built-in tools: `shell`, `read_file`, `write_file`, `web_fetch`,
    `web_search`, `task_pipeline`, `task_status`, `set_settings`,
-   `subagent`, the scheduler's `remind_me`/`list_reminders`/
+   `subagent`, `fork`, the scheduler's `remind_me`/`list_reminders`/
    `cancel_reminder`, memory's `search_memory`/`recall_raw`, and the
    send, note and read tools (§3.5.9–11). Schemas
    are generated from type hints and docstrings; `_`-prefixed parameters
@@ -889,7 +889,10 @@ Per transport:
    profile, the calling channel's tool set minus itself and a
    persona-neutral prompt as shipped, which is one of the agent's prompts
    under principle 15; it returns a task id at once and its result arrives
-   as a notification like any other tool.
+   as a notification like any other tool. Nested background agents
+   (subagent and fork) are bounded by `tools.max_agent_depth`
+   (default 2); a spawn at the limit is refused with a message naming
+   the key and the remedy.
 8. MCP servers connect at startup over any transport the client
    supports, fail-soft per server. A server that fails recovers without a
    restart or a triggering tool call, and its tools reach the running
@@ -1397,7 +1400,8 @@ design, not requirement. The requirements are outcomes:
    written by a fork of that pre-compaction copy when one was taken, and a replay sends the request the running
    agent would. Seeding and imports have no window and run standalone (a windowless call,
    unlike the view call, which is also `mode = standalone` in `usage_log`).
-   Subagents never fork.
+   Nested background agents are allowed; their depth is bounded by
+   `tools.max_agent_depth` (default 2) to prevent resource exhaustion.
 6. How much of each fork's prompt came from cache is recorded per stage and
    profile (§3.13.10). A stage whose forks keep missing the cached prefix
    the window's main turns keep reusing is reported, naming the stage and
@@ -1724,6 +1728,7 @@ record that holds the reasoning.
 | Two grades on a queue item: kernel-certified `metadata`, never a hook argument, and plugin-owned `annotations`; non-human items (and a person's message whose transport supplies a name or addressing) get a code-built header, and outside payloads a fence derived from the stored row; foreign-origin items are framed, never withheld (no silence default) | §3.1.4; §3.3.11; #555 |
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
+| Nested background agents bounded, not prohibited; `tools.max_agent_depth` default 2 | §3.5.7; #816; owner 2026-11-13 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
 | Every model endpoint is a resource pool of warm context heads the operator declares; queues lease heads and switch at call boundaries (drain or yield, latency classes); no spend or rate caps for now; single-slot is a deployment choice, not architecture; the lease order is pluggable | principle 16; §3.13; #296; operator, 2026-11-02 |
 | Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
