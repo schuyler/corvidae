@@ -3191,6 +3191,7 @@ class MemoryPlugin(CorvidaePlugin):
     async def _retrieve_pool(
         self, text: str, k: int | None = None,
         exclude: tuple[str, int] | None = None,
+        now: float | None = None,
     ) -> RetrievalPool:
         """Score the whole candidate pool for a query text (#407).
 
@@ -3198,12 +3199,17 @@ class MemoryPlugin(CorvidaePlugin):
         logs the whole pool. ``excluded`` lists in-window records whose
         score would have placed them in the top k (vec path only; the FTS
         path reports only their count).
+
+        ``now`` pins the clock the decay and the ages are measured against,
+        so a scoring run is reproducible: two runs on different days with the
+        same pinned ``now`` produce the same scores and bands (#661). Passive
+        retrieval leaves it None and uses the wall clock.
         """
         db = await self._ensure_schema()
         k = k or self._retrieval_k
         if db is None:
             return RetrievalPool([], [], None, False, k)
-        now = time.time()
+        now = time.time() if now is None else now
 
         rows: list[CandidateRow] = []
         degraded = False

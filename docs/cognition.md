@@ -588,7 +588,9 @@ What it does:
   path fetches `k × 4` candidates, so a different k changes the pool too.
   `--candidates hybrid|vector` overrides `memory.retrieval.candidates`
   (#666), so the fused pool can be scored against the KNN alone; each pool
-  candidate records its `source`.
+  candidate records its `source`. `--now EPOCH` pins the clock decay is
+  measured against (#661), so the same snapshot scores identically on two
+  run dates; each pool records the pin it used, or `null` for the wall clock.
 - **Names labelled ids it can't reach.** A labelled id is reachable when its
   row exists with `indexed = 1` and `redacted = 0`, the filter both searches
   apply. Anything else is listed by id with its status, checked in this
@@ -639,7 +641,12 @@ The pool file is written once, after the last query:
 ```json
 {
   "run_at": 1762700000.0,
+  "now": 1762700000.0,
   "k": 8,
+  "settings": {"half_life_days": 7, "recency_from": "created",
+               "band_on": "relative", "band_strong": 4.5,
+               "band_moderate": 3.0, "k": 8,
+               "encoder": "nomic-embed-text", "dimensions": 768},
   "queries": [
     {
       "index": 0,
@@ -685,14 +692,18 @@ Operator notes:
   environment even though no chat request is made. If it isn't, the run
   stops with `Config error: llm.<profile>.api_key references ${VAR}, which
   is not set … — check <config>`.
-- **Scores drift with the run date; rankings don't.** Decay runs against
-  the wall clock at query time, not a time taken from the snapshot. Scoring
-  the same snapshot a month later multiplies every score by the same
-  factor, so the order, Recall@k and MRR are unchanged, but absolute
+- **Scores drift with the run date unless `--now` pins it.** Decay runs
+  against the clock at query time, not a time taken from the snapshot, so
+  scoring the same snapshot a month later multiplies every score by the
+  same factor: the order, Recall@k and MRR are unchanged, but absolute
   scores are lower, and so are bands under `band_on: score` (bands under
-  `relative` and `similarity` don't use decay). `run_at` records the
-  date. shortcut: no pinned "now"; add one before comparing pool files
-  scored on different days.
+  `relative` and `similarity` don't use decay). Pass `--now <epoch>` to
+  pin it; two runs with the same pin produce identical scores and bands
+  whatever day they ran, which is what makes pool files comparable. The
+  file records both the pin (`now`) and the settings that scored it
+  (`settings`: half-life, `recency_from`, `band_on` and its thresholds, k,
+  and the encoder identity and dimensions), so a comparison never has to
+  assume the config behind a pool.
 - **An unreachable embedding server turns every query into FTS5.** Each
   query's embedding call fails after the client's retries (slow), logs a
   `retrieval embedding failed; degrading to FTS5` warning with a traceback
