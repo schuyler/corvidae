@@ -64,13 +64,22 @@ Wiring, all of it, or CI breaks or the plugin never loads:
   `pytest --ignore=tests/cognition`; add `--ignore=tests/<package>`, and add
   the extra to the `full` job's `uv sync`. The kernel must install, boot and
   pass its tests **without** your plugin.
-- `corvidae scaffold <name>` generates a standalone project. Use it only as a
-  starting point; adapt it to the layout above.
+- `corvidae scaffold <name>` generates a standalone project: the step 3
+  skeleton, its test, and a pytest timeout. Use it as the starting point,
+  then adapt it to the layout above.
 
 ## 3. The plugin skeleton (this runs; tested against the real plugin manager)
 
+`corvidae scaffold echo` writes exactly these two files, and
+`tests/test_scaffold.py::TestGeneratedProjectContents` compares them against
+this section, so the doc and the generator cannot drift apart. Start from them
+rather than from empty hooks: they read their own config section, validate it
+loudly, and register a tool the agent can call.
+
+The plugin module:
+
 ```python
-"""Corvidae plugin: echo (example)."""
+"""Corvidae plugin: echo."""
 
 from __future__ import annotations
 
@@ -85,7 +94,7 @@ DEFAULT_MAX_CHARS = 200
 
 
 class EchoPlugin(CorvidaePlugin):
-    """Gives the agent an `echo` tool."""
+    """Registers the `echo` tool."""
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -94,8 +103,8 @@ class EchoPlugin(CorvidaePlugin):
         raw = config_value(config, "echo.max_chars", DEFAULT_MAX_CHARS)
         if type(raw) is not int or raw < 1:  # malformed: loud, names key + value
             raise ValueError(
-                f"Config error: echo.max_chars must be a positive integer, "
-                f"got {raw!r} — check agent.yaml"
+                f"Config error: echo.max_chars must be a positive "
+                f"integer, got {raw!r} — check agent.yaml"
             )
         self._max_chars = raw
 
@@ -104,37 +113,68 @@ class EchoPlugin(CorvidaePlugin):
         tool_registry.append(self.echo)  # bare async callables are auto-wrapped
 
     async def echo(self, text: str) -> str:
-        """Return the text unchanged.
+        """TODO: say what this tool does.
 
         Args:
-            text: What to echo.
+            text: TODO: say what this argument is.
         """
+        # TODO: do the work here. Until then it echoes its input, which is
+        # enough to show the wiring (config read, registration) works.
         if len(text) > self._max_chars:
             # Says what failed, which limit, and the next step.
             return (
-                f"Could not echo: text is {len(text)} chars, the limit is "
-                f"{self._max_chars}; shorten it."
+                f"Could not echo: text is {len(text)} chars, the limit "
+                f"is {self._max_chars}; shorten it."
             )
         return text
 ```
 
-A test that goes through the real plugin manager (use this shape; a test that
-only calls your methods will not catch hook-binding or registration bugs):
+The test. It goes through the real plugin manager, because a test that only
+constructs the class cannot catch hook-binding or registration bugs:
 
 ```python
+"""Tests for echo: the skeleton loads through the real plugin manager."""
+
+from __future__ import annotations
+
+import pytest
+
+from corvidae.hooks import create_plugin_manager
+from corvidae.tool import Tool
+
+from echo import EchoPlugin
+
+
 async def test_registers_tool_through_the_real_pm():
-    pm = create_plugin_manager()          # corvidae.hooks
-    plugin = EchoPlugin()
-    pm.register(plugin, name="echo")
+    pm = create_plugin_manager()
+    pm.register(EchoPlugin(), name="echo")
     await pm.ahook.on_init(pm=pm, config={})
     registry: list = []
     pm.hook.register_tools(tool_registry=registry)  # register_tools is sync
     assert [Tool.from_function(f).name for f in registry] == ["echo"]
+
+
+async def test_malformed_config_names_the_key_and_the_remedy():
+    pm = create_plugin_manager()
+    pm.register(EchoPlugin(), name="echo")
+    # The message must name the key, the rejected value and the remedy.
+    with pytest.raises(
+        ValueError,
+        match=r"Config error: echo\.max_chars must be a positive "
+        r"integer, got 0 — check agent\.yaml",
+    ):
+        await pm.ahook.on_init(
+            pm=pm, config={"echo": {"max_chars": 0}}
+        )
 ```
 
 If the plugin writes files, make the path a config key and set it to
 `tmp_path` in every test that reaches the write. A default under `state/`
 otherwise lands in the checkout, and `tests/state_dir_guard.py` fails the test.
+
+For an in-repo plugin (step 2) the same code goes in
+`packages/<name>/<package>/__init__.py`, and the test in
+`tests/<package>/test_<thing>.py`.
 
 ## 4. Traps that fail silently
 
