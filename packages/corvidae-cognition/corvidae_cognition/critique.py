@@ -101,7 +101,7 @@ RECORD_MESSAGE_TYPES = ("message", "summary")
 # (#202); should_send_response vetoes a final that is exactly this.
 NO_REPLY_MARKER = "NO_REPLY"
 
-# Wake-stub text once the retention lens is on (critique.retention.root set).
+# Wake-stub text once the retention lens is on (a retention root is known).
 # The funnel keeps one pending stub per (channel, "critique"), so whichever
 # critique wake fires first instructs the whole drain: the note covers both
 # retention filing and the provenance rule (#742). {root} is quoted.
@@ -532,6 +532,36 @@ def _candidate(row) -> dict:
     }
 
 
+def _recall_roots(config: dict) -> list[str] | None:
+    """The directories markdown_recall indexes, or None when it does not run.
+
+    Mirrors the recall plugin's own reading: ``markdown_recall.roots``, else
+    ``markdown_recall.root``, else its default root when the block exists.
+    None when there is no block or the plugin is disabled, since then
+    nothing indexes anything. Entries that are not non-empty strings are
+    skipped here; recall itself rejects them at startup.
+    """
+    if config_value(config, "markdown_recall", None) is None:
+        return None
+    disabled = config_value(config, "plugins.disabled", None) or []
+    if isinstance(disabled, list) and "markdown_recall" in disabled:
+        return None
+    roots = config_value(config, "markdown_recall.roots", None)
+    if roots is None:
+        single = config_value(config, "markdown_recall.root", None)
+        if isinstance(single, str) and single.strip():
+            roots = [single]
+        else:
+            # A block with neither key indexes recall's default root.
+            from corvidae_cognition.markdown_recall.plugin import DEFAULT_ROOT
+
+            roots = [DEFAULT_ROOT]
+    if not isinstance(roots, list):
+        return None
+    usable = [r.strip() for r in roots if isinstance(r, str) and r.strip()]
+    return usable or None
+
+
 class CritiquePlugin(CorvidaePlugin):
     """Deferred, salience-gated self-critique plus the provenance check."""
 
@@ -590,17 +620,8 @@ class CritiquePlugin(CorvidaePlugin):
         root = config_value(config, "critique.retention.root", None)
         if not isinstance(root, str) or not root.strip():
             return
-        roots = config_value(config, "markdown_recall.roots", None)
-        if roots is None:
-            single = config_value(config, "markdown_recall.root", None)
-            if isinstance(single, str) and single.strip():
-                roots = [single]
-            elif config_value(config, "markdown_recall", None) is not None:
-                # A block with neither key indexes recall's default root.
-                from corvidae_cognition.markdown_recall.plugin import DEFAULT_ROOT
-
-                roots = [DEFAULT_ROOT]
-        if not isinstance(roots, list) or not roots:
+        roots = _recall_roots(config)
+        if not roots:
             return  # no recall index configured: nothing to drift from
         filed = Path(root).expanduser().resolve()
         indexed = {Path(r).expanduser().resolve() for r in roots if isinstance(r, str)}
@@ -973,13 +994,14 @@ class CritiquePlugin(CorvidaePlugin):
 
         # Retention (#742): a durable fact is worth filing only when the
         # exchange was both novel and commitment-dense, and only when there is
-        # a knowledge base to file it in. Inert without critique.retention.root:
-        # with nowhere to file, the lens could only flag what it cannot place.
-        root = config_value(self.config, "critique.retention.root", None)
+        # a knowledge base to file it in: critique.retention.root, or recall's
+        # root. Inert without either: with nowhere to file, the lens could only
+        # flag what it cannot place.
+        root = self._retention_root()
         novelty = dims.get("novelty")
         commitment = dims.get("commitment_density")
         if (
-            isinstance(root, str) and root.strip()
+            root is not None
             and novelty is not None and commitment is not None
             and novelty >= resolve_tunable(
                 channel, self.config, "critique.lens.novelty", LENS_NOVELTY_DEFAULT)
@@ -1344,11 +1366,17 @@ class CritiquePlugin(CorvidaePlugin):
             reset_attribution(token)
 
     def _retention_root(self) -> str | None:
-        """The configured knowledge base root, or None when the lens is off."""
+        """The knowledge base root, or None when the lens is off.
+
+        ``critique.retention.root`` when set; otherwise markdown_recall's
+        (first) root, so facts are filed where recall reads them. That is a
+        default, not a rescue, so it is not logged.
+        """
         root = config_value(self.config, "critique.retention.root", None)
-        if not isinstance(root, str) or not root.strip():
-            return None
-        return root.strip()
+        if isinstance(root, str) and root.strip():
+            return root.strip()
+        recall = _recall_roots(self.config)
+        return recall[0] if recall else None
 
     def _wake_stub(self) -> str:
         """The stub for a critique wake: PROVENANCE_NOTE unless the retention
@@ -1490,7 +1518,7 @@ class CritiquePlugin(CorvidaePlugin):
         )
         if lens == "retention":
             # The lens has to name a file, so it has to know where they live.
-            root = config_value(self.config, "critique.retention.root", "")
+            root = self._retention_root() or ""
             instruction += (
                 f"\n\nThe knowledge base root is «{quote(str(root))}»: every "
                 "file you name is a path under it."
