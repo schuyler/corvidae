@@ -304,6 +304,31 @@ class TestWindowExclusion:
         await db.close()
 
 
+    async def test_in_window_measured_record_is_judged_measured_first(self):
+        """#856 follow-up: the pool ranks measured candidates first, so an
+        in-window measured record's would-be rank must not count an
+        unembedded pool row that the pool itself ranks after it."""
+        memory, _e, channel, conv, db = await build_retrieval_env(
+            config(k=1, band_on="similarity", bands={"moderate": 0.0})
+        )
+        window_text = "what then"
+        # Below the 0.6 proxy, so the unembedded row wins the fused tiebreak.
+        assert 0.0 < cosine(QUERY, window_text) < 0.6
+        in_window = await seed(db, channel.id, window_text, WINDOW_START, WINDOW_START + 1)
+        await seed_memory(db, channel.id, NAMED, embedded=False)
+        fill_window(conv)
+
+        conv.append({"role": "user", "content": QUERY, "_db_id": WINDOW_START + 5})
+        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+
+        async with db.execute(
+            "SELECT memory_id, outcome, rank FROM retrieval_candidate"
+        ) as cursor:
+            rows = {r[0]: r[1:] for r in await cursor.fetchall()}
+        assert rows.get(in_window) == ("excluded_in_window", 1), rows
+        await db.close()
+
+
 class TestConfig:
     async def test_unknown_candidates_value_warns_and_uses_hybrid(self, caplog):
         with caplog.at_level(logging.WARNING):
