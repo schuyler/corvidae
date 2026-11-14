@@ -102,6 +102,9 @@ class FakeZulip:
         self._next_event_id = 0
         self.scripts: dict[str, deque] = defaultdict(deque)
         self.polls: list[int] = []
+        # When set, a typing "start" waits on it inside the handler, so a test
+        # can hold a refresh in flight across a final's stop (#643).
+        self.block_typing_starts: asyncio.Event | None = None
         self._wake = asyncio.Event()
         self.server: TestServer | None = None
 
@@ -230,6 +233,11 @@ class FakeZulip:
         early = await self._begin(request)
         if early is not None:
             return early
+        if (
+            self.block_typing_starts is not None
+            and self.requests[-1].form.get("op") == "start"
+        ):
+            await self.block_typing_starts.wait()
         return web.json_response({"result": "success", "msg": ""})
 
     async def start(self) -> str:
@@ -1566,7 +1574,7 @@ class TestTyping:
                 annotations={},
                 logprobs=None,
             )
-            assert h.plugin._outstanding[channel.id] == 0
+            assert h.plugin._outstanding.get((channel.id, None), 0) == 0
             assert h.server.typing[-1]["op"] == "stop"
         finally:
             await stop(h)
@@ -1578,9 +1586,9 @@ class TestTyping:
         try:
             await _deliver(h, dm_msg("one"), dm_msg("two"))
             channel = h.registry.get(f"zulip:dm:{ALICE}")
-            assert h.plugin._outstanding[channel.id] == 2
+            assert h.plugin._outstanding[(channel.id, None)] == 2
             await h.plugin.send_message(channel, OutboundMessage(text="both", latency_ms=None))
-            assert h.plugin._outstanding[channel.id] == 0
+            assert h.plugin._outstanding.get((channel.id, None), 0) == 0
             assert len([t for t in h.server.typing if t["op"] == "stop"]) == 1
         finally:
             await stop(h)
@@ -1593,7 +1601,7 @@ class TestTyping:
             channel = h.registry.get(f"zulip:dm:{ALICE}")
             await h.plugin.send_progress(channel, OutboundProgress(text="working on it"))
             assert h.server.sent[-1]["content"] == "working on it"
-            assert h.plugin._outstanding[channel.id] == 1
+            assert h.plugin._outstanding[(channel.id, None)] == 1
         finally:
             await stop(h)
 
@@ -1618,5 +1626,143 @@ class TestTyping:
                 channel, OutboundMessage(text="still replied", latency_ms=None)
             )
             assert h.server.sent[-1]["content"] == "still replied"
+        finally:
+            await stop(h)
+
+
+# ---------------------------------------------------------------------------
+# Reply and typing routing per topic (#643)
+# ---------------------------------------------------------------------------
+
+
+class TestTopicRouting:
+    """Each message is answered in its own topic, and typing stays there.
+
+    A Zulip channel with several active topics is the normal shape, so "the
+    newest message's topic" answered the wrong one whenever two people wrote in
+    different topics close together (#643).
+    """
+
+    @staticmethod
+    def _traces(h: Harness) -> dict[str, str]:
+        """text -> trace id, from the on_message calls so far."""
+        return {c["text"]: c["trace_id"] for c in h.calls()}
+
+    async def test_each_reply_lands_in_the_topic_of_the_message_it_answers(self):
+        h = await _start()
+        try:
+            await _deliver(
+                h,
+                channel_msg("first in alpha", topic="alpha"),
+                channel_msg("second in beta", topic="beta"),
+                flags=["mentioned"],
+            )
+            traces = self._traces(h)
+            channel = h.registry.get("zulip:7")
+            await h.plugin.send_message(
+                channel,
+                OutboundMessage(text="answer one", trace_id=traces["first in alpha"]),
+            )
+            assert h.server.sent[-1]["topic"] == "alpha"
+            await h.plugin.send_message(
+                channel,
+                OutboundMessage(text="answer two", trace_id=traces["second in beta"]),
+            )
+            assert h.server.sent[-1]["topic"] == "beta"
+        finally:
+            await stop(h)
+
+    async def test_a_reply_with_no_trace_still_uses_the_newest_topic(self):
+        """A proactive send (reminder, heartbeat) has no message to answer; the
+        newest allowed topic is what it used before, and still is."""
+        h = await _start()
+        try:
+            await _deliver(h, channel_msg("in gamma", topic="gamma"), flags=["mentioned"])
+            channel = h.registry.get("zulip:7")
+            await h.plugin.send_message(channel, OutboundMessage(text="proactive"))
+            assert h.server.sent[-1]["topic"] == "gamma"
+        finally:
+            await stop(h)
+
+    async def test_progress_text_goes_to_the_turns_topic(self, fast_typing):
+        """OutboundProgress carries no trace, so the topic comes from the
+        attribution the kernel sets around the turn."""
+        from corvidae.attribution import reset_attribution, set_attribution
+
+        h = await _start()
+        try:
+            await _deliver(
+                h,
+                channel_msg("first in alpha", topic="alpha"),
+                channel_msg("second in beta", topic="beta"),
+                flags=["mentioned"],
+            )
+            traces = self._traces(h)
+            channel = h.registry.get("zulip:7")
+            token = set_attribution(trace_id=traces["first in alpha"])
+            try:
+                await h.plugin.send_progress(channel, OutboundProgress(text="working"))
+            finally:
+                reset_attribution(token)
+            assert h.server.sent[-1]["topic"] == "alpha"
+            assert h.server.sent[-1]["content"] == "working"
+        finally:
+            await stop(h)
+
+    async def test_typing_shows_in_both_topics_and_each_stop_stays_there(
+        self, fast_typing
+    ):
+        """A start and its stop are per (stream, topic), so two topics owing a
+        reply show typing twice and stop twice, each in its own topic."""
+        h = await _start()
+        try:
+            await _deliver(
+                h,
+                channel_msg("first in alpha", topic="alpha"),
+                channel_msg("second in beta", topic="beta"),
+                flags=["mentioned"],
+            )
+            await _wait_until(
+                lambda: {t["topic"] for t in h.server.typing if t["op"] == "start"}
+                == {"alpha", "beta"}
+            )
+            channel = h.registry.get("zulip:7")
+            traces = self._traces(h)
+            await h.plugin.send_message(
+                channel, OutboundMessage(text="done", trace_id=traces["first in alpha"])
+            )
+            stops = [t["topic"] for t in h.server.typing if t["op"] == "stop"]
+            assert set(stops) == {"alpha", "beta"}, stops
+        finally:
+            await stop(h)
+
+    async def test_a_refresh_start_that_lost_the_race_sends_its_own_stop(
+        self, fast_typing
+    ):
+        """A start already in flight when the final's stop goes out must not
+        leave typing showing: the loop stops the topic itself afterwards."""
+        h = await _start()
+        try:
+            await _deliver(h, channel_msg("in alpha", topic="alpha"), flags=["mentioned"])
+            await _wait_until(lambda: len([t for t in h.server.typing if t["op"] == "start"]) >= 1)
+            channel = h.registry.get("zulip:7")
+            trace = self._traces(h)["in alpha"]
+
+            # Block the next refresh start inside the handler, so it is in
+            # flight (and already recorded) while the final is sent.
+            gate = asyncio.Event()
+            h.server.block_typing_starts = gate
+            await _wait_until(
+                lambda: len([t for t in h.server.typing if t["op"] == "start"]) >= 2
+            )
+            await h.plugin.send_message(
+                channel, OutboundMessage(text="done", trace_id=trace)
+            )
+            assert h.server.typing[-1]["op"] == "stop"
+
+            gate.set()
+            await _wait_until(lambda: len([t for t in h.server.typing if t["op"] == "stop"]) >= 2)
+            assert h.server.typing[-1]["op"] == "stop"
+            assert h.server.typing[-1]["topic"] == "alpha"
         finally:
             await stop(h)
