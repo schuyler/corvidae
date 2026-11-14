@@ -50,6 +50,11 @@ logger = logging.getLogger("corvidae.gates")
 ENGAGEMENT_ENFORCE_DEFAULT = False     # gate.engagement.enforce — shadow mode
 ENGAGEMENT_THRESHOLD_DEFAULT = 0.2     # gate.engagement.threshold
 SEND_ENFORCE_DEFAULT = True            # gate.send.enforce
+# Origins whose finals this gate never withholds: the text was asked for. A user
+# reply answers the person in front of us; a reminder is text the operator
+# scheduled, and withholding it silently is the gate overruling an instruction.
+_NEVER_WITHHELD_ORIGINS = ("user", "reminder")
+
 SEND_MIN_SALIENCE_DEFAULT = 0.15       # gate.send.min_salience
 SEND_ALLOW_PROGRESS_DEFAULT = True     # gate.send.allow_progress
 SEND_ALLOW_THINKING_DEFAULT = True     # gate.send.allow_thinking
@@ -284,10 +289,16 @@ class GatePlugin(CorvidaePlugin):
             # salience key: a null in a json_patch fragment deletes the key.
             record.update(vetoed=False, would_veto=False, reason="no_vector")
             verdict = None
-        elif origin == "user":
+        elif origin in _NEVER_WITHHELD_ORIGINS:
             # A direct reply to a human is never swallowed by a guessed
-            # threshold.
-            record.update(salience=salience, vetoed=False, would_veto=False, reason="user_origin")
+            # threshold. Neither is a reminder: the operator asked for that
+            # text at that moment, so salience is not the judge of whether to
+            # say it -- over three days this gate ate 38 reminder finals on the
+            # operator's own channel, scored 0.05-0.15 (#see PR).
+            record.update(
+                salience=salience, vetoed=False, would_veto=False,
+                reason=f"{origin}_origin",
+            )
             verdict = None
         else:
             would_veto = salience < min_salience
