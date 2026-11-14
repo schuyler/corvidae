@@ -332,6 +332,120 @@ def test_snapshot_reports_fts_fallback_on_encoder_mismatch(
     assert "FTS5 fallback on 2 of 2 queries" in capsys.readouterr().out
 
 
+def test_pool_records_its_pinned_now_and_the_settings_that_scored_it(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#661: the file describes itself — the pin, and what scored every row."""
+    from corvidae_cognition.memory import (
+        DEFAULT_BAND_MODERATE_Z,
+        DEFAULT_BAND_STRONG_Z,
+        DEFAULT_HALF_LIFE_DAYS,
+    )
+
+    source = tmp_path / "sessions.db"
+    ids = build_source(source, [TEXT_A, TEXT_B])
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(
+        tmp_path / "labels.json", [{"text": TEXT_A, "relevant": [ids[0]]}],
+    )
+    pool_out = tmp_path / "pool.json"
+    pinned = 1_700_000_000.0
+
+    script.main([
+        "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
+        "--pool-out", str(pool_out), "--now", str(pinned),
+    ])
+    capsys.readouterr()
+
+    pool = read_pool(pool_out)
+    assert pool["now"] == pinned
+    # Settings as the plugin resolved them: the file says what produced its
+    # numbers, rather than leaving the reader to infer it from the config.
+    assert pool["settings"] == {
+        "half_life_days": DEFAULT_HALF_LIFE_DAYS,
+        "recency_from": "created",
+        "band_on": "relative",
+        "band_strong": DEFAULT_BAND_STRONG_Z,
+        "band_moderate": DEFAULT_BAND_MODERATE_Z,
+        # k is the effective cutoff: no --k here, so memory.retrieval.k's
+        # default, not the fixture-mode 5.
+        "k": 8,
+        "encoder": "test-embedder",
+        "dimensions": len(bow_embed("x")),
+    }
+
+
+def test_two_runs_on_different_days_agree_when_now_is_pinned(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#661: the run date stops mattering once --now is given.
+
+    Decay runs against the wall clock, so without a pin the same snapshot
+    scores lower tomorrow and its bands move with it. Two runs a month apart,
+    with the clock moved between them and the same --now, must agree on every
+    score and band.
+    """
+    source = tmp_path / "sessions.db"
+    created = 1_700_000_000.0
+    ids = build_source(source, [TEXT_A, TEXT_B, TEXT_C], created_at=created)
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [ids[0]]},
+        {"text": TEXT_B, "relevant": [ids[1]]},
+    ])
+
+    def run(day: float) -> dict[str, Any]:
+        """One run with the wall clock pinned to `day`."""
+        monkeypatch.setattr(time, "time", lambda: day)
+        pool_out = tmp_path / f"pool-{int(day)}.json"
+        script.main([
+            "--snapshot", str(source), "--labels", str(labels),
+            "--config", str(config), "--pool-out", str(pool_out),
+            "--now", str(created + 86400.0),
+        ])
+        capsys.readouterr()
+        return read_pool(pool_out)
+
+    first = run(created + 2 * 86400.0)
+    second = run(created + 30 * 86400.0)
+
+    # The clock moved (the file records when it ran)...
+    assert first["run_at"] != second["run_at"]
+    # ...and the numbers did not.
+    for one, other in zip(first["queries"], second["queries"], strict=True):
+        assert [c["score"] for c in one["candidates"]] == [
+            c["score"] for c in other["candidates"]
+        ]
+        assert [c["band"] for c in one["candidates"]] == [
+            c["band"] for c in other["candidates"]
+        ]
+    assert first["summary"]["mean_recall_at_k"] == second["summary"]["mean_recall_at_k"]
+    assert first["summary"]["mean_mrr"] == second["summary"]["mean_mrr"]
+
+
+def test_now_must_be_a_positive_instant(
+    script: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A pinned clock of 0 or nan is refused by name, not scored silently."""
+    source = tmp_path / "sessions.db"
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [])
+    for bad in ("0", "-5", "nan", "inf"):
+        with pytest.raises(SystemExit) as exc:
+            script.main([
+                "--snapshot", str(source), "--labels", str(labels),
+                "--config", str(config), "--pool-out", str(tmp_path / "p.json"),
+                "--now", bad,
+            ])
+        assert exc.value.code == 2  # argparse's usage error, via parser.error
+        # The message must be the rule, not argparse's "unrecognized
+        # arguments" for a flag that does not exist yet.
+        assert "positive Unix timestamp" in capsys.readouterr().err
+
+
 def test_snapshot_names_unreachable_label_ids(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
     tmp_path: Path, capsys: pytest.CaptureFixture[str],

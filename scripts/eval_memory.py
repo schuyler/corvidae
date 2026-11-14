@@ -71,6 +71,7 @@ import asyncio
 import importlib
 import json
 import logging
+import math
 import sqlite3
 import sys
 import tempfile
@@ -375,6 +376,7 @@ SNAPSHOT_REQUIRED_FLAGS: tuple[tuple[str, str, str], ...] = (
 SNAPSHOT_VARIANT_FLAGS: tuple[tuple[str, str], ...] = (
     ("--query-context", "query_context"),
     ("--candidates", "candidates"),
+    ("--now", "now"),
 )
 
 
@@ -581,6 +583,7 @@ async def run_snapshot_evaluation(
     pool_out: Path, k: int | None, work_dir: Path,
     query_context: str | None = None,
     candidates: str | None = None,
+    now: float | None = None,
 ) -> None:
     """Copy the snapshot, score the labelled queries, print and write the pool."""
     import aiosqlite
@@ -658,7 +661,7 @@ async def run_snapshot_evaluation(
                 {"id": i, "status": statuses[i]} for i in query.relevant if i in statuses
             ]
             text = probe_query(query, memory._query_context)
-            pool = await memory._retrieve_pool(text, k=k, exclude=None)
+            pool = await memory._retrieve_pool(text, k=k, exclude=None, now=now)
             # Top k is the expression retrieve() returns.
             top_ids = [c["id"] for c in pool.ranked[: pool.k]]
             scored = bool(reachable)
@@ -692,6 +695,23 @@ async def run_snapshot_evaluation(
         recalls = [r["recall_at_k"] for r in results if r["recall_at_k"] is not None]
         mrrs = [r["mrr"] for r in results if r["mrr"] is not None]
         degraded = sum(1 for r in results if r["degraded"])
+        # What scored this file: the pin, and the retrieval settings behind
+        # every score and band. Recorded rather than assumed, so two pool
+        # files from different configs cannot be compared by accident (#661).
+        settings = {
+            "half_life_days": memory._half_life_days,
+            "recency_from": memory._recency_from,
+            "band_on": memory._band_on,
+            "band_strong": memory._band_strong,
+            "band_moderate": memory._band_moderate,
+            "k": effective_k,
+            "encoder": (
+                memory._embedding_cfg.get("model")
+                if memory._embedding_cfg else None
+            ),
+            "dimensions": memory._embedding_dimensions(),
+        }
+
         summary = {
             "queries": len(results),
             "scored": len(recalls),
@@ -717,7 +737,10 @@ async def run_snapshot_evaluation(
             print(f"⚠️  FTS5 fallback on {degraded} of {len(results)} queries")
 
         pool_out.write_text(json.dumps(
-            {"run_at": run_at, "k": effective_k, "queries": results, "summary": summary},
+            {
+                "run_at": run_at, "now": now, "k": effective_k,
+                "settings": settings, "queries": results, "summary": summary,
+            },
             indent=2,
         ), encoding="utf-8")
         print(f"\nPool written to {pool_out}")
@@ -762,6 +785,15 @@ def snapshot_arg_error(args: argparse.Namespace) -> str | None:
         return (
             f"--k must be a positive integer, got {args.k}; pass --k 1 or "
             "more, or omit it to use memory.retrieval.k."
+        )
+
+    # A pinned clock has to be a real instant: 0 or negative would age every
+    # record by decades and read as an empty memory, and nan/inf silently
+    # poison every score.
+    if args.now is not None and not (math.isfinite(args.now) and args.now > 0):
+        return (
+            f"--now must be a positive Unix timestamp in seconds, got "
+            f"{args.now}; pass --now {int(time.time())} for the current instant."
         )
 
     # The pool file must not be the source (or its WAL/shm files), the
@@ -828,6 +860,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--candidates", default=None, choices=("hybrid", "vector"),
                         help="Snapshot mode: override memory.retrieval.candidates "
                              "(hybrid fuses vec KNN with FTS5; vector is KNN alone)")
+    parser.add_argument("--now", type=float, default=None, metavar="EPOCH",
+                        help="Snapshot mode: pin the clock decay is measured "
+                             "against (Unix seconds), so pools taken on "
+                             "different days are comparable")
     # LLM connection flags; mirrors scripts/eval_compaction.py.
     parser.add_argument("--base-url", default=None, help="LLM API base URL")
     parser.add_argument("--model", default=None, help="LLM model name")
@@ -851,7 +887,7 @@ def main(argv: list[str] | None = None) -> None:
             asyncio.run(run_snapshot_evaluation(
                 args.snapshot, args.labels, args.config, args.pool_out,
                 args.k, Path(work), query_context=args.query_context,
-                candidates=args.candidates,
+                candidates=args.candidates, now=args.now,
             ))
         return
 
