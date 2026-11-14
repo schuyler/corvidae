@@ -187,12 +187,13 @@ class TestConfig:
         await pm.ahook.on_init(pm=pm, config=config)
         assert "context_panel" in [name for name, _ in web_plugin._panels]
 
-    async def test_routes_are_three_gets(self, make_env):
+    async def test_routes_are_four_gets(self, make_env):
         env, _ = await panel_env(make_env)
         panels = dict(env.plugin._panels)
         routes = panels["context_panel"].routes
         assert sorted((r.method, r.path) for r in routes) == [
-            ("GET", "/channels"), ("GET", "/poll"), ("GET", "/window")]
+            ("GET", "/channels"), ("GET", "/poll"), ("GET", "/rendered"),
+            ("GET", "/window")]
 
 
 # ===========================================================================
@@ -270,6 +271,58 @@ class TestChannelsAndWindow:
         body = await poll(env, "web:main", cursor)
         assert body["rows"] == []
         assert set(body) <= {"loaded", "resync", "rows", "cursor", "live"}
+
+
+# ===========================================================================
+# Rendered request body (R11, #695)
+# ===========================================================================
+
+class TestRendered:
+    """The on-demand view of what build_prompt() sends, not the stored rows."""
+
+    async def test_rendered_equals_build_prompt_for_the_window(self, make_env):
+        env, _ = await panel_env(make_env)
+        win = seed(env, prompt="the system prompt")
+        win.append({"role": "user", "content": "hello"})
+        win.append({"role": "system", "content": "ctx"}, MessageType.CONTEXT)
+        win.append({"role": "assistant", "content": "withheld"}, MessageType.UNSENT)
+        win.append({"role": "tool", "tool_call_id": "c1", "content": "result"})
+        win.messages[-1]["_db_id"] = 7
+        channel = env.registry.get("web:main")
+
+        body = await fetch(env, "rendered", channel="web:main")
+
+        assert body["loaded"] is True
+        assert body["total"] == len(body["messages"])
+        # The acceptance criterion: exactly what the agent would send.
+        assert body["messages"] == win.build_prompt(
+            frozenset(channel.pending_tool_call_ids),
+            mid_conversation_system_role="system",
+        )
+        # Internal tags must not reach the wire through this route either.
+        assert all(not k.startswith("_") for m in body["messages"] for k in m)
+
+    async def test_rendered_passes_the_channel_pending_tool_calls(self, make_env):
+        """A call still in flight renders with its placeholder, not as a bare call."""
+        env, _ = await panel_env(make_env)
+        win = seed(env, prompt="p")
+        win.append({
+            "role": "assistant", "content": None,
+            "tool_calls": [{"id": "c9", "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"}}],
+        })
+        channel = env.registry.get_or_create("web", "main")
+        channel.pending_tool_call_ids.add("c9")
+
+        body = await fetch(env, "rendered", channel="web:main")
+
+        assert body["messages"] == win.build_prompt(
+            frozenset({"c9"}), mid_conversation_system_role="system")
+
+    async def test_rendered_unloaded_channel(self, make_env):
+        env, _ = await panel_env(make_env)
+        env.registry.get_or_create("web", "pending")  # conversation is None
+        assert await fetch(env, "rendered", channel="web:pending") == {"loaded": False}
 
 
 # ===========================================================================

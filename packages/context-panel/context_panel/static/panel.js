@@ -19,6 +19,7 @@
     liveCount: 0,
     toolNames: new Map(),  // tool_call_id -> tool name, filled as assistant rows render
     rowsText: "",  // the status line for the rows shown, restored after a failed poll
+    rendered: false,  // showing the build_prompt body instead of the rows
   };
 
   // Create an element with properties and children.
@@ -35,12 +36,13 @@
   const view = el("div", { id: "context-view", className: "panel-view hidden" });
   const status = el("span", { id: "status" });
   const showAll = el("button", { type: "button", textContent: "show all", hidden: true });
+  const renderedBtn = el("button", { type: "button", textContent: "rendered", hidden: true });
   const entries = el("div", { id: "entries" });
   const liveEntries = el("div", { id: "live-entries" });
   const liveArea = el("details", { id: "live", open: true, hidden: true },
     el("summary", { textContent: "live (latest turn)" }), liveEntries);
   section.append(refresh, tabs);
-  view.append(el("div", { id: "statusline" }, status, showAll), entries, liveArea);
+  view.append(el("div", { id: "statusline" }, status, showAll, renderedBtn), entries, liveArea);
   document.getElementById("main").append(view);
 
   // One collapsible entry: summary label plus a text-only body.
@@ -230,6 +232,37 @@
     }
   }
 
+  // Show the request body build_prompt() produces, or go back to the rows. It is
+  // an on-demand fetch: the body is not append-mostly, so it cannot be tailed.
+  async function toggleRendered() {
+    if (state.rendered) {
+      state.rendered = false;
+      renderedBtn.textContent = "rendered";
+      await openWindow(false);
+      return;
+    }
+    const gen = ++state.gen;
+    try {
+      const res = await get("rendered", { channel: state.channel });
+      if (gen !== state.gen || failed(res)) return;
+      const body = res.body;
+      if (!body.loaded) {
+        showUnloaded();
+        return;
+      }
+      state.rendered = true;
+      renderedBtn.textContent = "rows";
+      showAll.hidden = true;
+      entries.replaceChildren(
+        entry("cat-system-prompt", `request body (${body.total} messages)`,
+          JSON.stringify(body.messages, null, 2)));
+      setStatus(`build_prompt() output for ${state.channel}`);
+    } catch (err) {
+      console.warn("context panel: rendered fetch failed", err);
+      setStatus("connection lost; retrying");
+    }
+  }
+
   // One poll: tail the selected channel, then show its live events.
   async function pollOnce() {
     const gen = state.gen;
@@ -256,7 +289,7 @@
 
   // The poll chain: the next tick is scheduled only after the last one finishes.
   async function tick() {
-    if (state.channel && !state.opening && !state.stopped) {
+    if (state.channel && !state.opening && !state.stopped && !state.rendered) {
       try {
         await pollOnce();
       } catch (err) {
@@ -305,6 +338,9 @@
     }
     state.channel = id;
     state.cursor = null;
+    state.rendered = false;
+    renderedBtn.textContent = "rendered";
+    renderedBtn.hidden = !id;
     markTabs();
     if (id) {
       view.classList.remove("hidden");
@@ -322,6 +358,7 @@
 
   refresh.addEventListener("click", loadChannels);
   showAll.addEventListener("click", () => openWindow(true));
+  renderedBtn.addEventListener("click", toggleRendered);
   window.addEventListener("hashchange", route);
 
   loadChannels();
