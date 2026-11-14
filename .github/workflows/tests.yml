@@ -167,7 +167,12 @@ jobs:
       - name: Install dependencies (kernel and context panel)
         run: uv sync --locked --extra dev --extra acp --extra context-panel
 
-      # Chromium plus the system libraries it needs on the runner.
+      # The Chromium download only. No --with-deps: that runs `sudo apt-get`,
+      # and the self-hosted runner user has no passwordless sudo (it executes
+      # PR code, so sudo there would hand root to any PR). Chromium's system
+      # libraries are a one-time runner prerequisite:
+      #   uvx --from playwright==1.64.0 playwright install-deps chromium
+      # Re-run that by hand when the pinned Playwright version changes.
       - name: Install Playwright Chromium
         run: uv run --no-sync --with playwright==1.64.0 playwright install chromium
 
