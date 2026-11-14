@@ -246,7 +246,7 @@ class CompactionPlugin(CorvidaePlugin):
         retain_count = 0
         retain_tokens = 0
         for msg in reversed(conversation.messages):
-            msg_tokens = message_tokens(msg)
+            msg_tokens = message_tokens(msg, conversation.fence_key)
             if retain_tokens + msg_tokens > retain_budget and retain_count > 0:
                 break
             retain_tokens += msg_tokens
@@ -371,7 +371,7 @@ class CompactionPlugin(CorvidaePlugin):
             return planned
 
         def tail_tokens(cut: int) -> int:
-            return sum(message_tokens(m) for m in messages[cut:])
+            return sum(message_tokens(m, conversation.fence_key) for m in messages[cut:])
 
         ceiling = max_tokens * (self._compaction_retention + self._compaction_threshold) / 2
         fixed = count_tokens(conversation.system_prompt) + self._SUMMARY_RESPONSE_RESERVE_TOKENS

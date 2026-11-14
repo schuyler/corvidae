@@ -569,8 +569,9 @@ subagent's own loop, which reach the subagent's model with no frame; and the
 subagent's final report to the main model, which can repeat what the
 subagent read. The header names the spill source for a read-back when the log
 still holds the row that cut it (#576), cleaned like any header value, and
-fenced rows are costed by the estimator without their framing, so a long run
-of them can undercount tokens against the hard ceiling (#577).
+fenced rows are costed by the estimator at their rendered size — header and
+fence included — so a long run of them cannot undercount the window against
+the hard ceiling the way counting the provenance record did (#577).
 
 The HTTP transports (`streamable_http`, `sse`) open an outbound connection
 to whatever `url` names and send the configured `headers`, bearer token
