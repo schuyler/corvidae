@@ -672,7 +672,7 @@ class Agent(CorvidaePlugin):
         if isinstance(spill, NotificationSpill):
             cut = await spill.cut(
                 text, limit=limit, source=f"tool result ({metadata.tool or source})",
-                can_read=spill.can_read(channel),
+                can_read=spill.can_read(channel), channel=channel,
             )
         else:
             # The Runtime always registers the service; a bare plugin manager
@@ -692,6 +692,7 @@ class Agent(CorvidaePlugin):
             spill_chars=cut.spilled,
             spill_failed=True if cut.failed else None,
             cut_source=cut.source,
+            page_chars=cut.page_chars,
         )
 
     def _notification_metadata(self, channel, tool_call_id: str | None) -> ItemMetadata:
@@ -711,6 +712,7 @@ class Agent(CorvidaePlugin):
             spill_chars=cut.spilled if cut else None,
             spill_failed=True if cut and cut.failed else None,
             cut_source=cut.source if cut else None,
+            page_chars=cut.page_chars if cut else None,
         )
 
     def _tool_result_metadata(self, channel, tool_call_id: str) -> ItemMetadata:

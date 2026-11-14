@@ -64,6 +64,7 @@ class Cut:
     spilled: int | None = None  # characters in the file; set with path
     failed: bool = False  # this channel can read spills, but the write failed
     source: str | None = None  # who the item came from, kept on the row (#576)
+    page_chars: int | None = None  # read_file page size this channel's budget fits (#579)
 
 
 _current_cut: contextvars.ContextVar[Cut | None] = contextvars.ContextVar(
@@ -172,6 +173,7 @@ class NotificationSpill(CorvidaePlugin):
                 spilled=spilled if reads and path else None,
                 failed=reads and failed,
                 source=source,
+                page_chars=self.page_chars_for(channel) if reads and path else None,
             )
             token = _current_cut.set(cut)
             try:
@@ -180,11 +182,16 @@ class NotificationSpill(CorvidaePlugin):
                 _current_cut.reset(token)
         return str(path) if path else None
 
-    async def cut(self, text: str, *, limit: int, source: str, can_read: bool) -> Cut:
+    async def cut(
+        self, text: str, *, limit: int, source: str, can_read: bool,
+        channel: Channel | None = None,
+    ) -> Cut:
         """Spill ``text``, which is longer than ``limit``, for one destination.
 
         The caller passes the first ``limit`` characters on and records the
-        returned ``Cut``. The file is written only when ``can_read``.
+        returned ``Cut``. The file is written only when ``can_read``. ``channel``
+        only sizes the ``read_file`` page the header suggests (#579): without
+        one, or without a budget to size it by, the header names no page.
         """
         path, spilled, failed = await self._spill(
             text, source=source, limit=limit, what="for one destination",
@@ -193,7 +200,31 @@ class NotificationSpill(CorvidaePlugin):
             shown=limit, total=len(text),
             path=str(path) if path else None, spilled=spilled, failed=failed,
             source=source,
+            page_chars=self.page_chars_for(channel) if path else None,
         )
+
+    def page_chars_for(self, channel: Channel | None) -> int | None:
+        """The ``read_file`` page size that fits ``channel``'s budget, if any.
+
+        The same helper ``read_file`` sizes its own pages with, so the header's
+        suggestion is the page the tool will actually return rather than a
+        number of the kernel's own invention. None when the channel, its budget,
+        the tool collection or the registry is missing: there is then no budget
+        to fit, and the header says nothing about pages.
+        """
+        if channel is None:
+            return None
+        tools = self.pm.get_plugin("tools")
+        registry = self.pm.get_plugin("registry")
+        if tools is None or registry is None:
+            return None
+        budget = registry.resolve_config(channel).get("max_context_tokens")
+        if budget is None:
+            return None
+        # Function-local: the kernel does not import a tool module at load time.
+        from corvidae.tools.files import page_chars
+
+        return page_chars(tools.max_result_chars, budget, tools.read_file_window_fraction)
 
     def can_read(self, channel: Channel, tools: dict | None = None) -> bool:
         """Whether an enabled tool on ``channel`` declares it reads spill files.

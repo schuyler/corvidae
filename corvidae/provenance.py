@@ -67,11 +67,16 @@ class ItemMetadata:
     # and the row are swept. Only ``spill_source`` is rendered.
     cut_source: str | None = None
     spill_source: str | None = None
+    # The cut row or result too: the read_file page size that fits the channel's
+    # budget, so the model pages through the file instead of asking for it whole
+    # (#579). Recorded, not recomputed: the budget can change between the cut and
+    # the render, and a reload has to render the same bytes.
+    page_chars: int | None = None
 
 
 _FIELDS = frozenset(f.name for f in dataclasses.fields(ItemMetadata))
 _BOOL_FIELDS = frozenset({"addressed", "spill_failed", "untrusted"})
-_INT_FIELDS = frozenset({"cut_shown", "cut_total", "spill_chars"})
+_INT_FIELDS = frozenset({"cut_shown", "cut_total", "spill_chars", "page_chars"})
 
 
 def _well_typed(name: str, value: object) -> bool:
@@ -186,12 +191,16 @@ def _person_header(meta: ItemMetadata, channel_id: str) -> str | None:
 
 
 def cut_text(
-    shown: int, total: int, path: str | None, spilled: int | None, failed: bool
+    shown: int, total: int, path: str | None, spilled: int | None, failed: bool,
+    page: int | None = None,
 ) -> str:
     """The words saying a text was cut and where the rest is, without brackets.
 
     Shared by the kernel's ``metadata:`` line and the plain-text marker a
     subagent loop puts on a cut tool result, so both say the same thing.
+    ``page`` names the ``read_file`` size that fits this channel's budget, when
+    the caller worked one out: the rest of a spill is usually read back in
+    pages, and asking for it whole cuts and spills it again (#579).
     """
     text = f"cut to the first {shown} of {total} characters"
     if path:
@@ -200,6 +209,8 @@ def cut_text(
             text += f"; the full text is in {shown_path}"
         else:
             text += f"; the first {spilled} characters are in {shown_path}"
+        if page:
+            text += f"; read it back with read_file max_chars={page}"
     elif failed:
         text += "; the full text was not saved"
     return text
@@ -212,7 +223,7 @@ def _cut_line(meta: ItemMetadata) -> str:
     shown = meta.cut_shown if meta.cut_shown is not None else total
     words = cut_text(
         shown, total, meta.spill_path, meta.spill_chars,
-        bool(meta.spill_failed),
+        bool(meta.spill_failed), meta.page_chars,
     )
     return f"[metadata: {words}]"
 

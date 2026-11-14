@@ -24,7 +24,7 @@ from corvidae.channel import Channel, ChannelRegistry, load_channel_config
 from corvidae.hooks import create_plugin_manager, get_dependency, hookimpl
 from corvidae.context import ContextWindow, MessageType
 from corvidae.persistence import PersistencePlugin
-from corvidae.provenance import PROVENANCE_KEY, ItemMetadata, encode, frame
+from corvidae.provenance import PROVENANCE_KEY, ItemMetadata, cut_text, encode, frame
 from corvidae.tool import Tool
 from corvidae.tool_collection import ToolCollectionPlugin
 from fake_clock import FakeClock, install_kernel_clock
@@ -124,6 +124,14 @@ class Harness:
             for item in self.items
         }
 
+    def page_for(self, channel_id: str) -> int | None:
+        """The read_file page the header suggests on ``channel_id``, or None."""
+        tools = self.pm.get_plugin("tools")
+        budget = self.registry.resolve_config(self.channels(channel_id)[0]).get("max_context_tokens")
+        if tools is None or budget is None:
+            return None
+        return expected_page(budget, tools.max_result_chars, tools.read_file_window_fraction)
+
     async def notify(self, *ids: str, text: str = TEXT, limit: int = 10, source: str = "test",
                      annotations: dict | None = None) -> str | None:
         """Hand ``text`` to the service for the named channels."""
@@ -137,9 +145,14 @@ def files_in(directory: Path) -> list[Path]:
     return sorted(directory.iterdir()) if directory.is_dir() else []
 
 
-def pointer(path: str, shown: int = 10, total: int = 50) -> str:
-    """The cut line for a channel that got the pointer to a whole spill."""
-    return f"[metadata: cut to the first {shown} of {total} characters; the full text is in {path}]"
+def pointer(path: str, shown: int = 10, total: int = 50, page: int | None = None) -> str:
+    """The cut line for a channel that got the pointer to a whole spill.
+
+    ``page`` is the read_file size the header suggests (#579), when the channel
+    has a budget to size one by.
+    """
+    line = f"[metadata: cut to the first {shown} of {total} characters; the full text is in {path}"
+    return line + (f"; read it back with read_file max_chars={page}]" if page else "]")
 
 
 def plain_cut(shown: int = 10, total: int = 50) -> str:
@@ -230,7 +243,7 @@ async def test_a_plugin_spills_with_no_spill_code_of_its_own(make):
     [item] = h.items
     assert item.content == TEXT[:10]
     assert item.annotations == {"origin": "pager"}
-    assert h.cut_lines() == {"irc:#a": pointer(path)}
+    assert h.cut_lines() == {"irc:#a": pointer(path, page=h.page_for("irc:#a"))}
 
 
 async def test_fanout_to_three_channels_writes_one_file_named_in_every_header(make):
@@ -240,7 +253,9 @@ async def test_fanout_to_three_channels_writes_one_file_named_in_every_header(ma
     path = await h.notify("irc:#a", "irc:#b", "discord:1")
 
     assert files_in(h.dir) == [Path(path)]
-    assert h.cut_lines() == {cid: pointer(path) for cid in ("irc:#a", "irc:#b", "discord:1")}
+    assert h.cut_lines() == {
+        cid: pointer(path, page=h.page_for(cid)) for cid in ("irc:#a", "irc:#b", "discord:1")
+    }
 
 
 async def test_sender_controlled_text_does_not_shape_the_file_name(make, tmp_path):
@@ -291,7 +306,8 @@ async def test_content_over_the_cap_writes_exactly_cap_characters(make, tmp_path
     assert Path(path).read_text(encoding="utf-8") == text[:100]
     assert h.cut_lines() == {"irc:#a": (
         f"[metadata: cut to the first 10 of 250 characters; "
-        f"the first 100 characters are in {path}]"
+        f"the first 100 characters are in {path}; "
+        f"read it back with read_file max_chars={h.page_for('irc:#a')}]"
     )}
 
 
@@ -338,7 +354,9 @@ async def test_a_lone_surrogate_payload_still_spills(make):
 
     assert files_in(h.dir) == [Path(path)]
     assert len(Path(path).read_text(encoding="utf-8")) == len(text)
-    assert h.cut_lines() == {cid: pointer(path, total=len(text)) for cid in ("irc:#a", "irc:#b")}
+    assert h.cut_lines() == {
+        cid: pointer(path, total=len(text), page=h.page_for(cid)) for cid in ("irc:#a", "irc:#b")
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +380,7 @@ async def test_pointer_only_where_a_declaring_tool_is_enabled(make, tools, chann
     path = await h.notify("irc:#a", "discord:1")
 
     assert h.cut_lines() == {
-        cid: pointer(path) if cid in readers else plain_cut()
+        cid: pointer(path, page=h.page_for(cid)) if cid in readers else plain_cut()
         for cid in ("irc:#a", "discord:1")
     }
     assert [item.content for item in h.items] == [TEXT[:10]] * 2
@@ -375,7 +393,7 @@ async def test_a_non_builtin_declaring_tool_earns_the_pointer(make):
     path = await h.notify("irc:#a")
 
     assert path is not None
-    assert h.cut_lines() == {"irc:#a": pointer(path)}
+    assert h.cut_lines() == {"irc:#a": pointer(path, page=h.page_for("irc:#a"))}
 
 
 async def test_no_reader_anywhere_writes_no_file_and_some_writes_one(make, tmp_path):
@@ -519,7 +537,7 @@ async def test_tool_result_over_the_cap_is_cut_spilled_and_headed(make):
     [path] = files_in(h.dir)
     assert path.read_text(encoding="utf-8") == TEXT
     assert item.content == TEXT[:10]
-    assert rendered(h, item) == f"{pointer(str(path))}\n{TEXT[:10]}"
+    assert rendered(h, item) == f"{pointer(str(path), page=h.page_for(item.channel.id))}\n{TEXT[:10]}"
 
 
 async def test_tool_result_within_the_cap_is_untouched(make):
@@ -551,7 +569,7 @@ async def test_untrusted_tool_result_keeps_its_fence_and_gains_the_cut_line(make
     [path] = files_in(h.dir)
     lines = rendered(h, item).split("\n")
     assert lines[0].startswith("[metadata: result of your own web_fetch call call_1;")
-    assert lines[1] == pointer(str(path))
+    assert lines[1] == pointer(str(path), page=h.page_for(item.channel.id))
     assert lines[2].startswith("[payload ") and lines[2].endswith(" begins]")
     assert lines[3] == TEXT[:10]
 
@@ -567,7 +585,8 @@ async def test_tool_result_over_the_spill_cap_says_how_much_was_saved(make, tmp_
     assert path.read_text(encoding="utf-8") == TEXT[:20]
     assert rendered(h, item).split("\n")[0] == (
         f"[metadata: cut to the first 10 of 50 characters; "
-        f"the first 20 characters are in {path}]"
+        f"the first 20 characters are in {path}; "
+        f"read it back with read_file max_chars={h.page_for('irc:#a')}]"
     )
 
 
@@ -880,3 +899,106 @@ async def test_a_failing_log_lookup_does_not_lose_the_result(make, persistence, 
     assert item.metadata.spill_source is None
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(NAME in w and "RuntimeError" in w for w in warnings), warnings
+
+
+# ---------------------------------------------------------------------------
+# The cut header suggests a page size that fits the channel's budget (#579)
+# ---------------------------------------------------------------------------
+
+
+def expected_page(budget: int, max_result_chars: int = 100_000, fraction: float = 0.08) -> int:
+    """The page read_file would size for a channel with ``budget`` tokens."""
+    from corvidae.tools.files import page_chars
+
+    return page_chars(max_result_chars, budget, fraction)
+
+
+async def test_a_cut_notification_names_a_page_that_fits_the_channel_budget(make):
+    """R1: the header a cut notification renders names the page size read_file
+    will return on that channel, worked out from that channel's budget."""
+    h = await make(channels={"irc:#a": {"max_context_tokens": 30_000}})
+    path = await h.notify("irc:#a")
+
+    [item] = h.items
+    expected = expected_page(30_000)
+    assert item.metadata.page_chars == expected
+    assert h.cut_lines() == {"irc:#a": pointer(path, page=expected)}
+
+
+async def test_each_channel_gets_the_page_its_own_budget_fits(make):
+    """R2: one delivery, two budgets, two numbers — a page sized for the larger
+    channel would be cut and spilled again on the smaller one."""
+    h = await make(channels={
+        "irc:#a": {"max_context_tokens": 10_000},
+        "irc:#b": {"max_context_tokens": 200_000},
+    })
+    await h.notify("irc:#a", "irc:#b")
+
+    small, large = h.items
+    assert small.metadata.page_chars == expected_page(10_000)
+    assert large.metadata.page_chars == expected_page(200_000)
+    assert large.metadata.page_chars > small.metadata.page_chars
+
+
+async def test_the_page_suggestion_never_exceeds_the_live_result_cap(make):
+    """R3: the cap bounds a page too, so a huge budget still names the cap.
+
+    read_file clamps to ``tools.max_result_chars``; a suggestion above it would
+    be a page the tool never returns.
+    """
+    h = await make(
+        tools={"max_result_chars": 5_000},
+        channels={"irc:#a": {"max_context_tokens": 10_000_000}},
+    )
+    await h.notify("irc:#a")
+
+    [item] = h.items
+    assert item.metadata.page_chars == 5_000
+
+
+async def test_no_page_is_suggested_without_a_channel_or_a_budget(make):
+    """R4: with nothing to size a page by, the header says nothing about pages.
+
+    A number invented where the budget is unknown would be a page the tool will
+    not return. Every channel the registry resolves has a budget, so the
+    unsized cases are the direct calls: no channel, and no tool collection.
+    """
+    h = await make()
+    channel = h.channels("irc:#a")[0]
+
+    assert h.spill.page_chars_for(None) is None
+    band = h.spill
+    band.pm = type("NoPlugins", (), {"get_plugin": lambda self, name: None})()
+    assert band.page_chars_for(channel) is None
+
+
+async def test_the_page_suggestion_survives_a_reload(make):
+    """R5: the number is stored on the row, not recomputed at render time.
+
+    A budget change between the cut and the reload must not rewrite what the
+    model was told when it first saw the row.
+    """
+    from corvidae.provenance import decode
+
+    h = await make(channels={"irc:#a": {"max_context_tokens": 30_000}})
+    await h.notify("irc:#a")
+    [item] = h.items
+
+    # The record survives a JSON round trip, as a reload from message_log must.
+    record = json.loads(json.dumps(encode(item.metadata, {})))
+    meta, _annotations = decode(record)
+    assert meta.page_chars == expected_page(30_000)
+
+
+async def test_a_cut_tool_result_names_a_page_too(make):
+    """R6: the same words head a cut tool result, sized for its channel."""
+    h = await make(channels={"irc:#a": {"max_context_tokens": 30_000}})
+    channel = h.channels("irc:#a")[0]
+
+    cut = await h.spill.cut(
+        "z" * 50, limit=10, source="tool result (read_file)",
+        can_read=True, channel=channel,
+    )
+    assert cut.page_chars == expected_page(30_000)
+    words = cut_text(cut.shown, cut.total, cut.path, cut.spilled, cut.failed, cut.page_chars)
+    assert f"; read it back with read_file max_chars={cut.page_chars}" in words

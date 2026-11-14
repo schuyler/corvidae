@@ -1447,8 +1447,15 @@ in code:
   (the spill cap); `[metadata: cut to the first N of M characters; the full
   text was not saved]` when the write failed; and `[metadata: cut to the
   first N of M characters]` when the channel has no tool that can read the
-  file. The kernel builds it from the stored fields, so no plugin writes or
-  forges it; the path goes through `clean_value`.
+  file. A channel that gets the pointer also gets `; read it back with
+  read_file max_chars=<P>` (#579), where P is the page `read_file` sizes for
+  that channel's budget (`tools.files.page_chars`, the same helper the tool
+  uses), never above `tools.max_result_chars`: the rest of a spill is read
+  back in pages, and asking for it whole cuts and spills it again. The number
+  is recorded on the row like every other cut field, so a budget change does
+  not rewrite what the model was told. The kernel builds the line from the
+  stored fields, so no plugin writes or forges it; the path goes through
+  `clean_value`.
 - A cross-channel tool result gets `[metadata: result of your own <tool>
   action on <target>; ...]`, in the tool message itself so call and result
   stay adjacent.

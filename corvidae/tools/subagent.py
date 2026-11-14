@@ -180,7 +180,7 @@ async def _cut_result(
     if isinstance(spill, NotificationSpill):
         cut = await spill.cut(
             content, limit=limit, source="subagent tool result",
-            can_read=spill.can_read(channel, tools),
+            can_read=spill.can_read(channel, tools), channel=channel,
         )
     else:
         # No spill service (a bare loop): the head is kept and the line says it was cut.
@@ -190,7 +190,7 @@ async def _cut_result(
             len(content), limit,
         )
         cut = Cut(shown=limit, total=len(content))
-    words = cut_text(cut.shown, cut.total, cut.path, cut.spilled, cut.failed)
+    words = cut_text(cut.shown, cut.total, cut.path, cut.spilled, cut.failed, cut.page_chars)
     return f"[{words}]\n{content[:limit]}"
 
 
