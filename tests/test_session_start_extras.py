@@ -21,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / ".claude" / "hooks" / "session-start.sh"
 CLAUDE_MD = ROOT / "CLAUDE.md"
+WORKFLOW = ROOT / ".github" / "workflows" / "tests.yml"
 
 
 def _extras(line: str) -> list[str]:
@@ -33,6 +34,21 @@ def _sync_lines(text: str) -> list[str]:
         line for line in text.splitlines()
         if re.match(r"^\s*uv sync --extra", line)
     ]
+
+
+def _ci_full_job_extras() -> set[str]:
+    """The extras CI's full job installs: the `uv sync` line with the most.
+
+    The kernel, cognition-fts and web-smoke jobs each install a strict subset,
+    so the largest line is the full one. CI is the real reference — it is what
+    actually runs every suite — so a name missing here is a bug however the
+    docs read.
+    """
+    lines = [
+        line for line in WORKFLOW.read_text().splitlines()
+        if re.search(r"\buv sync\b.*--extra", line)
+    ]
+    return set(_extras(max(lines, key=lambda line: len(_extras(line)))))
 
 
 def test_the_hook_installs_every_extra_the_docs_call_for() -> None:
@@ -56,6 +72,23 @@ def test_the_hook_installs_every_extra_the_docs_call_for() -> None:
         "the session-start hook and CLAUDE.md's `# everything` line disagree "
         "about which extras the full suite needs; a test directory whose extra "
         "is named in only one of them fails to import in a web session (#699)"
+    )
+
+
+def test_the_hook_installs_what_ci_installs() -> None:
+    """CLAUDE.md can be wrong too: `rss` was missing from both while CI's full
+    job needed it for the rss-reader tests, which is the same drift one level up.
+
+    CI's full job is the definition of "the full suite", so the hook follows it
+    rather than the docs.
+    """
+    hook_extras = set(_extras(_sync_lines(HOOK.read_text())[0]))
+    ci_extras = _ci_full_job_extras()
+    assert ci_extras, "no `uv sync` line with extras found in CI's workflow"
+    assert hook_extras == ci_extras, (
+        "the session-start hook and CI's full job disagree: hook has "
+        f"{sorted(hook_extras - ci_extras)} too many and is missing "
+        f"{sorted(ci_extras - hook_extras)}"
     )
 
 

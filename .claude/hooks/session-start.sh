@@ -27,6 +27,6 @@ cd "${CLAUDE_PROJECT_DIR:-$(pwd)}"
 # Keep this line identical to CLAUDE.md's; uv sync is idempotent and reuses its
 # cache, so the extra extras cost a resolution, not a download.
 echo "session-start: installing dependencies with uv"
-uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra signal --extra outbound-cap
+uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap
 
 echo "session-start: dependencies ready"
