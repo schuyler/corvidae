@@ -768,6 +768,60 @@ class TestRetentionDelivery:
         await _teardown(env)
 
 
+class TestRetentionRootFromRecall:
+    """Owner, on #857: the retention root matches recall's root when the
+    retention key is unset, so facts are filed where recall reads them."""
+
+    async def _env(self, tmp_path, recall, chat_text=EMPTY_VERDICT, with_funnel=False):
+        appraisal = FakeAppraisal(
+            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
+        )
+        return await build_critique(
+            tmp_path, appraisal=appraisal, chat_text=chat_text,
+            with_funnel=with_funnel, config={"markdown_recall": recall},
+        )
+
+    async def test_recalls_root_turns_the_lens_on_and_is_named(self, tmp_path):
+        """AC9a: the lens runs, and the fork names recall's root."""
+        env = await self._env(tmp_path, {"root": "values/"})
+        await _fire(env, "krec", origin="user")
+        await _run_next_task(env.task)
+        outcomes = await _read_outcomes(env.db, "krec")
+        assert "retention" in outcomes["critique"]["lenses"]
+        instructions = [c["instruction"] for c in env.fork_agent.calls]
+        assert any("knowledge base root is «values/»" in t for t in instructions), instructions
+        await _teardown(env)
+
+    async def test_the_wake_stub_names_recalls_root(self, tmp_path):
+        """AC9a: the filing turn is told the same root."""
+        env = await self._env(
+            tmp_path, {"root": "values/"}, chat_text=RETENTION_VERDICT, with_funnel=True,
+        )
+        env.funnel.ingest = Mock(wraps=env.funnel.ingest)
+        env.funnel.ingest_and_wake = AsyncMock()
+        await _fire(env, "krecw", origin="user")
+        await _run_next_task(env.task)
+        env.funnel.ingest_and_wake.assert_awaited_once()
+        assert "values/" in env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
+        await _teardown(env)
+
+    async def test_several_recall_roots_use_the_first(self, tmp_path):
+        """AC9b: the first listed root is the one the lens files into."""
+        env = await self._env(tmp_path, {"roots": ["a/", "b/"]})
+        await _fire(env, "kroots", origin="user")
+        await _run_next_task(env.task)
+        instructions = [c["instruction"] for c in env.fork_agent.calls]
+        assert any("knowledge base root is «a/»" in t for t in instructions), instructions
+        await _teardown(env)
+
+    async def test_a_derived_root_does_not_warn(self, tmp_path, caplog):
+        """AC9e: nothing has drifted when the root came from recall."""
+        env = await self._env(tmp_path, {"roots": ["a/", "b/"]})
+        assert not [r for r in caplog.records
+                    if r.levelname == "WARNING" and "critique.retention.root" in r.getMessage()]
+        await _teardown(env)
+
+
 def test_objection_schema_allows_file_and_content():
     """AC3: a server that honours the schema can return the retention fields."""
     from corvidae_cognition.critique import OBJECTION_SCHEMA
