@@ -566,6 +566,46 @@ def fail(message: str) -> NoReturn:
     raise SystemExit(1)
 
 
+def all_degraded_cause(memory) -> str:
+    """Why every query fell back to FTS5, and what to change (#662).
+
+    Read off the plugin's own state rather than guessed from the metrics: the
+    ways retrieval loses its vectors are distinguishable, and the fix differs
+    for each. Order matters — an encoder mismatch also switches the vec path
+    off, so it has to be named before the "no vectors at all" branch, which
+    would otherwise blame a missing extension. The last branch is the runtime
+    failure: the encoder was configured and matched, so the embed call itself
+    must have raised.
+    """
+    if getattr(memory, "_encoder_mismatch", False):
+        return (
+            "the snapshot's embedding_meta records a different encoder or "
+            "dimensions than this config, so its vectors are not comparable "
+            "and every query fell back to FTS5; point llm.embedding at the "
+            "encoder that built the snapshot, or re-embed a copy of it with "
+            "this one, then rerun"
+        )
+    if getattr(memory, "_embedding_cfg", None) is None:
+        return (
+            "the config names no embedding profile (llm.embedding), so no "
+            "record has a stored vector and every query fell back to FTS5; "
+            "add the embedding profile the deployment uses (docs/cognition.md) "
+            "and rerun"
+        )
+    if not memory._vec_available:
+        return (
+            "sqlite-vec is not loaded in this interpreter, so every query fell "
+            "back to FTS5; install it (uv sync --extra cognition) in the "
+            "environment running this script and rerun"
+        )
+    return (
+        "the embedding server failed every query (see the 'retrieval "
+        "embedding failed; degrading to FTS5' warnings), so the run measured "
+        "keyword search, not vectors; start the server llm.embedding's "
+        "base_url names, check the profile's api_key, and rerun"
+    )
+
+
 def fmt_metric(value: float | None) -> str:
     """Format a metric for stdout; None (not scored) prints as n/a."""
     return "n/a" if value is None else f"{value:.2f}"
@@ -692,10 +732,16 @@ async def run_snapshot_evaluation(
         recalls = [r["recall_at_k"] for r in results if r["recall_at_k"] is not None]
         mrrs = [r["mrr"] for r in results if r["mrr"] is not None]
         degraded = sum(1 for r in results if r["degraded"])
+        # A pool in which nothing was measured but keyword search. The run
+        # still writes the file, marked, and then exits non-zero (#662): an
+        # FTS-only pool is not a vector measurement, and its 0.6 similarities
+        # are a constant, so nothing downstream can tell.
+        all_degraded = bool(results) and degraded == len(results)
         summary = {
             "queries": len(results),
             "scored": len(recalls),
             "degraded": degraded,
+            "all_degraded": all_degraded,
             "mean_recall_at_k": mean(recalls),
             "mean_mrr": mean(mrrs),
             "query_context": memory._query_context,
@@ -721,6 +767,12 @@ async def run_snapshot_evaluation(
             indent=2,
         ), encoding="utf-8")
         print(f"\nPool written to {pool_out}")
+        if all_degraded:
+            fail(
+                f"eval_memory: every scored query degraded to FTS5, so this "
+                f"pool is keyword-only ({pool_out} is written and marked "
+                f"\"all_degraded\"); {all_degraded_cause(memory)}"
+            )
     finally:
         # Release everything before main's temp dir deletes the copy; a
         # failure here is logged and must not mask the original exception.

@@ -660,7 +660,7 @@ The pool file is written once, after the last query:
       ]
     }
   ],
-  "summary": {"queries": 1, "scored": 1, "degraded": 0,
+  "summary": {"queries": 1, "scored": 1, "degraded": 0, "all_degraded": false,
               "mean_recall_at_k": 1.0, "mean_mrr": 0.5,
               "query_context": "previous_reply", "candidates": "hybrid",
               "subsets": {"(untagged)": {"queries": 1, "scored": 1,
@@ -693,6 +693,14 @@ Operator notes:
   `relative` and `similarity` don't use decay). `run_at` records the
   date. shortcut: no pinned "now"; add one before comparing pool files
   scored on different days.
+- **A run where every query degraded exits non-zero.** An FTS-only pool is
+  not a vector measurement — every similarity is FTS5's constant 0.6 — so
+  after writing the file (`summary.all_degraded` marks it, and the scores are
+  still worth reading) the run prints the cause and exits 1: a missing
+  `llm.embedding` profile, a snapshot whose `embedding_meta` names a different
+  encoder, `sqlite-vec` not loading, or an embedding server that failed every
+  call. A run where only some queries degraded still exits 0, and says how
+  many on stdout (#662).
 - **An unreachable embedding server turns every query into FTS5.** Each
   query's embedding call fails after the client's retries (slow), logs a
   `retrieval embedding failed; degrading to FTS5` warning with a traceback

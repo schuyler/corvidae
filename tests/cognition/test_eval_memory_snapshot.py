@@ -176,6 +176,22 @@ def read_pool(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
+def run_snapshot(script: ModuleType, argv: list[str]) -> None:
+    """Invoke the script, tolerating the #662 refusal on an FTS-only install.
+
+    The `cognition-fts` job deliberately has no sqlite-vec, so there every
+    query degrades and a snapshot run now exits 1 by design. The pool is still
+    written and every test here asserts what is in it, so on that path the
+    exit is tolerated; with vectors present the run must succeed outright.
+    """
+    if HAS_VEC:
+        script.main(argv)
+        return
+    with pytest.raises(SystemExit) as exc:
+        script.main(argv)
+    assert exc.value.code == 1
+
+
 def test_snapshot_copy_leaves_source_bytes_and_includes_wal_rows(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
@@ -234,7 +250,7 @@ def test_snapshot_copy_leaves_source_bytes_and_includes_wal_rows(
     pool_out = tmp_path / "pool.json"
     before = (sha256(image_db), sha256(image_wal))
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(image_db), "--labels", str(labels),
         "--config", str(config), "--pool-out", str(pool_out),
     ])
@@ -275,7 +291,7 @@ def test_snapshot_scores_known_ranking(
     ])
     pool_out = tmp_path / "pool.json"
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
         "--pool-out", str(pool_out), "--k", "2",
     ])
@@ -307,7 +323,13 @@ def test_snapshot_reports_fts_fallback_on_encoder_mismatch(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """S3: an encoder mismatch degrades every query and the run says so."""
+    """S3: an encoder mismatch degrades every query, and the run now fails.
+
+    A pool whose every similarity is FTS5's constant 0.6 is not a vector
+    measurement, so #662 makes the run exit non-zero with the cause — while
+    still writing the file, marked, because the numbers are still worth
+    reading in that light.
+    """
     # Source built with encoder "test-embedder"; the config names another.
     source = tmp_path / "sessions.db"
     ids = build_source(source, [TEXT_A, TEXT_B])
@@ -320,16 +342,97 @@ def test_snapshot_reports_fts_fallback_on_encoder_mismatch(
     ])
     pool_out = tmp_path / "pool.json"
 
+    with pytest.raises(SystemExit) as exc:
+        script.main([
+            "--snapshot", str(source), "--labels", str(labels),
+            "--config", str(config), "--pool-out", str(pool_out),
+        ])
+
+    # Per-query flag, summary count, the stdout sentence, and the refusal.
+    pool = read_pool(pool_out)
+    assert [q["degraded"] for q in pool["queries"]] == [True, True]
+    assert pool["summary"]["degraded"] == 2
+    assert pool["summary"]["all_degraded"] is True
+    captured = capsys.readouterr()
+    assert "FTS5 fallback on 2 of 2 queries" in captured.out
+    assert exc.value.code == 1
+    assert "every scored query degraded" in captured.err
+    assert "different encoder or dimensions" in captured.err
+
+
+@needs_vec
+def test_all_degraded_run_names_the_embedding_failure(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#662: a dead embedding server is named as the cause, not the mismatch."""
+    async def dead_embed(self: LLMClient, texts: list[str], kind: str) -> list[list[float]]:
+        raise RuntimeError("encoder down")
+
+    source = tmp_path / "sessions.db"
+    ids = build_source(source, [TEXT_A, TEXT_B])
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [ids[0]]},
+        {"text": TEXT_B, "relevant": [ids[1]]},
+    ])
+    pool_out = tmp_path / "pool.json"
+    # Only the scoring queries fail: seeding already embedded its rows.
+    monkeypatch.setattr(LLMClient, "embed", dead_embed)
+
+    with pytest.raises(SystemExit) as exc:
+        script.main([
+            "--snapshot", str(source), "--labels", str(labels),
+            "--config", str(config), "--pool-out", str(pool_out),
+        ])
+
+    pool = read_pool(pool_out)
+    assert pool["summary"]["all_degraded"] is True
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "embedding server failed every query" in err
+    assert "different encoder" not in err
+
+
+@needs_vec
+def test_some_degraded_queries_still_exit_0(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#662: a partial fallback is reported but does not fail the run."""
+    source = tmp_path / "sessions.db"
+    ids = build_source(source, [TEXT_A, TEXT_B])
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [ids[0]]},
+        {"text": TEXT_B, "relevant": [ids[1]]},
+    ])
+    pool_out = tmp_path / "pool.json"
+
+    # The first scoring query embeds; every one after it finds the encoder
+    # down, so the pool is part vector, part keyword.
+    seen = {"n": 0}
+
+    async def flaky_embed(self: LLMClient, texts: list[str], kind: str) -> list[list[float]]:
+        seen["n"] += 1
+        if seen["n"] > 1:
+            raise RuntimeError("encoder down")
+        return [bow_embed(t) for t in texts]
+
+    monkeypatch.setattr(LLMClient, "embed", flaky_embed)
+
     script.main([
         "--snapshot", str(source), "--labels", str(labels),
         "--config", str(config), "--pool-out", str(pool_out),
     ])
 
-    # Per-query flag, summary count, and the stdout sentence.
     pool = read_pool(pool_out)
-    assert [q["degraded"] for q in pool["queries"]] == [True, True]
-    assert pool["summary"]["degraded"] == 2
-    assert "FTS5 fallback on 2 of 2 queries" in capsys.readouterr().out
+    assert [q["degraded"] for q in pool["queries"]] == [False, True]
+    assert pool["summary"]["degraded"] == 1
+    assert pool["summary"]["all_degraded"] is False
+    assert "FTS5 fallback on 1 of 2 queries" in capsys.readouterr().out
 
 
 def test_snapshot_names_unreachable_label_ids(
@@ -366,7 +469,7 @@ def test_snapshot_names_unreachable_label_ids(
     ])
     pool_out = tmp_path / "pool.json"
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels),
         "--config", str(config), "--pool-out", str(pool_out),
     ])
@@ -424,7 +527,7 @@ def test_snapshot_never_calls_chat_or_embeds_documents(
         {"text": query_texts[1], "relevant": [ids[1]]},
     ])
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
         "--pool-out", str(tmp_path / "pool.json"),
     ])
@@ -515,7 +618,7 @@ def test_snapshot_pool_json_holds_whole_pool(
     labels = write_labels(tmp_path / "labels.json", [{"text": TEXT_A, "relevant": [ids[0]]}])
     pool_out = tmp_path / "pool.json"
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
         "--pool-out", str(pool_out), "--k", "1",
     ])
@@ -552,10 +655,14 @@ def test_config_half_life_days_changes_scores(
             memory={"half_life_days": half_life},
         )
         pool_out = tmp_path / f"pool{half_life}.json"
-        script.main([
-            "--snapshot", str(source), "--labels", str(labels),
-            "--config", str(config), "--pool-out", str(pool_out),
-        ])
+        # A config with no embedding profile is an FTS-only run, which #662
+        # now refuses after writing the pool; the scores are still there.
+        with pytest.raises(SystemExit) as exc:
+            script.main([
+                "--snapshot", str(source), "--labels", str(labels),
+                "--config", str(config), "--pool-out", str(pool_out),
+            ])
+        assert exc.value.code == 1
         candidates = read_pool(pool_out)["queries"][0]["candidates"]
         assert [c["id"] for c in candidates] == ids
         scores[half_life] = candidates[0]["score"]
@@ -601,7 +708,7 @@ def test_snapshot_not_a_database_reports_open_error(
 def run(script: ModuleType, tmp_path: Path, labels: Path, *extra: str) -> dict:
     """Run snapshot mode over tmp_path/sessions.db and return the pool JSON."""
     pool_out = tmp_path / "pool.json"
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(tmp_path / "sessions.db"), "--labels", str(labels),
         "--config", str(tmp_path / "agent.yaml"), "--pool-out", str(pool_out),
         *extra,
