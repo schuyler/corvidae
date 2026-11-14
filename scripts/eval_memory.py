@@ -719,8 +719,15 @@ async def run_snapshot_evaluation(
         if degraded == len(results):
             # #662: every query degraded — the pool file is useless for
             # calibration. Name the cause and refuse to write it.
-            cause = "embedding server unreachable" if memory._embedding_cfg else                     "no embedding profile in config"
-            fail(f"eval_memory: all {len(results)} queries degraded to FTS5 "
+            n = len(results)
+            if memory._embedding_cfg is None:
+                cause = "no embedding profile in config"
+            elif memory._encoder_mismatch:
+                expected = memory._embedding_cfg.get("model", "unknown")
+                cause = f"encoder mismatch (config wants {expected})"
+            else:
+                cause = "embedding server unreachable"
+            fail(f"eval_memory: all {n} queries degraded to FTS5 "
                  f"({cause}); the pool file would hold FTS5's constant 0.6 "
                  f"similarity for every candidate and is useless for "
                  f"calibration. Fix the embedding path and re-run.")

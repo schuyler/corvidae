@@ -6,13 +6,10 @@
 #704: each candidate in the pool JSON carries its relative-gate z.
 """
 
-import json
 from pathlib import Path
 from types import ModuleType
-from typing import Any
 
 import pytest
-import yaml
 
 from .test_eval_memory_snapshot import (
     FTS_CONFIG,
@@ -33,6 +30,7 @@ from .test_eval_memory_snapshot import (
 
 def test_all_degraded_exits_nonzero(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A snapshot run where every query degraded to FTS5 exits non-zero."""
     # FTS_CONFIG has no embedding profile, so every query degrades.
@@ -45,22 +43,15 @@ def test_all_degraded_exits_nonzero(
 
     with pytest.raises(SystemExit) as excinfo:
         run(script, tmp_path, labels, "--k", "3")
-    assert excinfo.value.code != 0
-    # The error message should say which cause it saw.
-    # (The exact wording is implementation-defined; just check it's non-empty.)
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "degraded to FTS5" in err
 
-
-def test_partial_degradation_still_exits_zero(
-    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
-) -> None:
-    """A snapshot run where some (not all) queries degraded exits zero."""
-    # EMBED_CONFIG has an embedding profile, so queries use the vec path.
-    # This test needs the vec path to work; skip if unavailable.
-    pass  # This test is a placeholder; the all-degraded test above is the key one.
 
 
 # #661: pool JSON records effective settings.
 
+@needs_vec
 def test_pool_json_records_effective_settings(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
 ) -> None:
@@ -76,10 +67,10 @@ def test_pool_json_records_effective_settings(
     # The pool JSON should have the effective settings under "settings".
     assert "settings" in pool, "pool JSON missing settings"
     settings = pool["settings"]
-    assert "half_life_days" in settings, "settings missing half_life_days"
-    assert "recency_from" in settings, "settings missing recency_from"
-    assert "band_on" in settings, "settings missing band_on"
-    assert "encoder" in settings, "settings missing encoder"
+    assert settings["half_life_days"] == 30.0
+    assert settings["recency_from"] == "created"
+    assert settings["band_on"] == "relative"
+    assert settings["encoder"] is not None
 
 
 # #704: each candidate carries its relative-gate z.

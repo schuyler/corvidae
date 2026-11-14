@@ -329,7 +329,8 @@ def test_snapshot_reports_fts_fallback_on_encoder_mismatch(
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
     assert "degraded to FTS5" in err
-    assert "other-embedder" in err or "embedding" in err
+    assert "encoder mismatch" in err
+    assert "other-embedder" in err
 
 
 def test_snapshot_names_unreachable_label_ids(
@@ -531,35 +532,20 @@ def test_snapshot_pool_json_holds_whole_pool(
     assert scores == sorted(scores, reverse=True)
 
 
-def test_config_half_life_days_changes_scores(
+def test_fts_only_run_exits_nonzero(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """S8: memory.half_life_days from --config reaches the scorer.
-
-    #662: a single-query FTS run now exits non-zero (all queries degraded),
-    so the half-life score check moves to a two-query setup where the second
-    query is a negative probe (not scored, but still in the pool).
-    """
-    # FTS-path source (no embedding profile) with a ten-day-old row.
+    """#662: a single-query FTS-only run exits non-zero (all queries degraded)."""
     source = tmp_path / "sessions.db"
     ids = build_source(
-        source, [TEXT_A, TEXT_B], config=FTS_CONFIG,
+        source, [TEXT_A], config=FTS_CONFIG,
         created_at=time.time() - 10 * 86400, embedded=False,
     )
-    # Two queries: one scored, one negative probe. Both degrade (FTS path),
-    # so degraded=2, len(results)=2 → #662 fires.
-    # To avoid the #662 exit, we need at least one non-degraded query.
-    # With FTS_CONFIG, all queries degrade. So this test can't work as-is.
-    # The #662 behavior is correct: a fully-degraded FTS run is useless.
-    # Update: expect the SystemExit and verify the message.
     labels = write_labels(tmp_path / "labels.json", [
         {"text": TEXT_A, "relevant": [ids[0]]},
     ])
-    config = write_config(
-        tmp_path / "agent.yaml", FTS_CONFIG,
-        memory={"half_life_days": 1},
-    )
+    config = write_config(tmp_path / "agent.yaml", FTS_CONFIG)
     pool_out = tmp_path / "pool.json"
     with pytest.raises(SystemExit) as excinfo:
         script.main([
@@ -567,7 +553,41 @@ def test_config_half_life_days_changes_scores(
             "--config", str(config), "--pool-out", str(pool_out),
         ])
     assert excinfo.value.code == 1
-    assert "degraded to FTS5" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "degraded to FTS5" in err
+    assert "no embedding profile" in err
+
+@needs_vec
+def test_config_half_life_days_changes_scores(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path,
+) -> None:
+    """S8: memory.half_life_days from --config reaches the vec-path scorer."""
+    source = tmp_path / "sessions.db"
+    ids = build_source(
+        source, [TEXT_A], created_at=time.time() - 10 * 86400,
+    )
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [ids[0]]},
+    ])
+
+    scores: dict[float, float] = {}
+    for half_life in (1, 1000):
+        config = write_config(
+            tmp_path / f"agent{half_life}.yaml", EMBED_CONFIG,
+            memory={"half_life_days": half_life},
+        )
+        pool_out = tmp_path / f"pool{half_life}.json"
+        script.main([
+            "--snapshot", str(source), "--labels", str(labels),
+            "--config", str(config), "--pool-out", str(pool_out),
+        ])
+        candidates = read_pool(pool_out)["queries"][0]["candidates"]
+        assert [c["id"] for c in candidates] == ids
+        scores[half_life] = candidates[0]["score"]
+
+    # A shorter half-life decays the score more.
+    assert scores[1] < scores[1000]
 
 
 def test_snapshot_not_a_database_reports_open_error(
