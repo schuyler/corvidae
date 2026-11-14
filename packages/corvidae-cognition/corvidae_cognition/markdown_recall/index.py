@@ -42,7 +42,11 @@ OVERFETCH = 3
 
 # The chunker version stamped into the manifest meta: a change here (a new
 # vendored chunker) rebuilds the whole index, like an encoder change.
-CHUNKER_VERSION = "otterwiki-1"
+# otterwiki-2: a merged stub section keeps its heading in the chunk text
+# (#863), so every chunk's text is different — reconcile() only re-chunks a
+# file whose content hash moved, so without this bump the fix would never
+# reach a page nobody edits again.
+CHUNKER_VERSION = "otterwiki-2"
 
 CHUNKS_DDL = """
 CREATE TABLE IF NOT EXISTS chunks (

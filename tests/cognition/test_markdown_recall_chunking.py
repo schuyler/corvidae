@@ -198,6 +198,23 @@ class TestSectionAwareChunking:
         text = "\n".join(c["text"] for c in chunk_page("test", content))
         assert "Status" in text and "Done." in text
 
+    def test_a_heading_only_stub_keeps_its_heading(self):
+        """A stub with a title and no body still contributes the title.
+
+        Nothing pins this in the pre-fix code path (which dropped an empty
+        stub entirely), and it is the case that matters most in practice: a
+        "## Known bugs" heading that says nothing yet. Case taken from #903,
+        which found it against the same bug.
+        """
+        long_body = " ".join([f"word{i}" for i in range(60)])
+        content = (
+            "---\ntitle: Heading Only\n---\n"
+            "# Known bugs\n\n"
+            f"# Long Section\n\n{long_body}"
+        )
+        text = "\n".join(c["text"] for c in chunk_page("test", content))
+        assert "Known bugs" in text
+
     def test_page_title_falls_back_to_pagepath(self):
         content = "# Section One\n\nSome content here in the section."
         result = chunk_page("My/Wiki/Page", content)
