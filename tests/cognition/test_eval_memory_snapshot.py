@@ -176,6 +176,7 @@ def read_pool(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
+@needs_vec
 def test_snapshot_copy_leaves_source_bytes_and_includes_wal_rows(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
@@ -333,6 +334,7 @@ def test_snapshot_reports_fts_fallback_on_encoder_mismatch(
     assert "other-embedder" in err
 
 
+@needs_vec
 def test_snapshot_names_unreachable_label_ids(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
@@ -396,6 +398,7 @@ def test_snapshot_names_unreachable_label_ids(
         assert status in out
 
 
+@needs_vec
 def test_snapshot_never_calls_chat_or_embeds_documents(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
     tmp_path: Path,
