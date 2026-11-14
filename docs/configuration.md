@@ -987,6 +987,7 @@ For `transport: stdio`, the required keys are `command` and optionally `args` an
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| `mcp.servers.<name>.tools` | mapping | none | Narrows which of that server's tools reach the registry; see below. `include` keeps only the tools whose own name matches one of its globs, then `exclude` drops from that set. Absent keeps every tool, and the block is static config (not hot-reloaded). |
 | `mcp.servers.<name>.headers` | map of string to string | none | HTTP headers sent on every request to the server (`streamable_http` and `sse` only). A value may contain `${VAR}`, replaced at connect time from the daemon's environment; put secrets there, not in `agent.yaml`. If a referenced variable is unset, empty, or contains a newline or NUL (a trailing newline from a secrets file, say), that server is skipped with one WARNING naming the server, the header and the variable, and it is not retried, since the environment can't change without a restart. Only the braced `${VAR}` form is substituted. Header values are never logged. |
 
 **A credential in the `url` is redacted, but a `${VAR}` header is the shape to prefer.** A token in the query string, or a `user:pass@` userinfo, is dropped from corvidae's own MCP warnings (#386) and from the log records the MCP SDK and HTTP client emit (#595): when the client starts, every root log handler gains a filter over `mcp.*`, `httpx.*`, `httpx2.*`, `httpcore.*` and `httpcore2.*` that reduces every URL in a library record that carries a credential marker to scheme, host, port and path, so an innocent URL in the same record loses its query too (`https://api.example/x?page=2` becomes `https://api.example/x?…`). That filter is a net over text corvidae does not emit, so it catches the URL shapes it knows and nothing else — a library that wrote the credential in some other form, a handler attached to a descendant logger, or a logger outside that list (`asyncio`, `anyio`) would still get through. The filter sits on the root handlers present when the client starts, so a later logging reconfiguration that replaces them drops it.
@@ -1002,6 +1003,9 @@ mcp:
       env:                     # optional environment variables (stdio only)
         NODE_ENV: production
       tool_prefix: "fs"        # optional; defaults to server name
+      tools:                   # optional; keep a few of a large server's tools (#529)
+        include: ["read_*", "list_*"]   # only these, if present
+        exclude: ["*_delete_*"]         # dropped after include
       timeout_seconds: 30      # optional; per tool call; default 30 (above tools.call_timeout, the call is cut at call_timeout)
       connect_timeout_seconds: 30  # optional; connect + initialize + list_tools; default 30
 
@@ -1019,6 +1023,21 @@ mcp:
       tool_prefix: "remote"            # optional; defaults to server name
       timeout_seconds: 30              # optional; per tool call; default 30 (above tools.call_timeout, the call is cut at call_timeout)
 ```
+
+`mcp.servers.<name>.tools` narrows a server's tool list before it reaches the
+registry, which matters because every tool schema is prefill on every call
+whether or not the agent uses it: a server exposing dozens of tools that the
+operator wants three of otherwise costs the rest on every turn. Patterns are
+`fnmatch` globs (`*`, `?`, `[seq]`) matched against the server's **own** tool
+name — not the `<tool_prefix>__` name the agent sees — so a pattern keeps
+working when `tool_prefix` changes. `include`, when present, keeps only the
+matching tools; `exclude` then drops from that set, so a tool matching both is
+dropped. One INFO line per connection says how many tools the filter kept, and
+each pattern that matched no tool logs a WARNING naming it, since the failure a
+typo causes (a tool silently absent from the prompt) is otherwise invisible. A
+filtered-out tool cannot be called by the agent at all: the schema is what tells
+it the tool exists. Out of scope, deliberately: changing the filter during a run
+(#530) and per-channel narrowing, which is `channels.<id>.tools.disabled`.
 
 `connect_timeout_seconds` bounds each server's startup handshake (transport
 open, `initialize`, `list_tools`); it must be positive. A server that does not
@@ -1038,7 +1057,9 @@ a mapping, an unknown `transport`, a missing or null (or non-string) `command`/`
 `args` that is not a list of strings, `env` that is not a mapping, `headers`
 that is not a mapping, a `timeout_seconds` or `connect_timeout_seconds` that is
 not a finite number (`.nan`, `.inf`, a string or a list), a non-positive
-`connect_timeout_seconds`, and an unset `${VAR}` in `headers`. A malformed
+`connect_timeout_seconds`, a `tools` block that is not a mapping or that names
+a key other than `include`/`exclude`, a `tools.include` or `tools.exclude` that
+is not a list of non-empty glob strings, and an unset `${VAR}` in `headers`. A malformed
 block as a whole fails startup with a `Config error` naming the key and value:
 `mcp` that is not a mapping, or `mcp.servers` that is neither null nor a mapping
 (`mcp: null` and `servers: null` just mean no servers). The `mcp` section itself

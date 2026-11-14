@@ -75,15 +75,19 @@ def _make_server_state(
     prefix: str = "myserver",
     timeout_seconds: float = 30.0,
     mcp_tools: list | None = None,
+    tools=None,
 ) -> _McpServerState:
     """Build a _McpServerState for use in unit tests."""
-    return _McpServerState(
+    state = _McpServerState(
         name=name,
         session=session or MagicMock(),
         prefix=prefix,
         timeout_seconds=timeout_seconds,
         mcp_tools=mcp_tools or [],
     )
+    if tools is not None:
+        state.tools = tools
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -1781,3 +1785,136 @@ def test_an_mcp_tool_function_declares_untrusted_output():
 
     tool = _make_tool(_make_server_state(), _make_mcp_tool("anything"))
     assert declares_untrusted_output(tool.fn)
+
+
+# ---------------------------------------------------------------------------
+# TestToolFilters: per-server include/exclude globs (#529)
+# ---------------------------------------------------------------------------
+
+
+class TestToolFilters:
+    """A server's tools can be narrowed before they reach the registry.
+
+    Every tool schema is prefill on every call, so an operator running a large
+    MCP server wants a few of its tools, not all of them. Patterns match the
+    server's own tool name, so they survive a change of ``tool_prefix``.
+    """
+
+    @staticmethod
+    def _filter(include=(), exclude=()):
+        from corvidae.mcp_client import _ToolFilter
+
+        return _ToolFilter(include=tuple(include), exclude=tuple(exclude))
+
+    @pytest.mark.parametrize("include, exclude, expected", [
+        ((), (), ["search_a", "search_b", "get_a", "delete_a"]),
+        (("search_*",), (), ["search_a", "search_b"]),
+        ((), ("*delete*",), ["search_a", "search_b", "get_a"]),
+        # both: include selects, exclude drops from that selection
+        (("search_*", "get_*"), ("*_a",), ["search_b"]),
+        # an exclude that the include never selected changes nothing
+        (("search_*",), ("get_*",), ["search_a", "search_b"]),
+        (("nomatch_*",), (), []),
+    ])
+    def test_the_filter_decides_which_tools_are_built(self, include, exclude, expected):
+        plugin = McpClientPlugin(None)
+        state = _make_server_state(
+            name="big", prefix="big",
+            mcp_tools=[_make_mcp_tool(n) for n in
+                       ("search_a", "search_b", "get_a", "delete_a")],
+            tools=self._filter(include, exclude),
+        )
+        plugin._servers = [state]
+
+        assert [t.name for t in plugin._build_tool_list()] == [
+            f"big__{n}" for n in expected
+        ]
+
+    def test_a_pattern_matches_the_servers_own_name_not_the_prefixed_one(self):
+        """The prefix is a local naming choice; a filter must not encode it."""
+        plugin = McpClientPlugin(None)
+        state = _make_server_state(
+            name="big", prefix="renamed", mcp_tools=[_make_mcp_tool("search_a")],
+            tools=self._filter(include=("search_*",)),
+        )
+        plugin._servers = [state]
+
+        assert [t.name for t in plugin._build_tool_list()] == ["renamed__search_a"]
+
+    def test_an_info_line_says_how_many_tools_the_filter_dropped(self, caplog):
+        plugin = McpClientPlugin(None)
+        state = _make_server_state(
+            name="big", prefix="big",
+            mcp_tools=[_make_mcp_tool(n) for n in ("search_a", "get_a", "delete_a")],
+            tools=self._filter(include=("search_*",)),
+        )
+        plugin._servers = [state]
+
+        with caplog.at_level(logging.INFO, logger="corvidae.mcp_client"):
+            plugin._build_tool_list()
+
+        info = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert any("kept 1 of 3" in m for m in info), info
+
+    def test_a_pattern_that_matches_nothing_warns_once_per_connection(self, caplog):
+        """A typo'd pattern silently hides tools, so it is named — and a rebuild
+        of the cached list must not repeat it."""
+        plugin = McpClientPlugin(None)
+        state = _make_server_state(
+            name="big", prefix="big", mcp_tools=[_make_mcp_tool("search_a")],
+            tools=self._filter(include=("search_*", "serch_*")),
+        )
+        plugin._servers = [state]
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
+            plugin._build_tool_list()
+            plugin._build_tool_list()
+
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelno == logging.WARNING and "matched no tool" in r.getMessage()]
+        assert len(warnings) == 1, warnings
+        assert "'serch_*'" in warnings[0]
+        assert "mcp.servers.big.tools" in warnings[0]
+
+    def test_an_absent_filter_keeps_every_tool_and_logs_nothing(self, caplog):
+        plugin = McpClientPlugin(None)
+        plugin._servers = [_make_server_state(
+            name="big", prefix="big",
+            mcp_tools=[_make_mcp_tool(n) for n in ("search_a", "get_a")],
+        )]
+
+        with caplog.at_level(logging.DEBUG, logger="corvidae.mcp_client"):
+            tools = plugin._build_tool_list()
+
+        assert len(tools) == 2
+        assert not [r for r in caplog.records if "tool filter" in r.getMessage()]
+
+    @pytest.mark.parametrize("bad, key, shown", [
+        ({"include": "search_*"}, "mcp.servers.bad.tools.include", "'search_*'"),
+        ({"include": [1]}, "mcp.servers.bad.tools.include", "[1]"),
+        ({"exclude": [""]}, "mcp.servers.bad.tools.exclude", "['']"),
+        ({"includes": ["x"]}, "mcp.servers.bad.tools", "'includes'"),
+        (["x"], "mcp.servers.bad.tools", "['x']"),
+    ])
+    async def test_a_bad_filter_is_a_config_error_naming_key_and_value(
+        self, pm, kernel_clock, sdk, caplog, bad, key, shown
+    ):
+        """A filter that cannot be read must fail the server once, not retry."""
+        sdk.up.add("good")
+        config = _servers("good")
+        config["mcp"]["servers"]["bad"] = {
+            "transport": "stdio", "command": "bad", "args": [], "tools": bad,
+        }
+        caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
+        plugin, _ = await _start_plugin(pm, config)
+        try:
+            assert [s.name for s in plugin._servers] == ["good"]
+            assert plugin._pending_servers == {}
+            skips = [r for r in caplog.records if r.levelno == logging.WARNING
+                     and r.__dict__.get("server") == "bad"]
+            assert len(skips) == 1, skips
+            msg = skips[0].getMessage()
+            assert key in msg and shown in msg, msg
+            assert "failed to connect" not in msg
+        finally:
+            await plugin.on_stop()
