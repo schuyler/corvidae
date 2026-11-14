@@ -477,6 +477,7 @@ class TestWithheldStillCritiqued:
         env.pm.register(critique, name="critique")
         await critique.on_init(pm=env.pm, config=env.config)
 
+        withheld: list[str] = []
         for origin in ("reminder", "user", "critique", "heartbeat", "task"):
             eligible = critique._eligible("t1", {"origin": origin})
             verdict = await env.gates.should_send_response(
@@ -484,6 +485,18 @@ class TestWithheldStillCritiqued:
                 trace_id="t1", annotations={"origin": origin},
             )
             assert not (eligible and verdict is False), origin
+            if verdict is False:
+                withheld.append(origin)
+        # The assertion above is only worth something if the gate can withhold
+        # at all under this fixture: an exempt-everything gate would pass it
+        # vacuously.
+        assert withheld, "no origin was withheld, so the property is untested"
+        # The same guard on the other half: a broken _eligible that returned
+        # False for everything would satisfy the assertion above silently.
+        assert any(
+            critique._eligible("t1", {"origin": origin})
+            for origin in ("reminder", "user", "critique", "heartbeat", "task")
+        ), "no origin was eligible, so the property is untested"
 
 class _FakePM:
     def __init__(self, **plugins):
@@ -562,9 +575,11 @@ class TestDecisionTable:
             ({"origin": "heartbeat"}, 0.1, {"gate": {"send": {"enforce": False}}}, None,
              {"vetoed": False, "would_veto": True, "enforced": False}),
             # A reminder is text the operator scheduled: never withheld, and the
-            # record says why rather than blaming the threshold.
+            # record says why rather than blaming the threshold -- while still
+            # carrying the counterfactual the threshold fit needs.
             ({"origin": "reminder"}, 0.1, {}, None,
-             {"origin": "reminder", "vetoed": False, "reason": "reminder_origin"}),
+             {"origin": "reminder", "vetoed": False, "would_veto": True,
+              "reason": "reminder_origin"}),
             # annotations["origin"] is used as-is, and every other origin still
             # takes the threshold.
             ({"origin": "critique"}, 0.1, {}, False, {"origin": "critique", "vetoed": True}),
@@ -593,6 +608,9 @@ class TestDecisionTable:
         send = log.writes[-1]["outcomes"]["send"]
         assert send["vetoed"] is False and send["reason"] == "reminder_origin"
         assert send["salience"] == salience
+        # The counterfactual survives the exemption: this row would have been
+        # withheld, so a threshold fit can still count it.
+        assert send["would_veto"] is True
 
     async def test_user_final_skips_advisory_reads(self):
         gate, log, channel = await _gate(appraisal=_StubAppraisal(0.0))
