@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import threading
 import warnings
 
 from corvidae.runtime import Runtime
@@ -49,7 +50,14 @@ async def _run(config_path: str) -> int:
             file=sys.stderr,
         )
         return 1
-    print("pre-flight OK", file=sys.stderr)
+
+    # _cleanup_failed_start is best effort: a plugin that leaked a non-daemon
+    # thread during on_init used to hold this process open until the restart
+    # tool's preflight_timeout killed it (default 120 s) (#757). Arm the same
+    # bound the daemon uses — armed here, inside the coroutine, because the
+    # wait it bounds happens after this returns, when asyncio shuts down and
+    # the interpreter joins non-daemon threads.
+    runtime.arm_exit_bound()
     return 0
 
 
@@ -65,7 +73,30 @@ def main() -> int:
     warnings.simplefilter("ignore")
     logging.disable(logging.CRITICAL)
 
-    return asyncio.run(_run(args.config))
+    code = asyncio.run(_run(args.config))
+    if code != 0:
+        return code
+    # Any non-daemon thread still running now is a plugin's: asyncio has
+    # joined its own executor, which is what a check inside the coroutine
+    # would have caught instead. Name it directly — kernel logging is off
+    # here, so the watchdog's own WARNING would go nowhere the operator can
+    # see — and refuse the restart, because the daemon would leak it too.
+    survivors = [
+        t.name
+        for t in threading.enumerate()
+        if t is not threading.main_thread() and not t.daemon
+    ]
+    if survivors:
+        print(
+            f"pre-flight: {', '.join(survivors)} still running after the "
+            f"plugins were stopped; a plugin opened something in on_init and "
+            f"did not close it in on_stop. Refusing the restart; this process "
+            f"exits within daemon.exit_timeout.",
+            file=sys.stderr,
+        )
+        return 1
+    print("pre-flight OK", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":

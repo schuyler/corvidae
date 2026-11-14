@@ -20,6 +20,23 @@ from state_dir_guard import forbid_writes_to_cwd_state  # noqa: F401
 warnings.filterwarnings("ignore", message=".*iscoroutinefunction.*deprecated.*")
 
 
+@pytest.fixture(autouse=True)
+def _no_exit_watchdog_in_process(monkeypatch):
+    """Never arm the exit watchdog inside the pytest process.
+
+    ``run()`` takes ``exit_watchdog=False`` by default for exactly this
+    reason, but a test can reach the armed path through ``run_daemon`` — the
+    acp CLI tests invoke the command in-process — and then a failed start
+    arms a thread that ends the whole pytest run with ``os._exit(1)`` some
+    seconds later, with no summary and no failing test to point at (#757).
+    The watchdog itself is exercised where it belongs: in subprocesses
+    (tests/test_exit_watchdog.py, tests/corvidae_restart/test_preflight.py).
+    """
+    import corvidae.runtime
+
+    monkeypatch.setattr(corvidae.runtime, "arm_exit_watchdog", lambda timeout: None)
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--run-eval", action="store_true", default=False,
