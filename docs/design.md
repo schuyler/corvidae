@@ -3663,7 +3663,8 @@ returns (a null or absent `reaction` falls through to the text rule as before).
    created.
 3. A `reaction` that is not an object: WARNING, dropped.
 4. `isRemove` true: DEBUG, dropped. Removals are noise by decision.
-5. Emoji check (`_is_plain_emoji`): see below. A mismatch is a WARNING naming the
+5. Emoji check (`_is_single_emoji`): a membership test against the RGI table
+   from the `emoji` package, see below. A mismatch is a WARNING naming the
    sender, with the value cut to 32 characters and then `%r`'d, so an escape is
    never split.
 6. `targetSentTimestamp` must be an `int` (`type(x) is int`, so `True` fails),
@@ -3689,26 +3690,35 @@ a thumbs-up starts no turn and gets no reply; the row sits at the tail of the
 next turn's window, after that turn's own user message. `on_notify` was
 rejected for this because it always enqueues a turn.
 
-*Why the emoji shape is so narrow.* The emoji string is sender-controlled and
-goes into the prompt. A grammar for compound emoji (flags, keycaps, ZWJ
-sequences) was tried twice in review and each version had a new hole: tag-sequence
-payloads, enclosed letters joined by ZWJ, regional-indicator words. So
-`_PLAIN_EMOJI` accepts exactly one pictograph, then optionally one skin-tone
-modifier (U+1F3FB to 1F3FF), then optionally VS16 (U+FE0F), matched with
-`fullmatch` (a trailing newline fails). A pictograph is a code point in one of
-the emoji-bearing Unicode blocks, taken as whole blocks so emoji added later
-still pass; the skin-tone modifiers are carved out of those ranges so they only
-follow a base. No ZWJ, tag character, digit, keycap or regional indicator
-matches, so at most three code points get through and only one of them carries
-content. The price is that a real compound reaction (a flag, a keycap, a
-family, 🏳️‍🌈) is dropped with a WARNING. Widening it needs a real emoji table, not a
-hand-written grammar.
+*How a reaction's emoji is judged (#780).* The emoji string is
+sender-controlled and goes into the prompt, so what is accepted has to be
+enumerable. Two reviews of a hand-written grammar for compound emoji each found
+a hole — tag characters in a subdivision flag carry hidden ASCII, and
+ZWJ-joined enclosed letters or regional-indicator pairs spell words — so the
+check is no longer a grammar. `_is_single_emoji` asks the `emoji` package
+whether the *whole string* is one emoji (`emoji.is_emoji`, a whole-string test
+in the 2.x series, after stripping one trailing VS16 when what precedes it is
+itself a table entry, so `👍️` and `👍🏽️` stay accepted): a flag (🇯🇵), a keycap (1️⃣), a ZWJ sequence (❤️‍🔥, 🤷‍♀️,
+🏳️‍🌈, the family) and the three RGI subdivision flags pass, while a tag
+sequence carrying hidden ASCII, enclosed letters joined by ZWJ, a
+regional-indicator word, a non-RGI ZWJ join, two emoji in one string and a
+trailing newline fail. `tests/test_signal_reaction_events.py` parametrizes both
+sets and pins the whole-string semantics, so a version bump that changed it
+fails there rather than widening what reaches the prompt.
+
+The table is an extra, not a kernel dependency, following the Discord
+precedent: the transport is in the kernel tree, the `emoji` package comes from
+`--extra signal`, and `corvidae.channels.signal` imports without it (the
+import is guarded, and the kernel CI job asserts the module imports and the
+package is absent). A `signal:` block with the package missing fails at
+`on_init`, naming the package and the install line, rather than dropping every
+reaction at run time: silence is for absence, not for a missing install.
 
 *Shortcuts, each marked `shortcut:` in the code.* Waiting reactions live in
 memory and are lost on a crash. The row has no kernel provenance header and
 bypasses the cognition funnel's trust quarantine (PRD §3.3.11), and the
 allowlist check is the transport's own rather than `should_process_message`
-(PRD §3.2.2); this is safe only because the accepted string is a single symbol
+(PRD §3.2.2); this is safe only because the accepted string is one emoji from a real table
 and the rest of the row is built here (`docs/threat-model.md`, finding 18). An
 agent-initiated contact is not on the allowlist, so its reactions are refused by
 the same check. There is no snippet of the target message, so the agent learns

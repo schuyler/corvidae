@@ -565,6 +565,9 @@ restart = [
 rss = [
     { name = "rss-reader" },
 ]
+signal = [
+    { name = "emoji" },
+]
 timepiece = [
     { name = "corvidae-timepiece" },
 ]
@@ -599,6 +602,7 @@ requires-dist = [
     { name = "cross-channel-send", marker = "extra == 'cross-channel-send'", editable = "packages/cross-channel-send" },
     { name = "ddgs", specifier = ">=9.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.4" },
+    { name = "emoji", marker = "extra == 'signal'", specifier = ">=2.14,<3" },
     { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1" },
     { name = "mcp", specifier = ">=2.0" },
     { name = "pydantic", specifier = ">=2.13.3" },
@@ -610,7 +614,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "webhook-notify", marker = "extra == 'webhook-notify'", editable = "packages/webhook-notify" },
 ]
-provides-extras = ["dev", "acp", "discord", "cross-channel-send", "vision", "context-panel", "webhook-notify", "rss", "cognition", "restart", "timepiece", "inotify"]
+provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "context-panel", "webhook-notify", "rss", "cognition", "restart", "timepiece", "inotify"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -787,6 +791,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ef/57/9a2d9abdabdc9db8ef28ce0cf4129669e1c8717ba28d607b5ba357c4de3b/discord_py-2.7.1.tar.gz", hash = "sha256:24d5e6a45535152e4b98148a9dd6b550d25dc2c9fb41b6d670319411641249da", size = 1106326, upload-time = "2026-03-03T18:40:46.24Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f7/a7/17208c3b3f92319e7fad259f1c6d5a5baf8fd0654c54846ced329f83c3eb/discord_py-2.7.1-py3-none-any.whl", hash = "sha256:849dca2c63b171146f3a7f3f8acc04248098e9e6203412ce3cf2745f284f7439", size = 1227550, upload-time = "2026-03-03T18:40:44.492Z" },
+]
+
+[[package]]
+name = "emoji"
+version = "2.16.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/34/01/a25a9c13e2f8945d06b219e08e88a5dd8a504ad1a79f872f25d6814f498c/emoji-2.16.0.tar.gz", hash = "sha256:ff9e9b1c48389ef78ed1787e7693c555e84e6bb9bac16be1fd65e1616dbf80c8", size = 617905, upload-time = "2026-09-16T19:47:57.051Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fd/8a/75e3177f374877b19dd3112820b071836ad1100f9f58424630b4783519bc/emoji-2.16.0-py3-none-any.whl", hash = "sha256:c4230d80640def9071599ff56b1b5950fe13a2a94c0da98c5deab12431b24330", size = 610912, upload-time = "2026-09-16T19:47:55.507Z" },
 ]
 
 [[package]]

@@ -201,29 +201,56 @@ MAX_REACT_EMOJI_CODE_POINTS = 16
 # A target timestamp must be below year 9999, in milliseconds.
 _MAX_TARGET_TS_MS = 253402300800000
 
-# One pictograph from the emoji-bearing Unicode blocks (whole blocks, so emoji
-# added later still pass), then optionally one skin-tone modifier and VS16.
-# The skin-tone modifiers U+1F3FB-1F3FF are carved out of the pictograph
-# ranges, so they are accepted only after a base. No ZWJ, tag character, digit
-# or keycap matches, so a compound emoji is dropped (design: Deferred).
-_PLAIN_EMOJI = re.compile(
-    "[\u00a9\u00ae\u203c\u2049\u2122\u2139\u2190-\u21ff\u2300-\u23ff"
-    "\u24c2\u25a0-\u25ff\u2600-\u27bf\u2900-\u297f\u2b00-\u2bff"
-    "\u3030\u303d\u3297\u3299\U0001f000-\U0001f0ff\U0001f170\U0001f171"
-    "\U0001f17e\U0001f17f\U0001f18e\U0001f191-\U0001f19a"
-    "\U0001f200-\U0001f3fa\U0001f400-\U0001faff]"
-    "[\U0001f3fb-\U0001f3ff]?\ufe0f?"
+# A reaction's emoji is judged against a real emoji table, not a grammar
+# (#780). Two hand-written grammars were each found to let something through:
+# tag characters in a subdivision flag carry hidden ASCII, and ZWJ-joined
+# enclosed letters or regional-indicator pairs spell words. The transport is
+# in the kernel like Discord's, but the table is its own extra (`signal`), so
+# the import is guarded and a configured transport refuses to start without
+# it — the kernel job installs no extras and must still import this module.
+try:  # pragma: no cover - the kernel job takes the ImportError branch
+    import emoji as _emoji
+except ImportError:  # pragma: no cover
+    _emoji = None
+
+_INSTALL_HINT = (
+    "uv sync --extra signal, naming the other extras you use as well "
+    "(e.g. --extra dev --extra acp --extra signal): uv sync removes extras "
+    "you don't name"
 )
 
 
-def _is_plain_emoji(value: str) -> bool:
-    """Whether ``value`` is one pictograph, optionally with a skin tone and VS16.
+def emoji_table_missing() -> bool:
+    """Whether the emoji table the reaction check needs failed to import."""
+    return _emoji is None
 
-    The value is sender-controlled and goes into the prompt, so the accepted
-    set is kept small enough to check exhaustively. ``fullmatch``, not
-    ``match``: a trailing newline must fail.
+
+def _is_single_emoji(value: str) -> bool:
+    """Whether ``value`` is exactly one emoji, per the RGI table (#780).
+
+    A flag (``🇯🇵``), a keycap (``1️⃣``) and a ZWJ sequence (``❤️‍🔥``,
+    ``🤷‍♀️``, ``🏳️‍🌈``, the subdivision flags) pass; a tag sequence with
+    hidden ASCII, enclosed letters joined by ZWJ, a regional-indicator word, a
+    non-RGI ZWJ join or a trailing newline do not.
+
+    One normalisation precedes the lookup: a single trailing U+FE0F (VS16) is
+    stripped when what precedes it is itself a table entry, so a base or a
+    base plus skin tone followed by VS16 (``👍️``, ``👍🏽️``) is accepted as
+    it was before the table. Nothing else is normalised: a string ending in
+    two VS16, or a VS16 after text, still fails.
+
+    ``emoji.is_emoji`` is what the 2.x series makes it: the *whole string* is
+    one emoji, so this is a membership test rather than a scan.
+    ``tests/test_signal_reaction_events.py::test_the_table_is_what_decides``
+    pins that semantics, so a version bump that changed it fails there instead
+    of quietly widening what reaches the prompt.
     """
-    return _PLAIN_EMOJI.fullmatch(value) is not None
+    if _emoji is None:
+        return False
+    # Strip one trailing VS16 only when the remainder is itself a table entry.
+    if value.endswith("\ufe0f") and _emoji.is_emoji(value[:-1]):
+        return True
+    return _emoji.is_emoji(value)
 
 
 def _format_reaction_time(timestamp_ms: int) -> str:
@@ -330,6 +357,17 @@ class SignalPlugin(TransportPlugin):
             return
         if not isinstance(signal_config, dict):
             raise ValueError("signal: config block must be a mapping")
+
+        # A configured transport needs the emoji table for its reaction check
+        # (#780). Refused here, at startup, rather than dropping every
+        # reaction at run time: silence is for absence, not for a missing
+        # install. Bound once at import, so installing the package needs a restart.
+        if emoji_table_missing():
+            raise RuntimeError(
+                "SignalPlugin: agent.yaml has a signal: block, but the 'emoji' "
+                f"package its reaction check needs is not installed. Install it "
+                f"with {_INSTALL_HINT}."
+            )
 
         socket_path = signal_config.get("socket")
         if not socket_path:
@@ -782,10 +820,10 @@ class SignalPlugin(TransportPlugin):
 
         # The emoji is sender-controlled and enters the prompt: validate it.
         emoji = reaction.get("emoji")
-        if not isinstance(emoji, str) or not _is_plain_emoji(emoji):
+        if not isinstance(emoji, str) or not _is_single_emoji(emoji):
             logger.warning(
                 "signal: dropped reaction from %s: %r is not a single emoji "
-                "(a compound reaction such as a flag or keycap is not accepted)",
+                "(a sequence carrying text or a non-emoji ZWJ join is not accepted)",
                 source_uuid, str(emoji)[:32],
             )
             return
@@ -840,7 +878,7 @@ class SignalPlugin(TransportPlugin):
         # Append each row before removing it, so a failure loses nothing.
         # shortcut: the row bypasses the cognition trust quarantine and has
         # no kernel provenance header (PRD 3.3.11); safe only because the
-        # accepted emoji is one symbol and the rest of the row is built here.
+        # accepted emoji is one table entry and the rest of the row is built here.
         # The allowlist check is the transport's own, not should_process_message.
         # The Agent persists rows appended here that lack a _db_id.
         while pending:

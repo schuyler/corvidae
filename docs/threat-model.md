@@ -1574,13 +1574,17 @@ quarantine. The allowlist check is the transport's own `_is_allowed`, not
 
 Mitigations:
 
-- The emoji must `fullmatch` one shape: a single pictograph from the emoji
-  Unicode blocks, then optionally one skin-tone modifier, then optionally VS16.
-  That is at most three code points, one of which carries content. ZWJ, tag
-  characters, digits, keycaps and regional indicators do not match, so nothing
-  this shape accepts can spell a sentence or hide a payload. Everything else
-  (including a real flag or a family emoji) is dropped with a WARNING naming the
-  sender.
+- The emoji must be **one emoji in a real RGI table** (#780), not merely a
+  match for a hand-written shape: `_is_single_emoji` asks the `emoji` package
+  whether the whole string is one emoji (after stripping one trailing VS16 when
+  what precedes it is itself a table entry, so `👍️` and `👍🏽️` stay accepted),
+  and anything else — a tag sequence
+  carrying hidden ASCII, enclosed letters joined by ZWJ, a regional-indicator
+  word, a non-RGI ZWJ join, two emoji in one string, a trailing newline — is
+  dropped with a WARNING naming the sender. Two grammars were tried before this
+  and each had a hole, which is why the check is a membership test now. The
+  table ships as the `signal` extra and is a guarded import at module load; the transport
+  refuses to start without it rather than dropping reactions at run time.
 - Every other part of the row is built in code: the whose-message word comes
   from a UUID comparison, and the time from an integer that must be positive and
   below year 9999. A non-integer, boolean or out-of-range timestamp drops the
@@ -1592,9 +1596,12 @@ Mitigations:
 
 Accepted residual: the sender is already allowlisted and can send arbitrary text
 through the normal path, so the row adds no capability a sender lacks. What it
-adds is a route around the header and the funnel for one symbol. If the accepted
-set is ever widened (flags and keycaps are the likely ask), the widening needs a
-real emoji table and a fresh look at this entry, not a longer regex. Waiting
+adds is a route around the header and the funnel for one emoji. The accepted
+set is now wider than one pictograph — flags, keycaps, ZWJ sequences — and that was
+widened through a real table, as this entry asked, rather than a longer regex.
+What still holds is the property the mitigation depends on: the accepted string
+is a single sequence from a published table, so it cannot spell a sentence or
+carry a payload. Waiting
 reactions are lost on a crash, and the tools and the event path are verified
 against fake clients and a fake signal-cli socket only (PRD §3.2.9).
 

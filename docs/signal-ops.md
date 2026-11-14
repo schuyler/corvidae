@@ -13,6 +13,20 @@ Two processes cannot share a signal-cli data directory. Once the daemon is
 running, every CLI command in this document will fail until you stop it.
 Do the one-time setup first.
 
+## Install corvidae's Signal extra
+
+The transport itself ships in corvidae, but its reaction check judges an emoji
+against the `emoji` package's RGI table (#780), which is the `signal` extra:
+
+```sh
+uv sync --extra signal --extra dev --extra acp     # name every extra you use
+```
+
+`uv sync` removes extras you don't name, so add `--extra signal` to the line
+you already use rather than replacing it. Without it, a `signal:` block fails
+at startup with a message naming the package, and a `signal:`-less config never
+imports it.
+
 ## Install signal-cli
 
 There is no apt package. Take the pinned release from GitHub:

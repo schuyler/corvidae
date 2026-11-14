@@ -28,6 +28,11 @@ acp = [
 discord = [
     "discord-py>=2.4",
 ]
+# The Signal transport's emoji table (#780). The transport is in the kernel
+# like Discord's, but the RGI table it judges reactions against is an extra.
+signal = [
+    "emoji>=2.14,<3",
+]
 cross-channel-send = [
     "cross-channel-send",
 ]
