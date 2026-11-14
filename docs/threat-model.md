@@ -1194,7 +1194,11 @@ don't bound its total.
 On a metered endpoint, set a spend limit with the provider, and keep
 inbound allowlists tight on any channel with untrusted participants:
 inbound admission is the main control on total cost the tree has. Filtering
-floods at the transport is a future improvement (#296).
+floods at the transport is a future improvement (#296), with one exception
+since #793: `webhook_notify` caps its own deliveries at
+`max_notifications` per `per_seconds` per endpoint (10 per hour by default),
+so a webhook flood costs that many turns per target channel plus one drop
+report, rather than one turn per delivery (finding 16).
 
 ### 15. One identity across channels (by design)
 
@@ -1322,8 +1326,19 @@ to no conversation. What each auth mode gives:
 The `webhook-notify` package is the concrete path from a payload to a prompt:
 each delivery on a configured endpoint is injected into every target channel
 as a fenced notification, so whoever can post to the endpoint chooses text the
-model reads there. Each delivery spends one main-model turn per target
-channel, and provider-side event filtering is the only volume control.
+model reads there. Provider-side event filtering is no longer the only volume
+control: `webhook_notify` throttles per endpoint (#793), on by default. A
+sender now costs at most `max_notifications` turns per `per_seconds` per
+target channel — 10 per hour out of the box — plus one drop report, and the
+digest inside a single notification is bounded by `max_payload_chars` inline
+and the spill cap on disk, as before. Two residual risks remain. A flood can
+still push real events out of the buffer, because the policy is drop-oldest:
+the drops are counted, logged and reported to the model, but the event itself
+is gone. And the cap protects the turn budget, not the disk: a held buffer
+keeps up to `max_buffered` payloads, each of which may spill
+`daemon.notification_spill_max_chars` when it flushes, so the spill growth in
+the next finding still applies at the capped rate rather than at the sender's
+rate.
 
 A payload longer than `max_payload_chars` is cut, and the kernel's
 notification spill service writes the full text to a file

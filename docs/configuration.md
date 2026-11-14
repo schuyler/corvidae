@@ -1127,22 +1127,36 @@ Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv 
 
 ## `webhook_notify` — webhook deliveries as notifications
 
-Requires the webhook-notify extra (`--extra webhook-notify` on your `uv sync` line) and the `webhook` ingress. Each delivery on a listed endpoint is sent to every channel listed for it as a notification: the payload as compact JSON, fenced, with `origin=webhook:<endpoint>` in the header; an over-long payload is cut and spilled to a file (see `daemon.notification_spill_*`). Each delivery costs one turn per target channel. Restart to apply a change.
+Requires the webhook-notify extra (`--extra webhook-notify` on your `uv sync` line) and the `webhook` ingress. Deliveries on a listed endpoint are sent to every channel listed for it as notifications: the payload as compact JSON, fenced, with `origin=webhook:<endpoint>` in the header; an over-long payload is cut and spilled to a file (see `daemon.notification_spill_*`). Restart to apply a change.
+
+**Throttling is on by default (#793).** A delivery on an endpoint with no open window opens one for `batch_seconds`, and everything that arrives in the window is sent as **one** notification: a single delivery as before, more than one as a compact JSON array in arrival order with a `deliveries=<n>` annotation. A burst of forty CI events therefore costs one turn per target channel, not forty. On top of that, at most `max_notifications` flushes go out per endpoint per `per_seconds`; a flush over the cap is held and its deliveries stay buffered up to `max_buffered`, beyond which the oldest are dropped. The next flush that gets through carries `dropped=<n>`, and a window that dropped deliveries and is followed by no flush still sends one notification carrying only `dropped=<n>`, so a drop reaches the model and not just the log; every drop also logs a `WARNING` naming the endpoint and the running count. To restore the pre-#793 behaviour, set `batch_seconds: 0` and a high `max_notifications`.
 
 ```yaml
 webhook_notify:
   max_payload_chars: 8000
+  defaults:                 # every endpoint inherits these; these are the built-in values
+    batch_seconds: 60
+    max_notifications: 10
+    per_seconds: 3600
+    max_buffered: 500
   endpoints:
-    github: [irc:#corvidae, discord:123456789]
-    siri: [signal:+15551234567]
+    github:                 # mapping form: channels plus overrides
+      channels: [irc:#corvidae, discord:123456789]
+      max_notifications: 20
+    siri: [signal:+15551234567]   # bare-list form: these channels, the defaults
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `webhook_notify.max_payload_chars` | integer | `8000` | Longest compact-JSON payload passed inline, in characters. A longer one is cut, and the header says it was cut to the first N of M characters. Where a channel's tools can read spill files, the full text goes to a file the header names (see `daemon.notification_spill_*`). Must be an integer ≥ 1. |
-| `webhook_notify.endpoints.<endpoint>` | list of strings | none | Non-empty list of channel ids (`transport:scope`) notified of each delivery on that `webhook` endpoint. Repeated ids are notified once. |
+| `webhook_notify.defaults.<key>` | see the four keys below | the values above | The throttle every endpoint inherits unless it overrides it. |
+| `webhook_notify.defaults.batch_seconds` | number | `60` | Length of an endpoint's digest window, in seconds. `0` turns batching off and delivers on arrival. Must be ≥ 0. |
+| `webhook_notify.defaults.max_notifications` | integer | `10` | Flushes allowed per endpoint per `per_seconds`. A flush over the cap is held, not dropped. Must be an integer ≥ 1. |
+| `webhook_notify.defaults.per_seconds` | number | `3600` | The window the cap counts over, in seconds. Must be > 0. |
+| `webhook_notify.defaults.max_buffered` | integer | `500` | Deliveries an endpoint may hold while its flush is held. Past it the oldest is dropped, counted and reported. Must be an integer ≥ 1. |
+| `webhook_notify.endpoints.<endpoint>` | list of strings, or mapping | none | Either a non-empty list of channel ids (`transport:scope`) notified of the endpoint's digests, or a mapping with `channels:` plus any of the four throttle keys to override `defaults` for this endpoint. Repeated ids are notified once. All of an endpoint's channels receive the same digest, so the window and the cap are per endpoint; give a channel its own limits by routing it through its own endpoint. |
 
-A malformed block fails startup naming the key and the value; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet (Discord or Signal before they start) is skipped with a `WARNING` for that delivery. For GitHub, filter events in the webhook's own settings: payloads such as `pull_request` and `check_run` are large and are cut at the cap, with the rest in a spill file.
+A malformed block fails startup naming the key, the value and the accepted range, including an unknown key under `defaults` or under an endpoint; an absent block leaves the plugin inert. A target on a transport that cannot build its channels yet (Discord or Signal before they start) is skipped with a `WARNING` naming the endpoint and how many deliveries the digest carried. Buffered deliveries are lost at shutdown, with a `WARNING` naming the endpoint and the count. For GitHub, filter events in the webhook's own settings: payloads such as `pull_request` and `check_run` are large and are cut at the cap, with the rest in a spill file.
 
 ---
 
