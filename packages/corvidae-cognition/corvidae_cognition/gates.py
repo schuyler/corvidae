@@ -54,6 +54,10 @@ SEND_ENFORCE_DEFAULT = True            # gate.send.enforce
 # reply answers the person in front of us; a reminder is text the operator
 # scheduled, and withholding it silently is the gate overruling an instruction.
 _NEVER_WITHHELD_ORIGINS = ("user", "reminder")
+# Origins that skip the advisory reads: only what is both never withheld and
+# frequent. A reminder is never withheld and keeps its advisory reads, because
+# its salience is the measurement that says whether the floor is right.
+_ADVISORY_SKIPPED_ORIGINS = ("user",)
 
 SEND_MIN_SALIENCE_DEFAULT = 0.15       # gate.send.min_salience
 SEND_ALLOW_PROGRESS_DEFAULT = True     # gate.send.allow_progress
@@ -277,9 +281,11 @@ class GatePlugin(CorvidaePlugin):
             vector = await self._pull(
                 appraisal.get_or_compute_out, channel, trace_id, text, direction="out",
             )
-            if origin != "user":
-                # Calibration context for decisions that can bite; a user
-                # final is never withheld, so it skips the extra reads.
+            if origin not in _ADVISORY_SKIPPED_ORIGINS:
+                # A user final answers the person in front of us and is the
+                # commonest origin, so it skips two best-effort reads. An exempt
+                # reminder does not skip them: it is rare enough to afford, and
+                # its score is the evidence for where the floor should sit.
                 record["advisory"] = await self._advisory(appraisal, channel, trace_id)
         salience = (vector or {}).get("salience")
 
@@ -295,8 +301,14 @@ class GatePlugin(CorvidaePlugin):
             # text at that moment, so salience is not the judge of whether to
             # say it -- over three days this gate ate 38 reminder finals on the
             # operator's own channel, scored 0.05-0.15 (#see PR).
+            # The counterfactual is recorded even though nothing is withheld:
+            # without it there is no way to recount how many exempt finals sit
+            # below the floor, which is the only evidence for keeping, moving
+            # or reverting the threshold. Fit on `origin` and `would_veto`, not
+            # on the reason string.
             record.update(
-                salience=salience, vetoed=False, would_veto=False,
+                salience=salience, vetoed=False,
+                would_veto=salience < min_salience,
                 reason=f"{origin}_origin",
             )
             verdict = None
