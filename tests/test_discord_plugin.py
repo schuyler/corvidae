@@ -461,6 +461,19 @@ class TestConfig:
             )
         assert "no leading zeros and no prefix" in str(excinfo.value)
 
+    async def test_two_aliases_naming_one_id_is_refused(self):
+        """One person, two aliases: the allowlist would be ambiguous to read, and
+        removing one line would silently keep them admitted (#702)."""
+        with pytest.raises(ValueError, match="allow.schuyler") as excinfo:
+            await _start_plugin(
+                discord_overrides={
+                    "allow": {"schuyler": AUTH_ID, "schuyler-alt": AUTH_ID}
+                },
+                wait_connect=False,
+            )
+        message = str(excinfo.value)
+        assert "allow.schuyler-alt" in message and "one alias" in message
+
     @pytest.mark.parametrize("bad", ["false", 0, None])
     async def test_require_mention_not_a_bool_raises(self, bad):
         """`require_mention` must be a bool; the error names the key and the remedy."""

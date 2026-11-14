@@ -335,6 +335,12 @@ def _allow_list_from_map(allow: dict) -> list[str]:
                 "123456789012345678, digits only, quoted or not, no leading "
                 "zeros and no prefix — in the discord: block of agent.yaml"
             )
+        if text in ids:
+            first = next(a for a, v in allow.items() if str(v) == text)
+            raise ValueError(
+                f"discord: config entries 'allow.{first}' and 'allow.{alias}' are "
+                f"the same user id ({text}); give that user one alias"
+            )
         ids.append(text)
     return ids
 
