@@ -159,6 +159,11 @@ agent:
 # critique:
 #   fork_prompt:
 #     provenance: "..."               # prompts/critique_<lens>_fork.md
+#   retention:                        # #742: defaults to markdown_recall's root
+#     root: values/                   # the knowledge base the lens files into; inert with neither
+#   lens:
+#     novelty: 0.6                    # both thresholds must be crossed
+#     retention: 0.5
 
 # Engagement and decide gates (optional; cognition extra, see
 # docs/configuration.md "gate.*"). Runtime-tunable per channel via set_settings.
