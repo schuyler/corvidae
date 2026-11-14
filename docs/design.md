@@ -845,6 +845,10 @@ All operations are synchronous; no database access:
   counted accurately. It never raises on a row's content (§3.1.18.1, #392):
   a value JSON cannot encode is counted by its `str()`, and a row that is not
   a mapping is counted by its `repr`, so both still contribute to the budget.
+  A row with a provenance record that renders into a header and fence is
+  counted as it renders (`provenance.sent_form`, #577), because the record is
+  far smaller than the framing it used to stand in for; a person row's header
+  is a separate message and is not counted here.
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.
