@@ -2521,9 +2521,12 @@ class MemoryPlugin(CorvidaePlugin):
         return True
 
     async def _embed_in_chunks(
-        self, client: Any, texts: list[str], channel_id: str,
+        self, client: Any, texts: list[str], where: str,
     ) -> list[list[float] | None]:
         """Embed ``texts`` as documents, halving a batch the server rejects (#655).
+
+        ``where`` names the caller in the warning: a channel id on the write
+        path, and the pass's name where the batch spans channels (#681).
 
         A server with a per-request cap rejects a large batch; the two halves
         are retried, recursively, so depth is bounded by log2 of the count.
@@ -2542,15 +2545,15 @@ class MemoryPlugin(CorvidaePlugin):
             if len(texts) == 1:
                 raise
             logger.warning(
-                "memory embedding of %d entries failed for channel %s (%s); "
+                "memory embedding of %d entries failed for %s (%s); "
                 "retrying in two smaller batches, in case the server caps the "
                 "batch size",
-                len(texts), channel_id, type(exc).__name__,
+                len(texts), where, type(exc).__name__,
             )
         mid = len(texts) // 2
         return (
-            await self._embed_in_chunks(client, texts[:mid], channel_id)
-            + await self._embed_in_chunks(client, texts[mid:], channel_id)
+            await self._embed_in_chunks(client, texts[:mid], where)
+            + await self._embed_in_chunks(client, texts[mid:], where)
         )
 
     async def _insert_record(

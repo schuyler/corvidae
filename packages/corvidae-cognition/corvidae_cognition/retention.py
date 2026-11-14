@@ -234,7 +234,13 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
         import sqlite_vec
         client = memory._llm().get_client("embedding")
         texts = [row[1] for row in backfill_rows]
-        embeddings = await client.embed(texts, kind="document")
+        # Through the write path's halving retry (#655), so a server that caps
+        # the batch below memory.retention.backfill_batch still backfills
+        # instead of failing this pass on every run (#681). The rows span
+        # channels, so the label is the pass, not a channel.
+        embeddings = await memory._embed_in_chunks(
+            client, texts, "retention backfill",
+        )
         # A wrong-width vector would make vec0 reject its INSERT and roll
         # back the whole batch on every run; skip and log that row, keep the
         # rest (same handling as the write path).
