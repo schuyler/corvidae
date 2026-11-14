@@ -441,9 +441,11 @@ one is a bug even if its tests pass.
     announced (`on_message_persisted`) in arrival order. A turn in flight is
     never interrupted. Only consecutive inbound messages coalesce: a tool
     result, a notification or a retry stops the run and keeps its place, and
-    the channel queue never coalesces notification items (the funnel's
-    batching of notification payloads happens before they reach the queue,
-    §3.7). A coalesced burst is one exchange for
+    the channel queue never coalesces notification items. Batching before
+    the queue is allowed: a producer may merge a burst into one notification,
+    and the funnel holds notification payloads outside the queue and admits
+    them per `(channel, origin)` at the turn their one stub triggers (§3.7).
+    A coalesced burst is one exchange for
     `max_turns` (item 3). The last message's trace owns the turn: every
     turn hook, usage row and reply carries it, and the earlier messages'
     traces get admission and persistence only.
