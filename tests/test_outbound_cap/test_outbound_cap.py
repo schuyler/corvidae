@@ -412,3 +412,251 @@ async def test_a_broken_channel_object_fails_open(caplog):
         assert await harness.gate.send(Broken()) is True
 
     assert any("failed" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# #821: sliding window limit
+# ---------------------------------------------------------------------------
+
+import time
+from unittest.mock import patch
+
+from outbound_cap import (
+    MAX_MESSAGES_PER_WINDOW_KEY,
+    WINDOW_SECONDS_KEY,
+    parse_max_messages_per_window,
+    parse_window_seconds,
+)
+
+
+class FakeClock:
+    """A controllable clock for window tests."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class WindowHarness:
+    """Harness with a fake clock injected into the plugin."""
+
+    def __init__(self) -> None:
+        self.pm = create_plugin_manager()
+        self.registry = ChannelRegistry(AGENT_DEFAULTS)
+        self.pm.register(self.registry, name="registry")
+        self.plugin = OutboundCapPlugin()
+        self.pm.register(self.plugin, name="outbound_cap")
+        self.pm.register(FakeTransport("signal", {"signal:aci1", "signal:aci2"}), name="signal")
+        self.gate = Gate(self.pm)
+        self.clock = FakeClock()
+
+    async def init(self, config: dict | None = None) -> None:
+        await self.plugin.on_init(self.pm, config or {})
+        # Inject the fake clock after init (init sets self._clock = time.monotonic)
+        self.plugin._clock = self.clock
+
+    def channel(self, channel_id: str):
+        return self.registry.get_or_create(channel_id.split(":")[0], channel_id.split(":", 1)[1])
+
+    async def admitted(self, channel) -> None:
+        await self.plugin.on_message_admitted(channel, "t0", "human", "hi")
+
+    async def send(self, channel, text="hi", emission="final", trace_id="t1") -> bool:
+        return await self.gate.send(channel, text, emission, trace_id)
+
+
+class TestSlidingWindow:
+    """#821: N messages per window_seconds per channel."""
+
+    @pytest.mark.asyncio
+    async def test_window_fills_then_vetoes(self):
+        """After N messages within the window, the next is vetoed."""
+        h = WindowHarness()
+        await h.init({
+            "outbound_cap": {
+                "max_messages_per_window": 3,
+                "window_seconds": 60,
+            }
+        })
+        ch = h.channel("signal:aci1")
+
+        # 3 messages fit in the window
+        assert await h.send(ch, trace_id="t1") is True
+        assert await h.send(ch, trace_id="t2") is True
+        assert await h.send(ch, trace_id="t3") is True
+
+        # 4th is vetoed
+        assert await h.send(ch, trace_id="t4") is False
+
+    @pytest.mark.asyncio
+    async def test_window_slides_open(self):
+        """After window_seconds, old messages expire and new ones fit."""
+        h = WindowHarness()
+        await h.init({
+            "outbound_cap": {
+                "max_messages_per_window": 2,
+                "window_seconds": 30,
+            }
+        })
+        ch = h.channel("signal:aci1")
+
+        # Fill the window
+        assert await h.send(ch, trace_id="t1") is True
+        assert await h.send(ch, trace_id="t2") is True
+        assert await h.send(ch, trace_id="t3") is False  # vetoed
+
+        # Advance past the window
+        h.clock.advance(31)
+
+        # Now a new message fits
+        assert await h.send(ch, trace_id="t4") is True
+
+    @pytest.mark.asyncio
+    async def test_human_message_does_not_reset_window(self):
+        """A human message does not clear the window timestamps."""
+        h = WindowHarness()
+        await h.init({
+            "outbound_cap": {
+                "max_messages_per_window": 2,
+                "window_seconds": 60,
+            }
+        })
+        ch = h.channel("signal:aci1")
+
+        # Fill the window
+        assert await h.send(ch, trace_id="t1") is True
+        assert await h.send(ch, trace_id="t2") is True
+
+        # Human message arrives — window is NOT reset
+        await h.admitted(ch)
+
+        # Still vetoed
+        assert await h.send(ch, trace_id="t3") is False
+
+    @pytest.mark.asyncio
+    async def test_both_limits_whichever_reaches_first(self):
+        """With both M and N configured, whichever is reached first vetoes."""
+        h = WindowHarness()
+        await h.init({
+            "outbound_cap": {
+                "max_messages": 5,
+                "max_messages_per_window": 3,
+                "window_seconds": 60,
+            }
+        })
+        ch = h.channel("signal:aci1")
+
+        # Window limit (3) is reached before M limit (5)
+        assert await h.send(ch, trace_id="t1") is True
+        assert await h.send(ch, trace_id="t2") is True
+        assert await h.send(ch, trace_id="t3") is True
+        assert await h.send(ch, trace_id="t4") is False  # window veto
+
+    @pytest.mark.asyncio
+    async def test_window_limit_alone(self):
+        """Only the window limit configured; M limit is off."""
+        h = WindowHarness()
+        await h.init({
+            "outbound_cap": {
+                "max_messages_per_window": 2,
+                "window_seconds": 60,
+            }
+        })
+        ch = h.channel("signal:aci1")
+
+        assert await h.send(ch, trace_id="t1") is True
+        assert await h.send(ch, trace_id="t2") is True
+        assert await h.send(ch, trace_id="t3") is False
+
+    @pytest.mark.asyncio
+    async def test_m_limit_alone(self):
+        """Only the M limit configured; window limit is off."""
+        h = WindowHarness()
+        await h.init({
+            "outbound_cap": {
+                "max_messages": 2,
+            }
+        })
+        ch = h.channel("signal:aci1")
+
+        # M limit: 2 messages between human messages
+        assert await h.send(ch, trace_id="t1") is True
+        assert await h.send(ch, trace_id="t2") is True
+        assert await h.send(ch, trace_id="t3") is False
+
+    @pytest.mark.asyncio
+    async def test_no_window_config_means_no_window_cap(self):
+        """Without max_messages_per_window, only the M limit applies."""
+        h = WindowHarness()
+        await h.init({
+            "outbound_cap": {
+                "max_messages": 10,
+            }
+        })
+        ch = h.channel("signal:aci1")
+
+        # 10 messages should all go through (M limit is 10)
+        for i in range(10):
+            assert await h.send(ch, trace_id=f"t{i}") is True
+
+        # 11th is vetoed by M limit
+        assert await h.send(ch, trace_id="t10") is False
+
+
+class TestWindowConfig:
+    """#821: config validation for the window limit."""
+
+    def test_parse_max_messages_per_window_valid(self):
+        assert parse_max_messages_per_window(5) == 5
+        assert parse_max_messages_per_window(1) == 1
+        assert parse_max_messages_per_window(None) is None
+
+    def test_parse_max_messages_per_window_rejects_bool(self):
+        with pytest.raises(ValueError, match="positive integer"):
+            parse_max_messages_per_window(True)
+
+    def test_parse_max_messages_per_window_rejects_zero(self):
+        with pytest.raises(ValueError, match="positive integer"):
+            parse_max_messages_per_window(0)
+
+    def test_parse_max_messages_per_window_rejects_negative(self):
+        with pytest.raises(ValueError, match="positive integer"):
+            parse_max_messages_per_window(-1)
+
+    def test_parse_max_messages_per_window_rejects_float(self):
+        with pytest.raises(ValueError, match="positive integer"):
+            parse_max_messages_per_window(5.0)
+
+    def test_parse_max_messages_per_window_rejects_string(self):
+        with pytest.raises(ValueError, match="positive integer"):
+            parse_max_messages_per_window("5")
+
+    def test_parse_window_seconds_valid(self):
+        assert parse_window_seconds(60) == 60
+        assert parse_window_seconds(1) == 1
+        assert parse_window_seconds(None) is None
+
+    def test_parse_window_seconds_rejects_bool(self):
+        with pytest.raises(ValueError, match="positive integer"):
+            parse_window_seconds(True)
+
+    def test_parse_window_seconds_rejects_zero(self):
+        with pytest.raises(ValueError, match="positive integer"):
+            parse_window_seconds(0)
+
+    def test_parse_window_seconds_rejects_negative(self):
+        with pytest.raises(ValueError, match="positive integer"):
+            parse_window_seconds(-1)
+
+    def test_parse_window_seconds_rejects_float(self):
+        with pytest.raises(ValueError, match="positive integer"):
+            parse_window_seconds(60.0)
+
+    def test_parse_window_seconds_rejects_string(self):
+        with pytest.raises(ValueError, match="positive integer"):
+            parse_window_seconds("60")

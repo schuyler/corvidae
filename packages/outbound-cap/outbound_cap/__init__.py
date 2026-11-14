@@ -47,6 +47,7 @@ counted and nothing is withheld.
 from __future__ import annotations
 
 import logging
+import time
 
 from corvidae.hooks import CorvidaePlugin, TransportPlugin, hookimpl, resolve_reject_wins
 from corvidae.tuning import resolve_tunable
@@ -57,6 +58,8 @@ logger = logging.getLogger("corvidae.outbound_cap")
 # both tuning surfaces work (set_settings per channel, hot config reload).
 MAX_MESSAGES_KEY = "outbound_cap.max_messages"
 COUNT_PROGRESS_KEY = "outbound_cap.count_progress"
+MAX_MESSAGES_PER_WINDOW_KEY = "outbound_cap.max_messages_per_window"
+WINDOW_SECONDS_KEY = "outbound_cap.window_seconds"
 
 # What counts as one message when count_progress is false.
 COUNTED_EMISSIONS = frozenset({"final"})
@@ -101,6 +104,24 @@ def parse_count_progress(value: object, key: str = COUNT_PROGRESS_KEY) -> bool:
     return value
 
 
+def parse_max_messages_per_window(value: object, key: str = MAX_MESSAGES_PER_WINDOW_KEY) -> int | None:
+    """Validate a ``max_messages_per_window`` value; ``None`` means no window cap."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise _bad_int(key, value)
+    return value
+
+
+def parse_window_seconds(value: object, key: str = WINDOW_SECONDS_KEY) -> int | None:
+    """Validate a ``window_seconds`` value; ``None`` means no window cap."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise _bad_int(key, value)
+    return value
+
+
 class OutboundCapPlugin(CorvidaePlugin):
     """Caps agent messages per channel between admitted human messages."""
 
@@ -115,6 +136,12 @@ class OutboundCapPlugin(CorvidaePlugin):
         self._withheld: dict[str, int] = {}
         # channel ids that have already logged their first WARNING this run
         self._warned: set[str] = set()
+        # channel id -> emission timestamps within the current window (#821)
+        self._window_timestamps: dict[str, list[float]] = {}
+        # channel ids that have already logged their first window WARNING
+        self._window_warned: set[str] = set()
+        # The clock, injectable for tests
+        self._clock = time.monotonic
         # Validate at startup so a bad value names itself here rather than
         # capping nothing at the first send.
         block = config.get("outbound_cap")
@@ -232,6 +259,36 @@ class OutboundCapPlugin(CorvidaePlugin):
         )
         return COUNTED_EMISSIONS_WITH_PROGRESS if counted else COUNTED_EMISSIONS
 
+    def _window_limit(self, channel) -> tuple[int | None, str]:
+        """The channel's effective window limit and the key that set it."""
+        overrides = getattr(channel, "runtime_overrides", None) or {}
+        key = MAX_MESSAGES_PER_WINDOW_KEY
+        raw = resolve_tunable(channel, self._config, MAX_MESSAGES_PER_WINDOW_KEY, None)
+        if overrides and MAX_MESSAGES_PER_WINDOW_KEY in overrides:
+            key = f"runtime override {MAX_MESSAGES_PER_WINDOW_KEY}"
+        try:
+            return parse_max_messages_per_window(raw, key), key
+        except ValueError as exc:
+            logger.warning(
+                "outbound_cap: ignoring the window limit; %s",
+                exc,
+                extra={"channel": getattr(channel, "id", None)},
+            )
+            return None, key
+
+    def _window_seconds(self, channel) -> int:
+        """The channel's window duration in seconds."""
+        raw = resolve_tunable(channel, self._config, WINDOW_SECONDS_KEY, 60)
+        try:
+            return parse_window_seconds(raw, WINDOW_SECONDS_KEY) or 60
+        except ValueError as exc:
+            logger.warning(
+                "outbound_cap: ignoring window_seconds; %s",
+                exc,
+                extra={"channel": getattr(channel, "id", None)},
+            )
+            return 60
+
     @hookimpl
     async def should_send_response(
         self, channel, text: str, emission: str, trace_id, annotations
@@ -244,41 +301,78 @@ class OutboundCapPlugin(CorvidaePlugin):
         exception logs and returns no opinion.
         """
         try:
-            limit, key = self._limit(channel)
-            if limit is None:
-                return None
             channel_id = channel.id
             if not self._transport_owned(channel):
                 return None
 
-            count = self._counts.get(channel_id, 0)
-            if count >= limit:
-                withheld = self._withheld.get(channel_id, 0) + 1
-                self._withheld[channel_id] = withheld
-                if channel_id not in self._warned:
-                    self._warned.add(channel_id)
-                    logger.warning(
-                        "outbound_cap: withholding the %s emission for %s on %s: "
-                        "%d withheld since the cap was reached, limit %d set by %s",
-                        emission,
-                        trace_id,
-                        channel_id,
-                        withheld,
-                        limit,
-                        key,
-                        extra={"channel": channel_id, "trace_id": trace_id},
-                    )
-                else:
-                    logger.info(
-                        "outbound_cap: withheld the %s emission for %s on %s "
-                        "(%d withheld since the cap was reached)",
-                        emission,
-                        trace_id,
-                        channel_id,
-                        withheld,
-                        extra={"channel": channel_id, "trace_id": trace_id},
-                    )
-                return False
+            # Check M limit (messages between human messages)
+            limit, key = self._limit(channel)
+            if limit is not None:
+                count = self._counts.get(channel_id, 0)
+                if count >= limit:
+                    withheld = self._withheld.get(channel_id, 0) + 1
+                    self._withheld[channel_id] = withheld
+                    if channel_id not in self._warned:
+                        self._warned.add(channel_id)
+                        logger.warning(
+                            "outbound_cap: withholding the %s emission for %s on %s: "
+                            "%d withheld since the cap was reached, limit %d set by %s",
+                            emission,
+                            trace_id,
+                            channel_id,
+                            withheld,
+                            limit,
+                            key,
+                            extra={"channel": channel_id, "trace_id": trace_id},
+                        )
+                    else:
+                        logger.info(
+                            "outbound_cap: withheld the %s emission for %s on %s "
+                            "(%d withheld since the cap was reached)",
+                            emission,
+                            trace_id,
+                            channel_id,
+                            withheld,
+                            extra={"channel": channel_id, "trace_id": trace_id},
+                        )
+                    return False
+
+            # Check N limit (messages per window, #821)
+            win_limit, win_key = self._window_limit(channel)
+            if win_limit is not None:
+                now = self._clock()
+                timestamps = self._window_timestamps.get(channel_id, [])
+                # Drop timestamps older than the window
+                window_seconds = self._window_seconds(channel)
+                cutoff = now - window_seconds
+                active = [t for t in timestamps if t > cutoff]
+                if len(active) >= win_limit:
+                    if channel_id not in self._window_warned:
+                        self._window_warned.add(channel_id)
+                        logger.warning(
+                            "outbound_cap: withholding the %s emission for %s on %s: "
+                            "window limit %d per %ds reached (set by %s)",
+                            emission,
+                            trace_id,
+                            channel_id,
+                            win_limit,
+                            window_seconds,
+                            win_key,
+                            extra={"channel": channel_id, "trace_id": trace_id},
+                        )
+                    else:
+                        logger.info(
+                            "outbound_cap: withheld the %s emission for %s on %s "
+                            "(window limit %d per %ds)",
+                            emission,
+                            trace_id,
+                            channel_id,
+                            win_limit,
+                            window_seconds,
+                            extra={"channel": channel_id, "trace_id": trace_id},
+                        )
+                    return False
+
             return None
         except Exception:
             logger.warning(
@@ -306,13 +400,25 @@ class OutboundCapPlugin(CorvidaePlugin):
         results = yield
         try:
             if resolve_reject_wins(results) is not False:
-                limit, _key = self._limit(channel)
                 if (
-                    limit is not None
-                    and self._transport_owned(channel)
+                    self._transport_owned(channel)
                     and emission in self._counted_kinds(channel)
                 ):
-                    self._counts[channel.id] = self._counts.get(channel.id, 0) + 1
+                    # Count for M limit
+                    limit, _key = self._limit(channel)
+                    if limit is not None:
+                        self._counts[channel.id] = self._counts.get(channel.id, 0) + 1
+                    # Record timestamp for N limit (#821)
+                    win_limit, _win_key = self._window_limit(channel)
+                    if win_limit is not None:
+                        now = self._clock()
+                        window_seconds = self._window_seconds(channel)
+                        cutoff = now - window_seconds
+                        timestamps = self._window_timestamps.get(channel.id, [])
+                        # Drop old timestamps and append the new one
+                        self._window_timestamps[channel.id] = [
+                            t for t in timestamps if t > cutoff
+                        ] + [now]
         except Exception:
             logger.warning(
                 "outbound_cap: counting the %s emission of %s failed; it was sent uncounted",
