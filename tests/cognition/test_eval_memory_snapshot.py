@@ -520,15 +520,64 @@ def test_snapshot_pool_json_holds_whole_pool(
         "--pool-out", str(pool_out), "--k", "1",
     ])
 
-    # All three candidates, ranked 1..3, each with the six documented fields.
+    # All three candidates, ranked 1..3, each with the documented fields.
     candidates = read_pool(pool_out)["queries"][0]["candidates"]
     assert [c["rank"] for c in candidates] == [1, 2, 3]
     assert [c["id"] for c in candidates] == ids
     for cand in candidates:
-        assert set(cand) == {"id", "rank", "similarity", "score", "band", "source"}
+        assert set(cand) == {
+            "id", "rank", "similarity", "score", "band", "z", "source",
+        }
         assert cand["band"] in {"strong", "moderate", "weak"}
+        # Three records is under RELATIVE_MIN_RECORDS, so no spread was
+        # computed and z is null (#704).
+        assert cand["z"] is None
     scores = [c["score"] for c in candidates]
     assert scores == sorted(scores, reverse=True)
+
+
+@needs_vec
+def test_pool_records_the_relative_z_once_the_memory_is_big_enough(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path,
+) -> None:
+    """#704: z is numeric on every embedded candidate at/over the spread floor."""
+    from corvidae_cognition.memory import RELATIVE_MIN_RECORDS
+
+    # One distinctive record to probe, and enough filler to clear the floor
+    # where band_on: relative trusts the spread. The filler shares words with
+    # the probe, so it ranks behind it rather than out of the pool.
+    filler = [
+        f"filler{i} alpha beta gamma delta epsilon zeta eta theta"
+        for i in range(RELATIVE_MIN_RECORDS - 1)
+    ]
+    source = tmp_path / "sessions.db"
+    ids = build_source(source, [TEXT_C, *filler])
+    config = write_config(
+        tmp_path / "agent.yaml", EMBED_CONFIG,
+        memory={"retrieval": {"band_on": "relative"}},
+    )
+    labels = write_labels(
+        tmp_path / "labels.json", [{"text": TEXT_C, "relevant": [ids[0]]}],
+    )
+    pool_out = tmp_path / "pool.json"
+
+    script.main([
+        "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
+        "--pool-out", str(pool_out), "--k", "3",
+    ])
+
+    candidates = read_pool(pool_out)["queries"][0]["candidates"]
+    # The pool itself is over-fetched from the KNN scan, not the whole memory,
+    # so its length is unrelated to the spread floor; what matters is that the
+    # spread was computed at all, which shows up as a z on every candidate.
+    assert candidates
+    # Every candidate here has a stored vector, so every one carries the z its
+    # band came from; the probe's own z is the largest, being the outlier.
+    for cand in candidates:
+        assert isinstance(cand["z"], float), cand
+    assert candidates[0]["id"] == ids[0]
+    assert candidates[0]["z"] == max(c["z"] for c in candidates)
 
 
 def test_config_half_life_days_changes_scores(
