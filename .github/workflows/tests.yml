@@ -166,7 +166,7 @@ jobs:
 
       # Chromium plus the system libraries it needs on the runner.
       - name: Install Playwright Chromium
-        run: uv run --no-sync --with playwright==1.64.0 playwright install --with-deps chromium
+        run: uv run --no-sync --with playwright==1.64.0 playwright install chromium
 
       # -rs lists skips; a skip means the guard did not run, so fail on one.
       - name: Run web render smoke tests

@@ -860,7 +860,8 @@ Advertised ACP session capabilities: `loadSession`, `list`, `resume`,
 
 **bb:** register Corvidae under `customAcpAgents` with command
 `uv run corvidae acp` (from a checkout with the `acp` extra). See
-[plugin-guide.md](plugin-guide.md#acp-transport) for the smoke checklist.
+[plugin-guide.md](plugin-guide.md#acp-transport) for the smoke checklist, or
+[acp-clients.md](acp-clients.md) for Zed and bb setup.
 
 ---
 
