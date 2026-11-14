@@ -204,6 +204,46 @@ def parse_duration(text: str | int | float) -> float:
     return seconds
 
 
+#: ``weekday`` accepts these full names, or their first three letters (#770).
+WEEKDAY_NAMES = (
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+)
+
+
+def parse_weekday(text: object) -> int:
+    """``friday``/``Fri`` -> 4 (Monday is 0, as ``date.weekday()`` counts)."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(
+            f"weekday must be a day name, got {text!r}; use one of "
+            f"{', '.join(WEEKDAY_NAMES)}"
+        )
+    wanted = text.strip().lower()
+    for index, day in enumerate(WEEKDAY_NAMES):
+        if wanted in (day, day[:3]):
+            return index
+    raise ValueError(
+        f"weekday {text!r} is not a day name; use one of "
+        f"{', '.join(WEEKDAY_NAMES)}"
+    )
+
+
+def _next_weekday_wall_clock(
+    now: float, weekday: int, hour: int, minute: int, second: int, tz: tzinfo,
+) -> float:
+    """The next instant strictly after ``now`` on ``weekday`` whose wall clock
+    in ``tz`` reads hour:minute:second (#770).
+
+    Computed in wall-clock time, so the answer is that weekday at that time
+    even when a DST change falls in between.
+    """
+    first = _next_wall_clock(now, hour, minute, second, tz)
+    local = datetime.fromtimestamp(first, tz)
+    ahead = (weekday - local.weekday()) % 7
+    if ahead:
+        first = (local + timedelta(days=ahead)).timestamp()
+    return first
+
+
 def _next_wall_clock(now: float, hour: int, minute: int, second: int, tz: tzinfo) -> float:
     """The next instant strictly after ``now`` whose wall clock in ``tz``
     reads hour:minute:second."""
@@ -370,19 +410,25 @@ class JobSpec:
     at: str | None
     text: str
     cron: str | None = None
+    #: The weekday a weekly job is anchored to (Monday is 0); None otherwise.
+    weekday: int | None = None
 
     def schedule_spec(self, tz_name: str) -> str:
         """Canonical string of everything that determines the schedule, so
         a reload recomputes next_fire_at only when it actually changed."""
         if self.cron is not None:
             return f"cron={self.cron};tz={tz_name}"
-        return f"every={self.interval_seconds!r};at={self.at or ''};tz={tz_name}"
+        return (
+            f"every={self.interval_seconds!r};at={self.at or ''};"
+            f"weekday={self.weekday};tz={tz_name}"
+        )
 
     def first_fire(self, now: float, tz: tzinfo) -> float:
         """The first fire time for a newly (re)scheduled job.
 
         Cron: the next cron slot after now. No anchor: one interval
-        from now. ``HH:MM``: the next occurrence. ISO datetime: the anchor
+        from now. ``weekday`` with ``HH:MM``: the next occurrence of that
+        weekday at that time. ``HH:MM``: the next occurrence. ISO datetime: the anchor
         itself if future, else the first slot ``anchor + k*every`` after now
         (``every: 7d`` anchored on a Friday 09:00 is "every Friday at 9am").
         """
@@ -394,9 +440,15 @@ class JobSpec:
             return now + self.interval_seconds
         match = _HHMM.match(self.at)
         if match:
-            return _next_wall_clock(
-                now, int(match.group(1)), int(match.group(2)), int(match.group(3) or 0), tz,
+            hour, minute, second = (
+                int(match.group(1)), int(match.group(2)), int(match.group(3) or 0),
             )
+            if self.weekday is not None:
+                return _next_weekday_wall_clock(
+                    now, self.weekday, hour, minute, second, tz,
+                )
+            return _next_wall_clock(now, hour, minute, second, tz)
+        # (A weekday anchor is always HH:MM; parse_job refuses anything else.)
         anchor = datetime.fromisoformat(self.at)
         if anchor.tzinfo is None:
             anchor = anchor.replace(tzinfo=tz)
@@ -437,6 +489,12 @@ def parse_job(raw: object, base_dir: Path) -> JobSpec:
             raise ValueError(f"job {name!r} has invalid cron {cron_expr!r}: {exc}") from exc
         interval = None
         at = None
+        if raw.get("weekday") is not None:
+            raise ValueError(
+                f"job {name!r} sets 'weekday' with 'cron'; a cron expression "
+                f"already names its days"
+            )
+        weekday = None
     else:
         interval = parse_duration(every)
         cron_expr = None
@@ -448,6 +506,21 @@ def parse_job(raw: object, base_dir: Path) -> JobSpec:
                     datetime.fromisoformat(at)
                 except ValueError:
                     raise ValueError(f"job {name!r} 'at' {at!r} is not HH:MM or an ISO datetime") from None
+        weekday = raw.get("weekday")
+        if weekday is not None:
+            weekday = parse_weekday(weekday)
+            if at is None or not _HHMM.match(at):
+                raise ValueError(
+                    f"job {name!r} 'weekday' needs 'at' as HH:MM, so the "
+                    f"weekly slot has a time of day as well as a day"
+                )
+            if interval % 604800:
+                raise ValueError(
+                    f"job {name!r} 'weekday' needs 'every' to be a whole "
+                    f"number of weeks (7d, 14d); with {every!r} the job would "
+                    f"leave {WEEKDAY_NAMES[weekday].capitalize()} after its "
+                    f"first fire"
+                )
 
     # The objective text comes inline or from a file relative to agent.yaml.
     prompt = raw.get("prompt")
@@ -468,6 +541,7 @@ def parse_job(raw: object, base_dir: Path) -> JobSpec:
     return JobSpec(
         name=name.strip(), channel_id=channel_id, origin=origin,
         interval_seconds=interval, at=at, text=prompt.strip(), cron=cron_expr,
+        weekday=weekday,
     )
 
 
