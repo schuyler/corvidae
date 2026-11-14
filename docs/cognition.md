@@ -1333,6 +1333,14 @@ sees every memory. A goal added or retired on one channel shows up on the
 others at their next turn; see finding 10 in
 [threat-model.md](threat-model.md).
 
+**Concurrency:** `retire_goal` and `set_goal_status` take one plugin-level
+lock from their check through their update, so two racing retirements write
+one record (the loser gets the `already retired` error) and racing status
+changes report a consistent chain of `old_status` values. The hooks fire
+after the lock is released. The lock is shared by every goal, and a
+retirement holds it across the record's embedding call; retirements are rare,
+so a per-goal lock is the upgrade if they stop being.
+
 **Retirement record:** `retire_goal` calls `MemoryPlugin.write_record` first
 and updates the goal only once that succeeds, so no goal is retired without
 its record. If the record can't be written, the tool returns an error string

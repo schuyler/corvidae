@@ -118,6 +118,14 @@ class GoalsPlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self._schema_ready = False
+        # Serializes the read-check-write of a goal's state: retire_goal and
+        # set_goal_status take it from their check through their UPDATE, so two
+        # racing calls can't both pass the check (an orphan retirement record, or
+        # two changes reporting the same old_status). Hooks fire after release.
+        # shortcut: one lock for every goal, and retire_goal holds it across the
+        # embedding call in write_record; retirements are rare, so move to a
+        # per-goal lock if they ever become frequent.
+        self._state_lock = asyncio.Lock()
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -352,58 +360,54 @@ class GoalsPlugin(CorvidaePlugin):
                 return (
                     "Error: conclusion is empty; say what you concluded and why"
                 )
-            db = await plugin._require_db()
-            checked = await plugin._check_open(db, id)
-            if isinstance(checked, str):
-                return checked
-            channel_id = _ctx.channel.id
-            # Link the record to the newest real message on this channel.
-            async with db.execute(
-                "SELECT MAX(id) FROM message_log "
-                "WHERE channel_id = ? AND message_type = 'message'",
-                (channel_id,),
-            ) as cursor:
-                (msg_id,) = await cursor.fetchone()
-            now = plugin._now()
-            # Guard: don't write an orphan memory for an already-retired goal.
-            if checked.retired_at is not None:
-                return (
-                    f"Error: goal #{id} is already retired; add a new goal instead"
+            async with plugin._state_lock:
+                db = await plugin._require_db()
+                checked = await plugin._check_open(db, id)
+                if isinstance(checked, str):
+                    return checked
+                channel_id = _ctx.channel.id
+                # Link the record to the newest real message on this channel.
+                async with db.execute(
+                    "SELECT MAX(id) FROM message_log "
+                    "WHERE channel_id = ? AND message_type = 'message'",
+                    (channel_id,),
+                ) as cursor:
+                    (msg_id,) = await cursor.fetchone()
+                now = plugin._now()
+                summary = (
+                    f'I retired my goal "{checked.text}" '
+                    f"(set {_day(checked.created_at)}). {conclusion}"
                 )
-            summary = (
-                f'I retired my goal "{checked.text}" '
-                f"(set {_day(checked.created_at)}). {conclusion}"
-            )
-            # The record goes first: no goal is retired without its record.
-            try:
-                memory_id = await plugin._memory().write_record(
-                    channel_id=channel_id,
-                    summary=summary,
-                    created_at=now,
-                    importance=RETIRED_GOAL_IMPORTANCE,
-                    msg_id_start=msg_id,
-                    msg_id_end=msg_id,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "retirement record for goal %d failed", id, exc_info=True
-                )
-                return (
-                    f"Error: couldn't record the conclusion for goal #{id} "
-                    f"({type(exc).__name__}); the goal is still open, try again"
-                )
-            # write_record released the lock; take it for the state change only.
-            async with plugin._memory()._db_lock:
-                cursor = await db.execute(
-                    "UPDATE goals SET retired_at = ?, updated_at = ?, memory_id = ? "
-                    "WHERE id = ? AND retired_at IS NULL",
-                    (now, now, memory_id, id),
-                )
-                await db.commit()
-            if cursor.rowcount == 0:
-                return (
-                    f"Error: goal #{id} is already retired; add a new goal instead"
-                )
+                # The record goes first: no goal is retired without its record.
+                try:
+                    memory_id = await plugin._memory().write_record(
+                        channel_id=channel_id,
+                        summary=summary,
+                        created_at=now,
+                        importance=RETIRED_GOAL_IMPORTANCE,
+                        msg_id_start=msg_id,
+                        msg_id_end=msg_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "retirement record for goal %d failed", id, exc_info=True
+                    )
+                    return (
+                        f"Error: couldn't record the conclusion for goal #{id} "
+                        f"({type(exc).__name__}); the goal is still open, try again"
+                    )
+                # write_record released the lock; take it for the state change only.
+                async with plugin._memory()._db_lock:
+                    cursor = await db.execute(
+                        "UPDATE goals SET retired_at = ?, updated_at = ?, memory_id = ? "
+                        "WHERE id = ? AND retired_at IS NULL",
+                        (now, now, memory_id, id),
+                    )
+                    await db.commit()
+                if cursor.rowcount == 0:
+                    return (
+                        f"Error: goal #{id} is already retired; add a new goal instead"
+                    )
             await plugin._fire_state_changed(
                 goal_id=id,
                 kind="retired",
@@ -467,25 +471,26 @@ class GoalsPlugin(CorvidaePlugin):
                     f"Error: status must be one of {', '.join(VALID_STATUSES)}, "
                     f"got {status!r}"
                 )
-            db = await plugin._require_db()
-            goal = await plugin._get(db, id)
-            if goal is None or goal.retired_at is not None:
-                return (
-                    f"Error: no open goal #{id}; "
-                    "the ids are in the latest goals entry"
-                )
-            now = plugin._now()
-            async with db.execute(
-                "UPDATE goals SET status = ?, updated_at = ? WHERE id = ? AND retired_at IS NULL",
-                (status, now, id),
-            ) as cursor:
-                if cursor.rowcount == 0:
-                    # Retired between the read above and this write.
+            async with plugin._state_lock:
+                db = await plugin._require_db()
+                goal = await plugin._get(db, id)
+                if goal is None or goal.retired_at is not None:
                     return (
-                        f"Error: goal #{id} was retired just now; "
-                        "add a new goal instead"
+                        f"Error: no open goal #{id}; "
+                        "the ids are in the latest goals entry"
                     )
-            await db.commit()
+                now = plugin._now()
+                async with db.execute(
+                    "UPDATE goals SET status = ?, updated_at = ? WHERE id = ? AND retired_at IS NULL",
+                    (status, now, id),
+                ) as cursor:
+                    if cursor.rowcount == 0:
+                        # Retired between the read above and this write.
+                        return (
+                            f"Error: goal #{id} was retired just now; "
+                            "add a new goal instead"
+                        )
+                await db.commit()
             # No notify on a no-op (setting the same status).
             if goal.status != status:
                 await plugin._fire_state_changed(

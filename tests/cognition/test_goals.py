@@ -751,3 +751,42 @@ async def test_set_goal_status_bad_status_lists_accepted_values(env):
     result = await env.tools["set_goal_status"](1, "done", _ctx=ctx)
     assert "'done'" in result
     assert "open, in-progress, blocked, waiting" in result
+
+
+async def test_concurrent_retire_writes_exactly_one_memory_record(env):
+    """Two retire_goal calls racing on one goal: one wins, and the loser must
+    not leave an orphan memory record behind."""
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "work")
+    await env.tools["add_goal"]("race me", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+
+    results = await asyncio.gather(
+        env.tools["retire_goal"](gid, "I concluded A.", _ctx=ctx),
+        env.tools["retire_goal"](gid, "I concluded B.", _ctx=ctx),
+    )
+
+    assert sorted("already retired" in r for r in results) == [False, True]
+    assert (await rows(env, "SELECT COUNT(*) FROM memory"))[0][0] == 1
+    assert len([c for c in env.state_changes if c["kind"] == "retired"]) == 1
+
+
+async def test_concurrent_status_changes_report_a_consistent_chain(env):
+    """Racing set_goal_status calls: each hook's old_status is the previous
+    change's new_status, so a subscriber never sees two changes from 'open'."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("flip", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    env.state_changes.clear()
+
+    await asyncio.gather(
+        env.tools["set_goal_status"](gid, "blocked", _ctx=ctx),
+        env.tools["set_goal_status"](gid, "waiting", _ctx=ctx),
+        env.tools["set_goal_status"](gid, "in-progress", _ctx=ctx),
+    )
+
+    seen = [(c["old_status"], c["new_status"]) for c in env.state_changes]
+    assert len(seen) == 3
+    assert seen[0][0] == "open"
+    for (_, prev_new), (next_old, _) in zip(seen, seen[1:]):
+        assert next_old == prev_new
