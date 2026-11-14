@@ -15,7 +15,11 @@ import time
 import aiosqlite
 import pytest
 
-from corvidae_cognition.memory import MemoryPlugin
+from corvidae_cognition.memory import (
+    DEFAULT_ENTRY_TARGET_TOKENS,
+    MemoryPlugin,
+    consolidation_instruction,
+)
 
 from helpers import FakeForkAgent, window_of
 from .test_goals import add_message, ctx_for, env  # noqa: F401  (fixture reused)
@@ -60,6 +64,12 @@ PRE_CHANGE_COLUMNS = (
     "participants, msg_id_start, msg_id_end, retrieval_count, last_retrieved_at, "
     "indexed, superseded_by, redacted, embedded"
 )
+
+
+def composed(prompt: str) -> str:
+    """The instruction a configured prompt becomes (#686): the prompt plus the
+    entry-size sentence for the default target."""
+    return consolidation_instruction(prompt, DEFAULT_ENTRY_TARGET_TOKENS)
 
 
 def sha(text: str) -> str:
@@ -128,10 +138,10 @@ async def test_catchup_record_stamped_standalone(tmp_path):
         [(_, prompt_hash, mode, model)] = await stamps_of(db)
         assert mode == "standalone"
         assert model == "main-model"
-        assert prompt_hash == sha("PROMPT-F")
+        assert prompt_hash == sha(composed("PROMPT-F"))
         # The side table resolves the hash to exactly the fork instruction.
         text = await prompt_text(db, prompt_hash)
-        assert text == "PROMPT-F"
+        assert text == composed("PROMPT-F")
         assert "Record the" not in text
     finally:
         await db.close()
@@ -162,7 +172,7 @@ async def test_fork_record_stamped_with_fork_prompt_only(fork_env):
     assert model == "main-y"
     text = await prompt_text(db, prompt_hash)
     # Exactly the fork prompt: no code-generated range sentence (it quotes chat text).
-    assert text == "PROMPT-F"
+    assert text == composed("PROMPT-F")
     assert "Record the" not in text
 
 
@@ -174,8 +184,8 @@ async def test_idle_fork_record_stamped(fork_env):
 
     [(_, prompt_hash, mode, model)] = await stamps_of(db)
     assert (mode, model) == ("fork", "main-y")
-    assert prompt_hash == sha("PROMPT-F")
-    assert await prompt_text(db, prompt_hash) == "PROMPT-F"
+    assert prompt_hash == sha(composed("PROMPT-F"))
+    assert await prompt_text(db, prompt_hash) == composed("PROMPT-F")
 
 
 async def test_raw_transcript_fallback_is_stamped_raw(tmp_path):
@@ -196,7 +206,7 @@ async def test_raw_transcript_fallback_is_stamped_raw(tmp_path):
 
         [(_, prompt_hash, mode, model)] = await stamps_of(db)
         assert (mode, model) == ("raw", "main-x")
-        assert prompt_hash == sha("PROMPT-F")
+        assert prompt_hash == sha(composed("PROMPT-F"))
     finally:
         await db.close()
 
@@ -215,7 +225,7 @@ async def test_prompt_text_stored_once(tmp_path):
 
         stamps = await stamps_of(db)
         assert len(stamps) == 3
-        assert {s[1] for s in stamps} == {sha("PROMPT-F")}
+        assert {s[1] for s in stamps} == {sha(composed("PROMPT-F"))}
         async with db.execute("SELECT COUNT(*) FROM memory_prompt") as cursor:
             assert (await cursor.fetchone())[0] == 1
     finally:
@@ -251,14 +261,15 @@ async def test_dedup_survivor_keeps_its_own_stamp():
         ) as cursor:
             [(old_hash, old_sup), (new_hash, new_sup)] = await cursor.fetchall()
         assert old_sup is not None and new_sup is None
-        assert old_hash == sha("P1")
+        assert old_hash == sha(composed("P1"))
         assert new_hash == sha("P2")
     finally:
         await db.close()
 
 
 async def test_empty_prompt_is_stored(tmp_path):
-    """R1: an empty configured prompt is a real prompt: hashed and stored as ''."""
+    """R1: an empty configured prompt is a real prompt: hashed and stored,
+    composed with the size sentence like any other (#686)."""
     config = config_with(EMBED_CONFIG, consolidation_fork_prompt="")
     memory, persistence, stub, channel, db = await build_consolidation_env(
         config, db_path=str(tmp_path / "s.db")
@@ -268,8 +279,8 @@ async def test_empty_prompt_is_stored(tmp_path):
 
         [(_, prompt_hash, mode, _model)] = await stamps_of(db)
         assert mode == "standalone"
-        assert prompt_hash == sha("")
-        assert await prompt_text(db, prompt_hash) == ""
+        assert prompt_hash == sha(composed(""))
+        assert await prompt_text(db, prompt_hash) == composed("")
     finally:
         await db.close()
 
