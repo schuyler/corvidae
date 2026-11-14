@@ -70,22 +70,28 @@ class CLIPlugin(TransportPlugin):
             return
         self._task = asyncio.create_task(self._read_loop(), name="cli-read-loop")
 
-    def _stdin_reader(self, queue: asyncio.Queue) -> None:
+    def _stdin_reader(self, queue: asyncio.Queue,
+                      loop: asyncio.AbstractEventLoop) -> None:
         """Daemon thread: read stdin lines into the asyncio queue.
 
         Runs in a daemon thread so it is killed at process exit — a blocked
         ``readline`` cannot hold up shutdown (#759). Posts each line via
         ``loop.call_soon_threadsafe`` so the asyncio loop picks it up.
+
+        The ``loop`` is captured in ``_read_loop`` (where we are on the
+        loop) and passed in, because ``asyncio.get_event_loop()`` raises
+        in a non-main thread on Python 3.10+.
         """
-        loop = asyncio.get_event_loop()
         while True:
             try:
                 line = sys.stdin.readline()
             except (EOFError, OSError):
                 line = ""
-            # Post to the queue from the thread; call_soon_threadsafe is
-            # the thread-safe way to schedule on the loop.
-            loop.call_soon_threadsafe(queue.put_nowait, line)
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, line)
+            except RuntimeError:
+                # Loop closed during shutdown; daemon thread — just exit.
+                return
             if not line:
                 # EOF: the queue now has a "" sentinel; the read loop will
                 # see it and exit. Stop reading.
@@ -113,8 +119,9 @@ class CLIPlugin(TransportPlugin):
 
         if queue is None:
             queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
             self._reader_thread = threading.Thread(
-                target=self._stdin_reader, args=(queue,),
+                target=self._stdin_reader, args=(queue, loop),
                 daemon=True, name="cli-stdin-reader",
             )
             self._reader_thread.start()

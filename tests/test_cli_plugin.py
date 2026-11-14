@@ -1,6 +1,8 @@
 """Tests for corvidae.channels.cli.CLIPlugin."""
 
 import asyncio
+import os
+import signal
 import sys
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -165,7 +167,7 @@ class TestReadLoop:
              patch("corvidae.channels.cli.os.kill") as mock_kill:
             mock_stdin.isatty.return_value = True
             await plugin._read_loop(queue)
-        mock_kill.assert_called_once()
+        mock_kill.assert_called_once_with(os.getpid(), signal.SIGINT)
 
     async def test_read_loop_skips_blank_lines(self):
         """Blank lines are skipped; the prompt is re-printed."""
@@ -212,7 +214,7 @@ class TestNonInteractiveStdin:
              patch("corvidae.channels.cli.os.kill") as mock_kill:
             mock_stdin.isatty.return_value = True
             await plugin._read_loop(queue)
-        mock_kill.assert_called_once()
+        mock_kill.assert_called_once_with(os.getpid(), signal.SIGINT)
 
     async def test_piped_lines_dispatched_before_eof(self):
         """Lines from a pipe are dispatched before the EOF sentinel."""
@@ -239,7 +241,7 @@ class TestNonInteractiveStdin:
              patch("corvidae.channels.cli.os.kill") as mock_kill:
             mock_stdin.isatty.return_value = False
             await plugin._read_loop(queue)
-        mock_kill.assert_called_once()
+        mock_kill.assert_called_once_with(os.getpid(), signal.SIGINT)
 
     async def test_on_start_reads_exit_on_eof(self):
         """on_start reads _cli_exit_on_eof from config."""
@@ -276,6 +278,7 @@ class TestNonInteractiveStdin:
 
     async def test_banner_only_on_tty(self):
         """The banner is printed only when stdin is a TTY."""
+        # TTY case: banner is printed
         plugin, pm, registry, queue = _make_plugin_with_lines(
             [""], interactive=True,
         )
@@ -288,6 +291,20 @@ class TestNonInteractiveStdin:
             str(c.args[0]) for c in mock_stdout.write.call_args_list
         )
         assert "Agent ready" in written
+
+        # Non-TTY case: banner is NOT printed
+        plugin2, pm2, registry2, queue2 = _make_plugin_with_lines(
+            [""], interactive=False,
+        )
+        with patch("sys.stdin") as mock_stdin2, \
+             patch("sys.stdout") as mock_stdout2, \
+             patch("corvidae.channels.cli.os.kill"):
+            mock_stdin2.isatty.return_value = False
+            await plugin2._read_loop(queue2)
+        written2 = "".join(
+            str(c.args[0]) for c in mock_stdout2.write.call_args_list
+        )
+        assert "Agent ready" not in written2
 
     async def test_no_stdin_starts_no_task(self, caplog):
         """When sys.stdin is None, on_start logs a warning and skips."""
@@ -413,10 +430,31 @@ class TestOnStop:
 
 
 class TestDaemonReader:
-    def test_stdin_reader_creates_daemon_thread(self):
-        """_stdin_reader is designed to run in a daemon thread, so a
-        blocked readline cannot hold up process exit (#759). Verify the
-        threading contract: a daemon thread is killed at process exit."""
+    async def test_reader_thread_is_daemon(self):
+        """_read_loop spawns a daemon reader thread, so a blocked readline
+        cannot hold up process exit (#759)."""
         import threading
-        t = threading.Thread(target=lambda: None, daemon=True)
-        assert t.daemon
+        pm, registry = _make_pm_with_registry(transport="cli")
+        plugin = CLIPlugin(pm)
+        pm.register(plugin, name="cli")
+        plugin._registry = registry
+
+        # Use a readline that blocks briefly, so the thread is still
+        # running when we check it.
+        def blocking_readline():
+            threading.Event().wait(1.0)
+            return ""
+
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.isatty.return_value = False
+            mock_stdin.readline = blocking_readline
+            task = asyncio.create_task(plugin._read_loop())
+            await asyncio.sleep(0.05)  # let the thread spawn
+            assert plugin._reader_thread is not None
+            assert plugin._reader_thread.daemon
+            assert plugin._reader_thread.name == "cli-stdin-reader"
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
