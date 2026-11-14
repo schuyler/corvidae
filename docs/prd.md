@@ -441,7 +441,9 @@ one is a bug even if its tests pass.
     announced (`on_message_persisted`) in arrival order. A turn in flight is
     never interrupted. Only consecutive inbound messages coalesce: a tool
     result, a notification or a retry stops the run and keeps its place, and
-    notifications never coalesce. A coalesced burst is one exchange for
+    the channel queue never coalesces notification items (the funnel's
+    batching of notification payloads happens before they reach the queue,
+    §3.7). A coalesced burst is one exchange for
     `max_turns` (item 3). The last message's trace owns the turn: every
     turn hook, usage row and reply carries it, and the earlier messages'
     traces get admission and persistence only.
@@ -1776,4 +1778,4 @@ record that holds the reasoning.
 | Identity is agent-wide and heads every prompt written in the agent's voice; channel register is appended after it and never replaces it; the subagent's prompt is persona-neutral (§3.5.7) | operator directive, 2026-11-01; #380; #388 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
-| Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; notifications never coalesce | §3.1.19; #398, #296; owner, 2026-11-03 |
+| Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; the channel queue never coalesces notification items | §3.1.19; #398, #296; owner, 2026-11-03 |
