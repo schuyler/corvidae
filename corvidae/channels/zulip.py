@@ -264,14 +264,19 @@ class ZulipPlugin(TransportPlugin):
         self._dropped = 0
         self._message_counter = 0
 
-        # Liveness bookkeeping, per channel id (transport:scope).
+        # Liveness bookkeeping, keyed by _typing_key: channel id and topic,
+        # because a Zulip typing notice is per (stream, topic) and two topics
+        # owing a reply show two notices.
         self._outstanding: dict[tuple[str, Optional[str]], int] = {}
-        # Keyed by (channel id, topic): a Zulip typing notice is per
-        # (stream, topic), so two topics owing a reply show two notices.
+        # One loop per key, and it is the only thing that ever posts a typing
+        # notice (#643 rounds 5-6, one writer): the message path sets what is
+        # owed and wakes the loop, and never sends start or stop itself.
         self._typing_tasks: dict[tuple[str, Optional[str]], asyncio.Task] = {}
-        # Bumped whenever a topic's typing is stopped, so a refresh whose start
-        # was already in flight can tell it outlived the stop and send its own.
-        self._typing_epoch: dict[tuple[str, Optional[str]], int] = {}
+        # Whether the topic currently shows a notice. Written only by the loop,
+        # after its own send has finished, so it always describes the server.
+        self._typing_showing: dict[tuple[str, Optional[str]], bool] = {}
+        # The loop's wake-up, set by anything that changes what is owed.
+        self._typing_wake: dict[tuple[str, Optional[str]], asyncio.Event] = {}
         # Trace ids admitted while their on_message call is still running;
         # _handle_message's finally consumes them.
         self._admitted: set[str] = set()
@@ -919,12 +924,11 @@ class ZulipPlugin(TransportPlugin):
             # by then (gate veto, agent not ready, an exception, cancellation)
             # gets no reply, so give its typing slot back and stop the notice.
             if took_slot and trace_id not in self._admitted:
-                # No turn will answer it: give the slot back and stop the
-                # notice in the topic that was showing it. The trace's topic
+                # No turn will answer it: give the slot back and let the
+                # topic's loop notice and send the stop. The trace's topic
                 # entry stays: `_remember_topic`'s bound evicts it, and a turn
                 # that is admitted on a retry still needs it.
-                if self._decrement_outstanding(channel, topic):
-                    await self._send_typing(channel, "stop", topic)
+                self._decrement_outstanding(channel, topic)
             self._admitted.discard(trace_id)
 
     def _transient_channel(self, scope: str) -> Channel:
@@ -1025,99 +1029,114 @@ class ZulipPlugin(TransportPlugin):
         """
         return (channel.id, topic)
 
-    async def _begin_typing(self, channel: Channel, topic: Optional[str]) -> None:
-        """Count this message as outstanding; on the first one for its topic,
-        send typing immediately and start the refresh loop for that topic."""
-        key = self._typing_key(channel, topic)
-        count = self._outstanding.get(key, 0) + 1
-        self._outstanding[key] = count
-        if count == 1:
-            await self._send_typing(channel, "start", topic)
-            # A loop from an earlier turn may still be asleep; it will see the
-            # count back above zero and carry on, so a second one would double
-            # the refreshes and leave one untracked by on_stop.
-            existing = self._typing_tasks.get(key)
-            if existing is None or existing.done():
-                self._typing_tasks[key] = asyncio.create_task(
-                    self._typing_refresh_loop(channel, topic)
-                )
+    def _typing_wakeup(self, key: tuple[str, Optional[str]]) -> asyncio.Event:
+        """The wake-up for ``key``, created with the topic's first notice."""
+        wake = self._typing_wake.get(key)
+        if wake is None:
+            wake = self._typing_wake[key] = asyncio.Event()
+        return wake
 
-    def _decrement_outstanding(self, channel: Channel, topic: Optional[str]) -> bool:
-        """Give back one slot for a message that was never admitted. True when
-        that left nothing owed in that topic."""
+    async def _begin_typing(self, channel: Channel, topic: Optional[str]) -> None:
+        """Count one more reply owed in this topic, and wake its loop.
+
+        Sends nothing: the loop is the only writer of typing state, so no
+        window exists where a start and a stop can cross (#643 rounds 5-6).
+        """
+        key = self._typing_key(channel, topic)
+        self._outstanding[key] = self._outstanding.get(key, 0) + 1
+        self._typing_wakeup(key).set()
+        existing = self._typing_tasks.get(key)
+        if existing is None or existing.done():
+            self._typing_tasks[key] = asyncio.create_task(
+                self._typing_refresh_loop(channel, topic)
+            )
+
+    def _decrement_outstanding(self, channel: Channel, topic: Optional[str]) -> None:
+        """Give back one slot for a message that was never admitted.
+
+        Returns nothing: whether that left the topic owing nothing is the
+        loop's to notice, on the wake-up set here.
+        """
         key = self._typing_key(channel, topic)
         count = self._outstanding.get(key, 0)
-        if count > 0:
-            if count == 1:
-                # Delete rather than leave a zero behind: the dict is keyed by
-                # (channel, topic), so a channel with many topics would grow it
-                # forever (#643 review).
-                del self._outstanding[key]
-                return True
+        if count > 1:
             self._outstanding[key] = count - 1
-        return False
+        elif count == 1:
+            # Delete rather than leave a zero behind: the dict is keyed by
+            # (channel, topic), so a channel with many topics would grow it
+            # forever (#643 review).
+            del self._outstanding[key]
+        else:
+            return
+        wake = self._typing_wake.get(key)
+        if wake is not None:
+            wake.set()
 
-    def _release_all(self, channel: Channel) -> list[Optional[str]]:
+    def _release_all(self, channel: Channel) -> None:
         """Close out every outstanding slot on a final, sent or unsent: one final
         answers a coalesced burst.
 
-        Returns the topics that were showing typing, one entry per notice, so
-        each stop goes to the topic its start did. Synchronous on purpose:
-        callers run it before their first await.
+        Synchronous on purpose, and it posts nothing: the loops wake and send
+        their own stops, each to the topic its start went to.
         """
-        released: list[Optional[str]] = []
         for key in [k for k in self._outstanding if k[0] == channel.id]:
             del self._outstanding[key]
-            # A refresh may be mid-request; the bump makes it send a stop of
-            # its own, so typing cannot reappear after the stop below. With no
-            # live loop nothing will pop the bump, so skip it rather than leak
-            # the key (#643 review).
-            task = self._typing_tasks.get(key)
-            if task is not None and not task.done():
-                self._typing_epoch[key] = self._typing_epoch.get(key, 0) + 1
-            released.append(key[1])
-        return released
+            wake = self._typing_wake.get(key)
+            if wake is not None:
+                wake.set()
 
     async def _typing_refresh_loop(self, channel: Channel, topic: Optional[str]) -> None:
-        """Re-send typing every TYPING_REFRESH_SECONDS while a reply is owed in
-        this topic; stop once nothing is owed or a send fails."""
+        """Hold this topic's typing notice in line with what is owed.
+
+        The one writer: every pass re-derives owed-and-showing from state and
+        acts on it, and every await returns to the top of the loop rather than
+        deciding anything itself. That is what removes the races the re-checks
+        used to patch (#643 rounds 5 and 6): a message arriving inside a start's
+        or a stop's round trip simply changes the state the next pass reads.
+        """
         key = self._typing_key(channel, topic)
+        wake = self._typing_wakeup(key)
         try:
-            while self._outstanding.get(key, 0) > 0:
-                await asyncio.sleep(TYPING_REFRESH_SECONDS)
-                if self._outstanding.get(key, 0) <= 0:
+            while True:
+                owed = self._outstanding.get(key, 0) > 0
+                showing = self._typing_showing.get(key, False)
+                if owed and not showing:
+                    if not await self._send_typing(channel, "start", topic):
+                        return
+                    self._typing_showing[key] = True
+                    # Look again: the count may have moved during the send.
+                    continue
+                if not owed and showing:
+                    if not await self._send_typing(channel, "stop", topic):
+                        self._typing_showing[key] = False
+                        return
+                    self._typing_showing[key] = False
+                    # A message may have arrived inside the stop's round trip;
+                    # the next pass sees it owed and starts again.
+                    continue
+                if not owed:
+                    # Nothing owed and nothing showing, decided with no await
+                    # since the reads above: a _begin_typing either ran before
+                    # them (and is seen) or runs after the task is forgotten
+                    # below (and starts a new loop). Never neither.
                     return
-                epoch = self._typing_epoch.get(key, 0)
-                if not await self._send_typing(channel, "start", topic):
-                    return
-                # The final may have stopped typing while that start was in
-                # flight, in which case the start landed after the stop and the
-                # topic would show typing with nothing owed.
-                if self._typing_epoch.get(key, 0) != epoch:
-                    # The epoch moved under the start that just landed, which
-                    # means a final released this topic. A new message in the
-                    # same topic may have arrived in that window and be owed a
-                    # reply already: stopping here would turn typing off with
-                    # nothing left to turn it back on, since this loop is still
-                    # the topic's only one (#643 round 5).
-                    if self._outstanding.get(key, 0) > 0:
-                        continue
-                    await self._send_typing(channel, "stop", topic)
-                    # That stop is a round trip of its own: a message can
-                    # arrive inside it, and it would find this loop alive and
-                    # start none, then lose its typing when the loop exits
-                    # (#643 round 6). Nothing owed means the loop is done.
-                    if self._outstanding.get(key, 0) > 0:
-                        continue
-                    return
+                # Still owed and still showing: wait for a refresh, unless
+                # something changes first.
+                wake.clear()
+                try:
+                    await asyncio.wait_for(
+                        wake.wait(), timeout=TYPING_REFRESH_SECONDS
+                    )
+                except TimeoutError:
+                    if not await self._send_typing(channel, "start", topic):
+                        return
         finally:
             # Forget this loop only if it is still the tracked one, never a
             # successor registered under the same channel id and topic.
             if self._typing_tasks.get(key) is asyncio.current_task():
                 del self._typing_tasks[key]
-                # Nothing is left to notice a bump once this loop is gone, so
-                # the epoch goes with it (#643 review).
-                self._typing_epoch.pop(key, None)
+                self._typing_showing.pop(key, None)
+                self._typing_wake.pop(key, None)
 
     def _typing_form(
         self, channel: Channel, op: str, topic: Optional[str] = None
@@ -1373,8 +1392,7 @@ class ZulipPlugin(TransportPlugin):
             # sent that error - and the retry behind it - to the newest topic.
             # The 512-entry bound evicts a finished turn instead, which costs
             # nothing but a fallback (#643 review).
-            for released_topic in self._release_all(channel):
-                await self._send_typing(channel, "stop", released_topic)
+            self._release_all(channel)
 
     async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
         """Deliver a final reply in the topic of the message it answers, then
@@ -1385,8 +1403,7 @@ class ZulipPlugin(TransportPlugin):
         # model is re-queued with the same trace id (#643 review), and both the
         # fallback error and the retry must answer in the topic the message
         # came from.
-        for released_topic in self._release_all(channel):
-            await self._send_typing(channel, "stop", released_topic)
+        self._release_all(channel)
 
     async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Deliver intermediate assistant text without closing out the

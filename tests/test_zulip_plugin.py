@@ -1505,7 +1505,7 @@ class TestTyping:
             assert first["stream_id"] == "7" and first["topic"] == "plans"
             channel = h.registry.get("zulip:7")
             await h.plugin.send_message(channel, OutboundMessage(text="done", latency_ms=None))
-            assert any(t["op"] == "stop" for t in h.server.typing)
+            await _wait_until(lambda: any(t["op"] == "stop" for t in h.server.typing))
             seen = len(h.server.typing)
             await asyncio.sleep(0.2)
             assert len(h.server.typing) == seen  # the refresh loop ended
@@ -1549,13 +1549,19 @@ class TestTyping:
             h.server.push(dm_msg("vetoed"))
             await _wait_until(lambda: h.on_message.await_count >= 1)
             await asyncio.sleep(0.2)
-            assert h.plugin._outstanding.get(f"zulip:dm:{ALICE}", 0) == 0
-            # No reply is owed, so the notice the start showed must be cleared
-            # explicitly: the refresh loop ending by itself would leave it up.
-            assert h.server.typing[-1]["op"] == "stop"
-            starts = len([t for t in h.server.typing if t["op"] == "start"])
+            key = (h.registry.get(f"zulip:dm:{ALICE}").id, None)
+            assert h.plugin._outstanding.get(key, 0) == 0
+            # One writer (#643 rounds 5-6): the loop, not the message path,
+            # decides a notice is owed. A veto that lands before the loop first
+            # runs shows nothing at all; one that lands after shows a stop. The
+            # invariant either way is that no notice is left showing.
+            assert not h.plugin._typing_showing.get(key, False)
+            assert h.plugin._typing_tasks.get(key) is None
+            ops = [t["op"] for t in h.server.typing]
+            assert ops == [] or ops[-1] == "stop", ops
+            starts = ops.count("start")
             await asyncio.sleep(0.2)
-            assert len([t for t in h.server.typing if t["op"] == "start"]) == starts
+            assert [t["op"] for t in h.server.typing].count("start") == starts
         finally:
             await stop(h)
 
@@ -1577,7 +1583,7 @@ class TestTyping:
                 logprobs=None,
             )
             assert h.plugin._outstanding.get((channel.id, None), 0) == 0
-            assert h.server.typing[-1]["op"] == "stop"
+            await _wait_until(lambda: h.server.typing[-1]["op"] == "stop")
         finally:
             await stop(h)
 
@@ -1591,7 +1597,9 @@ class TestTyping:
             assert h.plugin._outstanding[(channel.id, None)] == 2
             await h.plugin.send_message(channel, OutboundMessage(text="both", latency_ms=None))
             assert h.plugin._outstanding.get((channel.id, None), 0) == 0
-            assert len([t for t in h.server.typing if t["op"] == "stop"]) == 1
+            await _wait_until(
+                lambda: len([t for t in h.server.typing if t["op"] == "stop"]) == 1
+            )
         finally:
             await stop(h)
 
@@ -1987,6 +1995,10 @@ class TestTopicRouting:
             traces = self._traces(h)
             await h.plugin.send_message(
                 channel, OutboundMessage(text="done", trace_id=traces["first in alpha"])
+            )
+            await _wait_until(
+                lambda: {"alpha", "beta"}
+                <= {t["topic"] for t in h.server.typing if t["op"] == "stop"}
             )
             stops = [t["topic"] for t in h.server.typing if t["op"] == "stop"]
             assert set(stops) == {"alpha", "beta"}, stops
