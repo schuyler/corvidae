@@ -1695,19 +1695,20 @@ from warm heads, whether the agent sees its provider's state) are tracked in
    next main turn. What a fork costs on a given backend is measured
    (item 10; §3.8.6), not assumed. A fork whose
    prefix no longer holds a head waits for a lease like any queue.
-5. Every queue has a latency bound, how long its waiting work may wait
-   for a head, except a channel the operator leaves without a latency
-   class. A channel gets its bound from a latency class, a named bound set
-   in operator config: a transport may declare the class its channels
-   default to (someone typing into a web UI expects an immediate reply;
-   someone texting doesn't), and the operator can assign a channel another
-   class or none. The operator config defines which classes exist and what
-   each one's bound is. A channel with no class has no bound: its work
-   never preempts a holder and is never overdue (past its bound). Upkeep
-   and agency take the latency bounds §3.1.16 gives idle work (principle
-   13). A lease holder yields at its next call
-   boundary when a waiting queue reaches its latency bound, and the head
-   goes to that queue. A holder may also yield of its own accord at any
+5. A latency bound is how long a queue's waiting work may wait for a
+   head, and a queue may have none. A channel gets its bound from a
+   latency class, a named bound set in operator config: a transport may
+   declare the class its channels default to (someone typing into a web
+   UI expects an immediate reply; someone texting doesn't), and the
+   operator can assign a channel another class or none. The operator
+   config defines which classes exist and what each one's bound is.
+   Upkeep and agency take the latency bounds §3.1.16 gives idle work, on
+   whichever queue they wait, and the heartbeat always has one (§3.7
+   Heartbeat). A plugin whose documented behaviour must hold under
+   traffic gives its work a bound (principle 13). Work with no bound
+   never preempts a holder and is never overdue (past its bound). A
+   lease holder yields at its next call boundary when a waiting queue's
+   work reaches its latency bound, and the head goes to that queue. A holder may also yield of its own accord at any
    call boundary (consolidation between chunks, for example), and it goes
    to the end of the line. Under the kernel's default order every call
    boundary is a yield point: a holder with no call in flight on a
@@ -1802,7 +1803,7 @@ record that holds the reasoning.
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
 | Every provider keeps warm context heads, and the operator declares how many; queues lease heads and switch at call boundaries (drain or yield, latency classes); no spend or rate caps for now; single-slot is a deployment choice, not architecture; the lease order is pluggable (release on drain superseded 2026-11-15, row below) | principle 16; §3.13; #296; operator, 2026-11-02 |
 | Leases are a kernel mechanism (a lease per provider and queue, stop and resume at a call boundary, the policy view) under a replaceable default order: FIFO grants, a holder keeps its head across calls while no other queue waits and gives it up at its next call boundary when one does (sticky until contention). That keeps prefixes warm on a best-effort basis and cannot deadlock, since a head is held against a waiter only until the calls already in flight end; backend-aware optimisation is a scheduler plugin's job. It replaces an earlier default that kept a lease until the queue drained and its exchange's forks had run, which needed the kernel to infer when a queue still had work coming and kept finding ways to hold a head its own work was waiting for. Nothing orders forks ahead of their own channel's next main turn, because what that order would save depends on how a provider manages its cache; a pool is a provider, not a separate concept | principle 3; §3.13.3–5, 7; #364; #362; operator, 2026-11-15 |
-| A channel's latency bound is optional; every other queue keeps one. A channel the operator leaves without a latency class never preempts and is never overdue, a replacement order may delay its work indefinitely, and its exchange's forks, which share its bound, lose principle 3's starvation guarantee | principle 3; §3.13.5, 7; #989; operator, 2026-11-15 |
+| A latency bound is optional for any queue: work with none never preempts and is never overdue, and a replacement order may delay it indefinitely. Where a bound matters, the requirement says so (§3.1.16's idle-work bounds, the heartbeat's, and any plugin whose documented behaviour must hold under traffic, principle 13), and on a channel with no class its exchange's forks lose principle 3's starvation guarantee. Supersedes "every queue has a latency bound" | principle 3; §3.13.5, 7; #989; operator, 2026-11-15 |
 | Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
 | Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
 | Hedging vocabulary is persona, not architecture | §3.11.5; diverges from the Persyn spec |
