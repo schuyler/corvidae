@@ -927,15 +927,50 @@ class TestQuietOrigins:
         await _speak_up(tools, channel, trace_id="t2")
         assert await _final(gate, channel, _GITHUB, trace_id="t2") is None
 
-    async def test_q6_runtime_override_cannot_lift_the_veto(self):
+    # #928: gate.send.quiet_origins is a per-channel runtime tunable.
+    async def test_q6_runtime_override_can_lift_the_veto(self):
         gate, _log, channel = await _gate(_QUIET, appraisal=_StubAppraisal(0.9))
         channel.runtime_overrides["gate.send.quiet_origins"] = []
-        assert await _final(gate, channel, _GITHUB) is False
+        assert await _final(gate, channel, _GITHUB) is None
 
-    async def test_q6_runtime_override_cannot_add_a_quiet_origin(self):
+    async def test_q6_runtime_override_can_add_a_quiet_origin(self):
         gate, _log, channel = await _gate({}, appraisal=_StubAppraisal(0.9))
         channel.runtime_overrides["gate.send.quiet_origins"] = ["webhook:github"]
-        assert await _final(gate, channel, _GITHUB) is None
+        assert await _final(gate, channel, _GITHUB) is False
+
+    async def test_q6_clearing_the_override_restores_the_config_list(self):
+        """set_settings with null pops the override; YAML applies again."""
+        gate, _log, channel = await _gate(_QUIET, appraisal=_StubAppraisal(0.9))
+        channel.runtime_overrides["gate.send.quiet_origins"] = []
+        assert await _final(gate, channel, _GITHUB, trace_id="t1") is None
+        channel.runtime_overrides.pop("gate.send.quiet_origins")
+        assert await _final(gate, channel, _GITHUB, trace_id="t2") is False
+
+    async def test_q6_override_on_one_channel_leaves_another_on_config(self):
+        gate, _log, channel = await _gate(_QUIET, appraisal=_StubAppraisal(0.9))
+        other = Channel(transport="test", scope="other", config=ChannelConfig())
+        channel.runtime_overrides["gate.send.quiet_origins"] = []
+        assert await _final(gate, channel, _GITHUB, trace_id="t1") is None
+        assert await _final(gate, other, _GITHUB, trace_id="t2") is False
+
+    async def test_q6_override_listing_user_is_ignored_with_a_warning(self, caplog):
+        gate, _log, channel = await _gate({}, appraisal=_StubAppraisal(0.9))
+        channel.runtime_overrides["gate.send.quiet_origins"] = ["user", "webhook:github"]
+        with caplog.at_level("WARNING", logger="corvidae.gates"):
+            assert await _final(gate, channel, _GITHUB) is False
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "gate.send.quiet_origins" in text
+        assert "'user'" in text
+
+    async def test_q6_invalid_override_fails_open_naming_key_and_channel(self, caplog):
+        gate, _log, channel = await _gate(_QUIET, appraisal=_StubAppraisal(0.9))
+        channel.runtime_overrides["gate.send.quiet_origins"] = "webhook:github"
+        with caplog.at_level("WARNING", logger="corvidae.gates"):
+            assert await _final(gate, channel, _GITHUB) is None
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "gate.send.quiet_origins" in text
+        assert "'webhook:github'" in text
+        assert channel.id in text
 
     @pytest.mark.parametrize("value", ["webhook:github", 5, ["webhook:github", 5]])
     async def test_q7_non_list_fails_open_with_a_warning(self, value, caplog):
