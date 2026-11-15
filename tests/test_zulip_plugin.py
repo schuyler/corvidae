@@ -25,7 +25,7 @@ import tomllib
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiohttp import web
@@ -1702,6 +1702,71 @@ class TestTopicRouting:
             )
             assert h.server.sent[-1]["topic"] == "alpha"
             assert h.server.sent[-1]["content"] == "the real answer"
+        finally:
+            await stop(h)
+
+    async def test_the_agent_hook_order_keeps_the_reply_in_its_topic(self):
+        """`on_agent_response` runs before `send_message` in the agent loop.
+
+        Every other test here calls `send_message` alone, so the forget that
+        `on_agent_response` did on a *sent* final went unseen: by the time the
+        reply was routed its topic was gone and it went to the newest one
+        (#643 review).
+        """
+        h = await _start()
+        try:
+            await _deliver(
+                h,
+                channel_msg("first in alpha", topic="alpha"),
+                channel_msg("second in beta", topic="beta"),
+                flags=["mentioned"],
+            )
+            traces = self._traces(h)
+            alpha_trace = traces["first in alpha"]
+            channel = h.registry.get("zulip:7")
+            # The agent loop's order: the response hook, then the send.
+            with patch(
+                "corvidae.channels.zulip.final_was_unsent", return_value=False
+            ):
+                await h.plugin.on_agent_response(
+                    channel=channel,
+                    request_text="first in alpha",
+                    response_text="answer",
+                    trace_id=alpha_trace,
+                    annotations={},
+                    logprobs=None,
+                )
+            await h.plugin.send_message(
+                channel, OutboundMessage(text="answer", trace_id=alpha_trace),
+            )
+            assert h.server.sent[-1]["topic"] == "alpha"
+        finally:
+            await stop(h)
+
+    async def test_an_unsent_final_still_forgets_its_topic(self):
+        """The one case with no send behind it keeps the old behaviour."""
+        h = await _start()
+        try:
+            await _deliver(
+                h,
+                channel_msg("first in alpha", topic="alpha"),
+                channel_msg("second in beta", topic="beta"),
+                flags=["mentioned"],
+            )
+            traces = self._traces(h)
+            channel = h.registry.get("zulip:7")
+            with patch(
+                "corvidae.channels.zulip.final_was_unsent", return_value=True
+            ):
+                await h.plugin.on_agent_response(
+                    channel=channel,
+                    request_text="first in alpha",
+                    response_text="",
+                    trace_id=traces["first in alpha"],
+                    annotations={},
+                    logprobs=None,
+                )
+            assert traces["first in alpha"] not in h.plugin._trace_topics
         finally:
             await stop(h)
 

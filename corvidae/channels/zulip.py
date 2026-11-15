@@ -1065,8 +1065,12 @@ class ZulipPlugin(TransportPlugin):
         for key in [k for k in self._outstanding if k[0] == channel.id]:
             del self._outstanding[key]
             # A refresh may be mid-request; the bump makes it send a stop of
-            # its own, so typing cannot reappear after the stop below.
-            self._typing_epoch[key] = self._typing_epoch.get(key, 0) + 1
+            # its own, so typing cannot reappear after the stop below. With no
+            # live loop nothing will pop the bump, so skip it rather than leak
+            # the key (#643 review).
+            task = self._typing_tasks.get(key)
+            if task is not None and not task.done():
+                self._typing_epoch[key] = self._typing_epoch.get(key, 0) + 1
             released.append(key[1])
         return released
 
@@ -1347,8 +1351,12 @@ class ZulipPlugin(TransportPlugin):
                 extra={"channel": channel.id, "trace_id": trace_id},
             )
             return
-        self._forget_topic(trace_id)
         if unsent:
+            # Only an unsent final has no send_message to follow it, so this is
+            # the only case that forgets the topic. Forgetting on a sent final
+            # ran before send_message routed the reply, so every reply fell back
+            # to the newest topic (#643 review).
+            self._forget_topic(trace_id)
             for released_topic in self._release_all(channel):
                 await self._send_typing(channel, "stop", released_topic)
 
