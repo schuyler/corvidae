@@ -1101,6 +1101,14 @@ class ZulipPlugin(TransportPlugin):
         next_refresh = 0.0
         try:
             while True:
+                # Cleared before the reads, never after them: a setter writes
+                # its state and then sets this event with no await between, so
+                # a set that happened before this pass is either seen by the
+                # reads below or is still set when the wait starts. Clearing
+                # after the reads instead would drop a wake that landed in that
+                # gap, and the stop it announced would wait out the refresh
+                # (#888 round 7 nit).
+                wake.clear()
                 owed = self._outstanding.get(key, 0) > 0
                 showing = self._typing_showing.get(key, False)
                 if owed and not showing:
@@ -1132,7 +1140,6 @@ class ZulipPlugin(TransportPlugin):
                 # expire under a reply that is owed (#888 round 7).
                 due = next_refresh - time.monotonic()
                 if due > 0:
-                    wake.clear()
                     try:
                         await asyncio.wait_for(wake.wait(), timeout=due)
                     except TimeoutError:
