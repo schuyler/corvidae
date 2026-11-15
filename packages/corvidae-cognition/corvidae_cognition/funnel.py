@@ -604,8 +604,11 @@ class FunnelPlugin(CorvidaePlugin):
                     carried.append(
                         self._carried_payload(cid, source, result, old.created))
                 else:
+                    # _discard cancelled it if it was still running; a finished
+                    # one had nothing to admit (None, cancelled, or raised).
                     logger.debug(
-                        "superseding the pending %s promise for %s: the newer submit cancels it",
+                        "superseding the pending %s promise for %s: it was cancelled "
+                        "or finished with nothing to admit",
                         source, cid, extra={"channel_id": cid, "source": source},
                     )
             entry = _Pending(promise, self._now())
@@ -804,10 +807,13 @@ class FunnelPlugin(CorvidaePlugin):
                         payload.source, channel.id, exc_info=True,
                         extra={"channel_id": channel.id, "source": payload.source},
                     )
-            # Entries neither admitted nor already present in the window
-            # were dropped by the budget — they stay registered (§2.2).
-            # Deduped entries ARE in the window, so this containment check
-            # counts them as satisfied rather than re-queueing them forever.
+            # Entries neither admitted nor deduped were dropped by the budget —
+            # they stay registered (§2.2). A deduped entry is satisfied: it is
+            # either already in the window (the containment check below) or it
+            # was dropped by its key (#725), and a key-deduped entry has
+            # different text by definition, so containment alone would keep
+            # re-queueing it every turn forever.
+            duplicates = set(admission.duplicate)
             window_context = [
                 msg.get("content") or ""
                 for msg in conv.messages
@@ -822,6 +828,7 @@ class FunnelPlugin(CorvidaePlugin):
                 [
                     (entry, key) for entry, key in pairs
                     if entry not in admission.admitted
+                    and entry not in duplicates
                     and not any(entry in existing for existing in window_context)
                 ],
             )

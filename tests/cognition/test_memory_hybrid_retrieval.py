@@ -10,6 +10,7 @@ candidate records which search found it (``source``).
 """
 
 import logging
+import time
 
 import aiosqlite
 import pytest
@@ -303,6 +304,31 @@ class TestWindowExclusion:
         await db.close()
 
 
+    async def test_in_window_measured_record_is_judged_measured_first(self):
+        """#856 follow-up: the pool ranks measured candidates first, so an
+        in-window measured record's would-be rank must not count an
+        unembedded pool row that the pool itself ranks after it."""
+        memory, _e, channel, conv, db = await build_retrieval_env(
+            config(k=1, band_on="similarity", bands={"moderate": 0.0})
+        )
+        window_text = "what then"
+        # Below the 0.6 proxy, so the unembedded row wins the fused tiebreak.
+        assert 0.0 < cosine(QUERY, window_text) < 0.6
+        in_window = await seed(db, channel.id, window_text, WINDOW_START, WINDOW_START + 1)
+        await seed_memory(db, channel.id, NAMED, embedded=False)
+        fill_window(conv)
+
+        conv.append({"role": "user", "content": QUERY, "_db_id": WINDOW_START + 5})
+        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+
+        async with db.execute(
+            "SELECT memory_id, outcome, rank FROM retrieval_candidate"
+        ) as cursor:
+            rows = {r[0]: r[1:] for r in await cursor.fetchall()}
+        assert rows.get(in_window) == ("excluded_in_window", 1), rows
+        await db.close()
+
+
 class TestConfig:
     async def test_unknown_candidates_value_warns_and_uses_hybrid(self, caplog):
         with caplog.at_level(logging.WARNING):
@@ -313,4 +339,74 @@ class TestConfig:
         assert "memory.retrieval.candidates" in message
         assert "'everything'" in message and "hybrid" in message and "vector" in message
         assert isinstance(memory, MemoryPlugin) and memory._candidates == "hybrid"
+        await db.close()
+
+
+class TestUnmeasuredDoesNotTakeASlot:
+    """#705: a record with no stored vector is scored from
+    ``FTS_SIMILARITY_PROXY``, not from the query, so it cannot be admitted on
+    its own relevance. It must not take a top-k slot from a candidate the
+    vector side measured, while staying in the candidate log."""
+
+    async def test_an_unembedded_hit_does_not_take_the_only_slot(self):
+        # k=1, band_on: similarity so the measured record's *band* does not
+        # decay with age while its ranking score does. The unembedded record
+        # is fresh, ties on fused rank (both are rank 1 in their own list) and
+        # wins the score tiebreak, so it used to take the single slot.
+        measured_text = "what about what about"
+        assert cosine(QUERY, measured_text) >= 0.6  # clears the gate
+        memory, _e, channel, conv, db = await build_retrieval_env(
+            config(k=1, band_on="similarity")
+        )
+        old = await seed_memory(
+            db, channel.id, measured_text, created_at=time.time() - 60 * 86400,
+        )
+        fresh = await seed_memory(db, channel.id, NAMED, embedded=False)
+
+        conv.append({"role": "user", "content": QUERY})
+        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+
+        recalled = " ".join(m["content"] for m in context_messages(conv))
+        assert measured_text in recalled
+        assert NAMED not in recalled
+
+        # The unembedded record is still scored and still logged, as cut.
+        async with db.execute(
+            "SELECT memory_id, rank, outcome, source FROM retrieval_candidate "
+            "ORDER BY rank"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        by_id = {row[0]: row[1:] for row in rows}
+        assert by_id[fresh] == (2, "cut", "fts"), rows
+        assert by_id[old] == (1, "admitted", "vec"), rows
+        await db.close()
+
+    async def test_pool_keeps_the_unmeasured_candidate_after_the_measured(self):
+        memory, _e, channel, _conv, db = await build_retrieval_env(config(k=2))
+        for text in DISTRACTORS:
+            await seed_memory(db, channel.id, text)
+        unembedded = await seed_memory(db, channel.id, NAMED, embedded=False)
+        measured = await seed_memory(db, channel.id, DISTRACTORS[0])
+
+        pool = await memory._retrieve_pool(QUERY)
+
+        ids = [c["id"] for c in pool.ranked]
+        measured_flags = [c["measured"] for c in pool.ranked]
+        assert unembedded in ids, "the unembedded candidate is still in the pool"
+        assert ids.index(measured) < ids.index(unembedded)
+        assert measured_flags[0] is True, "measured candidates rank first"
+        assert pool.ranked[-1]["measured"] is False
+        await db.close()
+
+    async def test_degraded_path_is_unaffected(self):
+        """With no vector side nothing is measured, so the order is the FTS
+        score order it always was and candidates still reach the cut."""
+        memory, embedder, channel, _conv, db = await build_retrieval_env(config(k=2))
+        named = await seed_named_and_distractors(db, channel.id)
+        embedder.fail = True
+
+        pool = await memory._retrieve_pool(QUERY)
+
+        assert all(c["measured"] is False for c in pool.ranked)
+        assert named in [c["id"] for c in pool.ranked[: pool.k]]
         await db.close()

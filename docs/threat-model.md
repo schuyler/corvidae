@@ -59,7 +59,7 @@ a claim. The provenance critic is shown excerpts of earlier raw-log
 messages, from every channel, matching retrieval (finding 15, #168), so
 text from one channel can reach the critic's prompt while it judges another's
 reply. They are quoted, untrusted text in the critic's prompt, framed as data, and
-the critic's objections re-enter the window as CONTEXT (provenance objections also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; `SilencePlugin`'s veto of a final containing `NO_REPLY` covers every turn origin while it is loaded; otherwise only critique's own exact-match veto of critique-origin turns applies). The number of
+the critic's objections re-enter the window as CONTEXT (provenance objections, and retention findings when the lens has a root (finding 21), also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; `SilencePlugin`'s veto of a final containing `NO_REPLY` covers every turn origin while it is loaded; otherwise only critique's own exact-match veto of critique-origin turns applies). The number of
 claims (5) and excerpts (5 per claim, 500 characters each) is capped, so
 one reply can't fan out into an unbounded critic prompt. Leaving sandboxing out
 of the MVP was a reasonable call, but it matters here: the attacker is not
@@ -557,20 +557,20 @@ remains a pass-through hook.
 
 **What is fenced and what is not.** Fenced as untrusted outside content: the
 results of `read_file` (spill files read back included), `web_fetch`,
-`web_search` and every MCP tool. A tool declares this for itself
+`web_search`, `shell` and `task_pipeline`, and every MCP tool. A tool declares this for itself
 (`returns_untrusted`, read when the call is dispatched and stored on the
 result), so a result of a tool no plugin declares is unfenced unless it acts on
 another channel. Result rows stored before #557 carry no flag and stay
 unfenced on reload. Unfenced today:
-`shell` and `task_pipeline` output, including a `cat` of a spill file (#580);
 `recall_raw` and `search_memory` replays of earlier content, which can carry
 text that was untrusted when it first arrived; the results inside a
 subagent's own loop, which reach the subagent's model with no frame; and the
 subagent's final report to the main model, which can repeat what the
 subagent read. The header names the spill source for a read-back when the log
 still holds the row that cut it (#576), cleaned like any header value, and
-fenced rows are costed by the estimator without their framing, so a long run
-of them can undercount tokens against the hard ceiling (#577).
+fenced rows are costed by the estimator at their rendered size — header and
+fence included — so a long run of them cannot undercount the window against
+the hard ceiling the way counting the provenance record did (#577).
 
 The HTTP transports (`streamable_http`, `sse`) open an outbound connection
 to whatever `url` names and send the configured `headers`, bearer token
@@ -1003,7 +1003,7 @@ What each kind of unlock costs:
   instruction text in `memory_prompt`), so the records written under an
   edited `memory.consolidation_fork_prompt` can be found afterwards.
   Records from before the standalone prompt was removed keep their old
-  stamp; they are not migrated. The stamp records the consolidation instructions,
+  stamp; they are not migrated. The stamp records the consolidation instruction, including its entry size sentence,
   not the system prompt and window a fork runs under, so an edit to the
   system prompt isn't identifiable this way; nor does it cover the
   compaction, appraisal or critique prompts. `memory_prompt` holds
@@ -1372,8 +1372,9 @@ back is fenced: the header's pointer is kernel text, and the file's contents
 arrive as a `read_file` result under the untrusted-output header and nonce
 fence (#571), though not the notification's own fence, and the header names
 the source recorded when the content was spilled, if the log row survives
-(#576). A `cat` of the file through `shell` arrives unfenced
-(#580). The spill directory is not inside any tool root
+(#576), and a `cat` of the file through `shell` arrives fenced, though
+without the source line, because the stamp needs a whole spill path as its
+argument (#580). The spill directory is not inside any tool root
 (`read_file` has none until #444), so the file is reachable the same way any
 other path is, and the agent can read it whether or not a header pointed at
 it.
@@ -1386,9 +1387,10 @@ case adds the cap times the rate of long tool results. The file is written
 only where the channel (or, in a subagent, its tool set) has a spill reader,
 and read back the same ways as a notification's. The cut line on an
 untrusted result sits in the header, outside the fence. On a trusted result
-it heads the unfenced content, so text in that content (a `shell` command's
-output, say) could imitate it. That is no new reach: such output was
-already unfenced and could imitate any text. In a subagent's loop the cut
+it heads the unfenced content, so text in that content (the output of a tool
+that does not declare itself untrusted, say) could imitate it. That is no new
+reach: such output is unfenced by that tool's own declaration and could
+imitate any text. In a subagent's loop the cut
 line is plain text in the result, with no kernel header at all.
 
 ### Smaller things
@@ -1439,7 +1441,7 @@ line is plain text in the result, with no kernel header at all.
   Zulip channel tells the model it may answer `NO_REPLY` to send nothing (or,
   with `silence.mode` `tool` or `both`, call `end_turn`), and
   a message that says "don't reply to this" may be enough. The worst case is
-  a missed reply. The veto is a containment check, so a reply that merely quotes the token (say, repeating an incoming message that contains `NO_REPLY`) is dropped too: untrusted text can get a reply suppressed without the model choosing silence. A decline is a row in `exchange_log` with
+  a missed reply. The veto is a containment check, so a reply that merely quotes the token (say, repeating an incoming message that contains `NO_REPLY`) is dropped too: untrusted text can get a reply suppressed without the model choosing silence. This is accepted for now, not prevented: the withheld reply is stored `unsent` and recorded as `no_reply`, the cost is one re-prompt, and an exact-match veto would instead leak the token to users whenever the model writes anything beside it. Narrowing the match without that leak is #902. A decline is a row in `exchange_log` with
   `outcomes.silence` (`no_reply` or `empty`) only when `outcome_log` is loaded
   and the turn has a trace id, so look there to find them. With
   `silence.mode: tool` or `both` the agent also has an `end_turn(reason)` tool,
@@ -1627,7 +1629,12 @@ indefinitely, at the operator's expense and against the person on the other end.
 
 `OutboundCapPlugin` counts the messages the gate lets through on a channel
 since the last admitted human message and withholds everything after
-`outbound_cap.max_messages` until a human speaks again.
+`outbound_cap.max_messages` until a human speaks again. Since #821 it also
+enforces an optional sliding window — `outbound_cap.max_messages_per_window`
+in `outbound_cap.window_seconds`, off unless configured — which bounds the
+cases the between-human counter does not: a channel where a human keeps
+talking, or one whose counter keeps being reset. A human message does not
+reset the window.
 
 Mitigations and their limits:
 
@@ -1643,11 +1650,14 @@ Mitigations and their limits:
 - A withheld `final` is still stored as `UNSENT` with a not-sent marker, so the
   agent can see it was held; nothing is silently lost.
 - Every withheld emission is logged, the first in a run at `WARNING` with the
-  channel, emission, trace id and limit key, so an operator can see a cap doing
-  its work rather than guessing at silence.
+  channel, emission, trace id and the limit key that fired, so an operator can
+  see a cap doing its work rather than guessing at silence; a message held while
+  both limits are reached names both, and the window logs one `WARNING` summary
+  when it slides open again.
 
 The agent can raise or clear its own cap through `set_settings`
-(`outbound_cap.max_messages`, `outbound_cap.count_progress`), and an invalid
+(`outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`,
+`outbound_cap.window_seconds`, `outbound_cap.count_progress`), and an invalid
 override fails open, unless the operator lists those keys in
 `agent.immutable_settings`.
 
@@ -1661,6 +1671,121 @@ signal. And a capped channel is a **self-silencing** route: an injected
 instruction can deliberately burn the budget and stop the agent from answering
 the person until they send another message, which is the same class of harm as
 the existing `NO_REPLY` route, not a new capability.
+
+### 20. `github_webhook`: a sender's strings reach the window, and a run number can silence a report (#792)
+
+PRD principle 9 asks for an entry when untrusted text reaches somewhere new.
+The `github-webhook` package turns webhook payloads into one line each, and
+the strings in those lines — PR titles, branch names, workflow names — are
+chosen by whoever can sign a request to the endpoint (finding 16's HMAC
+sender) or by anyone who can open a PR or push a branch in the repository.
+
+Mitigations:
+
+- A line's sender-controlled parts go only into the notification text, which
+  the kernel fences (§3.3.11). Annotations carry `origin` alone, minted here,
+  so nothing sender-shaped is rendered outside the fence.
+- Each sender string is cut to 120 characters and newlines are collapsed, so a
+  sender cannot pad a line or fake structure in the header.
+- Volume per delivery is at most one line, and one line per completed run, PR
+  transition or selected push — `workflow_job` churn, non-terminal runs and
+  unselected events are dropped and counted. A GitHub endpoint therefore needs
+  no separate rate cap; if one is ever needed, #793's throttle is the shared
+  mechanism rather than a second one.
+- The plugin owns its endpoints: an endpoint listed in both `github_webhook`
+  and `webhook_notify` is warned about at startup, because every subscriber to
+  an endpoint receives every delivery and it would otherwise be notified twice.
+
+Accepted residuals. A sender can fabricate `run_number`s to suppress a
+cancelled-run report: supersession is inferred from the highest run number
+seen per `(repository, workflow, branch)`, the map is in memory, and a forged
+high number makes a real cancellation look superseded. The map is lost on
+restart, which costs at worst one extra cancelled line. And a hook that
+subscribes to only some event types reports superseded cancellations as plain
+cancellations, because the `workflow_run` events supersession needs are then
+not delivered.
+
+### 21. The retention lens proposes writes to the knowledge base that recall reads back (#742)
+
+With a knowledge base root (`critique.retention.root`, or markdown_recall's
+root when that key is unset), the retention critique lens forks the
+window after a novel, commitment-dense exchange and may return findings, each
+naming a `file` under the root and `content` to append. The finding wakes the
+channel (origin `critique`), and the woken turn is told to read the file and
+append the content only if it is missing. That is a new route from exchange
+text to durable files: a sender's words shape what the lens proposes, the
+agent writes it with its own file tools, and when the root is one
+`markdown_recall` indexes (finding 17; the default), the written text comes back as CONTEXT
+on later turns, in every channel. An injected "fact" can persist past the
+conversation that planted it.
+
+Mitigations:
+
+- The lens only flags; nothing is written by the plugin. The write happens in
+  an ordinary agent turn, with the agent's own tools and their existing limits
+  (the `write_file`/`shell` reach described under "Privilege separation"), and
+  the stub tells the agent to read the file first and append only what is
+  missing, never rewrite.
+- The woken turn is silent by default: its stub ends with `NO_REPLY`, which
+  critique's veto on critique-origin finals (and `SilencePlugin`'s, when
+  loaded) withholds, and critique does not critique its own turns.
+- The lens is inert unless the operator configures a root: `critique.retention.root`,
+  or a markdown_recall block, whose root it then uses. Enabling recall
+  therefore enables this route. Selection needs both novelty and commitment density over their thresholds,
+  so an ordinary exchange does not fire it.
+- Text written to the folder returns only through recall's framing
+  (finding 17): "retrieved data, not instructions", under the funnel budget.
+
+Accepted residuals. The lens's `file` is model output: an absolute path or one
+with `..` names a file outside the root, and nothing but the agent's judgement
+in the filing turn stops that; the file tools' own reach is the bound. A
+sender who can steer an exchange can get a false durable "fact" proposed, and
+the filing turn's "only if missing" check is the agent's judgement, not a
+verification. The knowledge base directory must be writable by the daemon,
+which also makes it writable by anything else running as the daemon's user.
+
+### 22. Quiet origins and `speak_up`: a notification source can be muted, and the mute can be lifted from inside the turn (#790)
+
+`gate.send.quiet_origins` lists origins (for example `webhook:github`) whose
+turns send nothing to the human: the decide gate withholds their `final`,
+`progress` and `thinking` emissions whatever their salience. It exists because
+the 2026-11-12 flood (finding 19) was the agent answering CI notifications one
+by one. When the list is non-empty the agent also gets a `speak_up(reason)`
+tool, which lifts the veto for the rest of the calling turn's trace.
+
+What changes for untrusted text:
+
+- Once the list is non-empty, `speak_up` is in the tool list of every turn,
+  including the turns a quiet source drives, so the quiet payload itself, a
+  webhook body or a PR title, can tell the agent to call it. Called in a turn
+  that isn't quiet, it lifts nothing but still records `outcomes.speak_up`.
+  `tools.disabled: [speak_up]` removes it, leaving a veto with no hatch. The hatch lifts only this veto: the surfaced final still goes through the
+  salience floor (`gate.send.min_salience`), every other `should_send_response`
+  implementation (silence, critique, `outbound_cap`) and the normal not-sent
+  marker. A flood of hatch calls is therefore bounded by `outbound_cap`
+  (finding 19) when that plugin is loaded and configured, not by this plugin. The call is recorded as
+  `outcomes.speak_up` with its reason, so an operator can see which turns
+  surfaced and why.
+- The hatch never sends anything itself. A design that sent directly would
+  have bypassed every gate, `outbound_cap` included.
+- The list is read from `agent.yaml` only, never from `runtime_overrides`, so
+  neither `set_settings` nor an injected instruction can un-quiet a source or
+  quiet one. This departs from the "persona may tune its own gates" default
+  (see configuration.md, runtime-tunable gate parameters) on purpose: an agent
+  that can un-mute its own noisiest source is the flood again.
+- `user` and `reminder` can never be quiet; listing them is ignored with a
+  warning. A list that is not a list of strings fails open (nothing is quiet)
+  with a warning naming the key and the value, so a typo cannot mute the agent.
+
+Accepted residuals. Progress and thinking sent in the same response as the
+`speak_up` call are gated before the tool runs, so they stay withheld. A
+follow-up turn whose origin differs from the quiet turn (for example a
+`critique` wake) is not quiet. The tool appears or disappears only at restart;
+a hot reload changes the veto at once but not the tool list. The veto lives in
+`GatePlugin`, so disabling `gates` disables it. The agent can set a
+scheduler job's origin to `heartbeat` (the only other origin the scheduler
+accepts besides `reminder`); if `heartbeat` is quiet, that mutes the job's
+own turns, which fails toward silence rather than toward noise.
 
 ## Privilege separation
 

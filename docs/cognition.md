@@ -33,7 +33,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
-| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss) and the provenance check |
+| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), and the provenance check |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
@@ -249,7 +249,10 @@ passes (demotion, re-promotion, retrieval-log pruning when
 `memory.retention.retrieval_log_max_age_days` is set (#654), vec backfill;
 a pruning failure is logged and leaves backfill to run): each batch commits whole
 or rolls back whole, and the backfill's embeddings are computed before the
-transaction opens. Each pass selects its candidates before its transaction,
+transaction opens. The prune takes `RETENTION_PRUNE_BATCH` (1000) rows per
+transaction and releases the lock between them (#682), so enabling it against
+a large existing log cannot push another memory write past its busy timeout;
+`retrieval_log(ts)` is indexed so each batch's cutoff lookup does not scan. Each pass selects its candidates before its transaction,
 so every write re-checks the selection: demotion skips a row redacted,
 already demoted or retrieved since the SELECT; re-promotion never
 re-indexes a row superseded or redacted meanwhile; the backfill writes no
@@ -389,7 +392,17 @@ argument applied before the cut to k: the degraded FTS5 path filters it in
 `WHERE` ahead of its `LIMIT`, and the vector path selects it as a flag (#407)
 over a KNN that fetches `k × 4` plus a `COUNT(*)` of the excluded records,
 then sets the flagged rows aside, so in-window records can't take every
-slot. The hybrid FTS side does the same over its own `k × 4` rows. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
+slot. That `k` is clamped to sqlite-vec's ceiling of 4096 rows
+(`SQLITE_VEC_KNN_MAX`), which the extension enforces by refusing the query
+outright: a large `k` or a long window used to come back as an embedding
+failure and a fall back to FTS5 on every turn. Now the clamp keeps the
+vector path, logs one WARNING per process naming the limit, the `k`, the
+over-fetch and the channel's in-window count, and reads only the nearest
+4096 rows (#637). The hybrid FTS side does the same over its own `k × 4`
+rows. A KNN failure for any other reason logs `retrieval KNN query failed;
+degrading to FTS5`, separate from the embedding warning, so the operator is
+not sent to the embed server for a fault in the query — and a degraded query
+ranks the FTS rows by the decayed score, never through the hybrid fusion. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
 and `search_memory` see everything. It is not a scope: other channels'
 records, and this channel's once their rows leave the window, are
 retrieved normally. Known limit: the bound assumes the window is a
@@ -499,7 +512,11 @@ similarity and the rows returned are unchanged.
 
 `excluded_in_window` rows carry a would-be rank: one plus the number of
 not-excluded candidates ranking at least as high (under fusion, its
-fused value is computed from the ranks it would have had in each list). It can therefore equal a
+fused value is computed from the ranks it would have had in each list).
+"At least as high" follows the pool's measured-first order (#705): a record
+with a measured cosine counts only measured candidates, and one without a
+stored vector counts every measured candidate plus the unmeasured ones at
+least as high. It can therefore equal a
 returned row's rank. Each excluded record is judged alone against the
 ranked pool, not against the other excluded records, so two excluded rows
 may share a would-be rank, and an excluded record that would not have made
@@ -588,15 +605,36 @@ What it does:
   path fetches `k × 4` candidates, so a different k changes the pool too.
   `--candidates hybrid|vector` overrides `memory.retrieval.candidates`
   (#666), so the fused pool can be scored against the KNN alone; each pool
-  candidate records its `source`.
+  candidate records its `source`. `--now EPOCH` pins the clock decay is
+  measured against (#661), so the same snapshot scores identically on two
+  run dates; each pool records the pin it used, or `null` for the wall clock.
 - **Names labelled ids it can't reach.** A labelled id is reachable when its
   row exists with `indexed = 1` and `redacted = 0`, the filter both searches
   apply. Anything else is listed by id with its status, checked in this
   order: `absent`, `redacted`, `superseded`, `not_indexed`. Unreachable ids
-  are left out of scoring. A query left with no reachable id (or labelled
-  with an empty list, a negative probe) is not scored: its metrics are
-  `null`, stdout says `not scored: no reachable relevant id`, and the means
-  say `over M of N queries`.
+  are left out of scoring. A query left with no reachable id is not
+  scored: its metrics are `null`, stdout says
+  `not scored: no reachable relevant id`, and the means say
+  `over M of N queries`.
+- **Scores negative probes on false admits** (#802). A query labelled
+  `"relevant": []` asks for the opposite of recall: it should admit
+  nothing, so what the gate does admit is counted as false admits, split by
+  the band that showed it — `strong` is shown bare, `moderate` as
+  `[marginal]`. Recall@k and MRR stay `null` for it. The gate is the
+  daemon's own, `admitted_candidates`, shared with `before_agent_turn`, so
+  a threshold fitted from these counts is the one the daemon applies: on
+  the degraded path the top k is admitted ungated, otherwise every
+  candidate above the weak band. A negative probe whose pool degraded is
+  reported apart and left out of the rate, since no gate ran. An empty
+  reachable set is *not* a negative probe: a right answer existed and was
+  lost, and counting admits there would charge the gate for a labelling
+  gap. The pool carries `negative`, per-probe `false_admits`
+  (`{"strong": n, "marginal": n}`), and `admitted` on every candidate, so
+  admission on positive probes is replayable offline; the summary and each
+  subset carry `negative_probes`, `negative_scored`, `false_admit_rate`
+  (the share of scored negative probes that admitted anything),
+  `mean_false_admits` and `strong_false_admits` (a total, not a mean, since
+  it is the count a threshold change moves first).
 - **Counts FTS5 fallback.** Each query reports `degraded`, and the summary
   prints `FTS5 fallback on D of N queries` whenever any query fell back.
 - **Writes every query's whole scored pool to `--pool-out`**, for #409's
@@ -639,7 +677,12 @@ The pool file is written once, after the last query:
 ```json
 {
   "run_at": 1762700000.0,
+  "now": 1762700000.0,
   "k": 8,
+  "settings": {"half_life_days": 7, "recency_from": "created",
+               "band_on": "relative", "band_strong": 4.5,
+               "band_moderate": 3.0, "k": 8,
+               "encoder": "nomic-embed-text", "dimensions": 768},
   "queries": [
     {
       "index": 0,
@@ -650,31 +693,48 @@ The pool file is written once, after the last query:
       "relevant": [412, 415],
       "unscorable": [{"id": 415, "status": "superseded"}],
       "degraded": false,
+      "negative": false,
+      "false_admits": null,
       "recall_at_k": 1.0,
       "mrr": 0.5,
       "candidates": [
         {"id": 398, "rank": 1, "similarity": 0.81, "score": 0.77, "band": "strong",
-         "source": "both"},
+         "z": 2.4, "source": "both", "admitted": true},
         {"id": 412, "rank": 2, "similarity": 0.79, "score": 0.74, "band": "moderate",
-         "source": "vec"}
+         "z": 1.1, "source": "vec", "admitted": true}
       ]
     }
   ],
-  "summary": {"queries": 1, "scored": 1, "degraded": 0,
+  "summary": {"queries": 1, "scored": 1, "degraded": 0, "all_degraded": false,
               "mean_recall_at_k": 1.0, "mean_mrr": 0.5,
               "query_context": "previous_reply", "candidates": "hybrid",
+              "negative_probes": 0, "negative_scored": 0,
+              "false_admit_rate": null, "mean_false_admits": null,
+              "strong_false_admits": 0,
               "subsets": {"(untagged)": {"queries": 1, "scored": 1,
-                                         "mean_recall_at_k": 1.0, "mean_mrr": 0.5}}}
+                                         "mean_recall_at_k": 1.0, "mean_mrr": 0.5,
+                                         "negative_probes": 0, "negative_scored": 0,
+                                         "false_admit_rate": null,
+                                         "mean_false_admits": null,
+                                         "strong_false_admits": 0}}}
 }
 ```
 
 `candidates` is the ranked pool, best score first; the entries with
-`rank <= k` are `retrieve()`'s top k, what passive retrieval would hand on
-before it drops weak-band entries (all of them, so an all-weak pool admits
-nothing, #409; a degraded pool keeps its top k) and the funnel admits them,
-with no window exclusion. It holds ids and scores but
+`rank <= k` are `retrieve()`'s top k, and `admitted` is the daemon's own
+gate applied to them (`admitted_candidates`, #802). A candidate outside the
+top k was never offered to the gate, so it is not admitted. The gate drops
+weak-band entries (all of them, so an all-weak pool admits nothing, #409) and
+keeps the top k on a degraded pool; the funnel then admits the survivors,
+with no window exclusion. A negative probe carries its `false_admits` counts
+and `null` metrics. It holds ids and scores but
 no memory text beyond the labels' own `text`, `context` and `query`; look the
-ids up in the source. `run_at` is the wall-clock
+ids up in the source. `z` is the statistic a `band_on: relative` band came
+from — how far this record's similarity stands out from the query's spread
+over the whole memory — so the z thresholds can be fitted offline instead of
+reading `retrieval_candidate.z` from live traffic (#704). It is `null` when no
+spread was computed: a memory under `RELATIVE_MIN_RECORDS` (50) embedded
+records, or a run banded on `similarity`/`score`. `run_at` is the wall-clock
 time the run started. The means are `null` when no query was scored.
 
 Operator notes:
@@ -685,14 +745,26 @@ Operator notes:
   environment even though no chat request is made. If it isn't, the run
   stops with `Config error: llm.<profile>.api_key references ${VAR}, which
   is not set … — check <config>`.
-- **Scores drift with the run date; rankings don't.** Decay runs against
-  the wall clock at query time, not a time taken from the snapshot. Scoring
-  the same snapshot a month later multiplies every score by the same
-  factor, so the order, Recall@k and MRR are unchanged, but absolute
+- **Scores drift with the run date unless `--now` pins it.** Decay runs
+  against the clock at query time, not a time taken from the snapshot, so
+  scoring the same snapshot a month later multiplies every score by the
+  same factor: the order, Recall@k and MRR are unchanged, but absolute
   scores are lower, and so are bands under `band_on: score` (bands under
-  `relative` and `similarity` don't use decay). `run_at` records the
-  date. shortcut: no pinned "now"; add one before comparing pool files
-  scored on different days.
+  `relative` and `similarity` don't use decay). Pass `--now <epoch>` to
+  pin it; two runs with the same pin produce identical scores and bands
+  whatever day they ran, which is what makes pool files comparable. The
+  file records both the pin (`now`) and the settings that scored it
+  (`settings`: half-life, `recency_from`, `band_on` and its thresholds, k,
+  and the encoder identity and dimensions), so a comparison never has to
+  assume the config behind a pool.
+- **A run where every query degraded exits non-zero.** An FTS-only pool is
+  not a vector measurement — every similarity is FTS5's constant 0.6 — so
+  after writing the file (`summary.all_degraded` marks it, and the scores are
+  still worth reading) the run prints the cause and exits 1: a missing
+  `llm.embedding` profile, a snapshot whose `embedding_meta` names a different
+  encoder, `sqlite-vec` not loading, or an embedding server that failed every
+  call. A run where only some queries degraded still exits 0, and says how
+  many on stdout (#662).
 - **An unreachable embedding server turns every query into FTS5.** Each
   query's embedding call fails after the client's retries (slow), logs a
   `retrieval embedding failed; degrading to FTS5` warning with a traceback
@@ -731,8 +803,8 @@ across several compactions or a long unsummarized history yields several consoli
 view is trimmed oldest-first to the budget, put under the channel's
 `reasoning_history`, headed by the channel's system prompt (identity and
 register, from `Agent.view_inputs`, which also resolves the channel after a
-restart) and ends with `memory.consolidation_fork_prompt` plus the range
-sentence. It goes on the `consolidation` stage's profile with no tools and the reply
+restart) and ends with `memory.consolidation_fork_prompt` plus the entry size
+sentence and the range sentence. It goes on the `consolidation` stage's profile with no tools and the reply
 schema. Each segment is its own consolidation (one or more entries) and its own watermark advance; a
 failure leaves earlier segments stored and retries the rest. A segment
 with no dialog that is followed by another folds its id span into the next
@@ -743,12 +815,24 @@ the record is its private memory, not a message to anyone on the channel.
 `memory.consolidation_prompt` is removed: a config that still sets it logs a
 startup warning naming `memory.consolidation_fork_prompt`.
 
+**Entry size target** (plugin-defined, #686). `memory.entry_target_tokens`
+(default 256) feeds a sentence appended to the consolidation instruction,
+default or override, asking for about `round(target × 0.75)` words per
+entry (192 by default) and consecutive entries for a longer topic. It sits
+after the instruction and before the range sentence. An entry whose
+narrative exceeds the target by the kernel's tiktoken `count_tokens` (not
+the serving model's tokenizer) is stored in full, with no truncation and no
+schema limit; after the write commits a warning names the channel, memory
+id, tokens, target, mode and prompt hash (fork and standalone entries).
+Whether the target holds in practice is unmeasured (#885).
+
 Every record says how it was made (#299, #633, PRD §3.7 Memory 2), in four
 nullable `memory` columns:
 
 - `prompt_hash`: sha256 of the UTF-8 instruction text the call used. The
   text itself is stored once per hash in `memory_prompt`, however many
-  records share it. An empty prompt is still a prompt and is stored as `''`.
+  records share it. An empty `memory.consolidation_fork_prompt` is still a
+  prompt: it is stored as a blank line plus the entry size sentence.
 - `mode`: `fork`, `standalone` (the view call on the `consolidation` stage's profile),
   `raw` (a catch-up range stored as its transcript after both view-call
   replies were unusable, #626; the prompt hash, model and trigger are the
@@ -772,19 +856,23 @@ What each path stamps:
 
 | Path | `mode` | Instruction text | `model` |
 |---|---|---|---|
-| Fork of the live window (compaction, idle or turn) | `fork` | `memory.consolidation_fork_prompt` | `ForkResult.model` |
-| Catch-up: the rebuilt view on the `consolidation` stage's profile | `standalone` | `memory.consolidation_fork_prompt` | `LLMClient.request_model` of that profile's client |
-| Raw-transcript fallback after two unusable replies | `standalone` | `memory.consolidation_fork_prompt` | as above (the call was sent; only its reply was unusable) |
+| Fork of the live window (compaction, idle or turn) | `fork` | `memory.consolidation_fork_prompt` + size sentence | `ForkResult.model` |
+| Catch-up: the rebuilt view on the `consolidation` stage's profile | `standalone` | `memory.consolidation_fork_prompt` + size sentence | `LLMClient.request_model` of that profile's client |
+| Raw-transcript fallback after two unusable replies | `raw` | `memory.consolidation_fork_prompt` + size sentence | as above (the call was sent; only its reply was unusable) |
 | `write_record` (goal retirement) | `direct` | none: `prompt_hash` NULL, no `memory_prompt` row | NULL (`trigger` NULL too) |
 
 Catch-up records written before the view was introduced carry the removed
 `memory.consolidation_prompt` as their stamp; they are not migrated, so the
-records that prompt wrote stay findable by its hash. A fork's or view's instruction also carries a code-generated sentence naming where
+records that prompt wrote stay findable by its hash. The stamped instruction is `memory.consolidation_fork_prompt` plus the
+entry size sentence (`memory.entry_target_tokens`, a static value), so the
+hash covers both: changing the target changes the hash, and an override's
+hash is not sha256 of its config text. A fork's or view's instruction also
+carries a code-generated sentence naming where
 the range starts, which can quote the first new message. That sentence is
 left out of the stamp: `memory_prompt` is outside `corvidae redact`'s
 cascade, so storing conversation text there would put it where redaction
 can't reach (PRD §3.7 Memory 8). `memory_prompt` holds configured
-instructions only. The stamp is the consolidation instruction, not the
+instructions plus the static size sentence only. The stamp is the consolidation instruction, not the
 agent's system prompt and window that frame a fork.
 
 A `direct` record was written by no consolidation call, so it has nothing
@@ -978,8 +1066,8 @@ Two kernel registrations replace the old `on_idle` hook:
   re-arms the same way.
 
 Changes to `memory.idle_consolidate_after`,
-`memory.consolidate_after_tokens` and `memory.retention.*` take effect at
-restart.
+`memory.consolidate_after_tokens`, `memory.entry_target_tokens` and
+`memory.retention.*` take effect at restart.
 
 The importance prior is pluggable (`MemoryPlugin.importance_prior`,
 default `RubricPrior`); `AppraisalPlugin` wraps it in `AppraisalPrior`
@@ -1342,9 +1430,17 @@ one record (the loser gets the `already retired` error) and racing status
 changes report a consistent chain of `old_status` values. The hooks fire
 after the lock is released, so a slow subscriber can receive two racing
 events out of commit order; a subscriber that tracks a goal's latest status
-should compare each event's `old_status` against its own state. The lock is shared by every goal, and a
-retirement holds it across the record's embedding call; retirements are rare,
-so a per-goal lock is the upgrade if they stop being.
+should compare each event's `old_status` against its own state; ordered
+delivery is tracked with the routing subscriber in #841. `update_goal` takes
+the same lock around its check and update, so a retirement record always
+quotes the text the goal had when it was retired (#846). `add_goal` computes
+the new goal's `position` inside its INSERT, as `corvidae goals seed` does, so
+the seed CLI running beside the daemon cannot tie two positions. The lock is
+shared by every goal, and a retirement holds it across the record's embedding
+call; retirements are rare, so a per-goal lock is the upgrade if they stop
+being. `set_goal_status` writes without the memory plugin's `_db_lock`, unlike
+the other goal tools; that is harmless while the memory plugin has its own
+write connection, and matters only if it falls back to the shared one.
 
 **Retirement record:** `retire_goal` calls `MemoryPlugin.write_record` first
 and updates the goal only once that succeeds, so no goal is retired without
@@ -1377,7 +1473,7 @@ appears on every channel at its next turn.
 
 **Heartbeat review.** A beat's turn carries the goals entry like any other
 turn. When this plugin is loaded, the heartbeat also asks
-`retired_goals(heartbeat.retired_goal_limit)` (default 20) for the newest
+`retired_goals(heartbeat.retired_goal_limit)` (default 5) for the newest
 retirement records (agent-wide, newest
 first, each with its age) and appends them to the beat with an instruction
 to take a next step on an open goal or retire a finished one, and not to
@@ -1545,7 +1641,12 @@ model makes both language judgments; the code only fetches evidence:
 the channel's next turn. Provenance objections wake the channel with a
 stub whose text tells the agent the default is to send nothing: reply
 exactly `NO_REPLY`, and reply in the channel only if its earlier reply
-could lead the other party to take an incorrect action. The plugin's
+could lead the other party to take an incorrect action. With a
+retention root (`critique.retention.root`, else markdown_recall's root), retention findings wake the channel too, and
+every critique wake (provenance included) uses one stub that adds how to
+file them: read the named file under the root and append only what is
+missing. The funnel keeps one pending stub per channel and origin, so the
+first wake's text governs everything queued behind it. The plugin's
 `should_send_response` vetoes a `final` on a critique-origin turn whose
 stripped text is `NO_REPLY`; the kernel stores it as `unsent` with the
 not-sent marker. That veto is critique's own and always on with this plugin
@@ -1648,6 +1749,30 @@ nothing.
   never writes the outcome log; the vetoing plugin does.
 - `error` and anything else: no opinion.
 
+**Quiet origins** (#790). `gate.send.quiet_origins` (operator config only,
+default empty) lists origins whose turns send nothing to the human, such as
+`webhook:github`. For such a turn the gate withholds the `final` before any
+salience check (no vector needed, `gate.send.enforce` ignored), recorded as
+`outcomes.send = {emission, origin, vetoed: true, reason: "quiet_origin",
+surfaced: false}`, and withholds `progress` and `thinking` ahead of the allow
+switches, recorded as `outcomes.suppressed = {<emission>: true}` plus
+`quiet_origin: <origin>`. `error` emissions are not affected. `user` and
+`reminder` are never quiet; listing either is ignored with a warning, and a
+value that is not a list of strings fails open with a warning. The list is
+read through `config_value`, so `set_settings` cannot change it, and a hot
+reload applies on the next decision.
+
+When the list is non-empty at startup, the agent has a `speak_up(reason)`
+tool. Calling it marks the turn's trace as surfaced (a bounded LRU of 1024,
+never cleared explicitly, because a final's thinking is gated after the
+final) and records `outcomes.speak_up = <reason>` (cut to 200 characters; written
+only when `outcome_log` is loaded and the turn has a trace id). A surfaced quiet final
+then follows the normal non-user policy above, with `surfaced: true` in its
+record, so the salience floor still applies. Progress and thinking sent in
+the same response as the `speak_up` call are gated before the tool runs and
+stay withheld. If `speak_up` is in a batch cut off at `max_turns`, it never
+runs and the fallback final stays withheld.
+
 What the kernel does with a withheld final is in
 [design.md](design.md#the-output-gate). On the cognition side, critique still
 judges a withheld `user` or `reminder` final, its provenance probe doesn't
@@ -1705,8 +1830,8 @@ A `NO_REPLY` that was actually sent (say another gate's veto raised and the send
 
 **Divergences from the PRD.** The code is what runs; where it differs from [prd.md](prd.md) §3.7 (Output gate and the right to silence), this section says how, and the PRD is unchanged until the owner decides which side moves.
 
-- *A declined turn "sends nothing" and "is recorded" (item 5).* In `tool` and `both` mode that is not guaranteed. `end_turn` does not end the turn (the loop calls the model again), so nothing is sent only when the model then echoes `NO_REPLY`; any other follow-up is sent, and text written beside the call goes out as progress. The `tool` row is written when the tool is called, so it also exists for a turn that went on to reply: it records a call, not a decline.
-- *Withholding is for declines (items 4 to 6, and principle 9).* The veto is a containment check, so it also withholds a final that is not a decline but quotes the token, such as a reply repeating an incoming message that contains `NO_REPLY`. Untrusted text can therefore get one reply suppressed without the agent choosing silence. The channel can still answer its next message, and the withheld row is stored as `unsent` and recorded as `no_reply`, so it is visible; but the PRD's "no gate withholds a direct user reply by default" does not hold for a reply that carries the token. See [threat-model.md](threat-model.md).
+- *A signal followed by sent text is not a decline (item 5).* In `tool` and `both` mode `end_turn` does not end the turn (the loop calls the model again), so nothing is sent only when the model then echoes `NO_REPLY`; any other follow-up is sent, and text written beside the call goes out as progress. The `tool` row is written when the tool is called, so it also exists for a turn that went on to reply: it records a call, not a decline, where the PRD says such a turn is not recorded as one. Closing this means writing the row when the final is known (#901).
+- *The veto acts on the agent's own signal (item 5).* The veto is a containment check, so it also withholds a final that only quotes the token, such as a reply repeating an incoming message that contains `NO_REPLY`: untrusted text can get one reply suppressed without the agent choosing silence. The row is stored as `unsent` and recorded as `no_reply`, so it is visible, and the cost is one re-prompt. Matching only an exact token would instead send the token to the user whenever the model writes anything beside it, which is why containment was chosen. Narrowing the match is #902; the exposure is in [threat-model.md](threat-model.md).
 
 **Ending the turn.** An unsent final never reaches `send_message`, which is where Discord and Signal give back every outstanding typing slot, ACP completes the prompt and the CLI prints its next `> `. Those four transports now do the same in an `on_agent_response` of their own when the final was unsent (see [the plugin guide](plugin-guide.md#transports-with-per-turn-state)). That runs whether or not this plugin is loaded, so an empty final no longer keeps the typing indicator refreshing or an ACP prompt hanging. On Signal, a release that takes the count to zero sends an explicit typing stop, so the indicator clears at once; Discord has no stop, so its indicator lingers until the client times it out.
 
@@ -1731,20 +1856,23 @@ any channel cancels the pending beat. The result is at most one beat per
 `after` seconds, never two at once, and none during a conversation. Under
 traffic that never stops it never beats; that is accepted until #214.
 
-**What a beat is.** The plugin reads `MemoryPlugin.recent(heartbeat.memory_limit)` (default 20),
+**What a beat is.** The plugin reads `MemoryPlugin.recent(heartbeat.memory_limit)` (default 5),
 re-checks that the system is still quiet (a message may have landed
 during the read), and calls `on_notify` on `internal:heartbeat` with
-`source="heartbeat"` and `annotations={"origin": "heartbeat"}`. The text is the
-heartbeat prompt (`DEFAULT_HEARTBEAT_PROMPT`, overridable with
-`heartbeat.prompt`; documented copy in `prompts/heartbeat.md`, and the key's
-resolution in [configuration.md](configuration.md#heartbeat--a-turn-on-system-idle))
-followed by the memories, framed as the agent's own
-summaries and as data, or `(none)`. When the goals plugin is loaded, the
-text then carries `GOALS_INSTRUCTION` (overridable with
-`heartbeat.goals_instruction`; same reference) and the conclusions of up to
-`heartbeat.retired_goal_limit` retired goals (default 20,
-`GoalsPlugin.retired_goals`), framed as data, or `(none)`;
-without it, no goals text appears. A failed memory or retired-goals read
+`source="heartbeat"` and `annotations={"origin": "heartbeat"}`. Without the
+goals plugin the text is the memories, framed as the agent's own summaries and
+as data (or `(none)`), followed by the heartbeat prompt
+(`DEFAULT_HEARTBEAT_PROMPT`, overridable with `heartbeat.prompt`; documented
+copy in `prompts/heartbeat.md`, and the key's resolution in
+[configuration.md](configuration.md#heartbeat--a-turn-on-system-idle)). When
+the goals plugin is loaded, the beat leads with the conclusions of up to
+`heartbeat.retired_goal_limit` retired goals (default 5,
+`GoalsPlugin.retired_goals`), framed as data, then the open goals front of the
+queue first, each not plainly open marked `[in-progress]`, `[blocked]` or
+`[waiting]`; then the memories and the prompt; and it ends with
+`GOALS_INSTRUCTION`, the queue's pick rule (overridable with
+`heartbeat.goals_instruction`; documented copy in `prompts/heartbeat-goals.md`),
+so the call-to-action is last. `prompts/heartbeat.md` shows a full beat. A failed memory or retired-goals read
 skips the beat, which is retried after one period. The turn then runs the
 ordinary notification pipeline with the agent's normal tools. The `heartbeat`
 origin keeps the existing conventions: critique doesn't review it, the

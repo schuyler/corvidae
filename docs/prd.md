@@ -441,7 +441,11 @@ one is a bug even if its tests pass.
     announced (`on_message_persisted`) in arrival order. A turn in flight is
     never interrupted. Only consecutive inbound messages coalesce: a tool
     result, a notification or a retry stops the run and keeps its place, and
-    notifications never coalesce. A coalesced burst is one exchange for
+    the channel queue never coalesces notification items. Batching before
+    the queue is allowed: a producer may merge a burst into one notification,
+    and the funnel holds notification payloads outside the queue and admits
+    them per `(channel, origin)` at the turn their one stub triggers (§3.7).
+    A coalesced burst is one exchange for
     `max_turns` (item 3). The last message's trace owns the turn: every
     turn hook, usage row and reply carries it, and the earlier messages'
     traces get admission and persistence only.
@@ -603,9 +607,14 @@ Per transport:
 
 1. Each channel has a token budget (`max_context_tokens`), estimated with
    tiktoken over the JSON-serialized visible fields of every message
-   (tool-call arguments, reasoning and the stored provenance record
-   included; the record stands in for the header and fence it renders
-   into), with a character-based fallback.
+   (tool-call arguments and reasoning included), with a character-based
+   fallback. A row whose provenance record renders into a `metadata:` header
+   and a payload fence is estimated as it renders, not by the record: the
+   record is roughly a fifth of the framing's size, so counting it
+   under-counted a window full of small untrusted results and compaction
+   fired late (#577). A person row is the one exception — its header goes out
+   as a separate message, and the estimate counts messages one at a time, so
+   its record still stands in for that header.
 2. Compaction runs when the estimate passes `compaction_threshold`
    (default 80%), retains the most recent messages that fit
    `compaction_retention` (default 50%), and skips windows of
@@ -1029,7 +1038,7 @@ only through the funnel.
    double-store, in a plugin-owned task that never starts a turn.
 2. A consolidation writes one or more records. A record is a
    self-contained first-person narrative entry about one stretch or topic
-   of the range, with epistemic framing preserved and facts and opinions
+   of the range, short enough that several fit the memory admission budget, with epistemic framing preserved and facts and opinions
    kept as expressed, attributed to who expressed them; dated by when the
    conversation happened, embedded, and linked to its consolidation's
    `message_log` id range. The records of one consolidation share that
@@ -1210,7 +1219,12 @@ deciding only what to newly append and in what order.
    concluded gets silence. A declined turn sends nothing, is withheld as a
    vetoed final is (item 2) so the agent knows it stayed silent, and is
    recorded in the outcome log. In conversational registers it errs toward
-   silence: a missed reply costs the user one re-prompt.
+   silence: a missed reply costs the user one re-prompt. How the agent
+   signals a decline is the plugin's choice (a token in the final text, a
+   tool call, or both). The veto that enforces it acts on the agent's own
+   signal, so it is not a gate in the sense of item 4. A signal followed by
+   text that is sent is not a decline: it is not recorded as one, and what
+   was sent is not withheld.
 6. A final with no text and no tool calls is a decline (item 5): it is
    withheld, never sent. A generation that stopped before its reasoning
    finished is not a decline but a failed generation. The agent rescues
@@ -1741,6 +1755,7 @@ record that holds the reasoning.
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
 | The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
+| A decline is signalled by a plugin-chosen mechanism (token, tool or both) and enforced by a veto that acts on the agent's signal, not a gate; a signal followed by sent text is not a decline | #791, #795, #797, #799, #806 |
 | Model endpoints may be remote; a profile's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each profile sends | #217 |
 | Critique is gated: stylistic lenses run on salience, the provenance check on every claim about the past, never unconditionally per reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
 | No inline refine step: the sent reply is the candidate, and correction arrives on a later turn | principle 3; §3.7 Critique 4; the Persyn spec's own deferred-deliberation default |
@@ -1786,4 +1801,4 @@ record that holds the reasoning.
 | Identity is agent-wide and heads every prompt written in the agent's voice; channel register is appended after it and never replaces it; the subagent's prompt is persona-neutral (§3.5.7) | operator directive, 2026-11-01; #380; #388 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
-| Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; notifications never coalesce | §3.1.19; #398, #296; owner, 2026-11-03 |
+| Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; the channel queue never coalesces notification items | §3.1.19; #398, #296; owner, 2026-11-03 |

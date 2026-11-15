@@ -96,11 +96,12 @@ _NARRATE = (
     "record them as if they happened now. Skip pleasantries and chatter."
 )
 _ENTRIES = (
-    "Write it as separate entries, one for each distinct stretch or topic, in "
-    "order. Each entry is a paragraph at most and must make sense read on its "
-    "own, months from now, with nothing else: name the people, projects and "
-    "things involved rather than \"he\" or \"it\". Don't attribute a fact from "
-    "one entry's topic to another's."
+    "Write one entry for each distinct stretch or topic, in order, and keep "
+    "each entry to its topic: an entry that wanders across several topics is hard to "
+    "find again. Each entry must make sense read on its own, months from "
+    "now, with nothing else: name the people, projects and things involved "
+    "rather than \"he\" or \"it\". Don't attribute a fact from one entry's "
+    "topic to another's."
 )
 _RATE = (
     "Then rate how important this stretch is to remember long-term, from 0 "
@@ -130,3 +131,34 @@ def test_consolidation_instruction_asks_for_entries():
         assert _flat(paragraph) in copy
     for key in ('"entries"', '"narrative"', '"topic_tags"', '"participants"', '"importance"'):
         assert key in copy
+
+
+def test_heartbeat_goals_copy_is_the_goals_instruction():
+    """#860: prompts/heartbeat-goals.md is the documented copy of
+    GOALS_INSTRUCTION, verbatim and bare, so it can also serve as the
+    heartbeat.goals_instruction file without sending a doc header."""
+    from corvidae_cognition.heartbeat import GOALS_INSTRUCTION
+
+    copy = (REPO / "prompts" / "heartbeat-goals.md").read_text()
+    assert _flat(copy) == _flat(GOALS_INSTRUCTION)
+
+
+def test_heartbeat_doc_example_is_what_a_beat_sends():
+    """#860: the framing example in prompts/heartbeat.md is frame_beat's own
+    output for the sample it shows, open goals and status markers included."""
+    from corvidae_cognition.heartbeat import frame_beat
+
+    beat = frame_beat(
+        memories=[{"age_seconds": 3 * 3600, "channel_id": "irc:#lex",
+                   "summary": "<summary>"}],
+        retired=[{"age_seconds": 2 * 86400,
+                  "summary": 'I retired my goal "<text>" (set <date>). <conclusion>'}],
+        open_goals=[
+            {"age_seconds": 18 * 60, "id": 6, "summary": "<goal text>",
+             "status": "in-progress"},
+            {"age_seconds": 3600, "id": 4, "summary": "<goal text>", "status": "open"},
+            {"age_seconds": 7200, "id": 3, "summary": "<goal text>", "status": "waiting"},
+        ],
+    )
+    doc = (REPO / "prompts" / "heartbeat.md").read_text()
+    assert _flat(beat) in _flat(doc)

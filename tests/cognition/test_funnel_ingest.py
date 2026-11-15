@@ -475,6 +475,11 @@ class TestIngestKeys:
         await turn(env)
         assert "now with an age line" not in text_of(env.conv)
         assert seen and seen[0].duplicate == ["The page <!--page.md#intro--> now with an age line"]
+        # A key-deduped entry has different text from the row it duplicates, so
+        # containment cannot identify it: without the duplicate list it would be
+        # a leftover, re-queued and re-reported on every turn forever (#725 review).
+        assert env.funnel._next_turn == {}, "a deduped entry must not stay queued"
+        assert env.funnel._deferred == {}
 
     async def test_keys_stay_paired_with_their_entries_through_a_budget_hold(self, build):
         """A held entry keeps its own key, or the next drain dedupes the wrong page."""
@@ -527,6 +532,8 @@ class TestIngestKeys:
         await turn(env)
         await turn(env)
         assert text_of(env.conv).count("same text") == 1
+
+
 class _ResolveThenSubmit(Provider):
     """Resolves the channel's previous promise, then submits the next one.
 
@@ -587,5 +594,3 @@ class TestSameTurnAdmission:
         provider.offer(env.channel.id, "markdown_recall", pending())
         await turn(env)
         assert "late result" in text_of(env.conv)
-
-

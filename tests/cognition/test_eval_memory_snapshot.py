@@ -176,6 +176,22 @@ def read_pool(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
+def run_snapshot(script: ModuleType, argv: list[str]) -> None:
+    """Invoke the script, tolerating the #662 refusal on an FTS-only install.
+
+    The `cognition-fts` job deliberately has no sqlite-vec, so there every
+    query degrades and a snapshot run now exits 1 by design. The pool is still
+    written and every test here asserts what is in it, so on that path the
+    exit is tolerated; with vectors present the run must succeed outright.
+    """
+    if HAS_VEC:
+        script.main(argv)
+        return
+    with pytest.raises(SystemExit) as exc:
+        script.main(argv)
+    assert exc.value.code == 1
+
+
 def test_snapshot_copy_leaves_source_bytes_and_includes_wal_rows(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
@@ -234,7 +250,7 @@ def test_snapshot_copy_leaves_source_bytes_and_includes_wal_rows(
     pool_out = tmp_path / "pool.json"
     before = (sha256(image_db), sha256(image_wal))
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(image_db), "--labels", str(labels),
         "--config", str(config), "--pool-out", str(pool_out),
     ])
@@ -275,7 +291,7 @@ def test_snapshot_scores_known_ranking(
     ])
     pool_out = tmp_path / "pool.json"
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
         "--pool-out", str(pool_out), "--k", "2",
     ])
@@ -307,7 +323,13 @@ def test_snapshot_reports_fts_fallback_on_encoder_mismatch(
     script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """S3: an encoder mismatch degrades every query and the run says so."""
+    """S3: an encoder mismatch degrades every query, and the run now fails.
+
+    A pool whose every similarity is FTS5's constant 0.6 is not a vector
+    measurement, so #662 makes the run exit non-zero with the cause — while
+    still writing the file, marked, because the numbers are still worth
+    reading in that light.
+    """
     # Source built with encoder "test-embedder"; the config names another.
     source = tmp_path / "sessions.db"
     ids = build_source(source, [TEXT_A, TEXT_B])
@@ -320,16 +342,211 @@ def test_snapshot_reports_fts_fallback_on_encoder_mismatch(
     ])
     pool_out = tmp_path / "pool.json"
 
+    with pytest.raises(SystemExit) as exc:
+        script.main([
+            "--snapshot", str(source), "--labels", str(labels),
+            "--config", str(config), "--pool-out", str(pool_out),
+        ])
+
+    # Per-query flag, summary count, the stdout sentence, and the refusal.
+    pool = read_pool(pool_out)
+    assert [q["degraded"] for q in pool["queries"]] == [True, True]
+    assert pool["summary"]["degraded"] == 2
+    assert pool["summary"]["all_degraded"] is True
+    captured = capsys.readouterr()
+    assert "FTS5 fallback on 2 of 2 queries" in captured.out
+    assert exc.value.code == 1
+    assert "every scored query degraded" in captured.err
+    assert "different encoder or dimensions" in captured.err
+
+
+@needs_vec
+def test_all_degraded_run_names_the_embedding_failure(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#662: a dead embedding server is named as the cause, not the mismatch."""
+    async def dead_embed(self: LLMClient, texts: list[str], kind: str) -> list[list[float]]:
+        raise RuntimeError("encoder down")
+
+    source = tmp_path / "sessions.db"
+    ids = build_source(source, [TEXT_A, TEXT_B])
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [ids[0]]},
+        {"text": TEXT_B, "relevant": [ids[1]]},
+    ])
+    pool_out = tmp_path / "pool.json"
+    # Only the scoring queries fail: seeding already embedded its rows.
+    monkeypatch.setattr(LLMClient, "embed", dead_embed)
+
+    with pytest.raises(SystemExit) as exc:
+        script.main([
+            "--snapshot", str(source), "--labels", str(labels),
+            "--config", str(config), "--pool-out", str(pool_out),
+        ])
+
+    pool = read_pool(pool_out)
+    assert pool["summary"]["all_degraded"] is True
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "embedding server failed every query" in err
+    assert "different encoder" not in err
+
+
+@needs_vec
+def test_some_degraded_queries_still_exit_0(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#662: a partial fallback is reported but does not fail the run."""
+    source = tmp_path / "sessions.db"
+    ids = build_source(source, [TEXT_A, TEXT_B])
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [ids[0]]},
+        {"text": TEXT_B, "relevant": [ids[1]]},
+    ])
+    pool_out = tmp_path / "pool.json"
+
+    # The first scoring query embeds; every one after it finds the encoder
+    # down, so the pool is part vector, part keyword.
+    seen = {"n": 0}
+
+    async def flaky_embed(self: LLMClient, texts: list[str], kind: str) -> list[list[float]]:
+        seen["n"] += 1
+        if seen["n"] > 1:
+            raise RuntimeError("encoder down")
+        return [bow_embed(t) for t in texts]
+
+    monkeypatch.setattr(LLMClient, "embed", flaky_embed)
+
     script.main([
         "--snapshot", str(source), "--labels", str(labels),
         "--config", str(config), "--pool-out", str(pool_out),
     ])
 
-    # Per-query flag, summary count, and the stdout sentence.
     pool = read_pool(pool_out)
-    assert [q["degraded"] for q in pool["queries"]] == [True, True]
-    assert pool["summary"]["degraded"] == 2
-    assert "FTS5 fallback on 2 of 2 queries" in capsys.readouterr().out
+    assert [q["degraded"] for q in pool["queries"]] == [False, True]
+    assert pool["summary"]["degraded"] == 1
+    assert pool["summary"]["all_degraded"] is False
+    assert "FTS5 fallback on 1 of 2 queries" in capsys.readouterr().out
+
+
+def test_pool_records_its_pinned_now_and_the_settings_that_scored_it(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#661: the file describes itself — the pin, and what scored every row."""
+    from corvidae_cognition.memory import (
+        DEFAULT_BAND_MODERATE_Z,
+        DEFAULT_BAND_STRONG_Z,
+        DEFAULT_HALF_LIFE_DAYS,
+    )
+
+    source = tmp_path / "sessions.db"
+    ids = build_source(source, [TEXT_A, TEXT_B])
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(
+        tmp_path / "labels.json", [{"text": TEXT_A, "relevant": [ids[0]]}],
+    )
+    pool_out = tmp_path / "pool.json"
+    pinned = 1_700_000_000.0
+
+    run_snapshot(script, [
+        "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
+        "--pool-out", str(pool_out), "--now", str(pinned),
+    ])
+    capsys.readouterr()
+
+    pool = read_pool(pool_out)
+    assert pool["now"] == pinned
+    # Settings as the plugin resolved them: the file says what produced its
+    # numbers, rather than leaving the reader to infer it from the config.
+    assert pool["settings"] == {
+        "half_life_days": DEFAULT_HALF_LIFE_DAYS,
+        "recency_from": "created",
+        "band_on": "relative",
+        "band_strong": DEFAULT_BAND_STRONG_Z,
+        "band_moderate": DEFAULT_BAND_MODERATE_Z,
+        # k is the effective cutoff: no --k here, so memory.retrieval.k's
+        # default, not the fixture-mode 5.
+        "k": 8,
+        "encoder": "test-embedder",
+        "dimensions": len(bow_embed("x")),
+    }
+
+
+def test_two_runs_on_different_days_agree_when_now_is_pinned(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#661: the run date stops mattering once --now is given.
+
+    Decay runs against the wall clock, so without a pin the same snapshot
+    scores lower tomorrow and its bands move with it. Two runs a month apart,
+    with the clock moved between them and the same --now, must agree on every
+    score and band.
+    """
+    source = tmp_path / "sessions.db"
+    created = 1_700_000_000.0
+    ids = build_source(source, [TEXT_A, TEXT_B, TEXT_C], created_at=created)
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [ids[0]]},
+        {"text": TEXT_B, "relevant": [ids[1]]},
+    ])
+
+    def run(day: float) -> dict[str, Any]:
+        """One run with the wall clock pinned to `day`."""
+        monkeypatch.setattr(time, "time", lambda: day)
+        pool_out = tmp_path / f"pool-{int(day)}.json"
+        run_snapshot(script, [
+            "--snapshot", str(source), "--labels", str(labels),
+            "--config", str(config), "--pool-out", str(pool_out),
+            "--now", str(created + 86400.0),
+        ])
+        capsys.readouterr()
+        return read_pool(pool_out)
+
+    first = run(created + 2 * 86400.0)
+    second = run(created + 30 * 86400.0)
+
+    # The clock moved (the file records when it ran)...
+    assert first["run_at"] != second["run_at"]
+    # ...and the numbers did not.
+    for one, other in zip(first["queries"], second["queries"], strict=True):
+        assert [c["score"] for c in one["candidates"]] == [
+            c["score"] for c in other["candidates"]
+        ]
+        assert [c["band"] for c in one["candidates"]] == [
+            c["band"] for c in other["candidates"]
+        ]
+    assert first["summary"]["mean_recall_at_k"] == second["summary"]["mean_recall_at_k"]
+    assert first["summary"]["mean_mrr"] == second["summary"]["mean_mrr"]
+
+
+def test_now_must_be_a_positive_instant(
+    script: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A pinned clock of 0 or nan is refused by name, not scored silently."""
+    source = tmp_path / "sessions.db"
+    config = write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [])
+    for bad in ("0", "-5", "nan", "inf"):
+        with pytest.raises(SystemExit) as exc:
+            script.main([
+                "--snapshot", str(source), "--labels", str(labels),
+                "--config", str(config), "--pool-out", str(tmp_path / "p.json"),
+                "--now", bad,
+            ])
+        assert exc.value.code == 2  # argparse's usage error, via parser.error
+        # The message must be the rule, not argparse's "unrecognized
+        # arguments" for a flag that does not exist yet.
+        assert "positive Unix timestamp" in capsys.readouterr().err
 
 
 def test_snapshot_names_unreachable_label_ids(
@@ -366,7 +583,7 @@ def test_snapshot_names_unreachable_label_ids(
     ])
     pool_out = tmp_path / "pool.json"
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels),
         "--config", str(config), "--pool-out", str(pool_out),
     ])
@@ -424,7 +641,7 @@ def test_snapshot_never_calls_chat_or_embeds_documents(
         {"text": query_texts[1], "relevant": [ids[1]]},
     ])
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
         "--pool-out", str(tmp_path / "pool.json"),
     ])
@@ -515,20 +732,69 @@ def test_snapshot_pool_json_holds_whole_pool(
     labels = write_labels(tmp_path / "labels.json", [{"text": TEXT_A, "relevant": [ids[0]]}])
     pool_out = tmp_path / "pool.json"
 
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
         "--pool-out", str(pool_out), "--k", "1",
     ])
 
-    # All three candidates, ranked 1..3, each with the six documented fields.
+    # All three candidates, ranked 1..3, each with the documented fields.
     candidates = read_pool(pool_out)["queries"][0]["candidates"]
     assert [c["rank"] for c in candidates] == [1, 2, 3]
     assert [c["id"] for c in candidates] == ids
     for cand in candidates:
-        assert set(cand) == {"id", "rank", "similarity", "score", "band", "source"}
+        assert set(cand) == {
+            "id", "rank", "similarity", "score", "band", "z", "source", "admitted",
+        }
         assert cand["band"] in {"strong", "moderate", "weak"}
+        # Three records is under RELATIVE_MIN_RECORDS, so no spread was
+        # computed and z is null (#704).
+        assert cand["z"] is None
     scores = [c["score"] for c in candidates]
     assert scores == sorted(scores, reverse=True)
+
+
+@needs_vec
+def test_pool_records_the_relative_z_once_the_memory_is_big_enough(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path,
+    tmp_path: Path,
+) -> None:
+    """#704: z is numeric on every embedded candidate at/over the spread floor."""
+    from corvidae_cognition.memory import RELATIVE_MIN_RECORDS
+
+    # One distinctive record to probe, and enough filler to clear the floor
+    # where band_on: relative trusts the spread. The filler shares words with
+    # the probe, so it ranks behind it rather than out of the pool.
+    filler = [
+        f"filler{i} alpha beta gamma delta epsilon zeta eta theta"
+        for i in range(RELATIVE_MIN_RECORDS - 1)
+    ]
+    source = tmp_path / "sessions.db"
+    ids = build_source(source, [TEXT_C, *filler])
+    config = write_config(
+        tmp_path / "agent.yaml", EMBED_CONFIG,
+        memory={"retrieval": {"band_on": "relative"}},
+    )
+    labels = write_labels(
+        tmp_path / "labels.json", [{"text": TEXT_C, "relevant": [ids[0]]}],
+    )
+    pool_out = tmp_path / "pool.json"
+
+    script.main([
+        "--snapshot", str(source), "--labels", str(labels), "--config", str(config),
+        "--pool-out", str(pool_out), "--k", "3",
+    ])
+
+    candidates = read_pool(pool_out)["queries"][0]["candidates"]
+    # The pool itself is over-fetched from the KNN scan, not the whole memory,
+    # so its length is unrelated to the spread floor; what matters is that the
+    # spread was computed at all, which shows up as a z on every candidate.
+    assert candidates
+    # Every candidate here has a stored vector, so every one carries the z its
+    # band came from; the probe's own z is the largest, being the outlier.
+    for cand in candidates:
+        assert isinstance(cand["z"], float), cand
+    assert candidates[0]["id"] == ids[0]
+    assert candidates[0]["z"] == max(c["z"] for c in candidates)
 
 
 def test_config_half_life_days_changes_scores(
@@ -552,10 +818,14 @@ def test_config_half_life_days_changes_scores(
             memory={"half_life_days": half_life},
         )
         pool_out = tmp_path / f"pool{half_life}.json"
-        script.main([
-            "--snapshot", str(source), "--labels", str(labels),
-            "--config", str(config), "--pool-out", str(pool_out),
-        ])
+        # A config with no embedding profile is an FTS-only run, which #662
+        # now refuses after writing the pool; the scores are still there.
+        with pytest.raises(SystemExit) as exc:
+            script.main([
+                "--snapshot", str(source), "--labels", str(labels),
+                "--config", str(config), "--pool-out", str(pool_out),
+            ])
+        assert exc.value.code == 1
         candidates = read_pool(pool_out)["queries"][0]["candidates"]
         assert [c["id"] for c in candidates] == ids
         scores[half_life] = candidates[0]["score"]
@@ -601,7 +871,7 @@ def test_snapshot_not_a_database_reports_open_error(
 def run(script: ModuleType, tmp_path: Path, labels: Path, *extra: str) -> dict:
     """Run snapshot mode over tmp_path/sessions.db and return the pool JSON."""
     pool_out = tmp_path / "pool.json"
-    script.main([
+    run_snapshot(script, [
         "--snapshot", str(tmp_path / "sessions.db"), "--labels", str(labels),
         "--config", str(tmp_path / "agent.yaml"), "--pool-out", str(pool_out),
         *extra,
@@ -772,3 +1042,165 @@ def test_candidates_flag_needs_snapshot(
         script.main(["--candidates", "vector"])
     assert excinfo.value.code == 2
     assert "--candidates is only used with --snapshot" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# #802: negative probes are scored on false admits
+# ---------------------------------------------------------------------------
+
+
+@needs_vec
+def test_negative_probe_counts_what_the_gate_admitted(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A probe labelled ``"relevant": []`` scores the gate's admits, not recall.
+
+    The gate is the daemon's (#703): with nothing above weak it admits nothing.
+    Against the three-text fixture every record scores well above the weak
+    band, so all of the top k is admitted — which is exactly the false admit a
+    negative probe exists to expose.
+    """
+    id_a, id_b, _id_c = build_source(tmp_path / "sessions.db", [TEXT_A, TEXT_B, TEXT_C])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": []},
+        {"text": TEXT_A, "relevant": [id_a]},
+    ])
+
+    pool = run(script, tmp_path, labels, "--k", "2")
+
+    negative, positive = pool["queries"]
+    assert negative["negative"] is True
+    assert negative["recall_at_k"] is None and negative["mrr"] is None
+    # Three embedded records is under the 50 band_on: relative needs, so the
+    # gate bands on similarity (strong 0.75, moderate 0.6): A at cosine 1.0 is
+    # strong, B at 0.5 is weak and dropped. One false admit, shown bare.
+    assert negative["false_admits"] == {"strong": 1, "marginal": 0}
+    assert {c["id"] for c in negative["candidates"] if c["admitted"]} == {id_a}
+    # Every candidate carries the gate's verdict, so admission is replayable.
+    assert all(c["admitted"] is False for c in positive["candidates"] if c["rank"] > 2)
+    assert positive["negative"] is False and positive["false_admits"] is None
+    summary = pool["summary"]
+    assert summary["negative_probes"] == 1
+    assert summary["negative_scored"] == 1
+    assert summary["false_admit_rate"] == pytest.approx(1.0)
+    assert summary["mean_false_admits"] == pytest.approx(1.0)
+    assert summary["strong_false_admits"] == 1
+    out = capsys.readouterr().out
+    assert "negative probe: 1 false admit (1 strong, 0 marginal) ids=[%d]" % id_a in out
+    assert "100% of 1 negative probe admitted something (mean 1.00, 1 strong)" in out
+
+
+def test_all_unreachable_labels_are_not_a_negative_probe(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+) -> None:
+    """An empty reachable set is a labelling gap, not a negative probe (#802).
+
+    Requirement 2: a probe whose labelled ids are all unreachable stays
+    unscored and is not counted as a false admit, since a right answer existed.
+    """
+    build_source(tmp_path / "sessions.db", [TEXT_A, TEXT_B, TEXT_C])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [99_001, 99_002]},
+    ])
+
+    pool = run(script, tmp_path, labels, "--k", "2")
+
+    (probe,) = pool["queries"]
+    assert probe["negative"] is False
+    assert probe["false_admits"] is None
+    assert probe["recall_at_k"] is None
+    assert [u["status"] for u in probe["unscorable"]] == ["absent", "absent"]
+    assert pool["summary"]["negative_probes"] == 0
+    assert pool["summary"]["false_admit_rate"] is None
+
+
+def test_degraded_negative_probe_is_counted_apart(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Requirement 4: the FTS5 path admits its top k without a gate, so a
+    degraded negative probe is reported and left out of the rate."""
+    build_source(
+        tmp_path / "sessions.db", [TEXT_A, TEXT_B, TEXT_C],
+        config=FTS_CONFIG, embedded=False,
+    )
+    write_config(tmp_path / "agent.yaml", FTS_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": []},
+    ])
+
+    # Every query degrades here, so the run writes the pool and then exits 1
+    # on every install, vectors or not (#662); the pool is what is checked.
+    pool_out = tmp_path / "pool.json"
+    with pytest.raises(SystemExit) as exc:
+        script.main([
+            "--snapshot", str(tmp_path / "sessions.db"), "--labels", str(labels),
+            "--config", str(tmp_path / "agent.yaml"), "--pool-out", str(pool_out),
+            "--k", "2",
+        ])
+    assert exc.value.code == 1
+    pool = read_pool(pool_out)
+
+    (probe,) = pool["queries"]
+    assert pool["summary"]["all_degraded"] is True
+    assert probe["degraded"] is True
+    assert probe["negative"] is True
+    assert probe["false_admits"] is None
+    summary = pool["summary"]
+    assert summary["negative_probes"] == 1
+    assert summary["negative_scored"] == 0
+    assert summary["false_admit_rate"] is None
+    assert "degraded" in capsys.readouterr().out
+
+
+def test_no_negative_probes_prints_na(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Requirement 6: with no negative probes the metrics print n/a."""
+    id_a, _id_b, _id_c = build_source(tmp_path / "sessions.db", [TEXT_A, TEXT_B, TEXT_C])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [id_a]},
+    ])
+
+    pool = run(script, tmp_path, labels, "--k", "2")
+
+    assert pool["summary"]["negative_probes"] == 0
+    out = capsys.readouterr().out
+    assert "n/a" in out and "no negative probes" in out
+
+
+@needs_vec
+def test_false_admits_are_reported_per_subset(
+    script: ModuleType, stub_calls: StubCalls, private_tmp: Path, tmp_path: Path,
+) -> None:
+    """The same counts go into each subset, not only the run summary."""
+    build_source(tmp_path / "sessions.db", [TEXT_A, TEXT_B, TEXT_C])
+    write_config(tmp_path / "agent.yaml", EMBED_CONFIG)
+    labels = write_labels(tmp_path / "labels.json", [
+        {"text": TEXT_A, "relevant": [], "subset": "negative"},
+        {"text": TEXT_A, "relevant": [1], "subset": "positive"},
+    ])
+
+    pool = run(script, tmp_path, labels, "--k", "2")
+
+    subsets = pool["summary"]["subsets"]
+    assert subsets["negative"]["negative_probes"] == 1
+    assert subsets["negative"]["false_admit_rate"] == pytest.approx(1.0)
+    assert subsets["positive"]["negative_probes"] == 0
+    assert subsets["positive"]["false_admit_rate"] is None
+
+
+def test_false_admits_split_by_band_and_plural(script: ModuleType) -> None:
+    """The split is what a threshold change moves: strong bare, moderate marginal."""
+    assert script.false_admits([]) == {"strong": 0, "marginal": 0}
+    assert script.false_admits(
+        [{"band": "strong"}, {"band": "moderate"}, {"band": "moderate"}]
+    ) == {"strong": 1, "marginal": 2}
+    assert script.plural(1, "false admit") == "1 false admit"
+    assert script.plural(0, "false admit") == "0 false admits"
+    assert script.plural(2, "negative probe") == "2 negative probes"

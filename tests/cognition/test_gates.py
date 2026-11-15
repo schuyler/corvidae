@@ -458,35 +458,45 @@ class TestTunableFlips:
 
 
 class TestWithheldStillCritiqued:
-    async def test_withheld_reminder_final_is_critiqued(self, make_env):
-        """WP2.7's deferred assertion: a withheld response stays eligible."""
+    """WP2.7's deferred assertion is now unreachable, and this says why.
+
+    Critique is eligible only for ``reminder`` origin and for admitted ``user``
+    traces; a user final is never withheld, so the one origin that could be both
+    withheld and eligible was the reminder. Exempting reminders from the gate
+    (the change above) removed the last vehicle, and a test that constructs an
+    impossible combination would assert nothing. Kept as a class so the next
+    reader finds the reasoning rather than a gap: if a new origin becomes
+    eligible *and* withholdable, this is where its test goes.
+    """
+
+    async def test_no_origin_is_both_withheld_and_eligible(self, make_env):
         from corvidae_cognition.critique import CritiquePlugin
 
-        env = await make_env(
-            config={"gate": {"send": {"min_salience": 1.0}}, "critique": {"sample_below_rate": 1.0}},
-            responses=[_make_text_response("stretch time.")],
-        )
+        env = await make_env(config={"gate": {"send": {"min_salience": 1.0}}})
         critique = CritiquePlugin()
         env.pm.register(critique, name="critique")
         await critique.on_init(pm=env.pm, config=env.config)
-        critique._run_critique = AsyncMock()
 
-        await _notify(env, "time to stretch", annotations={"origin": "reminder"})
-        await drain_task_queue(env.plugin)
-
-        rows = await env.rows_by_type()
-        assert [t for m, t in rows if m.get("role") == "assistant"] == ["unsent"]
-        critique._run_critique.assert_awaited_once()
-        args = critique._run_critique.await_args.args
-        assert "stretch time." in args
-
-
-
-
-# ---------------------------------------------------------------------------
-# Unit tests: GatePlugin against stub appraisal and outcome-log plugins
-# ---------------------------------------------------------------------------
-
+        withheld: list[str] = []
+        for origin in ("reminder", "user", "critique", "heartbeat", "task"):
+            eligible = critique._eligible("t1", {"origin": origin})
+            verdict = await env.gates.should_send_response(
+                channel=env.channel, text="x", emission="final",
+                trace_id="t1", annotations={"origin": origin},
+            )
+            assert not (eligible and verdict is False), origin
+            if verdict is False:
+                withheld.append(origin)
+        # The assertion above is only worth something if the gate can withhold
+        # at all under this fixture: an exempt-everything gate would pass it
+        # vacuously.
+        assert withheld, "no origin was withheld, so the property is untested"
+        # The same guard on the other half: a broken _eligible that returned
+        # False for everything would satisfy the assertion above silently.
+        assert any(
+            critique._eligible("t1", {"origin": origin})
+            for origin in ("reminder", "user", "critique", "heartbeat", "task")
+        ), "no origin was eligible, so the property is untested"
 
 class _FakePM:
     def __init__(self, **plugins):
@@ -564,8 +574,15 @@ class TestDecisionTable:
             # Shadow mode: would veto, sends.
             ({"origin": "heartbeat"}, 0.1, {"gate": {"send": {"enforce": False}}}, None,
              {"vetoed": False, "would_veto": True, "enforced": False}),
-            # annotations["origin"] is used as-is.
-            ({"origin": "reminder"}, 0.1, {}, False, {"origin": "reminder", "vetoed": True}),
+            # A reminder is text the operator scheduled: never withheld, and the
+            # record says why rather than blaming the threshold -- while still
+            # carrying the counterfactual the threshold fit needs.
+            ({"origin": "reminder"}, 0.1, {}, None,
+             {"origin": "reminder", "vetoed": False, "would_veto": True,
+              "reason": "reminder_origin"}),
+            # annotations["origin"] is used as-is, and every other origin still
+            # takes the threshold.
+            ({"origin": "critique"}, 0.1, {}, False, {"origin": "critique", "vetoed": True}),
             # User origin is never withheld, at any threshold.
             ({"origin": "user"}, 0.0, {"gate": {"send": {"min_salience": 1.0}}}, None,
              {"vetoed": False, "reason": "user_origin"}),
@@ -576,6 +593,24 @@ class TestDecisionTable:
         assert await _final(gate, channel, annotations) is verdict
         send = log.writes[-1]["outcomes"]["send"]
         assert {k: send[k] for k in record} == record
+
+    @pytest.mark.parametrize("salience", [0.0, 0.05, 0.147])
+    async def test_a_reminder_is_never_withheld(self, salience):
+        """38 reminder finals were dropped in three days, scored 0.05-0.15.
+
+        Salience is a guess about whether text is worth saying; a reminder is
+        text the operator asked for at a time they chose, so the gate has no
+        business overruling it (#see PR)."""
+        gate, log, channel = await _gate(
+            {"gate": {"send": {"min_salience": 0.15}}}, appraisal=_StubAppraisal(salience)
+        )
+        assert await _final(gate, channel, {"origin": "reminder"}) is None
+        send = log.writes[-1]["outcomes"]["send"]
+        assert send["vetoed"] is False and send["reason"] == "reminder_origin"
+        assert send["salience"] == salience
+        # The counterfactual survives the exemption: this row would have been
+        # withheld, so a threshold fit can still count it.
+        assert send["would_veto"] is True
 
     async def test_user_final_skips_advisory_reads(self):
         gate, log, channel = await _gate(appraisal=_StubAppraisal(0.0))
@@ -726,3 +761,190 @@ class TestOrigin:
             # So its final is never withheld, and the record doesn't relabel the row.
             assert await _final(gate, channel, trace_id="old") is None
             assert log.writes[-1]["origin"] is None
+
+
+# ---------------------------------------------------------------------------
+# #790 — quiet origins (gate.send.quiet_origins) and the speak_up tool
+# ---------------------------------------------------------------------------
+
+_QUIET = {"gate": {"send": {"quiet_origins": ["webhook:github"]}}}
+_GITHUB = {"origin": "webhook:github"}
+
+
+def _quiet_config(**send):
+    """A config naming webhook:github quiet, plus extra gate.send keys."""
+    return {"gate": {"send": {"quiet_origins": ["webhook:github"], **send}}}
+
+
+async def _gate_with_tools(config, *, appraisal=None):
+    """A gate on stubs after on_init, plus the tools register_tools offers."""
+    gate, log, channel = await _gate(config, appraisal=appraisal)
+    await gate.on_init(pm=gate.pm, config=config)
+    registry: list = []
+    gate.register_tools(tool_registry=registry)
+    return gate, log, channel, {tool.name: tool for tool in registry}
+
+
+async def _speak_up(tools, channel, trace_id="t1", **kwargs):
+    """Call speak_up as the kernel's tool Task does: the turn's trace id in
+    the attribution and a ToolContext for ``channel``."""
+    from corvidae.attribution import reset_attribution, set_attribution
+    from corvidae.tool import ToolContext
+
+    ctx = ToolContext(channel=channel, tool_call_id="call-1", task_queue=None)
+    token = set_attribution(trace_id=trace_id)
+    try:
+        return await tools["speak_up"].fn(_ctx=ctx, **kwargs)
+    finally:
+        reset_attribution(token)
+
+
+async def _emit(gate, channel, emission, annotations=None, trace_id="t1"):
+    verdict = await gate.should_send_response(
+        channel=channel, text="x", emission=emission,
+        trace_id=trace_id, annotations=annotations or {},
+    )
+    await asyncio.gather(*set(gate._record_tasks))
+    return verdict
+
+
+def _merged_outcomes(log) -> dict:
+    """Every outcomes fragment the stub log received, merged by top-level key."""
+    merged: dict = {}
+    for write in log.writes:
+        merged.update(write.get("outcomes", {}))
+    return merged
+
+
+class TestQuietOrigins:
+    @pytest.mark.parametrize(
+        "appraisal, config",
+        [
+            (_StubAppraisal(0.9), _quiet_config()),
+            (None, _quiet_config()),
+            (_StubAppraisal(0.9), _quiet_config(enforce=False)),
+        ],
+        ids=["high_salience", "no_appraisal", "enforce_off"],
+    )
+    async def test_q1_listed_origin_final_is_withheld(self, appraisal, config):
+        gate, log, channel = await _gate(config, appraisal=appraisal)
+        assert await _final(gate, channel, _GITHUB) is False
+        send = log.writes[-1]["outcomes"]["send"]
+        assert send["reason"] == "quiet_origin"
+        assert send["vetoed"] is True
+        assert send["surfaced"] is False
+
+    @pytest.mark.parametrize("emission", ["progress", "thinking"])
+    async def test_q2_progress_and_thinking_are_vetoed(self, emission):
+        config = _quiet_config(allow_progress=True, allow_thinking=True)
+        gate, log, channel = await _gate(config, appraisal=_StubAppraisal(0.9))
+        assert await _emit(gate, channel, emission, _GITHUB) is False
+        assert log.writes[-1]["outcomes"] == {
+            "suppressed": {emission: True}, "quiet_origin": "webhook:github",
+        }
+
+    async def test_q2_error_emission_is_not_vetoed(self):
+        gate, log, channel = await _gate(_QUIET, appraisal=_StubAppraisal(0.9))
+        assert await _emit(gate, channel, "error", _GITHUB) is None
+
+    async def test_q3_speak_up_lifts_the_veto_for_that_trace(self):
+        gate, log, channel, tools = await _gate_with_tools(
+            _QUIET, appraisal=_StubAppraisal(0.9)
+        )
+        await _speak_up(tools, channel, trace_id="t1", reason="build is broken")
+        assert await _final(gate, channel, _GITHUB, trace_id="t1") is None
+        send = _merged_outcomes(log)["send"]
+        assert send["surfaced"] is True
+        # Another trace from the same origin stays quiet.
+        assert await _final(gate, channel, _GITHUB, trace_id="t2") is False
+
+    async def test_q3_normal_policy_still_applies_after_speak_up(self):
+        config = _quiet_config(min_salience=0.5)
+        gate, log, channel, tools = await _gate_with_tools(
+            config, appraisal=_StubAppraisal(0.05)
+        )
+        await _speak_up(tools, channel, trace_id="t1")
+        assert await _final(gate, channel, _GITHUB, trace_id="t1") is False
+        send = log.writes[-1]["outcomes"]["send"]
+        assert send["reason"] == "below_threshold"
+        assert send["surfaced"] is True
+
+    async def test_q3_thinking_after_a_surfaced_final_is_not_vetoed(self):
+        """The final is gated before the same response's thinking, so the
+        surfaced mark must outlive the final's decision."""
+        gate, _log, channel, tools = await _gate_with_tools(
+            _QUIET, appraisal=_StubAppraisal(0.9)
+        )
+        await _speak_up(tools, channel, trace_id="t1")
+        assert await _final(gate, channel, _GITHUB, trace_id="t1") is None
+        assert await _emit(gate, channel, "thinking", _GITHUB, trace_id="t1") is None
+
+    @pytest.mark.parametrize("origin", ["user", "reminder"])
+    async def test_q4_user_and_reminder_cannot_be_quiet(self, origin, caplog):
+        config = {"gate": {"send": {"quiet_origins": ["user", "reminder"]}}}
+        gate, _log, channel = await _gate(config, appraisal=_StubAppraisal(0.9))
+        with caplog.at_level("WARNING", logger="corvidae.gates"):
+            assert await _final(gate, channel, {"origin": origin}) is None
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "gate.send.quiet_origins" in text
+        assert origin in text
+
+    async def test_q5_absent_key_changes_nothing_and_offers_no_tool(self):
+        gate, _log, channel, tools = await _gate_with_tools(
+            {}, appraisal=_StubAppraisal(0.9)
+        )
+        assert await _final(gate, channel, _GITHUB) is None
+        assert "speak_up" not in tools
+
+    async def test_q5_valid_list_registers_speak_up(self):
+        _gate_obj, _log, _channel, tools = await _gate_with_tools(_QUIET)
+        assert "speak_up" in tools
+
+    async def test_q5_only_never_quiet_origins_registers_no_tool(self):
+        config = {"gate": {"send": {"quiet_origins": ["user"]}}}
+        _gate_obj, _log, _channel, tools = await _gate_with_tools(config)
+        assert "speak_up" not in tools
+
+    async def test_q6_runtime_override_cannot_lift_the_veto(self):
+        gate, _log, channel = await _gate(_QUIET, appraisal=_StubAppraisal(0.9))
+        channel.runtime_overrides["gate.send.quiet_origins"] = []
+        assert await _final(gate, channel, _GITHUB) is False
+
+    async def test_q6_runtime_override_cannot_add_a_quiet_origin(self):
+        gate, _log, channel = await _gate({}, appraisal=_StubAppraisal(0.9))
+        channel.runtime_overrides["gate.send.quiet_origins"] = ["webhook:github"]
+        assert await _final(gate, channel, _GITHUB) is None
+
+    @pytest.mark.parametrize("value", ["webhook:github", 5, ["webhook:github", 5]])
+    async def test_q7_non_list_fails_open_with_a_warning(self, value, caplog):
+        config = {"gate": {"send": {"quiet_origins": value}}}
+        gate, _log, channel = await _gate(config, appraisal=_StubAppraisal(0.9))
+        with caplog.at_level("WARNING", logger="corvidae.gates"):
+            assert await _final(gate, channel, _GITHUB) is None
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "gate.send.quiet_origins" in text
+        assert str(value) in text
+        assert "list" in text
+
+    async def test_q8_speak_up_is_recorded_on_the_trace(self):
+        gate, log, channel, tools = await _gate_with_tools(_QUIET)
+        result = await _speak_up(tools, channel, trace_id="t1", reason="build is broken")
+        await asyncio.gather(*set(gate._record_tasks))
+        assert log.writes[-1]["trace_id"] == "t1"
+        assert log.writes[-1]["outcomes"] == {"speak_up": "build is broken"}
+
+    async def test_q8_speak_up_without_a_trace_says_the_reply_stays_withheld(self):
+        gate, log, channel, tools = await _gate_with_tools(_QUIET)
+        result = await _speak_up(tools, channel, trace_id=None)
+        assert "trace" in result
+        assert "withheld" in result
+        assert log.writes == []
+
+    async def test_q8_speak_up_without_a_channel_returns_error_text(self):
+        from corvidae.tool import ToolContext
+
+        _gate_obj, _log, _channel, tools = await _gate_with_tools(_QUIET)
+        ctx = ToolContext(channel=None, tool_call_id="call-1", task_queue=None)
+        result = await tools["speak_up"].fn(_ctx=ctx, reason="x")
+        assert "channel" in result
+        assert "withheld" in result

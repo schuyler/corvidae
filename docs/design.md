@@ -201,7 +201,7 @@ owner's plugin name after the prefix.
 | `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, Zulip, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines; `MemoryPlugin` runs its turn consolidation trigger from it, awaiting nothing, since the send waits on the hook |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
-| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes any `final` of any origin that contains `NO_REPLY` (a containment check, not an exact match) (cognition extra); a raising implementation fails open (logged, sent); `OutboundCapPlugin` vetoes every emission on a channel once the agent has sent `outbound_cap.max_messages` there since the last admitted human message (`outbound-cap` extra, #791, threat-model finding 19); no kernel implementation, so with none registered everything is sent |
+| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes any `final` of any origin that contains `NO_REPLY` (a containment check, not an exact match) (cognition extra); a raising implementation fails open (logged, sent); `OutboundCapPlugin` vetoes every emission on a channel once the agent has sent `outbound_cap.max_messages` there since the last admitted human message, and likewise once it has sent `outbound_cap.max_messages_per_window` in the last `outbound_cap.window_seconds` — a sliding window a human message does not reset, shipped unset (`outbound-cap` extra, #791, #821, threat-model finding 19); no kernel implementation, so with none registered everything is sent |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
 | `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None). Each message of a coalesced burst fires it under its own trace, in arrival order, before the turn's model call |
@@ -845,6 +845,10 @@ All operations are synchronous; no database access:
   counted accurately. It never raises on a row's content (§3.1.18.1, #392):
   a value JSON cannot encode is counted by its `str()`, and a row that is not
   a mapping is counted by its `repr`, so both still contribute to the budget.
+  A row with a provenance record that renders into a header and fence is
+  counted as it renders (`provenance.sent_form`, #577), because the record is
+  far smaller than the framing it used to stand in for; a person row's header
+  is a separate message and is not counted here.
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.
@@ -1465,7 +1469,8 @@ in code:
   same cut line as a cut notification. On a fenced result it is the last
   header line, outside the fence; on any other result it is the only header
   line, followed by the content unfenced. Text in an unfenced (trusted)
-  result could imitate that line; shell output is trusted by declaration,
+  result could imitate that line, and only a tool that declares its own output
+  trusted is unfenced — `shell` and `task_pipeline` declare otherwise (#580) —
   so this is accepted (see threat-model.md).
 - Declared annotations follow as `[annotations: k=v, ...]`.
 
@@ -1499,8 +1504,10 @@ reads it and is strict (`is True`, so a truthy non-bool does not count). It
 is per callable and not a plugin class attribute because MCP tools are
 created per server at connect time and no class-level list could name them.
 Declared today: `read_file` (so a spill file read back is fenced, and so is
-any other file), `web_fetch`, `web_search`, and every tool `mcp_client`
-builds. `shell` and `task_pipeline` are not declared (#580).
+any other file), `web_fetch`, `web_search`, `shell` and `task_pipeline` (a
+command's output, or a `cat` of a spill file, is as much outside text as a
+file's contents are), and every tool `mcp_client` builds. A tool nobody
+declares is unfenced.
 
 The declaration is evaluated when the call is dispatched, not when the
 result arrives. `_dispatch_tool_calls` writes `Agent._dispatched_calls`,
@@ -2401,7 +2408,7 @@ some view. Each segment's view is trimmed oldest-first with
 `ContextWindow.fit_to_budget` to the budget less the instruction's size, then
 put under the channel's `reasoning_history` policy (the live loop's order),
 and ends with the consolidation instruction (`memory.consolidation_fork_prompt`
-plus the range sentence). Row dicts are copied per segment so the policy's
+plus the entry size sentence and the range sentence). Row dicts are copied per segment so the policy's
 stripping can't alter rows a later segment reuses as context. Warnings, each
 naming the channel and message ids: the budget trim dropped a segment's own
 rows (they commit without reaching a view); a row was truncated; the
@@ -2415,7 +2422,7 @@ retried once, then degrades to the raw transcript, split into records that fit t
 with no dialog that is followed by another segment folds its id span into
 the next segment's record (no record or commit of its own); a no-dialog
 last segment advances the watermark without a record. Records are
-stamped `(memory.consolidation_fork_prompt, "standalone", the
+stamped `(memory.consolidation_fork_prompt + size sentence, "standalone", the
 request model)`. A view that the stage's profile rejects for length is a
 transport error: the watermark stays and the next trigger retries.
 
@@ -2455,7 +2462,7 @@ past claim and its closest earlier messages.
 (`LLMClient.request_model` of the fork's body, so an `extra_body` override
 shows). `Agent.fork` always sets it, so it is None only when a
 `ForkResult` is built without it. Consolidation stamps it on a fork record, together with
-`memory.consolidation_fork_prompt` but not the range sentence
+`memory.consolidation_fork_prompt` plus the entry size sentence (`memory.entry_target_tokens`) but not the range sentence
 ([cognition.md](cognition.md#record-stamps)).
 
 **Configuration** (`agent.forks`, validated at startup and on reload by
@@ -3306,6 +3313,19 @@ with their own ownership check.
 `CLIPlugin` — stdin/stdout transport. Routes to `cli:local` channel.
 Reads stdin line-by-line in a background task. Prints responses to
 stdout with latency timing.
+
+The blocking read runs in a **daemon** thread that hands each line to an
+`asyncio.Queue` (`cli-stdin-reader`), not through `run_in_executor` (#759). A
+`ThreadPoolExecutor` worker blocked in `readline` is non-daemon, so both
+`asyncio.run`'s executor shutdown and interpreter exit waited for it: a SIGINT
+at a TTY, or with an open pipe that never sent a line, ended as exit 1 after
+`daemon.exit_timeout` with an exit-watchdog WARNING naming
+`ThreadPoolExecutor-0_0` — a leak report for a thread that had done nothing
+wrong. A daemon thread cannot hold the process open: it stays blocked in
+`readline` and dies with the process, which is the right shape for a read that
+has no cancel. `tests/test_cli_sigint.py` runs a real daemon in a subprocess
+with an open pipe on stdin and asserts exit 0 within the bound, with no
+watchdog line.
 
 EOF ends the session at an interactive terminal (Ctrl-D), and always
 under `corvidae cli`, which is a session by definition (`corvidae cli <
@@ -4292,8 +4312,14 @@ three failed connects, checks `/` for a 401 to detect an expired session.
 `tests/test_web_render_smoke.py` checks the sanitising and the
 unconfirmed-send restore in headless Chrome; it skips without Playwright,
 so the `web-smoke` CI job installs a pinned Playwright and Chromium and
-fails if the test is skipped. Run it locally with
-`uv run --with playwright pytest tests/test_web_render_smoke.py`.
+fails if the test is skipped. It downloads the browser only: `--with-deps`
+would run `sudo apt-get`, and the self-hosted runner has no passwordless
+sudo (it executes PR code, so sudo there would hand root to any PR). Chromium's
+system libraries are a one-time runner prerequisite, reinstalled by hand when
+the pinned Playwright version changes with
+`uvx --from playwright==1.64.0 playwright install-deps chromium`; a runner
+missing them fails the smoke step rather than skipping it. Run the test
+locally with `uv run --with playwright pytest tests/test_web_render_smoke.py`.
 
 The page keeps a map of sends the server hasn't answered, keyed by `seq`,
 and clears the composer on send. `sent` removes the entry. An `error` for a
@@ -4479,6 +4505,37 @@ there too. The plugin depends on
 `"spill"`. Configuration is in
 [configuration.md](configuration.md#webhook_notify--webhook-deliveries-as-notifications).
 
+### GitHub events (`github-webhook` package)
+
+`GithubWebhookPlugin` subscribes one handler to each endpoint in
+`github_webhook.endpoints` and keeps at most one line per delivery: no
+`workflow_job` churn, no non-terminal runs, nothing for an event it does not
+know. `WebhookDelivery.event_type` (the `X-GitHub-Event` header, #807) selects
+a `_line_<event>` method, so an unknown event costs one DEBUG count rather
+than a branch in a chain. The line is built in code from payload fields read
+through `_field`, which warns and returns None for an absent one instead of
+raising into the ingress worker.
+
+Supersession is the one piece of state: an `OrderedDict` of the highest
+`run_number` per `(repository.full_name, workflow.id, head_branch)`, updated
+from every `workflow_run` event including the `requested` and `in_progress`
+ones it drops, bounded to `SUPERSESSION_KEYS` with least-recently-updated
+evicted first. The key and run number are read before anything else, because
+GitHub sends `"conclusion": null` until a run completes; only a completed run
+needs the fields its line prints. A completed `cancelled` run below that mark is dropped. It is
+in memory, so a restart can cost one extra cancelled line.
+
+Lines go through the kernel's spill service exactly as `webhook_notify`'s
+payloads do (`limit=max_payload_chars`, `origin=webhook:<endpoint>`), so the
+kernel fences and cuts them; the plugin adds no annotation beyond `origin`,
+because a PR title or branch name in an annotation would land outside the
+fence. Sender-controlled fields are cut to 120 characters with newlines
+collapsed. At `on_init` an endpoint listed in both this plugin and
+`webhook_notify.endpoints` is warned about: every subscriber to an endpoint
+receives every delivery, so such an endpoint would be notified twice.
+Configuration is in
+[configuration.md](configuration.md#github_webhook--github-events-as-terminal-outcomes).
+
 ### ACP (`channels/acp.py`)
 
 `AcpPlugin` + `corvidae acp` — Agent Client Protocol **v1** over stdio for
@@ -4589,6 +4646,7 @@ tools:
 memory:
   idle_consolidate_after: 1800  # seconds a channel must be quiet before idle consolidation
   consolidate_after_tokens: 4000  # new window tokens that start a turn consolidation (forks only)
+  entry_target_tokens: 256      # size target per consolidation entry, stated as ~192 words (#686)
   half_life_days: 30            # retrieval recency decay (e-folding time, days)
   retrieval:
     k: 8                        # KNN candidate count

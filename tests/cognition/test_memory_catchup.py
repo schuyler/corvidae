@@ -28,6 +28,8 @@ from corvidae.context import MessageType, count_tokens, message_tokens
 from corvidae_cognition.memory import (
     CONSOLIDATION_EXTRA_BODY,
     DEFAULT_CONSOLIDATION_FORK_PROMPT,
+    DEFAULT_ENTRY_TARGET_TOKENS,
+    consolidation_instruction,
     _fork_range_sentence,
 )
 from helpers import FakeForkAgent, RecordingClient
@@ -181,12 +183,20 @@ def dump(messages: list[dict]) -> str:
     return json.dumps(messages)
 
 
+def composed_default() -> str:
+    """The default instruction as sent (#686): the prompt plus the entry-size
+    sentence for the default target."""
+    return consolidation_instruction(
+        DEFAULT_CONSOLIDATION_FORK_PROMPT, DEFAULT_ENTRY_TARGET_TOKENS
+    )
+
+
 def expected_instruction(prefix: list[dict], dialog_ids: set[int]) -> dict:
     """The consolidation instruction message: the fork prompt, a blank line,
     and the range sentence over ``prefix`` (the segment's window)."""
     return {
         "role": "user",
-        "content": DEFAULT_CONSOLIDATION_FORK_PROMPT + "\n\n"
+        "content": composed_default() + "\n\n"
         + _fork_range_sentence(prefix, dialog_ids),
     }
 
@@ -205,7 +215,7 @@ def budget_for_rows(rows_per_segment: float) -> int:
         [tagged(user("x"), 0), tagged(row, 1)], {1}
     )
     instruction = {
-        "role": "user", "content": DEFAULT_CONSOLIDATION_FORK_PROMPT + "\n\n" + sentence
+        "role": "user", "content": composed_default() + "\n\n" + sentence
     }
     return (
         count_tokens(SYSTEM) + message_tokens(instruction)

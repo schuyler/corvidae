@@ -407,9 +407,11 @@ contract:
   the whole budget is dropped with a warning, and `funnel.ingest_ttl` ages out
   a result nobody collected. Whether a hit is relevant enough to show is not
   decided here (#674).
-- **Render stably.** The funnel dedupes on a whole line for now (#725), so a
-  line that carries something that changes (an age, a rank) re-admits the same
-  hit every turn.
+- **Render stably.** `RecallSourceMixin` does not pass dedupe keys yet, so a
+  mixin source is deduped by whole-line containment, and a line that carries
+  something that changes (an age, a rank) re-admits the same hit every turn.
+  The funnel takes keys from a source that submits its own promise (#725), and
+  a keyed entry is deduped on the key instead.
 - **Without the funnel** nothing calls the hook and the source does nothing.
   The mixin lists `funnel` in `optional_depends_on`, so that is logged at DEBUG.
 - **One timing limit** (#726, #624). A result is admitted at the turn after the
@@ -1688,6 +1690,9 @@ mcp:
       env:                     # optional: extra env vars for the subprocess
         NODE_ENV: production
       tool_prefix: "fs"        # optional: prefix for tool names; defaults to server name
+      tools:                   # optional: narrow which tools reach the registry (#529)
+        include: ["read_*", "list_*"]   # keep only these (fnmatch, server's own names)
+        exclude: ["*_delete_*"]         # then drop these; a tool matching both is dropped
       timeout_seconds: 30      # optional: per-call timeout; default 30 (a value above tools.call_timeout is cut at call_timeout)
       connect_timeout_seconds: 30  # optional: startup handshake bound; default 30
 
@@ -1702,6 +1707,14 @@ mcp:
       headers:
         Authorization: "Bearer ${OTTERWIKI_MCP_TOKEN}"
 ```
+
+A server's `tools` block narrows what reaches the registry, which is worth
+doing because every tool schema is prefill on every call: `include` keeps only
+the matching tools and `exclude` drops from that set, both as `fnmatch` globs on
+the server's own tool name (not the `tool_prefix` name the agent sees). A
+filtered-out tool cannot be called at all. One INFO line per connection reports
+how many tools were kept; a pattern that matched nothing warns, naming the
+server and the pattern, since otherwise a typo just makes a tool vanish.
 
 `streamable_http` is MCP's current HTTP transport; `sse` is the older one.
 Both take an optional `headers` map, sent on every request. `${VAR}` in a

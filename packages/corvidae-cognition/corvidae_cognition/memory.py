@@ -59,11 +59,15 @@ Config:
           moderate: 3.0              # value >= moderate → shown [marginal];
                                      # below is weak, never admitted
                                      # (0.60 under score/similarity)
+      entry_target_tokens: 256       # size target for one consolidation
+                                     # entry (positive int, #686); sent to
+                                     # the model as words and checked at
+                                     # write time; static config
       consolidation_fork_prompt: ... # instruction for forked consolidation
                                      # (agent.forks, #51); static config
 
-Changes to ``idle_consolidate_after``, ``consolidate_after_tokens`` and
-``retention.*`` take effect at restart: the idle watch and retention timer
+Changes to ``idle_consolidate_after``, ``consolidate_after_tokens``,
+``entry_target_tokens`` and ``retention.*`` take effect at restart: the idle watch and retention timer
 are set when the plugin starts, and ``consolidate_after_tokens`` is read
 once at startup.
 A channel that never goes quiet is consolidated at turn ends (forks on)
@@ -207,6 +211,11 @@ FTS_SIMILARITY_PROXY = 0.6
 # Vec KNN over-fetch factor: candidates are filtered by channel scope and
 # indexed/redacted flags after the KNN scan, so fetch more than k.
 VEC_OVERFETCH = 4
+#: sqlite-vec refuses a KNN query asking for more rows than this
+#: ("k value in knn query too large", v0.1.9). The scan is brute force and
+#: costs the same whatever k asks for, so clamping loses no work, only reach
+#: into a memory larger than the extension will scan in one call (#637).
+SQLITE_VEC_KNN_MAX = 4096
 
 
 def _exclude_clause(
@@ -317,11 +326,12 @@ DEFAULT_CONSOLIDATION_FORK_PROMPT = (
     "their raw output. Bracketed CONTEXT blocks are things you recalled or "
     "were shown, not new events; don't record them as if they happened now. "
     "Skip pleasantries and chatter.\n\n"
-    "Write it as separate entries, one for each distinct stretch or topic, "
-    "in order. Each entry is a paragraph at most and must make sense read "
-    "on its own, months from now, with nothing else: name the people, "
-    "projects and things involved rather than \"he\" or \"it\". Don't "
-    "attribute a fact from one entry's topic to another's.\n\n"
+    "Write one entry for each distinct stretch or topic, in order, and keep "
+    "each entry to its topic: an entry that wanders across several topics is hard to "
+    "find again. Each entry must make sense read on its own, months from "
+    "now, with nothing else: name the people, projects and things involved "
+    "rather than \"he\" or \"it\". Don't attribute a fact from one entry's "
+    "topic to another's.\n\n"
     "Then rate how important this stretch is to remember long-term, from 0 "
     "(routine) to 1 (essential). Do not call tools.\n\n"
     "Respond with a single JSON object, nothing else:\n"
@@ -334,6 +344,11 @@ DEFAULT_CONSOLIDATION_FORK_PROMPT = (
     '  "importance": "<number from 0 to 1>"\n'
     "}"
 )
+
+# Size target for one consolidation entry, in tokens (#686): 256 is the
+# memory admission budget (2048) divided by retrieval k (8). Sent to the
+# model as words and used as the write-time overrun threshold.
+DEFAULT_ENTRY_TARGET_TOKENS = 256
 
 # How a consolidation range gets its record (MemoryPlugin._live_record).
 LiveOutcome = Literal["record", "skip", "catch_up"]
@@ -973,6 +988,20 @@ def _previous_reply(messages: list[dict]) -> str | None:
     return None
 
 
+def admitted_candidates(candidates: list[dict], degraded: bool) -> list[dict]:
+    """The candidates passive retrieval admits, before the funnel (#703, #802).
+
+    The FTS5-degraded path has no relevance to gate on, so it admits what it
+    found; otherwise a candidate banded ``weak`` is dropped with no fallback
+    (#409), so a query with nothing above weak admits nothing. Shared by
+    ``before_agent_turn`` and ``scripts/eval_memory.py``, so the eval measures
+    what the daemon admits and the two cannot drift.
+    """
+    if degraded:
+        return list(candidates)
+    return [c for c in candidates if c["band"] != "weak"]
+
+
 def retrieval_query(messages: list[dict], query_context: str) -> str:
     """Build passive retrieval's query text from a window (#665).
 
@@ -1232,6 +1261,46 @@ def resolve_consolidation_fork_prompt(config: dict) -> str:
     """
     return resolve_prompt(config, "memory.consolidation_fork_prompt",
                           DEFAULT_CONSOLIDATION_FORK_PROMPT)
+
+
+def resolve_entry_target_tokens(config: dict) -> int:
+    """The entry size target (``memory.entry_target_tokens``) for a config.
+
+    Absent or null gives the default; anything but a positive int raises,
+    naming the key (bool is an int subclass, so YAML ``true`` is refused).
+    """
+    raw = (config.get("memory") or {}).get("entry_target_tokens")
+    # Absent or null: the default.
+    if raw is None:
+        return DEFAULT_ENTRY_TARGET_TOKENS
+    # Reject bool, non-int and non-positive values at startup.
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        raise ValueError(
+            f"memory.entry_target_tokens: got {raw!r}; expected a positive "
+            f"integer number of tokens (default {DEFAULT_ENTRY_TARGET_TOKENS})"
+            " — check agent.yaml"
+        )
+    return raw
+
+
+def entry_size_sentence(target_tokens: int) -> str:
+    """The sentence asking for entries of about ``target_tokens`` tokens.
+
+    Stated in words (0.75 words per token, an English-prose estimate).
+    """
+    words = round(target_tokens * 0.75)
+    return (
+        f"Keep each entry's narrative to about {words} words or fewer; if "
+        "one topic needs more, give it consecutive entries rather than one "
+        "long one."
+    )
+
+
+def consolidation_instruction(prompt: str, target_tokens: int) -> str:
+    """``prompt`` followed by the entry size sentence: the text the model gets."""
+    return prompt + "\n\n" + entry_size_sentence(target_tokens)
+
+
 MEMORY_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_memory_channel ON memory (channel_id, created_at)"
 )
@@ -1308,6 +1377,12 @@ CREATE TABLE IF NOT EXISTS retrieval_candidate (
     z            REAL,               -- band_on: relative z-score (#409); NULL when none was computed
     PRIMARY KEY (retrieval_id, memory_id)
 ) WITHOUT ROWID
+"""
+
+# The retention prune's age cutoff (#682) and every "what was retrieved when"
+# query: without it a first prune of months of rows scans the whole table.
+RETRIEVAL_LOG_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS retrieval_log_ts ON retrieval_log (ts)
 """
 
 # Lookups by memory: "why didn't it remember X" and the redaction delete.
@@ -1451,7 +1526,10 @@ class MemoryPlugin(CorvidaePlugin):
         self._embedding_cfg: dict | None = None
         self._memory_cfg: dict = {}
         self._idle_consolidate_after: float = DEFAULT_IDLE_CONSOLIDATE_AFTER
-        self._consolidation_fork_prompt: str = DEFAULT_CONSOLIDATION_FORK_PROMPT
+        self._entry_target_tokens: int = DEFAULT_ENTRY_TARGET_TOKENS
+        self._consolidation_fork_prompt: str = consolidation_instruction(
+            DEFAULT_CONSOLIDATION_FORK_PROMPT, DEFAULT_ENTRY_TARGET_TOKENS
+        )
         # Compaction fork tasks spawned in before_compaction, awaited by the
         # on_compaction task: (channel_id, range_end) -> task returning
         # (watermark, record) or None (#628).
@@ -1590,7 +1668,12 @@ class MemoryPlugin(CorvidaePlugin):
             float(raw_age) if raw_age is not None else None
         )
         # A non-str prompt is refused here (startup fails loudly).
-        self._consolidation_fork_prompt = resolve_consolidation_fork_prompt(config)
+        # The entry size target feeds both the instruction and the overrun
+        # check; the sentence is appended so overrides get it too (#686).
+        self._entry_target_tokens = resolve_entry_target_tokens(config)
+        self._consolidation_fork_prompt = consolidation_instruction(
+            resolve_consolidation_fork_prompt(config), self._entry_target_tokens
+        )
         self._rubric_prompt = resolve_prompt(config, "memory.rubric_prompt", RUBRIC_PROMPT)
         # The standalone prompt is gone; say so once at startup (O2).
         if "consolidation_prompt" in self._memory_cfg:
@@ -1636,6 +1719,8 @@ class MemoryPlugin(CorvidaePlugin):
             )
         # Warn once per process when the relative gate falls back (#409).
         self._relative_fallback_warned = False
+        # ...and when the KNN k is clamped to sqlite-vec's limit (#637).
+        self._knn_clamp_warned = False
         self._recency_from = _retrieval_choice(
             retrieval_cfg, "recency_from", RECENCY_FROM_CHOICES
         )
@@ -2486,6 +2571,9 @@ class MemoryPlugin(CorvidaePlugin):
             # that fell through to it (#633).
             stamp = dataclasses.replace(record.stamp, trigger=trigger)
             memory_ids: list[int] = []
+            # (memory_id, tokens) of entries over the size target, logged
+            # once the transaction has committed.
+            overruns: list[tuple[int, int]] = []
             for entry, embedding in zip(record.entries, embeddings):
                 # Siblings never merge into each other: their ids are
                 # excluded from the near-dup check (by id, since a sibling
@@ -2505,7 +2593,28 @@ class MemoryPlugin(CorvidaePlugin):
                     stamp=stamp,
                     exclude_ids=frozenset(memory_ids),
                 ))
+                # An instruction-written entry past the target is stored
+                # in full; remember it so a warning follows the commit.
+                if stamp.mode in ("fork", "standalone"):
+                    tokens = count_tokens(entry.narrative)
+                    if tokens > self._entry_target_tokens:
+                        overruns.append((memory_ids[-1], tokens))
             await self._set_watermark(wdb, channel_id, new_wm)
+        # Committed: one warning per overrunning entry (#686).
+        for memory_id, tokens in overruns:
+            logger.warning(
+                "consolidation entry over memory.entry_target_tokens for "
+                "channel %s: memory %d is %d tokens, target %d (mode %s, "
+                "prompt %s); stored in full — if this is frequent, check the "
+                "model or the memory.consolidation_fork_prompt override",
+                channel_id, memory_id, tokens, self._entry_target_tokens,
+                stamp.mode, stamp.hash,
+                extra={
+                    "channel_id": channel_id, "memory_id": memory_id,
+                    "tokens": tokens, "target": self._entry_target_tokens,
+                    "mode": stamp.mode, "prompt_hash": stamp.hash,
+                },
+            )
         logger.info(
             "memory consolidated",
             extra={
@@ -2521,9 +2630,12 @@ class MemoryPlugin(CorvidaePlugin):
         return True
 
     async def _embed_in_chunks(
-        self, client: Any, texts: list[str], channel_id: str,
+        self, client: Any, texts: list[str], where: str,
     ) -> list[list[float] | None]:
         """Embed ``texts`` as documents, halving a batch the server rejects (#655).
+
+        ``where`` names the caller in the warning: a channel id on the write
+        path, and the pass's name where the batch spans channels (#681).
 
         A server with a per-request cap rejects a large batch; the two halves
         are retried, recursively, so depth is bounded by log2 of the count.
@@ -2542,15 +2654,15 @@ class MemoryPlugin(CorvidaePlugin):
             if len(texts) == 1:
                 raise
             logger.warning(
-                "memory embedding of %d entries failed for channel %s (%s); "
+                "memory embedding of %d entries failed for %s (%s); "
                 "retrying in two smaller batches, in case the server caps the "
                 "batch size",
-                len(texts), channel_id, type(exc).__name__,
+                len(texts), where, type(exc).__name__,
             )
         mid = len(texts) // 2
         return (
-            await self._embed_in_chunks(client, texts[:mid], channel_id)
-            + await self._embed_in_chunks(client, texts[mid:], channel_id)
+            await self._embed_in_chunks(client, texts[:mid], where)
+            + await self._embed_in_chunks(client, texts[mid:], where)
         )
 
     async def _insert_record(
@@ -3012,11 +3124,9 @@ class MemoryPlugin(CorvidaePlugin):
             # Drop weak-banded candidates, with no fallback (#409): a query
             # with nothing above weak admits nothing. The FTS5-degraded path
             # has no relevance to gate on, so it admits its top k (flagged in
-            # retrieval_log and marked marginal).
-            if degraded:
-                selected = list(candidates)
-            else:
-                selected = [c for c in candidates if c["band"] != "weak"]
+            # retrieval_log and marked marginal). The rule is shared with the
+            # eval, which measures false admits against it (#802).
+            selected = admitted_candidates(candidates, degraded)
 
             # One line per memory: "(age, memory <id>) summary", marked
             # "[marginal]" when the record banded moderate; each keyed on its
@@ -3191,6 +3301,7 @@ class MemoryPlugin(CorvidaePlugin):
     async def _retrieve_pool(
         self, text: str, k: int | None = None,
         exclude: tuple[str, int] | None = None,
+        now: float | None = None,
     ) -> RetrievalPool:
         """Score the whole candidate pool for a query text (#407).
 
@@ -3198,12 +3309,17 @@ class MemoryPlugin(CorvidaePlugin):
         logs the whole pool. ``excluded`` lists in-window records whose
         score would have placed them in the top k (vec path only; the FTS
         path reports only their count).
+
+        ``now`` pins the clock the decay and the ages are measured against,
+        so a scoring run is reproducible: two runs on different days with the
+        same pinned ``now`` produce the same scores and bands (#661). Passive
+        retrieval leaves it None and uses the wall clock.
         """
         db = await self._ensure_schema()
         k = k or self._retrieval_k
         if db is None:
             return RetrievalPool([], [], None, False, k)
-        now = time.time()
+        now = time.time() if now is None else now
 
         rows: list[CandidateRow] = []
         degraded = False
@@ -3220,7 +3336,6 @@ class MemoryPlugin(CorvidaePlugin):
             try:
                 client = self._llm().get_client("embedding")
                 query_vector = (await client.embed([text], kind="query"))[0]
-                rows = await self._vec_candidates(db, query_vector, k, exclude)
             except Exception:
                 logger.warning(
                     "retrieval embedding failed; degrading to FTS5",
@@ -3228,14 +3343,31 @@ class MemoryPlugin(CorvidaePlugin):
                 )
                 degraded = True
             else:
-                vec_ids = {row[0] for row in rows}
-                measured = set(vec_ids)
-                if self._candidates == "hybrid":
-                    rows, fts_order, measured = await self._hybrid_rows(
-                        db, text, query_vector, k, exclude, rows,
+                try:
+                    # Its own try: a KNN refusal is not an embedding failure,
+                    # and naming it as one sends the operator to the embed
+                    # server for a fault that is in the query (#637).
+                    rows = await self._vec_candidates(db, query_vector, k, exclude)
+                except Exception:
+                    logger.warning(
+                        "retrieval KNN query failed; degrading to FTS5",
+                        exc_info=True,
                     )
-                if self._band_on == "relative":
-                    spread = await self._relative_spread(db, query_vector)
+                    rows, degraded = [], True
+                else:
+                    # Only a KNN that answered feeds the hybrid path. On a
+                    # refusal the rows come from FTS below, and they must be
+                    # ranked by the decayed score: filling fts_order here would
+                    # send them through RRF instead (#637 review), which is the
+                    # rule this branch exists to keep.
+                    vec_ids = {row[0] for row in rows}
+                    measured = set(vec_ids)
+                    if self._candidates == "hybrid":
+                        rows, fts_order, measured = await self._hybrid_rows(
+                            db, text, query_vector, k, exclude, rows,
+                        )
+                    if self._band_on == "relative":
+                        spread = await self._relative_spread(db, query_vector)
         else:
             degraded = True
 
@@ -3324,6 +3456,11 @@ class MemoryPlugin(CorvidaePlugin):
                 "z": z,
                 "age_seconds": age_seconds,
                 "source": source,
+                # Measured means the vector side gave this record a real
+                # cosine: a KNN hit, or an FTS hit whose stored vector was
+                # read back. An unmeasured candidate is scored from
+                # FTS_SIMILARITY_PROXY, not from the query (#705).
+                "measured": memory_id in measured,
             })
         # Split off the in-window rows; the rest is the ranked pool.
         pool_rows = [c for c, w in zip(candidates, in_window_flags) if not w]
@@ -3335,10 +3472,35 @@ class MemoryPlugin(CorvidaePlugin):
             # Vec-only or degraded: rank by the decayed score, as before #666.
             keys = {c["id"]: (c["score"],) for c in candidates}
         ranked = sorted(pool_rows, key=lambda c: keys[c["id"]], reverse=True)
+        # A candidate with no measured similarity cannot be admitted on its
+        # own relevance — it bands weak (#409: no keyword-only floor), its
+        # score coming from FTS_SIMILARITY_PROXY rather than the query — so
+        # it must not take a top-k slot from one that can (#705). Measured candidates keep their fused order, then the
+        # unmeasured ones follow in theirs: they stay in the pool, and so in
+        # the candidate log, but they cannot push a measured record past the
+        # cut. On the degraded path nothing is measured and this is a no-op.
+        ranked = (
+            [c for c in ranked if c["measured"]]
+            + [c for c in ranked if not c["measured"]]
+        )
         # Each in-window record is judged alone: would it have made top k?
         excluded: list[tuple[int, dict]] = []
+        # It is judged against the pool's own measured-first order: a measured
+        # record competes only with measured rows; an unmeasured one ranks
+        # behind every measured row, then among the unmeasured by key.
+        measured_ahead = sum(1 for c in ranked if c["measured"])
         for e in in_window_rows:
-            would_be_rank = 1 + sum(1 for c in ranked if keys[c["id"]] >= keys[e["id"]])
+            if e["measured"]:
+                ahead = sum(
+                    1 for c in ranked
+                    if c["measured"] and keys[c["id"]] >= keys[e["id"]]
+                )
+            else:
+                ahead = measured_ahead + sum(
+                    1 for c in ranked
+                    if not c["measured"] and keys[c["id"]] >= keys[e["id"]]
+                )
+            would_be_rank = 1 + ahead
             if would_be_rank <= k:
                 excluded.append((would_be_rank, e))
         # The exclusion count: flagged rows (vec) or one COUNT query (FTS).
@@ -3457,6 +3619,27 @@ class MemoryPlugin(CorvidaePlugin):
             ) as cursor:
                 (excluded_count,) = await cursor.fetchone()
             knn_k += excluded_count
+        if knn_k > SQLITE_VEC_KNN_MAX:
+            # The extension refuses the query outright, and the refusal used to
+            # surface as "embedding failed; degrading to FTS5" on every turn
+            # (#637). Clamping keeps retrieval on the vector path; what is lost
+            # is the reach past the limit, which only matters for a memory
+            # bigger than the extension will scan in one call.
+            if not self._knn_clamp_warned:
+                self._knn_clamp_warned = True
+                logger.warning(
+                    "retrieval KNN k clamped to sqlite-vec's limit (%d): asked "
+                    "for %d rows (k=%d, over-fetch %d%s). Retrieval stays on "
+                    "the vector path and sees the nearest %d rows; if that "
+                    "leaves too few in-window results, shrink the channel's "
+                    "window or accept the nearest-row ordering. Logged once "
+                    "per process.",
+                    SQLITE_VEC_KNN_MAX, knn_k, k, VEC_OVERFETCH,
+                    f", {excluded_count} in-window on {exclude[0]}"
+                    if exclude is not None else "",
+                    SQLITE_VEC_KNN_MAX,
+                )
+            knn_k = SQLITE_VEC_KNN_MAX
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at, v.distance, "
             + exclude_sql + " AS in_window "
@@ -3892,6 +4075,7 @@ class MemoryPlugin(CorvidaePlugin):
         await db.execute(MEMORY_FTS_INSERT_TRIGGER)
         await db.execute(MEMORY_FTS_UPDATE_TRIGGER)
         await db.execute(RETRIEVAL_LOG_DDL)
+        await db.execute(RETRIEVAL_LOG_INDEX_DDL)
         # Schema upgrade: retrieval_log tables from before top_similarity
         # (#66) gain it as a nullable column; old rows read NULL.
         await add_column_if_missing(db, "retrieval_log", "top_similarity", "REAL")
