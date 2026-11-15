@@ -448,7 +448,7 @@ async def test_pre_363_usage_log_gains_lease_key_on_start(tmp_path) -> None:
             profile="main", model="m", request_id="new", usage={}, latency_ms=1.0,
             attribution={"stage": "turn", "lease_key": "irc:#a"}, error=None,
             timings=None, started_at=2.0, total_ms=1.0, attempts=1,
-            message_count=1, tool_count=0,
+            message_count=1, tool_count=0, lease_wait_ms=None,
         )
         async with db.execute(
             "SELECT request_id, lease_key FROM usage_log ORDER BY id"
