@@ -231,8 +231,9 @@ class RecallSourceMixin:
     def render(self, hit: Any) -> str:
         """Render one hit as the line the funnel admits.
 
-        Overridden by the source. Render stably: the funnel dedupes on whole
-        text for now (#725), so a line that changes between turns defeats it.
+        Overridden by the source. Render stably: the mixin does not carry
+        dedupe keys yet, so the funnel falls back to whole-text containment and
+        a line that changes between turns defeats it (#725).
         """
         raise NotImplementedError(
             f"recall source {self.source_name!r} does not implement render(); "

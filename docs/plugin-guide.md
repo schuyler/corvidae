@@ -317,6 +317,16 @@ class RecallPlugin(CorvidaePlugin):
 - `on_admitted`, if given, is a sync callable. The funnel calls it with the
   `Admission` (`admitted` and `duplicate` lists) after each admission attempt
   that completes. A raise is logged and does not stop the drain.
+- `keys=`, if given, is one stable identity per entry (#725), the same
+  argument `admit()` takes. With keys, an entry is a duplicate when its key
+  already appears in this source's CONTEXT rows, so a page that re-renders
+  with a new age or score is not admitted twice. The match is containment, so
+  render the key into the line you admit (memory renders its record id;
+  a folder source can carry `<!--notes/page.md#intro-->`). A key list that is
+  not one per entry is rejected with a warning naming the source, both
+  lengths and the remedy, and the entries are admitted unkeyed: a promise has
+  no caller to raise at, and a result the turn is waiting for should not be
+  dropped over its keys.
 - A promise that is done when the turn starts is admitted that turn. One
   still pending is admitted at the channel's next turn after it resolves,
   whatever that turn's origin. Nothing wakes the channel for it.
@@ -395,9 +405,11 @@ contract:
   the whole budget is dropped with a warning, and `funnel.ingest_ttl` ages out
   a result nobody collected. Whether a hit is relevant enough to show is not
   decided here (#674).
-- **Render stably.** The funnel dedupes on a whole line for now (#725), so a
-  line that carries something that changes (an age, a rank) re-admits the same
-  hit every turn.
+- **Render stably.** `RecallSourceMixin` does not pass dedupe keys yet, so a
+  mixin source is deduped by whole-line containment, and a line that carries
+  something that changes (an age, a rank) re-admits the same hit every turn.
+  The funnel takes keys from a source that submits its own promise (#725), and
+  a keyed entry is deduped on the key instead.
 - **Without the funnel** nothing calls the hook and the source does nothing.
   The mixin lists `funnel` in `optional_depends_on`, so that is logged at DEBUG.
 - **One timing limit** (#726). A result is admitted at the turn after the one
