@@ -37,6 +37,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
@@ -153,6 +154,12 @@ class _Rejected(_ZulipError):
         self.msg = msg
 
 
+#: Durable catch-up cursor (#644): the last message id the transport has looked
+#: at, per channel id, with the narrow it was found under. Written atomically
+#: beside the keys and databases it outlives.
+CURSOR_FILE = "zulip_cursor.json"
+
+
 @dataclass
 class _EventQueue:
     """A registered event queue and our place in it."""
@@ -220,6 +227,11 @@ class ZulipPlugin(TransportPlugin):
         self._mention_re: Optional[re.Pattern[str]] = None
         self._server_max_len: Optional[int] = None
         self._empty_topic_label: str = "general chat"
+
+        # Catch-up state: {channel id: {"last": <message id>, "narrow": [[...]]}},
+        # loaded from CURSOR_FILE and saved after every admission (#644).
+        self._cursor: dict[str, dict] = {}
+        self._cursor_dir: Optional[Path] = None
 
         # Connection state.
         self._session: Optional[aiohttp.ClientSession] = None
@@ -475,7 +487,95 @@ class ZulipPlugin(TransportPlugin):
         # every version; Zulip reads the credentials as UTF-8.
         token = base64.b64encode(f"{self._email}:{self._api_key}".encode()).decode("ascii")
         self._session = aiohttp.ClientSession(headers={"Authorization": f"Basic {token}"})
+        # Where the catch-up cursor lives, beside the rest of the durable state.
+        self._cursor_dir = Path(config.get("_base_dir", Path(".")))
+        await self._load_cursor()
         self._connect_task = asyncio.create_task(self._connection_loop())
+
+    # -----------------------------------------------------------------
+    # Catch-up cursor (#644)
+    # -----------------------------------------------------------------
+
+    def _cursor_path(self) -> Optional[Path]:
+        """The cursor file's path, or None before on_start has set the dir."""
+        return None if self._cursor_dir is None else self._cursor_dir / CURSOR_FILE
+
+    async def _load_cursor(self) -> None:
+        """Read the persisted cursor. A missing file is a first run; a corrupt
+        one costs one gap rather than failing every restart."""
+        path = self._cursor_path()
+        if path is None:
+            return
+        try:
+            raw = await asyncio.to_thread(path.read_text)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning(
+                "zulip: could not read the catch-up cursor at %s (%s); starting "
+                "from now, so messages sent while this bot was down are not replayed",
+                path, type(exc).__name__,
+            )
+            return
+        try:
+            loaded = json.loads(raw)
+        except ValueError:
+            loaded = None
+        if not isinstance(loaded, dict):
+            logger.warning(
+                "zulip: the catch-up cursor at %s is not a JSON object; starting "
+                "from now, so messages sent while this bot was down are not replayed",
+                path,
+            )
+            return
+        kept: dict[str, dict] = {}
+        for channel_id, entry in loaded.items():
+            if (
+                isinstance(channel_id, str)
+                and isinstance(entry, dict)
+                and isinstance(entry.get("last"), int)
+                and isinstance(entry.get("narrow"), list)
+            ):
+                kept[channel_id] = {"last": entry["last"], "narrow": entry["narrow"]}
+        dropped = len(loaded) - len(kept)
+        if dropped:
+            logger.warning(
+                "zulip: the catch-up cursor at %s has %d unreadable entr%s; "
+                "those channels start from now",
+                path, dropped, "y" if dropped == 1 else "ies",
+            )
+        self._cursor = kept
+
+    async def _save_cursor(self) -> None:
+        """Write the cursor atomically: a half-written file would cost every
+        channel's place at once."""
+        path = self._cursor_path()
+        if path is None:
+            return
+        tmp = path.with_name(path.name + ".tmp")
+        payload = json.dumps(self._cursor, sort_keys=True)
+        try:
+            await asyncio.to_thread(self._write_atomic, tmp, path, payload)
+        except OSError as exc:
+            logger.warning(
+                "zulip: could not save the catch-up cursor at %s (%s); a restart "
+                "will replay messages from the last saved point",
+                path, type(exc).__name__,
+            )
+
+    @staticmethod
+    def _write_atomic(tmp: Path, path: Path, payload: str) -> None:
+        tmp.write_text(payload)
+        os.replace(tmp, path)
+
+    def _remember_seen(self, channel_id: str, narrow: list, message_id: int) -> bool:
+        """Record that this message has been looked at. True when the cursor
+        moved, so the caller can skip a save for a repeat."""
+        entry = self._cursor.get(channel_id)
+        if entry is not None and entry.get("last", -1) >= message_id:
+            return False
+        self._cursor[channel_id] = {"last": message_id, "narrow": narrow}
+        return True
 
     @hookimpl
     async def on_stop(self) -> None:
