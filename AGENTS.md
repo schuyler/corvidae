@@ -60,7 +60,7 @@ Findings gate on consequence, not reachability (PRD principle 12).
 * **Critical blocks the merge:** on an input the reviewer names, the change causes a security hole, data loss, a hang or crash, or a wrong result the user sees. The finding states the input and the consequence.
 * **Important blocks the merge:**
   * the change deviates from scope in either direction. Too much implementation is as much a deviation as too little (an option nobody asked for, an abstraction with one caller, a config key with no user), and so is a test suite past its use-by: tests that re-prove behaviour another test already proves. Past 3:1 (test lines against the non-test lines changed in the same PR), the reviewer checks for exactly that. **A regression test for the bug being fixed is always in scope.**
-  * a test that cannot fail: one that passes on the parent commit (see "Process instructions"), or whose claim rests on values neither the test nor the code under test set, such as a default compared with a default.
+  * a test that cannot fail: one that no mutation of the change makes fail, or whose claim rests on values neither the test nor the code under test set, such as a default compared with a default.
   * a path the change adds that no test reaches.
   * a claim in the docs or the PR body that the code contradicts (but see narrative prose, below).
 * **Everything else is non-blocking** and does not buy another round: naming, structure, an alternative weighed, a nit, and a failure the reviewer can reach whose consequence is none of the critical ones and that is none of the important kinds above. The reviewer reports that last kind with its input, its consequence and a rough fix size.
@@ -102,5 +102,5 @@ Findings gate on consequence, not reachability (PRD principle 12).
 * If you are adding or changing a plugin, read `docs/plugin-checklist.md` first. It covers placement (a plugin, not the kernel), the package layout and CI wiring, and the traps that fail silently. `docs/plugin-guide.md` has the depth.
 * **The plan comment is the claim.** Before starting on an issue, read its comments and the open PRs that mention it; if someone has claimed it, stop and ask. Otherwise post the plan comment above before writing code -- that comment is what the next agent checks for.
 * A claim about code, config or runtime state names the command that produced it and the tree it ran against. A worktree, the live checkout and the installed package are three different answers to the same import.
-* A new test has to fail on the parent commit before it counts as a test. Run it there, not only in your head.
+* A new test has to fail before it counts as a test: a test of new or fixed behaviour fails on the parent commit; a guard test, which pins behaviour the change must not break, fails under a mutation of the change. Run it, not only in your head.
 * Comment every block with its purpose, as the coding conventions say. `docs/plugin-checklist.md` asks for the shorter "why it is there"; that is a compression of this rule, not a different one, and this file wins.
