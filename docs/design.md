@@ -4025,12 +4025,12 @@ Sending to a channel other than the turn's own has no general text tool: no
 already: `send_attachment`, whose caption is text, and `start_thread` — both
 against any registered `discord:` channel except a DM, which `start_thread`
 refuses. PRD §3.5.9 gates nothing about which
-channel a turn may speak on — there is no cross-channel allowlist — and the
-limit the operator may apply is a per-destination count of the messages the
-agent starts *through the send gate*, shipped as the `outbound_cap` plugin
-(#791). The file, caption and reaction tools above bypass the gate and are not
-counted: they are the plugin's "sends that bypass the gate" Known gap, not
-something this paragraph's cap reaches.
+channel a turn may speak on — there is no cross-channel allowlist. The file,
+caption and reaction tools above bypass the send gate and are not counted at all:
+they are the `outbound_cap` plugin's "sends that bypass the gate" Known gap, not
+something this paragraph's cap reaches. What the operator can apply is a
+per-destination count of the messages the agent starts *through the send gate*,
+shipped as `outbound_cap` (#791).
 
 Out of scope: voice, slash commands, embeds, and inbound reactions (the agent
 can add and remove its own reaction on the triggering message, see
