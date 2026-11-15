@@ -955,9 +955,11 @@ key points at. The change applies when the key is next resolved: on an
 for the rest. Editing a prompt file does not trigger a reload. `set_settings`
 cannot change these keys: `resolve_prompt` reads static config only. The
 cost is the same as the system-prompt entry: the agent redefines its own
-instructions for that scope. Lock the files read-only to the daemon. There
-is no restart tool in this tree; the agent can restart only by way of
-`shell` or a tool an MCP server provides. Nor is there deferred application:
+instructions for that scope. Lock the files read-only to the daemon. The
+`restart` tool comes from the opt-in restart plugin (`packages/corvidae-restart`,
+the `restart` extra; see [Restart plugin](#restart-plugin)); without it, the
+agent can restart only by way of `shell` or a tool an MCP server provides.
+There is no deferred application either:
 a `reasoning_history` override applies to the whole window from the next
 call. None of these can be unlocked yet (#292). Context leases, latency
 classes and scheduling policy (PRD §3.13) aren't built at all (#296). On a
