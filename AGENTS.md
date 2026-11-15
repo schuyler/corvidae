@@ -44,6 +44,18 @@ the string it will print.
 
 **The two-layer rule does not license vagueness.** The opener is short because it is selected, not because the detail is thin. Everything a reviewer needs to check the work is still written down, in the detail block, and a body whose detail block is empty has failed this section rather than complied with it.
 
+# Workflow labels
+
+An issue's label says what stage it is in, so an agent looking for work and the owner looking for what waits on them can each find it with one label query instead of reading every thread. Five labels mark the stages, and they go on the issue, not the PR. An issue carries at most one of them. Whoever moves an issue to the next stage removes the old label and adds the new one in the same step, because a stale label sends the next reader to the wrong place.
+
+* **`ready`** -- the owner has accepted the requirements, in whatever form they are posted on the issue. The rest is up to the agent: the PRD comparison, the plan and the implementation. Only the owner's acceptance makes an issue `ready`.
+* **`claimed`** -- an agent has posted the requirements and plan comment ("Process instructions") and is working on it. Add it with that comment and remove `ready`. The label is an index, not a lock: the claim belongs to the first agent to post requirements to the issue, so an agent that finds an earlier plan comment than its own withdraws its own.
+* **`needs-review`** -- the PR is open, the author has swept it ("The author's side"), and it is waiting for a blind review round. The author sets it on handing over, removing `claimed`, and again after pushing fixes for a re-review, removing `needs-revision`.
+* **`needs-revision`** -- a review round ended `NEEDS-CHANGES` and the author is fixing the findings. It replaces `needs-review` when the verdict lands. From the third round on, it stays until the owner says to continue ("Rounds").
+* **`merge-ready`** -- every required review has passed: the loop's end condition in "Rounds" holds, and the change is ready for merge pending owner acceptance. It replaces `needs-review`. The label says the change is admissible; it is not permission to merge ("Merging"). The issue leaves the workflow when the owner merges and it closes.
+
+When one issue's work spans several PRs, the issue's label follows the PR furthest behind, and the issue is `merge-ready` only when all of them are.
+
 # Review loops
 
 * **Every non-trivial change gets a review loop before it is merged.** The criterion is whether behaviour, or something a reader or another plugin acts on, could change, not the file type: a config key, a prompt, a documented contract, a docs page readers act on, a one-line code fix and a refactor all count. What can change neither does not (a typo, a broken link, a comment that was wrong about unchanged code), and the PR body says which case it is.
@@ -95,7 +107,7 @@ Findings are rated by consequence, not reachability (PRD principle 12).
 * If you are solving a GitHub issue, post the requirements, the PRD comparison above, and the implementation plan as a comment on the issue before implementing -- opened with the short summary the section above asks for, with the lists inside one `<details>` block.
 * Check @docs/ before your work is complete and make sure the documentation is updated.
 * If you are adding or changing a plugin, read `docs/plugin-checklist.md` first. It covers placement (a plugin, not the kernel), the package layout and CI wiring, and the traps that fail silently. `docs/plugin-guide.md` has the depth.
-* **The plan comment is the claim.** Before starting on an issue, read its comments and the open PRs that mention it; if someone has claimed it, stop and ask. Otherwise post the plan comment above before writing code -- that comment is what the next agent checks for.
+* **The plan comment is the claim.** Before starting on an issue, read its comments and the open PRs that mention it; if someone has claimed it, stop and ask. Otherwise post the plan comment above before writing code -- that comment is what the next agent checks for -- and move the issue from `ready` to `claimed` ("Workflow labels").
 * A claim about code, config or runtime state names the command that produced it and the tree it ran against. A worktree, the live checkout and the installed package are three different answers to the same import.
 * A new test has to fail before it counts as a test: a test of new or fixed behaviour fails on the parent commit; a guard test, which pins behaviour the change must not break, fails under a mutation of the change. Run it, not only in your head.
 * Comment every block with its purpose, as the coding conventions say. `docs/plugin-checklist.md` asks for the shorter "why it is there"; that is a compression of this rule, not a different one, and this file wins.
