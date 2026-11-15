@@ -17,6 +17,7 @@ Logging:
 import enum
 import json
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from corvidae.provenance import frame, sent_form
@@ -95,6 +96,18 @@ class MessageType(str, enum.Enum):
 
 #: Default characters-per-token estimate for rough token counting.
 DEFAULT_CHARS_PER_TOKEN: float = 3.5
+
+#: A line in a summary that begins with "[" is neutralised with a zero-width
+#: space after the bracket (#561). The kernel's own headers and fences all
+#: begin that way -- "[metadata:", "[annotations:", "[payload ... begins]" --
+#: and a summary is text the agent rereads in place of what was said, so one
+#: that begins a line with a header must not read as one. Shape, not
+#: vocabulary: any bracketed line start goes inert, so a header the kernel
+#: adds later is covered without another rule. Invisible in the text, and a
+#: pure function of the row, so the prompt stays stable across turns.
+SUMMARY_BRACKET_RE = re.compile(r"^\[", re.MULTILINE)
+SUMMARY_BRACKET_DEFANGED = "[\u200b"
+
 
 TOOL_RESULT_PENDING = "[still running — the result will arrive in a later message]"
 TOOL_RESULT_ABANDONED = "[did not complete — no result was returned]"
@@ -446,6 +459,11 @@ class ContextWindow:
         only, and no ``tool_calls`` key at all when none survive (an empty
         list is not the same as an absent one to a chat template)."""
         out = _visible(msg)
+        if msg.get("_message_type") == MessageType.SUMMARY:
+            content = out.get("content")
+            if isinstance(content, str):
+                out["content"] = SUMMARY_BRACKET_RE.sub(
+                    SUMMARY_BRACKET_DEFANGED, content)
         if "tool_calls" not in out:
             return out
         kept = well_formed_calls(msg)
