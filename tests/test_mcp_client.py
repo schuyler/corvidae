@@ -1292,6 +1292,11 @@ def _owner_tasks() -> list[asyncio.Task]:
     ]
 
 
+async def _park_retry_loop(_plugin) -> None:
+    """A retry loop that never reconnects, so a requeued entry stays queued."""
+    await asyncio.sleep(3600)
+
+
 class TestLiveness:
     """#477: a server that dies mid-session is noticed and re-queued.
 
@@ -1305,6 +1310,9 @@ class TestLiveness:
         self, pm, kernel_clock, sdk, caplog, monkeypatch,
     ):
         monkeypatch.setattr(mcp_client_mod, "_LIVENESS_PING_SECONDS", 0.02)
+        monkeypatch.setattr(
+            mcp_client_mod.McpClientPlugin, "_retry_loop", _park_retry_loop
+        )
         sdk.up.add("a")
         plugin, tools = await _start_plugin(pm, _servers("a"))
         try:
@@ -1345,6 +1353,169 @@ class TestLiveness:
             assert session.send_ping.await_count >= 2
         finally:
             await plugin.on_stop()
+
+    async def test_a_server_that_answers_the_ping_with_an_error_stays(
+        self, pm, kernel_clock, sdk, caplog, monkeypatch,
+    ):
+        """An error reply proves the transport works (#477 review, critical 1).
+
+        The SDK raises MCPError for a JSON-RPC error as well as for a dead
+        connection. A server that does not implement ``ping`` answered - it is
+        reachable - and tearing it down every interval rebuilt the tool list
+        forever at WARNING.
+        """
+        from mcp.shared.exceptions import MCPError
+
+        monkeypatch.setattr(mcp_client_mod, "_LIVENESS_PING_SECONDS", 0.02)
+        sdk.up.add("a")
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        try:
+            session = plugin._servers[0].session
+            # -32601 is "method not found": the server answered, with an error.
+            session.send_ping = AsyncMock(
+                side_effect=MCPError(-32601, "Method not found")
+            )
+            await asyncio.sleep(0.12)
+            assert [s.name for s in plugin._servers] == ["a"]
+            assert "a" in plugin._owners
+            assert plugin._pending_servers == {}
+            assert session.send_ping.await_count >= 2
+            assert not [
+                r for r in caplog.records if "stopped answering" in r.getMessage()
+            ]
+        finally:
+            await plugin.on_stop()
+
+    async def test_a_ping_that_times_out_is_death(
+        self, pm, kernel_clock, sdk, caplog, monkeypatch,
+    ):
+        """The #477 hang itself: a ping that never answers (#477 review, 4).
+
+        This is the reported failure - the transport accepts the request and
+        the reply never arrives - so the ping's own bound has to end the wait.
+        Removing ``asyncio.timeout(_LIVENESS_PING_TIMEOUT)`` leaves the server
+        registered forever and fails this test.
+        """
+        monkeypatch.setattr(mcp_client_mod, "_LIVENESS_PING_SECONDS", 0.02)
+        # The deadline short enough that the test can wait it out.
+        monkeypatch.setattr(mcp_client_mod, "_LIVENESS_PING_TIMEOUT", 0.05)
+        monkeypatch.setattr(
+            mcp_client_mod.McpClientPlugin, "_retry_loop", _park_retry_loop
+        )
+        sdk.up.add("a")
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        try:
+            session = plugin._servers[0].session
+
+            async def never_answers():
+                await asyncio.sleep(30)
+
+            session.send_ping = AsyncMock(side_effect=never_answers)
+            for _ in range(100):
+                if "a" in plugin._pending_servers:
+                    break
+                await asyncio.sleep(0.02)
+            assert plugin._servers == []
+            assert "a" not in plugin._owners
+            assert "a" in plugin._pending_servers
+        finally:
+            await plugin.on_stop()
+
+    async def test_a_call_in_flight_defers_the_ping(
+        self, pm, kernel_clock, sdk, monkeypatch,
+    ):
+        """A serialising server cannot answer a ping behind a running call.
+
+        Pinging regardless tore a healthy server down mid-call (#477 review,
+        important 1): the loop stands aside while this server has a call.
+        """
+        monkeypatch.setattr(mcp_client_mod, "_LIVENESS_PING_SECONDS", 0.02)
+        sdk.up.add("a")
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        try:
+            session = plugin._servers[0].session
+            session.send_ping = AsyncMock(return_value=None)
+            plugin._calls_in_flight["a"] = 1
+            await asyncio.sleep(0.12)
+            assert session.send_ping.await_count == 0, (
+                "the ping ran while a call was in flight"
+            )
+            # When the call finishes the ping resumes.
+            plugin._calls_in_flight.pop("a")
+            await asyncio.sleep(0.12)
+            assert session.send_ping.await_count >= 1
+        finally:
+            await plugin.on_stop()
+
+    async def test_a_cancelled_transport_is_requeued_not_left_registered(
+        self, pm, kernel_clock, sdk, caplog, monkeypatch,
+    ):
+        """A bare CancelledError from the transport means dead (#477 review, 2).
+
+        The SDK's task group cancels the host task when a connection drops.
+        That cancel used to escape the ping's except tuple, so the owner exited
+        and the dead session stayed in ``_servers`` with no log line: #477's end
+        state, reached silently.
+        """
+        monkeypatch.setattr(mcp_client_mod, "_LIVENESS_PING_SECONDS", 0.02)
+        monkeypatch.setattr(
+            mcp_client_mod.McpClientPlugin, "_retry_loop", _park_retry_loop
+        )
+        sdk.up.add("a")
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        try:
+            session = plugin._servers[0].session
+            # Not a cancel of this task: `cancelling()` stays 0, which is how a
+            # task group's internal cancel arrives.
+            session.send_ping = AsyncMock(side_effect=asyncio.CancelledError())
+            for _ in range(100):
+                if "a" in plugin._pending_servers:
+                    break
+                await asyncio.sleep(0.02)
+            assert plugin._servers == []
+            assert "a" not in plugin._owners
+            assert "a" in plugin._pending_servers
+            assert any(
+                "dropped its transport" in r.getMessage()
+                for r in caplog.records if r.levelname == "WARNING"
+            ), [r.getMessage() for r in caplog.records]
+        finally:
+            await plugin.on_stop()
+
+    async def test_on_stop_waits_for_an_owner_that_is_still_unwinding(
+        self, pm, kernel_clock, sdk, monkeypatch,
+    ):
+        """A requeued owner is still on_stop's to await (#477 review, 2).
+
+        ``_requeue_dead_server`` drops the owner from ``_owners`` while its task
+        is still closing the stack, so without a draining set that task
+        outlives on_stop: never awaited, never bounded by the stop bound, never
+        cancelled. A slow stack close makes the difference observable.
+        """
+        monkeypatch.setattr(mcp_client_mod, "_LIVENESS_PING_SECONDS", 0.02)
+        monkeypatch.setattr(
+            mcp_client_mod.McpClientPlugin, "_retry_loop", _park_retry_loop
+        )
+        sdk.up.add("a")
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        owner = plugin._owners["a"]
+        task = owner.task
+
+        async def slow_close():
+            await asyncio.sleep(0.3)
+
+        owner.stack.aclose = slow_close
+        session = plugin._servers[0].session
+        session.send_ping = AsyncMock(side_effect=ConnectionError("gone"))
+        for _ in range(100):
+            if "a" in plugin._draining_owners:
+                break
+            await asyncio.sleep(0.02)
+        assert "a" in plugin._draining_owners, "the dying owner was not tracked"
+
+        await plugin.on_stop()
+
+        assert task.done(), "on_stop returned while the requeued owner was unwinding"
 
     async def test_on_stop_wins_over_a_late_requeue(self, pm, kernel_clock, sdk):
         sdk.up.add("a")
