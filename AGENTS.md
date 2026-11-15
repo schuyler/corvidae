@@ -44,6 +44,16 @@ the string it will print.
 
 **The two-layer rule does not license vagueness.** The opener is short because it is selected, not because the detail is thin. Everything a reviewer needs to check the work is still written down, in the detail block, and a body whose detail block is empty has failed this section rather than complied with it.
 
+# Workflow labels
+
+An issue's label says what stage it is in, so an agent looking for work and the owner looking for what waits on them can each find it with one label query instead of reading every thread. Five labels mark the stages, and they go on the issue, not the PR. An issue carries at most one of them. Whoever moves an issue to the next stage removes the old label and adds the new one in the same step, because a stale label sends the next reader to the wrong place.
+
+* **`ready`** -- the owner has accepted the requirements, in whatever form they are posted on the issue. The rest is up to the agent: the PRD comparison, the plan and the implementation. Only the owner's acceptance makes an issue `ready`, and the label is the signal that any agent may claim it: an agent does not claim an issue on its own initiative without it. Work the owner hands an agent directly needs no label first.
+* **`claimed`** -- an agent has posted the requirements and plan comment ("Process instructions") and is working on it. Add it with that comment and remove `ready`. The label is an index, not a lock: the claim belongs to the first agent to post requirements to the issue, so an agent that finds an earlier plan comment than its own withdraws its own.
+* **`needs-review`** -- the PR is open, the author has swept it ("The author's side"), and it is waiting for a blind review round. The author sets it on handing over, removing `claimed`, and again after pushing fixes for a re-review, removing `needs-revision`.
+* **`needs-revision`** -- a review round ended `NEEDS-CHANGES`. Either the author is fixing the findings, or "Rounds" has stopped the loop for the owner (a meta-review, or a third round ending `NEEDS-CHANGES`), and the author's latest PR comment says which. The author sets it when the verdict lands, removing `needs-review`.
+* **`merge-ready`** -- every required review has passed: the loop's end condition in "Rounds" holds, and the change is ready for merge pending owner acceptance. A change the loop exempts reaches it straight from `claimed`. The author sets it, removing whichever stage label the issue carries. The label says the change is admissible; it is not permission to merge ("Merging"). The issue leaves the workflow when the owner merges and it closes.
+
 # Review loops
 
 * **Every non-trivial change gets a review loop before it is merged.** The criterion is whether behaviour, or something a reader or another plugin acts on, could change, not the file type: a config key, a prompt, a documented contract, a docs page readers act on, a one-line code fix and a refactor all count. What can change neither does not (a typo, a broken link, a comment that was wrong about unchanged code), and the PR body says which case it is.
@@ -67,7 +77,7 @@ Findings are rated by consequence, not reachability (PRD principle 12).
 * **Sweep before you hand it over.** Apply the review's checks to the whole change yourself first. Review is for what you could not see, not a substitute for looking.
 * **Show your tests can fail.** The PR body gives, for each new behavioural test, a mutation of the change that makes it fail on the assertion carrying its claim.
 * **Drive the real path.** Acceptance tests run the hook order the agent runs, on data shaped the way production writes it. A test that does not says why it is equivalent.
-* **Run the full suite before answering a round**, docs-only changes included -- tests read docs too -- and give the count.
+* **Run the full suite before answering a round**, docs-only changes included -- tests read docs too -- and give the count. The exception is a change confined to files no test opens, which may rely on CI's run instead; find what tests open by grepping `tests/` and `packages/*/tests/` for each changed file's basename, since tests often join a path from parts.
 * **Fix the class, not the example.** Name the finding's class and fix every instance the change covers; the reviewer's instance is a lower bound.
 * **Triage honestly and disclose what you skip.** Fix the findings that land against the requirement. List the ones you skip in the PR body, file a follow-up issue for any that is not cosmetic, and name a skipped critical in the opener. Skip non-blocking findings unless the fix is a line or two: every addition is new surface for the next round.
 * **The PR body describes the design that ships**, not the draft and not one an earlier round rejected.
@@ -95,7 +105,7 @@ Findings are rated by consequence, not reachability (PRD principle 12).
 * If you are solving a GitHub issue, post the requirements, the PRD comparison above, and the implementation plan as a comment on the issue before implementing -- opened with the short summary the section above asks for, with the lists inside one `<details>` block.
 * Check @docs/ before your work is complete and make sure the documentation is updated.
 * If you are adding or changing a plugin, read `docs/plugin-checklist.md` first. It covers placement (a plugin, not the kernel), the package layout and CI wiring, and the traps that fail silently. `docs/plugin-guide.md` has the depth.
-* **The plan comment is the claim.** Before starting on an issue, read its comments and the open PRs that mention it; if someone has claimed it, stop and ask. Otherwise post the plan comment above before writing code -- that comment is what the next agent checks for.
+* **The plan comment is the claim.** Before starting on an issue, read its comments and the open PRs that mention it; if someone has claimed it, stop and ask. If it is not `ready` and the owner did not send you to it, it is not yours to start. Otherwise post the plan comment above before writing code -- that comment is what the next agent checks for -- and move the issue from `ready` to `claimed` ("Workflow labels").
 * A claim about code, config or runtime state names the command that produced it and the tree it ran against. A worktree, the live checkout and the installed package are three different answers to the same import.
 * A new test has to fail before it counts as a test: a test of new or fixed behaviour fails on the parent commit; a guard test, which pins behaviour the change must not break, fails under a mutation of the change. Run it, not only in your head.
 * Comment every block with its purpose, as the coding conventions say. `docs/plugin-checklist.md` asks for the shorter "why it is there"; that is a compression of this rule, not a different one, and this file wins.
