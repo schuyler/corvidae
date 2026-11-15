@@ -312,6 +312,10 @@ attribution snapshot for that call, into `MetricsPlugin`'s emitted tags,
 the `usage_log.trigger` column, and the `memory consolidated` completion
 log line, which carries `memory_ids`, `entries` (their count), `embedded`
 (how many were stored with a vector), the message range and `trigger`.
+`_consolidate_range` also opens a lease scope (#363): its catch-up views
+and every rubric call (after a fork record too) run under
+`upkeep:memory:consolidation`, while the consolidation forks run under
+the channel id. The key lands in `usage_log.lease_key`.
 
 ### Corrupt `exchange_log` rows
 

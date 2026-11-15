@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS usage_log (
     tool_count INTEGER,
     max_context_tokens INTEGER,
     prompt_ms REAL,
-    predicted_ms REAL
+    predicted_ms REAL,
+    lease_key TEXT
 )
 """
 # Columns added by #350, as (name, type) for the in-place upgrade sweep.
@@ -110,6 +111,7 @@ class MetricsPlugin(CorvidaePlugin):
             "stage": attribution.get("stage", ""),
             "channel": attribution.get("channel_id", ""),
             "trigger": attribution.get("trigger", ""),
+            "lease_key": attribution.get("lease_key", ""),
         }
         # Token metrics: emit only the fields the usage dict actually has.
         if usage:
@@ -186,6 +188,9 @@ class UsageLogPlugin(CorvidaePlugin):
             # context budget, and the backend's prefill/decode split.
             for column, column_type in USAGE_LOG_TIMING_COLUMNS:
                 await add_column_if_missing(db, "usage_log", column, column_type)
+            # #363: the queue the call leased (or would lease); NULL when
+            # unleased or written before the column existed.
+            await add_column_if_missing(db, "usage_log", "lease_key", "TEXT")
             await db.commit()
             self._table_ready = True
         return db
@@ -250,9 +255,9 @@ class UsageLogPlugin(CorvidaePlugin):
                 "completion_tokens, total_tokens, cached_tokens, cache_n, "
                 "prompt_n, latency_ms, error, started_at, ended_at, total_ms, "
                 "attempts, message_count, tool_count, max_context_tokens, "
-                "prompt_ms, predicted_ms) "
+                "prompt_ms, predicted_ms, lease_key) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     request_id,
@@ -280,6 +285,7 @@ class UsageLogPlugin(CorvidaePlugin):
                     self._max_context_tokens(attribution.get("channel_id")),
                     timings.get("prompt_ms"),
                     timings.get("predicted_ms"),
+                    attribution.get("lease_key"),
                 ),
             )
             await db.commit()

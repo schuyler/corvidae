@@ -515,8 +515,8 @@ hooks with the client's profile (a key under `llm.profiles`, such as `main`) and
 current attribution snapshot.
 
 **Attribution.** `attribution.py` holds a single ContextVar dict
-(`stage`, `channel_id`, `trace_id`, `annotations`, `agent_depth`, plus
-stage-specific extras such as `trigger` on consolidation calls). Callers set it at the
+(`stage`, `channel_id`, `trace_id`, `annotations`, `agent_depth`,
+`lease_key`, plus stage-specific extras such as `trigger` on consolidation calls). Callers set it at the
 top of a logical operation and reset in a `finally`: the Agent turn loop
 (`stage="turn"`), CompactionPlugin around its summary call
 (`stage="compaction"`, shadowing the turn), and the subagent work loop
@@ -528,6 +528,19 @@ time and TaskQueue workers are created once at startup, so `Task`
 captures `contextvars.copy_context()` at creation and the worker runs
 `task.work()` inside that context via
 `asyncio.create_task(task.work(), context=task.ctx)`.
+
+`lease_key` names the queue a call belongs to (#363). `lease_scope(key=None)`
+sets it: no key inherits the enclosing one, a key overrides and the parent's
+is restored on exit. Keys are the channel id (turn, forks, appraisal,
+critique, the consolidation fork at compaction, the `fork` tool),
+`subagent:<task_id>`, and `upkeep:<plugin>:<tag>` (catch-up consolidation is
+`upkeep:memory:consolidation`). Five sites open a scope: the channel turn in
+`_process_queue_item`, `Agent.fork`, the subagent `work()`, the `fork` tool's
+`work()` and `MemoryPlugin._consolidate_range`; everything else inherits.
+`LLMClient.chat` with no key runs unleased and logs a WARNING naming the
+stage once per stage per process, then DEBUG; embedding calls need no key
+and never warn. No lease is taken yet (#364 decides what scope exit means
+for one).
 
 **Nested agents.** `agent_depth` is the kernel's bound on recursion (#816).
 A main turn runs at depth 0; `next_agent_depth(tools.max_agent_depth)` in
@@ -546,7 +559,7 @@ ten children per level is still many tasks.
 
 **Sinks.** `metrics.py` provides `MetricsPlugin` (translates
 `on_llm_response` into `on_metrics` events: `llm.tokens.*`,
-`llm.latency_ms`, `llm.errors`), `UsageLogPlugin` (one `usage_log` row
+`llm.latency_ms`, `llm.errors`, each tagged with the call's `lease_key`, `""` when it had none), `UsageLogPlugin` (one `usage_log` row
 per call), and `MetricsJsonlPlugin` (JSONL event sink, config
 `daemon.metrics_jsonl`). `outcome_log.py` owns the `exchange_log` table:
 one row per exchange, written by `OutcomeLogPlugin`'s hookimpls at
@@ -609,7 +622,8 @@ CREATE TABLE usage_log (
     tool_count INTEGER,         -- tool schemas in the request (embeddings: 0)
     max_context_tokens INTEGER, -- the channel's budget in force when the row is written; NULL with no channel, no registry or an unknown channel
     prompt_ms REAL,             -- llama-server timings.prompt_ms: the final attempt's prefill time; NULL from other providers and on failure
-    predicted_ms REAL           -- llama-server timings.predicted_ms: the final attempt's decode time; NULL likewise
+    predicted_ms REAL,          -- llama-server timings.predicted_ms: the final attempt's decode time; NULL likewise
+    lease_key TEXT              -- the queue the call belongs to (#363): channel id, 'subagent:<task_id>' or 'upkeep:<plugin>:<tag>'; NULL when unleased and on older rows
 );
 
 CREATE TABLE exchange_log (

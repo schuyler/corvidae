@@ -94,7 +94,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import aiosqlite
 
-from corvidae.attribution import reset_attribution, set_attribution
+from corvidae.attribution import lease_scope, reset_attribution, set_attribution
 from corvidae.prompts import resolve_prompt
 from corvidae.context import (
     ContextWindow,
@@ -2536,6 +2536,10 @@ class MemoryPlugin(CorvidaePlugin):
         attribution_token = set_attribution(
             stage="consolidation", channel_id=channel_id, trigger=trigger
         )
+        # Catch-up consolidation is plugin-owned upkeep, one queue for its
+        # views and rubric calls; forks inside it re-key to the channel (#363).
+        lease = lease_scope("upkeep:memory:consolidation")
+        lease.__enter__()
         # The message-id range and what is already stored, for the failure log.
         range_desc = f"up to {range_end}"
         stored = "nothing was stored"
@@ -2628,6 +2632,7 @@ class MemoryPlugin(CorvidaePlugin):
                 channel_id, trigger, range_desc, stored, exc_info=True,
             )
         finally:
+            lease.__exit__(None, None, None)
             reset_attribution(attribution_token)
 
     async def _commit(
