@@ -260,7 +260,19 @@ class ContextPanelPlugin(CorvidaePlugin):
         ``_resolve_mid_conversation_system_role``).
         """
         agent = self.pm.get_plugin("agent") if self.pm is not None else None
-        return getattr(agent, "mid_conversation_system_role", "system")
+        role = getattr(agent, "mid_conversation_system_role", None)
+        if role is None:
+            # The agent's own default, used knowingly: with no agent (a panel on
+            # a hand-built plugin manager) there is no resolved key to read, and
+            # a rename would otherwise silently show a different role than the
+            # model receives (#695 review).
+            logger.warning(
+                "context panel: no agent.mid_conversation_system_role to read; "
+                "rendering mid-conversation system rows as 'system', which may "
+                "not be the role the agent uses",
+            )
+            return "system"
+        return role
 
     async def rendered(self, request: web.Request) -> web.Response:
         """A channel's window as the request body the agent would send (#695).

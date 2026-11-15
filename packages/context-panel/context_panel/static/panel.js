@@ -253,13 +253,21 @@
       state.rendered = true;
       renderedBtn.textContent = "rows";
       showAll.hidden = true;
-      entries.replaceChildren(
-        entry("cat-system-prompt", `request body (${body.total} messages)`,
-          JSON.stringify(body.messages, null, 2)));
+      // The live area is not part of build_prompt()'s output, and polling is
+      // paused while rendered, so a turn would look frozen rather than stale.
+      renderLive([]);
+      const bodyEntry = entry("cat-system-prompt",
+        `request body (${body.total} messages)`,
+        JSON.stringify(body.messages, null, 2));
+      // Open it: the whole point of the button is to see the body.
+      bodyEntry.open = true;
+      entries.replaceChildren(bodyEntry);
       setStatus(`build_prompt() output for ${state.channel}`);
     } catch (err) {
       console.warn("context panel: rendered fetch failed", err);
-      setStatus("connection lost; retrying");
+      // Nothing retries this one — the rows poll resumes instead — so the
+      // message says what to do rather than what is not happening.
+      setStatus("could not load the request body; press rendered to try again");
     }
   }
 

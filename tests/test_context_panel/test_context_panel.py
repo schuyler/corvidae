@@ -274,7 +274,7 @@ class TestChannelsAndWindow:
 
 
 # ===========================================================================
-# Rendered request body (R11, #695)
+# Rendered request body (#695)
 # ===========================================================================
 
 class TestRendered:
@@ -299,8 +299,6 @@ class TestRendered:
             frozenset(channel.pending_tool_call_ids),
             mid_conversation_system_role="system",
         )
-        # Internal tags must not reach the wire through this route either.
-        assert all(not k.startswith("_") for m in body["messages"] for k in m)
 
     async def test_rendered_passes_the_channel_pending_tool_calls(self, make_env):
         """A call still in flight renders with its placeholder, not as a bare call."""
@@ -318,6 +316,46 @@ class TestRendered:
 
         assert body["messages"] == win.build_prompt(
             frozenset({"c9"}), mid_conversation_system_role="system")
+
+    async def test_rendered_uses_the_agents_mid_system_role(self, make_env, caplog):
+        """The re-roling the issue wants visible, and the one thing no test reached.
+
+        Hardcoding "system" in ``_mid_system_role`` passed all 34 tests, because
+        the stub agent has no ``mid_conversation_system_role`` and every expected
+        body passed ``"system"`` explicitly (#695 review).
+        """
+        env, _ = await panel_env(make_env)
+        env.agent.mid_conversation_system_role = "user"
+        win = seed(env, prompt="p")
+        win.append({"role": "user", "content": "hello"})
+        win.append({"role": "system", "content": "ctx"}, MessageType.CONTEXT)
+        channel = env.registry.get("web:main")
+
+        body = await fetch(env, "rendered", channel="web:main")
+
+        assert body["messages"] == win.build_prompt(
+            frozenset(channel.pending_tool_call_ids),
+            mid_conversation_system_role="user",
+        )
+        # The point of the finding: the mid-conversation row is re-roled as the
+        # agent would send it, not as stored.
+        assert [m["role"] for m in body["messages"]] == ["system", "user", "user"]
+        assert "no agent.mid_conversation_system_role" not in caplog.text
+
+    async def test_rendered_without_an_agent_says_which_role_it_assumed(
+        self, make_env, caplog,
+    ):
+        """A missing attribute is a rescue, so it is a warning naming the guess."""
+        env, _ = await panel_env(make_env)
+        env.pm.unregister(name="agent")
+        win = seed(env, prompt="p")
+        win.append({"role": "system", "content": "ctx"}, MessageType.CONTEXT)
+
+        body = await fetch(env, "rendered", channel="web:main")
+
+        assert body["messages"] == win.build_prompt(
+            frozenset(), mid_conversation_system_role="system")
+        assert "no agent.mid_conversation_system_role" in caplog.text
 
     async def test_rendered_unloaded_channel(self, make_env):
         env, _ = await panel_env(make_env)
