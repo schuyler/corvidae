@@ -46,11 +46,13 @@ import asyncio
 import copy
 import logging
 import math
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import aiohttp
 
+from corvidae import lease
 from corvidae.attribution import get_attribution
 from corvidae.envref import EnvRefError, expand_env_refs
 from corvidae.hooks import CorvidaePlugin, hookimpl
@@ -532,6 +534,11 @@ class LLMPlugin(CorvidaePlugin):
         self._config: LLMConfig | None = None
         # stage -> kind; collected from register_llm_stages in on_start
         self._stages: dict[str, str] = {}
+        # The lease manager; None until on_start finds a chat-used provider
+        # that declares heads (#364).
+        self.leases: lease.LeaseManager | None = None
+        # Metric emissions in flight, kept referenced until they finish.
+        self._emitting: set[asyncio.Task] = set()
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -548,6 +555,9 @@ class LLMPlugin(CorvidaePlugin):
             client = self._create_client(cfg, profile=profile)
             await client.start()
             self._clients[profile] = client
+
+        # Leases: a manager only when a chat-used provider declares heads.
+        self._start_leases()
 
         # R8: one line per provider; heads on an embedding-only provider is inert.
         for pname in sorted(self._config.providers):
@@ -593,8 +603,61 @@ class LLMPlugin(CorvidaePlugin):
             ),
         )
 
+    def _start_leases(self) -> None:
+        """Build the lease manager, and hand each chat client of a
+        bounded provider its table. Does nothing with no bounded chat provider."""
+        assert self._config is not None
+        heads = {
+            pname: block["heads"]
+            for pname, block in self._config.providers.items()
+            if block.get("heads") is not None
+            and any(
+                cfg["provider"] == pname and cfg["kind"] == "chat"
+                for cfg in self._config.profiles.values()
+            )
+        }
+        if not heads:
+            return
+        # The kernel clock's monotonic time when one is registered.
+        pm = getattr(self, "pm", None)
+        clock = pm.get_plugin("clock") if pm is not None else None
+        manager = lease.LeaseManager(
+            heads,
+            monotonic=clock.monotonic if clock is not None else time.monotonic,
+            emit=self._emit_metric if pm is not None else None,
+        )
+        for profile, cfg in self._config.profiles.items():
+            if cfg["kind"] == "chat" and cfg["provider"] in heads:
+                self._clients[profile].leases = manager.provider(cfg["provider"])
+        self.leases = manager
+
+    def _emit_metric(self, name: str, value: float, tags: dict[str, str]) -> None:
+        """Schedule one lease event on on_metrics (called from sync code)."""
+        task = asyncio.get_running_loop().create_task(
+            self._send_metric(name, value, tags)
+        )
+        self._emitting.add(task)
+        task.add_done_callback(self._emitting.discard)
+
+    async def _send_metric(self, name: str, value: float, tags: dict[str, str]) -> None:
+        """Fire on_metrics, fail-soft: a consumer's failure is logged."""
+        try:
+            await self.pm.ahook.on_metrics(name=name, value=value, tags=tags)
+        except Exception:
+            logger.warning(
+                "on_metrics emission of %s for key %s on provider %s failed",
+                name, tags.get("lease_key"), tags.get("provider"), exc_info=True,
+            )
+
     @hookimpl
     async def on_stop(self) -> None:
+        # Fail waiting calls first so none hangs on a client about to close;
+        # close() is safe to call twice.
+        if self.leases is not None:
+            self.leases.close()
+        # Let the shutdown lease.release events reach on_metrics before stopping.
+        if self._emitting:
+            await asyncio.gather(*self._emitting)
         for client in self._clients.values():
             await client.stop()
 
