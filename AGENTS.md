@@ -77,7 +77,7 @@ Findings are rated by consequence, not reachability (PRD principle 12).
 * **Sweep before you hand it over.** Apply the review's checks to the whole change yourself first. Review is for what you could not see, not a substitute for looking.
 * **Show your tests can fail.** The PR body gives, for each new behavioural test, a mutation of the change that makes it fail on the assertion carrying its claim.
 * **Drive the real path.** Acceptance tests run the hook order the agent runs, on data shaped the way production writes it. A test that does not says why it is equivalent.
-* **Run the full suite before answering a round**, docs-only changes included -- tests read docs too -- and give the count.
+* **Run the full suite before answering a round**, docs-only changes included -- tests read docs too -- and give the count. The exception is a change confined to files no test opens, which may rely on CI's run instead; find what tests open by grepping `tests/` and `packages/*/tests/` for each changed file's basename, since tests often join a path from parts.
 * **Fix the class, not the example.** Name the finding's class and fix every instance the change covers; the reviewer's instance is a lower bound.
 * **Triage honestly and disclose what you skip.** Fix the findings that land against the requirement. List the ones you skip in the PR body, file a follow-up issue for any that is not cosmetic, and name a skipped critical in the opener. Skip non-blocking findings unless the fix is a line or two: every addition is new surface for the next round.
 * **The PR body describes the design that ships**, not the draft and not one an earlier round rejected.
