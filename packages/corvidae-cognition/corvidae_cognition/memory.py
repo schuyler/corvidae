@@ -566,7 +566,49 @@ def _coerce_importance(value: object) -> float | None:
     return number if math.isfinite(number) and 0.0 <= number <= 1.0 else None
 
 
-def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
+#: The accepted `importance` range, named in the warning so an operator can see
+#: whether the reply was on another scale (#929).
+_IMPORTANCE_RANGE = "[0, 1]"
+
+
+def _importance_or_warn(
+    data: dict, channel_id: str | None, msg_id_range: tuple[int, int] | None,
+) -> float | None:
+    """The reply's ``importance``, warning once when it is present but unusable.
+
+    An absent key is the normal case for a prompt that does not ask for one, so
+    it is silent. A present-but-unusable value means the reply rated on some
+    other scale (``7`` out of 10, ``"high"``), and the rubric will rate the range
+    instead: without this line an operator sees an unexplained extra model call
+    (#929).
+    """
+    if "importance" not in data:
+        return None
+    value = data.get("importance")
+    importance = _coerce_importance(value)
+    if importance is not None:
+        return importance
+    shown = repr(value)
+    if len(shown) > 80:
+        shown = shown[:77] + "..."
+    span = f"{msg_id_range[0]}-{msg_id_range[1]}" if msg_id_range else "unknown"
+    logger.warning(
+        "consolidation reply's importance is unusable on channel %s, message ids "
+        "%s: %s is not a number in %s; the rubric model will rate the range "
+        "instead",
+        channel_id or "unknown", span, shown, _IMPORTANCE_RANGE,
+        extra={"channel_id": channel_id},
+    )
+    return None
+
+
+def _consolidation_from_text(
+    text: str,
+    stamp: RecordStamp,
+    *,
+    channel_id: str | None = None,
+    msg_id_range: tuple[int, int] | None = None,
+) -> Consolidation:
     """Parse a consolidation reply into a :class:`Consolidation`.
 
     ``entries`` items with a non-blank string ``narrative`` become entries;
@@ -617,7 +659,7 @@ def _consolidation_from_text(text: str, stamp: RecordStamp) -> Consolidation:
     return Consolidation(
         entries=tuple(entries),
         participants=participants,
-        importance=_coerce_importance(data.get("importance")),
+        importance=_importance_or_warn(data, channel_id, msg_id_range),
         stamp=stamp,
     )
 
@@ -2102,7 +2144,8 @@ class MemoryPlugin(CorvidaePlugin):
                 )
                 return None
             record = await self._fork_record(
-                agent, channel, contained, cut, snapshot=snapshot
+                agent, channel, contained, cut, snapshot=snapshot,
+                msg_id_range=(rows[0][0], range_end),
             )
             return watermark, record
         except asyncio.CancelledError:
@@ -2174,6 +2217,7 @@ class MemoryPlugin(CorvidaePlugin):
     async def _fork_record(
         self, agent, channel, contained: tuple[list[dict], set[int]], cut: int | None,
         snapshot: WindowSnapshot | None = None,
+        msg_id_range: tuple[int, int] | None = None,
     ) -> Consolidation:
         """The memory record from a fork of ``channel``'s window.
 
@@ -2199,6 +2243,8 @@ class MemoryPlugin(CorvidaePlugin):
         return _consolidation_from_text(
             result.text,
             RecordStamp(self._consolidation_fork_prompt, "fork", result.model),
+            channel_id=channel.id,
+            msg_id_range=msg_id_range,
         )
 
     @hookimpl
@@ -2721,10 +2767,18 @@ class MemoryPlugin(CorvidaePlugin):
         channel = registry.get(channel_id) if registry is not None else None
         if channel is None:
             channel = _StubChannel(channel_id)
-        importance = await self.importance_prior.score(
-            dialog, msg_id_range=msg_id_range, channel=channel,
-            hint=record.importance,
-        )
+        # The rubric call is its own kind of model call: without a mode its
+        # usage_log row reads as a legacy consolidation row with NULL mode
+        # (#929). Scoped to the score call, which only reaches the rubric model
+        # when the reply gave no usable importance.
+        rubric_token = set_attribution(mode="rubric")
+        try:
+            importance = await self.importance_prior.score(
+                dialog, msg_id_range=msg_id_range, channel=channel,
+                hint=record.importance,
+            )
+        finally:
+            reset_attribution(rubric_token)
 
         # Valence: mean stage-2 valence over the range (NULL when none) —
         # the §4.9-classifier deletion made real: affect is the appraisal
@@ -3176,7 +3230,10 @@ class MemoryPlugin(CorvidaePlugin):
                     return "skip", None
                 # No await between the containment check and the render.
                 try:
-                    return "record", await self._fork_record(agent, channel, contained, cut)
+                    return "record", await self._fork_record(
+                        agent, channel, contained, cut,
+                        msg_id_range=(rows[0][0], range_end),
+                    )
                 except Exception as exc:
                     # A turn failure that starts the backoff (#620) is retried
                     # by idle or compaction, or by the turn trigger only once
@@ -3256,7 +3313,11 @@ class MemoryPlugin(CorvidaePlugin):
                     client, channel_id, segment.messages,
                     extra_body=CONSOLIDATION_EXTRA_BODY,
                 )
-                return _consolidation_from_text(result.text, stamp)
+                return _consolidation_from_text(
+                    result.text, stamp,
+                    channel_id=channel_id,
+                    msg_id_range=(segment.rows[0][0], segment.end_id),
+                )
             except (ValueError, ForkRefused) as exc:
                 logger.warning(
                     "consolidation reply unusable for channel %s, message ids %s "

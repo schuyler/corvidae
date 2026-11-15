@@ -522,8 +522,11 @@ top of a logical operation and reset in a `finally`: the Agent turn loop
 (`stage="compaction"`, shadowing the turn), and the subagent work loop
 (`stage="subagent"`). Stages that can run as forks (compaction,
 consolidation, appraisal, critique) add `mode="fork"` (set by
-`Agent.fork`) or `mode="standalone"` around their own LLM call; it lands
-in `usage_log.mode`. Contextvars snapshot at `asyncio.create_task`
+`Agent.fork`) or `mode="standalone"` around their own LLM call, and the
+importance prior's rubric call — which `consolidation` makes when a reply gave
+no usable `importance` — adds `mode="rubric"`, so its row is not read as a
+legacy consolidation row with a NULL mode (#929); the mode lands in
+`usage_log.mode`. Contextvars snapshot at `asyncio.create_task`
 time and TaskQueue workers are created once at startup, so `Task`
 captures `contextvars.copy_context()` at creation and the worker runs
 `task.work()` inside that context via
