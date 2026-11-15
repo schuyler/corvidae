@@ -34,22 +34,20 @@ from llm_response_fixtures import (
 
 BASE_CONFIG = {
     "llm": {
-        "main": {
-            "base_url": "http://localhost:8080",
-            "model": "test-model",
-        },
+        "providers": {"main": {"base_url": "http://localhost:8080"}},
+        "profiles": {"main": {"model": "test-model"}},
     },
 }
 
 BACKGROUND_CONFIG = {
     "llm": {
-        "main": {
-            "base_url": "http://localhost:8080",
-            "model": "test-model",
+        "providers": {
+            "main": {"base_url": "http://localhost:8080"},
+            "background": {"base_url": "http://localhost:8081"},
         },
-        "background": {
-            "base_url": "http://localhost:8081",
-            "model": "bg-model",
+        "profiles": {
+            "main": {"model": "test-model"},
+            "background": {"provider": "background", "model": "bg-model"},
         },
     },
 }

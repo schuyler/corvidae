@@ -14,9 +14,10 @@ Scopes are ids, never names (PRD principle 10): ``zulip:<stream_id>`` for a
 channel, ``zulip:dm:<user id>`` for a 1:1 DM, ``zulip:dm:<id>,<id>`` (sorted,
 the bot excluded) for a group DM. A Zulip *topic* is a name users can rename,
 so it is deliberately not part of any scope: it is shown to the model as part
-of the channel's label (``#general > plans``) and it is where the reply goes
-(the topic of the newest admitted message, kept in memory only; with none
-remembered, ``zulip.default_topic``).
+of the channel's label (``#general > plans``) and it is where the reply goes:
+the topic of the message the turn answers, recorded per trace id, falling back
+to the newest admitted message's topic and then to ``zulip.default_topic``.
+Both maps are in memory only (#643).
 
 Needs Zulip 9.0 (feature level 248) or newer, the first server that accepts the
 modern ``channel`` and ``direct`` message types; an older server is refused at
@@ -36,12 +37,14 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
 import aiohttp
 
+from corvidae.attribution import get_attribution
 from corvidae.channel import (
     Channel,
     ChannelRegistry,
@@ -84,6 +87,22 @@ _BACKOFF_CAP = 300
 # Replies held while the server is unreachable, oldest first, bounded (PRD 3.2
 # item 8). Past the bound the oldest is dropped and the drop is logged.
 _OUTBOUND_QUEUE_MAX = 50
+
+# Bound on the trace -> topic map. Past it the oldest entry goes, which costs a
+# slowly-answered message its preferred topic, never a delivery (#643).
+_TOPIC_MAP_MAX = 512
+
+
+def _current_trace_id() -> Optional[str]:
+    """The trace of the turn running now, or None outside one.
+
+    ``OutboundProgress`` carries no trace id, so a progress line's topic comes
+    from the attribution the kernel sets around the turn. Anything unexpected in
+    that dict is read as "no trace": a progress line is not worth raising over.
+    """
+    attribution = get_attribution()
+    trace_id = attribution.get("trace_id") if isinstance(attribution, dict) else None
+    return trace_id if isinstance(trace_id, str) and trace_id else None
 
 # HTTP budgets. Ordinary calls give up after this long; the long poll uses the
 # server's own recommended timeout, with this as the fallback.
@@ -225,9 +244,17 @@ class ZulipPlugin(TransportPlugin):
         self._session: Optional[aiohttp.ClientSession] = None
         self._connect_task: Optional[asyncio.Task] = None
 
-        # The topic of the newest admitted message per channel id: where the
-        # next reply goes. Memory only; a restart forgets it (default_topic).
+        # The topic of the newest admitted message per channel id: the
+        # fallback when a reply's trace says nothing. Memory only; a restart
+        # forgets it (default_topic).
         self._topics: dict[str, str] = {}
+        # trace_id -> the topic its message was written in, insertion-ordered
+        # and bounded. This is what routes a reply (#643): a channel with two
+        # active topics owes each message its own topic, and "the newest
+        # message's topic" answers the wrong one whenever they interleave.
+        # (channel scope, trace id) -> topic: a trace alone would let a send
+        # on another stream reuse this stream's topic name (#643 review).
+        self._trace_topics: dict[tuple[str, str], str] = {}
 
         # Replies held while the server is unreachable (PRD 3.2 item 8).
         self._outbound: collections.deque[_Outbound] = collections.deque()
@@ -238,9 +265,19 @@ class ZulipPlugin(TransportPlugin):
         self._dropped = 0
         self._message_counter = 0
 
-        # Liveness bookkeeping, per channel id (transport:scope).
-        self._outstanding: dict[str, int] = {}
-        self._typing_tasks: dict[str, asyncio.Task] = {}
+        # Liveness bookkeeping, keyed by _typing_key: channel id and topic,
+        # because a Zulip typing notice is per (stream, topic) and two topics
+        # owing a reply show two notices.
+        self._outstanding: dict[tuple[str, Optional[str]], int] = {}
+        # One loop per key, and it is the only thing that ever posts a typing
+        # notice (#643 rounds 5-6, one writer): the message path sets what is
+        # owed and wakes the loop, and never sends start or stop itself.
+        self._typing_tasks: dict[tuple[str, Optional[str]], asyncio.Task] = {}
+        # Whether the topic currently shows a notice. Written only by the loop,
+        # after its own send has finished, so it always describes the server.
+        self._typing_showing: dict[tuple[str, Optional[str]], bool] = {}
+        # The loop's wake-up, set by anything that changes what is owed.
+        self._typing_wake: dict[tuple[str, Optional[str]], asyncio.Event] = {}
         # Trace ids admitted while their on_message call is still running;
         # _handle_message's finally consumes them.
         self._admitted: set[str] = set()
@@ -870,9 +907,12 @@ class ZulipPlugin(TransportPlugin):
         # log the attempt. The trace id is minted here (#95).
         trace_id = mint_trace_id()
         took_slot = allowed
+        if took_slot and topic is not None:
+            # Where this message's reply belongs, whatever arrives next (#643).
+            self._remember_topic(channel.scope, trace_id, topic)
         try:
             if took_slot:
-                await self._begin_typing(channel)
+                await self._begin_typing(channel, topic)
             channel.addressed = addressed
             await self.pm.ahook.on_message(
                 channel=channel,
@@ -885,8 +925,11 @@ class ZulipPlugin(TransportPlugin):
             # by then (gate veto, agent not ready, an exception, cancellation)
             # gets no reply, so give its typing slot back and stop the notice.
             if took_slot and trace_id not in self._admitted:
-                if self._decrement_outstanding(channel):
-                    await self._send_typing(channel, "stop")
+                # No turn will answer it: give the slot back and let the
+                # topic's loop notice and send the stop. The trace's topic
+                # entry stays: `_remember_topic`'s bound evicts it, and a turn
+                # that is admitted on a retry still needs it.
+                self._decrement_outstanding(channel, topic)
             self._admitted.discard(trace_id)
 
     def _transient_channel(self, scope: str) -> Channel:
@@ -977,59 +1020,150 @@ class ZulipPlugin(TransportPlugin):
     # Liveness: typing indicator
     # -----------------------------------------------------------------
 
-    async def _begin_typing(self, channel: Channel) -> None:
-        """Count this message as outstanding; on the first one, send typing
-        immediately and start the refresh loop."""
-        count = self._outstanding.get(channel.id, 0) + 1
-        self._outstanding[channel.id] = count
-        if count == 1:
-            await self._send_typing(channel, "start")
-            # A loop from an earlier turn may still be asleep; it will see the
-            # count back above zero and carry on, so a second one would double
-            # the refreshes and leave one untracked by on_stop.
-            existing = self._typing_tasks.get(channel.id)
-            if existing is None or existing.done():
-                self._typing_tasks[channel.id] = asyncio.create_task(
-                    self._typing_refresh_loop(channel)
-                )
+    @staticmethod
+    def _typing_key(channel: Channel, topic: Optional[str]) -> tuple[str, Optional[str]]:
+        """What a typing notice and its outstanding count are filed under.
 
-    def _decrement_outstanding(self, channel: Channel) -> bool:
-        """Give back one slot for a message that was never admitted. True when
-        that left nothing owed (a final releases every slot instead)."""
-        count = self._outstanding.get(channel.id, 0)
-        if count > 0:
-            self._outstanding[channel.id] = count - 1
-            return count - 1 == 0
-        return False
+        The topic is part of the key because Zulip's notice is per
+        (stream, topic): one stream with two topics owing replies shows typing
+        twice, and each notice stops where it started (#643).
+        """
+        return (channel.id, topic)
 
-    def _release_all(self, channel: Channel) -> bool:
+    def _typing_wakeup(self, key: tuple[str, Optional[str]]) -> asyncio.Event:
+        """The wake-up for ``key``, created with the topic's first notice."""
+        wake = self._typing_wake.get(key)
+        if wake is None:
+            wake = self._typing_wake[key] = asyncio.Event()
+        return wake
+
+    async def _begin_typing(self, channel: Channel, topic: Optional[str]) -> None:
+        """Count one more reply owed in this topic, and wake its loop.
+
+        Sends nothing: the loop is the only writer of typing state, so no
+        window exists where a start and a stop can cross (#643 rounds 5-6).
+        """
+        key = self._typing_key(channel, topic)
+        self._outstanding[key] = self._outstanding.get(key, 0) + 1
+        self._typing_wakeup(key).set()
+        existing = self._typing_tasks.get(key)
+        if existing is None or existing.done():
+            self._typing_tasks[key] = asyncio.create_task(
+                self._typing_refresh_loop(channel, topic)
+            )
+
+    def _decrement_outstanding(self, channel: Channel, topic: Optional[str]) -> None:
+        """Give back one slot for a message that was never admitted.
+
+        Returns nothing: whether that left the topic owing nothing is the
+        loop's to notice, on the wake-up set here.
+        """
+        key = self._typing_key(channel, topic)
+        count = self._outstanding.get(key, 0)
+        if count > 1:
+            self._outstanding[key] = count - 1
+        elif count == 1:
+            # Delete rather than leave a zero behind: the dict is keyed by
+            # (channel, topic), so a channel with many topics would grow it
+            # forever (#643 review).
+            del self._outstanding[key]
+        else:
+            return
+        wake = self._typing_wake.get(key)
+        if wake is not None:
+            wake.set()
+
+    def _release_all(self, channel: Channel) -> None:
         """Close out every outstanding slot on a final, sent or unsent: one final
-        answers a coalesced burst. True when a slot was held, i.e. a typing
-        notice is showing and needs a stop. Synchronous on purpose: callers run
-        it before their first await."""
-        held = self._outstanding.get(channel.id, 0) > 0
-        if held:
-            self._outstanding[channel.id] = 0
-        return held
+        answers a coalesced burst.
 
-    async def _typing_refresh_loop(self, channel: Channel) -> None:
-        """Re-send typing every TYPING_REFRESH_SECONDS while a reply is owed;
-        stop once nothing is owed or a send fails."""
+        Synchronous on purpose, and it posts nothing: the loops wake and send
+        their own stops, each to the topic its start went to.
+        """
+        for key in [k for k in self._outstanding if k[0] == channel.id]:
+            del self._outstanding[key]
+            wake = self._typing_wake.get(key)
+            if wake is not None:
+                wake.set()
+
+    async def _typing_refresh_loop(self, channel: Channel, topic: Optional[str]) -> None:
+        """Hold this topic's typing notice in line with what is owed.
+
+        The one writer: every pass re-derives owed-and-showing from state and
+        acts on it, and every await returns to the top of the loop rather than
+        deciding anything itself. That is what removes the races the re-checks
+        used to patch (#643 rounds 5 and 6): a message arriving inside a start's
+        or a stop's round trip simply changes the state the next pass reads.
+        """
+        key = self._typing_key(channel, topic)
+        wake = self._typing_wakeup(key)
+        # When the notice showing on the server next needs re-sending.
+        next_refresh = 0.0
         try:
-            while self._outstanding.get(channel.id, 0) > 0:
-                await asyncio.sleep(TYPING_REFRESH_SECONDS)
-                if self._outstanding.get(channel.id, 0) <= 0:
+            while True:
+                # Cleared before the reads, never after them: a setter writes
+                # its state and then sets this event with no await between, so
+                # a set that happened before this pass is either seen by the
+                # reads below or is still set when the wait starts. Clearing
+                # after the reads instead would drop a wake that landed in that
+                # gap, and the stop it announced would wait out the refresh
+                # (#888 round 7 nit).
+                wake.clear()
+                owed = self._outstanding.get(key, 0) > 0
+                showing = self._typing_showing.get(key, False)
+                if owed and not showing:
+                    if not await self._send_typing(channel, "start", topic):
+                        return
+                    self._typing_showing[key] = True
+                    next_refresh = time.monotonic() + TYPING_REFRESH_SECONDS
+                    # Look again: the count may have moved during the send.
+                    continue
+                if not owed and showing:
+                    if not await self._send_typing(channel, "stop", topic):
+                        self._typing_showing[key] = False
+                        return
+                    self._typing_showing[key] = False
+                    # A message may have arrived inside the stop's round trip;
+                    # the next pass sees it owed and starts again.
+                    continue
+                if not owed:
+                    # Nothing owed and nothing showing, decided with no await
+                    # since the reads above: a _begin_typing either ran before
+                    # them (and is seen) or runs after the task is forgotten
+                    # below (and starts a new loop). Never neither.
                     return
-                if not await self._send_typing(channel, "start"):
+                # Still owed and still showing: refresh when the deadline
+                # falls due, or re-derive early if something changes. The
+                # deadline is absolute, so a spurious wake (a second message
+                # while one reply is already owed) cannot push it out: a busy
+                # topic would otherwise never refresh and the notice would
+                # expire under a reply that is owed (#888 round 7).
+                due = next_refresh - time.monotonic()
+                if due > 0:
+                    try:
+                        await asyncio.wait_for(wake.wait(), timeout=due)
+                    except TimeoutError:
+                        pass
+                    continue
+                if not await self._send_typing(channel, "start", topic):
                     return
+                next_refresh = time.monotonic() + TYPING_REFRESH_SECONDS
         finally:
             # Forget this loop only if it is still the tracked one, never a
-            # successor registered under the same channel id.
-            if self._typing_tasks.get(channel.id) is asyncio.current_task():
-                del self._typing_tasks[channel.id]
+            # successor registered under the same channel id and topic.
+            if self._typing_tasks.get(key) is asyncio.current_task():
+                del self._typing_tasks[key]
+                self._typing_showing.pop(key, None)
+                self._typing_wake.pop(key, None)
 
-    def _typing_form(self, channel: Channel, op: str) -> Optional[dict[str, str]]:
-        """The /typing form for a channel, or None when its scope is unusable."""
+    def _typing_form(
+        self, channel: Channel, op: str, topic: Optional[str] = None
+    ) -> Optional[dict[str, str]]:
+        """The /typing form for a channel, or None when its scope is unusable.
+
+        ``topic`` is the one the notice belongs to (the message being answered);
+        without it the newest remembered topic stands in.
+        """
         if channel.scope.startswith("dm:"):
             ids = [int(i) for i in channel.scope[3:].split(",")]
             return {"type": "direct", "op": op, "to": json.dumps(ids)}
@@ -1038,14 +1172,16 @@ class ZulipPlugin(TransportPlugin):
                 "type": "channel",
                 "op": op,
                 "stream_id": channel.scope,
-                "topic": self._topics.get(channel.id, self._default_topic),
+                "topic": self._topic_or_fallback(channel, topic),
             }
         return None
 
-    async def _send_typing(self, channel: Channel, op: str) -> bool:
+    async def _send_typing(
+        self, channel: Channel, op: str, topic: Optional[str] = None
+    ) -> bool:
         """Send one typing notice. A failure is logged and never blocks the
         reply; returns whether it succeeded."""
-        form = self._typing_form(channel, op)
+        form = self._typing_form(channel, op, topic)
         if form is None:
             logger.debug("zulip: no typing target for %s", channel.id)
             return False
@@ -1070,22 +1206,47 @@ class ZulipPlugin(TransportPlugin):
     # Outbound
     # -----------------------------------------------------------------
 
-    def _destination(self, channel: Channel) -> Optional[dict[str, str]]:
+    def _topic_or_fallback(self, channel: Channel, topic: Optional[str]) -> str:
+        """The topic a name-less send falls back to: newest remembered, else
+        ``default_topic``. An empty topic is a real topic and round-trips."""
+        if topic is not None:
+            return topic
+        remembered = self._topics.get(channel.id)
+        return self._default_topic if remembered is None else remembered
+
+    def _remember_topic(self, scope: str, trace_id: str, topic: str) -> None:
+        """Record which topic a trace's message came from (#643), bounded.
+
+        Insertion-ordered like the Discord trigger map: past the bound the
+        oldest entry goes, which only costs a reply its preferred topic, never
+        a delivery.
+        """
+        self._trace_topics[(scope, trace_id)] = topic
+        while len(self._trace_topics) > _TOPIC_MAP_MAX:
+            del self._trace_topics[next(iter(self._trace_topics))]
+
+    def _destination(
+        self, channel: Channel, trace_id: Optional[str] = None
+    ) -> Optional[dict[str, str]]:
         """The ``/messages`` fields that address a channel, or None.
 
-        A channel goes to the topic of the newest admitted message, else
-        ``default_topic``; a DM to its user ids. An empty topic is a real topic
-        and is sent back verbatim.
+        A channel goes to the topic of the message this reply answers — the one
+        recorded for ``trace_id`` — and only falls back to the newest admitted
+        message's topic (then ``default_topic``) when the trace says nothing: a
+        proactive send, a restart, or a turn whose trace was evicted. A DM goes
+        to its user ids.
         """
         if channel.scope.startswith("dm:"):
             ids = [int(i) for i in channel.scope[3:].split(",")]
             return {"type": "direct", "to": json.dumps(ids)}
         if channel.scope.isdigit():
-            topic = self._topics.get(channel.id)
+            recorded = (
+                self._trace_topics.get((channel.scope, trace_id)) if trace_id else None
+            )
             return {
                 "type": "channel",
                 "to": channel.scope,
-                "topic": self._default_topic if topic is None else topic,
+                "topic": self._topic_or_fallback(channel, recorded),
             }
         return None
 
@@ -1104,14 +1265,16 @@ class ZulipPlugin(TransportPlugin):
         # split_message refuses anything under six bytes.
         return max(6, limit)
 
-    async def _deliver(self, channel: Channel, text: str) -> None:
+    async def _deliver(
+        self, channel: Channel, text: str, trace_id: Optional[str] = None
+    ) -> None:
         """Split text to the chunk limit and post each non-blank chunk in order.
 
         Mentions are defused first. A chunk the server refuses outright drops the
         rest of that reply, so a channel the bot cannot post in logs once, not
-        once per chunk.
+        once per chunk. ``trace_id`` decides the topic (#643).
         """
-        destination = self._destination(channel)
+        destination = self._destination(channel, trace_id)
         if destination is None:
             logger.warning(
                 "zulip: %s is not a Zulip channel or DM scope; dropping the reply "
@@ -1240,17 +1403,33 @@ class ZulipPlugin(TransportPlugin):
                 extra={"channel": channel.id, "trace_id": trace_id},
             )
             return
-        if unsent and self._release_all(channel):
-            await self._send_typing(channel, "stop")
+        if unsent:
+            # No topic is forgotten here, unsent or not: a generation that
+            # failed leaves the final unsent and the fallback error is
+            # delivered after this hook, on the same trace id, so forgetting
+            # sent that error - and the retry behind it - to the newest topic.
+            # The 512-entry bound evicts a finished turn instead, which costs
+            # nothing but a fallback (#643 review).
+            self._release_all(channel)
 
     async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
-        """Deliver a final reply and close out every outstanding slot: one reply
-        answers a coalesced burst."""
-        await self._deliver(channel, event.text)
-        if self._release_all(channel):
-            await self._send_typing(channel, "stop")
+        """Deliver a final reply in the topic of the message it answers, then
+        close out every outstanding slot: one reply answers a coalesced burst."""
+        await self._deliver(channel, event.text, event.trace_id)
+        # The mapping stays (nothing forgets it; the 512-entry bound in
+        # `_remember_topic` evicts it): a turn whose reply failed to reach the
+        # model is re-queued with the same trace id (#643 review), and both the
+        # fallback error and the retry must answer in the topic the message
+        # came from.
+        self._release_all(channel)
 
     async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Deliver intermediate assistant text without closing out the
-        outstanding slots (the final reply still owes them)."""
-        await self._deliver(channel, event.text)
+        outstanding slots (the final reply still owes them).
+
+        ``OutboundProgress`` carries no trace id, so the turn's is read from the
+        attribution the kernel sets around it — the same source the Discord
+        reaction tools use. Without it the text still goes out, to the newest
+        topic, which is what every reply used to do.
+        """
+        await self._deliver(channel, event.text, _current_trace_id())

@@ -317,15 +317,27 @@ class RecallPlugin(CorvidaePlugin):
 - `on_admitted`, if given, is a sync callable. The funnel calls it with the
   `Admission` (`admitted` and `duplicate` lists) after each admission attempt
   that completes. A raise is logged and does not stop the drain.
+- `keys=`, if given, is one stable identity per entry (#725), the same
+  argument `admit()` takes. With keys, an entry is a duplicate when its key
+  already appears in this source's CONTEXT rows, so a page that re-renders
+  with a new age or score is not admitted twice. The match is containment, so
+  render the key into the line you admit (memory renders its record id;
+  a folder source can carry `<!--notes/page.md#intro-->`). A key list that is
+  not one per entry is rejected with a warning naming the source, both
+  lengths and the remedy, and the entries are admitted unkeyed: a promise has
+  no caller to raise at, and a result the turn is waiting for should not be
+  dropped over its keys.
 - A promise that is done when the turn starts is admitted that turn. One
   still pending is admitted at the channel's next turn after it resolves,
   whatever that turn's origin. Nothing wakes the channel for it.
 - `funnel.ingest_ttl`, when set, drops a queued stub-less payload (`ingest`) or a pending promise
   older than it; an unresolved promise is cancelled, so your work should
   tolerate cancellation. Shutdown cancels pending promises.
-- A promise that finishes during a turn, after the funnel's sweep, is lost
-  if you submit again in that same turn. The funnel does not admit such a
-  result on re-submit yet.
+- A promise submitted already done is admitted in that same turn, before the
+  model call, rather than waiting for the next sweep (#726). A promise that
+  finishes during a turn, after the funnel's sweep, is carried into that
+  turn's drain even if you submit again in the same collect: the finished
+  predecessor's result is admitted, not cancelled and replaced.
 
 ### Writing a recall source
 
@@ -395,15 +407,20 @@ contract:
   the whole budget is dropped with a warning, and `funnel.ingest_ttl` ages out
   a result nobody collected. Whether a hit is relevant enough to show is not
   decided here (#674).
-- **Render stably.** The funnel dedupes on a whole line for now (#725), so a
-  line that carries something that changes (an age, a rank) re-admits the same
-  hit every turn.
+- **Render stably.** `RecallSourceMixin` does not pass dedupe keys yet, so a
+  mixin source is deduped by whole-line containment, and a line that carries
+  something that changes (an age, a rank) re-admits the same hit every turn.
+  The funnel takes keys from a source that submits its own promise (#725), and
+  a keyed entry is deduped on the key instead.
 - **Without the funnel** nothing calls the hook and the source does nothing.
   The mixin lists `funnel` in `optional_depends_on`, so that is logged at DEBUG.
-- **One timing limit** (#726). A result is admitted at the turn after the one
-  that started its search, never the same turn. The mixin never submits while its
-  own search is pending, so the funnel's lost-on-resubmit case needs a search that
-  finishes between the funnel's sweep and its collect in a single turn.
+- **One timing limit** (#726, #624). A result is admitted at the turn after the
+  one that started its search, never the same turn: `RecallSourceMixin` always
+  submits an `asyncio.ensure_future`, which is not done at submit time, so the
+  mixin pays that turn of latency and a source that wants no wait must submit a
+  future it has already resolved. The mixin never submits while its own search
+  is pending, and a result that finishes between the funnel's sweep and its
+  collect is now carried to that turn's drain rather than lost on resubmit.
 - **Tests.** Pass a fake clock as `init_recall(config, now=clock)`. See
   `tests/cognition/test_recall_mixin.py` for a source on a real plugin
   manager with the real funnel.
@@ -542,7 +559,13 @@ An example `panel.js` for the plugin above:
 The contract:
 
 - **Read-only.** Every route must be a GET route made with `web.get`. Anything else (`web.post`, `web.view`, `web.route("*", ...)`, a static definition) fails startup with a `PluginValidationError` that names your plugin. It fails in `on_init`, so the restart pre-flight refuses the restart too. GET is a floor on the HTTP method, not a sandbox: your handler runs in-process, so it's on you not to change state from it.
-- **One panel per plugin.** Register a single `Panel`; a second one from the same plugin is not supported.
+- **Route paths are sub-paths of your panel.** A panel mounts its routes at `/panel/<name><path>`, beside its assets at `/panel/<name>/static`. Three shapes are refused at startup, with a `PluginValidationError` naming your plugin (#692):
+  - a path that does not start with `/` mounts outside the panel, and one with a `..` segment walks back out of it; neither is reachable where you meant;
+  - a path under `/static` collides with your assets;
+  - `/` and an empty path are allowed: they mount at the panel's root and serve, so neither is an unreachable route. What the [PRD](prd.md) §Web means by "not with pages of their own" is the console's shape -- a sidebar section with no navigation to a page of its own -- and a route path cannot enforce it, since a handler at `/data` or a file in `static_dir` can serve a full page just as well. A panel's root route does not appear in the sidebar and is not linked from anywhere, which is the part the console owns.
+
+  `/data` is the shape to write; `data` is the mistake to avoid. The panel contract is still a sidebar section: put the UI in the panel script, and treat a root route as something a person reaches by URL, not something the console offers.
+- **One panel per plugin.** Register a single `Panel`. The sidebar section, the asset mount and the route prefix are all keyed by the plugin name, so a second panel either shadows the first or fights it for `/panel/<name>/static`; a second one fails startup, naming your plugin.
 - **Resolve dependencies lazily.** When the hook fires, each plugin's `on_init` has run up to its first suspending `await`, so a panel may decide whether to register from its own config, read synchronously in `on_init`. That holds only while no plugin wraps `on_init` or `on_web_console_init` with `@hookimpl(wrapper=True)`: apluggy then awaits the impls one by one. Look up other plugins in the handlers, not at registration. A handler can be called before your `on_start` or before a channel has a conversation, so check for `None`.
 - **Read synchronously.** Handlers run on the event loop. They may read kernel objects this guide documents for plugins (`channel.conversation`, the channel registry), as long as they read without awaiting in between, so the view is consistent.
 - **Text, never markup.** A panel often shows untrusted text: prompts, tool output, other people's messages. Render it with `textContent` or `createTextNode`, never `innerHTML`.
@@ -710,7 +733,8 @@ wholesale. Observer failures are logged and never break the LLM call.
 `attribution` is a snapshot of `corvidae.attribution.get_attribution()` —
 a contextvar dict describing what the current code path is doing on whose
 behalf. Built-in callers set `stage` (`"turn"`, `"compaction"`,
-`"subagent"`, `"consolidation"`) and `channel_id`; the dict is open for
+`"subagent"`, `"consolidation"`), `channel_id` and, through
+`lease_scope`, `lease_key` (see Lease scopes below); the dict is open for
 plugin-defined fields. `MemoryPlugin`'s consolidation stage adds `trigger`
 (`"compaction"`, `"idle"` or `"turn"`; `"eval"` when
 `scripts/eval_memory.py` drives it), naming which consolidation trigger
@@ -737,6 +761,48 @@ captures `contextvars.copy_context()` at creation and the TaskQueue worker
 runs the work inside that context — attribution set by the enqueuer is
 visible in the task body.
 
+#### Lease scopes
+
+Every model call belongs to a queue, and the attribution field `lease_key`
+names it. `corvidae.attribution.lease_scope(key=None)` is a context
+manager that sets it:
+
+```python
+from corvidae.attribution import lease_scope
+
+with lease_scope("upkeep:myplugin:digest"):
+    await client.chat(messages)
+```
+
+With no key, `lease_scope()` inherits the enclosing scope's key. With a
+key it overrides, and on exit restores the parent's key. Contextvars carry
+it into tasks, so a task started inside a scope belongs to it. Two kinds
+of work open their own scope instead: forks (`Agent.fork` and the `fork`
+tool always run under the channel id, whatever key the caller holds) and
+subagent runs (`subagent:<task_id>`).
+
+Three key formats:
+
+- the channel id, for channel work: the turn, its forks (appraisal,
+  critique, and the consolidation fork at compaction), and the `fork` tool;
+- `subagent:<task_id>` for a subagent run;
+- `upkeep:<plugin>:<tag>` for work a plugin owns, such as
+  `upkeep:memory:consolidation` for catch-up consolidation.
+
+Five built-in sites open a scope: the channel turn, `Agent.fork`,
+the subagent `work()`, the `fork` tool's `work()` and
+`MemoryPlugin._consolidate_range`. Everything else, vision included,
+inherits the caller's key. A plugin must open its own scope when it makes
+model calls outside a channel turn (a timer, a background loop, a startup
+task) and give it an `upkeep:<plugin>:<tag>` key. Work inside a turn
+needs nothing.
+
+A chat call with no key runs unleased and logs a WARNING naming the stage,
+once per stage per process; later calls log at DEBUG. Embedding calls need
+no key and never warn. The key is recorded in `usage_log.lease_key` and as
+the `lease_key` tag on `on_metrics` events (`""` with no key). No lease is
+taken yet; the key only names the queue.
+
 `on_metrics` carries a named numeric value with dimensional tags
 (StatsD/OpenTelemetry common denominator; dotted names like
 `llm.tokens.prompt`, `llm.latency_ms`). Emit metrics from any hook or tool
@@ -753,7 +819,7 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text, trace_id)` | reject-wins (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `should_send_response(channel, text, emission, trace_id, annotations)` | reject-wins (broadcast) | `bool \| None` | Any `False` withholds the emission; anything else sends it |
-| `resolve_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and gives its remedy: a timeout or an HTTP error asks the user to try again, while an unreachable backend the daemon has scheduled a retry for says the answer will come when the model server is back. When no retry could be scheduled (no kernel clock registered), the unreachable message falls back to asking the user to try again rather than promising a retry that will not happen. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.main.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
+| `resolve_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and gives its remedy: a timeout or an HTTP error asks the user to try again, while an unreachable backend the daemon has scheduled a retry for says the answer will come when the model server is back. When no retry could be scheduled (no kernel clock registered), the unreachable message falls back to asking the user to try again rather than promising a retry that will not happen. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.providers.<name>.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
 | `resolve_compaction(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `transform_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
 | `transform_display_text(channel, text, result_message)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input text unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
@@ -899,7 +965,7 @@ line in this guide.
 |---|---|
 | `corvidae.hooks` | `CorvidaePlugin`, `TransportPlugin`, `hookimpl`, `get_dependency`, `resolve_single_result`, `final_was_unsent` |
 | `corvidae.fork` | `fork_agent`, `quote`, `window_db_ids`, `ViewInputs`, `view_agent`, `view_call`, `ForkRefused`, `build_fork_prompt`, `snap_cut_forward`, `snap_cut_to_tool_boundary` (see [Forking the window](#forking-the-window) and [The view call](#the-view-call)) |
-| `corvidae.attribution` | `get_attribution`, `set_attribution`, `reset_attribution` |
+| `corvidae.attribution` | `get_attribution`, `set_attribution`, `reset_attribution`, `lease_scope` |
 | `corvidae.tuning` | `config_value`, `resolve_tunable` |
 | `corvidae.channel` | `ChannelRegistry`, `resolve_persisted_channel`, `ChannelNotReady` |
 | `corvidae.channels.webhook` | `WebhookDelivery`, `WebhookHandler` (for subscribers to the webhook ingress) |
@@ -1304,7 +1370,7 @@ signal:
   message_chunk_size: 2000            # Max UTF-8 bytes per message (default 2000)
 ```
 
-Omitting the block leaves the plugin loaded but inert. Signal channel scopes are always the sender's ACI (`signal:8f2c1c9a-…`), never a phone number — `sourceNumber` is absent under phone-number privacy, and a scope that can vanish would fork the channel's persisted history. Numbers in config are resolved forward to ACIs after the transport connects. See [signal-ops.md](signal-ops.md) for provisioning and [configuration.md](configuration.md) for the full key reference.
+Omitting the block leaves the plugin loaded but inert. A Signal channel created from an inbound message has the sender's ACI as its scope (`signal:8f2c1c9a-…`), never a phone number — `sourceNumber` is absent under phone-number privacy, and a scope that can vanish would fork the channel's persisted history. Numbers in config are resolved forward to ACIs after the transport connects. See [signal-ops.md](signal-ops.md) for provisioning and [configuration.md](configuration.md) for the full key reference.
 
 ### `resolve_channel` for transport authors
 
@@ -1617,7 +1683,7 @@ Registered by `SubagentPlugin` (entry point name: `subagent`).
 |------|------------|--------------|
 | `subagent` | `instructions: str`, `description: str`, `_ctx: ToolContext` | Enqueues a background task that runs a full agent loop with `instructions` as its prompt. Returns immediately with the enqueued task ID. Results are delivered via `on_notify` when the task completes. |
 
-`subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry; nesting through other tools is bounded by `tools.max_agent_depth`. The subagent calls the model as the `subagent` stage, a `chat` stage, so it uses `llm.stages.subagent`, else the default chat profile (`llm.main` by default).
+`subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry; nesting through other tools is bounded by `tools.max_agent_depth`. The subagent calls the model as the `subagent` stage, a `chat` stage, so it uses `llm.stages.subagent`, else the default chat profile (`llm.profiles.main` by default).
 
 ### RuntimeSettingsPlugin tools
 
@@ -1837,8 +1903,9 @@ logged with a traceback and never breaks an LLM call.
   and emits `on_metrics` events: `llm.tokens.prompt`, `llm.tokens.completion`,
   `llm.tokens.total` (each skipped if the usage dict lacks it),
   `llm.latency_ms` (always), and `llm.errors` (value 1.0, on terminal
-  failure). Tags: `{"profile", "model", "stage", "channel"}` — stage and
-  channel come from the call's attribution snapshot.
+  failure). Tags: `{"profile", "model", "stage", "channel", "lease_key"}` —
+  stage, channel and lease key come from the call's attribution snapshot
+  (`lease_key` is `""` for an unleased call).
 - **`UsageLogPlugin`** (entry point `"usage_log"`, depends on
   `"persistence"`) — consumes `on_llm_response` and writes one row per LLM
   call into the `usage_log` SQLite table (in the persistence plugin's
@@ -1854,6 +1921,8 @@ logged with a traceback and never breaks an LLM call.
   `prompt_ms` and `predicted_ms` (prefill and decode time of the final
   attempt, NULL when the backend reports none). Subtracting those two
   from `latency_ms` approximates the time a call queued in the server.
+  `lease_key` names the queue the call ran for (#363); it is NULL for an
+  unleased call and for rows written before the column existed.
   The table is created lazily on first use (`CREATE TABLE IF NOT EXISTS`).
 - **`MetricsJsonlPlugin`** (entry point `"metrics_jsonl"`) — consumes
   `on_metrics` and appends one JSON line per event
@@ -1878,14 +1947,16 @@ Owns the `LLMClient` instance lifecycle. Entry point name: `"llm"`. Other plugin
 Implements these lifecycle hooks:
 
 - `on_start` — broadcasts `register_llm_stages` to collect the model-calling
-  stages, parses the `llm:` section (`parse_llm_config`: profiles, `extends`,
+  stages, parses the `llm:` section (`parse_llm_config`: providers, profiles, `extends`,
   `llm.defaults`, `llm.stages`), checks the stage map against the registered
   stages, creates an `LLMClient` for each profile, starts their aiohttp
-  sessions, and logs where each stage resolves (`llm stages resolved: ...`).
+  sessions, logs one INFO line per provider (`llm provider <name>: <base_url>,
+  heads <N|unbounded>, profiles ...`), and logs where each stage resolves
+  (`llm stages resolved: ...`).
 - `on_stop` — closes all aiohttp sessions.
 - `on_config_reload` — swaps no client. A reload that changes `llm:` logs a
   warning, and the change applies on restart; nothing under `llm:` is
-  hot-reloaded, `llm.main` included.
+  hot-reloaded, `llm.providers.main` included.
 
 Each created client gets a hook observer injected that fires
 `on_llm_request`/`on_llm_response` (with the client's profile and the current
@@ -1893,7 +1964,9 @@ attribution snapshot) around every chat call. `corvidae/llm.py` itself
 stays free of plugin-system imports — the observer seam is a plain object
 with async `request`/`response` methods, defined in `llm_plugin.py`.
 
-Each key under `llm:` is a **profile**. A plugin that calls a model owns one
+`llm:` holds **providers** (an endpoint plus its credentials and capacity),
+**profiles** (a model and request parameters on one provider, each built into
+its own client), `defaults` and `stages`. A plugin that calls a model owns one
 or more **stages** and names them in `register_llm_stages`:
 
 ```python
@@ -1912,10 +1985,16 @@ llm = get_dependency(self.pm, "llm", LLMPlugin)
 client = llm.get_client("summarize")   # None if the stage resolves to no profile
 main = llm.get_client()                # the main-turn client (default chat profile)
 settings = llm.profile_config("summarize")  # the stage's resolved profile settings, read-only
+provider = llm.resolve_provider("summarize")  # the provider name the stage sends to, or None
+pconf = llm.provider_config(provider)         # that provider's block (base_url, heads, ...), read-only
 ```
 
 `get_client(stage)` raises `ValueError` for a name no plugin registered, and
 profile names count: `get_client("main")` raises, so use `get_client()`.
+`profile_config` includes its provider's client settings (`base_url`,
+`api_key`, `timeout`, retries) and a `provider` name; `heads` is read only
+through `provider_config` (absent or `None` when unbounded; `{}` for an unknown
+provider). Nothing schedules on it yet.
 Resolve the client when you call it, as the stages in this repo do, not in your
 own `on_start`: hooks run concurrently, so `LLMPlugin` may not have started
 yet. The `main_client` and `background_client` properties and
@@ -1924,25 +2003,31 @@ yet. The `main_client` and `background_client` properties and
 **Config:**
 ```yaml
 llm:
-  main:                        # required unless llm.defaults.chat names another profile
-    base_url: https://api.openai.com/v1
-    model: gpt-4o
-    api_key: sk-...            # optional; can also use environment variable
-    extra_body: {}             # optional: extra fields merged into request body
-    max_retries: 3             # optional (default 3)
-    retry_base_delay: 2.0      # optional (default 2.0)
-    retry_max_delay: 60.0      # optional (default 60.0)
-    timeout: 120               # optional: request timeout in seconds
-  embedding:                   # optional — the embedding stage gets no client without it
-    kind: embedding            # required for an embedding profile
-    base_url: http://localhost:8082/v1
-    model: nomic-embed-text
-    dimensions: 768            # required
+  providers:
+    main:                      # the provider a profile uses unless it names another
+      base_url: https://api.openai.com/v1
+      api_key: sk-...          # optional; can also use environment variable
+      max_retries: 3           # optional (default 3)
+      retry_base_delay: 2.0    # optional (default 2.0)
+      retry_max_delay: 60.0    # optional (default 60.0)
+      timeout: 120             # optional: request timeout in seconds
+      # heads: 2               # optional: warm context heads; omitted means unbounded
+    embedding:
+      base_url: http://localhost:8082/v1
+  profiles:
+    main:                      # required unless llm.defaults.chat names another profile
+      model: gpt-4o
+      extra_body: {}           # optional: extra fields merged into request body
+    embedding:                 # optional — the embedding stage gets no client without it
+      provider: embedding
+      kind: embedding          # required for an embedding profile
+      model: nomic-embed-text
+      dimensions: 768          # required
   # stages: {compaction: main}   # optional: map a stage to a defined profile
 ```
 
 See [`llm`](configuration.md#llm--llm-backend) for `kind`, `extends`,
-`defaults` and `stages`.
+`heads`, `defaults` (including `defaults.provider`) and `stages`.
 
 **Without this plugin:** `Agent` and `CompactionPlugin` cannot create LLM
 clients and will raise `RuntimeError` during startup.

@@ -46,7 +46,12 @@ from corvidae.llm import LLMHTTPError, is_backend_unreachable
 if TYPE_CHECKING:
     from corvidae.tool_collection import ToolCollectionPlugin
 from corvidae.turn import AgentTurnResult, run_agent_turn
-from corvidae.attribution import get_attribution, reset_attribution, set_attribution
+from corvidae.attribution import (
+    get_attribution,
+    lease_scope,
+    reset_attribution,
+    set_attribution,
+)
 from corvidae.channel import (
     Channel,
     ChannelConfig,
@@ -672,7 +677,7 @@ class Agent(CorvidaePlugin):
         if isinstance(spill, NotificationSpill):
             cut = await spill.cut(
                 text, limit=limit, source=f"tool result ({metadata.tool or source})",
-                can_read=spill.can_read(channel),
+                can_read=spill.can_read(channel), channel=channel,
             )
         else:
             # The Runtime always registers the service; a bare plugin manager
@@ -692,6 +697,7 @@ class Agent(CorvidaePlugin):
             spill_chars=cut.spilled,
             spill_failed=True if cut.failed else None,
             cut_source=cut.source,
+            page_chars=cut.page_chars,
         )
 
     def _notification_metadata(self, channel, tool_call_id: str | None) -> ItemMetadata:
@@ -711,6 +717,7 @@ class Agent(CorvidaePlugin):
             spill_chars=cut.spilled if cut else None,
             spill_failed=True if cut and cut.failed else None,
             cut_source=cut.source if cut else None,
+            page_chars=cut.page_chars if cut else None,
         )
 
     def _tool_result_metadata(self, channel, tool_call_id: str) -> ItemMetadata:
@@ -1037,7 +1044,7 @@ class Agent(CorvidaePlugin):
         self._turn_retries[channel.id] = _TurnRetry(retry_item, attempt, timer)
         logger.warning(
             "turn on channel %s (trace_id %s) could not reach the LLM backend (%s); "
-            "retrying in %g s — check that the server at llm.main.base_url is "
+            "retrying in %g s — check that the server at llm.providers.<provider>.base_url is "
             "running and has its model loaded",
             channel.id, item.trace_id, type(exc).__name__, delay,
             extra={
@@ -1338,7 +1345,11 @@ class Agent(CorvidaePlugin):
                 trace_id=item.trace_id, annotations=item.annotations,
             )
             try:
-                await self._process_queue_item_attributed(item, channel, absorbed)
+                # The turn's model calls lease this channel's queue (#363).
+                with lease_scope(channel.id):
+                    await self._process_queue_item_attributed(
+                        item, channel, absorbed
+                    )
             finally:
                 reset_attribution(attribution_token)
         finally:
@@ -1861,9 +1872,14 @@ class Agent(CorvidaePlugin):
         token = set_attribution(channel_id=channel.id, mode="fork")
         try:
             # The channel's own schemas: a fork must share the turn's prefix.
-            response = await client.chat(
-                messages, tools=self._tool_view(channel).schemas or None, extra_body=body
-            )
+            # A fork extends this channel's prefix, so it takes the channel's
+            # key whatever key the caller holds (#363).
+            with lease_scope(channel.id):
+                response = await client.chat(
+                    messages,
+                    tools=self._tool_view(channel).schemas or None,
+                    extra_body=body,
+                )
         finally:
             reset_attribution(token)
 

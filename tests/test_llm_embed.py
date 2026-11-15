@@ -171,9 +171,10 @@ class TestLLMPluginProfiles:
         for profile, client in profiles.items():
             plugin._clients[profile] = client
         stub_llm_config(plugin, {
-            "main": {"base_url": BASE_URL, "model": "chat-model"},
-            "embedding": {
-                "base_url": BASE_URL, "model": MODEL, "kind": "embedding", "dimensions": 3,
+            "providers": {"main": {"base_url": BASE_URL}},
+            "profiles": {
+                "main": {"model": "chat-model"},
+                "embedding": {"model": MODEL, "kind": "embedding", "dimensions": 3},
             },
         })
         return plugin
@@ -187,12 +188,18 @@ class TestLLMPluginProfiles:
         """Every key under llm: becomes a client; embedding keeps dimensions."""
         config = {
             "llm": {
-                "main": {"base_url": BASE_URL, "model": "chat-model"},
-                "embedding": {
-                    "kind": "embedding",
-                    "base_url": "http://localhost:8081",
-                    "model": MODEL,
-                    "dimensions": 3,
+                "providers": {
+                    "main": {"base_url": BASE_URL},
+                    "embedding": {"base_url": "http://localhost:8081"},
+                },
+                "profiles": {
+                    "main": {"model": "chat-model"},
+                    "embedding": {
+                        "provider": "embedding",
+                        "kind": "embedding",
+                        "model": MODEL,
+                        "dimensions": 3,
+                    },
                 },
             }
         }
@@ -207,8 +214,11 @@ class TestLLMPluginProfiles:
     async def test_missing_dimensions_raises_at_startup(self):
         config = {
             "llm": {
-                "main": {"base_url": BASE_URL, "model": "chat-model"},
-                "embedding": {"base_url": BASE_URL, "model": MODEL, "kind": "embedding"},
+                "providers": {"main": {"base_url": BASE_URL}},
+                "profiles": {
+                    "main": {"model": "chat-model"},
+                    "embedding": {"model": MODEL, "kind": "embedding"},
+                },
             }
         }
         plugin = LLMPlugin()

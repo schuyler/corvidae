@@ -488,10 +488,8 @@ class TestAgentMaxToolResultChars:
 
         config = {
             "llm": {
-                "main": {
-                    "base_url": "http://fake",
-                    "model": "test",
-                }
+                "providers": {"main": {"base_url": "http://fake"}},
+                "profiles": {"main": {"model": "test"}},
             },
         }
 
@@ -522,10 +520,8 @@ class TestSubagentPluginMaxToolResultChars:
                 "max_tool_result_chars": 8888,
             },
             "llm": {
-                "main": {
-                    "base_url": "http://fake",
-                    "model": "test",
-                }
+                "providers": {"main": {"base_url": "http://fake"}},
+                "profiles": {"main": {"model": "test"}},
             },
         }
 

@@ -16,8 +16,8 @@ from cross_channel_send import CrossChannelSendPlugin
 from llm_response_fixtures import _make_text_response
 
 from corvidae.agent import Agent
-from corvidae.channel import ChannelConfig, ChannelRegistry
-from corvidae.hooks import create_plugin_manager
+from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
+from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin
 from corvidae.thinking import ThinkingPlugin
@@ -292,35 +292,7 @@ class TestHopCount:
 
 
 class TestInputValidation:
-    """Input validation: unregistered target, empty/over-limit text."""
-
-    async def test_unregistered_target(self):
-        plugin, registry, db, agent = await _build_harness()
-        pm = agent.pm
-        await _init_plugin(plugin, pm)
-
-        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
-
-        from corvidae.attribution import _attribution
-
-        _attribution.set(
-            {
-                "channel_id": ch_a.id,
-                "trace_id": "trace-123",
-                "annotations": {},
-            }
-        )
-
-        notify = AsyncMock()
-        pm.ahook.on_notify = notify
-
-        result = await plugin.notify_other_channel("signal:nonexistent", "hello")
-        assert "not registered" in result
-        assert "signal:nonexistent" in result
-        assert "list_channels" in result
-        assert notify.call_count == 0
-
-        await db.close()
+    """Input validation: empty/over-limit text."""
 
     async def test_empty_text_rejected(self):
         plugin, registry, db, agent = await _build_harness()
@@ -1335,4 +1307,98 @@ class TestMinorCoverage:
         assert "non-empty" in result
         assert notify.call_count == 0
 
+        await db.close()
+
+
+class _ResolvingTransport:
+    """A transport plugin that implements resolve_channel (#938).
+
+    ``answer`` is what resolve_channel returns for every id: a Channel, or
+    None to say "not yet", which makes resolve_persisted_channel raise
+    ChannelNotReady because this transport implements the hook.
+    """
+
+    transport = "signal"
+
+    def __init__(self, answer):
+        self.answer = answer
+
+    @hookimpl
+    async def resolve_channel(self, channel_id: str):
+        return self.answer
+
+
+class TestUnregisteredTargets:
+    """notify_other_channel resolves targets with resolve_persisted_channel (#938)."""
+
+    async def _setup(self):
+        """Harness with a live source channel, attribution set, on_notify mocked."""
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+        source = registry.get_or_create("signal", "alice", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+
+        _attribution.set(
+            {"channel_id": source.id, "trace_id": "trace-938", "annotations": {}}
+        )
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+        return plugin, registry, db, pm, notify
+
+    async def test_unregistered_well_formed_id_gets_a_bare_channel(self):
+        # No loaded transport implements resolve_channel for "irc", so the
+        # resolver falls back to a bare registry channel and the send goes out.
+        plugin, registry, db, pm, notify = await self._setup()
+        assert registry.get("irc:#ops") is None
+
+        result = await plugin.notify_other_channel("irc:#ops", "wake up")
+
+        assert result == "Queued on irc:#ops."
+        assert notify.call_count == 1
+        assert notify.call_args.kwargs["channel"].id == "irc:#ops"
+        assert notify.call_args.kwargs["channel"] is registry.get("irc:#ops")
+        await db.close()
+
+    async def test_unregistered_id_resolved_by_its_transport(self):
+        # The owning transport answers resolve_channel; that Channel is notified.
+        plugin, registry, db, pm, notify = await self._setup()
+        resolved = Channel(transport="signal", scope="+15551234567")
+        pm.register(_ResolvingTransport(resolved), name="fake_signal")
+
+        result = await plugin.notify_other_channel("signal:+15551234567", "ping")
+
+        assert result == "Queued on signal:+15551234567."
+        assert notify.call_count == 1
+        assert notify.call_args.kwargs["channel"] is resolved
+        await db.close()
+
+    async def test_malformed_id_is_refused(self):
+        plugin, registry, db, pm, notify = await self._setup()
+
+        result = await plugin.notify_other_channel("nocolon", "hello")
+
+        assert notify.call_count == 0
+        assert "'nocolon'" in result
+        assert "transport:scope" in result
+        assert "list_channels" in result
+        await db.close()
+
+    async def test_channel_not_ready_is_refused_and_logged(self, caplog):
+        # The transport implements resolve_channel but answers None: not yet.
+        plugin, registry, db, pm, notify = await self._setup()
+        pm.register(_ResolvingTransport(None), name="fake_signal")
+
+        with caplog.at_level(logging.WARNING, logger="cross_channel_send"):
+            result = await plugin.notify_other_channel("signal:+15550000000", "hi")
+
+        assert notify.call_count == 0
+        assert "'signal:+15550000000'" in result
+        assert "try again once the transport is ready" in result
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and r.name == "cross_channel_send"
+        ]
+        assert any("signal:+15550000000" in r.getMessage() for r in warnings)
         await db.close()

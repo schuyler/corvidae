@@ -58,6 +58,10 @@ class ShellToolPlugin(CorvidaePlugin):
         shell.own_timeout = lambda: plugin._shell_timeout  # type: ignore[attr-defined]
         # A shell command can read a notification spill file.
         shell.reads_spill_files = True  # type: ignore[attr-defined]
+        # And what it prints is outside text, fenced payload included: a `cat`
+        # of a spill file must not be able to imitate a header, a role or an
+        # instruction (#580). read_file says the same about the file it reads.
+        shell.returns_untrusted = True  # type: ignore[attr-defined]
 
         # task_pipeline is shell by another name (PRD §3.5.3), so the shell
         # plugin registers it: disabling shell_tools removes both.

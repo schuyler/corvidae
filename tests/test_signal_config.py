@@ -168,7 +168,8 @@ class TestDaemonStartupWithNoSignalBlock:
         config = {
             "agent": AGENT_DEFAULTS,
             "llm": {
-                "main": {"base_url": "http://127.0.0.1:1/v1", "model": "test-model"},
+                "providers": {"main": {"base_url": "http://127.0.0.1:1/v1"}},
+                "profiles": {"main": {"model": "test-model"}},
             },
             "daemon": {"session_db": str(session_db_path)},
             "plugins": {
@@ -283,7 +284,8 @@ class TestDaemonStartupWithMalformedSignalBlock:
         config = {
             "agent": AGENT_DEFAULTS,
             "llm": {
-                "main": {"base_url": "http://127.0.0.1:1/v1", "model": "test-model"},
+                "providers": {"main": {"base_url": "http://127.0.0.1:1/v1"}},
+                "profiles": {"main": {"model": "test-model"}},
             },
             "daemon": {"session_db": str(session_db)},
             "plugins": {

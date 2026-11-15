@@ -140,7 +140,7 @@ model has no cheap way to issue a better one.
 - Only `summary` is embedded. `topic_tags` and `participants` never reach
   the vector. Appending them might sharpen the embedding; it might also
   add noise. Untested.
-- `llm.embedding.query_prefix` and `document_prefix` default to empty.
+- `llm.profiles.embedding.query_prefix` and `document_prefix` default to empty.
   bge-m3 needs neither; nomic-embed-text does. Worth confirming against
   the production encoder's model card.
 - FTS5 is wired in but used only as the degraded fallback. Proper nouns

@@ -10,9 +10,12 @@ Two example configs ship at the repo root: `agent.yaml.example` (every built-in 
 
 ```yaml
 llm:
-  main:
-    base_url: http://localhost:8080
-    model: my-model
+  providers:
+    main:
+      base_url: http://localhost:8080
+  profiles:
+    main:
+      model: my-model
 
 daemon:
   session_db: sessions.db
@@ -68,61 +71,89 @@ A misspelled entry is not an error: it blocks nothing, the daemon starts normall
 
 ## `llm` — LLM backend
 
-Every key under `llm:` except `defaults` and `stages` is a **profile**: an endpoint, a model and request parameters, built into its own client. Each model-calling stage is registered by the plugin that owns it, with a kind (`chat` or `embedding`). A stage sends to the profile `llm.stages` maps it to; a stage the map doesn't name uses its kind's default profile, `llm.main` for chat and `llm.embedding` for embedding unless `llm.defaults` says otherwise. Main turns use the default chat profile. There are no fallback chains. Only a default chat profile is required.
+`llm:` has exactly four sections, and any other key directly under `llm:` is a startup error:
+
+- `llm.providers.<name>` is a **provider**: one endpoint plus its credentials and capacity. It holds `base_url`, `api_key`, `timeout`, the retry settings and `heads`.
+- `llm.profiles.<name>` is a **profile**: what to ask a provider for. It holds the `model`, the `kind`, `extra_body` and the other request parameters, and is built into its own client. A profile uses the provider named by its `provider:` key, else `llm.defaults.provider`, else the provider named `main`.
+- `llm.defaults` names the default profile of each kind, and the default provider.
+- `llm.stages` maps a stage to a profile.
+
+Each model-calling stage is registered by the plugin that owns it, with a kind (`chat` or `embedding`). A stage sends to the profile `llm.stages` maps it to; a stage the map doesn't name uses its kind's default profile, `llm.profiles.main` for chat and `llm.profiles.embedding` for embedding unless `llm.defaults` says otherwise. Main turns use the default chat profile. There are no fallback chains. Only a default chat profile is required.
 
 ```yaml
 llm:
-  main:                       # a profile; kind omitted means chat
-    base_url: http://host:8080/v1
-    model: swift-1.5
-    extra_body: {reasoning_effort: xhigh}
-  forks:                      # a profile derived from main
-    extends: main
-    extra_body:
-      reasoning_budget_tokens: 8192
-  embedding:
-    kind: embedding
-    base_url: http://host:8081/v1
-    model: bge-m3
-    dimensions: 1024
+  providers:
+    main:                     # a provider: one endpoint plus its credentials and capacity
+      base_url: http://host:8080/v1
+      heads: 2                # optional: warm context heads; omitted means unbounded
+    embedding:
+      base_url: http://host:8081/v1
+  profiles:
+    main:                     # a profile; kind omitted means chat, provider omitted means main
+      model: swift-1.5
+      extra_body: {reasoning_effort: xhigh}
+    forks:                    # a profile derived from main
+      extends: main
+      extra_body:
+        reasoning_budget_tokens: 8192
+    embedding:
+      provider: embedding
+      kind: embedding
+      model: bge-m3
+      dimensions: 1024
   defaults: {chat: main, embedding: embedding}   # optional; these are the fallbacks
   stages:                     # optional: stage -> profile
     compaction: forks
     consolidation: forks
 ```
 
-**All of `llm:` is read at startup. A change to any of it, `llm.main` included, applies on restart.** A reload that changes it logs the usual per-key restart-only warning for each changed key, plus one summary, `llm config changed; LLM profiles, llm.stages and llm.defaults apply on restart`, and keeps the running clients. A reload whose `llm:` section is malformed is refused whole, like any other bad section.
+**All of `llm:` is read at startup. A change to any of it, `llm.providers.main` included, applies on restart.** A reload that changes it logs the usual per-key restart-only warning for each changed key, plus one summary, `llm config changed; LLM providers, profiles, llm.stages and llm.defaults apply on restart`, and keeps the running clients. A reload whose `llm:` section is malformed is refused whole, like any other bad section.
+
+A provider key written on a profile, a profile key written on a provider, a key directly under `llm:` outside the four sections, an unknown provider name and a bad `heads` all fail startup, and a reload is refused. Each message names the key and the block it belongs in, and an unknown provider lists the defined ones.
+
+### Provider keys (`llm.providers.<name>`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `llm.main.base_url` | string | — | Base URL for an OpenAI-compatible Chat Completions endpoint. Required in every profile; the `llm.main` block itself is required only when `llm.defaults.chat` is unset. |
-| `llm.main.model` | string | — | Model identifier sent in each request. Required in every profile. |
-| `llm.<profile>.kind` | `chat` \| `embedding` | `chat` | What the profile serves. A chat profile takes chat stages and main turns; an embedding profile takes the `embedding` stage and needs `dimensions`. An omitted `kind` means `chat`, applied after `extends` is merged, so a child of an embedding profile stays one. Any other value fails startup. |
-| `llm.<profile>.extends` | string | — | Name of another profile to build on. See [Derived profiles](#derived-profiles-extends). Consumed by corvidae; never sent to the endpoint. |
-| `llm.main.api_key` | string | `null` | API key for authentication, sent as `Authorization: Bearer <key>`. Omit if the backend does not require one. Either a literal key or a quoted `"${VAR}"` reference to an environment variable (see below). Give the bare key: a value such as `Bearer ${X}` would send "Bearer Bearer ...". |
-| `llm.main.extra_body` | mapping | `null` | Provider-specific fields merged into the request body (e.g., `id_slot` for llama.cpp). On llama.cpp, `reasoning_format: none` returns the reply's reasoning inline, for `raw_reasoning`. This is where a stage's reasoning budget (`reasoning_budget_tokens`) or token cap (`max_tokens`) goes. Corvidae passes the keys through without interpreting them. Where a channel's `set_settings` override and a fork's profile set the same key, the profile wins on a fork (see [`agent.forks`](#agentforks--background-processes-as-forks)); on a main turn the override wins. |
-| `llm.main.raw_reasoning` | boolean | `false` | The endpoint returns reasoning inline in `content`, closed by `</think>` (llama.cpp with `extra_body.reasoning_format: none`). Corvidae splits it into `reasoning_content` itself and treats a reply with no `</think>` as cut off mid-reasoning: the turn is re-run once, then reported as failed (#355). A call that sends `response_format` (a fork or background stage's JSON schema) runs in the server's parsed mode instead: `reasoning_format` is dropped from that request and its reply is not split, so it gets no cut-off detection (#360). shortcut: this relies on the server's own default being a parsed mode; a llama-server started with `--reasoning-format none` still rejects schema calls; upgrade to an explicit per-call override if such a deployment appears. shortcut: set it only where the chat template forces thinking open; otherwise every non-reasoning reply reads as cut off. Upgrade when a per-reply signal replaces the template assumption. |
-| `llm.main.reasoning_reopened` | string | `truncate` | What happens to a final reply that reopens reasoning after its answer: a second `<think>`, or a stray `</think>`, after the first `</think>` (#348). Needs `raw_reasoning`: in parsed mode the client sees no tags to check. Either way the client cuts the reply at that tag, so the user never sees the text after it, and logs a warning with the channel and the full raw completion. `truncate` sends and stores the text before the tag. `rerun` throws the cut reply away and regenerates once with the same messages; if that reply reopens too, its cut text is used. A stray `</think>` has no start marker, so the second block's text before the tag survives the cut. Only the main turn loop reruns; forks, subagents and background stages always truncate. Schema calls (`response_format`) aren't split, so they aren't checked. An invalid value is logged as a warning and read as `truncate`; it never stops startup. Applies on restart. |
-| `llm.main.max_retries` | integer | `3` | Maximum retry attempts on transient HTTP errors (429, 500, 502, 503, 504) and connection failures. Set to 0 to disable retries. After they run out, the turn sends the error reply and then retries itself (5 s doubling to 60 s) until the backend answers. |
-| `llm.main.retry_base_delay` | float | `2.0` | Base delay in seconds for exponential backoff between retry attempts. |
-| `llm.main.retry_max_delay` | float | `60.0` | Maximum delay cap in seconds for exponential backoff. |
-| `llm.main.model_not_loaded_wait` | float | `60.0` | Total seconds to keep retrying when the server answers HTTP 400 "model is not loaded" (a llama-server router running `--no-models-autoload` with another model swapped in). Separate from `max_retries`; uses the same backoff, with at least 1 s between attempts (the last sleep is cut short to fit the remaining wait). Must be a finite, non-negative number, or startup fails. The turn waits for this long before replying, so set it a little longer than a model swap takes. `0` disables. When it runs out, the reply names the unloaded model instead of the generic error, and the turn then retries itself (5 s doubling to 60 s) until the model is loaded. |
-| `llm.main.timeout` | float | `null` | Total HTTP timeout in seconds per LLM request. `null` means no timeout: the request waits as long as the server takes, and a connect to a host that drops packets waits until the OS gives up. |
-| `llm.embedding.base_url` | string | — | Base URL for an OpenAI-compatible `/embeddings` endpoint (embedding servers are usually separate from generation servers). Optional. |
-| `llm.embedding.model` | string | — | Embedding model identifier. Recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding. Config revert is the only remediation. |
-| `llm.embedding.kind` | string | — | **Must be `embedding`** on the profile the embedding stage uses. Without it the block is a chat profile and startup fails (see [Migration](#migration-from-the-single-main-block)). |
-| `llm.embedding.dimensions` | integer | — | **Required for an embedding profile** (any profile with `kind: embedding`, not only one named `embedding`). Fixed vector dimension of the embedding model; the `memory_vec` table schema depends on it. Validated at startup. |
-| `llm.embedding.document_prefix` | string | `""` | String prepended to every text when embedding stored content (`kind="document"`). Recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding. Config revert is the only remediation. Trailing space is the operator's responsibility (match the model card). |
-| `llm.embedding.query_prefix` | string | `""` | String prepended to every text when embedding a retrieval query (`kind="query"`). See `document_prefix` for mismatch semantics. |
-| `llm.defaults.chat`, `llm.defaults.embedding` | string | `main`, `embedding` | The default profile for each kind: what main turns and any unmapped stage of that kind use. Each must name a defined profile of that kind. A kind may have no default (no `llm.embedding` block and no `llm.defaults.embedding`: memory degrades to keyword search unless `llm.stages.embedding` maps the stage); a chat default is required, so `defaults.chat: foo` with no `llm.main` boots and sends main turns to `foo`. Any other key under `defaults` fails startup. |
+| `llm.providers.<name>.base_url` | string | — | Base URL for an OpenAI-compatible endpoint (Chat Completions, or `/embeddings` for an embedding profile). Required in every provider. The `main` provider is required only when a profile resolves to it. |
+| `llm.providers.<name>.api_key` | string | `null` | API key for authentication, sent as `Authorization: Bearer <key>`. Omit if the backend does not require one. Either a literal key or a quoted `"${VAR}"` reference to an environment variable (see below). Give the bare key: a value such as `Bearer ${X}` would send "Bearer Bearer ...". |
+| `llm.providers.<name>.heads` | integer | unbounded | The warm context heads the operator declares for this server: on llama-server, its slots plus the prefixes `--cache-ram` holds (PRD §3.13.2). A positive integer; zero, a negative number, a float, a boolean or a string fails startup. Omitted means unbounded. Nothing schedules on it yet (#364): it is read and logged, and the lease scheduler is a later change. A `heads` on a provider used only by embedding profiles logs a warning at startup, because embedding calls take no lease. |
+| `llm.providers.<name>.max_retries` | integer | `3` | Maximum retry attempts on transient HTTP errors (429, 500, 502, 503, 504) and connection failures. Set to 0 to disable retries. After they run out, the turn sends the error reply and then retries itself (5 s doubling to 60 s) until the backend answers. |
+| `llm.providers.<name>.retry_base_delay` | float | `2.0` | Base delay in seconds for exponential backoff between retry attempts. |
+| `llm.providers.<name>.retry_max_delay` | float | `60.0` | Maximum delay cap in seconds for exponential backoff. |
+| `llm.providers.<name>.model_not_loaded_wait` | float | `60.0` | Total seconds to keep retrying when the server answers HTTP 400 "model is not loaded" (a llama-server router running `--no-models-autoload` with another model swapped in). Separate from `max_retries`; uses the same backoff, with at least 1 s between attempts (the last sleep is cut short to fit the remaining wait). Must be a finite, non-negative number, or startup fails. The turn waits for this long before replying, so set it a little longer than a model swap takes. `0` disables. When it runs out, the reply names the unloaded model instead of the generic error, and the turn then retries itself (5 s doubling to 60 s) until the model is loaded. |
+| `llm.providers.<name>.timeout` | float | `null` | Total HTTP timeout in seconds per LLM request. `null` means no timeout: the request waits as long as the server takes, and a connect to a host that drops packets waits until the OS gives up. |
+
+### Profile keys (`llm.profiles.<name>`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `llm.profiles.<name>.provider` | string | `llm.defaults.provider`, else `main` | The provider this profile sends to. Must name a defined provider; startup fails otherwise, listing the defined ones. A profile with no `provider:` and no `llm.defaults.provider` and no provider named `main` fails startup naming the profile. |
+| `llm.profiles.<name>.model` | string | — | Model identifier sent in each request. Required in every profile. For an embedding profile it is recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding. Config revert is the only remediation. |
+| `llm.profiles.<name>.kind` | `chat` \| `embedding` | `chat` | What the profile serves. A chat profile takes chat stages and main turns; an embedding profile takes the `embedding` stage and needs `dimensions`. An omitted `kind` means `chat`, applied after `extends` is merged, so a child of an embedding profile stays one. Any other value fails startup. |
+| `llm.profiles.<name>.extends` | string | — | Name of another profile to build on. See [Derived profiles](#derived-profiles-extends). Consumed by corvidae; never sent to the endpoint. |
+| `llm.profiles.<name>.extra_body` | mapping | `null` | Provider-specific fields merged into the request body. On llama.cpp, `reasoning_format: none` returns the reply's reasoning inline, for `raw_reasoning`. This is where a stage's reasoning budget (`reasoning_budget_tokens`) or token cap (`max_tokens`) goes. Corvidae passes the keys through without interpreting them. Where a channel's `set_settings` override and a fork's profile set the same key, the profile wins on a fork (see [`agent.forks`](#agentforks--background-processes-as-forks)); on a main turn the override wins. Pinning a llama-server slot with `extra_body.id_slot` works against the lease scheduler (PRD §3.13): it sends two requests to one slot behind the scheduler's back, and is operator error. |
+| `llm.profiles.<name>.raw_reasoning` | boolean | `false` | The endpoint returns reasoning inline in `content`, closed by `</think>` (llama.cpp with `extra_body.reasoning_format: none`). Corvidae splits it into `reasoning_content` itself and treats a reply with no `</think>` as cut off mid-reasoning: the turn is re-run once, then reported as failed (#355). A call that sends `response_format` (a fork or background stage's JSON schema) runs in the server's parsed mode instead: `reasoning_format` is dropped from that request and its reply is not split, so it gets no cut-off detection (#360). shortcut: this relies on the server's own default being a parsed mode; a llama-server started with `--reasoning-format none` still rejects schema calls; upgrade to an explicit per-call override if such a deployment appears. shortcut: set it only where the chat template forces thinking open; otherwise every non-reasoning reply reads as cut off. Upgrade when a per-reply signal replaces the template assumption. |
+| `llm.profiles.<name>.reasoning_reopened` | string | `truncate` | What happens to a final reply that reopens reasoning after its answer: a second `<think>`, or a stray `</think>`, after the first `</think>` (#348). Needs `raw_reasoning`: in parsed mode the client sees no tags to check. Either way the client cuts the reply at that tag, so the user never sees the text after it, and logs a warning with the channel and the full raw completion. `truncate` sends and stores the text before the tag. `rerun` throws the cut reply away and regenerates once with the same messages; if that reply reopens too, its cut text is used. A stray `</think>` has no start marker, so the second block's text before the tag survives the cut. Only the main turn loop reruns; forks, subagents and background stages always truncate. Schema calls (`response_format`) aren't split, so they aren't checked. An invalid value is logged as a warning and read as `truncate`; it never stops startup. Applies on restart. |
+| `llm.profiles.<name>.dimensions` | integer | — | **Required for an embedding profile** (any profile with `kind: embedding`, not only one named `embedding`). Fixed vector dimension of the embedding model; the `memory_vec` table schema depends on it. Validated at startup. |
+| `llm.profiles.<name>.document_prefix` | string | `""` | String prepended to every text when embedding stored content (`kind="document"`). Recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding. Config revert is the only remediation. Trailing space is the operator's responsibility (match the model card). |
+| `llm.profiles.<name>.query_prefix` | string | `""` | String prepended to every text when embedding a retrieval query (`kind="query"`). See `document_prefix` for mismatch semantics. |
+
+`dimensions`, `document_prefix` and `query_prefix` are embedding-only. An embedding profile must set `kind: embedding`: without it the block is a chat profile, and startup fails if it is the default embedding profile by name.
+
+### Defaults and stages
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `llm.defaults.chat`, `llm.defaults.embedding` | string | `main`, `embedding` | The default profile for each kind: what main turns and any unmapped stage of that kind use. Each must name a defined profile of that kind. A kind may have no default (no `llm.profiles.embedding` and no `llm.defaults.embedding`: memory degrades to keyword search unless `llm.stages.embedding` maps the stage); a chat default is required, so `defaults.chat: foo` with no `llm.profiles.main` boots and sends main turns to `foo`. |
+| `llm.defaults.provider` | string | — | The provider a profile with no `provider:` uses. Must name a defined provider. Omitted, such a profile uses the provider named `main`. Any key under `defaults` other than `chat`, `embedding` and `provider` fails startup. |
 | `llm.stages.<stage>` | string | — | The profile `<stage>` sends to. See [Stages](#stages). |
-| `llm.embedding.*` | — | — | The remaining keys (`api_key`, which also takes `"${VAR}"`, `max_retries`, ...) match `llm.main`. `document_prefix` and `query_prefix` are embedding-only — they do not exist on `llm.main`. |
 
-**API key from the environment.** Quote the reference so YAML keeps it as text: `api_key: "${OPENAI_API_KEY}"`. The variable is read from the environment the daemon runs in, so a tracked `agent.yaml` holds no secret. This works for every profile, `main` included, and uses the same `${VAR}` expansion as MCP `headers`. A literal key still works; a value with no `${NAME}` (including one containing a bare `$`) is used as is. If the variable is unset, empty or contains a newline or NUL (often a trailing newline), startup fails with an error naming `llm.<profile>.api_key` and the variable; set it in the environment corvidae runs in and restart. The key's value is never logged or put in an error or a reply. To pick up a changed environment, restart. A reload doesn't rebuild clients, so a changed variable or a newly referenced one is picked up only on restart.
+**API key from the environment.** Quote the reference so YAML keeps it as text: `api_key: "${OPENAI_API_KEY}"`. The variable is read from the environment the daemon runs in, so a tracked `agent.yaml` holds no secret. This works for every provider, `main` included, and uses the same `${VAR}` expansion as MCP `headers`. A literal key still works; a value with no `${NAME}` (including one containing a bare `$`) is used as is. If the variable is unset, empty or contains a newline or NUL (often a trailing newline), startup fails with an error naming `llm.providers.<name>.api_key` and the variable; set it in the environment corvidae runs in and restart. The key's value is never logged or put in an error or a reply. To pick up a changed environment, restart. A reload doesn't rebuild clients, so a changed variable or a newly referenced one is picked up only on restart.
 
-**Remote profiles.** Every profile is an OpenAI-compatible client, so any of them can point at a hosted endpoint. Whatever that profile is sent then leaves the host. A profile receives the main turns if it is the default chat profile, and everything the stages mapped to it send (see [Stages](#stages)): the agent's rendered view (the system prompt, CONTEXT blocks, tool calls and results, up to the channel's budget; compaction's fallback sends the uncapped prefix), the importance prior, subagent turns, memory embedding, retrieval and retention. Conversation content is in all of these inputs. Every stage `llm.stages` doesn't map goes to its kind's default profile, so with no `llm.stages` entries the default chat profile gets all of the chat stages and the default embedding profile gets the embedding stage. See `threat-model.md` finding 12. Hosted endpoints give no latency guarantee, so set `llm.<profile>.timeout` generously.
+**Remote providers.** Every provider is an OpenAI-compatible endpoint, so any of them can be a hosted one. Whatever its profiles are sent then leaves the host, so a hosted provider's `base_url` is where conversation content goes. A profile receives the main turns if it is the default chat profile, and everything the stages mapped to it send (see [Stages](#stages)): the agent's rendered view (the system prompt, CONTEXT blocks, tool calls and results, up to the channel's budget; compaction's fallback sends the uncapped prefix), the importance prior, subagent turns, memory embedding, retrieval and retention. Conversation content is in all of these inputs. Every stage `llm.stages` doesn't map goes to its kind's default profile, so with no `llm.stages` entries the default chat profile gets all of the chat stages and the default embedding profile gets the embedding stage. See `threat-model.md` finding 12. Hosted endpoints give no latency guarantee, so set `llm.providers.<name>.timeout` generously.
 
-At startup `LLMPlugin` logs where every registered stage resolves, for example `llm stages resolved: appraisal→main, compaction→main, consolidation→main, critique→main, embedding→embedding, rubric→main, subagent→main`. A stage with no profile (its kind has no default and the map doesn't name it) shows `→(none)`.
+At startup `LLMPlugin` logs one INFO line per provider, for example `llm provider main: http://host:8080/v1, heads 2, profiles forks, main` (`heads unbounded` when unset), so you can see which profiles share a server. At startup `LLMPlugin` logs where every registered stage resolves, for example `llm stages resolved: appraisal→main, compaction→main, consolidation→main, critique→main, embedding→embedding, rubric→main, subagent→main`. A stage with no profile (its kind has no default and the map doesn't name it) shows `→(none)`.
 
 Retry behavior applies to transient status codes (429, 500, 502, 503, 504) and connection errors. The `Retry-After` header (429 responses) is honored when present; otherwise exponential backoff is used. Retries do not apply to client errors (4xx) other than 429.
 
@@ -135,7 +166,7 @@ Retry behavior applies to transient status codes (429, 500, 502, 503, 504) and c
 - A child's `null` deletes the inherited key. With `extends: main` and `extra_body: {reasoning_effort: null}`, the derived profile has no `reasoning_effort`.
 - Chains resolve root first. `kind` is an ordinary key, so a child inherits its base's.
 
-Every resolved profile needs `base_url` and `model` after the merge (a base block that exists only to be extended is not supported), and an embedding profile needs `dimensions`. Startup fails, and a reload is refused, on an unknown base, an `extends` cycle, an unknown `kind`, a missing `base_url`, `model` or `dimensions`, a non-mapping profile, an unknown or wrong-kind `defaults` entry, no default chat profile, a `defaults` or `stages` value that isn't a profile name (a list or mapping), or a `stages` entry naming a missing profile. Each message names the key (`llm.forks.extends names unknown profile 'mian'; defined profiles: embedding, forks, main`).
+`extends` applies to profiles only; a provider has no base to extend. Every resolved profile needs `model` and a provider with a `base_url` after the merge (a base block that exists only to be extended is not supported), and an embedding profile needs `dimensions`. Startup fails, and a reload is refused, on an unknown base, an `extends` cycle, an unknown `kind`, a missing `model`, `dimensions` or provider `base_url`, a non-mapping profile, an unknown or wrong-kind `defaults` entry, no default chat profile, a `defaults` or `stages` value that isn't a profile name (a list or mapping), or a `stages` entry naming a missing profile. Each message names the key (`llm.profiles.forks.extends names unknown profile 'mian'; defined profiles: embedding, forks, main`).
 
 A change to a base is a change to every profile that extends it, but only at the next restart.
 
@@ -158,14 +189,6 @@ The `consolidation`, `rubric`, `appraisal`, `critique` and `embedding` stages be
 An `llm.stages` entry naming a profile that doesn't exist, or one of the wrong kind (a chat stage mapped to an embedding profile), fails startup. An entry naming no registered stage logs a warning and is ignored: a disabled plugin's stage is expected there, and so is a typo, so check the warning. If a kind has no default profile and some stage of that kind is unmapped, startup logs a warning naming those stages, which then have no client and degrade.
 
 Keeping a fork's cached prefix is the operator's job. A stage mapped to another endpoint or model sends a cold prefill, and a profile that sets a template-visible key (such as `reasoning_effort`) differently from main's also misses. Derive the stage's profile from `main` with `extends` and set only sampler-side keys to keep it. #440 reports misses.
-
-### Migration from the single `main` block
-
-- An `llm.embedding` block needs `kind: embedding`. Without it startup fails with `llm.embedding is a chat profile but is the default embedding profile by name; add kind: embedding to it, or set llm.defaults.embedding`.
-- `agent.forks.reasoning_budget_tokens` is removed, and leaving it in config is a startup error that names the key. To keep a budget, put `reasoning_budget_tokens` in the `extra_body` of a profile, and map the fork stages to it under `llm.stages`. An unmapped fork carries a budget only if the default chat profile's `extra_body` sets one; the old default of 2048 is gone.
-- `llm.background` has no special meaning. It was accepted but nothing used it; map a stage to it under `llm.stages` if you want it used.
-- `llm.main` is no longer hot-swapped on reload; restart to apply a change.
-- The `main_client` and `background_client` properties and `LLMPlugin.embedding_dimensions` are removed; use `get_client(stage)` and `profile_config(stage)`.
 
 ---
 
@@ -355,7 +378,8 @@ The persona is allowed to tune its own gates by default — a deliberate operato
 | `critique.prompt.adversarial`, `critique.prompt.constrained`, `critique.prompt.predictive` | These are the critic's *system prompts*. An agent that can rewrite its own critic's instructions has no critic. |
 | `appraisal.stage2_prompt` | Same shape: the stage-2 appraisal system prompt. It is also where past claims are detected for the provenance check, so a prompt that never lists any switches the confabulation check off without touching `critique.provenance.enabled`. |
 | `gate.engagement.enforce`, `gate.send.enforce` | An injected message should not be able to silence the agent wholesale (enforce engagement with a threshold of 1.0) or un-silence it (turn the decide gate off). |
-| `outbound_cap.max_messages`, `outbound_cap.count_progress` | The runaway-send cap (#791). An agent that can raise or clear its own limit has no limit; an invalid override fails open, so it also lifts the cap. |
+| `outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`, `outbound_cap.window_seconds`, `outbound_cap.count_progress` | The runaway-send caps (#791, #821). An agent that can raise or clear its own limit has no limit; an invalid override fails open, so it also lifts the cap. |
+| `gate.send.quiet_origins` | A flood guardrail, not a security boundary (#928). A quiet turn's own payload (a webhook body, a PR title) can tell the agent to un-quiet its source on that channel, which brings back the reply-per-notification flood this key prevents (bounded by the decide gate's normal policy and by `outbound_cap` if configured); a message can also quiet a source the operator wants heard. Block it where either is unacceptable. |
 | `gate.engagement.threshold`, `gate.send.min_salience` | The same lever by other means: a threshold above 1.0 rejects or withholds everything the gate covers once enforcement is on; 0 turns the gate off. |
 
 These are recommendations, not hardcoded blocks: `set_settings` writes are channel-influenceable, which is exactly the persistence-of-influence shape the design polices elsewhere — but two-process discipline (agent tunes, operator audits via the outcome log) is the accepted trade-off, with the blocklist as the per-key valve.
@@ -364,8 +388,8 @@ The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) 
 
 - `appraisal.novelty.no_probe_default`, `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`, `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.stage2_prompt`, `appraisal.weights.commitment`, `appraisal.weights.disagreement`, `appraisal.weights.imperative`, `appraisal.weights.novelty`, `appraisal.weights.question`
 - `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.lens.novelty`, `critique.lens.retention`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.sample_below_rate`
-- `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.enforce`, `gate.send.min_salience`
-- `outbound_cap.count_progress`, `outbound_cap.max_messages`
+- `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.enforce`, `gate.send.min_salience`, `gate.send.quiet_origins`
+- `outbound_cap.count_progress`, `outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`, `outbound_cap.window_seconds`
 
 The fork instruction keys (`appraisal.stage2_fork_prompt`, `critique.fork_prompt.<lens>`) are deliberately not on that list: they are read from config only, so they need no `immutable_settings` entry.
 
@@ -419,6 +443,7 @@ Requires the cognition extra. `GatePlugin` (entry point `gates`) reads these per
 | `gate.send.min_salience` | `0.15` | A final from a non-user origin (reminder, heartbeat, task, critique) whose outbound salience is below this is withheld: stored as `unsent`, never sent. A reply to a user is never withheld by this key. |
 | `gate.send.allow_progress` | `true` | False suppresses the intermediate text sent alongside tool calls. |
 | `gate.send.allow_thinking` | `true` | False suppresses reasoning (`OutboundThinking`). |
+| `gate.send.quiet_origins` | `[]` | Origins whose turns send nothing to the human, e.g. `[webhook:github]`: their final, progress and thinking are withheld whatever their salience, and the agent's `speak_up` tool lets one turn's final through the normal policy (#790). `speak_up` is offered whenever the gates plugin is loaded, whatever this list holds, so a reload that adds an origin has its hatch at once (#925). Origins are matched exactly (`webhook:<endpoint>`, `heartbeat`, `inotify`, …). `user` and `reminder` are ignored with a warning; a value that is not a list of strings fails open with a warning. Runtime-tunable per channel through `set_settings` (#928): an override replaces this list on that channel (`[]` un-quiets every origin there) and outlasts a hot reload that edits this list, until `set_settings` clears it with `null` or the daemon restarts. On channels without an override, hot reload changes the veto on the next decision. Adding the key to `agent.immutable_settings` blocks new writes, `null` included, but does not clear an override already set: restart, or unlock, clear and lock again. See the recommended blocklist below. |
 
 ```yaml
 gate:
@@ -428,6 +453,7 @@ gate:
   send:
     enforce: true
     min_salience: 0.15
+    quiet_origins: []  # e.g. [webhook:github]
 ```
 
 ### `agent.context_compact` — removed
@@ -510,9 +536,10 @@ Each job:
 | `every` | one of `every`/`cron` | Interval: `30s`, `20m`, `6h`, `1d`, `7d`, `1h30m`, or a number of seconds. Mutually exclusive with `cron`. |
 | `cron` | one of `every`/`cron` | Cron expression: `M H DOM MON DOW`. Fire times are the next matching slots. Mutually exclusive with `every`. |
 | `at` | no | Anchor. `HH:MM`: the first fire is the next such time, then every `every` (or next cron slot). An ISO datetime: slots are that instant plus multiples of `every`. Without it, the first fire is one interval after the job is first synced (or the next cron slot). |
+| `weekday` | no | Day the weekly job is anchored to: a day name (`friday`) or its first three letters (`fri`). The first fire is the next occurrence of that weekday at the `at` time, and every `every` after it stays on that day — say "every Friday at 16:00" without timing a restart to a Friday. Needs `at` as `HH:MM`, needs `every` to be a whole number of weeks (`7d`, `14d`), and is refused with `cron`, which already names its days. |
 | `prompt` / `prompt_file` | one of them | The job's text. `prompt_file` is relative to the directory holding `agent.yaml`. |
 
-The next fire time is computed from the scheduled time, not the fire time, so jobs do not drift; a job more than one interval behind (after downtime) skips to the next slot rather than replaying. On reload, a changed `every`, `at`, or `timezone` reschedules a job from now; a changed `prompt`, `channel`, or `origin` keeps its schedule. A job removed from the list is disabled (`removed_from_config`), which survives restart. An invalid entry logs an ERROR and leaves its existing row as it was.
+The next fire time is computed from the scheduled time, not the fire time, so jobs do not drift; a job more than one interval behind (after downtime) skips to the next slot rather than replaying. On reload, a changed `every`, `at`, `weekday`, or `timezone` reschedules a job from now; a changed `prompt`, `channel`, or `origin` keeps its schedule. A job removed from the list is disabled (`removed_from_config`), which survives restart. An invalid entry logs an ERROR and leaves its existing row as it was.
 
 ```yaml
 scheduler:
@@ -587,11 +614,15 @@ On 2026-11-12 the agent sent about 600 Signal messages in one night with no huma
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `outbound_cap.max_messages` | integer | *unset — no cap* | Messages the agent may send on a channel between admitted human messages. A positive integer at least 1; a bool, a float (even a whole one), a string, `0` or a negative fails startup with a `Config error` naming the key, the value and the range, and a reload carrying one is rejected with an ERROR that keeps the previous limit. Resolved per decision through `resolve_tunable`, so a per-channel `set_settings` override wins and a reloaded value applies on the next send. |
+| `outbound_cap.max_messages_per_window` | integer | *unset — no window limit* | The second limit (#821): messages the agent may send on a channel within `outbound_cap.window_seconds`, sliding, on the kernel clock. Independent of `max_messages`, and counted over the same emissions. A human message does **not** reset it. Same validation and same `resolve_tunable` resolution as `max_messages`; a value without `window_seconds` fails startup with a `Config error` naming both keys rather than having a window invented for it. |
+| `outbound_cap.window_seconds` | integer | *unset* | The window `max_messages_per_window` counts in, as a positive whole number of seconds. Ignored when no window limit is set. |
 | `outbound_cap.count_progress` | boolean | `false` | Whether `progress` emissions count against the limit. With `false` only `final` emissions count, so a tool-using reply that sends "let me look that up" first is not penalised. `thinking` and `error` emissions never count. When the cap is reached, every emission is withheld, progress included. |
 
 A capped channel does not lose history. A withheld `final` is stored as `UNSENT`, is not sent, and leaves a not-sent marker in the window, so the agent knows it was held. The counter resets on `on_message_admitted`, so the reply to a human message is always within the cap, and a coalesced burst of messages resets it once. Every withheld emission is logged: the first in a run at `WARNING` with the channel, emission, trace id, the running count and the key that set the limit; later ones at `INFO`; and the reset logs a `WARNING` summary saying how many were withheld.
 
 Two things are never capped: a channel with no limit configured, and a channel no transport owns (for example `internal:heartbeat`), because that is the agent talking to itself. Scheduler reminders and task results notify the channel that originated them, so on a transport channel their finals are capped like any other message. Only emissions the combined gate verdict lets through count: an emission another gate vetoes (such as `NO_REPLY`) spends no budget. A non-mapping `outbound_cap:` block (`outbound_cap: 5`) fails startup with a `Config error`.
+
+The window limit exists because the between-human counter does not bound a channel where a human keeps talking, or one whose counter keeps being reset: a turn that sends several messages per human message is unbounded in time under `max_messages` alone. With `max_messages_per_window` set, a channel can send at most N messages in any window of `window_seconds` regardless of who is talking. Note the PRD trade-off (output gate item 4): this limit **can** withhold a direct reply to a human — someone who sends N+1 messages inside the window can have an answer held until the window slides — which is why it ships unset and off. When the window slides open, one `WARNING` says how many messages it withheld; each withholding line names which limit fired, and a message held while both are reached names both.
 
 The agent can raise or clear its own cap with `set_settings` unless the keys are blocked; see `agent.immutable_settings` and the blocklist above. Known gaps, accepted for the MVP: sends that bypass the output gate (`send_signal_attachment`, `signal_react`, tool-status events, the restart notice) are not capped, and the cap bounds messages, not turns ([#793](https://github.com/schuyler/corvidae/issues/793)).
 
@@ -636,7 +667,7 @@ The built-in tool keys are read by the plugin that owns the tool: `shell_timeout
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `tools.max_result_chars` | integer | `100000` | Longest tool result kept whole. A longer one reaches the model as its first `max_result_chars` characters behind the kernel's cut line (`[metadata: cut to the first N of M characters; the full text is in <path>]`), and its full text is written to a spill file under the `daemon.notification_spill_*` settings, where the channel has a tool that reads spill files. A subagent's results get the same words as a plain-text line. A background task's result that answers no tool call is cut and spilled the same way, by `TaskPlugin`. Read by `ToolCollectionPlugin`. The legacy key `agent.max_tool_result_chars` is accepted but deprecated; use `tools.max_result_chars` instead. |
+| `tools.max_result_chars` | integer | `100000` | Longest tool result kept whole. A longer one reaches the model as its first `max_result_chars` characters behind the kernel's cut line (`[metadata: cut to the first N of M characters; the full text is in <path>]`), and its full text is written to a spill file under the `daemon.notification_spill_*` settings, where the channel has a tool that reads spill files. A subagent's results get the same words as a plain-text line. A background task's result that answers no tool call is cut and spilled the same way, by `TaskPlugin`. The cut line also names the `read_file` page that fits the channel's budget (`; read it back with read_file length=<P>`, never above this cap), so the model pages through a spill instead of asking for it whole. Read by `ToolCollectionPlugin`. The legacy key `agent.max_tool_result_chars` is accepted but deprecated; use `tools.max_result_chars` instead. |
 | `tools.max_agent_depth` | integer | `2` | How deep background agents may nest. A main turn runs at depth 0; a `subagent` or `fork` it launches runs at depth 1, and a spawn from that loop at depth 2; a spawn from a depth-2 loop is refused with `Error: nested agent depth N reached (tools.max_agent_depth); do this work in the current task instead.` instead of enqueuing a task. Must be an integer of at least 1 (booleans, floats, strings, `0` and null are rejected; a bad value fails startup and refuses a reload, naming the key and the value). Bounds depth only, not fan-out: depth 2 with ten children per level is still many tasks. Read by `ToolCollectionPlugin`. Restart to apply. |
 | `tools.read_file_window_fraction` | number | `0.08` | The fraction of the channel's `max_context_tokens` one `read_file` page may take. A page is first estimated at `min(tools.max_result_chars, max(2000, fraction x max_context_tokens x 3.0))` characters, so it never exceeds `tools.max_result_chars`, and is then counted: while the page costs more than `fraction x max_context_tokens` tokens it is re-read smaller, up to three reads, so the share holds whatever the file contains (dense text such as base64, escapes, CJK or emoji tokenizes far below the 3.0-characters-per-token the estimate assumes). A call with no channel, or with no channel registry loaded, uses `tools.max_result_chars`. Must be a number with `0 < value <= 1`; any other value is a config error at startup and refuses a reload. Read by `ToolCollectionPlugin`. |
 | `tools.shell_timeout` | integer | `30` | Seconds before a `shell` command is killed. |
@@ -714,14 +745,14 @@ Pass the ids explicitly rather than using the `range` form: `message_log` ids ar
 
 The transport needs the Discord SDK: add `--extra discord` to your `uv sync` line. A `discord:` block without it fails at startup with a message saying so; with no block, the SDK is never loaded.
 
-The `discord` section is optional. If absent, `DiscordPlugin` loads but stays inert: no client, no tasks, nothing logged above `DEBUG`. If present, it must be well-formed — no token (in the block or the environment), an `allow` that is not a list, a `message_chunk_size` that is not an integer from 100 to 2000, a `require_mention` or `allow_bots` that is not a boolean, a `channels` entry keyed on anything but a numeric channel id, or an unknown key inside one, raises at startup naming the offending field and the remedy.
+The `discord` section is optional. If absent, `DiscordPlugin` loads but stays inert: no client, no tasks, nothing logged above `DEBUG`. If present, it must be well-formed — no token (in the block or the environment), an `allow` that is neither a list nor an alias→id map, an `allow` entry that is not a bare user id, an `allow` map whose two aliases name one id, a `message_chunk_size` that is not an integer from 100 to 2000, a `require_mention` or `allow_bots` that is not a boolean, a `channels` entry keyed on anything but a numeric channel id, or an unknown key inside one, raises at startup naming the offending field and the remedy.
 
 corvidae logs in as a Discord bot account. Creating the application, getting the token, and inviting the bot are covered in [discord-ops.md](discord-ops.md). In DMs the bot answers every message from an allowed user; in servers and threads it answers only messages that @-mention it, unless `discord.require_mention` is `false`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `discord.token` | string | `$DISCORD_TOKEN` | The bot token. If the key is absent, null, or empty, the `DISCORD_TOKEN` environment variable is used; if neither is set, startup fails. |
-| `discord.allow` | list of user ids | `[]` | Discord user ids permitted to drive the agent. Numeric ids, written as YAML ints or quoted strings; they are compared as strings. Default-deny: an empty or absent list refuses everyone, silently — no reply and no typing indicator. An explicit `allow: null` is an error, not an empty list. |
+| `discord.allow` | list of user ids, or a mapping of alias to user id | `[]` | Discord user ids permitted to drive the agent. Either a list — `allow: [123456789012345678]` — or a map whose keys are labels for humans and whose values are the ids: `allow: {schuyler: 123456789012345678}`. The alias is never used for matching and never reaches the model. In both forms an entry must be the bare id — digits, no `discord:` prefix, no leading zeros, quoted or as a YAML int — and anything else fails startup naming the entry (`allow.2` for a list index, `allow.schuyler` for an alias) and the rejected value, because a typo here silently denies that person: default-deny means an empty or absent list refuses everyone with no reply and no typing indicator, and a bad entry is the same failure one shape over. Two aliases naming one id also fail startup, naming both. An explicit `allow: null` is an error, not an empty list. |
 | `discord.message_chunk_size` | integer | `2000` | Maximum UTF-8 bytes per outbound Discord message, 100 to 2000 inclusive. Longer replies are split, keeping code fences intact, and sent as several messages; nothing is truncated. An explicit `null` is rejected (unlike a null `token`, which falls back to the environment). The limit is bytes, while Discord's 2000 is characters, so text with multi-byte characters splits earlier than strictly needed. |
 | `discord.allow_bots` | boolean | `false` | Whether messages from other bot accounts reach the agent. With `false` (the default) every message authored by a bot is dropped before the allowlist is consulted, so two agents cannot hear each other. With `true` a bot-authored message is treated like any other: it must still come from an id in `discord.allow`, and the bot still never answers itself, so opening this admits one named bot at a time, never every bot in the server. Keep the allowlist short: two bots that both answer every message will answer each other until something stops them, and `require_mention` is what makes stopping possible. Read at startup only. |
 | `discord.channels` | mapping | `{}` | Per-channel overrides, keyed by the Discord channel id — the number alone, quoted or not, as it appears after `discord:` in the agent's logs — digits, no prefix, no leading zeros. Each entry is a mapping whose only key is `require_mention`; listing one id twice (quoted and as a number) fails startup. A thread uses its parent channel's entry; a thread whose parent has no entry stays on `discord.require_mention`. A key that is not a bare number (`discord:123…`, `#general`) fails startup rather than matching nothing, because a silently ignored override is a channel left conversational. An empty section means no overrides. Read at startup only. |
@@ -990,7 +1021,11 @@ Discord channels are keyed on numeric ids: `discord:<channel_id>` for a server c
 
 Zulip channels are keyed the same way: `zulip:<stream_id>` for a channel (every topic in it shares the entry, because a topic is a name people can rename), `zulip:dm:<user_id>` for a 1:1 DM, and `zulip:dm:<id>,<id>` for a group DM, with the ids ascending and the bot's own left out.
 
-Signal channels accept either form of key. `signal:<aci>` is the real channel id and matches directly. `signal:+15551234567` is an alias: its overrides are copied onto the ACI-keyed channel the first time that person writes, once the number has resolved. The alias entry itself never becomes a live channel, and an alias naming someone absent from `signal.allow` is simply inert — an unauthorized sender never gets a turn for the overrides to apply to.
+Signal channels accept either form of key. `signal:<aci>` is the real channel id and matches directly. `signal:+15551234567` is an alias: its overrides are copied onto the ACI-keyed channel the first time that person writes, once the number has resolved. The alias key is also registered as a channel of its own (every exact key is, before `on_start`), and it is a delivery route in its own right — a send to it goes to that number (per `signal-cli(1)`'s RECIPIENT handling; not exercised against a live daemon) — but it holds its own history, separate from the person's ACI channel, which is where their inbound messages and the agent's replies to them land. So an override on the alias reaches both channels, while a conversation lives on the ACI one. An alias naming someone absent from `signal.allow` gets no override copy — it is never resolved, so nothing propagates and no unauthorized sender gets a turn for the overrides to apply to — but the channel itself is not disabled: it is still registered before `on_start` with its own `channels:` overrides, and still a delivery route, so a send to it goes to that number. Only the copy onto the ACI channel is inert; the overrides themselves apply to a turn that runs on that channel, not to a plain delivery (see the limit below). One limit on all of this: a plain delivery to a
+channel id consults no `ChannelConfig`, so the overrides bite only on a turn
+that runs there, and an alias nobody writes from never runs one (on hot reload
+`tools.disabled` is the only key re-applied to a channel that already
+exists).
 
 ---
 
@@ -1128,7 +1163,7 @@ again.
 | `webhook.*` | `WebhookPlugin` reads its block in `on_init` and binds in `on_start`; it has no reload hook, so a change takes a restart. |
 | `web.host`, `web.port`, `web.allowed_origins`, adding or removing the `web` block | The listener is bound at startup. A reload logs `restart to apply` and keeps serving with the old values. |
 | Existing exact entries in `channels:` | Channels already registered retain their original `ChannelConfig` until restart, except `tools.disabled` (above). Transport-wide entries are live (above). |
-| `llm.*` (every profile, including `llm.main`, plus `llm.defaults` and `llm.stages`) | Read at startup. A reload that changes any of it logs a restart-only warning per changed key and `llm config changed; LLM profiles, llm.stages and llm.defaults apply on restart` and keeps the running clients. A malformed `llm:` section still refuses the whole reload. A reload is not checked against the registered stages, so a `llm.stages` entry of the wrong kind passes the reload and fails the next startup. |
+| `llm.*` (every provider and profile, including `llm.providers.main`, plus `llm.defaults` and `llm.stages`) | Read at startup. A reload that changes any of it logs a restart-only warning per changed key and `llm config changed; LLM providers, profiles, llm.stages and llm.defaults apply on restart` and keeps the running clients. A malformed `llm:` section still refuses the whole reload. A reload is not checked against the registered stages, so a `llm.stages` entry of the wrong kind passes the reload and fails the next startup. |
 | `memory.*` (including `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after`, `memory.consolidate_after_tokens`, `memory.entry_target_tokens` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts, and the token threshold is read once then. |
 | `heartbeat.after` | `HeartbeatPlugin` reads it at init and registers its idle watch at start. Putting the heartbeat to sleep or waking it takes a restart. |
 | `timepiece.*` | `TimepiecePlugin` reads its section in `on_init` and has no reload hook. |
@@ -1140,7 +1175,7 @@ again.
 At startup (not reload), a missing or malformed config file, or a rejected
 value in the `agent` or `channels` sections (e.g. a `channels.<id>.tools`
 block that is not `{disabled: [names]}`, or an unknown key such as
-`channels.<id>.max_turn`), in the `llm` section (profiles, `extends`, `llm.defaults`, `llm.stages`), or in `tools.call_timeout` / `tools.timeouts` / `tools.read_file_window_fraction`, prints
+`channels.<id>.max_turn`), in the `llm` section (providers, profiles, `extends`, `llm.defaults`, `llm.stages`), or in `tools.call_timeout` / `tools.timeouts` / `tools.read_file_window_fraction`, prints
 `Config error: <detail> — check <path>` to stderr and exits non-zero. The
 detail names the key, the rejected value and what is accepted. The file is
 read as UTF-8 whatever the locale: one that isn't valid UTF-8 says so, with
@@ -1151,7 +1186,7 @@ nested too deeply to load says to reduce the nesting.
 - **Not valid UTF-8, or YAML nested too deeply**: logged at `ERROR` naming the file, the cause (with the byte offset for UTF-8) and the remedy; reload is skipped and the running config stays in force.
 - **Rejected value in `agent:`, `daemon:` or `channels:`** (e.g. a malformed `channels.<id>.tools`): logged at `ERROR` naming the file. For `channels:` the message also names the key and the value and says "reload skipped"; for `agent:` and other `daemon:` keys the key is in the logged traceback (`daemon.shutdown_timeout` and `daemon.exit_timeout` are named in the message; see the next item). The reload is skipped whole: no section is applied and no plugin receives `on_config_reload`, so a typo in one `channels:` entry cannot change `agent:` values.
 - **Rejected `tools.call_timeout`, `tools.timeouts`, `tools.read_file_window_fraction`, `daemon.shutdown_timeout` or `daemon.exit_timeout`**: logged at `ERROR` naming the key and the value, with "reload skipped"; the running config is unchanged.
-- **Malformed `llm:` section** (an unknown `extends` base, an `extends` cycle, an unknown `kind`, an embedding profile with no `dimensions`, no default chat profile, an `llm.stages` entry naming a missing profile, and so on): logged at `ERROR` naming the key, with "reload skipped"; the running config is unchanged.
+- **Malformed `llm:` section** (a key in the wrong block, an unknown provider, a bad `heads`, an unknown `extends` base, an `extends` cycle, an unknown `kind`, an embedding profile with no `dimensions`, no default chat profile, an `llm.stages` entry naming a missing profile, and so on): logged at `ERROR` naming the key, with "reload skipped"; the running config is unchanged.
 - **Config file deleted**: logged at `WARNING`; polling continues. The file may reappear.
 - **Per-plugin failure in `on_config_reload`**: logged at `ERROR`; other plugins still receive the reload.
 
@@ -1178,11 +1213,17 @@ When `logging.file` is set in YAML, logs go to that rotating file regardless of 
 
 Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv sync` line). Without it the `notify_other_channel` and `list_channels` tools do not exist.
 
-`CrossChannelSendPlugin` lets any turn send an instruction to another channel context. The message is delivered as a system-role notification via `on_notify` (the same mechanism the scheduler uses for reminders); the target mints its own trace and gets a fresh turn budget. Loop prevention is a `hop_count` in the notification annotations, refused when it exceeds `max_hops`. A call whose target is the current channel is refused, with a warning in the log (a self-send would queue a duplicate turn).
+`CrossChannelSendPlugin` lets any turn send an instruction to another channel context. The message is delivered as a system-role notification via `on_notify` (the same mechanism the scheduler uses for reminders); the target mints its own trace and gets a fresh turn budget. Loop prevention is a `hop_count` in the notification annotations, refused when it exceeds `max_hops`. A call whose target is the current channel is refused, with a warning in the log (a self-send would queue a duplicate turn). The target need not be live: any well-formed `transport:scope` id is resolved the way reminders resolve theirs (live registry, then the owning transport, then a bare channel), so a channel nobody has spoken in since the restart can be reached. A malformed id is refused naming the expected form, and an id whose transport can't apply its config yet is refused with a warning in the log; retry once the transport is ready.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `cross_channel_send.max_hops` | integer | `3` | Maximum send hops before a `notify_other_channel` call is refused. A send from a context whose attribution carries `hop_count` n is refused when n + 1 exceeds this limit. Must be an integer ≥ 1 (bools and floats are rejected); a non-integer value fails startup naming the key and the value. A missing block keeps the default silently. |
+
+---
+
+## `goals_notify` — goal state changes to the origin channel
+
+Requires the goals-notify extra (`--extra goals-notify` on your `uv sync` line), which brings in cross-channel-send; the goals plugin (cognition extra) supplies the events. There are no keys. Each goal status change or retirement made from a channel other than the one that created the goal is sent there as a `notify_other_channel` note, so `cross_channel_send.max_hops` applies. Seeded goals and changes made on the goal's own channel are silent, and messages can arrive out of order (each names the old and new status). To switch it off with the extra installed, list `goals_notify` under `plugins.disabled`. See [design.md](design.md#goals-notifications-goals-notify-package).
 
 ---
 
@@ -1209,7 +1250,7 @@ webhook_notify:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `webhook_notify.max_payload_chars` | integer | `8000` | Longest compact-JSON payload passed inline, in characters. A longer one is cut, and the header says it was cut to the first N of M characters. Where a channel's tools can read spill files, the full text goes to a file the header names (see `daemon.notification_spill_*`). Must be an integer ≥ 1. |
+| `webhook_notify.max_payload_chars` | integer | `8000` | Longest compact-JSON payload passed inline, in characters. A longer one is cut, and the header says it was cut to the first N of M characters, and names the `read_file` page that fits the reading channel's budget. Where a channel's tools can read spill files, the full text goes to a file the header names (see `daemon.notification_spill_*`). Must be an integer ≥ 1. |
 | `webhook_notify.defaults.<key>` | see the four keys below | the values above | The throttle every endpoint inherits unless it overrides it. |
 | `webhook_notify.defaults.batch_seconds` | number | `60` | Length of an endpoint's digest window, in seconds. `0` turns batching off and delivers on arrival. Must be ≥ 0. |
 | `webhook_notify.defaults.max_notifications` | integer | `10` | Flushes allowed per endpoint per `per_seconds`. A flush over the cap is held, not dropped. Must be an integer ≥ 1. |
@@ -1259,7 +1300,7 @@ A malformed block fails startup naming the key, the value and the accepted shape
 
 ## `context_panel` — live context window view
 
-Requires the context-panel extra (`--extra context-panel` on your `uv sync` line) and the `web` block. Adds a "Context" section at the bottom of the chat page's sidebar, below the conversation list, with one tab per channel whose context window is loaded, on any transport. A tab shows the channel's readable name when the transport has one (the id otherwise), its message count and its token estimate against the budget. Selecting a tab shows that channel's window in the main pane in place of the chat, read-only, and scrolls to the end; selecting a conversation returns to the chat. The window appears as the model sees it: system prompt, tool schemas and stored rows with their kinds, tool names and local-time stamps, followed live for the latest turn. Only user and assistant messages (and the live progress text) start expanded, in different colors; everything else starts collapsed. Stamps come from the session database, so a row not yet persisted has none. The tab list loads with the page and again when you press the section's `refresh` button; a channel whose window loads later has no tab until then. The panel shows the whole window to anyone holding the console token; see the threat model's finding 9.
+Requires the context-panel extra (`--extra context-panel` on your `uv sync` line) and the `web` block. Adds a "Context" section at the bottom of the chat page's sidebar, below the conversation list, with one tab per channel whose context window is loaded, on any transport. A tab shows the channel's readable name when the transport has one (the id otherwise), its message count and its token estimate against the budget. Selecting a tab shows that channel's window in the main pane in place of the chat, read-only, and scrolls to the end; selecting a conversation returns to the chat. The window appears as the model sees it: system prompt, tool schemas and stored rows with their kinds, tool names and local-time stamps, followed live for the latest turn. Only user and assistant messages (and the live progress text) start expanded, in different colors; everything else starts collapsed. Stamps come from the session database, so a row not yet persisted has none. The tab list loads with the page and again when you press the section's `refresh` button; a channel whose window loads later has no tab until then. The `rendered` button fetches the same window as the request body `build_prompt()` produces, which is what the model actually receives: provenance headers and fences, system rows re-roled, a tool block deferred to its last result, a placeholder for a call still in flight. It is fetched only when pressed, and polling pauses while it is shown, because that body is not append-mostly — a tool block moves when its result arrives — so it cannot be tailed with the window's cursor. Pressing `rows` returns to the stored rows. The panel shows the whole window to anyone holding the console token; see the threat model's finding 9.
 
 ```yaml
 context_panel: {}
@@ -1396,9 +1437,12 @@ Put this in `~/corvidae-data/agent.yaml`:
 
 ```yaml
 llm:
-  main:
-    base_url: http://host.docker.internal:8080/v1   # your model server, on the Docker host
-    model: llama3
+  providers:
+    main:
+      base_url: http://host.docker.internal:8080/v1   # your model server, on the Docker host
+  profiles:
+    main:
+      model: llama3
 agent:
   system_prompt: "You are a helpful assistant."
 web:
@@ -1423,7 +1467,7 @@ Open that URL. Why the config looks like this: inside a container the page has t
 
 **The model server.** On a Linux host, `host.docker.internal` is the Docker host's bridge address, so a model server listening only on `127.0.0.1` can't be reached through it, and every turn fails to connect. Either make the server listen on an address the container can reach (mind your firewall), or run the container with `--network host` in place of the `-p` and `--add-host` lines, so it shares the host's loopback. In that case use `http://127.0.0.1:8080/v1` as the `base_url` and write the `web:` block as just `web: {}`: the default bind is loopback, and the wildcard and `allowed_origins` above would expose the page on every host address.
 
-**The batteries are on.** Because the image carries every extra, memory, appraisal, critique and goals run by default. Memory consolidation, appraisal and the critique forks make model calls of their own, which matters on a single-slot local server. Without an `llm.embedding` profile memory still works but stores records without vectors, which is what the startup warning about a missing embedding profile means ([cognition.md](cognition.md)). List plugins under `plugins.disabled`, as `agent.minimal.yaml.example` does, to turn any of them off. The `restart` tool ends the daemon with SIGTERM, which is why the run command has `--restart unless-stopped`. Two other defaults are worth knowing: `timepiece` stamps each turn in the container's clock, which is UTC unless you add `-e TZ=…` or set `timepiece.timezone`, and `silence` lets the agent answer `NO_REPLY` and send nothing.
+**The batteries are on.** Because the image carries every extra, memory, appraisal, critique and goals run by default. Memory consolidation, appraisal and the critique forks make model calls of their own, which matters on a single-slot local server. Without an `llm.profiles.embedding` profile memory still works but stores records without vectors, which is what the startup warning about a missing embedding profile means ([cognition.md](cognition.md)). List plugins under `plugins.disabled`, as `agent.minimal.yaml.example` does, to turn any of them off. The `restart` tool ends the daemon with SIGTERM, which is why the run command has `--restart unless-stopped`. `goals_notify` is on too: a goal status change or retirement made from a channel other than the goal's own wakes that channel for a turn, another model call. Two other defaults are worth knowing: `timepiece` stamps each turn in the container's clock, which is UTC unless you add `-e TZ=…` or set `timepiece.timezone`, and `silence` lets the agent answer `NO_REPLY` and send nothing.
 
 **Discord.** The bot only connects out, so there is nothing to publish. Add a `discord:` block with your user id under `allow` (the default refuses everyone), and pass the bot token as `-e DISCORD_TOKEN=…` rather than writing it into `agent.yaml`. A new `discord:` block needs only `docker restart corvidae`, but `docker restart` keeps the old environment, so to add or change `DISCORD_TOKEN`, `docker rm -f corvidae` and run it again. Creating the application and inviting the bot are in [discord-ops.md](discord-ops.md). Two `voice will NOT be supported` warnings at startup are expected.
 

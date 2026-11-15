@@ -429,11 +429,65 @@ class TestConfig:
         finally:
             await h.plugin.on_stop()
 
-    @pytest.mark.parametrize("bad", ["123", 123, {"a": 1}])
-    async def test_allow_not_a_list_raises(self, bad):
-        """`allow` must be a list; the error names the field."""
-        with pytest.raises(ValueError, match="allow"):
+    @pytest.mark.parametrize("bad", ["123", 123])
+    async def test_allow_neither_list_nor_map_raises(self, bad):
+        """`allow` must be a list or an alias->id map; the error names both."""
+        with pytest.raises(ValueError, match="allow") as excinfo:
             await _start_plugin(discord_overrides={"allow": bad}, wait_connect=False)
+        assert "list of user ids" in str(excinfo.value)
+        assert "mapping of alias to user id" in str(excinfo.value)
+
+    async def test_allow_map_form_is_accepted(self):
+        """`allow: {alias: id}` admits the map's values, and only those (#702)."""
+        h = await _start_plugin(
+            discord_overrides={"allow": {"schuyler": AUTH_ID, "yoz": str(OTHER_ID)}}
+        )
+        try:
+            ch = h.registry.get_or_create("discord", f"dm:{AUTH_ID}")
+            assert await _drive_gate(h.pm, channel=ch, sender=str(AUTH_ID), text="x") is True
+            assert await _drive_gate(h.pm, channel=ch, sender=str(OTHER_ID), text="x") is True
+            assert await _drive_gate(h.pm, channel=ch, sender="1", text="x") is False
+        finally:
+            await h.plugin.on_stop()
+
+    @pytest.mark.parametrize(
+        "bad", ["discord:408709225498542081", "0408709225498542081", 408709225498542081.0]
+    )
+    async def test_allow_map_value_that_is_not_an_id_names_its_alias(self, bad):
+        """A bad value names the alias the editor typed, not just the id (#702)."""
+        with pytest.raises(ValueError, match="allow.schuyler") as excinfo:
+            await _start_plugin(
+                discord_overrides={"allow": {"schuyler": bad}}, wait_connect=False
+            )
+        message = str(excinfo.value)
+        assert "no leading zeros and no prefix" in message
+        # The rejected value is in the message: a YAML float is only obviously
+        # wrong when it is printed back.
+        assert repr(bad) in message
+
+    async def test_allow_list_entry_that_is_not_an_id_names_its_index(self):
+        """A list entry gets the map value's rule, and names the entry (#702)."""
+        with pytest.raises(ValueError, match="allow.1") as excinfo:
+            await _start_plugin(
+                discord_overrides={"allow": [AUTH_ID, "discord:408709225498542081"]},
+                wait_connect=False,
+            )
+        message = str(excinfo.value)
+        assert "discord:408709225498542081" in message
+        assert "no leading zeros and no prefix" in message
+
+    async def test_two_aliases_naming_one_id_is_refused(self):
+        """One person, two aliases: the allowlist would be ambiguous to read, and
+        removing one line would silently keep them admitted (#702)."""
+        with pytest.raises(ValueError, match="allow.schuyler") as excinfo:
+            await _start_plugin(
+                discord_overrides={
+                    "allow": {"schuyler": AUTH_ID, "schuyler-alt": AUTH_ID}
+                },
+                wait_connect=False,
+            )
+        message = str(excinfo.value)
+        assert "allow.schuyler-alt" in message and "one alias" in message
 
     @pytest.mark.parametrize("bad", ["false", 0, None])
     async def test_require_mention_not_a_bool_raises(self, bad):
@@ -455,7 +509,10 @@ class TestConfig:
         await h.plugin.on_stop()
 
     async def test_int_allow_entries_are_normalized_to_str(self):
-        """YAML parses ids as ints; the gate compares them to str(author.id)."""
+        """YAML parses ids as ints; the gate compares them to str(author.id).
+
+        It also guards the #702 list validation: a list of valid ids must still start.
+        """
         h = await _start_plugin(discord_overrides={"allow": [AUTH_ID, str(OTHER_ID)]})
         try:
             ch = h.registry.get_or_create("discord", f"dm:{AUTH_ID}")

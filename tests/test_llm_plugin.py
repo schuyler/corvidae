@@ -134,7 +134,7 @@ def test_llm_plugin_create_client_rejects_non_bool_raw_reasoning():
     assert LLMPlugin()._create_client({**cfg, "raw_reasoning": True}).raw_reasoning is True
     with pytest.raises(ValueError) as exc:
         LLMPlugin()._create_client({**cfg, "raw_reasoning": "false"}, profile="background")
-    assert "llm.background.raw_reasoning" in str(exc.value)
+    assert "llm.profiles.background.raw_reasoning" in str(exc.value)
     assert "true or false" in str(exc.value)
     assert "'false'" in str(exc.value)
 
@@ -162,7 +162,7 @@ def test_llm_plugin_create_client_invalid_reasoning_reopened_warns_and_falls_bac
         client = LLMPlugin()._create_client({**cfg, "reasoning_reopened": "sometimes"}, profile="background")
     assert client.reasoning_reopened == "truncate"
     text = " ".join(r.getMessage() for r in caplog.records if r.name == "corvidae.llm_plugin")
-    for needle in ("llm.background.reasoning_reopened", "'sometimes'", "truncate", "rerun"):
+    for needle in ("llm.profiles.background.reasoning_reopened", "'sometimes'", "truncate", "rerun"):
         assert needle in text
 
     # A non-string value also falls back without raising.
@@ -182,10 +182,8 @@ async def test_llm_plugin_on_start_creates_and_starts_main_client():
     plugin = LLMPlugin()
     config = {
         "llm": {
-            "main": {
-                "base_url": "http://localhost:8080",
-                "model": "test-model",
-            }
+            "providers": {"main": {"base_url": "http://localhost:8080"}},
+            "profiles": {"main": {"model": "test-model"}},
         }
     }
     await plugin.on_init(pm=MagicMock(), config=config)
@@ -198,7 +196,11 @@ async def test_llm_plugin_on_start_creates_and_starts_main_client():
 
     # The client is built from the resolved profile, which carries its kind.
     mock_create.assert_called_once_with(
-        {**config["llm"]["main"], "kind": "chat"}, profile="main"
+        {
+            "base_url": "http://localhost:8080", "model": "test-model",
+            "provider": "main", "kind": "chat",
+        },
+        profile="main",
     )
     mock_client.start.assert_awaited_once()
     assert plugin._clients["main"] is mock_client
@@ -354,6 +356,28 @@ def _profile_cfg(api_key: str | None) -> dict:
     return cfg
 
 
+# Keys that belong to a provider rather than a profile.
+_PROVIDER_KEYS = ("base_url", "api_key")
+
+
+def _as_llm(profiles: dict[str, dict]) -> dict:
+    """An llm: section from flat per-profile configs: each profile gets a
+    provider of the same name holding its base_url and api_key."""
+    return {
+        "providers": {
+            name: {k: v for k, v in cfg.items() if k in _PROVIDER_KEYS}
+            for name, cfg in profiles.items()
+        },
+        "profiles": {
+            name: {
+                **{k: v for k, v in cfg.items() if k not in _PROVIDER_KEYS},
+                "provider": name,
+            }
+            for name, cfg in profiles.items()
+        },
+    }
+
+
 async def _start_plugin(llm: dict):
     """Run on_start for an LLMPlugin with the given llm: config."""
     from corvidae.llm_plugin import LLMPlugin
@@ -368,11 +392,11 @@ class TestApiKeyFromEnvironment:
     async def test_env_ref_resolves_to_bearer_token(self, profile, monkeypatch):
         """K1: ${VAR} in api_key is sent as the Bearer token, for every profile."""
         monkeypatch.setenv(_KEY_VAR, _SECRET)
-        llm = {"main": _profile_cfg("sk-main")}
-        llm[profile] = _profile_cfg("${" + _KEY_VAR + "}")
+        flat = {"main": _profile_cfg("sk-main")}
+        flat[profile] = _profile_cfg("${" + _KEY_VAR + "}")
         if profile == "embedding":
-            llm[profile]["kind"] = "embedding"
-        plugin = await _start_plugin(llm)
+            flat[profile]["kind"] = "embedding"
+        plugin = await _start_plugin(_as_llm(flat))
         try:
             client = plugin._clients[profile]
             assert client.api_key == _SECRET
@@ -391,10 +415,10 @@ class TestApiKeyFromEnvironment:
             monkeypatch.delenv(_KEY_VAR, raising=False)
         else:
             monkeypatch.setenv(_KEY_VAR, value)
-        llm = {
+        llm = _as_llm({
             "main": _profile_cfg("sk-main"),
             "background": _profile_cfg("${" + _KEY_VAR + "}"),
-        }
+        })
         from corvidae.llm_plugin import LLMPlugin
 
         # Build the plugin here (not via _start_plugin) so teardown can stop
@@ -407,7 +431,7 @@ class TestApiKeyFromEnvironment:
         finally:
             await plugin.on_stop()
         msg = str(excinfo.value)
-        assert "llm.background.api_key" in msg
+        assert "llm.providers.background.api_key" in msg
         assert _KEY_VAR in msg
         if value == "k\n":
             assert "newline" in msg
@@ -426,7 +450,7 @@ class TestApiKeyFromEnvironment:
         """K3: a multi-line secret is not echoed anywhere."""
         secret = "topsecret217\nsecond"
         monkeypatch.setenv(_KEY_VAR, secret)
-        llm = {"main": _profile_cfg("${" + _KEY_VAR + "}")}
+        llm = _as_llm({"main": _profile_cfg("${" + _KEY_VAR + "}")})
         with caplog.at_level("DEBUG"):
             with pytest.raises(ValueError) as excinfo:
                 await _start_plugin(llm)
@@ -440,7 +464,7 @@ class TestApiKeyFromEnvironment:
         from corvidae.llm_plugin import LLMPlugin
 
         monkeypatch.setenv(_KEY_VAR, _SECRET)
-        plugin = await _start_plugin({"main": _profile_cfg("${" + _KEY_VAR + "}")})
+        plugin = await _start_plugin(_as_llm({"main": _profile_cfg("${" + _KEY_VAR + "}")}))
         try:
             with caplog.at_level("DEBUG"):
                 reply = await plugin.resolve_llm_error(
@@ -456,7 +480,7 @@ class TestApiKeyFromEnvironment:
 
     async def test_literal_key_still_works(self):
         """K4: a literal api_key behaves as before."""
-        plugin = await _start_plugin({"main": _profile_cfg("sk-literal")})
+        plugin = await _start_plugin(_as_llm({"main": _profile_cfg("sk-literal")}))
         try:
             assert plugin.get_client().session.headers[
                 "Authorization"
@@ -477,12 +501,12 @@ class TestApiKeyFromEnvironment:
         """Reload: llm is restart-only, so a changed api_key (here an unset
         variable) warns, is not resolved, and the old client stays."""
         monkeypatch.delenv(_KEY_VAR, raising=False)
-        plugin = await _start_plugin({"main": _profile_cfg("sk-old")})
+        plugin = await _start_plugin(_as_llm({"main": _profile_cfg("sk-old")}))
         try:
             old = plugin.get_client()
             with caplog.at_level("WARNING", logger="corvidae.llm_plugin"):
                 await plugin.on_config_reload(
-                    config={"llm": {"main": _profile_cfg("${" + _KEY_VAR + "}")}}
+                    config={"llm": _as_llm({"main": _profile_cfg("${" + _KEY_VAR + "}")})}
                 )
             assert "apply on restart" in caplog.text
             assert plugin.get_client() is old
@@ -516,7 +540,7 @@ def _plugin_with_profiles(stages: dict, *profiles: str):
         llm_section[profile] = {"base_url": f"http://{profile}.test", "model": profile}
     if "embedding" in llm_section:
         llm_section["embedding"].update(kind="embedding", dimensions=4)
-    stub_llm_config(plugin, llm_section)
+    stub_llm_config(plugin, _as_llm(llm_section))
     return plugin
 
 
@@ -586,7 +610,10 @@ async def test_on_start_collects_stages_through_register_llm_stages():
     pm.register(_OtherOwner(), name="other_owner")
     plugin = LLMPlugin()
     pm.register(plugin, name="llm")
-    config = {"llm": {"main": {"base_url": "http://m", "model": "m"}}}
+    config = {"llm": {
+        "providers": {"main": {"base_url": "http://m"}},
+        "profiles": {"main": {"model": "m"}},
+    }}
     await plugin.on_init(pm, config)
 
     with patch.object(plugin, "_create_client", lambda cfg, **kw: _BlockedClient()):
@@ -603,16 +630,37 @@ _STAGE_LOG_PREFIX = "llm stages resolved:"
     "llm_config,expected",
     [
         (
-            {"main": {"base_url": "http://m", "model": "m"},
-             "background": {"base_url": "http://b", "model": "b"},
-             "embedding": {"base_url": "http://e", "model": "e", "kind": "embedding",
-                           "dimensions": 4}},
+            {
+                "providers": {
+                    "main": {"base_url": "http://m"},
+                    "background": {"base_url": "http://b"},
+                    "embedding": {"base_url": "http://e"},
+                },
+                "profiles": {
+                    "main": {"model": "m"},
+                    "background": {"provider": "background", "model": "b"},
+                    "embedding": {
+                        "provider": "embedding",
+                        "model": "e",
+                        "kind": "embedding",
+                        "dimensions": 4,
+                    },
+                },
+            },
             "llm stages resolved: compaction→main, consolidation→main, "
             "embedding→embedding, rubric→main, subagent→main",
         ),
         (
-            {"main": {"base_url": "http://m", "model": "m"},
-             "background": {"base_url": "http://b", "model": "b"}},
+            {
+                "providers": {
+                    "main": {"base_url": "http://m"},
+                    "background": {"base_url": "http://b"},
+                },
+                "profiles": {
+                    "main": {"model": "m"},
+                    "background": {"provider": "background", "model": "b"},
+                },
+            },
             "llm stages resolved: compaction→main, consolidation→main, "
             "embedding→(none), rubric→main, subagent→main",
         ),

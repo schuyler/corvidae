@@ -77,6 +77,7 @@ class TestMetricsPlugin:
                 "stage": "turn",
                 "channel": "irc:#general",
                 "trigger": "",
+                "lease_key": "",
             }
         assert "llm.errors" not in by_name
 

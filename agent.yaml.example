@@ -1,49 +1,58 @@
 # LLM backend — OpenAI-compatible Chat Completions API (required)
-# Every key under llm: except defaults and stages is a profile, built into its
-# own client. Main turns go to the default chat profile (llm.main unless
-# llm.defaults.chat names another). A stage sends to the profile llm.stages
-# maps it to, else to its kind's default: chat stages (compaction,
-# consolidation, rubric, appraisal, critique, subagent) to the default chat
-# profile, the embedding stage to the default embedding profile (llm.embedding
-# unless llm.defaults.embedding names another), if there is one. Only a
-# default chat profile is required. All of llm: is read at startup; a change
-# needs a restart.
+# llm: has four sections. providers: are the servers (endpoint, key, timeout,
+# retries, heads); profiles: are what to ask a server for (model, kind,
+# extra_body), each built into its own client; defaults: and stages: pick
+# profiles. A profile uses the provider it names, else llm.defaults.provider,
+# else the provider named main. Main turns go to the default chat profile
+# (llm.profiles.main unless llm.defaults.chat names another). A stage sends to
+# the profile llm.stages maps it to, else to its kind's default: chat stages
+# (compaction, consolidation, rubric, appraisal, critique, subagent) to the
+# default chat profile, the embedding stage to the default embedding profile
+# (llm.profiles.embedding unless llm.defaults.embedding names another), if
+# there is one. Only a default chat profile is required. All of llm: is read
+# at startup; a change needs a restart.
 llm:
-  main:
-    base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
-    model: llama3                     # model name as the backend expects it
-    # api_key: sk-...                 # omit for local servers
-    # api_key: "${OPENAI_API_KEY}"    # or read it from the daemon's environment (quote it)
-    # extra_body:                      # optional: provider-specific request payload extensions
-    #   id_slot: 0                      # example: llama.cpp KV cache slot for parallelism
-    #   reasoning_format: none          # example: llama.cpp returns reasoning inline (pair with raw_reasoning)
-    # raw_reasoning: false             # endpoint returns <think>…</think> inline: corvidae splits it and re-runs a
-    #                                   # reply cut off mid-reasoning; only where the template forces thinking open.
-    #                                   # Calls sending response_format drop reasoning_format and aren't split
-    #                                   # (server default must be a parsed mode, not --reasoning-format none)
-    # reasoning_reopened: truncate     # raw_reasoning only: a reply that reopens reasoning after its answer is cut
-    #                                   # there and logged; truncate sends the cut text, rerun regenerates once (main turn only)
-    # max_retries: 3                   # max retry attempts on transient errors (429, 500, 502, 503, 504)
-    # retry_base_delay: 2.0            # base delay in seconds for exponential backoff
-    # retry_max_delay: 60.0            # maximum delay cap in seconds
-    # model_not_loaded_wait: 60.0      # seconds to wait out "model is not loaded" (llama-server router)
-    # timeout: null                    # HTTP timeout in seconds per request (null means no timeout)
-  # embedding:                         # optional: embedding model for memory retrieval
-  #   kind: embedding                  # REQUIRED for an embedding profile; an omitted kind means chat
-  #   base_url: http://localhost:8082/v1  # embedding servers are usually separate endpoints
-  #   model: nomic-embed-text
-  #   dimensions: 768                  # REQUIRED: fixed vector dimension of the model
-  #   # api_key: sk-...                # omit for local servers
-  #   # api_key: "${OPENAI_API_KEY}"   # or from the environment
-  # forks:                             # any other name is a profile: here one derived from main
-  #   extends: main                    # deep overlay: mappings merge, lists and scalars replace,
-  #                                    # a child's null deletes the inherited key
-  #   extra_body:
-  #     reasoning_budget_tokens: 2048  # a fork's think budget now lives in its profile
-  #     # reasoning_effort: null       # example: delete a key main sets
+  providers:
+    main:
+      base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
+      # api_key: sk-...                 # omit for local servers
+      # api_key: "${OPENAI_API_KEY}"    # or read it from the daemon's environment (quote it)
+      # heads: 2                        # optional: how many requests the server runs at once; omitted = unbounded
+      # max_retries: 3                   # max retry attempts on transient errors (429, 500, 502, 503, 504)
+      # retry_base_delay: 2.0            # base delay in seconds for exponential backoff
+      # retry_max_delay: 60.0            # maximum delay cap in seconds
+      # model_not_loaded_wait: 60.0      # seconds to wait out "model is not loaded" (llama-server router)
+      # timeout: null                    # HTTP timeout in seconds per request (null means no timeout)
+    # embedding:                         # optional: embedding servers are usually separate endpoints
+    #   base_url: http://localhost:8082/v1
+  profiles:
+    main:
+      model: llama3                     # model name as the backend expects it
+      # provider: main                  # optional: the provider to use (default: llm.defaults.provider, else main)
+      # extra_body:                      # optional: provider-specific request payload extensions
+      #   id_slot: 0                      # example: llama.cpp KV cache slot for parallelism (a request field only; corvidae does not schedule slots)
+      #   reasoning_format: none          # example: llama.cpp returns reasoning inline (pair with raw_reasoning)
+      # raw_reasoning: false             # endpoint returns <think>…</think> inline: corvidae splits it and re-runs a
+      #                                   # reply cut off mid-reasoning; only where the template forces thinking open.
+      #                                   # Calls sending response_format drop reasoning_format and aren't split
+      #                                   # (server default must be a parsed mode, not --reasoning-format none)
+      # reasoning_reopened: truncate     # raw_reasoning only: a reply that reopens reasoning after its answer is cut
+      #                                   # there and logged; truncate sends the cut text, rerun regenerates once (main turn only)
+    # embedding:                         # optional: embedding model for memory retrieval
+    #   provider: embedding              # the provider declared above
+    #   kind: embedding                  # REQUIRED for an embedding profile; an omitted kind means chat
+    #   model: nomic-embed-text
+    #   dimensions: 768                  # REQUIRED: fixed vector dimension of the model
+    # forks:                             # any other name is a profile: here one derived from main
+    #   extends: main                    # deep overlay: mappings merge, lists and scalars replace,
+    #                                    # a child's null deletes the inherited key
+    #   extra_body:
+    #     reasoning_budget_tokens: 2048  # a fork's think budget now lives in its profile
+    #     # reasoning_effort: null       # example: delete a key main sets
   # defaults:                          # optional: each kind's default profile
   #   chat: main                       # fallback when omitted (main turns and unmapped chat stages)
-  #   embedding: embedding             # when set, the profile must exist; omitted, llm.embedding is used if defined
+  #   embedding: embedding             # when set, the profile must exist; omitted, llm.profiles.embedding is used if defined
+  #   provider: main                   # the provider a profile without one uses (fallback: the provider named main)
   # stages:                            # optional: stage -> profile (default: the kind's default)
   #   compaction: forks                # stages: compaction, subagent, consolidation, rubric,
   #   consolidation: forks             # appraisal, critique (chat); embedding (embedding)
@@ -179,6 +188,11 @@ agent:
 #     min_salience: 0.15              # a reply to a user is never withheld
 #     allow_progress: true            # false suppresses text sent alongside tool calls
 #     allow_thinking: true            # false suppresses reasoning
+#     quiet_origins: []               # origins whose turns never reply, e.g. [webhook:github];
+#                                     # speak_up lets one turn through; set_settings can
+#                                     # override it per channel (see the recommended
+#                                     # blocklist); user/reminder ignored; reload applies
+#                                     # except on a channel with an override
 
 # Built-in tool settings (optional)
 # tools:
@@ -238,8 +252,10 @@ agent:
 # allowed user and needs the Message Content intent enabled in the portal.
 # discord:
 #   token: "..."                       # bot token; or set DISCORD_TOKEN instead
-#   allow:                             # Discord user ids (numeric); default-deny
-#     - 123456789012345678
+#   allow:                             # Discord user ids (numeric); default-deny.
+#     - 123456789012345678             # Either a list of ids, or an alias->id map
+#                                      # (the alias is for humans only, never matched):
+#                                      #   allow: {schuyler: 123456789012345678}
 #   message_chunk_size: 2000           # max UTF-8 bytes per message, 100-2000
 #   require_mention: true              # false: answer allowed users without an @-mention
 #   channels:                          # per-channel override; the key is the
@@ -334,8 +350,14 @@ agent:
 #     - name: morning-checkin          # unique; removing it disables the job durably
 #       channel: signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f
 #       every: 1d                      # required: 30s, 20m, 6h, 1d, 7d, 1h30m
-#       at: "08:30"                    # optional anchor: HH:MM, or ISO datetime for a weekday
+#       at: "08:30"                    # optional anchor: HH:MM, or an ISO datetime
 #       prompt: "Good-morning check-in: ask how they slept and what is on today."   # or prompt_file: path
+#     - name: weekly-review
+#       channel: signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f
+#       every: 7d                      # weekday needs a whole number of weeks (7d, 14d)
+#       at: "16:00"                    # weekday needs at as HH:MM
+#       weekday: friday                # optional: anchors the job to this day; name or first three letters
+#       prompt: "Weekly review: what got done this week, and what carries over."
 
 # Heartbeat (cognition; optional): a turn the agent starts after this many
 # seconds of system-wide quiet, on internal:heartbeat (no transport owns it,
@@ -370,6 +392,12 @@ agent:
 # reload both apply.
 # outbound_cap:
 #   max_messages: 6     # messages since the last human message, at least 1
+#   # The second limit (#821): at most this many messages per window, sliding,
+#   # whatever the humans do. Unset = off. It CAN withhold a direct reply to a
+#   # person who sends that many messages inside the window, which is why it is
+#   # off by default; set both keys or neither.
+#   max_messages_per_window: 20
+#   window_seconds: 3600
 #   count_progress: false   # count "let me look that up" progress lines too
 
 # ACP stdio transport (optional — does not enable ACP by itself).

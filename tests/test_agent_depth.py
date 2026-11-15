@@ -35,7 +35,10 @@ from corvidae.tools.subagent import SubagentPlugin
 
 from helpers import KERNEL_LLM_STAGES, stub_llm_config
 
-CONFIG = {"llm": {"main": {"base_url": "http://localhost:8080", "model": "test-model"}}}
+CONFIG = {"llm": {
+    "providers": {"main": {"base_url": "http://localhost:8080"}},
+    "profiles": {"main": {"model": "test-model"}},
+}}
 MY_PROMPT = "I am the agent."
 
 

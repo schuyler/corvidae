@@ -182,7 +182,10 @@ def _write_config(tmp_path, disabled: list[str]) -> str:
     """A minimal agent.yaml for a real Runtime boot, with plugins.disabled."""
     config = {
         "agent": {"system_prompt": "test", "max_context_tokens": 8000},
-        "llm": {"main": {"base_url": "http://127.0.0.1:1/v1", "model": "test-model"}},
+        "llm": {
+            "providers": {"main": {"base_url": "http://127.0.0.1:1/v1"}},
+            "profiles": {"main": {"model": "test-model"}},
+        },
         "daemon": {"session_db": str(tmp_path / "sessions.db")},
         "plugins": {"disabled": _COGNITION_DISABLED + disabled},
     }

@@ -361,4 +361,7 @@ class TaskPipelinePlugin:
             header = f"Pipeline complete: {total} tasks, {done} succeeded, {failed} failed"
             return header + "\n" + "\n".join(results_lines)
 
+        # Shell by another name (PRD §3.5.3): its report quotes each step's
+        # output, so it is outside text for the same reason shell is (#580).
+        task_pipeline.returns_untrusted = True  # type: ignore[attr-defined]
         tool_registry.append(Tool.from_function(task_pipeline))

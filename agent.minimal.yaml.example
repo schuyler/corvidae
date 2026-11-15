@@ -9,10 +9,13 @@
 # persistence/restart recovery.
 
 llm:
-  main:
-    base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
-    model: llama3                        # model name as the backend expects it
-    # api_key: sk-...                    # omit for local servers
+  providers:
+    main:
+      base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
+      # api_key: sk-...                    # omit for local servers
+  profiles:
+    main:
+      model: llama3                        # model name as the backend expects it
 
 daemon:
   session_db: sessions.db                # SQLite path for conversation history

@@ -164,16 +164,21 @@ async def run_live_evaluation(args) -> None:
 
     config = {
         "llm": {
-            "main": {
-                "base_url": args.base_url, "model": args.model,
-                "api_key": args.api_key,
+            "providers": {
+                "main": {"base_url": args.base_url, "api_key": args.api_key},
+                "embedding": {
+                    "base_url": args.embedding_base_url or args.base_url,
+                    "api_key": args.api_key,
+                },
             },
-            "embedding": {
-                "kind": "embedding",
-                "base_url": args.embedding_base_url or args.base_url,
-                "model": args.embedding_model or args.model,
-                "dimensions": args.embedding_dimensions,
-                "api_key": args.api_key,
+            "profiles": {
+                "main": {"model": args.model},
+                "embedding": {
+                    "provider": "embedding",
+                    "kind": "embedding",
+                    "model": args.embedding_model or args.model,
+                    "dimensions": args.embedding_dimensions,
+                },
             },
         },
         "memory": {},
@@ -672,13 +677,13 @@ def all_degraded_cause(memory) -> str:
         return (
             "the snapshot's embedding_meta records a different encoder or "
             "dimensions than this config, so its vectors are not comparable "
-            "and every query fell back to FTS5; point llm.embedding at the "
+            "and every query fell back to FTS5; point llm.profiles.embedding at the "
             "encoder that built the snapshot, or re-embed a copy of it with "
             "this one, then rerun"
         )
     if getattr(memory, "_embedding_cfg", None) is None:
         return (
-            "the config names no embedding profile (llm.embedding), so no "
+            "the config names no embedding profile (llm.profiles.embedding), so no "
             "record has a stored vector and every query fell back to FTS5; "
             "add the embedding profile the deployment uses (docs/cognition.md) "
             "and rerun"
@@ -692,8 +697,8 @@ def all_degraded_cause(memory) -> str:
     return (
         "the embedding server failed every query (see the 'retrieval "
         "embedding failed; degrading to FTS5' warnings), so the run measured "
-        "keyword search, not vectors; start the server llm.embedding's "
-        "base_url names, check the profile's api_key, and rerun"
+        "keyword search, not vectors; start the server llm.profiles.embedding's "
+        "provider base_url names, check that provider's api_key, and rerun"
     )
 
 

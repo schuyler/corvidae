@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
@@ -29,7 +30,9 @@ from corvidae.scheduler import (
     advance,
     frame_firing,
     parse_duration,
+    parse_job,
     parse_when,
+    parse_weekday,
 )
 from corvidae.tool import ToolContext
 
@@ -175,6 +178,26 @@ class TestAdvance:
         local = datetime.fromtimestamp(nxt, LA)
         assert (local.day, local.hour, local.minute) == (1, 8, 30)
         assert nxt - start == 86400 + 3600
+
+    def test_weekly_job_keeps_wall_clock_across_both_dst_changes(self):
+        """The docstring's claim, tested: a 7d step lands on the same clock time.
+
+        08:30 on Fri 2026-10-30 is PDT; a week later DST has ended (Nov 1), so
+        the slot is 08:30 PST — 169 hours of elapsed time. Spring-forward the
+        same way: 08:30 PST on Fri 2027-03-12, then 08:30 PDT a week later, the
+        transition being Mar 14 — 167 hours.
+        """
+        autumn = datetime(2026, 10, 30, 8, 30, tzinfo=LA).timestamp()
+        next_autumn = advance(autumn, 7 * 86400, autumn + 60, LA)
+        got = datetime.fromtimestamp(next_autumn, LA)
+        assert (got.strftime("%a"), got.hour, got.minute) == ("Fri", 8, 30)
+        assert next_autumn - autumn == 7 * 86400 + 3600
+
+        spring = datetime(2027, 3, 12, 8, 30, tzinfo=LA).timestamp()
+        next_spring = advance(spring, 7 * 86400, spring + 60, LA)
+        got = datetime.fromtimestamp(next_spring, LA)
+        assert (got.strftime("%a"), got.hour, got.minute) == ("Fri", 8, 30)
+        assert next_spring - spring == 7 * 86400 - 3600
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +388,40 @@ class TestConfigSync:
         await e.sched.on_config_reload(sched_config(jobs=[dict(JOB, every="12h", at="09:00")]))
         (moved,) = await e.rows()
         assert datetime.fromtimestamp(moved.next_fire_at, LA).hour == 9
+
+    async def test_a_row_in_the_older_spec_format_is_not_rescheduled(self, memdb):
+        """An upgrade must not re-anchor every job (#770 review).
+
+        Main stores `every=86400.0;at=;tz=UTC`. A spec that added `weekday=None`
+        to every job meant `row.schedule_spec != schedule_spec` on the first
+        sync after upgrading, so each job was re-anchored from now — a 1d job due
+        in an hour moved a day out, and a job that came due while the daemon was
+        down lost its catch-up fire.
+        """
+        e = await Env(memdb, sched_config(jobs=[JOB])).init()
+        (row,) = await e.rows()
+        # The spec main writes for this job: no `weekday=` key at all.
+        assert "weekday=" not in row.schedule_spec, row.schedule_spec
+        assert row.schedule_spec.startswith("every=86400.0;at=08:30;tz=")
+        due_soon = e.clock.now() + 3600
+        await e.db.execute(
+            "UPDATE schedule SET next_fire_at = ? WHERE id = ?", (due_soon, row.id),
+        )
+        await e.db.commit()
+
+        await e.sched.on_config_reload(sched_config(jobs=[JOB]))
+
+        (after,) = await e.rows()
+        assert after.next_fire_at == due_soon, (
+            "a stored spec that matches the current one must not re-anchor"
+        )
+
+    async def test_a_weekday_job_names_its_weekday_in_the_spec(self, memdb):
+        """The key appears only where it is meaningful, so old rows stay equal."""
+        job = dict(JOB, every="7d", at="08:30", weekday="friday")
+        e = await Env(memdb, sched_config(jobs=[job])).init()
+        (row,) = await e.rows()
+        assert "weekday=4;" in row.schedule_spec, row.schedule_spec
 
     async def test_removed_job_is_disabled_and_stays_disabled(self, memdb):
         e = await Env(memdb, sched_config(jobs=[JOB])).init()
@@ -767,3 +824,78 @@ class TestRobustness:
         (row,) = await env.rows()
         assert await env.tools["cancel_reminder"](f"#{row.id}", _ctx=env.ctx(ch)) == f"Cancelled reminder #{row.id}."
         assert "not a reminder id" in await env.tools["cancel_reminder"]("soon", _ctx=env.ctx(ch))
+
+
+class TestWeekdayAnchor:
+    """#770: ``weekday`` anchors a weekly job to a day, not to the restart."""
+
+    def test_parse_weekday_accepts_names_and_abbreviations(self):
+        for text, index in [
+            ("monday", 0), ("Tuesday", 1), ("WED", 2), ("thu", 3),
+            ("Friday", 4), ("sat", 5), ("sunday", 6),
+        ]:
+            assert parse_weekday(text) == index
+
+    @pytest.mark.parametrize("bad", ["", "  ", "funday", "fri day", 5, None])
+    def test_parse_weekday_refuses_anything_else_naming_the_choices(self, bad):
+        with pytest.raises(ValueError, match="monday"):
+            parse_weekday(bad)
+
+    def test_first_fire_is_the_next_friday_at_the_given_time(self):
+        # T0 is Fri 2026-10-23 14:00 PDT: the next Friday 16:00 is today.
+        job = parse_job(
+            {"name": "friday", "channel": "irc:#lex", "every": "7d",
+             "at": "16:00", "weekday": "friday", "prompt": "go"},
+            Path("."),
+        )
+        assert job.weekday == 4
+        local = datetime.fromtimestamp(job.first_fire(T0, LA), LA)
+        assert (local.strftime("%a %H:%M"), local.day) == ("Fri 16:00", 23)
+
+    def test_first_fire_skips_to_the_next_occurrence_when_today_has_passed(self):
+        # 14:00 Friday, asked for Friday 09:00: a week away, not today.
+        job = parse_job(
+            {"name": "friday", "channel": "irc:#lex", "every": "7d",
+             "at": "09:00", "weekday": "fri", "prompt": "go"},
+            Path("."),
+        )
+        local = datetime.fromtimestamp(job.first_fire(T0, LA), LA)
+        assert (local.strftime("%a %H:%M"), local.day) == ("Fri 09:00", 30)
+
+    def test_advancing_from_the_anchor_stays_on_the_weekday(self):
+        job = parse_job(
+            {"name": "friday", "channel": "irc:#lex", "every": "7d",
+             "at": "16:00", "weekday": "friday", "prompt": "go"},
+            Path("."),
+        )
+        first = job.first_fire(T0, LA)
+        nxt = advance(first, job.interval_seconds, first + 1, LA)
+        assert datetime.fromtimestamp(nxt, LA).strftime("%a %H:%M") == "Fri 16:00"
+
+    async def test_config_sync_lands_on_the_weekday(self, memdb):
+        job = dict(JOB, every="7d", weekday="monday")
+        e = await Env(memdb, sched_config(jobs=[job])).init()
+        (row,) = await e.rows()
+        local = datetime.fromtimestamp(row.next_fire_at, LA)
+        assert (local.strftime("%a"), local.hour, local.minute) == ("Mon", 8, 30)
+
+    async def test_changing_the_weekday_reschedules(self, memdb):
+        e = await Env(memdb, sched_config(jobs=[dict(JOB, every="7d", weekday="monday")])).init()
+        (before,) = await e.rows()
+        await e.sched.on_config_reload(
+            sched_config(jobs=[dict(JOB, every="7d", weekday="thursday")])
+        )
+        (after,) = await e.rows()
+        assert after.next_fire_at != before.next_fire_at
+        assert datetime.fromtimestamp(after.next_fire_at, LA).strftime("%a") == "Thu"
+
+    @pytest.mark.parametrize(("job", "message"), [
+        ({"every": "7d", "weekday": "friday"}, "needs 'at' as HH:MM"),
+        ({"every": "7d", "at": "2026-10-30T16:00", "weekday": "friday"}, "needs 'at' as HH:MM"),
+        ({"every": "2d", "at": "16:00", "weekday": "friday"}, "whole"),
+        ({"cron": "0 16 * * 5", "weekday": "friday"}, "already names its days"),
+        ({"every": "7d", "at": "16:00", "weekday": "funday"}, "not a day name"),
+    ])
+    def test_weekday_misuse_is_refused_by_name(self, job, message):
+        with pytest.raises(ValueError, match=message):
+            parse_job({"name": "bad", "channel": "irc:#lex", "prompt": "go", **job}, Path("."))

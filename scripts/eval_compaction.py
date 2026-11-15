@@ -60,9 +60,9 @@ def resolve_llm_defaults(llm_section: dict | None) -> dict:
     """The endpoint settings for the profile the compaction stage resolves to.
 
     The daemon resolves a stage through ``llm.stages``, then its kind's
-    default (``llm.defaults``, else ``llm.main``), folding ``extends`` chains.
+    default (``llm.defaults``, else ``llm.profiles.main``), folding ``extends`` chains.
     This eval measures compaction quality, so it must send to the same model
-    the daemon would; reading ``llm.main`` raw measured a different model
+    the daemon would; reading ``llm.profiles.main`` raw measured a different model
     whenever a deployment mapped the stage or used ``defaults`` (#470).
 
     Returns:
@@ -91,7 +91,7 @@ def resolve_llm_defaults(llm_section: dict | None) -> dict:
             api_key = expand_env_refs(api_key)
         except EnvRefError as exc:
             raise ValueError(
-                f"llm.{profile}.api_key references ${{{exc.var}}}, which is "
+                f"llm.providers.{resolved.get('provider')}.api_key references ${{{exc.var}}}, which is "
                 f"{'not set' if exc.reason == 'unset' else 'unusable'} in this "
                 f"environment; set {exc.var} and re-run"
             ) from None

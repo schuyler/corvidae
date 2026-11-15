@@ -237,7 +237,10 @@ KERNEL_LLM_STAGES = {"compaction": "chat", "subagent": "chat"}
 
 
 #: A minimal llm: section: one chat profile, no embedding profile.
-STUB_LLM_SECTION = {"main": {"base_url": "http://stub.test/v1", "model": "stub"}}
+STUB_LLM_SECTION = {
+    "providers": {"main": {"base_url": "http://stub.test/v1"}},
+    "profiles": {"main": {"model": "stub"}},
+}
 
 
 def with_chat_llm(config: dict | None = None) -> dict:
@@ -290,10 +293,14 @@ def recording_llm_plugin(main, background=None):
     plugin = _RecordingLLMPlugin()
     plugin._stages = dict(KERNEL_LLM_STAGES)
     plugin._clients["main"] = main
-    llm_section = dict(STUB_LLM_SECTION)
+    llm_section = {
+        "providers": dict(STUB_LLM_SECTION["providers"]),
+        "profiles": dict(STUB_LLM_SECTION["profiles"]),
+    }
     if background is not None:
         plugin._clients["background"] = background
-        llm_section["background"] = {"base_url": "http://background.test/v1", "model": "bg"}
+        llm_section["providers"]["background"] = {"base_url": "http://background.test/v1"}
+        llm_section["profiles"]["background"] = {"provider": "background", "model": "bg"}
     stub_llm_config(plugin, llm_section)
     return plugin
 

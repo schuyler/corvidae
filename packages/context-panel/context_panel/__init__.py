@@ -163,6 +163,7 @@ class ContextPanelPlugin(CorvidaePlugin):
                     web.get("/channels", self.channels),
                     web.get("/window", self.window),
                     web.get("/poll", self.poll),
+                    web.get("/rendered", self.rendered),
                 ],
             )
         )
@@ -249,6 +250,49 @@ class ContextPanelPlugin(CorvidaePlugin):
         # The response is built before this await; only ts is attached after it.
         await _stamp(self._db(), channel, shown, wire)
         return _json(body)
+
+    def _mid_system_role(self) -> str:
+        """``agent.mid_conversation_system_role`` as the agent resolved it.
+
+        Read from the live agent so a config reload is honoured without this
+        plugin parsing the key a second time; "system" is the agent's own
+        default when the key is absent (agent.py's
+        ``_resolve_mid_conversation_system_role``).
+        """
+        agent = self.pm.get_plugin("agent") if self.pm is not None else None
+        role = getattr(agent, "mid_conversation_system_role", None)
+        if role is None:
+            # The agent's own default, used knowingly: with no agent (a panel on
+            # a hand-built plugin manager) there is no resolved key to read, and
+            # a rename would otherwise silently show a different role than the
+            # model receives (#695 review).
+            logger.warning(
+                "context panel: no agent.mid_conversation_system_role to read; "
+                "rendering mid-conversation system rows as 'system', which may "
+                "not be the role the agent uses",
+            )
+            return "system"
+        return role
+
+    async def rendered(self, request: web.Request) -> web.Response:
+        """A channel's window as the request body the agent would send (#695).
+
+        The other routes show the window as stored rows. ``build_prompt()`` is
+        what the model actually receives: provenance headers and fences,
+        system rows re-roled, a tool block deferred to its last result, and a
+        placeholder for a call still pending. Fetching it on demand is the only
+        way to show it — the body is not append-mostly (a call's block moves
+        when its result arrives), so the panel's cursor cannot tail it.
+        """
+        channel = self._channel(request)
+        conv = channel.conversation if channel is not None else None
+        if conv is None:
+            return _json({"loaded": False})
+        messages = conv.build_prompt(
+            frozenset(channel.pending_tool_call_ids),
+            mid_conversation_system_role=self._mid_system_role(),
+        )
+        return _json({"loaded": True, "messages": messages, "total": len(messages)})
 
     async def poll(self, request: web.Request) -> web.Response:
         """Tail a channel from the client's cursor, plus its live events."""

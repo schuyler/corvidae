@@ -22,12 +22,18 @@ from corvidae.persistence import PersistencePlugin, init_db
 
 EMBED_CONFIG = {
     "llm": {
-        "main": {"base_url": "http://localhost:8080", "model": "chat"},
-        "embedding": {
-            "kind": "embedding",
-            "base_url": "http://localhost:8081",
-            "model": "test-embedder",
-            "dimensions": 4,
+        "providers": {
+            "main": {"base_url": "http://localhost:8080"},
+            "embedding": {"base_url": "http://localhost:8081"},
+        },
+        "profiles": {
+            "main": {"model": "chat"},
+            "embedding": {
+                "provider": "embedding",
+                "kind": "embedding",
+                "model": "test-embedder",
+                "dimensions": 4,
+            },
         },
     }
 }
@@ -158,7 +164,10 @@ class TestDegradedStart:
 
     async def test_starts_without_embedding_role(self):
         """No llm.embedding config → no vec table, no embedding_meta row."""
-        config = {"llm": {"main": {"base_url": "http://localhost:8080", "model": "chat"}}}
+        config = {"llm": {
+            "providers": {"main": {"base_url": "http://localhost:8080"}},
+            "profiles": {"main": {"model": "chat"}},
+        }}
         memory, db = await build_memory_plugin(config)
         assert memory._vec_available is False
         async with db.execute("SELECT count(*) FROM embedding_meta") as cursor:
@@ -206,14 +215,20 @@ class TestEncoderMismatch:
 
 EMBED_CONFIG_WITH_PREFIXES = {
     "llm": {
-        "main": {"base_url": "http://localhost:8080", "model": "chat"},
-        "embedding": {
-            "kind": "embedding",
-            "base_url": "http://localhost:8081",
-            "model": "test-embedder",
-            "dimensions": 4,
-            "document_prefix": "search_document: ",
-            "query_prefix": "search_query: ",
+        "providers": {
+            "main": {"base_url": "http://localhost:8080"},
+            "embedding": {"base_url": "http://localhost:8081"},
+        },
+        "profiles": {
+            "main": {"model": "chat"},
+            "embedding": {
+                "provider": "embedding",
+                "kind": "embedding",
+                "model": "test-embedder",
+                "dimensions": 4,
+                "document_prefix": "search_document: ",
+                "query_prefix": "search_query: ",
+            },
         },
     }
 }

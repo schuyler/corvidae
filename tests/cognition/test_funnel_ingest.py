@@ -438,3 +438,159 @@ class TestIngestTtlConfig:
         env.clock.t = 1000.0
         await turn(env)
         assert "second" in text_of(env.conv)
+
+
+class TestIngestKeys:
+    """#725: a promise result may key its entries, so a re-rendered page that is
+    already in the window is deduped instead of admitted a second time."""
+
+    async def test_a_ready_key_already_in_the_source_rows_is_a_duplicate(self, build):
+        env = await build()
+        # The key is matched by containment against the framed row, so a source
+        # renders it into the line it admits, the way memory renders its id.
+        first = pending()
+        env.provider.offer(env.channel.id, "markdown_recall", first)
+        first.set_result(
+            funnel_mod.Ingest(
+                entries=["The page <!--page.md#intro--> as it read at 10:00"],
+                keys=["<!--page.md#intro-->"],
+            )
+        )
+        await turn(env)
+        await turn(env)
+        assert "as it read at 10:00" in text_of(env.conv)
+
+        # Same page, same key, re-rendered: not admitted, and reported as a duplicate.
+        seen: list[funnel_mod.Admission] = []
+        second = pending()
+        env.provider.offer(env.channel.id, "markdown_recall", second)
+        second.set_result(
+            funnel_mod.Ingest(
+                entries=["The page <!--page.md#intro--> now with an age line"],
+                keys=["<!--page.md#intro-->"],
+                on_admitted=seen.append,
+            )
+        )
+        await turn(env)
+        await turn(env)
+        assert "now with an age line" not in text_of(env.conv)
+        assert seen and seen[0].duplicate == ["The page <!--page.md#intro--> now with an age line"]
+        # A key-deduped entry has different text from the row it duplicates, so
+        # containment cannot identify it: without the duplicate list it would be
+        # a leftover, re-queued and re-reported on every turn forever (#725 review).
+        assert env.funnel._next_turn == {}, "a deduped entry must not stay queued"
+        assert env.funnel._deferred == {}
+
+    async def test_keys_stay_paired_with_their_entries_through_a_budget_hold(self, build):
+        """A held entry keeps its own key, or the next drain dedupes the wrong page."""
+        env = await build(config={"funnel": {"budgets": {"markdown_recall": 12}}})
+        ready = pending()
+        env.provider.offer(env.channel.id, "markdown_recall", ready)
+        await turn(env)
+        # ALPHA fits the 12-token budget; BRAVO is held for a later drain.
+        ready.set_result(
+            funnel_mod.Ingest(entries=[ALPHA, BRAVO], keys=["alpha.md", "bravo.md"])
+        )
+        await turn(env)
+        assert ALPHA in text_of(env.conv) and BRAVO not in text_of(env.conv)
+        held = env.funnel._next_turn[env.channel.id]
+        assert [payload.keys for payload in held] == [["bravo.md"]]
+
+    async def test_a_mismatched_key_list_is_logged_with_source_lengths_and_remedy(
+        self, build, caplog
+    ):
+        env = await build()
+        ready = pending()
+        env.provider.offer(env.channel.id, "markdown_recall", ready)
+        ready.set_result(
+            funnel_mod.Ingest(entries=["entry"], keys=["one.md", "two.md"])
+        )
+        # The submission happens on this turn and the sweep on the next, so the
+        # warning fires inside the capture only if both turns run under it.
+        with caplog.at_level(logging.WARNING, logger="corvidae.funnel"):
+            await turn(env)
+            await turn(env)
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            "markdown_recall" in w and "2 keys" in w and "1 entries" in w
+            and "pass one key per entry, or no keys" in w
+            for w in warnings
+        ), warnings
+        # The entries are still admitted: the keys were the rejected part.
+        assert "entry" in text_of(env.conv)
+
+    async def test_without_keys_the_whole_text_still_dedupes(self, build):
+        env = await build()
+        first = pending()
+        first.set_result(funnel_mod.Ingest(entries=["same text"]))
+        env.provider.offer(env.channel.id, "markdown_recall", first)
+        await turn(env)
+        await turn(env)
+        second = pending()
+        second.set_result(funnel_mod.Ingest(entries=["same text"]))
+        env.provider.offer(env.channel.id, "markdown_recall", second)
+        await turn(env)
+        await turn(env)
+        assert text_of(env.conv).count("same text") == 1
+
+
+class _ResolveThenSubmit(Provider):
+    """Resolves the channel's previous promise, then submits the next one.
+
+    This is the window #726 is about: a search finishes after the funnel swept
+    the turn, and the source submits again in the same turn's collect.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # (source, Ingest) to resolve the previous promise with, once.
+        self.resolve_previous: list[tuple[str, object]] = []
+        # The future last submitted per (channel id, source).
+        self.promises: dict[tuple[str, str], asyncio.Future] = {}
+
+    @hookimpl
+    async def on_funnel_ingest(self, channel, trace_id, annotations, submit) -> None:
+        self.calls += 1
+        for source, ingest in self.resolve_previous:
+            future = self.promises.pop((channel.id, source), None)
+            if future is not None and not future.done():
+                future.set_result(ingest)
+        self.resolve_previous = []
+        mine = [o for o in self.offers if o[0] == channel.id]
+        self.offers = [o for o in self.offers if o[0] != channel.id]
+        for _, source, future in mine:
+            self.promises[(channel.id, source)] = future
+            submit(source, future)
+
+
+class TestSameTurnAdmission:
+    """#726: a fast source's result reaches the window on the turn that asked."""
+
+    async def test_a_promise_submitted_already_done_is_admitted_that_turn(self, build):
+        env = await build()
+        env.provider.offer(env.channel.id, "markdown_recall", resolved("ready now"))
+        await turn(env)
+        # One turn only: the entry is in the window before that turn's model call.
+        assert "ready now" in text_of(env.conv)
+
+    async def test_submitting_over_a_finished_predecessor_admits_its_result(self, build):
+        """The result that lands between the sweep and the collect is not lost."""
+        env = await build()
+        env.pm.unregister(name="provider")
+        provider = _ResolveThenSubmit()
+        env.pm.register(provider, name="resolver")
+        env.provider = provider
+
+        first = pending()
+        provider.offer(env.channel.id, "markdown_recall", first)
+        await turn(env)
+        assert text_of(env.conv) == ""
+
+        # Turn two: the first search finishes during this turn's collect, and the
+        # source submits a second promise in the same collect.
+        provider.resolve_previous = [
+            ("markdown_recall", funnel_mod.Ingest(entries=["late result"]))
+        ]
+        provider.offer(env.channel.id, "markdown_recall", pending())
+        await turn(env)
+        assert "late result" in text_of(env.conv)

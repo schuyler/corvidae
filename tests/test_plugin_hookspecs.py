@@ -228,7 +228,10 @@ class TestSpecsBeforeGuardAndInit:
             return []
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"llm": {"main": {"base_url": "http://x", "model": "m"}}}, f)
+            yaml.dump({"llm": {
+                "providers": {"main": {"base_url": "http://x"}},
+                "profiles": {"main": {"model": "m"}},
+            }}, f)
             config_path = f.name
 
         try:

@@ -196,7 +196,10 @@ class TestConfigureLogging:
 
 def _make_minimal_config(tmp_path, extra=None):
     """Write a minimal agent.yaml for integration tests and return its path."""
-    data = {"llm": {"main": {"base_url": "http://localhost:8080", "model": "test"}}}
+    data = {"llm": {
+        "providers": {"main": {"base_url": "http://localhost:8080"}},
+        "profiles": {"main": {"model": "test"}},
+    }}
     if extra:
         data.update(extra)
     config_file = tmp_path / "agent.yaml"
@@ -853,7 +856,10 @@ class TestAgentLogging:
 
         with caplog.at_level(logging.INFO, logger="corvidae.agent"):
             await plugin.on_start(config={
-                "llm": {"main": {"base_url": "http://localhost:8080", "model": "test"}},
+                "llm": {
+                    "providers": {"main": {"base_url": "http://localhost:8080"}},
+                    "profiles": {"main": {"model": "test"}},
+                },
                 "daemon": {"session_db": ":memory:"},
             })
 

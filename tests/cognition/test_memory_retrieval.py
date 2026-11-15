@@ -12,6 +12,7 @@ related texts have reproducibly higher cosine similarity.
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import re
 import time
@@ -27,7 +28,7 @@ from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from helpers import stub_llm_config, with_chat_llm
-from corvidae_cognition.memory import MemoryPlugin
+from corvidae_cognition.memory import SQLITE_VEC_KNN_MAX, MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 
 from evals.metrics import recall_at_k
@@ -37,12 +38,18 @@ DIMS = 32
 
 EMBED_CONFIG = {
     "llm": {
-        "main": {"base_url": "http://localhost:8080", "model": "chat"},
-        "embedding": {
-            "kind": "embedding",
-            "base_url": "http://localhost:8081",
-            "model": "test-embedder",
-            "dimensions": DIMS,
+        "providers": {
+            "main": {"base_url": "http://localhost:8080"},
+            "embedding": {"base_url": "http://localhost:8081"},
+        },
+        "profiles": {
+            "main": {"model": "chat"},
+            "embedding": {
+                "provider": "embedding",
+                "kind": "embedding",
+                "model": "test-embedder",
+                "dimensions": DIMS,
+            },
         },
     },
 }
@@ -663,4 +670,131 @@ class TestBurstRetrieval:
         recalled = " ".join(m["content"] for m in context_messages(conv))
         assert "falconry apprenticeship" in recalled
         assert "gazebo roof" in recalled
+        await db.close()
+
+
+# --- #637: sqlite-vec's KNN row limit ---
+
+
+def needs_vec() -> None:
+    """Skip a test that only means something on the vector path."""
+    try:
+        import sqlite_vec  # noqa: F401
+    except ImportError:
+        pytest.skip("sqlite-vec unavailable; the KNN limit needs vectors")
+
+
+class TestKnnRowLimit:
+    """sqlite-vec refuses a KNN query above 4096 rows; retrieval must not fall
+    back to FTS5 because of that, and a KNN refusal must not be logged as an
+    embedding failure."""
+
+    async def test_retrieval_stays_on_the_vector_path_past_the_limit(self, caplog):
+        needs_vec()
+        memory, _, channel, _, db = await build_retrieval_env()
+        # The record the query should find lives on another channel, so it is
+        # not among the excluded ones; the excluded channel is where the rows
+        # pile up.
+        await seed_memory(db, "irc:#garden", "the rain gauge is on the north wall")
+        # More in-window records than sqlite-vec will scan in one KNN call once
+        # the over-fetch and k are added, which is what used to make the
+        # extension refuse the query and retrieval degrade.
+        over = SQLITE_VEC_KNN_MAX + 10
+        await db.executemany(
+            "INSERT INTO memory (channel_id, created_at, summary, importance, "
+            "msg_id_start, msg_id_end, embedded) VALUES (?, ?, ?, ?, ?, ?, 0)",
+            [
+                (channel.id, 1_700_000_000.0, f"filler record {n}", 0.5, n, n)
+                for n in range(1, over + 1)
+            ],
+        )
+        await db.commit()
+
+        with caplog.at_level(logging.WARNING):
+            candidates, degraded = await memory.retrieve(
+                "where is the rain gauge?", k=5, exclude=(channel.id, 1),
+            )
+
+        assert not degraded, "the KNN refusal must not push retrieval to FTS5"
+        assert [c["summary"] for c in candidates] == [
+            "the rain gauge is on the north wall"
+        ]
+        clamp_warnings = [r for r in caplog.records
+                          if "clamped to sqlite-vec's limit" in r.getMessage()]
+        assert len(clamp_warnings) == 1, "the clamp is logged, once per process"
+        # The message names the limit, what was asked for, and how many rows on
+        # the channel were excluded, so an operator can tell which side grew.
+        message = clamp_warnings[0].getMessage()
+        assert str(SQLITE_VEC_KNN_MAX) in message and "in-window on" in message
+
+        # Second query: same clamp, no second warning.
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            await memory.retrieve("where is the rain gauge?", k=5,
+                                  exclude=(channel.id, 1))
+        assert not [r for r in caplog.records
+                    if "clamped to sqlite-vec's limit" in r.getMessage()]
+        await db.close()
+
+    async def test_knn_failure_is_logged_as_itself_not_as_an_embedding_failure(
+        self, caplog, monkeypatch,
+    ):
+        needs_vec()
+        memory, _, channel, _, db = await build_retrieval_env()
+        await seed_memory(db, channel.id, "the rain gauge is on the north wall")
+
+        async def refuse(*args, **kwargs):
+            raise RuntimeError("k value in knn query too large")
+
+        monkeypatch.setattr(memory, "_vec_candidates", refuse)
+
+        with caplog.at_level(logging.WARNING):
+            _, degraded = await memory.retrieve("where is the rain gauge?")
+
+        assert degraded, "a failed KNN still degrades, as before"
+        messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("KNN query failed" in m for m in messages), messages
+        assert not [m for m in messages if "embedding failed" in m], (
+            "a KNN refusal must not send the operator to the embed server"
+        )
+        await db.close()
+
+    async def test_a_knn_refusal_skips_the_hybrid_path(self, monkeypatch):
+        """Degraded rows rank by the decayed score, not by RRF (#637 review).
+
+        The hybrid path fills ``fts_order``. Letting it run after a refused KNN
+        sends the FTS rows that replace them through fusion, which is the rule
+        the degraded branch exists to keep.
+        """
+        needs_vec()
+        memory, _, channel, _, db = await build_retrieval_env()
+        await seed_memory(db, channel.id, "the rain gauge is on the north wall")
+        await seed_memory(db, channel.id, "the rain gauge reads in millimetres")
+        memory._candidates = "hybrid"
+        memory._band_on = "relative"
+        ran: list[str] = []
+
+        async def refuse(*args, **kwargs):
+            raise RuntimeError("k value in knn query too large")
+
+        async def hybrid(*args, **kwargs):
+            ran.append("hybrid")
+            return args[-1], [1], set()
+
+        async def spread(*args, **kwargs):
+            ran.append("spread")
+            return (0.5, 0.1)
+
+        monkeypatch.setattr(memory, "_vec_candidates", refuse)
+        monkeypatch.setattr(memory, "_hybrid_rows", hybrid)
+        monkeypatch.setattr(memory, "_relative_spread", spread)
+
+        candidates, degraded = await memory.retrieve("where is the rain gauge?")
+
+        assert degraded
+        assert candidates, "the FTS fallback still returns the rows"
+        assert ran == [], "neither fusion nor the spread scan runs when degraded"
+        scores = [c["score"] for c in candidates]
+        assert scores == sorted(scores, reverse=True), (
+            "degraded rows are ranked by the decayed score")
         await db.close()

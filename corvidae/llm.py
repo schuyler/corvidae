@@ -37,6 +37,10 @@ MODEL_NOT_LOADED_MARKER = "model is not loaded"
 
 logger = logging.getLogger(__name__)
 
+# Stages already warned about for an unleased chat call (#363). Module scope is
+# process scope: clients are rebuilt on config reload and must not re-warn.
+_unleased_warned_stages: set[str] = set()
+
 # Text shaped like a chat-template control token (<|endoftext|>, <|im_start|>)
 # or a bare reasoning/tool tag (<think>, <tool_call>, <tool_response> and their
 # closing forms). llama-server tokenizes request content with parse_special, so
@@ -76,7 +80,7 @@ def split_raw_reasoning(message: dict) -> bool:
     closed it. A server's parsed reasoning cannot tell a cut-off from a
     decline (both arrive as empty content); a missing </think> in the raw
     text can. shortcut: assumes the chat template forces thinking open, so
-    set llm.<profile>.raw_reasoning only on endpoints whose template does;
+    set llm.profiles.<profile>.raw_reasoning only on endpoints whose template does;
     elsewhere every reply without a </think> would read as cut off.
     """
     # Drop an optional opening tag and the whitespace after it.
@@ -348,6 +352,22 @@ class LLMClient:
         """
         if self.session is None:
             raise RuntimeError("LLMClient.start() must be called before chat()")
+
+        # A chat call with no lease key runs unleased: warn once per stage per
+        # process, then DEBUG. embed() never reaches here, so it never warns.
+        attribution = get_attribution()
+        if not attribution.get("lease_key"):
+            stage = attribution.get("stage") or "(none)"
+            level = logging.DEBUG if stage in _unleased_warned_stages else logging.WARNING
+            _unleased_warned_stages.add(stage)
+            logger.log(
+                level,
+                "chat call for stage %s on channel %s (model %s) has no lease "
+                "key and runs unleased; open corvidae.attribution.lease_scope("
+                "<queue key>) around it (warned once per stage; later calls "
+                "log at DEBUG)",
+                stage, attribution.get("channel_id") or "(none)", self.model,
+            )
 
         logger.debug(
             "chat completion request",

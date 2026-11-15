@@ -49,7 +49,9 @@ class TestShippedMinimalExample:
         raw = MINIMAL_EXAMPLE_PATH.read_text()
         config = yaml.safe_load(raw)
 
-        assert "main" in config.get("llm", {}), "llm.main block required"
+        assert "main" in config.get("llm", {}).get("profiles", {}), (
+            "llm.profiles.main block required"
+        )
         assert "session_db" in config.get("daemon", {}), "daemon.session_db required"
         assert len(config.get("channels", {})) == 1, "exactly one channel"
         assert set(config.get("plugins", {}).get("disabled", [])) == set(
@@ -67,7 +69,8 @@ def _write_minimal_config(tmp_path, session_db_path, extra_channels=None):
             "max_context_tokens": 8000,
         },
         "llm": {
-            "main": {"base_url": "http://127.0.0.1:1/v1", "model": "test-model"},
+            "providers": {"main": {"base_url": "http://127.0.0.1:1/v1"}},
+            "profiles": {"main": {"model": "test-model"}},
         },
         "daemon": {"session_db": str(session_db_path)},
         "plugins": {"disabled": list(MINIMAL_DISABLED_PLUGINS)},
