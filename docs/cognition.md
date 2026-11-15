@@ -461,8 +461,19 @@ differently now (#624); the closing paren keeps `memory 12` from matching
 bumped (`retrieval_count`, `last_retrieved_at` — the write half of
 reconsolidation), and every retrieval writes a `retrieval_log` row
 (the top-ranked candidate's decayed score and raw similarity,
-hit/admitted counts, degradation flag) and one `retrieval_candidate` row
-per logged candidate (#407, below).
+hit/admitted counts, degradation flag, banding path) and one
+`retrieval_candidate` row per logged candidate (#407, below).
+
+`retrieval_log.banding_path` says which banding path that retrieval actually
+took (#931): one of the configured `band_on` values (`score`, `similarity`,
+`relative`), `relative_fallback:<reason>` when `relative` could not measure the
+spread (`few_records`, `no_spread` or `scan_failed`; banding then used raw
+similarity), or `fts5` when the retrieval degraded to keyword search. Without
+it a z-gated retrieval and a fallback retrieval look identical once the
+fallback's once-per-process warning has gone quiet. Rows written before the
+column read `NULL`. `eval_memory --snapshot` records the same value per query
+and counts them in `banding_paths`, so an eval run shows how many queries the
+fallback banded.
 
 **The candidate log (#407).** `retrieval_log` says what a retrieval
 returned; `retrieval_candidate` says what it considered and what happened

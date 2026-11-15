@@ -250,6 +250,21 @@ def _exclude_clause(
 CandidateRow = tuple[int, str, float, "float | None", float, bool]
 
 
+def _banding_path(degraded: bool, band_on: str, spread_reason: str | None) -> str:
+    """The banding path a retrieval actually took, for its retrieval_log row.
+
+    ``relative`` with no measured spread is not the same run as ``relative``
+    with one, and after the once-per-process warning the two are otherwise
+    indistinguishable (#931), so the fallback carries its reason.
+    """
+    if degraded:
+        # Keyword search: there is no similarity to band on.
+        return "fts5"
+    if band_on == "relative" and spread_reason is not None:
+        return f"relative_fallback:{spread_reason}"
+    return band_on
+
+
 @dataclass(frozen=True)
 class RetrievalPool:
     """The whole scored pool of one retrieval (#407)."""
@@ -263,6 +278,13 @@ class RetrievalPool:
     excluded_in_window: int | None
     degraded: bool
     k: int
+    # Which banding path actually ran (#931): one of the configured band_on
+    # values (`score`, `similarity`, `relative`), `relative_fallback:<reason>`
+    # when the relative gate could not measure the spread, or `fts5` when the
+    # retrieval degraded to keyword search. Written to retrieval_log so a z
+    # gate and a raw-similarity fallback are told apart after the once-per-
+    # process warning has gone quiet.
+    banding_path: str = ""
 
 
 # How long (ms) the dedicated memory write connection waits for SQLite's
@@ -1523,7 +1545,8 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
     hit_count INTEGER NOT NULL,
     admitted_count INTEGER NOT NULL,
     degraded_to_fts INTEGER NOT NULL DEFAULT 0,
-    excluded_in_window INTEGER      -- in-window records matched before exclusion; NULL if none applied
+    excluded_in_window INTEGER,     -- in-window records matched before exclusion; NULL if none applied
+    banding_path TEXT               -- which banding path ran (#931); NULL on rows written before it
 )
 """
 
@@ -3349,7 +3372,7 @@ class MemoryPlugin(CorvidaePlugin):
             log_cursor = await db.execute(
                 "INSERT INTO retrieval_log (ts, channel_id, trace_id, top_score, "
                 "top_similarity, hit_count, admitted_count, degraded_to_fts, "
-                "excluded_in_window) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "excluded_in_window, banding_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     channel.id,
@@ -3360,6 +3383,7 @@ class MemoryPlugin(CorvidaePlugin):
                     len(admitted_ids),
                     1 if degraded else 0,
                     pool.excluded_in_window,
+                    pool.banding_path,
                 ),
             )
             retrieval_id = log_cursor.lastrowid
@@ -3485,7 +3509,7 @@ class MemoryPlugin(CorvidaePlugin):
         db = await self._ensure_schema()
         k = k or self._retrieval_k
         if db is None:
-            return RetrievalPool([], [], None, False, k)
+            return RetrievalPool([], [], None, False, k, "no_db")
         now = time.time() if now is None else now
 
         rows: list[CandidateRow] = []
@@ -3499,6 +3523,8 @@ class MemoryPlugin(CorvidaePlugin):
         # The query's cosine mean and stdev over the whole memory, for
         # band_on: relative (#409); None when not banding relatively.
         spread: tuple[float, float] | None = None
+        # Why the relative gate fell back, when it did (#931).
+        spread_reason: str | None = None
         if self._vec_available and self._embedding_enabled():
             try:
                 client = self._llm().get_client("embedding")
@@ -3534,7 +3560,9 @@ class MemoryPlugin(CorvidaePlugin):
                             db, text, query_vector, k, exclude, rows,
                         )
                     if self._band_on == "relative":
-                        spread = await self._relative_spread(db, query_vector)
+                        spread, spread_reason = await self._relative_spread(
+                            db, query_vector
+                        )
         else:
             degraded = True
 
@@ -3677,19 +3705,25 @@ class MemoryPlugin(CorvidaePlugin):
                 await self._fts_in_window_count(db, text, exclude)
                 if degraded else len(in_window_rows)
             )
-        return RetrievalPool(ranked, excluded, excluded_in_window, degraded, k)
+        return RetrievalPool(
+            ranked, excluded, excluded_in_window, degraded, k,
+            _banding_path(degraded, self._band_on, spread_reason),
+        )
 
     async def _relative_spread(
         self, db: aiosqlite.Connection, query_vector: list[float],
-    ) -> tuple[float, float] | None:
+    ) -> tuple[tuple[float, float] | None, str | None]:
         """The query's cosine mean and stdev over the whole memory (#409).
 
         One aggregate pass over every indexed, unredacted record with a
         stored vector (the same brute-force cost as the KNN scan, with no k
-        limit). Returns None, so banding falls back to raw similarity, when
-        there are fewer than ``RELATIVE_MIN_RECORDS`` such records, when they
-        have no spread, or when the scan fails; the first fallback of the
-        process is warned about.
+        limit). Returns ``(spread, None)``, or ``(None, reason)`` so banding
+        falls back to raw similarity when there are fewer than
+        ``RELATIVE_MIN_RECORDS`` such records, when they have no spread, or when
+        the scan fails; the first fallback of the process is warned about. The
+        reason comes back to the caller because the warning is once per process
+        and silent afterwards, and the retrieval_log row has to say which path
+        ran every time (#931): ``few_records``, ``no_spread`` or ``scan_failed``.
         """
         import sqlite_vec
         reason: str | None = None
@@ -3710,7 +3744,8 @@ class MemoryPlugin(CorvidaePlugin):
                 "(the next query retries)",
                 exc_info=True,
             )
-            return None
+            return None, "scan_failed"
+        code = "few_records"
         if count < RELATIVE_MIN_RECORDS:
             reason = (
                 f"only {count} embedded records (band_on: relative needs at "
@@ -3721,8 +3756,9 @@ class MemoryPlugin(CorvidaePlugin):
             stdev = math.sqrt(max(0.0, mean_sq - mean * mean))
             if stdev <= 1e-9:
                 reason = f"no spread in similarity across {count} records"
+                code = "no_spread"
             else:
-                return mean, stdev
+                return (mean, stdev), None
         # Fallback: warn the first time, then stay quiet (it recurs per query
         # until the memory grows).
         if not self._relative_fallback_warned:
@@ -3734,7 +3770,7 @@ class MemoryPlugin(CorvidaePlugin):
                 "logged once per process.",
                 DEFAULT_BAND_STRONG, DEFAULT_BAND_MODERATE, reason,
             )
-        return None
+        return None, code
 
     async def recent(self, limit: int) -> list[dict]:
         """The newest memories of the whole memory, every channel's.
@@ -4248,6 +4284,9 @@ class MemoryPlugin(CorvidaePlugin):
         await add_column_if_missing(db, "retrieval_log", "top_similarity", "REAL")
         # #407: the exclusion count and the per-candidate child table.
         await add_column_if_missing(db, "retrieval_log", "excluded_in_window", "INTEGER")
+        # #931: the banding path that ran (z gate, raw-similarity fallback with
+        # its reason, or the FTS5 degrade); rows from before it read NULL.
+        await add_column_if_missing(db, "retrieval_log", "banding_path", "TEXT")
         await db.execute(RETRIEVAL_CANDIDATE_DDL)
         # #666: which search found each candidate; old rows read NULL.
         await add_column_if_missing(db, "retrieval_candidate", "source", "TEXT")

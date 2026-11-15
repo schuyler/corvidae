@@ -390,6 +390,77 @@ class TestDegradation:
         await db.close()
 
 
+class TestBandingPath:
+    """#931: the retrieval_log row says which banding path ran.
+
+    The relative gate's fallback warns once per process and is then silent, so
+    a z-banded retrieval and a raw-similarity one used to look identical.
+    """
+
+    async def _banding_path(self, db) -> str:
+        async with db.execute(
+            "SELECT banding_path FROM retrieval_log ORDER BY id DESC LIMIT 1"
+        ) as cursor:
+            return (await cursor.fetchone())[0]
+
+    async def test_relative_over_enough_records_records_the_z_path(self):
+        needs_vec()
+        memory, embedder, channel, conv, db = await build_retrieval_env(gate_open())
+        try:
+            # RELATIVE_MIN_RECORDS embedded records, so the spread is measured.
+            for i in range(51):
+                await seed_memory(
+                    db, channel.id, f"note {i} about the north fence rain gauge",
+                )
+            memory._band_on = "relative"
+            await ask(memory, channel, conv, "where is the rain gauge?")
+            assert await self._banding_path(db) == "relative"
+        finally:
+            await db.close()
+
+    async def test_relative_on_a_small_memory_records_the_fallback_and_why(self):
+        needs_vec()
+        memory, embedder, channel, conv, db = await build_retrieval_env(gate_open())
+        try:
+            await seed_memory(db, channel.id, "the rain gauge is on the north fence")
+            memory._band_on = "relative"
+            await ask(memory, channel, conv, "where is the rain gauge?")
+            # Too few embedded records to trust the spread: raw similarity ran.
+            assert await self._banding_path(db) == "relative_fallback:few_records"
+        finally:
+            await db.close()
+
+    async def test_a_degraded_retrieval_records_the_fts_path(self):
+        memory, embedder, channel, conv, db = await build_retrieval_env(gate_open())
+        try:
+            await seed_memory(db, channel.id, "the rain gauge is on the north fence")
+            embedder.fail = True
+            await ask(memory, channel, conv, "where is the rain gauge?")
+            assert await self._banding_path(db) == "fts5"
+        finally:
+            await db.close()
+
+    @pytest.mark.parametrize(
+        "degraded, band_on, reason, expected",
+        [
+            (True, "relative", None, "fts5"),
+            (True, "score", None, "fts5"),
+            (False, "relative", None, "relative"),
+            (False, "relative", "few_records", "relative_fallback:few_records"),
+            (False, "relative", "no_spread", "relative_fallback:no_spread"),
+            (False, "relative", "scan_failed", "relative_fallback:scan_failed"),
+            (False, "similarity", None, "similarity"),
+            (False, "score", None, "score"),
+        ],
+    )
+    def test_every_path_has_a_name(self, degraded, band_on, reason, expected):
+        """The three fallback reasons and the three configured modes, because
+        a degraded retrieval bands on nothing and the split has to be total."""
+        from corvidae_cognition.memory import _banding_path
+
+        assert _banding_path(degraded, band_on, reason) == expected
+
+
 class TestRetrievalLog:
     async def test_retrieval_log_row_per_retrieval(self):
         memory, embedder, channel, conv, db = await build_retrieval_env(gate_open())
