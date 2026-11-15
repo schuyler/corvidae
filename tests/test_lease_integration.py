@@ -7,15 +7,12 @@ recorded with the lease key its call carried and parked on an
 ``asyncio.Event`` the test sets, so the test controls the order model calls
 leave in. Ordering is asserted from the recorded start order and from
 ``LeaseManager.snapshot``, never from sleeps. Covers R1, R5, R6, R7 and R13 of
-.claude/plans/364-sticky-leases.md; the manager's own rules are unit tested in
-tests/test_lease.py.
+#364's "sticky until contention" ruling; the manager's own rules are unit
+tested in tests/test_lease.py.
 
 Kernel tests must not import corvidae_cognition: the "silent task" of the R6
 case is enqueued by a small test plugin from ``on_agent_response``, as
 critique would.
-
-Names that do not exist yet (``LLMPlugin.leases``, ``usage_log.lease_wait_ms``)
-are reached inside each test, so a test fails on its own missing piece.
 """
 
 from __future__ import annotations
@@ -526,6 +523,34 @@ async def test_r12_shutdown_release_events_reach_a_registered_on_metrics_consume
     releases = [(v, t) for n, v, t in metrics.events if n == "lease.release"]
     assert [t.get("lease_key") for _v, t in releases] == [stack.a.id]
     assert releases[0][1]["reason"] == "shutdown"
+
+
+class _BrokenMetrics:
+    """Consumer plugin whose on_metrics always raises."""
+
+    @hookimpl
+    async def on_metrics(self, name: str, value: float, tags: dict) -> None:
+        """Fail every event."""
+        raise RuntimeError("metrics sink down")
+
+
+async def test_r12_failing_on_metrics_consumer_is_logged_and_shutdown_completes(make_stack, caplog) -> None:
+    """R12 rescue: an on_metrics consumer that raises never breaks a call or
+    shutdown; LLMPlugin logs a warning naming the lease metric, the key and
+    the provider."""
+    stack = await make_stack(1)
+    stack.plugin.pm.register(_BrokenMetrics(), name="broken_metrics")
+    script(stack, {})
+
+    with caplog.at_level("WARNING", logger="corvidae.llm_plugin"):
+        await send(stack, stack.a, "A1")
+        await until(lambda: len(sent_texts(stack.plugin.pm, OutboundMessage)) >= 1, "A's reply")
+        await stack.llm.on_stop()
+
+    messages = [r.getMessage() for r in caplog.records if r.name == "corvidae.llm_plugin"]
+    assert any(
+        "lease.grant" in m and stack.a.id in m and "main" in m for m in messages
+    ), messages
 
 
 async def test_r13_usage_log_created_before_this_change_gains_lease_wait_ms_in_place(tmp_path) -> None:

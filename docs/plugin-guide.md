@@ -810,6 +810,10 @@ a key keeps its head across calls while no other key waits, gives it up at
 its next call boundary (no call in flight) when one does, and waiting keys
 are served first come, first served. A plugin needs nothing beyond its
 `lease_scope` for this; the wait happens inside `LLMClient.chat`.
+`on_llm_response` fires while its call still counts as in flight, so an
+implementation must not make a chat call on the same bounded provider from
+inside it: on `heads: 1` that call waits for a head its own caller holds,
+and never gets it.
 
 Long upkeep can step aside of its own accord between chunks:
 

@@ -2,12 +2,10 @@
 
 Unit tests on ``corvidae.lease.LeaseManager`` / ``ProviderLeases`` with a
 hand-moved monotonic clock and a list-collecting emitter, one test per
-acceptance criterion in .claude/plans/364-sticky-leases.md: R2, R3m, R3p, S1,
-S2, R8, R9m, R10, R11 and R12. The path through the real Agent, TaskQueue and
-LLMPlugin (R1, R5, R6, R7, R13) is tests/test_lease_integration.py.
-
-``corvidae.lease`` does not exist yet, so it is imported inside ``make`` and a
-test fails on its own missing piece rather than at collection.
+acceptance criterion of #364's "sticky until contention" ruling: R2, R3m, R3p,
+S1, S2, R8, R9m, R10, R11 and R12, plus the paths the design adds. The path
+through the real Agent, TaskQueue and LLMPlugin (R1, R5, R6, R7, R13) is
+tests/test_lease_integration.py.
 
 Ordering is asserted from recorded events (``Env.log``) and snapshots, never
 from sleeps. ``spin`` yields to the loop a fixed number of times; no wall time
@@ -275,6 +273,30 @@ async def test_s2_least_recently_used_idle_holder_yields_to_a_new_waiter() -> No
     yields = named(env, "lease.yield")
     assert [(e[2]["lease_key"], e[2]["reason"]) for e in yields] == [("A", "contention")]
     await c.leave()
+
+
+async def test_s2_holders_parked_call_is_admitted_once_no_other_key_waits() -> None:
+    """S2 / R6: heads 2, A and C mid-call, B waiting, A's second call parked
+    behind B. C's call ends: C gives way to B, nobody else waits, so A's
+    parked call runs on A's own lease at once (it is never left behind A)."""
+    env = make({"main": 2})
+    a1 = await take(env, "A", "A1")
+    c = await take(env, "C")
+    b = await take(env, "B")
+    a2 = await take(env, "A", "A2")
+    # B waits for a head; A's second call queues behind B (contention).
+    assert waiter_keys(env) == ["B", "A"]
+    assert not a2.entered.is_set()
+
+    await c.leave()
+    await spin()
+
+    # B took C's head and A2 was admitted on A's lease while A1 still runs.
+    assert b.entered.is_set() and a2.entered.is_set()
+    assert holder_keys(env) == ["A", "B"]
+    assert [e[2]["lease_key"] for e in named(env, "lease.grant")] == ["A", "C", "B"]
+    for probe in (a1, a2, b):
+        await probe.leave()
 
 
 async def test_s2_holder_mid_call_yields_when_its_call_ends() -> None:
@@ -591,6 +613,30 @@ async def test_r12_release_event_is_emitted_only_at_shutdown() -> None:
 # ---------------------------------------------------------------------------
 # Paths the design adds beyond the numbered criteria
 # ---------------------------------------------------------------------------
+
+
+async def test_r12_failing_emitter_is_logged_and_never_breaks_leasing(caplog) -> None:
+    """R12 rescue: an emitter that raises does not stop the grant, and the
+    warning names the metric, the key and the provider."""
+    from corvidae.lease import LeaseManager
+
+    def boom(name: str, value: float, tags: dict) -> None:
+        """An emitter that always fails."""
+        raise RuntimeError("sink down")
+
+    mgr = LeaseManager({"main": 1}, monotonic=Ticker().monotonic, emit=boom)
+    env = SimpleNamespace(mgr=mgr, prov=mgr.provider("main"), log=[], events=[])
+
+    with caplog.at_level("WARNING", logger="corvidae.lease"):
+        a = await take(env, "A")
+
+    # The call got its head despite the failed lease.grant emission.
+    assert a.entered.is_set()
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any(
+        "lease.grant" in m and "A" in m and "main" in m for m in messages
+    ), messages
+    await a.leave()
 
 
 async def test_r11_call_on_a_closed_provider_raises_and_takes_no_lease() -> None:
