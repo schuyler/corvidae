@@ -24,7 +24,9 @@ Three admission paths:
   finished at the turn's sweep is admitted that turn; one still pending is
   admitted at the channel's first turn after it resolves, whatever its
   origin. At most one pending promise per (channel, source): a newer submit
-  cancels the older. ``ingest()`` is the stub-less producer API (#202).
+  cancels the older, but one that had already finished is admitted this turn
+  instead of being lost (#726). ``ingest()`` is the stub-less producer API
+  (#202).
 
 Behavior, in order:
   1. Dedupe: drop any entry whose exact text already appears inside a
@@ -271,7 +273,9 @@ class FunnelSpec:
 
         Implementers submit and return; they must not await the promise here.
         A provider that submits again while its previous promise is pending
-        cancels that promise, so it should wait for the pending one to finish.
+        cancels that promise; a previous one that had already finished is
+        admitted in the same turn rather than lost (#726), so re-submitting is
+        safe either way.
         """
 
 
@@ -435,7 +439,9 @@ class FunnelPlugin(CorvidaePlugin):
            ``annotations``, never parsed from stub text (§2.2/§4.7
            no-inference rule).
         4. Collect promises from ``on_funnel_ingest``. Collection is last, so
-           a promise submitted this turn is first swept on the next turn.
+           a promise submitted this turn is first swept on the next turn; one
+           that resolved after this turn's sweep and is superseded here by a
+           newer submit is carried to the drain in the same step instead (#726).
 
         The pending flag is cleared FIRST, before the drains: a failure inside
         admission leaves payloads registered, and the next producer's stub
@@ -533,26 +539,35 @@ class FunnelPlugin(CorvidaePlugin):
             # Finished: take its result (None when it admits nothing or failed).
             result = self._discard(channel_id, source, pending)
             if result is not None:
-                keys = result.keys
-                try:
-                    _check_keys(source, result.entries, keys)
-                except ValueError as exc:
-                    # The keys arrived inside a promise, so there is no caller
-                    # to raise at: log the same message admit_detailed would
-                    # have raised, and admit the entries unkeyed rather than
-                    # drop a result the turn is waiting for.
-                    logger.warning(
-                        "%s; admitting the %s result for %s without keys",
-                        exc, source, channel_id,
-                        extra={"channel_id": channel_id, "source": source},
-                    )
-                    keys = None
                 self._next_turn.setdefault(channel_id, []).append(
-                    _Payload(
-                        source, list(result.entries), pending.created,
-                        result.on_admitted, keys,
-                    )
+                    self._carried_payload(channel_id, source, result, pending.created)
                 )
+
+    def _carried_payload(
+        self, channel_id: str, source: str, result, created: float,
+    ) -> _Payload:
+        """A resolved promise's result as a payload for this turn's drain (#726).
+
+        Its keys travel with it, checked exactly as ``admit_detailed`` checks a
+        caller's: a promise has no caller to raise at, so a wrong-length list is
+        logged and the entries are admitted unkeyed rather than dropped — and
+        rather than raising inside ``_drain``, where it would fail again on
+        every later turn (#725's tests catch that, #726's review named it).
+        """
+        keys = getattr(result, "keys", None)
+        try:
+            _check_keys(source, result.entries, keys)
+        except ValueError as exc:
+            logger.warning(
+                "%s; admitting the %s result for %s without keys",
+                exc, source, channel_id,
+                extra={"channel_id": channel_id, "source": source},
+            )
+            keys = None
+        return _Payload(
+            source, list(result.entries), created,
+            getattr(result, "on_admitted", None), keys,
+        )
 
     async def _drain_origin(self, channel, pair: tuple[str, str] | None) -> None:
         """Drain the origin-keyed queue for ``pair``, if this turn's origin matches it."""
@@ -574,16 +589,37 @@ class FunnelPlugin(CorvidaePlugin):
         """Call ``on_funnel_ingest`` so implementers submit promises for ``channel``."""
         cid = channel.id
 
+        # Results that finished after this turn's sweep, carried to this turn's
+        # drain rather than lost to a supersede or replaced by a newer submit.
+        carried: list[_Payload] = []
+
         def submit(source: str, promise: asyncio.Future) -> None:
-            # Store the promise under (channel, source); an older pending one for the source is cancelled.
+            # Store the promise under (channel, source); an older one for the
+            # source is superseded. A predecessor that already finished hands
+            # over its result instead of losing it (#726).
             old = self._pending.get(cid, {}).get(source)
             if old is not None:
-                logger.debug(
-                    "superseding the pending %s promise for %s: the newer submit cancels it",
-                    source, cid, extra={"channel_id": cid, "source": source},
-                )
-                self._discard(cid, source, old)
-            self._pending.setdefault(cid, {})[source] = _Pending(promise, self._now())
+                result = self._discard(cid, source, old)
+                if result is not None:
+                    carried.append(
+                        self._carried_payload(cid, source, result, old.created))
+                else:
+                    # _discard cancelled it if it was still running; a finished
+                    # one had nothing to admit (None, cancelled, or raised).
+                    logger.debug(
+                        "superseding the pending %s promise for %s: it was cancelled "
+                        "or finished with nothing to admit",
+                        source, cid, extra={"channel_id": cid, "source": source},
+                    )
+            entry = _Pending(promise, self._now())
+            self._pending.setdefault(cid, {})[source] = entry
+            # A promise submitted already done is admitted this turn: waiting a
+            # turn for a result the source had in hand is the latency #726 removes.
+            if promise.done():
+                result = self._discard(cid, source, entry)
+                if result is not None:
+                    carried.append(
+                        self._carried_payload(cid, source, result, entry.created))
 
         # Ask every implementer to submit; a raising one is logged, and the others' submissions stand.
         try:
@@ -597,6 +633,12 @@ class FunnelPlugin(CorvidaePlugin):
                 cid, exc_info=True,
                 extra={"channel_id": cid, "trace_id": trace_id},
             )
+        # Admit the carried results now: collection is the last step of
+        # before_agent_turn, so this is still before the turn's model call.
+        if carried:
+            remaining = await self._drain(channel, carried)
+            if remaining:
+                self._next_turn.setdefault(cid, []).extend(remaining)
 
     def _discard(self, channel_id: str, source: str, pending: _Pending) -> Ingest | None:
         """Remove ``pending`` from ``_pending``; return its ``Ingest`` if it finished with one.

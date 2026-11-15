@@ -1242,8 +1242,8 @@ Implementers call `submit(source, promise)`, where `promise` is an
   a disabled funnel is logged at DEBUG rather than WARNING. With the funnel
   disabled, nothing calls the hook.
 - At most one pending promise per `(channel, source)`. A newer submit
-  cancels the older, so do not submit again while your previous promise
-  for the channel is still pending.
+  cancels the older one, and an older promise that had already finished is
+  admitted this turn instead of being lost, so submitting again is safe.
 - Each turn runs four steps in order, none of which returns early:
   **expire** (only when `funnel.ingest_ttl` is set: queued stub-less payloads and
   pending promises older than it are dropped, and unresolved promises are
@@ -1262,9 +1262,9 @@ Implementers call `submit(source, promise)`, where `promise` is an
 Two limits. Expiry runs at the channel's next turn, with no timer, so a
 pending promise on a channel that takes no further turn keeps running
 until then or until shutdown. And a promise that finishes after the turn's
-sweep is superseded, and its entries lost, if its provider submits again
-in that same turn's collect. The funnel does not admit such a result on
-re-submit yet.
+sweep, while its provider submits again in that same collect, is carried to
+the turn's own drain rather than lost: the finished result is admitted from
+collect, alongside the newer promise's (which is swept next turn).
 
 **`ponder` tool.** The funnel registers one tool, `ponder()`, which takes no
 arguments: a bounded wait for recall already in flight. Every

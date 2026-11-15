@@ -333,9 +333,11 @@ class RecallPlugin(CorvidaePlugin):
 - `funnel.ingest_ttl`, when set, drops a queued stub-less payload (`ingest`) or a pending promise
   older than it; an unresolved promise is cancelled, so your work should
   tolerate cancellation. Shutdown cancels pending promises.
-- A promise that finishes during a turn, after the funnel's sweep, is lost
-  if you submit again in that same turn. The funnel does not admit such a
-  result on re-submit yet.
+- A promise submitted already done is admitted in that same turn, before the
+  model call, rather than waiting for the next sweep (#726). A promise that
+  finishes during a turn, after the funnel's sweep, is carried into that
+  turn's drain even if you submit again in the same collect: the finished
+  predecessor's result is admitted, not cancelled and replaced.
 
 ### Writing a recall source
 
@@ -412,10 +414,13 @@ contract:
   a keyed entry is deduped on the key instead.
 - **Without the funnel** nothing calls the hook and the source does nothing.
   The mixin lists `funnel` in `optional_depends_on`, so that is logged at DEBUG.
-- **One timing limit** (#726). A result is admitted at the turn after the one
-  that started its search, never the same turn. The mixin never submits while its
-  own search is pending, so the funnel's lost-on-resubmit case needs a search that
-  finishes between the funnel's sweep and its collect in a single turn.
+- **One timing limit** (#726, #624). A result is admitted at the turn after the
+  one that started its search, never the same turn: `RecallSourceMixin` always
+  submits an `asyncio.ensure_future`, which is not done at submit time, so the
+  mixin pays that turn of latency and a source that wants no wait must submit a
+  future it has already resolved. The mixin never submits while its own search
+  is pending, and a result that finishes between the funnel's sweep and its
+  collect is now carried to that turn's drain rather than lost on resubmit.
 - **Tests.** Pass a fake clock as `init_recall(config, now=clock)`. See
   `tests/cognition/test_recall_mixin.py` for a source on a real plugin
   manager with the real funnel.
