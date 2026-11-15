@@ -734,13 +734,20 @@ class TestQueueItemStartLine:
 class TestQueueItemPairing:
     """Every "queue item start" is closed, whatever way the item ends."""
 
-    async def test_an_item_with_no_conversation_message_still_closes(
+    async def test_an_item_with_no_conversation_message_opens_no_stage(
         self, plugin_and_channel, caplog,
     ):
-        """The first early return used to leave the start unpaired (#469)."""
+        """A routine early return is not a stage, so it logs neither record.
+
+        Round 2's fix logged a start before the early returns and closed it,
+        which paired but put two INFO lines on every absorbed tool result
+        (#469 round 3). The start now happens once the item does real work, and
+        the close is gated on it, so nothing can dangle.
+        """
         plugin, channel, db = plugin_and_channel
         item = QueueItem(
             role=QueueItemRole.USER, content="hi", channel=channel, sender="alice",
+            trace_id=mint_trace_id(),
         )
 
         # No conversation message: the body returns before the completion
@@ -750,13 +757,9 @@ class TestQueueItemPairing:
         with caplog.at_level(logging.INFO):
             await plugin._process_queue_item_attributed(item, channel, [])
 
-        starts = [r for r in caplog.records if r.getMessage() == "queue item start"]
-        timings = [r for r in caplog.records if r.getMessage() == "queue item timing"]
-        assert len(starts) == 1
-        assert len(timings) == 1, "the start must be paired with a close"
-        assert timings[0].trace_id == starts[0].trace_id
-        assert timings[0].outcome == "no_message"
-        assert timings[0].total_ms >= 0
+        names = [r.getMessage() for r in caplog.records]
+        assert "queue item start" not in names, names
+        assert "queue item timing" not in names, names
 
     async def test_an_item_that_raises_closes_as_failed(
         self, plugin_and_channel, caplog,
@@ -767,10 +770,10 @@ class TestQueueItemPairing:
         plugin, channel, db = plugin_and_channel
         item = QueueItem(
             role=QueueItemRole.USER, content="hi", channel=channel, sender="alice",
+            trace_id=mint_trace_id(),
         )
-        plugin._build_conversation_message = MagicMock(
-            side_effect=RuntimeError("boom")
-        )
+        # Raise after the stage opened, which is the case the outcome covers.
+        plugin._llm_overrides = MagicMock(side_effect=RuntimeError("boom"))
 
         with caplog.at_level(logging.INFO):
             with pytest.raises(RuntimeError):
@@ -782,6 +785,27 @@ class TestQueueItemPairing:
         assert len(timings) == 1, "the raising path must still close its start"
         assert timings[0].outcome == "failed"
         assert "ok" not in [getattr(r, "outcome", None) for r in timings]
+
+    async def test_an_absorbed_tool_result_logs_no_stage(self, plugin_and_channel, caplog):
+        """One INFO line per batched tool result was the noise round 3 named.
+
+        A result absorbed into a pending batch does no work, so it opens no
+        stage: a batch of five calls logged ten INFO lines before this.
+        """
+        plugin, channel, db = plugin_and_channel
+        plugin._mark_started()
+        channel.pending_tool_call_ids.update({"c1", "c2"})
+        item = QueueItem(
+            role=QueueItemRole.NOTIFICATION, content="result", channel=channel,
+            sender="tool", tool_call_id="c1", trace_id=mint_trace_id(),
+        )
+
+        with caplog.at_level(logging.INFO):
+            await plugin._process_queue_item_attributed(item, channel, [])
+
+        names = [r.getMessage() for r in caplog.records]
+        assert "queue item start" not in names, names
+        assert "queue item timing" not in names, names
 
     async def test_a_completed_item_says_so_on_its_completion_record(
         self, plugin_and_channel, caplog,

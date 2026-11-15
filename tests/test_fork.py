@@ -637,6 +637,34 @@ class TestStageLogLines:
         assert done.ok is True
         assert isinstance(done.duration_ms, int) and done.duration_ms >= 0
 
+    async def test_two_forks_under_one_stage_pair_by_seq(
+        self, forking_agent, caplog
+    ):
+        """A trace can fork more than once under one stage (critique's lenses).
+
+        Without a per-call discriminator both calls log the same
+        (channel, stage, trace_id), so no reader can say which duration belongs
+        to which call (#469 round 3).
+        """
+        plugin, channel, client = forking_agent
+        client.chat = AsyncMock(return_value=_make_text_response("fork says hi"))
+        token = set_attribution(trace_id="trace-469")
+        try:
+            with caplog.at_level(logging.INFO, logger="corvidae.agent"):
+                await plugin.fork(channel, INSTRUCTION, stage="appraisal")
+                await plugin.fork(channel, INSTRUCTION, stage="appraisal")
+        finally:
+            reset_attribution(token)
+
+        starts = [r for r in caplog.records if r.getMessage() == "stage start"]
+        dones = [r for r in caplog.records if r.getMessage() == "stage done"]
+        assert len(starts) == len(dones) == 2
+        # The seq is what distinguishes them; both calls really happened.
+        assert starts[0].stage == starts[1].stage == "appraisal"
+        assert dones[0].seq == starts[0].seq
+        assert dones[1].seq == starts[1].seq
+        assert dones[0].seq != dones[1].seq
+
     async def test_a_refused_fork_still_logs_its_done_line(
         self, forking_agent, caplog
     ):

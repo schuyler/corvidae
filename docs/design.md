@@ -2291,10 +2291,12 @@ written out); transport errors propagate.
 
 **The kernel's stage records (#469).** Every `Agent.fork` call logs
 `stage start` at entry and `stage done` when it returns or raises, each
-carrying `stage`, `channel`, `trace_id`, and — on the done record —
-`duration_ms` and `ok`. They are kernel records, not stage plugin ones, so a
-stage that later refuses (`ForkRefused`) still has a start; the pair is what
-makes a stage's duration derivable from the log without a clock. A stage run
+carrying `stage`, `channel`, `trace_id`, `seq` (a per-call counter on the
+agent, so a trace that forks several times under one stage — critique's lenses
+do — gives each call its own pair), and — on the done record — `duration_ms`
+and `ok`. They are kernel records, not stage plugin ones, so a stage that
+later refuses (`ForkRefused`) still has a start; the pair is what makes a
+stage's duration derivable from the log without a clock. A stage run
 beside the main turn also has `queue item start` / `queue item timing`, whose
 close carries an `outcome`: `ok` on the step-11 completion record,
 `no_message`, `buffered` or `no_result` on the early returns, and `failed` when

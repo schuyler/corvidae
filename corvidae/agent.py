@@ -27,6 +27,7 @@ Logging:
 
 import asyncio
 import dataclasses
+import itertools
 import json
 import os
 import logging
@@ -298,6 +299,10 @@ class Agent(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self._client = None
+        # A per-call discriminator for the stage records (#469 review): a
+        # trace can fork more than once under one stage (critique's lenses), so
+        # (trace_id, stage) alone cannot pair a start with its done.
+        self._fork_seq = itertools.count(1)
         self._tools: dict[str, Callable] = {}
         self._tool_schemas: list[dict] = []
         # The ToolCollectionPlugin and the registry generation the two
@@ -1418,17 +1423,13 @@ class Agent(CorvidaePlugin):
                 return
         _t0 = time.monotonic()
         _phases: dict[str, float] = {}
-        # The start of the item's stage run (#469): "queue item timing" below
-        # closes it, and the trace id pairs the two even when two channels'
-        # items interleave. Same record shape as the completion, one line.
-        logger.info(
-            "queue item start",
-            extra={
-                "channel": item.channel.id,
-                "trace_id": item.trace_id,
-                "role": item.role.value,
-            },
-        )
+        # The start of the item's stage run (#469) is logged once the item is
+        # known to do real work: a routine early return (no conversation
+        # message, a tool result absorbed into a pending batch) opens no stage,
+        # because every batched tool result would otherwise log two INFO lines
+        # (#469 round 3). "queue item timing" below closes it, and the trace id
+        # pairs the two even when two channels' items interleave.
+        _started = False
 
         # The outcome the finally below reports when the run stops before
         # the completion record: "failed" unless a path says otherwise, because
@@ -1524,6 +1525,16 @@ class Agent(CorvidaePlugin):
                         )
                         _outcome = "buffered"
                         return
+
+                _started = True
+                logger.info(
+                    "queue item start",
+                    extra={
+                        "channel": item.channel.id,
+                        "trace_id": item.trace_id,
+                        "role": item.role.value,
+                    },
+                )
 
                 # 5. Compact if approaching context limit
                 _t_compact_start = time.monotonic()
@@ -1716,7 +1727,7 @@ class Agent(CorvidaePlugin):
             # message) or an exception would otherwise leave the start
             # record unpaired, which is exactly what makes duration
             # unmeasurable (#469).
-            if not _closed:
+            if _started and not _closed:
                 logger.info(
                     "queue item timing",
                     extra={
@@ -1905,10 +1916,14 @@ class Agent(CorvidaePlugin):
         # id is the turn's, taken before the fork's own attribution replaces
         # the mode, so a stage pairs with the turn that caused it.
         trace_id = get_attribution().get("trace_id")
+        seq = next(self._fork_seq)
         started = time.monotonic()
         logger.info(
             "stage start",
-            extra={"channel": channel.id, "stage": stage, "trace_id": trace_id},
+            extra={
+                "channel": channel.id, "stage": stage,
+                "trace_id": trace_id, "seq": seq,
+            },
         )
         token = set_attribution(channel_id=channel.id, mode="fork")
         # ok means the fork produced a result: a refusal is a stage that ran and
@@ -1938,6 +1953,7 @@ class Agent(CorvidaePlugin):
                     "channel": channel.id,
                     "stage": stage,
                     "trace_id": trace_id,
+                    "seq": seq,
                     "duration_ms": round((time.monotonic() - started) * 1000),
                     "ok": ok,
                 },
