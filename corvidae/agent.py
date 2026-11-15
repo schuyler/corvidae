@@ -1320,6 +1320,14 @@ class Agent(CorvidaePlugin):
                     item.trace_id = mint_trace_id()
                     item.originating = True
 
+            # Link each absorbed message to the trace that answers it (#423):
+            # redaction resolves a burst's owner by this lookup, because a row
+            # id cannot tell "the reply that answered this burst" from "the
+            # next turn's reply" (m1, rA, m2, rB is a burst arriving while the
+            # previous turn generates).
+            for absorbed_item in absorbed:
+                absorbed_item.annotations["absorbed_by_trace"] = item.trace_id
+
             # One line per coalesced burst, after the owner's trace is known.
             if absorbed:
                 logger.info(

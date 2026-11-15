@@ -189,6 +189,31 @@ class TestOriginatingTextLRU:
         assert env.appraisal.get_originating_text("k-lru-none") == "text with no rowid yet"
         await _teardown(env)
 
+    async def test_an_absorbed_message_records_its_owning_trace(self, tmp_path):
+        """#423: the kernel stamps `absorbed_by_trace`; the row keeps it.
+
+        Redaction resolves an absorbed message to the turn that answered it by
+        this key, because row order cannot (`m1, rA, m2, rB`).
+        """
+        env = await build_env(tmp_path)
+        await env.appraisal.on_message_persisted(
+            channel=env.channel, trace_id="absorbed-1", rowid=7,
+            text="the absorbed message", annotations={"absorbed_by_trace": "owner-1"},
+        )
+        appraisal = await _read_appraisal(env.db, "absorbed-1")
+        assert appraisal["absorbed_by"] == "owner-1"
+        await _teardown(env)
+
+    async def test_an_ordinary_message_records_no_owner(self, tmp_path):
+        env = await build_env(tmp_path)
+        await env.appraisal.on_message_persisted(
+            channel=env.channel, trace_id="plain-1", rowid=8,
+            text="a lone message", annotations={},
+        )
+        appraisal = await _read_appraisal(env.db, "plain-1")
+        assert "absorbed_by" not in (appraisal or {})
+        await _teardown(env)
+
     async def test_get_originating_text_returns_none_for_unknown_id(self, tmp_path):
         env = await build_env(tmp_path)
         assert env.appraisal.get_originating_text("never-seen") is None

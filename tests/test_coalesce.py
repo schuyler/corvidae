@@ -231,6 +231,37 @@ async def test_burst_rows_in_order_and_persisted_events_before_call(make_env):
     ]
 
 
+async def test_each_absorbed_message_names_the_trace_that_answers_it(make_env):
+    """#423: the kernel stamps the burst's owner onto every absorbed message.
+
+    Redaction resolves an absorbed message to the turn that answered it by
+    this link. Row ids cannot do it: in m0, rA, m1, rB the burst arrived while
+    the previous turn was generating, so an earlier message's nearest reply
+    belongs to another turn.
+    """
+    seen: list[tuple[str, dict]] = []
+    plugin, channel, db, llm = await make_env()
+
+    class Spy:
+        @hookimpl
+        async def on_message_persisted(self, channel, trace_id, rowid, text, annotations):
+            seen.append((text, dict(annotations)))
+
+    plugin.pm.register(Spy(), name="spy")
+
+    await start_inflight(plugin, channel, llm)
+    traces = await queue_burst(plugin, channel, ["m1", "m2", "m3"])
+    llm.gate.set()
+    await settle(plugin, channel)
+
+    owner = traces[-1]
+    by_text = dict(seen)
+    # The owner answered the burst; the two absorbed messages point at it.
+    assert by_text["m3"].get("absorbed_by_trace") is None
+    assert by_text["m1"]["absorbed_by_trace"] == owner
+    assert by_text["m2"]["absorbed_by_trace"] == owner
+
+
 # ---------------------------------------------------------------------------
 # R4: only adjacent messages merge
 # ---------------------------------------------------------------------------

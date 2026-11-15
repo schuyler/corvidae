@@ -649,6 +649,13 @@ class AppraisalPlugin(CorvidaePlugin):
         notification-born traces alike), regardless of persistence
         outcome (rowid may be None).
         """
+        # A message a coalesced burst absorbed carries the link to the trace
+        # that answers it (#423). Record it on the row so redaction resolves
+        # the owner by lookup: row ids cannot tell this burst's reply from the
+        # next turn's. Best-effort, like stage 1, and logged when it fails.
+        owner = (annotations or {}).get("absorbed_by_trace")
+        if owner:
+            await self._persist_absorbed_by(channel, trace_id, owner)
         self._originating_text[trace_id] = text
         self._originating_text.move_to_end(trace_id)
         while len(self._originating_text) > ORIGINATING_TEXT_LRU_MAXSIZE:
@@ -659,6 +666,28 @@ class AppraisalPlugin(CorvidaePlugin):
             self._originating_rowid.move_to_end(trace_id)
             while len(self._originating_rowid) > ORIGINATING_TEXT_LRU_MAXSIZE:
                 self._originating_rowid.popitem(last=False)
+
+    async def _persist_absorbed_by(self, channel, trace_id: str, owner: str) -> None:
+        """Upsert ``appraisal.absorbed_by`` onto an absorbed message's row.
+
+        Same atomic-merge upsert as stage 1: the row may not exist yet when
+        this runs, and a plain update would no-op.
+        """
+        try:
+            outcome_log = self.pm.get_plugin("outcome_log")
+            if outcome_log is None:
+                logger.debug("absorbed_by persist skipped: outcome_log not registered")
+                return
+            await outcome_log.upsert_exchange(
+                trace_id, channel.id, None, appraisal={"absorbed_by": owner},
+            )
+        except Exception:
+            logger.warning(
+                "absorbed_by persist failed; redaction of this message will not "
+                "reach its owning turn",
+                exc_info=True,
+                extra={"trace_id": trace_id, "channel": channel.id},
+            )
 
     def get_originating_text(self, trace_id: str) -> str | None:
         """Pure reader for the exchange's true originating text, or None."""

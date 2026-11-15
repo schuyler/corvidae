@@ -1046,7 +1046,9 @@ queued, unmoved, so those keep their place. When the call returns
 anything, the last item taken owns the turn, and the item that was
 dequeued plus the other taken items are *absorbed*: `absorbed = [item,
 *following[:-1]]`, `item = following[-1]`. One INFO log names the channel,
-the burst size and the owning trace id. Trace
+the burst size and the owning trace id, and stamps each absorbed item's
+`annotations["absorbed_by_trace"]` with that id (the redaction link, #423).
+Trace
 resolution, `before_agent_turn`, the model call, the gates,
 `on_agent_response` and every usage row use the owner's trace; absorbed
 traces see admission and persistence only. The queue is never touched while
@@ -1865,14 +1867,21 @@ creates schema; schema is daemon-owned.
   exchange that owns a redacted id X has every
   `appraisal.stage2.past_claims` claim and query replaced with the
   tombstone text. The owner is the row with the largest
-  `message_rowid <= X` when that row carries stage-2 `past_claims` — except
-  for a coalesced burst (#398, #423): every message of the burst gets a row
-  at admission *and* a stage-1 appraisal from the gate, so the nearest row is
-  the absorbed message's own and only the turn's owner has stage 2. The owner
-  is then the last exchange row before the reply that answered the burst —
-  the first assistant row after X bounds the walk. Never an earlier row, whose
-  claims were not derived from X; and never an unbounded walk forward, since a
-  turn may legitimately have no stage 2 at all. The number of claims
+  `message_rowid = X`, or — when X has no row of its own, being a reply or a
+  tool row — the nearest row at or before X that carries stage-2
+  `past_claims`, never a later one. A coalesced burst (#398, #423) needs more
+  than that: every message of the burst gets a row at admission *and* a
+  stage-1 appraisal from the gate, so X's own row is not the owner's, and row
+  order cannot find the owner either — in `m1, rA, m2, rB` a burst arrived
+  while the previous turn was generating, so `m1`'s nearest reply belongs to
+  the other turn. The kernel therefore records the link: when it coalesces, it
+  stamps `annotations["absorbed_by_trace"]` on every absorbed message, and
+  `AppraisalPlugin.on_message_persisted` upserts it onto that message's row as
+  `appraisal.absorbed_by` (same atomic-merge upsert as stage 1). The scrubber
+  reads it, so an absorbed message resolves to the trace that answered it
+  whatever the row order, and a turn that never ran stage 2 owns nothing. The
+  annotation key is not model-visible: only keys a plugin declares in
+  `_annotation_keys` are serialised into the prompt. The number of claims
   and queries is kept for calibration, and the other appraisal fields are
   untouched. Every exchange in the channel with `message_rowid >=` the
   smallest redacted id has its `provenance_snapshot` set to NULL. That

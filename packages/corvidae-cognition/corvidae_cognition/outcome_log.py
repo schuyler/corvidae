@@ -431,61 +431,48 @@ async def _owning_trace_id(
 ) -> str | None:
     """The exchange a redacted message belongs to (#423).
 
-    Normally the exchange whose row holds this message and its stage-2
-    appraisal. A coalesced burst (#398) breaks that: every message of the burst
-    gets its own row at admission *and* a stage-1 appraisal from the gate
-    (appraisal.py's ``_persist_stage1``), while only the turn's owner — the last
-    message — gets stage 2. So "the row has an appraisal" cannot tell an
-    absorbed row from an owner; stage 2 can.
+    A coalesced burst (#398) breaks the obvious rule: every message of the
+    burst gets its own row at admission and a stage-1 appraisal, while only the
+    turn's owner — the last message — gets stage 2. The kernel records the link
+    when it coalesces (`annotations["absorbed_by_trace"]`, which
+    AppraisalPlugin upserts onto the absorbed row as `appraisal.absorbed_by`),
+    so this is a lookup: an absorbed message resolves to the trace that
+    answered it, whatever the row order.
 
-    When the message's own row has no stage-2 claims, it was absorbed (or its
-    turn has no stage 2 yet: a fork miss, a critique-origin turn, a pending
-    stage-2 task), and the owner is the last exchange row of its burst. The
-    burst ends at the reply that answered it, so the walk is bounded by the
-    first assistant row after ``msg_id``: a later exchange's claims were not
-    derived from this message, and tombstoning them would destroy provenance
-    redaction has no reason to touch. Later *windows* are a different matter,
-    and the snapshot rule already over-scrubs in that direction deliberately.
+    Row order cannot substitute for the link. In `m1, rA, m2, rB` — a burst
+    that arrived while the previous turn was generating, which is what
+    coalescing exists for — `m1`'s nearest reply is `rB`, the *other* turn's.
+    A positional walk bounded there leaves `m1`'s content in place; bounded at
+    the next reply it tombstones a later exchange's claims instead.
+
+    A message with no row of its own (an assistant reply, an id from another
+    channel) resolves to nothing, which is the pre-#423 behaviour.
     """
     async with db.execute(
         "SELECT trace_id, CASE WHEN json_valid(appraisal) THEN "
-        "json_extract(appraisal, '$.stage2.past_claims') END, message_rowid "
-        "FROM exchange_log WHERE channel_id = ? AND message_rowid IS NOT NULL "
-        "AND message_rowid <= ? ORDER BY message_rowid DESC LIMIT 1",
+        "json_extract(appraisal, '$.absorbed_by') END "
+        "FROM exchange_log WHERE channel_id = ? AND message_rowid = ? "
+        "LIMIT 1",
         (channel_id, msg_id),
     ) as cursor:
         row = await cursor.fetchone()
-    # The nearest row is the message's own: it owns the exchange when it has
-    # stage-2 claims. An earlier exchange's claims are never a fallback — they
-    # were not derived from this message, so tombstoning them would destroy
-    # provenance rather than protect it.
-    if row is not None and row[1] is not None:
-        return row[0]
-    # Only a message that *is* a row of its own can have been absorbed by a
-    # burst. When the nearest row belongs to an earlier message — X is an
-    # assistant reply, or a row with no addressable exchange — walking forward
-    # would bound at the next turn's reply and reach the next exchange's user
-    # row, tombstoning claims nothing derived from X (#423 review).
-    if row is None or row[2] != msg_id:
-        return None
-    # The first reply after this message bounds the burst it belongs to.
+    if row is not None:
+        # The absorbed_by link wins when present: it names the turn whose
+        # stage 2 can restate this message. Otherwise the row is the
+        # exchange's own.
+        return row[1] or row[0]
+    # No row of its own: the message is inside an exchange (an assistant
+    # reply, a tool row). The exchange that answered it is the nearest one at
+    # or before it that has stage-2 claims — main's rule, kept. Only a row
+    # *with* claims can own, so a turn whose stage 2 never ran owns nothing
+    # and no later exchange is reached (#423 review).
     async with db.execute(
-        "SELECT MIN(id) FROM message_log WHERE channel_id = ? "
-        "AND json_extract(message, '$.role') = 'assistant' AND id > ?",
-        (channel_id, msg_id),
-    ) as cursor:
-        row = await cursor.fetchone()
-    bound = row[0] if row is not None else None
-    if bound is None:
-        # Not answered yet: the burst has no owner to reach, and guessing at
-        # a later exchange is the direction this function refuses.
-        return None
-    async with db.execute(
-        "SELECT trace_id FROM exchange_log "
-        "WHERE channel_id = ? AND message_rowid IS NOT NULL "
-        "AND message_rowid >= ? AND message_rowid < ? "
+        "SELECT trace_id FROM exchange_log WHERE channel_id = ? "
+        "AND message_rowid IS NOT NULL AND message_rowid <= ? "
+        "AND CASE WHEN json_valid(appraisal) THEN "
+        "json_extract(appraisal, '$.stage2.past_claims') END IS NOT NULL "
         "ORDER BY message_rowid DESC LIMIT 1",
-        (channel_id, msg_id, bound),
+        (channel_id, msg_id),
     ) as cursor:
         row = await cursor.fetchone()
     return row[0] if row is not None else None

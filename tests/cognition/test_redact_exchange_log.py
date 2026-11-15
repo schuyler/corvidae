@@ -104,15 +104,19 @@ async def _db_with_dialog(path: str | None = None):
 
 async def _add_absorbed_row(
     db, trace_id: str, channel_id: str, message_rowid: int,
-    *, stage2: bool = False,
+    *, stage2: bool = False, absorbed_by: str | None = None,
 ) -> None:
     """An exchange row as a coalesced burst's message leaves it (#398, #423).
 
     The gate writes stage 1 onto every admitted message's row before the queue
     coalesces, so an absorbed row is not empty: it carries ``{"stage1": ...}``
-    and never stage 2. Only the turn's owner gets stage 2.
+    and never stage 2. Only the turn's owner gets stage 2. ``absorbed_by`` is
+    the owner link the kernel stamps at coalesce and AppraisalPlugin upserts
+    here; redaction resolves an absorbed message through it.
     """
     appraisal = {"stage1": {"score": 0.3}}
+    if absorbed_by is not None:
+        appraisal["absorbed_by"] = absorbed_by
     if stage2:
         appraisal["stage2"] = {"valence": 0.1, "past_claims": CLAIMS}
     await db.execute(
@@ -140,8 +144,8 @@ class TestCoalescedBurst:
         m2 = await insert_message(db, "irc:#a", "user", "and Zebulon owes 40")
         m3 = await insert_message(db, "irc:#a", "user", "what do you make of that")
         reply = await insert_message(db, "irc:#a", "assistant", "I make nothing of it")
-        await _add_absorbed_row(db, "b1", "irc:#a", m1)
-        await _add_absorbed_row(db, "b2", "irc:#a", m2)
+        await _add_absorbed_row(db, "b1", "irc:#a", m1, absorbed_by="b3")
+        await _add_absorbed_row(db, "b2", "irc:#a", m2, absorbed_by="b3")
         await _add_exchange(db, "b3", "irc:#a", m3, snapshot=snapshot)
         return db, {"m1": m1, "m2": m2, "m3": m3, "reply": reply}
 
@@ -161,8 +165,11 @@ class TestCoalescedBurst:
                 rows = await cursor.fetchall()
             assert len(rows) == 2
             for message_rowid, appraisal, snapshot in rows:
-                # Stage 1 survives: it holds a vector, not the message's words.
-                assert json.loads(appraisal) == {"stage1": {"score": 0.3}}
+                # Stage 1 survives (a vector, not the message's words), and
+                # so does the owner link: it names a trace, not the text.
+                assert json.loads(appraisal) == {
+                    "stage1": {"score": 0.3}, "absorbed_by": "b3",
+                }
                 assert message_rowid >= ids["m1"]
                 assert snapshot is None
         finally:
@@ -261,6 +268,74 @@ class TestCoalescedBurst:
             assert changed == 1
             owner, _ = await _row(db, "b3")
             assert owner["stage2"]["past_claims"] == CLAIMS
+        finally:
+            await db.close()
+
+
+class TestBurstArrivingDuringAGeneration:
+    """The ordering a positional rule cannot resolve (#423, #908 round 4).
+
+    `m1, rA, m2, rB` is a burst that arrived while the previous turn was
+    generating, which is what coalescing exists for: m1's nearest reply is rB,
+    the *other* turn's. The link the kernel stamps at coalesce is the only
+    thing that says which turn answered m1.
+    """
+
+    async def test_a_burst_arriving_mid_generation_scrubs_its_own_owner(self):
+        db = await make_full_db(None)
+        try:
+            await db.execute(EXCHANGE_LOG_DDL)
+            await db.commit()
+            m1 = await insert_message(db, "irc:#a", "user", "the kestrel nests at Brannan")
+            await insert_message(db, "irc:#a", "assistant", "answer A")
+            m2 = await insert_message(db, "irc:#a", "user", "and Zebulon owes 40")
+            await insert_message(db, "irc:#a", "assistant", "answer B")
+            await _add_absorbed_row(db, "eA", "irc:#a", m1, absorbed_by="eB")
+            await _add_exchange(db, "eB", "irc:#a", m2)
+
+            await redact_messages(db, [m1])
+
+            # The turn that answered the burst restated m1's content.
+            owner, _ = await _row(db, "eB")
+            _assert_scrubbed(owner)
+            # The other turn's claims are its own reply's, not m1's.
+            async with db.execute(
+                "SELECT appraisal FROM exchange_log WHERE trace_id = 'eA'"
+            ) as cursor:
+                row = await cursor.fetchone()
+            assert "past_claims" not in json.dumps(json.loads(row[0]))
+        finally:
+            await db.close()
+
+    async def test_a_burst_whose_owner_got_no_stage2_changes_nothing(self):
+        db = await make_full_db(None)
+        try:
+            await db.execute(EXCHANGE_LOG_DDL)
+            await db.commit()
+            m1 = await insert_message(db, "irc:#a", "user", "the kestrel nests at Brannan")
+            m2 = await insert_message(db, "irc:#a", "user", "and Zebulon owes 40")
+            await _add_absorbed_row(db, "e1", "irc:#a", m1, absorbed_by="e2")
+            await _add_absorbed_row(db, "e2", "irc:#a", m2)  # stage 1 only
+
+            await redact_messages(db, [m1])
+
+            for trace_id in ("e1", "e2"):
+                async with db.execute(
+                    "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
+                    (trace_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                assert "past_claims" not in json.dumps(json.loads(row[0])), trace_id
+        finally:
+            await db.close()
+
+    async def test_a_lone_exchange_is_redacted_as_before(self):
+        """No link, no burst: the row is its own owner."""
+        db, ids = await _db_with_dialog()
+        try:
+            await redact_messages(db, [ids["u1"]])
+            appraisal, _ = await _row(db, "t1")
+            _assert_scrubbed(appraisal)
         finally:
             await db.close()
 
