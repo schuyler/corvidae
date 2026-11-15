@@ -51,10 +51,8 @@ An issue's label says what stage it is in, so an agent looking for work and the 
 * **`ready`** -- the owner has accepted the requirements, in whatever form they are posted on the issue. The rest is up to the agent: the PRD comparison, the plan and the implementation. Only the owner's acceptance makes an issue `ready`.
 * **`claimed`** -- an agent has posted the requirements and plan comment ("Process instructions") and is working on it. Add it with that comment and remove `ready`. The label is an index, not a lock: the claim belongs to the first agent to post requirements to the issue, so an agent that finds an earlier plan comment than its own withdraws its own.
 * **`needs-review`** -- the PR is open, the author has swept it ("The author's side"), and it is waiting for a blind review round. The author sets it on handing over, removing `claimed`, and again after pushing fixes for a re-review, removing `needs-revision`.
-* **`needs-revision`** -- a review round ended `NEEDS-CHANGES` and the author is fixing the findings. It replaces `needs-review` when the verdict lands. From the third round on, it stays until the owner says to continue ("Rounds").
-* **`merge-ready`** -- every required review has passed: the loop's end condition in "Rounds" holds, and the change is ready for merge pending owner acceptance. It replaces `needs-review`. The label says the change is admissible; it is not permission to merge ("Merging"). The issue leaves the workflow when the owner merges and it closes.
-
-When one issue's work spans several PRs, the issue's label follows the PR furthest behind, and the issue is `merge-ready` only when all of them are.
+* **`needs-revision`** -- a review round ended `NEEDS-CHANGES`. Either the author is fixing the findings, or "Rounds" has stopped the loop for the owner (a meta-review, or a third round ending `NEEDS-CHANGES`), and the author's latest PR comment says which. The author sets it when the verdict lands, removing `needs-review`.
+* **`merge-ready`** -- every required review has passed: the loop's end condition in "Rounds" holds, and the change is ready for merge pending owner acceptance. A change the loop exempts reaches it straight from `claimed`. The author sets it, removing whichever stage label the issue carries. The label says the change is admissible; it is not permission to merge ("Merging"). The issue leaves the workflow when the owner merges and it closes.
 
 # Review loops
 
