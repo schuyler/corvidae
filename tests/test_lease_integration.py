@@ -508,3 +508,58 @@ async def test_r13_unbounded_provider_records_null_lease_wait(make_stack) -> Non
     await send(stack, stack.a, "A1")
 
     assert await lease_waits(stack, 1) == [(stack.a.id, None)]
+
+
+async def test_r12_shutdown_release_events_reach_a_registered_on_metrics_consumer(make_stack) -> None:
+    """R12: LLMPlugin.on_stop closes the manager and awaits the metric
+    emissions in flight, so A's lease.release (reason shutdown) is already at
+    an on_metrics consumer when on_stop returns."""
+    stack = await make_stack(1)
+    metrics = _Metrics()
+    stack.plugin.pm.register(metrics, name="metrics_recorder")
+    script(stack, {})
+    await send(stack, stack.a, "A1")
+    await until(lambda: len(sent_texts(stack.plugin.pm, OutboundMessage)) >= 1, "A's reply")
+
+    await stack.llm.on_stop()
+
+    releases = [(v, t) for n, v, t in metrics.events if n == "lease.release"]
+    assert [t.get("lease_key") for _v, t in releases] == [stack.a.id]
+    assert releases[0][1]["reason"] == "shutdown"
+
+
+async def test_r13_usage_log_created_before_this_change_gains_lease_wait_ms_in_place(tmp_path) -> None:
+    """R13: a usage_log without lease_wait_ms gains the column on
+    UsageLogPlugin start, the old row reads NULL, and a new write lands."""
+    from corvidae.hooks import create_plugin_manager
+    from corvidae.persistence import PersistencePlugin
+    from test_lease_scopes import PRE_363_USAGE_LOG_DDL
+
+    async with aiosqlite.connect(str(tmp_path / "old.db")) as db:
+        await db.execute(PRE_363_USAGE_LOG_DDL)
+        await db.execute(
+            "INSERT INTO usage_log (ts, request_id, profile, model) "
+            "VALUES (1.0, 'old', 'main', 'm')"
+        )
+        await db.commit()
+        pm = create_plugin_manager()
+        persistence = PersistencePlugin()
+        persistence.db = db
+        pm.register(persistence, name="persistence")
+        usage_log = UsageLogPlugin(pm)
+        await usage_log.on_start({})
+
+        async with db.execute("PRAGMA table_info(usage_log)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        assert "lease_wait_ms" in columns
+
+        await usage_log.on_llm_response(
+            profile="main", model="m", request_id="new", usage={}, latency_ms=1.0,
+            attribution={"stage": "turn"}, error=None, timings=None, started_at=2.0,
+            total_ms=1.0, attempts=1, message_count=1, tool_count=0, lease_wait_ms=12.5,
+        )
+        async with db.execute(
+            "SELECT request_id, lease_wait_ms FROM usage_log ORDER BY id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        assert rows == [("old", None), ("new", 12.5)]

@@ -557,3 +557,116 @@ async def test_r12_release_event_is_emitted_only_at_shutdown() -> None:
     assert releases[0][1] == 4000.0
     assert releases[0][2]["reason"] == "shutdown"
     assert releases[0][2]["lease_key"] == "B"
+
+
+# ---------------------------------------------------------------------------
+# Paths the design adds beyond the numbered criteria
+# ---------------------------------------------------------------------------
+
+
+async def test_r11_call_on_a_closed_provider_raises_and_takes_no_lease() -> None:
+    """R11 (call-path step 0): after close() a new call raises the shutdown
+    error naming the provider before touching the table, so no lease is taken
+    that shutdown would never release."""
+    env = make()
+    env.mgr.close()
+
+    with pytest.raises(RuntimeError) as raised:
+        async with env.prov.call("A", {}):
+            pytest.fail("a call on a closed provider must not run")
+
+    assert str(raised.value) == "LLM provider main is shutting down; the call was not sent"
+    assert env.mgr.snapshot("main").holders == ()
+    assert named(env, "lease.grant") == []
+
+
+async def test_r9m_yield_with_no_eligible_waiter_keeps_the_lease_and_the_next_call_passes() -> None:
+    """R9m/R6: a yield with nobody waiting changes nothing: the holder keeps
+    its head and a second call of the key goes straight through, instead of
+    being ordered behind the key's own call in flight."""
+    env = make()
+    a1 = await take(env, "A", "A1")
+
+    env.mgr.yield_key("A")
+    a2 = await take(env, "A", "A2")
+
+    assert a2.entered.is_set() and a2.wait_s == 0.0
+    assert holder_keys(env) == ["A"]
+    assert named(env, "lease.yield") == []
+    await a1.leave()
+    await a2.leave()
+
+
+@pytest.mark.parametrize("method", ["stop", "resume"])
+def test_r8_stop_or_resume_on_an_unknown_provider_names_it_and_the_bounded_ones(method: str) -> None:
+    """R8: stop/resume on a provider with no heads is a ValueError whose
+    message names the rejected provider and the bounded providers."""
+    env = make({"main": 1, "other": 2})
+
+    with pytest.raises(ValueError) as raised:
+        getattr(env.mgr, method)("nope", "A")
+
+    message = str(raised.value)
+    assert "nope" in message and "main" in message and "other" in message
+
+
+async def test_r13_chat_reports_the_error_once_with_a_wait_when_the_lease_raises() -> None:
+    """R13: LLMClient.chat on a provider whose manager has shut down: the
+    response observer fires exactly once with the error and a non-None
+    lease_wait_ms, then the error propagates, and no request was sent."""
+    from test_llm_embed import _make_mock_response, _make_mock_session
+
+    from corvidae.attribution import reset_attribution, set_attribution
+    from corvidae.llm import LLMClient
+
+    env = make()
+    env.mgr.close()
+    client = LLMClient(base_url="http://localhost:8080", model="m")
+    client.session = _make_mock_session(_make_mock_response())
+    client.leases = env.prov
+    responses: list[dict] = []
+
+    class Observer:
+        """Records each callback."""
+
+        async def request(self, **kwargs: Any) -> None:
+            """Not under test."""
+
+        async def response(self, **kwargs: Any) -> None:
+            """Keep the response callback."""
+            responses.append(kwargs)
+
+    client.observer = Observer()
+    token = set_attribution(lease_key="A")
+    try:
+        with pytest.raises(RuntimeError, match="LLM provider main is shutting down"):
+            await client.chat([{"role": "user", "content": "hi"}])
+    finally:
+        reset_attribution(token)
+
+    assert len(responses) == 1
+    assert responses[0]["error"] is not None
+    assert responses[0]["lease_wait_ms"] is not None
+    client.session.post.assert_not_called()
+
+
+async def test_r13_embed_reports_no_lease_wait() -> None:
+    """R13: embed() never takes a lease, so its observer response carries
+    lease_wait_ms None (NULL in usage_log)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from test_llm_embed import _make_mock_response, _make_mock_session
+
+    from corvidae.llm import LLMClient
+
+    client = LLMClient(base_url="http://localhost:8080", model="m")
+    client.session = _make_mock_session(_make_mock_response())
+    observer = MagicMock()
+    observer.request = AsyncMock()
+    observer.response = AsyncMock()
+    client.observer = observer
+
+    await client.embed(["alpha"], kind="document")
+
+    observer.response.assert_called_once()
+    assert observer.response.call_args.kwargs["lease_wait_ms"] is None
