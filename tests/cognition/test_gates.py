@@ -915,7 +915,7 @@ class TestQuietOrigins:
         channel.runtime_overrides["gate.send.quiet_origins"] = ["webhook:github"]
         assert await _final(gate, channel, _GITHUB) is None
 
-    @pytest.mark.parametrize("value", ["webhook:github", 5])
+    @pytest.mark.parametrize("value", ["webhook:github", 5, ["webhook:github", 5]])
     async def test_q7_non_list_fails_open_with_a_warning(self, value, caplog):
         config = {"gate": {"send": {"quiet_origins": value}}}
         gate, _log, channel = await _gate(config, appraisal=_StubAppraisal(0.9))
@@ -936,7 +936,7 @@ class TestQuietOrigins:
     async def test_q8_speak_up_without_a_trace_says_the_reply_stays_withheld(self):
         gate, log, channel, tools = await _gate_with_tools(_QUIET)
         result = await _speak_up(tools, channel, trace_id=None)
-        assert "speak_up" in result
+        assert "trace" in result
         assert "withheld" in result
         assert log.writes == []
 
@@ -946,5 +946,5 @@ class TestQuietOrigins:
         _gate_obj, _log, _channel, tools = await _gate_with_tools(_QUIET)
         ctx = ToolContext(channel=None, tool_call_id="call-1", task_queue=None)
         result = await tools["speak_up"].fn(_ctx=ctx, reason="x")
-        assert "speak_up" in result
+        assert "channel" in result
         assert "withheld" in result
