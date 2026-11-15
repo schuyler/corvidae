@@ -1814,8 +1814,9 @@ class TestTopicRouting:
             )
 
             # The other stream has no recording for this trace, so the reply
-            # does not land in a topic borrowed from the first stream.
-            assert h.server.sent[-1]["topic"] != "alpha"
+            # falls back to that stream's own newest topic ("random"'s default
+            # topic, "plans") - never a name borrowed from the first stream.
+            assert h.server.sent[-1]["topic"] == "plans"
             assert (first_stream.scope, trace) in h.plugin._trace_topics
         finally:
             await stop(h)
@@ -1881,6 +1882,15 @@ class TestTopicRouting:
             )
             stops = [t["topic"] for t in h.server.typing if t["op"] == "stop"]
             assert set(stops) == {"alpha", "beta"}, stops
+            # Both notices ran until the final (zulip-requirements 33): the
+            # release is channel-wide, so beta's stop is not premature, it is
+            # this turn's - and no reply will ever go to beta, because one
+            # final answers the burst. Every stop comes after the send.
+            ops = [(t["op"], t["topic"]) for t in h.server.typing]
+            send_at = len(h.server.sent) - 1
+            assert ops.count(("start", "alpha")) >= 1 and ops.count(("start", "beta")) >= 1
+            assert h.server.sent[send_at]["topic"] in {"alpha", "beta"}
+            assert stops, "the final must stop the notices"
         finally:
             await stop(h)
 

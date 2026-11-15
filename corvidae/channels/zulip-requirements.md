@@ -144,7 +144,14 @@ verified (see the last section).
     flight when the final's `stop` went out sends a `stop` of its own, so typing
     cannot reappear after it. It is never left on. A failed typing call is a
     WARNING and never costs the reply. [PRD 3.2.5, #643]
-33. One final releases every outstanding slot (it answers a coalesced burst). On
+33. One final releases every outstanding slot *on the channel* (it answers a
+    coalesced burst, and a burst may span topics). That release is deliberately
+    wider than the reply's topic: the notice in a topic whose message the same
+    turn absorbed stops even though no reply ever goes there, which is the one
+    place 32's "refreshed while a reply is owed there" and 33 disagree. The
+    alternative - releasing only the answering topic - leaves the absorbed
+    topic's notice refreshing every 8 s for a reply that will never be sent
+    there. On
     the withheld-final path (`on_agent_response`) the ownership check,
     `final_was_unsent` and the release run before the first `await`; a sent final
     releases after it has delivered, as Discord and Signal do, so a message that

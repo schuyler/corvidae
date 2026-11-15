@@ -99,7 +99,8 @@ def _current_trace_id() -> Optional[str]:
     from the attribution the kernel sets around the turn. Anything unexpected in
     that dict is read as "no trace": a progress line is not worth raising over.
     """
-    trace_id = get_attribution().get("trace_id")
+    attribution = get_attribution()
+    trace_id = attribution.get("trace_id") if isinstance(attribution, dict) else None
     return trace_id if isinstance(trace_id, str) and trace_id else None
 
 # HTTP budgets. Ordinary calls give up after this long; the long poll uses the
