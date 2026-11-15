@@ -389,6 +389,19 @@ def _timed_out(
     return TIMEOUT_RESULT_TEMPLATE.format(name=fn_name, bound=bound)
 
 
+def _attributed(channel: "Channel | None", **fields: object) -> dict:
+    """Log ``extra`` for a record about one tool call, naming its channel.
+
+    R397: a tool line that cannot be attributed is indistinguishable from
+    another channel's, which is what made the Signal + heartbeat interleave
+    unreadable. A call with no channel leaves the key off rather than
+    logging the string "None", so a reader can tell the two apart.
+    """
+    if channel is not None:
+        fields["channel"] = channel.id
+    return fields
+
+
 async def dispatch_tool_call(
     call: dict,
     tools: dict[str, Callable],
@@ -432,7 +445,7 @@ async def dispatch_tool_call(
     except json.JSONDecodeError:
         logger.warning(
             "malformed tool call arguments",
-            extra={"tool": fn_name, "raw_args": _truncate(raw_args)},
+            extra=_attributed(channel, tool=fn_name, raw_args=_truncate(raw_args)),
         )
         content = f"Error: malformed arguments for tool '{fn_name}'"
         return ToolCallResult(
@@ -446,7 +459,7 @@ async def dispatch_tool_call(
     # Step 2: Log dispatch
     logger.info(
         "tool call dispatched",
-        extra={"tool": fn_name, "arg_keys": list(args.keys())},
+        extra=_attributed(channel, tool=fn_name, arg_keys=list(args.keys())),
     )
     logger.debug(
         "tool call arguments",
@@ -458,7 +471,11 @@ async def dispatch_tool_call(
 
     # Step 3: Check tool exists
     if fn_name not in tools:
-        logger.warning("unknown tool called: %s", fn_name)
+        logger.warning(
+            "unknown tool called: %s",
+            fn_name,
+            extra=_attributed(channel, tool=fn_name),
+        )
         content = f"Error: unknown tool '{fn_name}'"
         return ToolCallResult(
             tool_call_id=call_id,
@@ -506,14 +523,18 @@ async def dispatch_tool_call(
         else:
             logger.info(
                 "tool call result",
-                extra={"tool": fn_name, "result_length": len(str(content)), "latency_ms": latency_ms},
+                extra=_attributed(
+                    channel,
+                    tool=fn_name,
+                    result_length=len(str(content)),
+                    latency_ms=latency_ms,
+                ),
             )
             logger.debug(
                 "tool call result content",
-                extra={
-                    "tool": fn_name,
-                    "content": _truncate(str(content)),
-                },
+                extra=_attributed(
+                    channel, tool=fn_name, content=_truncate(str(content))
+                ),
             )
     except Exception as exc:
         latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
@@ -526,7 +547,12 @@ async def dispatch_tool_call(
             )
         else:
             # Includes a tool's OWN TimeoutError raised before the deadline.
-            logger.warning("tool %s raised exception", fn_name, exc_info=True)
+            logger.warning(
+                "tool %s raised exception",
+                fn_name,
+                exc_info=True,
+                extra=_attributed(channel, tool=fn_name),
+            )
             content = f"Error: tool '{fn_name}' failed"
         error = True
 

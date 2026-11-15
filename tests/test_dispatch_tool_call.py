@@ -2,12 +2,11 @@
 
 import json
 import logging
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from corvidae.tool import dispatch_tool_call, ToolCallResult
-
+from corvidae.tool import ToolCallResult, dispatch_tool_call
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -554,3 +553,77 @@ async def test_tool_call_result_has_required_fields():
     assert hasattr(result, "content")
     assert hasattr(result, "latency_ms")
     assert hasattr(result, "error")
+
+
+# ---------------------------------------------------------------------------
+# #397: every tool line names the channel it belongs to
+# ---------------------------------------------------------------------------
+
+
+class _Channel:
+    """The only things dispatch needs from a Channel: an id, and no override."""
+
+    runtime_overrides: dict = {}
+
+    def __init__(self, channel_id: str) -> None:
+        self.id = channel_id
+
+    def matches_transport(self, transport: str) -> bool:
+        """Not an ACP channel, so dispatch stays on the inline path."""
+        return False
+
+
+def _tool_records(caplog, message_prefix: str) -> list[logging.LogRecord]:
+    return [
+        r for r in caplog.records
+        if r.name == "corvidae.tool" and r.getMessage().startswith(message_prefix)
+    ]
+
+
+async def test_dispatch_result_and_content_lines_name_the_channel(caplog):
+    """#397 R1, R2: a tool line carries `channel`, as the agent's own lines do.
+
+    Two turns interleaving — the issue's Signal + heartbeat case — can only be
+    separated afterwards if each tool line says which channel it belongs to.
+    """
+    tool_fn = AsyncMock(return_value="ok")
+    call = _make_call("call_ch", "my_tool", {})
+
+    with caplog.at_level(logging.DEBUG, logger="corvidae.tool"):
+        await dispatch_tool_call(call, {"my_tool": tool_fn}, channel=_Channel("signal:a"))
+
+    for prefix in ("tool call dispatched", "tool call result", "tool call result content"):
+        records = _tool_records(caplog, prefix)
+        assert records, f"expected a {prefix!r} record"
+        assert records[0].channel == "signal:a", f"{prefix} must name the channel"
+
+
+@pytest.mark.parametrize(
+    ("call", "tool_fn", "prefix"),
+    [
+        ({"id": "c", "function": {"name": "t", "arguments": "{bad"}}, AsyncMock(), "malformed tool call arguments"),
+        ({"id": "c", "function": {"name": "ghost", "arguments": "{}"}}, AsyncMock(), "unknown tool called"),
+        ({"id": "c", "function": {"name": "boom", "arguments": "{}"}}, AsyncMock(side_effect=RuntimeError("x")), "tool boom raised exception"),
+    ],
+)
+async def test_the_failure_lines_name_the_channel(caplog, call, tool_fn, prefix):
+    """#397 R3: a refusal or failure nobody can attribute has the same defect."""
+    with caplog.at_level(logging.DEBUG, logger="corvidae.tool"):
+        await dispatch_tool_call(call, {"boom": tool_fn, "t": tool_fn}, channel=_Channel("irc:#home"))
+
+    records = _tool_records(caplog, prefix)
+    assert records, f"expected a {prefix!r} record"
+    assert records[0].channel == "irc:#home"
+
+
+async def test_a_call_with_no_channel_omits_the_field_rather_than_logging_none(caplog):
+    """#397 R6: the degrade path leaves the key off, so "unattributed" is not
+    confused with a channel whose id is the string "None"."""
+    tool_fn = AsyncMock(return_value="ok")
+    call = _make_call("call_none", "my_tool", {})
+
+    with caplog.at_level(logging.DEBUG, logger="corvidae.tool"):
+        await dispatch_tool_call(call, {"my_tool": tool_fn}, channel=None)
+
+    dispatched = _tool_records(caplog, "tool call dispatched")[0]
+    assert not hasattr(dispatched, "channel")
