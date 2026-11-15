@@ -776,9 +776,10 @@ with lease_scope("upkeep:myplugin:digest"):
 
 With no key, `lease_scope()` inherits the enclosing scope's key. With a
 key it overrides, and on exit restores the parent's key. Contextvars carry
-it into tasks, so a task started inside a scope belongs to it. Forks are
-the exception: `Agent.fork` and the `fork` tool always run under the
-channel id, whatever key the caller holds.
+it into tasks, so a task started inside a scope belongs to it. Two kinds
+of work open their own scope instead: forks (`Agent.fork` and the `fork`
+tool always run under the channel id, whatever key the caller holds) and
+subagent runs (`subagent:<task_id>`).
 
 Three key formats:
 
