@@ -76,7 +76,7 @@ def split_raw_reasoning(message: dict) -> bool:
     closed it. A server's parsed reasoning cannot tell a cut-off from a
     decline (both arrive as empty content); a missing </think> in the raw
     text can. shortcut: assumes the chat template forces thinking open, so
-    set llm.<profile>.raw_reasoning only on endpoints whose template does;
+    set llm.profiles.<profile>.raw_reasoning only on endpoints whose template does;
     elsewhere every reply without a </think> would read as cut off.
     """
     # Drop an optional opening tag and the whitespace after it.

@@ -698,7 +698,7 @@ def all_degraded_cause(memory) -> str:
         "the embedding server failed every query (see the 'retrieval "
         "embedding failed; degrading to FTS5' warnings), so the run measured "
         "keyword search, not vectors; start the server llm.profiles.embedding's "
-        "provider base_url names, check the profile's api_key, and rerun"
+        "provider base_url names, check that provider's api_key, and rerun"
     )
 
 
