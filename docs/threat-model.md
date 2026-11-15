@@ -706,8 +706,12 @@ name is generated text, so it also appears in the channel's thread list to
 everyone who can read the channel. Deleting a thread is not offered, so an
 agent that creates them in a loop leaves them; Discord archives them instead.
 
-No tool sends a *message* to the person on another channel yet (the
-cross-channel `notify_other_channel` of #234 queues a turn there instead). PRD §3.5.9 now requires one, with no
+No tool sends a *message* to the person on another channel yet, though three
+already send something: `send_attachment` and `send_signal_attachment` take a
+caption, which is text to a person on a channel the model chose (no cross-channel
+allowlist); `start_thread` posts its opening message, which is text, into a
+thread on another `discord:` channel (never a DM, which it refuses); and
+`notify_other_channel` (#234) queues a turn there instead. PRD §3.5.9 now requires one, with no
 allowlist of target channels: any turn may speak on any channel (#234).
 Finding 15 is its entry. PRD §3.9.7 also lets the agent set recurring
 reminders, which the tree doesn't yet: a recurring reminder set because of
@@ -1079,8 +1083,8 @@ What each kind of unlock costs:
   for a budget that small (the log keeps them); the over-budget WARNING is
   the signal. A large `max_turns` lets one injected tool loop run far
   longer before dispatch is suppressed. It keeps its lease on one of the
-  provider's heads until another queue is waiting while one of its tools
-  runs, or another queue reaches its latency bound (PRD §3.13.5), and it
+  provider's heads while no other queue waits for one, and gives it up at
+  its next call boundary when one does (PRD §3.13.5), and it
   spends tokens throughout (finding 14).
   `reasoning_history: keep` fills the window with reasoning and brings
   compaction sooner; `drop` (the shipped default) strips the reasoning a

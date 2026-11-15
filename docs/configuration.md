@@ -1021,7 +1021,11 @@ Discord channels are keyed on numeric ids: `discord:<channel_id>` for a server c
 
 Zulip channels are keyed the same way: `zulip:<stream_id>` for a channel (every topic in it shares the entry, because a topic is a name people can rename), `zulip:dm:<user_id>` for a 1:1 DM, and `zulip:dm:<id>,<id>` for a group DM, with the ids ascending and the bot's own left out.
 
-Signal channels accept either form of key. `signal:<aci>` is the real channel id and matches directly. `signal:+15551234567` is an alias: its overrides are copied onto the ACI-keyed channel the first time that person writes, once the number has resolved. The alias entry itself never becomes a live channel, and an alias naming someone absent from `signal.allow` is simply inert — an unauthorized sender never gets a turn for the overrides to apply to.
+Signal channels accept either form of key. `signal:<aci>` is the real channel id and matches directly. `signal:+15551234567` is an alias: its overrides are copied onto the ACI-keyed channel the first time that person writes, once the number has resolved. The alias key is also registered as a channel of its own (every exact key is, before `on_start`), and it is a delivery route in its own right — a send to it goes to that number (per `signal-cli(1)`'s RECIPIENT handling; not exercised against a live daemon) — but it holds its own history, separate from the person's ACI channel, which is where their inbound messages and the agent's replies to them land. So an override on the alias reaches both channels, while a conversation lives on the ACI one. An alias naming someone absent from `signal.allow` gets no override copy — it is never resolved, so nothing propagates and no unauthorized sender gets a turn for the overrides to apply to — but the channel itself is not disabled: it is still registered before `on_start` with its own `channels:` overrides, and still a delivery route, so a send to it goes to that number. Only the copy onto the ACI channel is inert; the overrides themselves apply to a turn that runs on that channel, not to a plain delivery (see the limit below). One limit on all of this: a plain delivery to a
+channel id consults no `ChannelConfig`, so the overrides bite only on a turn
+that runs there, and an alias nobody writes from never runs one (on hot reload
+`tools.disabled` is the only key re-applied to a channel that already
+exists).
 
 ---
 

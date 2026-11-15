@@ -6,6 +6,7 @@ does, and asserts the exit code and the whole of stderr.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -49,6 +50,9 @@ LEAK_DEADLINE = 10.0
 
 # The child that injects a leaking plugin into the real pre-flight.
 LEAK_CHILD = Path(__file__).parent.parent / "preflight_leak_child.py"
+
+# The child that records whether the pre-flight closed what it built (#563).
+CLEANUP_CHILD = Path(__file__).parent.parent / "preflight_cleanup_child.py"
 
 
 def test_a_leak_in_the_preflight_is_bounded_and_named(tmp_path: Path) -> None:
@@ -116,6 +120,39 @@ def test_valid_minimal_config_passes(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert result.stderr == "pre-flight OK\n"
+
+
+def test_the_preflight_closes_what_it_built(tmp_path: Path) -> None:
+    """The pre-flight broadcasts on_stop before it returns (#563).
+
+    ``_cleanup_failed_start`` is the only thing that closes a pre-flight's
+    plugin manager, and removing its call made no test fail: the leak tests
+    cover the exit bound, which ``arm_exit_bound`` arms on every path. The
+    child records the broadcast through the runtime the pre-flight builds.
+    """
+    # PYTHONPATH this tree first: an editable install points at the main
+    # checkout, and the child would then test that tree's preflight, not the
+    # one under test. The mutation that removes the call proves the difference.
+    repo = CLEANUP_CHILD.parent.parent
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [str(repo)] + [str(p) for p in sorted((repo / "packages").glob("*"))]
+        ),
+    }
+    result = subprocess.run(
+        [sys.executable, "-P", str(CLEANUP_CHILD), str(write_config(tmp_path))],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "exit 0" in result.stdout, (result.stdout, result.stderr)
+    assert "on_stop broadcast" in result.stdout, (
+        "the pre-flight returned without closing its plugins: " + result.stdout
+    )
 
 
 def test_unknown_channel_key_names_key_and_accepted_keys(tmp_path: Path) -> None:

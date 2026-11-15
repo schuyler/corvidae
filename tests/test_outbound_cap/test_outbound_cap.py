@@ -9,6 +9,7 @@ resolution the kernel performs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
@@ -695,3 +696,52 @@ async def test_a_bad_window_reload_is_logged_and_the_old_limit_kept(w, caplog):
     for _ in range(3):
         assert await w.gate.send(channel) is True
     assert await w.gate.send(channel) is False
+
+
+# ---------------------------------------------------------------------------
+# Gate concurrency with outbound_cap's wrapper loaded (#904)
+# ---------------------------------------------------------------------------
+
+
+class RendezvousGate:
+    """A gate that abstains only after its peer has also started.
+
+    Two of these deadlock if the hook awaits them one after another, so the
+    pair proves the gates run concurrently.
+    """
+
+    def __init__(self, mine: asyncio.Event, peer: asyncio.Event) -> None:
+        self._mine = mine
+        self._peer = peer
+
+    @hookimpl
+    async def should_send_response(self, channel, text, emission, trace_id, annotations):
+        self._mine.set()
+        await self._peer.wait()
+        return None
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=TimeoutError,
+    reason=(
+        "#904: apluggy awaits a broadcast hook's implementations one by one "
+        "once any wrapper=True hookimpl (outbound_cap's) is registered. When "
+        "the lock carries the apluggy fix this XPASSes and strict fails it: "
+        "remove this marker and the plugin-guide caveat together."
+    ),
+)
+async def test_wrapped_should_send_response_gates_run_concurrently(h):
+    """Output gates stay concurrent with outbound_cap's wrapper loaded.
+
+    PRD §3.8 item 3 relies on broadcast hooks dispatching concurrently;
+    a wrapper must not quietly serialise every other gate.
+    """
+    first, second = asyncio.Event(), asyncio.Event()
+    h.pm.register(RendezvousGate(first, second), name="gate_a")
+    h.pm.register(RendezvousGate(second, first), name="gate_b")
+    channel = h.channel("signal:aci1")
+
+    # Sequential dispatch deadlocks on the rendezvous; the timeout turns
+    # that into a TimeoutError well inside the suite's 15 s budget.
+    assert await asyncio.wait_for(h.gate.send(channel), timeout=2) is True

@@ -2546,8 +2546,8 @@ so a background call delays a waiting main turn by its own slot time;
 today only what the operator puts in a stage's profile's `extra_body` (a
 `reasoning_budget_tokens`, a `max_tokens`) bounds a fork's share of that; an
 unmapped fork is bounded by the default chat profile's. #181's target adds the
-rest: a channel that drains keeps its head until its exchange-scoped forks
-have run (PRD principle 3; §3.13.4), and headroom (the window at the compaction threshold plus a
+rest: an exchange-scoped fork runs under its channel's lease and keeps
+that head while no other queue waits for one (PRD principle 3; §3.13.3–5), and headroom (the window at the compaction threshold plus a
 fork's instruction and its profile's caps fits the slot's
 context, so a fork just short of compaction still runs). #182 measures
 how long main turns wait today.
@@ -3511,8 +3511,8 @@ inline handling would deadlock the transport against its own request. The
 single-consumer processor also keeps rapid-succession messages in arrival
 order.
 
-**Identity.** A channel's scope is the sender's ACI — `signal:<aci>` —
-never their phone number. `sourceNumber` is absent whenever a sender has
+**Identity.** A channel created from an inbound message has the sender's ACI
+as its scope — `signal:<aci>` — never their phone number. `sourceNumber` is absent whenever a sender has
 phone-number privacy on, and channel ids are the persistence key for
 `sessions.db`, the jsonl logs, and memory; keying on a field that can
 vanish would fork one sender's history into two.
@@ -3704,12 +3704,25 @@ stop (#390). Since a reply to a coalesced burst already zeroes the count
 (#398), the early clear is total rather than one slot. This is
 [PRD §3.2.10](prd.md): a transport delivers every emission on a channel it
 owns, whatever originated the turn, and liveness and reply bookkeeping
-tolerate a reply that answers no outstanding message. Sending to a channel
-*other than* the turn's own is a separate capability (PRD §3.5.9: operator
-allowlist that starts empty, plus a budget); see the scheduler's "Not in
-phase one: a `send_to_channel` tool" note under
-[SchedulerPlugin](#schedulerplugin) and the deferred entry in
-`docs/threat-model.md`.
+tolerate a reply that answers no outstanding message. Sending to a channel *other than* the turn's own is in the PRD (PRD §3.5.9:
+"Nothing gates which channel a turn may speak on"). No general text
+`send_to_channel` tool exists — the scheduler's "Not in phase one" note under
+[SchedulerPlugin](#schedulerplugin) and `docs/threat-model.md`'s deferred entry
+are about that tool — but `send_signal_attachment` already reaches any known
+`signal:` contact, from a turn begun on any channel: a file, and a caption with
+it, is a way to speak on another channel today. The reach is registry
+membership only, as the threat model says (no cross-channel allowlist). What the
+operator can apply is a per-destination cap on how many messages the agent
+starts *through the send gate*: `outbound_cap` (#791), opt-in and off by
+default. It counts nothing this paragraph describes — `send_signal_attachment`
+and its caption bypass the gate (the cap's own Known gaps says so, naming the
+tool), and so do the reaction tools — so an operator who sets it has bounded
+replies, not outreach. The neighbouring capability that does
+exist is `notify_other_channel`, which leaves another channel's context a
+notification and wakes it (PRD §3.5.10; the cross-channel-send package).
+Neither is an allowlist: there is no cross-channel allowlist in corvidae, by
+PRD decision (the decision table's "No cross-channel allowlist and no memory
+compartments").
 
 **Reaction tools.** `register_tools` also offers `signal_react(emoji)` and
 `signal_unreact(emoji)` under the same `signal:` guard as the attachment tool.
@@ -4043,9 +4056,13 @@ Known limits of the splitter, none of which loses text:
 - A cut can fall inside a ZWJ emoji sequence or between a base character
   and its combining marks, because splitting is by codepoint.
 
-Outbound is text only. `send_thinking` and `send_tool_status` are not
-overridden (the `TransportPlugin` no-ops apply), so reasoning and tool
-traffic never reach Discord.
+Outbound is text and files. The ways out are `send_message`, `send_progress`,
+the `send_attachment` tool (#521, a file plus an optional caption),
+`start_thread` (which starts a thread on a registered channel and may post its first
+message into the new thread, never into the parent), and
+`discord_react` / `discord_unreact` (an emoji on a message). `send_thinking` and
+`send_tool_status` are still not overridden (the `TransportPlugin` no-ops
+apply), so reasoning and tool traffic never reach Discord.
 
 There is no local Discord server, so there is no harness end-to-end test
 for this transport; behavior is pinned by `tests/test_discord_plugin.py`
@@ -4057,10 +4074,18 @@ from the channel id, so no inbound message is needed. The outstanding count
 is guarded at zero in `DiscordPlugin._release_all`, as on Signal,
 with the same early typing release (#101): any final, sent or withheld,
 zeroes the count.
-Sending to a channel other than the turn's own is a separate capability,
-not provided by the transport: PRD §3.5.9 (operator allowlist that starts
-empty, plus a budget); see the scheduler's "Not in phase one: a
-`send_to_channel` tool" note and `docs/threat-model.md`.
+Sending to a channel other than the turn's own has no general text tool: no
+`send_to_channel` exists (the scheduler's "Not in phase one" note and
+`docs/threat-model.md`). Two of this transport's tools do cross channels
+already: `send_attachment`, whose caption is text, and `start_thread` — both
+against any registered `discord:` channel except a DM, which `start_thread`
+refuses. PRD §3.5.9 gates nothing about which
+channel a turn may speak on — there is no cross-channel allowlist. The file,
+caption and reaction tools above bypass the send gate and are not counted at all:
+they are the `outbound_cap` plugin's "sends that bypass the gate" Known gap, not
+something this paragraph's cap reaches. What the operator can apply is a
+per-destination count of the messages the agent starts *through the send gate*,
+shipped as `outbound_cap` (#791).
 
 Out of scope: voice, slash commands, embeds, and inbound reactions (the agent
 can add and remove its own reaction on the triggering message, see
@@ -4076,11 +4101,13 @@ The requirements live in [`corvidae/channels/zulip-requirements.md`](../corvidae
 
 With no `zulip:` block the plugin loads, resolves its registry dependency and does nothing else: no session, no tasks, nothing logged above DEBUG. A malformed block raises in `on_init` naming the field (`zulip.<key>`) and what is accepted. All validation runs before anything is stored, so a failed init leaves the plugin inert and not half-configured.
 
+The trace-to-topic map is keyed `(channel scope, trace id)`, so a send on one stream can never take another stream's topic name for its own (Zulip would create that topic silently). Nothing removes an entry: a finished turn's topic has to survive, because a failed generation's unsent final is followed by the fallback error on the same trace id and then by a retry that keeps it, and both must answer where the message came from (#643). The 512-entry bound evicts the oldest instead, which costs a reply its preferred topic, never a delivery.
+
 **Connection.** `_connection_loop` registers a queue and long-polls it. `/register` is sent with `event_types=["message"]` (edits and deletes are other event types and are never delivered, which is how the append-only log is kept), `apply_markdown=false` (raw Markdown for the model), `client_capabilities={"empty_topic_name": true}` and `fetch_event_types=["realm"]`. The last one matters: `max_message_length`, `max_topic_length` and the empty-topic label are returned only if `realm` is in `fetch_event_types`, which otherwise defaults to `event_types`. The response's `zulip_feature_level` must be at least 248 (Zulip 9.0, the first release with `channel` as a message and typing type), or the loop ends with one ERROR naming the site, the level and the remedy. Every call sorts its outcome into one of five signals: `_Fatal` (401 or a deactivated user or organisation: one ERROR, loop ends, not retried), `_QueueLost` (`BAD_EVENT_QUEUE_ID`: WARNING, re-register at once), `_RateLimited` (429: wait the server's `retry-after`, capped at 60 s), `_Transient` (network error, timeout, 5xx, a reply that is not Zulip's JSON: retry the same queue on the shared ladder, 10 s doubling to 300 s, reset on success) and `_Rejected` (a 4xx the server meant). Events are processed in id order and acknowledged by the next poll's `last_event_id`, after handling. A malformed message event is skipped with a WARNING naming the event and message ids, and does not stop the loop.
 
 **A lost queue is not replayed (#640 D4).** The server drops an idle queue, and a restart starts a new one. Messages sent in the gap are not fetched; the WARNING says so, naming the site and the bot. Catching up (persist the last admitted id per channel, `GET /messages` from it on re-register, deduplicate by id) is a follow-up.
 
-**Identity.** A channel's scope is built from ids only (PRD principle 10): `zulip:<stream_id>`; `zulip:dm:<user_id>` for a 1:1 DM, keyed on the other person; `zulip:dm:<id>,<id>` for a group DM, ids ascending, the bot's own left out. A Zulip *topic* has no stable id (the API pages for register, events, messages, topics and update-message expose none) and users can rename or move topics, so a topic-keyed scope would orphan its history on a rename. It is therefore a label and reply routing, never a key: `channel.name` is `#general > plans` (the empty topic shows as the realm's `realm_empty_topic_display_name`), and the topic of the newest *allowed* message is kept in `_topics[channel.id]`, in memory only. This is the same rule Discord applies to threads, which have their own immutable id; Zulip topics don't. The sender passed to `on_message` is the sender's user id, with the display name in `channel.sender_names`.
+**Identity.** A channel's scope is built from ids only (PRD principle 10): `zulip:<stream_id>`; `zulip:dm:<user_id>` for a 1:1 DM, keyed on the other person; `zulip:dm:<id>,<id>` for a group DM, ids ascending, the bot's own left out. A Zulip *topic* has no stable id (the API pages for register, events, messages, topics and update-message expose none) and users can rename or move topics, so a topic-keyed scope would orphan its history on a rename. It is therefore a label and reply routing, never a key: `channel.name` is `#general > plans` (the empty topic shows as the realm's `realm_empty_topic_display_name`), and reply routing is per turn — `_trace_topics[trace_id]` records the topic an allowed message came in, so its answer goes there even if a message in another topic arrived meanwhile (#643). `_topics[channel.id]` keeps the newest topic as the fallback for a send with no trace to answer. Both maps are in memory only. This is the same rule Discord applies to threads, which have their own immutable id; Zulip topics don't. The sender passed to `on_message` is the sender's user id, with the display name in `channel.sender_names`.
 
 **The empty topic.** From Zulip 10 a channel message may have `""` as its topic. Without the `empty_topic_name` capability the server rewrites it to its display label in events; with it, the transport receives `""`, replies with the same `""`, and shows the label only to the model. The reply therefore lands where the question was asked on every server version.
 
@@ -4090,12 +4117,12 @@ With no `zulip:` block the plugin loads, resolves its registry dependency and do
 
 **Addressing.** A message in a channel or group DM is admitted only when `flags` contains `mentioned` (Zulip sets it for a direct mention and for a mention through a user group the bot belongs to; the group's token is not the bot's own, so it stays in the text); `stream_wildcard_mentioned` and `topic_wildcard_mentioned` do not count, as `@everyone` does not for Discord. A 1:1 DM needs none. `channel.addressed` is set before every `on_message`, `None` for a 1:1 DM. The bot's own mention token (`@**Name**`, `@**Name|id**`, silent `@_**Name**`, or any name with the bot's id) is stripped from the text; other people's mentions stay. The bot's own messages come back through its queue and are dropped by sender id, which is the only thing between the agent and answering itself if its id is ever put on the allowlist with `require_mention: false`.
 
-**Liveness.** Typing only; Zulip bots have no read receipts. The first outstanding message on a channel sends `POST /typing` `op=start` (for a channel, `type=channel` with `stream_id` and `topic`; for a DM, `type=direct` with the user ids) and starts a refresh loop re-sending every 8 s while the count stays positive. Unlike Discord, Zulip has a stop frame, so a final (`send_message`), a withheld final (`on_agent_response` with `final_was_unsent`) or a message the gate never admitted sends `op=stop` once the last slot is released. On the withheld-final path (`on_agent_response`) the ownership check, `final_was_unsent` and the release happen before the first `await`, as for Discord and Signal; a sent final releases after it has delivered, so a message that arrives mid-delivery has its slot released with the rest. A failed typing call is a WARNING, never a lost reply. Only an allowed sender ever takes a slot.
+**Liveness.** Typing only; Zulip bots have no read receipts. A topic's refresh loop sends `POST /typing` `op=start` (for a channel, `type=channel` with `stream_id` and `topic`; for a DM, `type=direct` with the user ids) when a reply is owed there, and re-sends every 8 s while one is; a message that is never admitted shows no notice at all when its veto lands before that loop's first pass. Unlike Discord, Zulip has a stop frame, so a final (`send_message`), a withheld final (`on_agent_response` with `final_was_unsent`) or a message the gate never admitted leaves the loop to send `op=stop` once the last slot is released. One final answers a coalesced burst (#398), so the release is per channel while the refresh loop counts `(channel, topic)`: a topic whose message the same turn absorbed loses its notice when the reply goes out and is not re-started, because that turn will never send a reply there. That is the one place requirement 32 ("refreshed while a reply is owed there") and requirement 33 (one final releases every slot) disagree; 33 wins so that no notice runs forever, and both documents say so. The refresh loop is the only writer of typing state: it re-derives owed-and-showing from the counts after every `await` and sends `start` or `stop` itself, so nothing else posts a notice and no await is a window (#643 rounds 5-6, #888). A start it sends is refreshed on an absolute deadline, so a message arriving while a reply is already owed wakes the loop without postponing the refresh (#888 round 7). On the withheld-final path (`on_agent_response`) the ownership check, `final_was_unsent` and the release happen before the first `await`, as for Discord and Signal; a sent final releases after it has delivered, so a message that arrives mid-delivery has its slot released with the rest. A failed typing call is a WARNING, never a lost reply. Only an allowed sender ever takes a slot.
 
 **Outbound.** `_deliver` defuses mentions, splits with `split_message` at the smaller of `message_chunk_size` and the server's `max_message_length` (bytes, conservatively, since the server counts code points), skips whitespace-only chunks, and posts each in order through a bounded queue (50 chunks): a transient failure leaves it queued with a WARNING and the connection loop flushes it after the next successful poll (PRD §3.2 item 8); past the bound the oldest is dropped and the count logged; a refusal drops the rest of that reply and logs the channel, the topic and the server's own explanation. A 429 on a send waits `retry-after` up to twice. Two properties apply to every send:
 
 - *Mentions are defused.* Zulip has no allowed-mentions switch, so `@` followed by `*` (`@**all**`, `@**Name**`, `@*group*`) gets a zero-width space between them before splitting, and the chunks concatenate to the defused text. Silent mentions (`@_**Name**`) notify no one and pass through.
-- *Replies go to the topic they answer.* The topic of the newest allowed message, else `default_topic`; a DM goes to its user ids.
+- *Replies go to the topic they answer.* The topic recorded for the turn's trace, else the newest allowed message's topic, else `default_topic`; a DM goes to its user ids. Typing is per (stream, topic) and stops where it started.
 
 `send_thinking` and `send_tool_status` are not overridden, so reasoning and tool traffic never reach Zulip.
 

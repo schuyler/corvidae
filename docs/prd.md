@@ -101,11 +101,10 @@ one is a bug even if its tests pass.
    Background work runs in the gaps between main turns. Deferral is bounded
    so interactivity can't starve it: an exchange's own background work
    (stage-2 appraisal, critique) forks the exchange's prefix and runs under
-   the same lease, which by default a drained queue keeps until that
-   work is done (§3.13.4), so traffic on other channels can't starve it
-   and no other queue's context has displaced its prefix. A holder that
-   yields its head first (§3.13.5) leaves the work it has not started to
-   wait for a lease. Background work does not hold back
+   its channel's lease (§3.13.4), so that lease never orders it behind
+   its own channel's other calls, and where another queue is waiting for the head it takes
+   its turn in FIFO order, so traffic on other channels can't starve it
+   (§3.13.3, 5). Background work does not hold back
    its own channel's next main turn, and its results shape a later turn.
    What a fork costs on a given backend is measured, not assumed (§3.8.6).
    Other background work (upkeep) waits its turn for a head when every
@@ -313,7 +312,11 @@ one is a bug even if its tests pass.
     deployment choice rather than an architectural one. The operator
     declares how many warm heads each provider has; work runs under leases on
     them, and contexts switch at call boundaries chosen to keep prefixes
-    warm, not call by call (§3.13). Principles 2, 3, 7 and 11 and the fork
+    warm, not call by call (§3.13). The kernel's default order keeps a
+    prefix warm while no other queue wants its head and is only
+    best-effort under contention; choosing switch points that suit a
+    backend's cache is a scheduler plugin's job (§3.13.7). Principles 2,
+    3, 7 and 11 and the fork
     requirements (§3.8) follow from this one: reuse the prefix, keep
     background work out of the main turn's way, let cheap work gate
     expensive work, meter every call.
@@ -1665,26 +1668,27 @@ from warm heads, whether the agent sees its provider's state) are tracked in
    heads.
    A queue (a channel's serial queue, a subagent's run, or a plugin's own
    stream of upkeep such as consolidation) takes a lease when it has work
-   and a head is free, keeps it across calls until the queue drains,
-   yields (item 5) or is stopped (item 7), and then releases it, and the
-   next waiting queue's
-   context is prefilled. Holding a lease across calls is what keeps a
-   prefix warm: a channel's tool cycle (while no other queue is waiting,
-   item 5), its own compaction and the continuations of its exchange run
-   on the head it already has. Leases
+   and a head is free. Under the kernel's default order (item 7) it keeps
+   the lease across calls, idle included, while no other queue waits for
+   a head, and gives it up at its next call boundary when one does
+   (item 5), when it yields of its own accord, or when it is stopped
+   (item 7); the next waiting queue's context is then prefilled. Holding
+   a lease across calls is what keeps a prefix warm: while no other queue
+   waits, a channel's tool cycle, its own compaction, its exchange's forks
+   and its next turn run on the head it already has. Under contention the
+   default order keeps prefixes warm only as far as that rule does; a
+   scheduler plugin that knows its backend's cache can do better
+   (item 7). Leases
    go to waiting queues in FIFO order unless a scheduler plugin replaces
    the order (item 7).
 4. A fork runs under the lease that holds its prefix. Exchange-scoped
    background work (stage-2 appraisal, critique) forks the conversation
    (§3.8), so it runs under the lease of the queue whose head holds that
-   prefix. Under the kernel's default order (item 7) a queue that drains
-   keeps that lease until the exchange's forks have finished, so
-   other queues' traffic can't starve them and no other queue's context
-   has displaced their prefix in between (principle 3). The yields of
-   item 5 come first: a holder that yields gives up its head with forks
-   still pending. A head is never taken mid-call, so a fork already
-   running finishes, and one not yet started waits as the last sentence
-   of this item says. The lease orders
+   prefix. Under the kernel's default order (item 7) a fork's calls keep
+   that head as any of its queue's calls do: while no other queue waits.
+   A head is never taken mid-call, so a fork already running finishes,
+   and one not yet started when its queue gives up the head waits as the
+   last sentence of this item says. The lease orders
    other queues behind its holder; it does not hold back the holder's own
    next main turn. What a fork costs on a given backend is measured
    (item 10; §3.8.6), not assumed. A fork whose
@@ -1699,19 +1703,29 @@ from warm heads, whether the agent sees its provider's state) are tracked in
    gives idle work (principle 13). A lease holder yields at its next call
    boundary when a waiting queue reaches its latency bound, and the head
    goes to that queue. A holder may also yield of its own accord at any
-   call boundary (consolidation between chunks, for example). A running
-   tool is a call boundary: under the kernel's default order, a holder
-   waiting on a tool result gives up its head on each provider where
-   another queue is waiting for one, at any point in that wait, and keeps
-   it where none is;
-   it queues for a head again when the result arrives.
+   call boundary (consolidation between chunks, for example), and it goes
+   to the end of the line. Under the kernel's default order every call
+   boundary is a yield point: a holder with no call in flight on a
+   provider, whether it is waiting on a tool result, between items or
+   idle, gives up its head there as soon as another queue is waiting for
+   one, and keeps it while none is. When several holders have no call in
+   flight, the one whose last call ended earliest gives way first. While
+   another queue waits, a holder sends no new call on that provider until
+   it holds a head again. A
+   holder that has given up its head queues for one again when it next
+   has a call to send.
 6. While a provider has a free head, a queue with work takes it without
    waiting, background work included: background work runs beside a main
    turn rather than yielding to it. Principle 3's yield applies only when
    every head is leased.
 7. The kernel provides the mechanism (leases, stop and resume, and the
-   view of item 8) and ships a default order on it: FIFO, release when
-   the queue drains, and the yields of item 5. A plugin
+   view of item 8) and ships a default order on it: FIFO grants, keep a
+   head while no other queue waits for one, and give it up at a call
+   boundary to one that does (item 5). Under that order a head is held
+   against a waiting queue only until the calls its holder already has in
+   flight end, and calls end, so it cannot deadlock whatever the queues
+   wait on each other for.
+   A plugin
    can replace that order (separate high- and low-latency queues, or a
    lightweight classifier deciding what to swap in), can defer a queue
    until a deadline, which pauses that channel while others run, and can
@@ -1777,8 +1791,8 @@ record that holds the reasoning.
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
-| Every provider keeps warm context heads, and the operator declares how many; queues lease heads and switch at call boundaries (drain or yield, latency classes); no spend or rate caps for now; single-slot is a deployment choice, not architecture; the lease order is pluggable | principle 16; §3.13; #296; operator, 2026-11-02 |
-| Leases are a kernel mechanism (a lease per provider and queue, stop and resume at a call boundary, the policy view) under a replaceable default order (FIFO, release on drain, yield to a waiter while a tool runs); by default a queue that drains keeps its lease until its exchange's forks have run, a holder that yields first leaves its unstarted forks to wait for a lease, and nothing orders forks ahead of their own channel's next main turn, because what that order would save depends on how a provider manages its cache; a pool is a provider, not a separate concept | principle 3; §3.13.3–5, 7; #364; #362; operator, 2026-11-15 |
+| Every provider keeps warm context heads, and the operator declares how many; queues lease heads and switch at call boundaries (drain or yield, latency classes); no spend or rate caps for now; single-slot is a deployment choice, not architecture; the lease order is pluggable (release on drain superseded 2026-11-15, row below) | principle 16; §3.13; #296; operator, 2026-11-02 |
+| Leases are a kernel mechanism (a lease per provider and queue, stop and resume at a call boundary, the policy view) under a replaceable default order: FIFO grants, a holder keeps its head across calls while no other queue waits and gives it up at its next call boundary when one does (sticky until contention). That keeps prefixes warm on a best-effort basis and cannot deadlock, since a head is held against a waiter only until the calls already in flight end; backend-aware optimisation is a scheduler plugin's job. It replaces an earlier default that kept a lease until the queue drained and its exchange's forks had run, which needed the kernel to infer when a queue still had work coming and kept finding ways to hold a head its own work was waiting for. Nothing orders forks ahead of their own channel's next main turn, because what that order would save depends on how a provider manages its cache; a pool is a provider, not a separate concept | principle 3; §3.13.3–5, 7; #364; #362; operator, 2026-11-15 |
 | Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
 | Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
 | Hedging vocabulary is persona, not architecture | §3.11.5; diverges from the Persyn spec |
