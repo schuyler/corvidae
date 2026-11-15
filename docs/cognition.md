@@ -1400,7 +1400,8 @@ subscriber, state changes are silent. The opt-in `goals-notify` package (#841,
 [design.md](design.md#goals-notifications-goals-notify-package)) subscribes:
 it sends each change to the goal's `origin_channel` through
 `notify_other_channel`, unless the goal has no origin (seeded goals) or the
-origin made the change itself (which keeps heartbeat-created goals silent).
+origin made the change itself (so a goal the heartbeat created stays silent
+while the heartbeat is the one changing it).
 
 **Goals entry:** `before_agent_turn` admits one CONTEXT entry through the
 funnel under the source `goals` (budget `funnel.budgets.goals`, falling
