@@ -1027,7 +1027,11 @@ class McpClientPlugin(CorvidaePlugin):
                 # server's name (#477 review).
                 for task in pending:
                     if not task.done():
-                        task._log_destroy_pending = False
+                        # Private asyncio attribute: guard the write, so a
+                        # version that renames it costs a line in the log
+                        # rather than a shutdown that raises (#477 review).
+                        with contextlib.suppress(AttributeError):
+                            task._log_destroy_pending = False
         except asyncio.CancelledError:
             # on_stop itself was cancelled (stop budget spent): cancel the
             # owners so none outlives the daemon, then let it propagate.

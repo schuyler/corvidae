@@ -459,3 +459,29 @@ async def _wait_children_at_most(n: int, timeout: float = 5) -> list[int]:
     while len(_child_pids()) > n and time.monotonic() < deadline:
         await asyncio.sleep(0.05)
     return _child_pids()
+
+
+async def test_an_abandoned_owner_task_still_says_so_once(caplog):
+    """#477: the WARNING is the record; silence only stops the second copy.
+
+    An owner that ignores cancellation is abandoned after the grace. asyncio
+    would then log its destruction with no context; the plugin silences that
+    and keeps its own WARNING, which names the server. This pins that the
+    explanation did not take the information with it.
+    """
+    plugin, config = _make_plugin({"srv": _stdio_cfg()})
+    await _start_in_own_task(plugin, config)
+    try:
+        # A stop bound of zero makes every owner a straggler: the wait times
+        # out before the owner can observe its stop signal.
+        plugin._stop_bound = 0.0
+        caplog.set_level(logging.DEBUG)
+        await asyncio.wait_for(_stop_in_own_task(plugin), 5)
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelno >= logging.WARNING]
+        assert any("did not shut down within" in w for w in warnings), warnings
+    finally:
+        for owner in list(plugin._owners.values()):
+            if owner.task is not None:
+                owner.task.cancel()
+        await _wait_no_children()
