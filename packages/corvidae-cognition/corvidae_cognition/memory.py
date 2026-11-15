@@ -3245,14 +3245,20 @@ class MemoryPlugin(CorvidaePlugin):
                         exc_info=True,
                     )
                     rows, degraded = [], True
-                vec_ids = {row[0] for row in rows}
-                measured = set(vec_ids)
-                if self._candidates == "hybrid":
-                    rows, fts_order, measured = await self._hybrid_rows(
-                        db, text, query_vector, k, exclude, rows,
-                    )
-                if self._band_on == "relative":
-                    spread = await self._relative_spread(db, query_vector)
+                else:
+                    # Only a KNN that answered feeds the hybrid path. On a
+                    # refusal the rows come from FTS below, and they must be
+                    # ranked by the decayed score: filling fts_order here would
+                    # send them through RRF instead (#637 review), which is the
+                    # rule this branch exists to keep.
+                    vec_ids = {row[0] for row in rows}
+                    measured = set(vec_ids)
+                    if self._candidates == "hybrid":
+                        rows, fts_order, measured = await self._hybrid_rows(
+                            db, text, query_vector, k, exclude, rows,
+                        )
+                    if self._band_on == "relative":
+                        spread = await self._relative_spread(db, query_vector)
         else:
             degraded = True
 
@@ -3485,9 +3491,10 @@ class MemoryPlugin(CorvidaePlugin):
                 logger.warning(
                     "retrieval KNN k clamped to sqlite-vec's limit (%d): asked "
                     "for %d rows (k=%d, over-fetch %d%s). Retrieval stays on "
-                    "the vector path and sees the nearest %d rows; a memory "
-                    "this large needs a bigger k only if those are not enough. "
-                    "Logged once per process.",
+                    "the vector path and sees the nearest %d rows; if that "
+                    "leaves too few in-window results, shrink the channel's "
+                    "window or accept the nearest-row ordering. Logged once "
+                    "per process.",
                     SQLITE_VEC_KNN_MAX, knn_k, k, VEC_OVERFETCH,
                     f", {excluded_count} in-window on {exclude[0]}"
                     if exclude is not None else "",

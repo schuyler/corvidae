@@ -395,10 +395,11 @@ outright: a large `k` or a long window used to come back as an embedding
 failure and a fall back to FTS5 on every turn. Now the clamp keeps the
 vector path, logs one WARNING per process naming the limit, the `k`, the
 over-fetch and the channel's in-window count, and reads only the nearest
-4096 rows (#637). A KNN failure for any other reason logs `retrieval KNN
-query failed; degrading to FTS5`, separate from the embedding warning, so
-the operator is not sent to the embed server for a fault in the query.
-The hybrid FTS side does the same over its own `k × 4` rows. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
+4096 rows (#637). The hybrid FTS side does the same over its own `k × 4`
+rows. A KNN failure for any other reason logs `retrieval KNN query failed;
+degrading to FTS5`, separate from the embedding warning, so the operator is
+not sent to the embed server for a fault in the query — and a degraded query
+ranks the FTS rows by the decayed score, never through the hybrid fusion. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
 and `search_memory` see everything. It is not a scope: other channels'
 records, and this channel's once their rows leave the window, are
 retrieved normally. Known limit: the bound assumes the window is a

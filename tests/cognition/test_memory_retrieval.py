@@ -752,3 +752,43 @@ class TestKnnRowLimit:
             "a KNN refusal must not send the operator to the embed server"
         )
         await db.close()
+
+    async def test_a_knn_refusal_skips_the_hybrid_path(self, monkeypatch):
+        """Degraded rows rank by the decayed score, not by RRF (#637 review).
+
+        The hybrid path fills ``fts_order``. Letting it run after a refused KNN
+        sends the FTS rows that replace them through fusion, which is the rule
+        the degraded branch exists to keep.
+        """
+        needs_vec()
+        memory, _, channel, _, db = await build_retrieval_env()
+        await seed_memory(db, channel.id, "the rain gauge is on the north wall")
+        await seed_memory(db, channel.id, "the rain gauge reads in millimetres")
+        memory._candidates = "hybrid"
+        memory._band_on = "relative"
+        ran: list[str] = []
+
+        async def refuse(*args, **kwargs):
+            raise RuntimeError("k value in knn query too large")
+
+        async def hybrid(*args, **kwargs):
+            ran.append("hybrid")
+            return args[-1], [1], set()
+
+        async def spread(*args, **kwargs):
+            ran.append("spread")
+            return (0.5, 0.1)
+
+        monkeypatch.setattr(memory, "_vec_candidates", refuse)
+        monkeypatch.setattr(memory, "_hybrid_rows", hybrid)
+        monkeypatch.setattr(memory, "_relative_spread", spread)
+
+        candidates, degraded = await memory.retrieve("where is the rain gauge?")
+
+        assert degraded
+        assert candidates, "the FTS fallback still returns the rows"
+        assert ran == [], "neither fusion nor the spread scan runs when degraded"
+        scores = [c["score"] for c in candidates]
+        assert scores == sorted(scores, reverse=True), (
+            "degraded rows are ranked by the decayed score")
+        await db.close()
