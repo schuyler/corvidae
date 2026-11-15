@@ -146,10 +146,13 @@ discord:
     yoz: 987654321098765432
 ```
 
-A map value has to be the id alone — digits, no `discord:` prefix, no leading
-zeros — because anything else silently matches nobody, and default-deny turns
-that into a user who simply never gets an answer. The error names the alias you
-typed, so the typo is findable.
+In either shape an entry has to be the id alone — digits, no `discord:`
+prefix, no leading zeros — because anything else silently matches nobody, and
+default-deny turns that into a user who simply never gets an answer. Startup
+fails instead, naming the entry you typed (`allow.schuyler` for an alias,
+`allow.2` for a list index) and the value it rejected, so the typo is
+findable. Two aliases naming one id is also refused, naming both: it reads as
+two people admitted, and deleting one line then silently revokes that person.
 
 `allow` is default-deny. An empty or missing list means nobody can use the
 bot, and it will not tell them so.

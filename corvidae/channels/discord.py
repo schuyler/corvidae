@@ -313,6 +313,46 @@ def _attachment_kind(att: Any) -> str:
     return "document"
 
 
+_ALLOW_ID_FORM = (
+    "the number alone, as it appears after `discord:` in the agent's logs — "
+    "123456789012345678, digits only, quoted or not, no leading zeros and no "
+    "prefix"
+)
+
+
+def _checked_allow_id(key: str, value: object) -> str:
+    """One ``discord.allow`` entry as an id string, or a config error.
+
+    ``key`` names the entry the way the operator wrote it: ``'allow.3'`` for a
+    list index, ``'allow.schuyler'`` for a map alias. The rejected value is in
+    the message because the common failure is a number YAML turned into a
+    float (``4.087092254985421e+17``), which only looks wrong printed back.
+    """
+    text = str(value)
+    # A nested mapping or list stringifies to braces or brackets and fails here
+    # too, with the same sentence naming the fix.
+    if not re.fullmatch(r"[1-9][0-9]*", text):
+        raise ValueError(
+            f"discord: config entry '{key}' is not a Discord user id, got "
+            f"{value!r}; use {_ALLOW_ID_FORM} — in the discord: block of "
+            "agent.yaml"
+        )
+    return text
+
+
+def _allow_from_list(allow: list) -> list[str]:
+    """The ids from an ``allow: [id, ...]`` list, validating each as an id.
+
+    A typo in a bare snowflake silently denies that user (default-deny) — the
+    failure #702 opened with, one shape over — so a list entry gets the same
+    rule as a map value: digits alone, no prefix, no leading zeros.
+    """
+    return [
+        _checked_allow_id(f"allow.{index}", value)
+        for index, value in enumerate(allow)
+    ]
+
+
 def _allow_list_from_map(allow: dict) -> list[str]:
     """The ids from an ``allow: {alias: id}`` map, validating each as an id.
 
@@ -324,17 +364,7 @@ def _allow_list_from_map(allow: dict) -> list[str]:
     """
     ids: list[str] = []
     for alias, value in allow.items():
-        text = str(value)
-        # A nested mapping or list stringifies to braces or brackets and fails
-        # here too, with the same sentence naming the fix.
-        if not re.fullmatch(r"[1-9][0-9]*", text):
-            raise ValueError(
-                "discord: config entry 'allow."
-                f"{alias}' is not a Discord user id; use the number alone, as "
-                "it appears after `discord:` in the agent's logs — "
-                "123456789012345678, digits only, quoted or not, no leading "
-                "zeros and no prefix — in the discord: block of agent.yaml"
-            )
+        text = _checked_allow_id(f"allow.{alias}", value)
         if text in ids:
             first = next(a for a, v in allow.items() if str(v) == text)
             raise ValueError(
@@ -447,6 +477,8 @@ class DiscordPlugin(TransportPlugin):
                 '[123456789012345678]` or `allow: {schuyler: '
                 "123456789012345678}` in the discord: block of agent.yaml"
             )
+        else:
+            allow = _allow_from_list(allow)
 
         chunk_size = block.get("message_chunk_size", DISCORD_MESSAGE_LIMIT)
         if (

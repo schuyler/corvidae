@@ -459,7 +459,35 @@ class TestConfig:
             await _start_plugin(
                 discord_overrides={"allow": {"schuyler": bad}}, wait_connect=False
             )
-        assert "no leading zeros and no prefix" in str(excinfo.value)
+        message = str(excinfo.value)
+        assert "no leading zeros and no prefix" in message
+        # The rejected value is in the message: a YAML float is only obviously
+        # wrong when it is printed back.
+        assert repr(bad) in message
+
+    async def test_allow_list_entry_that_is_not_an_id_names_its_index(self):
+        """A list entry gets the map value's rule, and names the entry (#702)."""
+        with pytest.raises(ValueError, match="allow.1") as excinfo:
+            await _start_plugin(
+                discord_overrides={"allow": [AUTH_ID, "discord:408709225498542081"]},
+                wait_connect=False,
+            )
+        message = str(excinfo.value)
+        assert "discord:408709225498542081" in message
+        assert "no leading zeros and no prefix" in message
+
+    async def test_allow_list_of_ids_still_starts(self):
+        """Validating list entries must not refuse a list that is already right."""
+        h = await _start_plugin(discord_overrides={"allow": [AUTH_ID, str(OTHER_ID)]})
+        try:
+            ch = h.registry.get_or_create("discord", f"dm:{AUTH_ID}")
+            assert await _drive_gate(
+                h.pm, channel=ch, sender=str(AUTH_ID), text="x") is True
+            assert await _drive_gate(
+                h.pm, channel=ch, sender=str(OTHER_ID), text="x") is True
+            assert await _drive_gate(h.pm, channel=ch, sender="1", text="x") is False
+        finally:
+            await h.plugin.on_stop()
 
     async def test_two_aliases_naming_one_id_is_refused(self):
         """One person, two aliases: the allowlist would be ambiguous to read, and
