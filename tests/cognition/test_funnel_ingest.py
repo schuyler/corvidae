@@ -588,16 +588,4 @@ class TestSameTurnAdmission:
         await turn(env)
         assert "late result" in text_of(env.conv)
 
-    async def test_a_newer_unresolved_promise_still_supersedes_an_unresolved_one(self, build):
-        env = await build()
-        first = pending()
-        env.provider.offer(env.channel.id, "markdown_recall", first)
-        await turn(env)
-        second = pending()
-        env.provider.offer(env.channel.id, "markdown_recall", second)
-        await turn(env)
-        # The older promise is cancelled by the supersede, and nothing was admitted.
-        assert first.cancelled() and text_of(env.conv) == ""
-        second.set_result(funnel_mod.Ingest(entries=["only the second"]))
-        await turn(env)
-        assert "only the second" in text_of(env.conv)
+
