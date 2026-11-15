@@ -17,8 +17,9 @@ The agent's right to silence, decided from the appraisal vector:
     nothing, stays silent". ``gate.send.allow_progress`` /
     ``allow_thinking`` suppress those emissions wholesale.
   * The **quiet veto** (#790) sits in front of the salience policy. An
-    operator lists origins in ``gate.send.quiet_origins`` (config only: the
-    agent cannot change it through runtime overrides); a ``final``,
+    operator lists origins in ``gate.send.quiet_origins``, a per-channel
+    tunable like the other gate keys (#928: ``set_settings`` can override
+    it on one channel; ``agent.immutable_settings`` locks it); a ``final``,
     ``progress`` or ``thinking`` emission from a listed origin is withheld
     whatever its salience, with no appraisal vector, and even with
     ``gate.send.enforce`` off. ``error`` emissions are never vetoed.
