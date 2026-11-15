@@ -681,8 +681,9 @@ class WebPlugin(TransportPlugin):
         never runs. A startup error naming the plugin beats a silent
         non-route (#692).
 
-        ``""`` and ``/`` are deliberately allowed: both mount at
-        ``/panel/<name>/`` and serve, so they are not unreachable routes. The
+        ``""`` and ``/`` are deliberately allowed: they mount and serve, so
+        neither is an unreachable route -- ``/`` at ``/panel/<name>/`` and
+        ``""`` at ``/panel/<name>`` (no trailing slash). The
         PRD's "not with pages of their own" describes the console's shape, and
         a route path cannot enforce it -- a handler at ``/data`` or a file in
         the panel's ``static_dir`` can serve a full page just as well (owner
