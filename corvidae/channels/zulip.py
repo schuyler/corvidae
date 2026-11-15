@@ -530,7 +530,6 @@ class ZulipPlugin(TransportPlugin):
         """
         if not self._cursor:
             return
-        moved = False
         for channel_id, entry in list(self._cursor.items()):
             try:
                 messages = await self._fetch_after(
@@ -573,9 +572,7 @@ class ZulipPlugin(TransportPlugin):
                         "failed delivery; the rest is retried next time",
                         channel_id, msg["id"], extra={"channel": channel_id},
                     )
-                    continue
-        if moved:
-            await self._save_cursor()
+                    break
 
     async def _fetch_after(
         self, narrow: list, anchor: int, channel_id: str
