@@ -817,7 +817,7 @@ Long upkeep can step aside of its own accord between chunks:
 from corvidae.hooks import get_dependency
 from corvidae.llm_plugin import LLMPlugin
 
-llm = get_dependency(self.pm, "llm", LLMPlugin)  # declare depends_on = {"llm"}
+llm = get_dependency(self.pm, "llm", LLMPlugin)  # declare depends_on = frozenset({"llm"})
 if llm.leases is not None:                       # None: no provider declares heads
     llm.leases.yield_key("upkeep:myplugin:digest")
 ```
@@ -825,7 +825,8 @@ if llm.leases is not None:                       # None: no provider declares he
 `yield_key` gives up the key's head on every provider where it holds one,
 at once if no call of the key is in flight, else when the last one ends,
 and puts the key's waiting calls at the end of the line. If no other key is
-waiting it does nothing: the key is already first. Under the default order
+waiting once the key is idle, the yield is dropped and the key keeps its
+head: it is already first. Under the default order
 a yield is rarely needed, since contention already moves the head at every
 call boundary; it is for work that wants to give way ahead of the
 least-recently-used choice.
@@ -834,7 +835,8 @@ least-recently-used choice.
 holders with how long they have held and whether a call is in flight;
 waiters in order with how long they have waited) without any I/O.
 `stop(provider, key)` and `resume(provider, key)` exist for a scheduler
-plugin (#366): a stopped key gives up its head at its next call boundary and
+plugin (#366): a stopped key gives up its head at once if idle, else when
+its calls in flight end, and
 its calls wait until it is resumed, with no timer. A plugin that stops a key
 owns resuming it. An unknown or unbounded provider raises `ValueError`
 naming the bounded ones.
@@ -1939,7 +1941,7 @@ logged with a traceback and never breaks an LLM call.
   and emits `on_metrics` events: `llm.tokens.prompt`, `llm.tokens.completion`,
   `llm.tokens.total` (each skipped if the usage dict lacks it),
   `llm.latency_ms` (always), `llm.errors` (value 1.0, on terminal
-  failure), and `llm.lease_wait_ms` (only for a call that took a lease). Tags: `{"profile", "model", "stage", "channel", "lease_key"}` —
+  failure), and `llm.lease_wait_ms` (only for a call that waited for or took a lease). Tags: `{"profile", "model", "stage", "channel", "lease_key"}` —
   stage, channel and lease key come from the call's attribution snapshot
   (`lease_key` is `""` for an unleased call).
 - **`UsageLogPlugin`** (entry point `"usage_log"`, depends on
@@ -1960,7 +1962,8 @@ logged with a traceback and never breaks an LLM call.
   `lease_key` names the queue the call ran for (#363); it is NULL for an
   unleased call and for rows written before the column existed.
   `lease_wait_ms` is how long the call waited for a lease (#364): 0.0 when
-  it did not wait, NULL when it took none and on older rows.
+  it did not wait, NULL when it took none and on older rows; a call that
+  shutdown failed while it waited records the time it waited.
   The table is created lazily on first use (`CREATE TABLE IF NOT EXISTS`).
 - **`MetricsJsonlPlugin`** (entry point `"metrics_jsonl"`) — consumes
   `on_metrics` and appends one JSON line per event
@@ -2032,7 +2035,7 @@ profile names count: `get_client("main")` raises, so use `get_client()`.
 `profile_config` includes its provider's client settings (`base_url`,
 `api_key`, `timeout`, retries) and a `provider` name; `heads` is read only
 through `provider_config` (absent or `None` when unbounded; `{}` for an unknown
-provider). Nothing schedules on it yet.
+provider). It sizes the provider's lease table (see Leases).
 Resolve the client when you call it, as the stages in this repo do, not in your
 own `on_start`: hooks run concurrently, so `LLMPlugin` may not have started
 yet. The `main_client` and `background_client` properties and

@@ -1168,7 +1168,8 @@ class AgentSpec:
             lease_wait_ms: Milliseconds the call waited for a context lease
                 before it was sent (PRD §3.13.10); 0.0 for a leased call that
                 did not wait, None when the call took no lease (unkeyed,
-                embedding, or a provider with no ``heads``).
+                embedding, or a provider with no ``heads``); for a call that
+                shutdown failed while waiting, the time it waited.
         """
 
     @hookspec

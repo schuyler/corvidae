@@ -558,14 +558,15 @@ its POST, retries included, inside `leases.call(key, attribution)`:
 - a key that holds nothing takes a free head at once;
 - otherwise the call joins its key's waiter entry and waits.
 
-Every state change (a call entering or ending, a cancel, stop, resume,
+Every state change (a call parking or ending, a cancel, stop, resume,
 yield) re-runs one function, `_settle`, which is the default order: a
 stopped holder with no call in flight gives up its head (`lease.yield`
 reason `stop`); an idle holder that called `yield_key` gives it up if
 another key waits (`cooperative`; with no waiter the yield is dropped);
 free heads go to waiters in FIFO order; and while a waiter is left and no
 head is free, the idle holder whose last call ended earliest gives way
-(`contention`). A head is never taken mid-call, and a holder's call that
+(`contention`); last, a holder's own parked calls are let through on its
+lease once no other key waits. A head is never taken mid-call, and a holder's call that
 arrives while another key waits queues behind it, so a head is held against
 a waiter only until the calls already in flight end. A grant reserves the
 in-flight count of every waiting call of the key at once, so the head can't
@@ -599,7 +600,8 @@ calls waited; none for a call that took a free head or passed through),
 plus `reason`. A waiter entry shared by a turn and a fork of one channel
 carries its first call's attribution. Each call's own wait is
 `lease_wait_ms` on `on_llm_response` (0.0 when it did not wait, `None` when
-it took no lease), recorded in `usage_log.lease_wait_ms` and as
+it took no lease, and the time it waited when shutdown failed it before a
+lease), recorded in `usage_log.lease_wait_ms` and as
 `llm.lease_wait_ms`. The observer fires inside the lease, so under
 contention the head is held for the time `on_llm_response` takes.
 
@@ -620,7 +622,7 @@ ten children per level is still many tasks.
 
 **Sinks.** `metrics.py` provides `MetricsPlugin` (translates
 `on_llm_response` into `on_metrics` events: `llm.tokens.*`,
-`llm.latency_ms`, `llm.errors`, and `llm.lease_wait_ms` for a call that took a lease, each tagged with the call's `lease_key`, `""` when it had none), `UsageLogPlugin` (one `usage_log` row
+`llm.latency_ms`, `llm.errors`, and `llm.lease_wait_ms` for a call that waited for or took a lease, each tagged with the call's `lease_key`, `""` when it had none), `UsageLogPlugin` (one `usage_log` row
 per call), and `MetricsJsonlPlugin` (JSONL event sink, config
 `daemon.metrics_jsonl`). `outcome_log.py` owns the `exchange_log` table:
 one row per exchange, written by `OutcomeLogPlugin`'s hookimpls at
@@ -2759,7 +2761,7 @@ the resolved settings (read-only; `Agent.fork` reads its `extra_body`).
 `resolve_provider(stage)` returns the provider name the stage's profile uses
 (`None` for no profile) and `provider_config(name)` the provider block, `heads`
 included (`{}` for an unknown name or before `on_start`; read-only). `heads`
-is read and logged only: nothing schedules on it yet (#364).
+sizes the provider's lease table (see Leases above).
 Other plugins retrieve the plugin via `get_dependency(pm, "llm", LLMPlugin)`.
 `MemoryPlugin` reads the embedding stage's encoder identity, `dimensions` and
 prefixes the same way, with `parse_llm_config(config.get("llm"))` in its
@@ -4772,7 +4774,7 @@ llm:
       retry_max_delay: 60.0       # maximum retry delay cap in seconds
       model_not_loaded_wait: 60.0 # seconds to wait out an unloaded router model
       timeout: null               # HTTP timeout per request; null = no timeout
-      # heads: 2                  # warm context heads; absent = unbounded; nothing schedules on it yet
+      # heads: 2                  # warm context heads; chat calls lease one; absent = unbounded
     embedding:                    # optional: a separate embedding endpoint
       base_url: "..."
   profiles:
