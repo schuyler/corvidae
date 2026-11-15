@@ -1,7 +1,7 @@
 # Coding conventions
 
 * Package management in this project is done with uv.
-* Use red/green test-driven development on this project.
+* Use red/green test-driven development on this project. A guard test goes red under a mutation of the change rather than on the parent commit (see "Process instructions").
 * This project relies on asyncio, so all pytest runs need to employ timeouts to prevent hangs.
 * Always log exceptions, pass through, or re-raise -- never swallow exceptions with bare `except Exception: pass`.
 * Use idiomatic Python with proper type hinting.
@@ -40,25 +40,51 @@ the string it will print.
 </details>
 ```
 
-**Same shape for review feedback.** A review comment or verdict opens with the verdict and its one-sentence reason -- `REQUEST_CHANGES -- the budget is real now, but the label is wider than it reserves` -- and puts the probes, the numbers, the file and line references and the suggested patch inside a `<details>`. A blocking finding always gets its reason in the opener, never only in the collapsed part: a reader who expands nothing must still know what is being asked of them.
+**Same shape for review feedback.** A review comment or verdict opens with the verdict and its one-sentence reason -- `NEEDS-CHANGES -- the budget is real now, but the label is wider than it reserves` -- and puts the probes, the numbers, the file and line references and the suggested patch inside a `<details>`. A blocking finding always gets its reason in the opener, never only in the collapsed part: a reader who expands nothing must still know what is being asked of them.
 
 **The two-layer rule does not license vagueness.** The opener is short because it is selected, not because the detail is thin. Everything a reviewer needs to check the work is still written down, in the detail block, and a body whose detail block is empty has failed this section rather than complied with it.
 
 # Review loops
 
-* **Every non-trivial change gets a full review loop before it is merged.** The criterion is whether behaviour, or something a reader or another plugin acts on, could change, not the file type: a config key, a prompt, a documented contract, a docs page readers act on, a one-line code fix and a refactor all count. What can change neither does not (a typo, a broken link, a comment that was wrong about unchanged code), and the PR body says which case it is.
-* **The review is blind.** The reviewer gets the diff and the requirement as it was written -- the issue or the owner's words, never the author's paraphrase -- and nothing else: no reasoning, no commit-message justification, no test names offered as proof the tests are right. It reads the connected code, not only the diff. Use a subagent where the tooling allows. If no issue or owner's words state the requirement, write it on an issue before the review and give the reviewer that issue; never write it into the reviewer's prompt.
-* **Critical blocks the merge:** the change is wrong -- logic, safety, data loss, or a path nothing tests.
-* **Important blocks the merge:** the change deviates from scope in either direction. Too much implementation is as much a deviation as too little (an option nobody asked for, an abstraction with one caller, a config key with no user), and so is a test suite past its use-by: tests that re-prove behaviour another test already proves, or any test that cannot fail. Past 3:1 (test lines against the non-test lines changed in the same PR), the reviewer checks for exactly that. **A regression test for the bug being fixed is always in scope.**
-* **Everything else is the author's judgement** -- naming, structure, an alternative weighed, a nit -- and does not buy another round.
-* **Re-review is cold, never a conversation with the first reviewer.** Give the new reviewer the earlier findings as the reviewers wrote them, each with its outcome -- fixed, declined as non-blocking, or ruled on by the owner (quote the ruling) -- and no argument for any of them. The reviewer does not reopen what is listed; a finding about code changed since is new.
-* **A round closes on the reviewer's verdict, not the author's reading of it.** The author may argue a non-blocking finding down inside the round. A critical or important one is either fixed and re-reviewed cold, or, if the author thinks it is wrong, taken to the owner: quote the finding verbatim and give the author's case in one sentence; the owner's ruling joins the earlier findings for the next round. The author never closes the round over the reviewer.
-* **Loop until a round closes with nothing critical or important open.**
-* **Three rounds with a blocking finding still open is a stop, not a fourth round.** Ask the owner whether the scope or the approach is wrong.
+* **Every non-trivial change gets a review loop before it is merged.** The criterion is whether behaviour, or something a reader or another plugin acts on, could change, not the file type: a config key, a prompt, a documented contract, a docs page readers act on, a one-line code fix and a refactor all count. What can change neither does not (a typo, a broken link, a comment that was wrong about unchanged code), and the PR body says which case it is.
+* **The review is blind.** The reviewer gets the diff; the requirement as written -- the issue or the owner's words, never the author's paraphrase; the PR body, as claims to check; the severity rules below, verbatim; any owner rulings, as settled (disagreement goes to the owner and does not change the verdict); and on a re-review, the earlier findings with their outcomes. Nothing else: no reasoning beyond what the PR body states, no argument for or against a finding. It reads the connected code, not only the diff. Use a subagent where the tooling allows. If no issue or owner's words state the requirement, write it on an issue first; never write it into the reviewer's prompt.
+
+## Severity
+
+Findings are rated by consequence, not reachability (PRD principle 12).
+
+* **Critical:** on an input the reviewer names, the change causes a security hole, data loss, a hang or crash, or a wrong result the user sees.
+* **Important:**
+  * the change deviates from scope in either direction. Too much implementation is as much a deviation as too little (an option nobody asked for, an abstraction with one caller, a config key with no user), and so is a test suite past its use-by: tests that re-prove behaviour another test already proves. Past 3:1 (test lines against the non-test lines changed in the same PR), the reviewer checks for exactly that. **A regression test for the bug being fixed is always in scope.**
+  * a test the change adds that no mutation of the change makes fail, or whose claim rests on values neither the test nor the code under test set.
+  * a path the change adds that no test reaches.
+  * a claim the change makes, or leaves standing, that the code or another doc contradicts.
+* **Everything else is non-blocking.**
+* **Verdicts:** `SOUND` (no findings), `APPROVE WITH FOLLOW-UPS` (non-blocking findings only), `NEEDS-CHANGES` (a critical or important finding). The verdict opens the review, as "Issues and pull requests" asks.
+
+## The author's side
+
+* **Sweep before you hand it over.** Apply the review's checks to the whole change yourself first. Review is for what you could not see, not a substitute for looking.
+* **Show your tests can fail.** The PR body gives, for each new behavioural test, a mutation of the change that makes it fail on the assertion carrying its claim.
+* **Drive the real path.** Acceptance tests run the hook order the agent runs, on data shaped the way production writes it. A test that does not says why it is equivalent.
+* **Run the full suite before answering a round**, docs-only changes included -- tests read docs too -- and give the count.
+* **Fix the class, not the example.** Name the finding's class and fix every instance the change covers; the reviewer's instance is a lower bound.
+* **Triage honestly and disclose what you skip.** Fix the findings that land against the requirement. List the ones you skip in the PR body, file a follow-up issue for any that is not cosmetic, and name a skipped critical in the opener. Skip non-blocking findings unless the fix is a line or two: every addition is new surface for the next round.
+* **The PR body describes the design that ships**, not the draft and not one an earlier round rejected.
+
+## Rounds
+
+* **Severity sets the verdict; the author's triage ends the loop.** The loop ends when every critical and important finding is fixed or disclosed as skipped, and nothing has changed since the last round.
+* **Re-review is cold, never a conversation with the first reviewer.** The new reviewer checks that the fixes landed, marks a finding that comes back as a recurrence, and does not reopen the rest.
+* **Meta-review when findings recur.** When a finding recurs or a second round ends `NEEDS-CHANGES`, stop fixing and sweep the whole change for the class behind the findings. Post the diagnosis on the PR -- a flawed design, a flawed remedy, reviewer noise, or scope creep -- and take it to the owner unless the loop is converging.
+* **From the third round on, a round ending `NEEDS-CHANGES` stops the loop** until the owner says to continue.
 * **The reviewer does not expand scope.** It may name a larger problem it noticed as a one-line follow-up with its own issue; it may not fold that problem in, and the author does not adopt one to be agreeable. Scope grows by a decision recorded on an issue.
-* **No agent self-certifies and merges.** A non-blocking verdict makes a change admissible, not accepted: merging needs the owner's permission, either for that change or as a standing instruction the owner wrote, and the message says which. A review written under the author's own account is not a second party and never counts as permission. Because agents act under the owner's account, the author field proves nothing: permission is the owner's words in a live session, or a comment the owner points to from one.
+
+## Merging
+
+* **No agent self-certifies and merges.** A finished loop makes a change admissible, not accepted: merging needs the owner's permission, either for that change or as a standing instruction the owner wrote, and the message says which. A review written under the author's own account is not a second party and never counts as permission. Because agents act under the owner's account, the author field proves nothing: permission is the owner's words in a live session, or a comment the owner points to from one.
 * **An emergency merge without the loop** needs the owner's agreement recorded before it happens; it says so at the top of the PR body and is reviewed immediately afterwards, before anything else starts.
-* **Say what was reviewed in the PR body:** the rounds it took.
+* **Say what was reviewed in the PR body:** the rounds it took, any meta-review, and the findings skipped.
 
 # Process instructions
 
@@ -71,5 +97,5 @@ the string it will print.
 * If you are adding or changing a plugin, read `docs/plugin-checklist.md` first. It covers placement (a plugin, not the kernel), the package layout and CI wiring, and the traps that fail silently. `docs/plugin-guide.md` has the depth.
 * **The plan comment is the claim.** Before starting on an issue, read its comments and the open PRs that mention it; if someone has claimed it, stop and ask. Otherwise post the plan comment above before writing code -- that comment is what the next agent checks for.
 * A claim about code, config or runtime state names the command that produced it and the tree it ran against. A worktree, the live checkout and the installed package are three different answers to the same import.
-* A new test has to fail on the parent commit before it counts as a test. Run it there, not only in your head.
+* A new test has to fail before it counts as a test: a test of new or fixed behaviour fails on the parent commit; a guard test, which pins behaviour the change must not break, fails under a mutation of the change. Run it, not only in your head.
 * Comment every block with its purpose, as the coding conventions say. `docs/plugin-checklist.md` asks for the shorter "why it is there"; that is a compression of this rule, not a different one, and this file wins.
