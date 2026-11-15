@@ -259,3 +259,121 @@ class TestReviewFixes:
             await plugin.view_image(str(png))
 
         llm_plugin.get_client.assert_called_with("vision")
+
+
+class TestLeaseKey:
+    """#363 AC8: a view_image call inside a channel scope is recorded under
+    that channel's lease key. The plugin opens no scope of its own; it
+    inherits the calling turn's."""
+
+    @pytest.mark.asyncio
+    async def test_view_image_in_channel_scope_records_channel_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import logging
+
+        import aiohttp
+        import aiosqlite
+
+        from corvidae.attribution import lease_scope
+        from corvidae.hooks import create_plugin_manager
+        from corvidae.llm_plugin import LLMPlugin
+        from corvidae.metrics import UsageLogPlugin
+        from corvidae.persistence import PersistencePlugin
+
+        # The posts a stubbed HTTP session answers with one text completion.
+        class _Response:
+            status = 200
+            headers: dict = {}
+
+            def raise_for_status(self) -> None:
+                """Always a success."""
+
+            async def json(self) -> dict:
+                """One completion with usage."""
+                return {
+                    "choices": [{"message": {"role": "assistant", "content": "A tiny image."}}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+                }
+
+            async def text(self) -> str:
+                """No body text."""
+                return ""
+
+        class _Post:
+            async def __aenter__(self) -> _Response:
+                return _Response()
+
+            async def __aexit__(self, *exc: object) -> bool:
+                return False
+
+        class _Session:
+            def __init__(self, headers=None, **kw) -> None:
+                self.headers = headers or {}
+
+            def post(self, url, json=None, timeout=None, **kw) -> _Post:
+                """Answer every request."""
+                return _Post()
+
+            async def close(self) -> None:
+                """Nothing to release."""
+
+        monkeypatch.setattr(aiohttp, "ClientSession", _Session)
+        # Another test may have warned for this stage already; start clean.
+        import corvidae.llm as llm_module
+
+        monkeypatch.setattr(llm_module, "_unleased_warned_stages", set(), raising=False)
+
+        png = tmp_path / "test.png"
+        png.write_bytes(TINY_PNG)
+
+        async with aiosqlite.connect(str(tmp_path / "sessions.db")) as db:
+            # The real LLMPlugin and client, with the usage log registered.
+            pm = create_plugin_manager()
+            persistence = PersistencePlugin()
+            persistence.db = db
+            pm.register(persistence, name="persistence")
+            vision = VisionPlugin()
+            vision.pm = pm
+            pm.register(vision, name="vision")
+            llm = LLMPlugin()
+            pm.register(llm, name="llm")
+            config = {"llm": {
+                "providers": {"main": {"base_url": "http://main.test/v1"}},
+                "profiles": {"main": {"model": "main-m"}},
+            }}
+            await llm.on_init(pm, config)
+            await llm.on_start(config)
+            usage_log = UsageLogPlugin(pm)
+            pm.register(usage_log, name="usage_log")
+            await usage_log.on_start({})
+            try:
+                records: list[logging.LogRecord] = []
+
+                class _Collect(logging.Handler):
+                    def emit(self, record: logging.LogRecord) -> None:
+                        """Keep every record."""
+                        records.append(record)
+
+                handler = _Collect(level=logging.DEBUG)
+                logging.getLogger("corvidae.llm").addHandler(handler)
+                try:
+                    # The scope a turn on this channel would be running in.
+                    with lease_scope("irc:#home"):
+                        result = await vision.view_image(str(png))
+                finally:
+                    logging.getLogger("corvidae.llm").removeHandler(handler)
+
+                assert "tiny image" in result
+                async with db.execute(
+                    "SELECT stage, lease_key FROM usage_log ORDER BY id"
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                assert [key for _stage, key in rows] == ["irc:#home"]
+                # Keyed, so the unleased check stayed quiet.
+                assert [
+                    r for r in records
+                    if r.levelno == logging.WARNING and "lease" in r.getMessage().lower()
+                ] == []
+            finally:
+                await llm.on_stop()
