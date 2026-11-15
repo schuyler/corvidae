@@ -1762,8 +1762,10 @@ value that is not a list of strings fails open with a warning. The list is
 read through `config_value`, so `set_settings` cannot change it, and a hot
 reload applies on the next decision.
 
-When the list is non-empty at startup, the agent has a `speak_up(reason)`
-tool. Calling it marks the turn's trace as surfaced (a bounded LRU of 1024,
+The agent always has a `speak_up(reason)` tool while `gates` is loaded,
+whatever the list holds, so an origin added by hot reload has its hatch
+without a restart (tools are collected only at startup, #925; with nothing
+quiet, the call lifts nothing). Calling it marks the turn's trace as surfaced (a bounded LRU of 1024,
 never cleared explicitly, because a final's thinking is gated after the
 final) and records `outcomes.speak_up = <reason>` (cut to 200 characters; written
 only when `outcome_log` is loaded and the turn has a trace id). A surfaced quiet final
