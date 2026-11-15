@@ -161,17 +161,31 @@ def waiter_keys(env: SimpleNamespace, provider: str = "main") -> list[str]:
 
 async def test_r2_two_heads_serve_two_keys_without_waiting() -> None:
     """R2: on heads 2 two keys' calls are in flight together, neither waits,
-    and the first key keeps its lease (nobody was displaced)."""
+    and a key arriving while the first holder is idle takes the free head
+    rather than displacing it."""
     env = make({"main": 2})
 
     a = await take(env, "A")
     b = await take(env, "B")
 
+    # Both calls in flight together, neither waited.
     assert a.entered.is_set() and b.entered.is_set()
     assert (a.wait_s, b.wait_s) == (0.0, 0.0)
+    await b.leave()
+    await a.leave()
+    await spin()
+
+    # A fresh table with A idle and one head free.
+    env = make({"main": 2})
+    a = await take(env, "A")
+    await a.leave()
+    await spin()
+    b = await take(env, "B")
+
+    # B took the free head; idle A was not displaced.
+    assert b.entered.is_set() and b.wait_s == 0.0
     assert holder_keys(env) == ["A", "B"]
     assert named(env, "lease.yield") == []
-    await a.leave()
     await b.leave()
 
 
@@ -204,9 +218,14 @@ async def test_r3p_waiting_keys_are_granted_in_arrival_order() -> None:
     b = await take(env, "B")
     c = await take(env, "C")
     assert waiter_keys(env) == ["B", "C"]
-    for probe in (a, b, c):
+    # Check the order after each call ends, so a wrong order fails on the
+    # assertion instead of hanging on a call that is never granted.
+    expected = [["A", "B"], ["A", "B", "C"]]
+    for probe, log in zip((a, b), expected):
         await probe.leave()
         await spin()
+        assert env.log == log
+    await c.leave()
 
     assert env.log == ["A", "B", "C"]
     assert [e[2]["lease_key"] for e in named(env, "lease.grant")] == ["A", "B", "C"]
@@ -235,6 +254,8 @@ async def test_s2_least_recently_used_idle_holder_yields_to_a_new_waiter() -> No
     and B keeps its head."""
     env = make({"main": 2})
     b = await take(env, "B")
+    # A is granted strictly later than B, so oldest-grant would pick B.
+    env.clock.advance(1.0)
     a = await take(env, "A")
     env.clock.advance(1.0)
     await a.leave()
@@ -542,7 +563,7 @@ async def test_r12_release_event_is_emitted_only_at_shutdown() -> None:
     emits lease.yield and no release."""
     env = make()
     a = await take(env, "A", attribution=dict(ATTR))
-    b = await take(env, "B")
+    b = await take(env, "B", attribution=dict(ATTR))
     await a.leave()
     await spin()
     assert named(env, "lease.release") == []
@@ -557,6 +578,7 @@ async def test_r12_release_event_is_emitted_only_at_shutdown() -> None:
     assert releases[0][1] == 4000.0
     assert releases[0][2]["reason"] == "shutdown"
     assert releases[0][2]["lease_key"] == "B"
+    assert has_tags(releases[0][2], tags_for("B"))
 
 
 # ---------------------------------------------------------------------------
