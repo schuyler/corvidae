@@ -339,8 +339,14 @@ agent:
 #     - name: morning-checkin          # unique; removing it disables the job durably
 #       channel: signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f
 #       every: 1d                      # required: 30s, 20m, 6h, 1d, 7d, 1h30m
-#       at: "08:30"                    # optional anchor: HH:MM, or ISO datetime for a weekday
+#       at: "08:30"                    # optional anchor: HH:MM, or an ISO datetime
 #       prompt: "Good-morning check-in: ask how they slept and what is on today."   # or prompt_file: path
+#     - name: weekly-review
+#       channel: signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f
+#       every: 7d                      # weekday needs a whole number of weeks (7d, 14d)
+#       at: "16:00"                    # weekday needs at as HH:MM
+#       weekday: friday                # optional: anchors the job to this day; name or first three letters
+#       prompt: "Weekly review: what got done this week, and what carries over."
 
 # Heartbeat (cognition; optional): a turn the agent starts after this many
 # seconds of system-wide quiet, on internal:heartbeat (no transport owns it,
