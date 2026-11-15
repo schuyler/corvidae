@@ -779,7 +779,15 @@ class TestQueueItemPairing:
         )
         from corvidae.agent import _TurnRetry
 
-        plugin._turn_retries[channel.id] = _TurnRetry(item=item, attempt=1, timer=None)
+        # A success cancels the retry's timer, so it needs one that can cancel.
+        plugin._turn_retries[channel.id] = _TurnRetry(
+            item=item, attempt=1, timer=MagicMock()
+        )
+        # Without a client the turn closes as `no_result`, which would leave the
+        # retry happy path untested (#469 round 5).
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
+        plugin._client = mock_client
 
         with caplog.at_level(logging.INFO):
             await plugin._process_queue_item_attributed(item, channel, [])
@@ -790,6 +798,8 @@ class TestQueueItemPairing:
             f"a retried item must pair: {[r.getMessage() for r in caplog.records]}"
         )
         assert timings[0].trace_id == starts[0].trace_id == trace
+        # The retried turn ran and succeeded: not `no_result`.
+        assert timings[0].outcome == "ok"
 
     async def test_an_item_that_raises_closes_as_failed(
         self, plugin_and_channel, caplog,
@@ -815,6 +825,49 @@ class TestQueueItemPairing:
         assert len(timings) == 1, "the raising path must still close its start"
         assert timings[0].outcome == "failed"
         assert "ok" not in [getattr(r, "outcome", None) for r in timings]
+
+    async def test_a_pending_set_that_shrinks_mid_item_still_pairs(
+        self, plugin_and_channel, caplog,
+    ):
+        """One read of pending_tool_call_ids decides both the start and step 4b.
+
+        Reading it again after two awaits let the two disagree: the set is
+        cleared from another task (ACP's cancel_prompt), so an item chose
+        "buffered" at the top, found nothing pending at 4b, ran a whole turn and
+        logged `outcome: ok` with no start (#469 round 5).
+        """
+        plugin, channel, db = plugin_and_channel
+        plugin._mark_started()
+        channel.pending_tool_call_ids.update({"c1", "c2"})
+        item = QueueItem(
+            role=QueueItemRole.NOTIFICATION, content="result", channel=channel,
+            sender="tool", tool_call_id="c1", trace_id=mint_trace_id(),
+        )
+        # Simulate the other task clearing the set while this item is between
+        # the start decision and step 4b.
+        real_persist = plugin._append_and_persist_message
+
+        async def persist_then_clear(*args, **kwargs):
+            result = await real_persist(*args, **kwargs)
+            channel.pending_tool_call_ids.clear()
+            return result
+
+        plugin._append_and_persist_message = persist_then_clear
+        # A working client is what makes the disagreement visible: the item
+        # then runs a whole turn and reaches the success record, which is not
+        # gated on the start.
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
+        plugin._client = mock_client
+
+        with caplog.at_level(logging.INFO):
+            await plugin._process_queue_item_attributed(item, channel, [])
+
+        names = [r.getMessage() for r in caplog.records]
+        starts = names.count("queue item start")
+        timings = names.count("queue item timing")
+        assert starts == timings, f"unpaired stage: {names}"
+        assert starts == 0, "an absorbed result opens no stage, even after a clear"
 
     async def test_an_absorbed_tool_result_logs_no_stage(self, plugin_and_channel, caplog):
         """One INFO line per batched tool result was the noise round 3 named.

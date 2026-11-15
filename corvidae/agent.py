@@ -1432,12 +1432,19 @@ class Agent(CorvidaePlugin):
         # step 4, so the pair still spans the whole item: the persistence and
         # conversation build inside that span are part of the stage being timed
         # (#469 round 4). Retries skip those steps and still open a stage.
-        _started = not (
+        # Read the pending set once and branch on that value in both places.
+        # Reading it again at step 4b let the two disagree: the set is cleared
+        # from another task (ACP's cancel_prompt, agent.py's own note above), so
+        # an item could open no stage here and then find nothing pending there,
+        # run a whole turn, and log "queue item timing" with outcome ok and no
+        # start (#469 review).
+        _buffered = bool(
             not item.retry
             and item.role == QueueItemRole.NOTIFICATION
             and item.tool_call_id
             and (channel.pending_tool_call_ids - {item.tool_call_id})
         )
+        _started = not _buffered
         if _started:
             logger.info(
                 "queue item start",
@@ -1534,13 +1541,19 @@ class Agent(CorvidaePlugin):
                     self._queued_tool_results.discard((channel.id, item.tool_call_id))
                     # The metadata was computed at enqueue; the record is spent.
                     self._dispatched_calls.pop((channel.id, item.tool_call_id), None)
-                    if channel.pending_tool_call_ids:
+                    # The same value the start decision used, so a pair can
+                    # never be half-logged: either this item buffered and opened
+                    # no stage, or it opened one and runs to its close (#469
+                    # review).
+                    if _buffered:
                         logger.debug(
                             "tool result buffered, pending: %d",
                             len(channel.pending_tool_call_ids),
                             extra={"channel": channel.id, "tool_call_id": item.tool_call_id},
                         )
-                        _outcome = "buffered"
+                        # No outcome to record: an absorbed item opened no
+                        # stage, so the finally logs nothing for it. Setting
+                        # `_outcome` here was dead (#469 review).
                         return
 
 

@@ -630,6 +630,34 @@ class TestConsolidationStageLogLines:
         finally:
             await db.close()
 
+    async def test_a_failed_consolidation_closes_as_failed(self, caplog):
+        """A failure after the start closes the pair with `failed`.
+
+        Only a pre-start failure was covered, which is the case that logs no
+        close at all, so gating the close on `outcome != "failed"` still passed
+        the suite (#469 round 5).
+        """
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            ids = await seed_dialog(persistence, channel, [
+                ("user", "hi"), ("assistant", "hello"),
+            ])
+
+            async def boom(*args, **kwargs):
+                raise RuntimeError("store failed")
+
+            memory._commit = boom
+            with caplog.at_level(logging.INFO):
+                await memory._consolidate_range(channel.id, ids[-1], "idle")
+            timings = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation timing"
+            ]
+            assert len(timings) == 1, [r.getMessage() for r in caplog.records]
+            assert timings[0].outcome == "failed"
+        finally:
+            await db.close()
+
     async def test_a_skipped_range_logs_no_stage(self, caplog):
         """A turn trigger re-firing on a consolidated range opens nothing (#469 review)."""
         memory, persistence, stub, channel, db = await build_consolidation_env()
