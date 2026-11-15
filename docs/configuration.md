@@ -1186,7 +1186,7 @@ When `logging.file` is set in YAML, logs go to that rotating file regardless of 
 
 Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv sync` line). Without it the `notify_other_channel` and `list_channels` tools do not exist.
 
-`CrossChannelSendPlugin` lets any turn send an instruction to another channel context. The message is delivered as a system-role notification via `on_notify` (the same mechanism the scheduler uses for reminders); the target mints its own trace and gets a fresh turn budget. Loop prevention is a `hop_count` in the notification annotations, refused when it exceeds `max_hops`. A call whose target is the current channel is refused, with a warning in the log (a self-send would queue a duplicate turn).
+`CrossChannelSendPlugin` lets any turn send an instruction to another channel context. The message is delivered as a system-role notification via `on_notify` (the same mechanism the scheduler uses for reminders); the target mints its own trace and gets a fresh turn budget. Loop prevention is a `hop_count` in the notification annotations, refused when it exceeds `max_hops`. A call whose target is the current channel is refused, with a warning in the log (a self-send would queue a duplicate turn). The target need not be live: any well-formed `transport:scope` id is resolved the way reminders resolve theirs (live registry, then the owning transport, then a bare channel), so a channel nobody has spoken in since the restart can be reached. A malformed id is refused naming the expected form, and an id whose transport can't apply its config yet is refused with a warning in the log; retry once the transport is ready.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

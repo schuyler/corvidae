@@ -636,7 +636,9 @@ registry, including Signal contacts, and the jobs persist across restarts.
 The file-permission mitigation (keep the file unwritable by the daemon
 user) would disable the CRUD tools, so it is not a viable mitigation for
 the tool path. The real exposure is the same as for any cross-channel
-send tool (finding 15): registry membership is the whole gate. Bounding
+send tool (finding 15): registry membership is the whole gate, and for
+`notify_other_channel` not even that, since it reaches any well-formed
+channel id (#938). Bounding
 the tools (per-channel cap, operator opt-in) is a follow-up.
 
 The RSS reader (packages/rss-reader) polls configured feeds and delivers
@@ -1264,6 +1266,13 @@ decision (2026-11-01), and these are its costs.
   Signal contact can be messaged on the strength of text fetched in an IRC
   channel. Inbound default-deny bounds who can inject by talking; it does
   not bound what fetched content says.
+  `notify_other_channel` (the cross-channel-send plugin) reaches any
+  well-formed `transport:scope` id, not only channels live in the registry:
+  it resolves the id the way reminders and `corvidae-inotify` do (#938), so
+  a Signal contact or Discord channel nobody has spoken in since the
+  restart is reachable too. An id whose transport no plugin owns still
+  resolves to a bare channel and is reported as queued, though no reply is
+  delivered there.
 - **Notes and reads launder untrusted text.** A note is framed as the
   agent's own, so text injected on IRC that prompts a note reaches the
   operator's Signal window in the agent's voice, and a read pulls one

@@ -5,8 +5,10 @@ context. The message is delivered as a system-role notification (via
 on_notify), the same mechanism the scheduler uses for reminders. The
 target mints its own trace and gets a fresh turn budget.
 
-The list_channels tool returns registered channel IDs so the sending
-context knows its available targets.
+The list_channels tool returns the live (registered) channel IDs. A target
+need not be live: notify_other_channel resolves any well-formed
+"transport:scope" id with resolve_persisted_channel (#938), so a channel
+nobody has spoken in since the restart is still reachable.
 
 Loop prevention: each send increments a hop_count tracked in the
 notification's annotations. The receiving context's attribution carries the
@@ -36,7 +38,7 @@ from __future__ import annotations
 import logging
 
 from corvidae.attribution import get_attribution
-from corvidae.channel import ChannelRegistry
+from corvidae.channel import ChannelNotReady, ChannelRegistry, resolve_persisted_channel
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.tuning import config_value
 
@@ -94,8 +96,9 @@ class CrossChannelSendPlugin(CorvidaePlugin):
 
         Args:
             channel_id: The target channel in "transport:scope" form,
-                e.g. "signal:4d8d4445-..." or "web:main". Must differ from
-                the current channel.
+                e.g. "signal:4d8d4445-..." or "web:main". It need not appear
+                in list_channels: any well-formed id is resolved. Must differ
+                from the current channel.
             text: The instruction for the receiving context.
 
         Returns:
@@ -118,11 +121,31 @@ class CrossChannelSendPlugin(CorvidaePlugin):
             if not source_channel:
                 return "Could not send: no source channel in the current context."
 
-            target = self._registry.get(channel_id)
+            # Resolve the target the way persisted ids are resolved elsewhere
+            # (#938): live registry, then the owning transport, then a bare
+            # channel, so a channel that isn't live yet is still reachable.
+            try:
+                target = await resolve_persisted_channel(
+                    self.pm, self._registry, channel_id
+                )
+            except ChannelNotReady as exc:
+                # The owning transport can't apply the channel's config yet.
+                logger.warning(
+                    "notify_other_channel: channel %s not ready (%s); refused",
+                    channel_id,
+                    type(exc).__name__,
+                )
+                return (
+                    f"Could not send: channel {channel_id!r} can't be resolved yet "
+                    "(its transport isn't ready to apply its config); try again "
+                    "once the transport is ready."
+                )
+            # None means the id is not in transport:scope form.
             if target is None:
                 return (
-                    f"Could not send: channel {channel_id!r} is not registered; "
-                    "use list_channels to see available targets."
+                    f"Could not send: {channel_id!r} is not a channel id; expected "
+                    '"transport:scope" (e.g. "signal:+15551234567"); use '
+                    "list_channels to see available targets."
                 )
             if source_channel == target.id:
                 logger.warning(
@@ -170,8 +193,9 @@ class CrossChannelSendPlugin(CorvidaePlugin):
         """List registered channel IDs.
 
         Returns the IDs of all channels currently registered in the
-        ChannelRegistry. Use this to discover valid targets for
-        notify_other_channel.
+        ChannelRegistry. Use this to discover targets for
+        notify_other_channel; a well-formed id that isn't listed (a channel
+        nobody has spoken in since the restart) is also accepted.
 
         Returns:
             A newline-separated list of channel IDs (sorted), or a message
