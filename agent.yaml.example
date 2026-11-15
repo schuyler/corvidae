@@ -17,7 +17,7 @@ llm:
       base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
       # api_key: sk-...                 # omit for local servers
       # api_key: "${OPENAI_API_KEY}"    # or read it from the daemon's environment (quote it)
-      # heads: 2                        # optional: how many requests the server runs at once; omitted = unbounded
+      # heads: 2                        # optional: warm context heads (slots + --cache-ram prefixes); chat calls lease one; omitted = unbounded; set timeout with it
       # max_retries: 3                   # max retry attempts on transient errors (429, 500, 502, 503, 504)
       # retry_base_delay: 2.0            # base delay in seconds for exponential backoff
       # retry_max_delay: 60.0            # maximum delay cap in seconds

@@ -219,7 +219,7 @@ owner's plugin name after the prefix.
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
-| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim, plus the call's start time, total duration across retried attempts, attempts made, and the request's message and tool counts; side effects only (metrics, usage log) |
+| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim, plus the call's start time, total duration across retried attempts, attempts made, the request's message and tool counts, and its lease wait (`lease_wait_ms`, None when unleased); side effects only (metrics, usage log) |
 | `on_metrics` | broadcast | any plugin via `pm.ahook.on_metrics(...)`; built-in emission from `MetricsPlugin.on_llm_response`; never emit from inside an `on_metrics` implementation (recursion) |
 | `on_config_reload` | broadcast | `ConfigWatcherPlugin`, when `agent.yaml`'s mtime changes; per-plugin error isolation |
 
@@ -539,8 +539,69 @@ critique, the consolidation fork at compaction, the `fork` tool),
 `work()` and `MemoryPlugin._consolidate_range`; everything else inherits.
 `LLMClient.chat` with no key runs unleased and logs a WARNING naming the
 stage once per stage per process, then DEBUG; embedding calls need no key
-and never warn. No lease is taken yet (#364 decides what scope exit means
-for one).
+and never warn. On a provider that declares `heads`, the key is what takes a
+lease (below).
+
+**Leases (#364, #367).** `corvidae/lease.py` holds one `ProviderLeases`
+table per chat-used provider that declares `heads`; `LLMPlugin.on_start`
+builds a `LeaseManager` over them and hands each chat client of that
+provider its table (`LLMClient.leases`). With no such provider there is no
+manager (`LLMPlugin.leases is None`) and no call touches lease code. A
+table holds the leases (key → in-flight call count, grant time, end time of
+its last call, attribution of the last call that entered), the FIFO of
+waiting keys (one entry per key, whose concurrent calls share one future)
+and the stopped keys. `LLMClient.chat` with a table and a `lease_key` sends
+its POST, retries included, inside `leases.call(key, attribution)`:
+
+- a holder's call passes straight through while no other key waits (a
+  waiter that is stopped, or already holds here, doesn't count);
+- a key that holds nothing takes a free head at once;
+- otherwise the call joins its key's waiter entry and waits.
+
+Every state change (a call entering or ending, a cancel, stop, resume,
+yield) re-runs one function, `_settle`, which is the default order: a
+stopped holder with no call in flight gives up its head (`lease.yield`
+reason `stop`); an idle holder that called `yield_key` gives it up if
+another key waits (`cooperative`; with no waiter the yield is dropped);
+free heads go to waiters in FIFO order; and while a waiter is left and no
+head is free, the idle holder whose last call ended earliest gives way
+(`contention`). A head is never taken mid-call, and a holder's call that
+arrives while another key waits queues behind it, so a head is held against
+a waiter only until the calls already in flight end. A grant reserves the
+in-flight count of every waiting call of the key at once, so the head can't
+be taken back before they resume; a call cancelled after its grant gives its
+reservation back. `LeaseManager` exposes `snapshot(provider)` (heads,
+holders with age and whether a call is in flight, waiters in order with
+their ages), `stop` / `resume` by (provider, key), `yield_key(key)` (every
+provider where the key holds) and `close()`. Nothing in the kernel calls
+`stop`; it is there for a scheduler plugin (#366). The lease code never calls
+a model and never awaits anything but its own grant.
+
+The no-deadlock argument rests on calls ending. With the default
+`timeout: null` a backend that hangs holds its head for ever, as it stalls
+an unbounded provider today; set the provider's `timeout` where `heads` is
+set.
+
+Shutdown: `LLMPlugin.on_stop` closes the manager before the clients. Each
+lease is released (`lease.release`, value the ms it was held, reason
+`shutdown`), each waiting call fails with `LLM provider <name> is shutting
+down; the call was not sent`, and a call that arrives afterwards fails the
+same way. It then awaits the metric emissions still in flight. Those reach
+`on_metrics` only if its consumers have not stopped first (plugin `on_stop`
+order is not fixed), so the shutdown events are best effort.
+
+Events go through `on_metrics`, scheduled as tasks because the lease code is
+synchronous: `lease.grant` (1.0), `lease.wait_ms` (the wait of a key whose
+calls waited; none for a call that took a free head or passed through),
+`lease.yield` (1.0, `reason` `contention` / `cooperative` / `stop`) and
+`lease.release` (shutdown only). Tags: `provider`, `lease_key`, `stage`,
+`channel`, `trigger` from the attribution of the call the event concerns,
+plus `reason`. A waiter entry shared by a turn and a fork of one channel
+carries its first call's attribution. Each call's own wait is
+`lease_wait_ms` on `on_llm_response` (0.0 when it did not wait, `None` when
+it took no lease), recorded in `usage_log.lease_wait_ms` and as
+`llm.lease_wait_ms`. The observer fires inside the lease, so under
+contention the head is held for the time `on_llm_response` takes.
 
 **Nested agents.** `agent_depth` is the kernel's bound on recursion (#816).
 A main turn runs at depth 0; `next_agent_depth(tools.max_agent_depth)` in
@@ -559,7 +620,7 @@ ten children per level is still many tasks.
 
 **Sinks.** `metrics.py` provides `MetricsPlugin` (translates
 `on_llm_response` into `on_metrics` events: `llm.tokens.*`,
-`llm.latency_ms`, `llm.errors`, each tagged with the call's `lease_key`, `""` when it had none), `UsageLogPlugin` (one `usage_log` row
+`llm.latency_ms`, `llm.errors`, and `llm.lease_wait_ms` for a call that took a lease, each tagged with the call's `lease_key`, `""` when it had none), `UsageLogPlugin` (one `usage_log` row
 per call), and `MetricsJsonlPlugin` (JSONL event sink, config
 `daemon.metrics_jsonl`). `outcome_log.py` owns the `exchange_log` table:
 one row per exchange, written by `OutcomeLogPlugin`'s hookimpls at
@@ -623,7 +684,8 @@ CREATE TABLE usage_log (
     max_context_tokens INTEGER, -- the channel's budget in force when the row is written; NULL with no channel, no registry or an unknown channel
     prompt_ms REAL,             -- llama-server timings.prompt_ms: the final attempt's prefill time; NULL from other providers and on failure
     predicted_ms REAL,          -- llama-server timings.predicted_ms: the final attempt's decode time; NULL likewise
-    lease_key TEXT              -- the queue the call belongs to (#363): channel id, 'subagent:<task_id>' or 'upkeep:<plugin>:<tag>'; NULL when unleased and on older rows
+    lease_key TEXT,             -- the queue the call belongs to (#363): channel id, 'subagent:<task_id>' or 'upkeep:<plugin>:<tag>'; NULL when unleased and on older rows
+    lease_wait_ms REAL          -- ms the call waited for a lease before it was sent (#364); 0.0 when it did not wait; NULL when it took none (no key, no heads, embedding) and on older rows
 );
 
 CREATE TABLE exchange_log (
