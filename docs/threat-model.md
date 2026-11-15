@@ -1135,7 +1135,9 @@ What each kind of unlock costs:
   push upkeep back. Every deferral and pause lapses by itself
   and the operator can resume any channel, and no replacement order or
   deferral delays work past its latency bound (PRD §3.13.7), so the
-  damage from those is delay and prefill, not a wedged agent. A stop has
+  damage from those is delay and prefill, not a wedged agent; a channel
+  with no bound, whether a transport's default or an injection's doing,
+  can be delayed without limit by a replacement order. A stop has
   no such bound yet (#366): a stopped queue waits until the scheduler
   plugin or the operator resumes it, so until that is decided a scheduler
   plugin that stops a queue and never resumes it holds that queue's work
