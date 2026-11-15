@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -17,6 +17,7 @@ members = [
     "corvidae-vision",
     "cross-channel-send",
     "github-webhook",
+    "goals-notify",
     "outbound-cap",
     "rss-reader",
     "webhook-notify",
@@ -561,6 +562,9 @@ discord = [
 github-webhook = [
     { name = "github-webhook" },
 ]
+goals-notify = [
+    { name = "goals-notify" },
+]
 inotify = [
     { name = "corvidae-inotify" },
 ]
@@ -612,6 +616,7 @@ requires-dist = [
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.4" },
     { name = "emoji", marker = "extra == 'signal'", specifier = ">=2.14,<3" },
     { name = "github-webhook", marker = "extra == 'github-webhook'", editable = "packages/github-webhook" },
+    { name = "goals-notify", marker = "extra == 'goals-notify'", editable = "packages/goals-notify" },
     { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1" },
     { name = "mcp", specifier = ">=2.0" },
     { name = "outbound-cap", marker = "extra == 'outbound-cap'", editable = "packages/outbound-cap" },
@@ -624,7 +629,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "webhook-notify", marker = "extra == 'webhook-notify'", editable = "packages/webhook-notify" },
 ]
-provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "context-panel", "webhook-notify", "rss", "cognition", "restart", "outbound-cap", "timepiece", "inotify", "github-webhook"]
+provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "context-panel", "webhook-notify", "github-webhook", "goals-notify", "rss", "cognition", "restart", "outbound-cap", "timepiece", "inotify"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -895,6 +900,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "corvidae", editable = "." }]
+
+[[package]]
+name = "goals-notify"
+version = "0.0.1"
+source = { editable = "packages/goals-notify" }
+dependencies = [
+    { name = "corvidae" },
+    { name = "cross-channel-send" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "corvidae", editable = "." },
+    { name = "cross-channel-send", editable = "packages/cross-channel-send" },
+]
 
 [[package]]
 name = "h11"
