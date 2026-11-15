@@ -238,6 +238,9 @@ class ZulipPlugin(TransportPlugin):
         # Catch-up state: {channel id: {"last": <message id>, "narrow": [[...]]}},
         # loaded from CURSOR_FILE and saved after every admission (#644).
         self._cursor: dict[str, dict] = {}
+        # Set when a delivery failed and the cursor was put back, so catch-up
+        # stops the batch instead of advancing past the failed message.
+        self._cursor_rewound = False
         self._cursor_dir: Optional[Path] = None
 
         # Connection state.
@@ -527,7 +530,7 @@ class ZulipPlugin(TransportPlugin):
         """
         if not self._cursor:
             return
-        moved = True  # every handled message saves its own cursor
+        moved = False
         for channel_id, entry in list(self._cursor.items()):
             try:
                 messages = await self._fetch_after(
@@ -548,6 +551,7 @@ class ZulipPlugin(TransportPlugin):
                     "message": msg,
                     "flags": msg.get("flags") or [],
                 }
+                self._cursor_rewound = False
                 try:
                     await self._handle_event(event)
                 except asyncio.CancelledError:
@@ -560,9 +564,16 @@ class ZulipPlugin(TransportPlugin):
                         "zulip: catch-up could not handle a message in %s",
                         channel_id, exc_info=True, extra={"channel": channel_id},
                     )
-                # _handle_message advances the cursor for every message it
-                # looks at, and rewinds it when delivery fails; advancing again
-                # here would undo that rewind (#644 review).
+                # A rewind means this message's delivery failed: stop here, or
+                # the next message in the batch advances past it and the failed
+                # one is never fetched again (#644 round 2).
+                if self._cursor_rewound:
+                    logger.warning(
+                        "zulip: catch-up on %s stopped at message %s after a "
+                        "failed delivery; the rest is retried next time",
+                        channel_id, msg["id"], extra={"channel": channel_id},
+                    )
+                    break
         if moved:
             await self._save_cursor()
 
@@ -1128,6 +1139,7 @@ class ZulipPlugin(TransportPlugin):
                 self._cursor.pop(f"zulip:{scope}", None)
             else:
                 self._cursor[f"zulip:{scope}"] = previous
+            self._cursor_rewound = True
             await self._save_cursor()
             raise
         finally:

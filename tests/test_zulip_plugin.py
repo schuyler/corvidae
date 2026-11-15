@@ -1821,3 +1821,45 @@ async def test_a_failed_delivery_does_not_mark_the_message_seen(tmp_path):
         assert got == 0, f"a failed delivery was recorded as seen: cursor={got}"
     finally:
         await stop(h)
+
+
+async def test_a_failed_delivery_stops_the_batch_rather_than_being_skipped(tmp_path):
+    """The message after a failed one must not advance past it.
+
+    The rewind puts the cursor back to the last good message; if the batch then
+    carried on, the next message would move it forward again and the failed one
+    would never be fetched (#644 round 2).
+    """
+    h = await _start()
+    try:
+        ok, bad, later = (
+            channel_msg("@**Corvidae Bot** one", topic="plans"),
+            channel_msg("@**Corvidae Bot** two", topic="plans"),
+            channel_msg("@**Corvidae Bot** three", topic="plans"),
+        )
+        h.server.push_backlog(ok, flags=["mentioned"])
+        h.server.push_backlog(bad, flags=["mentioned"])
+        h.server.push_backlog(later, flags=["mentioned"])
+
+        calls = {"n": 0}
+
+        async def _fail_on_the_second(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("boom")
+
+        h.pm.ahook.on_message = AsyncMock(side_effect=_fail_on_the_second)
+        h.plugin._cursor_dir = tmp_path
+        channel_id = "zulip:7"
+        h.plugin._cursor = {
+            channel_id: {"last": 0, "narrow": [{"operator": "channel", "operand": 7}]}
+        }
+
+        await h.plugin._catch_up()
+
+        assert calls["n"] == 2, "the batch carried on past a failed delivery"
+        assert h.plugin._cursor[channel_id]["last"] == ok["id"], (
+            "the cursor moved past the message that failed"
+        )
+    finally:
+        await stop(h)
