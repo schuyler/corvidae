@@ -19,16 +19,17 @@ from typing import Any
 import aiohttp
 import aiosqlite
 import pytest
-
-from corvidae.llm_plugin import LLMPlugin
-from corvidae.metrics import UsageLogPlugin
-from corvidae.channel import Channel
-from corvidae_cognition.appraisal import AppraisalPlugin, DEFAULT_STAGE2_FORK_PROMPT
-from corvidae_cognition.critique import CritiquePlugin, DEFAULT_FORK_PROMPTS
+from corvidae_cognition.appraisal import DEFAULT_STAGE2_FORK_PROMPT, AppraisalPlugin
+from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, CritiquePlugin
 from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT, MemoryPlugin
 from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from helpers import build_plugin_and_channel, window_of
 from test_lease_scopes import ScriptedSession, unleased_records, usage_rows
+
+from corvidae.channel import Channel
+from corvidae.llm_plugin import LLMPlugin
+from corvidae.metrics import UsageLogPlugin
+
 from .test_appraisal_stage2 import VALID_STAGE2_JSON
 from .test_memory_consolidation import CONSOLIDATION_JSON, EMBED_CONFIG, seed_dialog
 

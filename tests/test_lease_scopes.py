@@ -15,7 +15,6 @@ its own missing piece rather than all of them failing at collection.
 """
 
 import asyncio
-import json
 import logging
 import re
 from dataclasses import dataclass
@@ -23,16 +22,6 @@ from typing import Any, Callable
 
 import aiosqlite
 import pytest
-
-from corvidae.agent import QueueItem, QueueItemRole
-from corvidae.attribution import get_attribution, reset_attribution, set_attribution
-from corvidae.channel import Channel, ChannelConfig
-from corvidae.context import ContextWindow
-from corvidae.fork import ForksConfig
-from corvidae.hooks import create_plugin_manager, hookimpl
-from corvidae.metrics import MetricsPlugin, UsageLogPlugin
-from corvidae.persistence import PersistencePlugin
-from corvidae.task import Task
 from helpers import (
     build_plugin_and_channel,
     drain,
@@ -45,6 +34,16 @@ from llm_response_fixtures import (
     _make_tool_call,
     _make_tool_call_response,
 )
+
+from corvidae.agent import QueueItem, QueueItemRole
+from corvidae.attribution import get_attribution, reset_attribution, set_attribution
+from corvidae.channel import Channel, ChannelConfig
+from corvidae.context import ContextWindow
+from corvidae.fork import ForksConfig
+from corvidae.hooks import create_plugin_manager, hookimpl
+from corvidae.metrics import MetricsPlugin, UsageLogPlugin
+from corvidae.persistence import PersistencePlugin
+from corvidae.task import Task
 
 # The stages the stack's LLMPlugin resolves; every one maps to the main profile.
 STAGES = {
@@ -189,11 +188,11 @@ def keys_of(rows: list[tuple], stage: str) -> list[str | None]:
 
 
 def unleased_records(caplog: pytest.LogCaptureFixture, level: int | None = None) -> list[logging.LogRecord]:
-    """Records the unleased check logged (their text names a lease), at
+    """Records the unleased check logged (their text says "unleased", per the designed format), at
     ``level`` when given."""
     return [
         r for r in caplog.records
-        if "lease" in r.getMessage().lower() and (level is None or r.levelno == level)
+        if "unleased" in r.getMessage().lower() and (level is None or r.levelno == level)
     ]
 
 
