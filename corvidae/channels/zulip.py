@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -50,6 +51,7 @@ from corvidae.channel import (
 )
 from corvidae.channels._registers import shipped_register
 from corvidae.channels.split import split_message
+from corvidae.channels.stale import maybe_prefix_stale
 from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress
 from corvidae.trace import mint_trace_id
@@ -158,6 +160,11 @@ class _Rejected(_ZulipError):
 #: at, per channel id, with the narrow it was found under. Written atomically
 #: beside the keys and databases it outlives.
 CURSOR_FILE = "zulip_cursor.json"
+
+
+def _ms_of(seconds: object) -> Optional[int]:
+    """Zulip timestamps are integer seconds; the shared prefix wants millis."""
+    return int(seconds) * 1000 if isinstance(seconds, (int, float)) else None
 
 
 @dataclass
@@ -488,9 +495,100 @@ class ZulipPlugin(TransportPlugin):
         token = base64.b64encode(f"{self._email}:{self._api_key}".encode()).decode("ascii")
         self._session = aiohttp.ClientSession(headers={"Authorization": f"Basic {token}"})
         # Where the catch-up cursor lives, beside the rest of the durable state.
-        self._cursor_dir = Path(config.get("_base_dir", Path(".")))
+        # Only when the runtime names a base dir: with none, a plugin has no
+        # durable home to write to, and guessing the working directory puts a
+        # stray file wherever the process happened to start (tests included).
+        base_dir = config.get("_base_dir")
+        self._cursor_dir = Path(base_dir) if base_dir is not None else None
         await self._load_cursor()
         self._connect_task = asyncio.create_task(self._connection_loop())
+
+    #: How many messages one catch-up page asks for, and how many a single
+    #: channel will fetch before it says so and stops (#644).
+    CATCH_UP_PAGE = 100
+    CATCH_UP_MAX = 1000
+
+    async def _catch_up(self) -> None:
+        """Fetch what each known channel missed while the queue was gone.
+
+        Runs after every successful register: a restart and a garbage-collected
+        queue look identical from here, and dedupe by message id makes the
+        fetch cheap when nothing was missed (#644).
+        """
+        if not self._cursor:
+            return
+        moved = False
+        for channel_id, entry in list(self._cursor.items()):
+            try:
+                messages = await self._fetch_after(
+                    entry["narrow"], int(entry["last"]), channel_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "zulip: could not catch up on %s as %s for %s: %s: %s",
+                    self._site, self._email, channel_id,
+                    type(exc).__name__, exc,
+                    extra={"channel": channel_id}, exc_info=True,
+                )
+                continue
+            for msg in messages:
+                event = {
+                    "type": "message",
+                    "message": msg,
+                    "flags": msg.get("flags") or [],
+                }
+                await self._handle_event(event)
+                if self._remember_seen(channel_id, entry["narrow"], int(msg["id"])):
+                    moved = True
+        if moved:
+            await self._save_cursor()
+
+    async def _fetch_after(
+        self, narrow: list, anchor: int, channel_id: str
+    ) -> list[dict]:
+        """Messages after ``anchor`` in that narrow, oldest first, page by page.
+
+        Zulip narrows channels by *name*, not id, so a channel renamed since the
+        cursor was written fetches nothing: that channel's gap is lost and the
+        next live message reinstates it. There is no id-based channel operator to
+        do better with.
+        """
+        out: list[dict] = []
+        seen = anchor
+        while len(out) < self.CATCH_UP_MAX:
+            body = await self._request(
+                "GET",
+                "/messages",
+                query={
+                    "anchor": str(seen),
+                    "num_before": "0",
+                    "num_after": str(self.CATCH_UP_PAGE),
+                    "include_anchor": "false",
+                    "apply_markdown": "false",
+                    "narrow": json.dumps(narrow),
+                },
+            )
+            batch = body.get("messages")
+            batch = [
+                m for m in batch
+                if isinstance(m, dict) and isinstance(m.get("id"), int)
+            ] if isinstance(batch, list) else []
+            fresh = [m for m in batch if m["id"] > seen]
+            if not fresh:
+                break
+            out.extend(fresh)
+            seen = fresh[-1]["id"]
+            if body.get("found_newest") is True or len(batch) < self.CATCH_UP_PAGE:
+                break
+        if len(out) >= self.CATCH_UP_MAX:
+            logger.warning(
+                "zulip: catch-up on %s as %s stopped at %d messages for %s; "
+                "anything older is not replayed",
+                self._site, self._email, len(out), channel_id,
+                extra={"channel": channel_id},
+            )
+        return out
 
     # -----------------------------------------------------------------
     # Catch-up cursor (#644)
@@ -794,6 +892,8 @@ class ZulipPlugin(TransportPlugin):
                 if queue is None:
                     queue = await self._register()
                     backoff = _INITIAL_BACKOFF
+                    # A new queue means a gap: a lost queue or a restart (#644).
+                    await self._catch_up()
                 events = await self._get_events(queue)
                 # Process in order; ack only after handling, so a crash replays.
                 for event in sorted(events, key=lambda e: e.get("id", 0)):
@@ -881,6 +981,7 @@ class ZulipPlugin(TransportPlugin):
             logger.debug("zulip: ignoring our own message %s", msg.get("id"))
             return
 
+
         flags = event.get("flags") or msg.get("flags") or []
         kind = msg["type"]
         topic: Optional[str] = None
@@ -934,9 +1035,20 @@ class ZulipPlugin(TransportPlugin):
         if self._mention_re is not None:
             text = self._mention_re.sub("", text)
         text = text.strip()
+        # Backlog says how old it is, as Signal's does (#644, PRD 3.2).
+        text = maybe_prefix_stale(text, _ms_of(msg.get("timestamp")), time.time() * 1000)
         if not text:
             logger.debug("zulip: ignoring message with no text content")
             return
+
+        # Where this message was found, kept beside its id so catch-up can ask
+        # the same question later (#644). Zulip narrows a channel by name.
+        if kind in ("stream", "channel"):
+            narrow = [{"operator": "channel", "operand": stream_name}]
+        else:
+            narrow = [{"operator": "dm", "operand": [int(i) for i in scope[3:].split(",")]}]
+        if self._remember_seen(f"zulip:{scope}", narrow, int(msg["id"])):
+            await self._save_cursor()
 
         # The allowlist is checked before the channel is resolved, so a refused
         # sender never adds a registry entry (PRD 3.2 item 6).
