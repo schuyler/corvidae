@@ -43,6 +43,22 @@ the string it will print.
 
 **The two-layer rule does not license vagueness.** The opener is short because it is selected, not because the detail is thin. Everything a reviewer needs to check the work is still written down, in the detail block, and a body whose detail block is empty has failed this section rather than complied with it.
 
+# Review loops
+
+* **Every non-trivial change gets a full review loop before it is merged.** The criterion is whether behaviour, or something a reader or another plugin acts on, could change, not the file type: a config key, a prompt, a documented contract, a docs page readers act on, a one-line code fix and a refactor all count. What can change neither does not (a typo, a broken link, a comment that was wrong about unchanged code), and the PR body says which case it is.
+* **The review is blind.** The reviewer gets the diff and the requirement as it was written -- the issue or the owner's words, never the author's paraphrase -- and nothing else: no reasoning, no commit-message justification, no test names offered as proof the tests are right. It reads the connected code, not only the diff. Use a subagent where the tooling allows. If no issue or owner's words state the requirement, write it on an issue before the review and give the reviewer that issue; never write it into the reviewer's prompt.
+* **Critical blocks the merge:** the change is wrong -- logic, safety, data loss, or a path nothing tests.
+* **Important blocks the merge:** the change deviates from scope in either direction. Too much implementation is as much a deviation as too little (an option nobody asked for, an abstraction with one caller, a config key with no user), and so is a test suite past its use-by: tests that re-prove behaviour another test already proves, or any test that cannot fail. Past 3:1 (test lines against the non-test lines changed in the same PR), the reviewer checks for exactly that. **A regression test for the bug being fixed is always in scope.**
+* **Everything else is the author's judgement** -- naming, structure, an alternative weighed, a nit -- and does not buy another round.
+* **Re-review is cold, never a conversation with the first reviewer.** Give the new reviewer the earlier findings as the reviewers wrote them, each with its outcome -- fixed, declined as non-blocking, or ruled on by the owner (quote the ruling) -- and no argument for any of them. The reviewer does not reopen what is listed; a finding about code changed since is new.
+* **A round closes on the reviewer's verdict, not the author's reading of it.** The author may argue a non-blocking finding down inside the round. A critical or important one is either fixed and re-reviewed cold, or, if the author thinks it is wrong, taken to the owner: quote the finding verbatim and give the author's case in one sentence; the owner's ruling joins the earlier findings for the next round. The author never closes the round over the reviewer.
+* **Loop until a round closes with nothing critical or important open.**
+* **Three rounds with a blocking finding still open is a stop, not a fourth round.** Ask the owner whether the scope or the approach is wrong.
+* **The reviewer does not expand scope.** It may name a larger problem it noticed as a one-line follow-up with its own issue; it may not fold that problem in, and the author does not adopt one to be agreeable. Scope grows by a decision recorded on an issue.
+* **No agent self-certifies and merges.** A non-blocking verdict makes a change admissible, not accepted: merging needs the owner's permission, either for that change or as a standing instruction the owner wrote, and the message says which. A review written under the author's own account is not a second party and never counts as permission. Because agents act under the owner's account, the author field proves nothing: permission is the owner's words in a live session, or a comment the owner points to from one.
+* **An emergency merge without the loop** needs the owner's agreement recorded before it happens; it says so at the top of the PR body and is reviewed immediately afterwards, before anything else starts.
+* **Say what was reviewed in the PR body:** the rounds it took.
+
 # Process instructions
 
 * Read `docs/prd.md` before implementing anything. The PRD is the reference for what must be true; issues, plans, design docs and the existing code derive from it.
@@ -52,3 +68,7 @@ the string it will print.
 * If you are solving a GitHub issue, post the requirements, the PRD comparison above, and the implementation plan as a comment on the issue before implementing -- opened with the short summary the section above asks for, with the lists inside one `<details>` block.
 * Check @docs/ before your work is complete and make sure the documentation is updated.
 * If you are adding or changing a plugin, read `docs/plugin-checklist.md` first. It covers placement (a plugin, not the kernel), the package layout and CI wiring, and the traps that fail silently. `docs/plugin-guide.md` has the depth.
+* **The plan comment is the claim.** Before starting on an issue, read its comments and the open PRs that mention it; if someone has claimed it, stop and ask. Otherwise post the plan comment above before writing code -- that comment is what the next agent checks for.
+* A claim about code, config or runtime state names the command that produced it and the tree it ran against. A worktree, the live checkout and the installed package are three different answers to the same import.
+* A new test has to fail on the parent commit before it counts as a test. Run it there, not only in your head.
+* Comment every block with its purpose, as the coding conventions say. `docs/plugin-checklist.md` asks for the shorter "why it is there"; that is a compression of this rule, not a different one, and this file wins.
