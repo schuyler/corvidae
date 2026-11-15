@@ -431,35 +431,54 @@ async def _owning_trace_id(
 ) -> str | None:
     """The exchange a redacted message belongs to (#423).
 
-    Normally the nearest exchange at or before the message. A coalesced burst
-    (#398) breaks that: every message of the burst gets its own exchange row at
-    admission, and only the last one — the turn's owner — is ever appraised, so
-    the nearest row to an absorbed message has no appraisal and no past_claims
-    to tombstone. The turn that answered the burst is then the nearest *later*
-    row that has an appraisal.
+    Normally the exchange whose row holds this message and its stage-2
+    appraisal. A coalesced burst (#398) breaks that: every message of the burst
+    gets its own row at admission *and* a stage-1 appraisal from the gate
+    (appraisal.py's ``_persist_stage1``), while only the turn's owner — the last
+    message — gets stage 2. So "the row has an appraisal" cannot tell an
+    absorbed row from an owner; stage 2 can.
 
-    Never an earlier one: an earlier exchange's claims were not derived from
-    this message, and tombstoning them would destroy provenance that redaction
-    has no reason to touch. Later exchanges are the direction the rest of this
-    scrubber already accepts — provenance_snapshot is cleared on every exchange
-    at or after the redacted id, because those windows may have carried its
-    text.
+    When the message's own row has no stage-2 claims, it was absorbed (or its
+    turn has no stage 2 yet: a fork miss, a critique-origin turn, a pending
+    stage-2 task), and the owner is the last exchange row of its burst. The
+    burst ends at the reply that answered it, so the walk is bounded by the
+    first assistant row after ``msg_id``: a later exchange's claims were not
+    derived from this message, and tombstoning them would destroy provenance
+    redaction has no reason to touch. Later *windows* are a different matter,
+    and the snapshot rule already over-scrubs in that direction deliberately.
     """
     async with db.execute(
-        "SELECT trace_id, appraisal IS NOT NULL FROM exchange_log "
-        "WHERE channel_id = ? AND message_rowid IS NOT NULL "
+        "SELECT trace_id, CASE WHEN json_valid(appraisal) THEN "
+        "json_extract(appraisal, '$.stage2.past_claims') END "
+        "FROM exchange_log WHERE channel_id = ? AND message_rowid IS NOT NULL "
         "AND message_rowid <= ? ORDER BY message_rowid DESC LIMIT 1",
         (channel_id, msg_id),
     ) as cursor:
         row = await cursor.fetchone()
-    if row is not None and row[1]:
+    # The nearest row is the message's own: it owns the exchange when it has
+    # stage-2 claims. An earlier exchange's claims are never a fallback — they
+    # were not derived from this message, so tombstoning them would destroy
+    # provenance rather than protect it.
+    if row is not None and row[1] is not None:
         return row[0]
+    # The first reply after this message bounds the burst it belongs to.
+    async with db.execute(
+        "SELECT MIN(id) FROM message_log WHERE channel_id = ? "
+        "AND json_extract(message, '$.role') = 'assistant' AND id > ?",
+        (channel_id, msg_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+    bound = row[0] if row is not None else None
+    if bound is None:
+        # Not answered yet: the burst has no owner to reach, and guessing at
+        # a later exchange is the direction this function refuses.
+        return None
     async with db.execute(
         "SELECT trace_id FROM exchange_log "
         "WHERE channel_id = ? AND message_rowid IS NOT NULL "
-        "AND message_rowid >= ? AND appraisal IS NOT NULL "
-        "ORDER BY message_rowid ASC LIMIT 1",
-        (channel_id, msg_id),
+        "AND message_rowid >= ? AND message_rowid < ? "
+        "ORDER BY message_rowid DESC LIMIT 1",
+        (channel_id, msg_id, bound),
     ) as cursor:
         row = await cursor.fetchone()
     return row[0] if row is not None else None
@@ -475,9 +494,9 @@ async def redact_exchange_log(
     """Scrub exchange_log text derived from redacted messages in one channel.
 
     For each redacted id X: the exchange that owns X (in the channel, the
-    largest message_rowid <= X that has an appraisal — or, for a message a
-    coalesced burst absorbed, the nearest later one; see _owning_trace_id)
-    gets its stage-2 past_claims tombstoned.
+    largest message_rowid <= X whose row has stage-2 claims — or, for a message
+    a coalesced burst absorbed, the last row of that burst; see
+    _owning_trace_id) gets its stage-2 past_claims tombstoned.
     Every exchange in the channel with message_rowid >= the smallest X loses
     its provenance_snapshot, since any later window may have carried X's
     text as CONTEXT. Exchanges with a NULL message_rowid are not reached.

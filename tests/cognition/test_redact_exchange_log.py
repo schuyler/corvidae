@@ -27,7 +27,7 @@ from corvidae.commands.redact import (
     redact_memory_id,
     redact_messages,
 )
-from corvidae_cognition.outcome_log import EXCHANGE_LOG_DDL
+from corvidae_cognition.outcome_log import EXCHANGE_LOG_DDL, redact_exchange_log
 
 from cognition.test_redact_cascade import insert_memory, insert_message, make_full_db
 
@@ -102,16 +102,24 @@ async def _db_with_dialog(path: str | None = None):
     return db, ids
 
 
-async def _add_absorbed_row(db, trace_id: str, channel_id: str, message_rowid: int) -> None:
-    """An exchange row as admission creates it: identity columns only.
+async def _add_absorbed_row(
+    db, trace_id: str, channel_id: str, message_rowid: int,
+    *, stage2: bool = False,
+) -> None:
+    """An exchange row as a coalesced burst's message leaves it (#398, #423).
 
-    Every message of a coalesced burst gets one of these, and only the owner's
-    row is ever appraised (#398, #423).
+    The gate writes stage 1 onto every admitted message's row before the queue
+    coalesces, so an absorbed row is not empty: it carries ``{"stage1": ...}``
+    and never stage 2. Only the turn's owner gets stage 2.
     """
+    appraisal = {"stage1": {"score": 0.3}}
+    if stage2:
+        appraisal["stage2"] = {"valence": 0.1, "past_claims": CLAIMS}
     await db.execute(
         "INSERT INTO exchange_log (trace_id, channel_id, origin, message_rowid, "
-        "created_at) VALUES (?, ?, ?, ?, ?)",
-        (trace_id, channel_id, "user", message_rowid, time.time()),
+        "created_at, appraisal) VALUES (?, ?, ?, ?, ?, ?)",
+        (trace_id, channel_id, "user", message_rowid, time.time(),
+         json.dumps(appraisal)),
     )
     await db.commit()
 
@@ -153,19 +161,10 @@ class TestCoalescedBurst:
                 rows = await cursor.fetchall()
             assert len(rows) == 2
             for message_rowid, appraisal, snapshot in rows:
-                assert appraisal is None
+                # Stage 1 survives: it holds a vector, not the message's words.
+                assert json.loads(appraisal) == {"stage1": {"score": 0.3}}
                 assert message_rowid >= ids["m1"]
                 assert snapshot is None
-        finally:
-            await db.close()
-
-    async def test_redacting_the_owner_message_scrubs_its_own_row(self):
-        """The owning message keeps the old path: its own row has the appraisal."""
-        db, ids = await self._db_with_burst()
-        try:
-            await redact_messages(db, [ids["m3"]])
-            owner, _ = await _row(db, "b3")
-            _assert_scrubbed(owner)
         finally:
             await db.close()
 
@@ -186,6 +185,52 @@ class TestCoalescedBurst:
             await redact_messages(db, [absorbed])
             prior, _ = await _row(db, "t0")
             assert prior["stage2"]["past_claims"] == CLAIMS
+        finally:
+            await db.close()
+
+
+    async def test_a_burst_owner_without_stage2_leaves_a_later_turn_alone(self):
+        """The walk stops at the burst's reply, so a later turn keeps its claims.
+
+        Stage 2 is legitimately missing on some turns (a fork miss, a
+        critique-origin turn, a pending stage-2 task), so "no stage 2 here"
+        must not mean "scrub the next exchange that has some".
+        """
+        db = await make_full_db(None)
+        try:
+            await db.execute(EXCHANGE_LOG_DDL)
+            await db.commit()
+            m1 = await insert_message(db, "irc:#a", "user", "absorbed one")
+            m2 = await insert_message(db, "irc:#a", "user", "absorbed two")
+            reply = await insert_message(db, "irc:#a", "assistant", "the answer")
+            later_user = await insert_message(db, "irc:#a", "user", "a later question")
+            await _add_absorbed_row(db, "b1", "irc:#a", m1)
+            await _add_absorbed_row(db, "b2", "irc:#a", m2)  # the owner, stage 1 only
+            await _add_exchange(db, "later", "irc:#a", later_user)
+
+            await redact_messages(db, [m1])
+
+            later, snapshot = await _row(db, "later")
+            assert later["stage2"]["past_claims"] == CLAIMS
+            # Its window may have carried the redacted text, so the snapshot
+            # rule still clears that — deliberately, and by message id rather
+            # than by proximity. The claims are the part that must not move.
+            assert snapshot is None
+            assert reply  # the reply bounds the burst
+        finally:
+            await db.close()
+
+    async def test_a_dry_run_counts_the_burst_owner_without_changing_it(self):
+        db, ids = await self._db_with_burst()
+        try:
+            changed = await redact_exchange_log(
+                db, "irc:#a", [ids["m1"]], dry_run=True, tombstone="[redacted]")
+            # The owner's row is the only one with anything to change here: the
+            # absorbed rows carry no snapshot and no stage 2, so the count a
+            # dry run reports is the count the write would change.
+            assert changed == 1
+            owner, _ = await _row(db, "b3")
+            assert owner["stage2"]["past_claims"] == CLAIMS
         finally:
             await db.close()
 

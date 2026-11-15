@@ -1865,11 +1865,14 @@ creates schema; schema is daemon-owned.
   exchange that owns a redacted id X has every
   `appraisal.stage2.past_claims` claim and query replaced with the
   tombstone text. The owner is the row with the largest
-  `message_rowid <= X` — except when that row has no appraisal, which is
-  what a coalesced burst leaves behind (#398, #423): every message of the
-  burst gets a row at admission and only the turn's owner is appraised, so
-  the owner is then the nearest *later* row that has an appraisal. Never an
-  earlier one, whose claims were not derived from X. The number of claims
+  `message_rowid <= X` when that row carries stage-2 `past_claims` — except
+  for a coalesced burst (#398, #423): every message of the burst gets a row
+  at admission *and* a stage-1 appraisal from the gate, so the nearest row is
+  the absorbed message's own and only the turn's owner has stage 2. The owner
+  is then the last exchange row before the reply that answered the burst —
+  the first assistant row after X bounds the walk. Never an earlier row, whose
+  claims were not derived from X; and never an unbounded walk forward, since a
+  turn may legitimately have no stage 2 at all. The number of claims
   and queries is kept for calibration, and the other appraisal fields are
   untouched. Every exchange in the channel with `message_rowid >=` the
   smallest redacted id has its `provenance_snapshot` set to NULL. That
