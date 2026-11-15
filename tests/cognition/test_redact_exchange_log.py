@@ -196,12 +196,15 @@ class TestCoalescedBurst:
             await db.close()
 
 
-    async def test_a_burst_owner_without_stage2_leaves_a_later_turn_alone(self):
-        """The walk stops at the burst's reply, so a later turn keeps its claims.
+    async def test_a_burst_owner_without_stage2_owns_nothing_to_scrub(self):
+        """An absorbed message resolves through the link to a stage-1-only owner.
 
         Stage 2 is legitimately missing on some turns (a fork miss, a
-        critique-origin turn, a pending stage-2 task), so "no stage 2 here"
-        must not mean "scrub the next exchange that has some".
+        critique-origin turn, a pending stage-2 task). The absorbed rows here
+        have their own rows, so this is the link branch: the owner is the trace
+        named in ``absorbed_by``, and having no claims it scrubs nothing. The
+        no-row fallback is covered separately, in
+        ``test_a_message_with_no_row_uses_the_nearest_row_at_or_before``.
         """
         db = await make_full_db(None)
         try:
@@ -222,6 +225,47 @@ class TestCoalescedBurst:
             # Its window may have carried the redacted text, so the snapshot
             # rule still clears that — deliberately, and by message id rather
             # than by proximity. The claims are the part that must not move.
+            assert snapshot is None
+        finally:
+            await db.close()
+
+    async def test_a_message_with_no_row_uses_the_nearest_row_at_or_before(self):
+        """The fallback is main's rule: nearest row at or before X, no claims filter.
+
+        A redacted id with no row of its own (a reply) resolves to the exchange
+        that owns it. Filtering that search for stage-2 claims would walk
+        forward to the next exchange that has some and tombstone claims that
+        cannot have restated X (#908 round 5).
+        """
+        db = await make_full_db(None)
+        try:
+            await db.execute(EXCHANGE_LOG_DDL)
+            await db.commit()
+            u0 = await insert_message(db, "irc:#a", "user", "the first question")
+            u1 = await insert_message(db, "irc:#a", "user", "the question")
+            reply = await insert_message(db, "irc:#a", "assistant", "the answer")
+            later_user = await insert_message(db, "irc:#a", "user", "a later question")
+            # e0 has claims and is *earlier* than e1; e1 is the nearest row at
+            # or before the reply and has stage 1 only.
+            await _add_exchange(db, "e0", "irc:#a", u0)
+            await _add_absorbed_row(db, "e1", "irc:#a", u1)
+            await _add_exchange(db, "later", "irc:#a", later_user)
+
+            await redact_messages(db, [reply])
+
+            # The nearest row is e1, which has nothing to scrub. A claims
+            # filter would walk back past it and tombstone e0's claims, which
+            # cannot have restated X either.
+            e0, _ = await _row(db, "e0")
+            assert e0["stage2"]["past_claims"] == CLAIMS, (
+                "the fallback must not walk backwards to find claims"
+            )
+            later, snapshot = await _row(db, "later")
+            assert later["stage2"]["past_claims"] == CLAIMS, (
+                "the fallback must not walk forward to find claims"
+            )
+            # The later exchange's own row is at or after X, so its snapshot
+            # still goes: the window may have carried the redacted text.
             assert snapshot is None
         finally:
             await db.close()

@@ -1868,8 +1868,9 @@ creates schema; schema is daemon-owned.
   `appraisal.stage2.past_claims` claim and query replaced with the
   tombstone text. The owner is the row with the largest
   `message_rowid = X`, or — when X has no row of its own, being a reply or a
-  tool row — the nearest row at or before X that carries stage-2
-  `past_claims`, never a later one. A coalesced burst (#398, #423) needs more
+  tool row — the nearest row at or before X, with no stage-2 filter (filtering
+  for claims walked forward to the next exchange that had some, and tombstoned
+  claims that could not have restated X), never a later one. A coalesced burst (#398, #423) needs more
   than that: every message of the burst gets a row at admission *and* a
   stage-1 appraisal from the gate, so X's own row is not the owner's, and row
   order cannot find the owner either — in `m1, rA, m2, rB` a burst arrived
