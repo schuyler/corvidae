@@ -655,7 +655,11 @@ class AppraisalPlugin(CorvidaePlugin):
         # next turn's. Best-effort, like stage 1, and logged when it fails.
         owner = (annotations or {}).get("absorbed_by_trace")
         if owner:
-            await self._persist_absorbed_by(channel, trace_id, owner)
+            # The rowid matters: without it the link lands on a row born with a
+            # NULL rowid, which no lookup by message id ever finds, so redaction
+            # falls back to the positional walk and tombstones the wrong
+            # exchange (#423 review).
+            await self._persist_absorbed_by(channel, trace_id, owner, rowid)
         self._originating_text[trace_id] = text
         self._originating_text.move_to_end(trace_id)
         while len(self._originating_text) > ORIGINATING_TEXT_LRU_MAXSIZE:
@@ -667,7 +671,9 @@ class AppraisalPlugin(CorvidaePlugin):
             while len(self._originating_rowid) > ORIGINATING_TEXT_LRU_MAXSIZE:
                 self._originating_rowid.popitem(last=False)
 
-    async def _persist_absorbed_by(self, channel, trace_id: str, owner: str) -> None:
+    async def _persist_absorbed_by(
+        self, channel, trace_id: str, owner: str, rowid: int | None = None
+    ) -> None:
         """Upsert ``appraisal.absorbed_by`` onto an absorbed message's row.
 
         Same atomic-merge upsert as stage 1: the row may not exist yet when
@@ -679,7 +685,8 @@ class AppraisalPlugin(CorvidaePlugin):
                 logger.debug("absorbed_by persist skipped: outcome_log not registered")
                 return
             await outcome_log.upsert_exchange(
-                trace_id, channel.id, None, appraisal={"absorbed_by": owner},
+                trace_id, channel.id, None, rowid,
+                appraisal={"absorbed_by": owner},
             )
         except Exception:
             logger.warning(

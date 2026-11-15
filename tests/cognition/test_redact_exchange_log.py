@@ -214,7 +214,8 @@ class TestCoalescedBurst:
             m2 = await insert_message(db, "irc:#a", "user", "absorbed two")
             await insert_message(db, "irc:#a", "assistant", "the answer")
             later_user = await insert_message(db, "irc:#a", "user", "a later question")
-            await _add_absorbed_row(db, "b1", "irc:#a", m1)
+            # m1 links to b2: the link branch, with a stage-1-only owner.
+            await _add_absorbed_row(db, "b1", "irc:#a", m1, absorbed_by="b2")
             await _add_absorbed_row(db, "b2", "irc:#a", m2)  # the owner, stage 1 only
             await _add_exchange(db, "later", "irc:#a", later_user)
 
@@ -784,3 +785,4 @@ class TestRegistration:
             assert any("exchange_log" in n for n in notices), notices
         finally:
             await db.close()
+

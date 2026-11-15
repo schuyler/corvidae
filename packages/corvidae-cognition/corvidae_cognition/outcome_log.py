@@ -305,6 +305,7 @@ class OutcomeLogPlugin(CorvidaePlugin):
         trace_id: str,
         channel_id: str,
         origin: str | None = None,
+        message_rowid: int | None = None,
         **columns,
     ) -> None:
         """Create-or-update an exchange row in one call.
@@ -320,6 +321,10 @@ class OutcomeLogPlugin(CorvidaePlugin):
         INSERT OR IGNORE that runs later stays correct against a row this
         upsert already created.
 
+        ``message_rowid`` is the row this exchange belongs to, when the caller
+        knows it: a row created by a gate-time upsert is otherwise born with a
+        NULL rowid, and every lookup by message id misses it (#423 review).
+
         Raises:
             ValueError: Same as update_exchange.
         """
@@ -331,7 +336,7 @@ class OutcomeLogPlugin(CorvidaePlugin):
             "INSERT OR IGNORE INTO exchange_log "
             "(trace_id, channel_id, origin, message_rowid, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (trace_id, channel_id, origin, None, time.time()),
+            (trace_id, channel_id, origin, message_rowid, time.time()),
         )
         merged_columns = dict(columns)
         if origin is not None:
@@ -445,8 +450,9 @@ async def _owning_trace_id(
     A positional walk bounded there leaves `m1`'s content in place; bounded at
     the next reply it tombstones a later exchange's claims instead.
 
-    A message with no row of its own (an assistant reply, an id from another
-    channel) resolves to nothing, which is the pre-#423 behaviour.
+    A message with no row of its own -- an assistant reply, or an id whose row
+    belongs to another channel -- falls back to the nearest exchange row at or
+    before it in this channel, which is the pre-#423 behaviour.
     """
     async with db.execute(
         "SELECT trace_id, CASE WHEN json_valid(appraisal) THEN "
