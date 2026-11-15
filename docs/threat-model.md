@@ -1773,9 +1773,10 @@ Accepted residuals. Progress and thinking sent in the same response as the
 follow-up turn whose origin differs from the quiet turn (for example a
 `critique` wake) is not quiet. The tool appears or disappears only at restart;
 a hot reload changes the veto at once but not the tool list. The veto lives in
-`GatePlugin`, so disabling `gates` disables it. The agent can create a
-scheduler job with an arbitrary `origin`; naming a quiet origin mutes that
-job's own turns, which fails toward silence rather than toward noise.
+`GatePlugin`, so disabling `gates` disables it. The agent can set a
+scheduler job's origin to `heartbeat` (the only other origin the scheduler
+accepts besides `reminder`); if `heartbeat` is quiet, that mutes the job's
+own turns, which fails toward silence rather than toward noise.
 
 ## Privilege separation
 
