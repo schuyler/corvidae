@@ -182,3 +182,69 @@ def test_a_compaction_stage_mapped_to_an_embedding_profile_is_refused(eval_scrip
         eval_script.resolve_llm_defaults(llm)
 
     assert "llm.stages.compaction" in str(exc.value) and "'emb'" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# #586: main()'s error paths, which no test reached (the suite exercised the
+# config resolver, not the script's own exit paths).
+# ---------------------------------------------------------------------------
+
+
+def test_main_exits_1_with_the_config_path_when_the_config_is_bad(
+    eval_script, tmp_path, monkeypatch, capsys,
+):
+    """A malformed agent.yaml is reported with the path and exit code 1.
+
+    ``resolve_llm_from_file`` is what raises; before this test, removing the
+    try/except around it left main() dying with a traceback instead of the
+    one-line Config error the operator gets.
+    """
+    # main() looks for agent.yaml beside the script's parent, so give it the
+    # scripts/ layout it is run from.
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    config = tmp_path / "agent.yaml"
+    config.write_text("llm: {}\n")
+
+    def boom(_path):
+        raise ValueError("no llm.main in the config")
+
+    monkeypatch.setattr(eval_script, "resolve_llm_from_file", boom)
+    monkeypatch.setattr(eval_script, "__file__", str(scripts / "eval_compaction.py"))
+    monkeypatch.setattr(sys, "argv", ["eval_compaction.py"])
+
+    with pytest.raises(SystemExit) as exc:
+        eval_script.main()
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "Config error: no llm.main in the config" in err
+    assert str(config) in err
+
+
+def test_main_exits_1_when_no_endpoint_resolves(
+    eval_script, tmp_path, monkeypatch, capsys,
+):
+    """With no flags and no agent.yaml, the message says what to pass.
+
+    Removing that guard called asyncio.run() with no base_url and failed
+    inside the request instead, so the operator saw a connection error
+    rather than the remedy.
+    """
+    # No agent.yaml beside the script, so nothing resolves.
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    monkeypatch.setattr(eval_script, "__file__", str(scripts / "eval_compaction.py"))
+    monkeypatch.setattr(sys, "argv", ["eval_compaction.py"])
+    ran: list[int] = []
+    monkeypatch.setattr(
+        eval_script, "run_evaluation", lambda _args: ran.append(1),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        eval_script.main()
+
+    assert exc.value.code == 1
+    assert ran == [], "the evaluation must not run without an endpoint"
+    out = capsys.readouterr().out
+    assert "--base-url" in out and "--model" in out
