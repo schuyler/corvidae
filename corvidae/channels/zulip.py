@@ -250,7 +250,9 @@ class ZulipPlugin(TransportPlugin):
         # and bounded. This is what routes a reply (#643): a channel with two
         # active topics owes each message its own topic, and "the newest
         # message's topic" answers the wrong one whenever they interleave.
-        self._trace_topics: dict[str, str] = {}
+        # (channel scope, trace id) -> topic: a trace alone would let a send
+        # on another stream reuse this stream's topic name (#643 review).
+        self._trace_topics: dict[tuple[str, str], str] = {}
 
         # Replies held while the server is unreachable (PRD 3.2 item 8).
         self._outbound: collections.deque[_Outbound] = collections.deque()
@@ -900,7 +902,7 @@ class ZulipPlugin(TransportPlugin):
         took_slot = allowed
         if took_slot and topic is not None:
             # Where this message's reply belongs, whatever arrives next (#643).
-            self._remember_topic(trace_id, topic)
+            self._remember_topic(channel.scope, trace_id, topic)
         try:
             if took_slot:
                 await self._begin_typing(channel, topic)
@@ -916,11 +918,12 @@ class ZulipPlugin(TransportPlugin):
             # by then (gate veto, agent not ready, an exception, cancellation)
             # gets no reply, so give its typing slot back and stop the notice.
             if took_slot and trace_id not in self._admitted:
-                # No turn will answer it: give the slot back, stop the notice
-                # in the topic that was showing it, and forget the topic.
+                # No turn will answer it: give the slot back and stop the
+                # notice in the topic that was showing it. The trace's topic
+                # entry stays: `_remember_topic`'s bound evicts it, and a turn
+                # that is admitted on a retry still needs it.
                 if self._decrement_outstanding(channel, topic):
                     await self._send_typing(channel, "stop", topic)
-                self._forget_topic(trace_id)
             self._admitted.discard(trace_id)
 
     def _transient_channel(self, scope: str) -> Channel:
@@ -1159,21 +1162,16 @@ class ZulipPlugin(TransportPlugin):
         remembered = self._topics.get(channel.id)
         return self._default_topic if remembered is None else remembered
 
-    def _remember_topic(self, trace_id: str, topic: str) -> None:
+    def _remember_topic(self, scope: str, trace_id: str, topic: str) -> None:
         """Record which topic a trace's message came from (#643), bounded.
 
         Insertion-ordered like the Discord trigger map: past the bound the
         oldest entry goes, which only costs a reply its preferred topic, never
         a delivery.
         """
-        self._trace_topics[trace_id] = topic
+        self._trace_topics[(scope, trace_id)] = topic
         while len(self._trace_topics) > _TOPIC_MAP_MAX:
             del self._trace_topics[next(iter(self._trace_topics))]
-
-    def _forget_topic(self, trace_id: Optional[str]) -> None:
-        """Drop a finished turn's topic; nothing more will be sent for it."""
-        if trace_id:
-            self._trace_topics.pop(trace_id, None)
 
     def _destination(
         self, channel: Channel, trace_id: Optional[str] = None
@@ -1190,7 +1188,9 @@ class ZulipPlugin(TransportPlugin):
             ids = [int(i) for i in channel.scope[3:].split(",")]
             return {"type": "direct", "to": json.dumps(ids)}
         if channel.scope.isdigit():
-            recorded = self._trace_topics.get(trace_id) if trace_id else None
+            recorded = (
+                self._trace_topics.get((channel.scope, trace_id)) if trace_id else None
+            )
             return {
                 "type": "channel",
                 "to": channel.scope,
@@ -1352,11 +1352,12 @@ class ZulipPlugin(TransportPlugin):
             )
             return
         if unsent:
-            # Only an unsent final has no send_message to follow it, so this is
-            # the only case that forgets the topic. Forgetting on a sent final
-            # ran before send_message routed the reply, so every reply fell back
-            # to the newest topic (#643 review).
-            self._forget_topic(trace_id)
+            # No topic is forgotten here, unsent or not: a generation that
+            # failed leaves the final unsent and the fallback error is
+            # delivered after this hook, on the same trace id, so forgetting
+            # sent that error - and the retry behind it - to the newest topic.
+            # The 512-entry bound evicts a finished turn instead, which costs
+            # nothing but a fallback (#643 review).
             for released_topic in self._release_all(channel):
                 await self._send_typing(channel, "stop", released_topic)
 
@@ -1364,11 +1365,11 @@ class ZulipPlugin(TransportPlugin):
         """Deliver a final reply in the topic of the message it answers, then
         close out every outstanding slot: one reply answers a coalesced burst."""
         await self._deliver(channel, event.text, event.trace_id)
-        # The mapping stays: a turn whose reply failed to reach the model is
-        # re-queued with the same trace id (#643 review), and the fallback error
-        # send has already been delivered by then. Forgetting it here sent the
-        # retry's real reply to whatever topic was newest. `_remember_topic`'s
-        # 512-entry bound evicts it instead.
+        # The mapping stays (nothing forgets it; the 512-entry bound in
+        # `_remember_topic` evicts it): a turn whose reply failed to reach the
+        # model is re-queued with the same trace id (#643 review), and both the
+        # fallback error and the retry must answer in the topic the message
+        # came from.
         for released_topic in self._release_all(channel):
             await self._send_typing(channel, "stop", released_topic)
 

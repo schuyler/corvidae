@@ -1743,8 +1743,14 @@ class TestTopicRouting:
         finally:
             await stop(h)
 
-    async def test_an_unsent_final_still_forgets_its_topic(self):
-        """The one case with no send behind it keeps the old behaviour."""
+    async def test_an_unsent_final_keeps_its_topic_for_the_fallback(self):
+        """A generation that failed leaves the final unsent, and the error
+        fallback is delivered *after* the hook on the same trace id.
+
+        Forgetting the topic here sent that fallback - and the retry behind it -
+        to the newest topic, which is the misrouting #643 exists to fix
+        (#643 review).
+        """
         h = await _start()
         try:
             await _deliver(
@@ -1754,6 +1760,7 @@ class TestTopicRouting:
                 flags=["mentioned"],
             )
             traces = self._traces(h)
+            alpha_trace = traces["first in alpha"]
             channel = h.registry.get("zulip:7")
             with patch(
                 "corvidae.channels.zulip.final_was_unsent", return_value=True
@@ -1762,11 +1769,54 @@ class TestTopicRouting:
                     channel=channel,
                     request_text="first in alpha",
                     response_text="",
-                    trace_id=traces["first in alpha"],
+                    trace_id=alpha_trace,
                     annotations={},
                     logprobs=None,
                 )
-            assert traces["first in alpha"] not in h.plugin._trace_topics
+            # The hook released the typing slot but kept the topic.
+            assert (channel.scope, alpha_trace) in h.plugin._trace_topics
+            # The fallback error the agent sends next answers in alpha.
+            await h.plugin.send_message(
+                channel,
+                OutboundMessage(text="model unavailable", trace_id=alpha_trace),
+            )
+            assert h.server.sent[-1]["topic"] == "alpha"
+        finally:
+            await stop(h)
+
+    async def test_a_topic_does_not_bleed_into_another_stream(self):
+        """The map is keyed by (scope, trace): a trace recorded in one stream
+        names a topic there, and that name means nothing in another stream.
+
+        A reply posted into the wrong stream's topic of the same name is a
+        silent misroute, and Zulip creates the topic without complaint
+        (#643 review).
+        """
+        h = await _start()
+        try:
+            await _deliver(
+                h,
+                channel_msg("first in alpha", topic="alpha"),
+                flags=["mentioned"],
+            )
+            traces = self._traces(h)
+            trace = traces["first in alpha"]
+            first_stream = h.registry.get("zulip:7")
+            # A second stream, so the same trace is asked to answer elsewhere.
+            await _deliver(
+                h, channel_msg("hello random", stream_id=8, stream="random"),
+                flags=["mentioned"],
+            )
+            other_stream = h.registry.get("zulip:8")
+
+            await h.plugin.send_message(
+                other_stream, OutboundMessage(text="cross-stream", trace_id=trace),
+            )
+
+            # The other stream has no recording for this trace, so the reply
+            # does not land in a topic borrowed from the first stream.
+            assert h.server.sent[-1]["topic"] != "alpha"
+            assert (first_stream.scope, trace) in h.plugin._trace_topics
         finally:
             await stop(h)
 
