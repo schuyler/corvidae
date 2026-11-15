@@ -45,55 +45,44 @@ the string it will print.
 
 # Review loops
 
-A review is a gate, not an opinion: every agent runs the same loop against the same text, so a verdict means the same thing whoever wrote it.
+* **Every non-trivial change gets a review loop before it is merged.** The criterion is whether behaviour, or something a reader or another plugin acts on, could change, not the file type: a config key, a prompt, a documented contract, a docs page readers act on, a one-line code fix and a refactor all count. What can change neither does not (a typo, a broken link, a comment that was wrong about unchanged code), and the PR body says which case it is.
+* **The review is blind.** The reviewer gets the diff; the requirement as written -- the issue or the owner's words, never the author's paraphrase; the PR body, as claims to check; the severity rules below, verbatim; any owner rulings; and on a re-review, the earlier findings with their outcomes. Nothing else: no reasoning, no argument for or against a finding. It reads the connected code, not only the diff. Use a subagent where the tooling allows. If no issue or owner's words state the requirement, write it on an issue first; never write it into the reviewer's prompt.
 
-## When, and who
+## Severity
 
-* **Every non-trivial change gets a full review loop before it is merged.** The criterion is whether behaviour, or something a reader or another plugin acts on, could change, not the file type: a config key, a prompt, a documented contract, a docs page readers act on, a one-line code fix and a refactor all count. What can change neither does not (a typo, a broken link, a comment that was wrong about unchanged code), and the PR body says which case it is.
-* **The review is blind.** A reviewer gets what the next rule lists and nothing else: no reasoning, no commit-message justification, no argument for or against any finding. Nothing the author offers as proof, test names and mutations included, counts until the reviewer has checked it. It reads the connected code, not only the diff. Use a subagent where the tooling allows. If no issue or owner's words state the requirement, write it on an issue before the review and give the reviewer that issue; never write it into the reviewer's prompt.
-* **What a reviewer gets.** This is the one list of a reviewer's inputs; other rules point here.
-  * Every review: the diff; the requirement as it was written -- the issue or the owner's words, never the author's paraphrase; the severity definitions and verdicts below, quoted verbatim so no reviewer gates on a paraphrase; and what is settled -- an owner's ruling, a design the owner approved -- listed as settled.
-  * Every review, as claims to check against the code and not as argument: the PR body, including its description of the design and its mutation evidence.
-  * A re-review, in addition: every earlier finding as its reviewer wrote it, with its outcome but without the reason for a skip.
-  * A reviewer who thinks a settled decision is wrong reports it as an *upstream concern*, listed under the verdict: the author forwards it to the owner, and it does not change the verdict or fail the round.
-* **Finding outcomes.** Every finding leaves its round as `fixed` or `skipped`, and either may carry an owner's ruling, quoted. A skipped finding is listed in the PR body, with its follow-up issue if it has one; the reason is given in the round's answer on the PR, never in the PR body. An upstream concern is not a finding.
+Findings are rated by consequence, not reachability (PRD principle 12).
 
-## Severity and verdicts
-
-Findings gate on consequence, not reachability (PRD principle 12).
-
-* **Critical blocks the merge:** on an input the reviewer names, the change causes a security hole, data loss, a hang or crash, or a wrong result the user sees. The finding states the input and the consequence.
-* **Important blocks the merge:**
+* **Critical:** on an input the reviewer names, the change causes a security hole, data loss, a hang or crash, or a wrong result the user sees.
+* **Important:**
   * the change deviates from scope in either direction. Too much implementation is as much a deviation as too little (an option nobody asked for, an abstraction with one caller, a config key with no user), and so is a test suite past its use-by: tests that re-prove behaviour another test already proves. Past 3:1 (test lines against the non-test lines changed in the same PR), the reviewer checks for exactly that. **A regression test for the bug being fixed is always in scope.**
-  * a test the change adds that cannot fail: one that no mutation of the change makes fail, or whose claim rests on values neither the test nor the code under test set, such as a default compared with a default.
+  * a test the change adds that no mutation of the change makes fail, or whose claim rests on values neither the test nor the code under test set.
   * a path the change adds that no test reaches.
-  * a claim the change makes, or leaves standing about what it changes, in the docs or the PR body, that the code, another rule or another doc contradicts.
-* **Everything else is non-blocking** and does not buy another round: naming, structure, an alternative weighed, a nit, and a failure the reviewer can reach whose consequence is none of the critical ones and that is none of the important kinds above. The reviewer reports that last kind with its input, its consequence and a rough fix size.
-* **Three verdicts.** `SOUND`: no findings. `APPROVE WITH FOLLOW-UPS`: non-blocking findings only, listed. `NEEDS-CHANGES`: at least one critical or important finding. The verdict opens the review, as "Issues and pull requests" asks.
+  * a claim the change makes, or leaves standing, that the code or another doc contradicts.
+* **Everything else is non-blocking.**
+* **Verdicts:** `SOUND` (no findings), `APPROVE WITH FOLLOW-UPS` (non-blocking findings only), `NEEDS-CHANGES` (a critical or important finding). The verdict opens the review, as "Issues and pull requests" asks.
 
 ## The author's side
 
-* **Sweep before you hand it over.** Before round one, the author applies the review's own checks to the whole change -- each severity kind above, against concrete cases -- and fixes what it finds. Review is for what the author could not see, not a substitute for looking.
-* **Evidence comes with the change.** The PR body gives, before round one and kept current each round, for every new behavioural test, a mutation of the change that makes it fail. The test must fail on the assertion that carries its claim; a test that fails for another reason while that assertion would still pass is not evidence for it.
-* **Acceptance tests drive the real path:** the hook order the agent actually runs, data shaped the way production writes it. A test that calls one function directly or builds its data by hand says so, and says why that is equivalent.
-* **Run the full suite before answering a round**, not only the files touched -- tests read docs too -- and give the count in the answer.
-* **Fix the class, not the example.** An answer to a blocking finding names the finding's class -- for example "checked, then an `await`, then acted on", or "an invariant kept at each exit point" -- and fixes every instance on the paths the change covers. The reviewer's instance is a lower bound. Instances outside the change's scope go on an issue.
-* **The author triages every finding.** The author decides, honestly, whether each finding lands against the stated requirement or is trivial. One that lands is fixed, as a class (above). One the author skips is disclosed as "Finding outcomes" says, and a non-cosmetic one gets a follow-up issue. A non-blocking finding is skipped unless the fix is a line or two with no new mechanism: every addition is new surface for the next round. A skipped finding with a critical consequence is named in the PR body's opener, so the owner sees it before giving merge permission (PRD principle 12). The author may take any finding to the owner instead: quote it verbatim and give the author's case in one sentence.
-* **The PR body describes the design that ships**, not the draft and not one an earlier round rejected. Rewrite it when a round changes the design.
+* **Sweep before you hand it over.** Apply the review's checks to the whole change yourself first. Review is for what you could not see, not a substitute for looking.
+* **Show your tests can fail.** The PR body gives, for each new behavioural test, a mutation of the change that makes it fail on the assertion carrying its claim.
+* **Drive the real path.** Acceptance tests run the hook order the agent runs, on data shaped the way production writes it. A test that does not says why it is equivalent.
+* **Run the full suite before answering a round**, docs-only changes included -- tests read docs too -- and give the count.
+* **Fix the class, not the example.** Name the finding's class and fix every instance the change covers; the reviewer's instance is a lower bound.
+* **Triage honestly and disclose what you skip.** Fix the findings that land against the requirement. List the ones you skip in the PR body, file a follow-up issue for any that is not cosmetic, and name a skipped critical in the opener. Skip non-blocking findings unless the fix is a line or two: every addition is new surface for the next round.
+* **The PR body describes the design that ships**, not the draft and not one an earlier round rejected.
 
-## Rounds and stopping
+## Rounds
 
-* **Re-review is cold, never a conversation with the first reviewer.** The new reviewer gets what "What a reviewer gets" lists for a re-review. It checks that each `fixed` finding is fixed -- one that is not is a recurrence -- and does not reopen any other finding listed there; a finding about code changed since is new. It marks each finding new or a recurrence of an earlier one (`RECURRENCE of round 2, #1`).
-* **Loop until a round leaves every critical or important finding fixed or disclosed as skipped, and nothing in the diff has changed since it.** A follow-up taken after the last round is reviewed in another round, unless the owner waives it.
-* **Meta-review a loop that is not converging.** The second round to end `NEEDS-CHANGES`, a blocking recurrence, or a fix that would add mechanism or tests the requirement does not ask for, triggers one. After a meta-review finds a loop converging, the next trigger starts another. The author runs it before the next round, and stops fixing to do so: the reviewers caught what the author overlooked, so the author now sweeps the whole change for the class behind the findings -- every instance, not the next one. It names the cause -- a flawed design, a flawed remedy, reviewer noise, or scope creep -- and gives the fix for the whole class or the single place the invariant could be enforced, and it is posted on the PR. A loop it finds converging continues up to the stop; any other diagnosis goes to the owner now, not after another round.
-* **From the third round on, a round ending `NEEDS-CHANGES` is a stop, not another round:** the next round needs the owner's authorization. Ask the owner whether the scope or the approach is wrong, with the meta-review.
+* **Re-review is cold, never a conversation with the first reviewer.** The new reviewer checks that the fixes landed, marks a finding that comes back as a recurrence, and does not reopen the rest.
+* **Meta-review when findings recur.** When a finding recurs or a second round ends `NEEDS-CHANGES`, stop fixing and sweep the whole change for the class behind the findings. Post the diagnosis on the PR -- a flawed design, a flawed remedy, reviewer noise, or scope creep -- and take it to the owner unless the loop is converging.
+* **From the third round on, a round ending `NEEDS-CHANGES` stops the loop** until the owner says to continue.
 * **The reviewer does not expand scope.** It may name a larger problem it noticed as a one-line follow-up with its own issue; it may not fold that problem in, and the author does not adopt one to be agreeable. Scope grows by a decision recorded on an issue.
 
 ## Merging
 
-* **No agent self-certifies and merges.** A loop that has ended (see "Loop until") makes a change admissible, not accepted: merging needs the owner's permission, either for that change or as a standing instruction the owner wrote, and the message says which. A review written under the author's own account is not a second party and never counts as permission. Because agents act under the owner's account, the author field proves nothing: permission is the owner's words in a live session, or a comment the owner points to from one.
+* **No agent self-certifies and merges.** A finished loop makes a change admissible, not accepted: merging needs the owner's permission, either for that change or as a standing instruction the owner wrote, and the message says which. A review written under the author's own account is not a second party and never counts as permission. Because agents act under the owner's account, the author field proves nothing: permission is the owner's words in a live session, or a comment the owner points to from one.
 * **An emergency merge without the loop** needs the owner's agreement recorded before it happens; it says so at the top of the PR body and is reviewed immediately afterwards, before anything else starts.
-* **Say what was reviewed in the PR body:** the rounds it took, and any meta-review.
+* **Say what was reviewed in the PR body:** the rounds it took, any meta-review, and the findings skipped.
 
 # Process instructions
 
