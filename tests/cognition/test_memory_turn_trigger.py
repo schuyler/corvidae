@@ -402,3 +402,42 @@ async def test_a_spawn_refused_after_on_stop_closes_its_coroutine(make_env):
     coro = work()
     assert env.memory._spawn(coro) is None
     assert coro.cr_frame is None, "the coroutine was closed, not left un-awaited"
+
+
+async def test_on_stop_refuses_a_late_idle_scan(make_env):
+    """#663: an idle timer that fired before on_stop and resumes after it.
+
+    ``on_stop`` cancels the watch, but a callback already suspended in a read
+    is past cancelling: when it resumes, ``_spawn`` refuses. That refusal must
+    be handled where it happens, because the idle path goes on to track the
+    task and attach a done-callback to it.
+    """
+    env = await make_env(1)
+
+    await env.memory.on_stop()
+    # Exactly what the timer callback does when it resumes.
+    await env.memory._on_channel_idle(env.channel.id)
+
+    assert not env.memory._tasks, "no task may be spawned after on_stop began"
+    assert env.channel.id not in env.memory._idle_inflight, (
+        "the channel stays marked idle, so no later scan can run"
+    )
+
+
+async def test_on_stop_refuses_a_late_compaction_fork(make_env):
+    """#663: the fork path's own refusal, which the stashes would trip over.
+
+    ``before_compaction`` stashes the spawned task and its eviction calls
+    ``cancel()`` on it: a ``None`` reaching the stash raises there instead.
+    """
+    env = await make_env(1)
+
+    await env.memory.on_stop()
+    await env.memory.before_compaction(
+        env.channel, compacted_ids=env.ids, cut=env.ids[-1]
+    )
+
+    assert not env.memory._tasks, "no task may be spawned after on_stop began"
+    assert not getattr(env.memory, "_fork_stash", {}), (
+        "a refused fork left a None in the stash"
+    )
