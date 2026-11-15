@@ -51,7 +51,7 @@ A review is a gate, not an opinion: every agent runs the same loop against the s
 
 * **Every non-trivial change gets a full review loop before it is merged.** The criterion is whether behaviour, or something a reader or another plugin acts on, could change, not the file type: a config key, a prompt, a documented contract, a docs page readers act on, a one-line code fix and a refactor all count. What can change neither does not (a typo, a broken link, a comment that was wrong about unchanged code), and the PR body says which case it is.
 * **The review is blind.** The reviewer gets the diff and the requirement as it was written -- the issue or the owner's words, never the author's paraphrase -- plus what the brief must carry (next rule), and nothing else: no reasoning, no commit-message justification, no test names offered as proof the tests are right. It reads the connected code, not only the diff. Use a subagent where the tooling allows. If no issue or owner's words state the requirement, write it on an issue before the review and give the reviewer that issue; never write it into the reviewer's prompt.
-* **The brief carries the rules.** Every review brief quotes the severity definitions and verdicts below verbatim, so no reviewer gates on a paraphrase. It also lists what is already settled -- an owner's ruling, a design the owner approved -- as settled. A reviewer who thinks a settled decision is wrong reports it as an *upstream concern*: it goes to the owner and does not fail the round.
+* **The brief carries the rules.** Every review brief quotes the severity definitions and verdicts below verbatim, so no reviewer gates on a paraphrase. It also lists what is already settled -- an owner's ruling, a design the owner approved -- as settled. A reviewer who thinks a settled decision is wrong reports it as an *upstream concern*, listed under the verdict: the author forwards it to the owner, and it does not by itself change the verdict or fail the round.
 
 ## Severity and verdicts
 
@@ -60,8 +60,8 @@ Findings gate on consequence, not reachability (PRD principle 12).
 * **Critical blocks the merge:** on an input the reviewer names, the change causes a security hole, data loss, a hang or crash, or a wrong result the user sees. The finding states the input and the consequence.
 * **Important blocks the merge:**
   * the change deviates from scope in either direction. Too much implementation is as much a deviation as too little (an option nobody asked for, an abstraction with one caller, a config key with no user), and so is a test suite past its use-by: tests that re-prove behaviour another test already proves. Past 3:1 (test lines against the non-test lines changed in the same PR), the reviewer checks for exactly that. **A regression test for the bug being fixed is always in scope.**
-  * a test that cannot fail: one that passes on the parent commit (see "Process instructions"), or whose claim rests on values the test itself never set.
-  * a path the change adds or alters that no test reaches.
+  * a test that cannot fail: one that passes on the parent commit (see "Process instructions"), or whose claim rests on values neither the test nor the code under test set, such as a default compared with a default.
+  * a path the change adds that no test reaches.
   * a claim in the docs or the PR body that the code contradicts (but see narrative prose, below).
 * **Everything else is non-blocking** and does not buy another round: naming, structure, an alternative weighed, a nit, and a failure the reviewer can reach whose consequence is none of the critical ones and that is none of the important kinds above. The reviewer reports that last kind with its input, its consequence and a rough fix size.
 * **Narrative prose waits for the code.** While a critical or important code finding is open, findings about narrative prose -- the PR body, explanatory docs -- are non-blocking; they block once the code findings are closed. A doc that states a contract other code relies on blocks in any round.
@@ -69,7 +69,7 @@ Findings gate on consequence, not reachability (PRD principle 12).
 
 ## The author's side
 
-* **Evidence comes with the change.** The PR body, before round one, and each round's answer give, for every new behavioural test, the mutation of the fix that makes it fail. The test must fail on the assertion that carries its claim; a test that fails for another reason while that assertion would still pass is not evidence for it.
+* **Evidence comes with the change.** The PR body, before round one, and each round's answer give, for every new behavioural test, a mutation of the change that makes it fail. The test must fail on the assertion that carries its claim; a test that fails for another reason while that assertion would still pass is not evidence for it.
 * **Acceptance tests drive the real path:** the hook order the agent actually runs, data shaped the way production writes it. A test that calls one function directly or builds its data by hand says so, and says why that is equivalent.
 * **Run the full suite before answering a round**, not only the files touched, and give the count in the answer.
 * **Fix the class, not the example.** An answer to a blocking finding names the finding's class -- for example "checked, then an `await`, then acted on", or "an invariant kept at each exit point" -- and fixes every instance on the paths the change covers. The reviewer's instance is a lower bound. Instances outside the change's scope go on an issue.
