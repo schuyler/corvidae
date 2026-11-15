@@ -1039,7 +1039,7 @@ class Agent(CorvidaePlugin):
         self._turn_retries[channel.id] = _TurnRetry(retry_item, attempt, timer)
         logger.warning(
             "turn on channel %s (trace_id %s) could not reach the LLM backend (%s); "
-            "retrying in %g s — check that the server at llm.main.base_url is "
+            "retrying in %g s — check that the server at llm.providers.<provider>.base_url is "
             "running and has its model loaded",
             channel.id, item.trace_id, type(exc).__name__, delay,
             extra={

@@ -33,10 +33,8 @@ def _write_config(path: str, data: dict | None = None) -> None:
     """Write a minimal YAML config file to path."""
     config = data or {
         "llm": {
-            "main": {
-                "base_url": "http://localhost:8080",
-                "model": "test-model",
-            },
+            "providers": {"main": {"base_url": "http://localhost:8080"}},
+            "profiles": {"main": {"model": "test-model"}},
         },
     }
     with open(path, "w") as f:
@@ -454,7 +452,7 @@ class TestRuntimeStart:
 
         config_path = tmp_path / "agent.yaml"
         config_path.write_text(
-            "llm:\n  main: {base_url: http://x, model: m}\nmcp:\n  servers: [a]\n"
+            "llm:\n  providers:\n    main: {base_url: http://x}\n  profiles:\n    main: {model: m}\nmcp:\n  servers: [a]\n"
         )
 
         async def mcp_on_init(pm, config):
@@ -547,7 +545,7 @@ class TestRuntimeStart:
 
         config_path = tmp_path / "agent.yaml"
         config_path.write_text(
-            "llm:\n  main: {base_url: 'http://127.0.0.1:1', model: m}\n"
+            "llm:\n  providers:\n    main: {base_url: 'http://127.0.0.1:1'}\n  profiles:\n    main: {model: m}\n"
             "channels:\n  'signal:abc':\n    max_turn: 5\n"
         )
         rt = Runtime(config_path=str(config_path))
@@ -570,7 +568,7 @@ class TestRuntimeStart:
 
         config_path = tmp_path / "agent.yaml"
         config_path.write_text(
-            "llm:\n  main: {base_url: 'http://127.0.0.1:1', model: m}\n"
+            "llm:\n  providers:\n    main: {base_url: 'http://127.0.0.1:1'}\n  profiles:\n    main: {model: m}\n"
             "channels:\n  'irc:#lex':\n    tools:\n      disabled: shell\n"
         )
         rt = Runtime(config_path=str(config_path))
@@ -664,7 +662,10 @@ class TestRuntimeStart:
         from corvidae.runtime import Runtime
 
         base_config_data = {
-            "llm": {"main": {"base_url": "http://localhost:8080", "model": "gpt-4"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "gpt-4"}},
+            },
             "channels": {"irc:#lex": {}},
         }
 
@@ -765,7 +766,10 @@ class TestRuntimeStart:
         _write_config(
             str(config_path),
             {
-                "llm": {"main": {"base_url": "http://localhost:8080", "model": "test-model"}},
+                "llm": {
+                    "providers": {"main": {"base_url": "http://localhost:8080"}},
+                    "profiles": {"main": {"model": "test-model"}},
+                },
                 "logging": {"file": "corvidae.log"},
             },
         )
@@ -895,7 +899,10 @@ class TestRuntimeStart:
         from corvidae.runtime import Runtime
 
         config_data = {
-            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "m"}},
+            },
             "channels": {"irc:#lex": {"register_prompt": "test"}},
         }
 
@@ -945,7 +952,10 @@ class TestRuntimeStart:
         from corvidae.runtime import Runtime
 
         config_data = {
-            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "m"}},
+            },
             "plugins": {"disabled": ["compaction"]},
         }
 
@@ -1007,7 +1017,10 @@ class TestRuntimeStart:
 
         # Config with no 'plugins' key at all
         config_data = {
-            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         }
 
         with tempfile.NamedTemporaryFile(
@@ -1416,7 +1429,10 @@ class TestConfigMergeSemantics:
         from corvidae.runtime import Runtime
 
         base_config_data = {
-            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "m"}},
+            },
             "logging": {"file": "original.log", "level": "DEBUG"},
         }
 
@@ -1461,7 +1477,10 @@ class TestConfigMergeSemantics:
         from corvidae.runtime import Runtime
 
         base_config_data = {
-            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "m"}},
+            },
             "logging": {"file": "important.log"},
         }
 
@@ -1562,7 +1581,10 @@ class TestStartupPluginSetLogging:
     async def test_logs_loaded_plugins_and_configured_disable_list(self, caplog):
         """The startup line names every loaded plugin and the disabled config."""
         config_data = {
-            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "m"}},
+            },
             "plugins": {"disabled": ["compaction", "critique"]},
         }
         # The PM reports the set that survived blocking.
@@ -1580,7 +1602,10 @@ class TestStartupPluginSetLogging:
     async def test_logs_empty_disable_list_when_config_omits_it(self, caplog):
         """With no plugins.disabled key the line still reports an empty list."""
         config_data = {
-            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         }
         record = await _start_with_plugin_set(
             config_data, ["agent", "registry"], caplog
@@ -1599,7 +1624,10 @@ class TestStartupPluginSetLogging:
         Startup itself must complete normally.
         """
         config_data = {
-            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "m"}},
+            },
             "plugins": {"disabled": ["compation"]},  # typo for "compaction"
         }
         record = await _start_with_plugin_set(
@@ -1850,7 +1878,8 @@ class TestKernelClockRuntime:
             str(config_path),
             {
                 "llm": {
-                    "main": {"base_url": "http://127.0.0.1:1", "model": "m"},
+                    "providers": {"main": {"base_url": "http://127.0.0.1:1"}},
+                    "profiles": {"main": {"model": "m"}},
                 },
                 "plugins": {"disabled": _SCHEDULER_TEST_DISABLED},
             },
@@ -1890,7 +1919,7 @@ class TestKernelClockRuntime:
 
         config_path = tmp_path / "agent.yaml"
         config_path.write_text(
-            "llm:\n  main: {base_url: 'http://127.0.0.1:1', model: m}\n"
+            "llm:\n  providers:\n    main: {base_url: 'http://127.0.0.1:1'}\n  profiles:\n    main: {model: m}\n"
             f"daemon:\n  {key}: 30\n"
         )
         rt = Runtime(config_path=str(config_path))
@@ -1911,7 +1940,7 @@ async def test_start_bad_call_timeout_is_config_error(tmp_path, capsys):
 
     config_path = tmp_path / "agent.yaml"
     config_path.write_text(
-        "llm:\n  main: {base_url: 'http://127.0.0.1:1', model: m}\n"
+        "llm:\n  providers:\n    main: {base_url: 'http://127.0.0.1:1'}\n  profiles:\n    main: {model: m}\n"
         "tools:\n  call_timeout: -5\n"
     )
     rt = Runtime(config_path=str(config_path))
@@ -1944,7 +1973,7 @@ async def test_start_bad_read_file_window_fraction_is_config_error(tmp_path, cap
 
     config_path = tmp_path / "agent.yaml"
     config_path.write_text(
-        "llm:\n  main: {base_url: 'http://127.0.0.1:1', model: m}\n"
+        "llm:\n  providers:\n    main: {base_url: 'http://127.0.0.1:1'}\n  profiles:\n    main: {model: m}\n"
         "tools:\n  read_file_window_fraction: 1.5\n"
     )
 

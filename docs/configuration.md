@@ -10,9 +10,12 @@ Two example configs ship at the repo root: `agent.yaml.example` (every built-in 
 
 ```yaml
 llm:
-  main:
-    base_url: http://localhost:8080
-    model: my-model
+  providers:
+    main:
+      base_url: http://localhost:8080
+  profiles:
+    main:
+      model: my-model
 
 daemon:
   session_db: sessions.db
@@ -68,61 +71,89 @@ A misspelled entry is not an error: it blocks nothing, the daemon starts normall
 
 ## `llm` — LLM backend
 
-Every key under `llm:` except `defaults` and `stages` is a **profile**: an endpoint, a model and request parameters, built into its own client. Each model-calling stage is registered by the plugin that owns it, with a kind (`chat` or `embedding`). A stage sends to the profile `llm.stages` maps it to; a stage the map doesn't name uses its kind's default profile, `llm.main` for chat and `llm.embedding` for embedding unless `llm.defaults` says otherwise. Main turns use the default chat profile. There are no fallback chains. Only a default chat profile is required.
+`llm:` has exactly four sections, and any other key directly under `llm:` is a startup error:
+
+- `llm.providers.<name>` is a **provider**: one endpoint plus its credentials and capacity. It holds `base_url`, `api_key`, `timeout`, the retry settings and `heads`.
+- `llm.profiles.<name>` is a **profile**: what to ask a provider for. It holds the `model`, the `kind`, `extra_body` and the other request parameters, and is built into its own client. A profile uses the provider named by its `provider:` key, else `llm.defaults.provider`, else the provider named `main`.
+- `llm.defaults` names the default profile of each kind, and the default provider.
+- `llm.stages` maps a stage to a profile.
+
+Each model-calling stage is registered by the plugin that owns it, with a kind (`chat` or `embedding`). A stage sends to the profile `llm.stages` maps it to; a stage the map doesn't name uses its kind's default profile, `llm.profiles.main` for chat and `llm.profiles.embedding` for embedding unless `llm.defaults` says otherwise. Main turns use the default chat profile. There are no fallback chains. Only a default chat profile is required.
 
 ```yaml
 llm:
-  main:                       # a profile; kind omitted means chat
-    base_url: http://host:8080/v1
-    model: swift-1.5
-    extra_body: {reasoning_effort: xhigh}
-  forks:                      # a profile derived from main
-    extends: main
-    extra_body:
-      reasoning_budget_tokens: 8192
-  embedding:
-    kind: embedding
-    base_url: http://host:8081/v1
-    model: bge-m3
-    dimensions: 1024
+  providers:
+    main:                     # a provider: one endpoint plus its credentials and capacity
+      base_url: http://host:8080/v1
+      heads: 2                # optional: warm context heads; omitted means unbounded
+    embedding:
+      base_url: http://host:8081/v1
+  profiles:
+    main:                     # a profile; kind omitted means chat, provider omitted means main
+      model: swift-1.5
+      extra_body: {reasoning_effort: xhigh}
+    forks:                    # a profile derived from main
+      extends: main
+      extra_body:
+        reasoning_budget_tokens: 8192
+    embedding:
+      provider: embedding
+      kind: embedding
+      model: bge-m3
+      dimensions: 1024
   defaults: {chat: main, embedding: embedding}   # optional; these are the fallbacks
   stages:                     # optional: stage -> profile
     compaction: forks
     consolidation: forks
 ```
 
-**All of `llm:` is read at startup. A change to any of it, `llm.main` included, applies on restart.** A reload that changes it logs the usual per-key restart-only warning for each changed key, plus one summary, `llm config changed; LLM profiles, llm.stages and llm.defaults apply on restart`, and keeps the running clients. A reload whose `llm:` section is malformed is refused whole, like any other bad section.
+**All of `llm:` is read at startup. A change to any of it, `llm.providers.main` included, applies on restart.** A reload that changes it logs the usual per-key restart-only warning for each changed key, plus one summary, `llm config changed; LLM providers, profiles, llm.stages and llm.defaults apply on restart`, and keeps the running clients. A reload whose `llm:` section is malformed is refused whole, like any other bad section.
+
+A provider key written on a profile, a profile key written on a provider, a key directly under `llm:` outside the four sections, an unknown provider name and a bad `heads` all fail startup, and a reload is refused. Each message names the key and the block it belongs in, and an unknown provider lists the defined ones.
+
+### Provider keys (`llm.providers.<name>`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `llm.main.base_url` | string | — | Base URL for an OpenAI-compatible Chat Completions endpoint. Required in every profile; the `llm.main` block itself is required only when `llm.defaults.chat` is unset. |
-| `llm.main.model` | string | — | Model identifier sent in each request. Required in every profile. |
-| `llm.<profile>.kind` | `chat` \| `embedding` | `chat` | What the profile serves. A chat profile takes chat stages and main turns; an embedding profile takes the `embedding` stage and needs `dimensions`. An omitted `kind` means `chat`, applied after `extends` is merged, so a child of an embedding profile stays one. Any other value fails startup. |
-| `llm.<profile>.extends` | string | — | Name of another profile to build on. See [Derived profiles](#derived-profiles-extends). Consumed by corvidae; never sent to the endpoint. |
-| `llm.main.api_key` | string | `null` | API key for authentication, sent as `Authorization: Bearer <key>`. Omit if the backend does not require one. Either a literal key or a quoted `"${VAR}"` reference to an environment variable (see below). Give the bare key: a value such as `Bearer ${X}` would send "Bearer Bearer ...". |
-| `llm.main.extra_body` | mapping | `null` | Provider-specific fields merged into the request body (e.g., `id_slot` for llama.cpp). On llama.cpp, `reasoning_format: none` returns the reply's reasoning inline, for `raw_reasoning`. This is where a stage's reasoning budget (`reasoning_budget_tokens`) or token cap (`max_tokens`) goes. Corvidae passes the keys through without interpreting them. Where a channel's `set_settings` override and a fork's profile set the same key, the profile wins on a fork (see [`agent.forks`](#agentforks--background-processes-as-forks)); on a main turn the override wins. |
-| `llm.main.raw_reasoning` | boolean | `false` | The endpoint returns reasoning inline in `content`, closed by `</think>` (llama.cpp with `extra_body.reasoning_format: none`). Corvidae splits it into `reasoning_content` itself and treats a reply with no `</think>` as cut off mid-reasoning: the turn is re-run once, then reported as failed (#355). A call that sends `response_format` (a fork or background stage's JSON schema) runs in the server's parsed mode instead: `reasoning_format` is dropped from that request and its reply is not split, so it gets no cut-off detection (#360). shortcut: this relies on the server's own default being a parsed mode; a llama-server started with `--reasoning-format none` still rejects schema calls; upgrade to an explicit per-call override if such a deployment appears. shortcut: set it only where the chat template forces thinking open; otherwise every non-reasoning reply reads as cut off. Upgrade when a per-reply signal replaces the template assumption. |
-| `llm.main.reasoning_reopened` | string | `truncate` | What happens to a final reply that reopens reasoning after its answer: a second `<think>`, or a stray `</think>`, after the first `</think>` (#348). Needs `raw_reasoning`: in parsed mode the client sees no tags to check. Either way the client cuts the reply at that tag, so the user never sees the text after it, and logs a warning with the channel and the full raw completion. `truncate` sends and stores the text before the tag. `rerun` throws the cut reply away and regenerates once with the same messages; if that reply reopens too, its cut text is used. A stray `</think>` has no start marker, so the second block's text before the tag survives the cut. Only the main turn loop reruns; forks, subagents and background stages always truncate. Schema calls (`response_format`) aren't split, so they aren't checked. An invalid value is logged as a warning and read as `truncate`; it never stops startup. Applies on restart. |
-| `llm.main.max_retries` | integer | `3` | Maximum retry attempts on transient HTTP errors (429, 500, 502, 503, 504) and connection failures. Set to 0 to disable retries. After they run out, the turn sends the error reply and then retries itself (5 s doubling to 60 s) until the backend answers. |
-| `llm.main.retry_base_delay` | float | `2.0` | Base delay in seconds for exponential backoff between retry attempts. |
-| `llm.main.retry_max_delay` | float | `60.0` | Maximum delay cap in seconds for exponential backoff. |
-| `llm.main.model_not_loaded_wait` | float | `60.0` | Total seconds to keep retrying when the server answers HTTP 400 "model is not loaded" (a llama-server router running `--no-models-autoload` with another model swapped in). Separate from `max_retries`; uses the same backoff, with at least 1 s between attempts (the last sleep is cut short to fit the remaining wait). Must be a finite, non-negative number, or startup fails. The turn waits for this long before replying, so set it a little longer than a model swap takes. `0` disables. When it runs out, the reply names the unloaded model instead of the generic error, and the turn then retries itself (5 s doubling to 60 s) until the model is loaded. |
-| `llm.main.timeout` | float | `null` | Total HTTP timeout in seconds per LLM request. `null` means no timeout: the request waits as long as the server takes, and a connect to a host that drops packets waits until the OS gives up. |
-| `llm.embedding.base_url` | string | — | Base URL for an OpenAI-compatible `/embeddings` endpoint (embedding servers are usually separate from generation servers). Optional. |
-| `llm.embedding.model` | string | — | Embedding model identifier. Recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding. Config revert is the only remediation. |
-| `llm.embedding.kind` | string | — | **Must be `embedding`** on the profile the embedding stage uses. Without it the block is a chat profile and startup fails (see [Migration](#migration-from-the-single-main-block)). |
-| `llm.embedding.dimensions` | integer | — | **Required for an embedding profile** (any profile with `kind: embedding`, not only one named `embedding`). Fixed vector dimension of the embedding model; the `memory_vec` table schema depends on it. Validated at startup. |
-| `llm.embedding.document_prefix` | string | `""` | String prepended to every text when embedding stored content (`kind="document"`). Recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding. Config revert is the only remediation. Trailing space is the operator's responsibility (match the model card). |
-| `llm.embedding.query_prefix` | string | `""` | String prepended to every text when embedding a retrieval query (`kind="query"`). See `document_prefix` for mismatch semantics. |
-| `llm.defaults.chat`, `llm.defaults.embedding` | string | `main`, `embedding` | The default profile for each kind: what main turns and any unmapped stage of that kind use. Each must name a defined profile of that kind. A kind may have no default (no `llm.embedding` block and no `llm.defaults.embedding`: memory degrades to keyword search unless `llm.stages.embedding` maps the stage); a chat default is required, so `defaults.chat: foo` with no `llm.main` boots and sends main turns to `foo`. Any other key under `defaults` fails startup. |
+| `llm.providers.<name>.base_url` | string | — | Base URL for an OpenAI-compatible endpoint (Chat Completions, or `/embeddings` for an embedding profile). Required in every provider. The `main` provider is required only when a profile resolves to it. |
+| `llm.providers.<name>.api_key` | string | `null` | API key for authentication, sent as `Authorization: Bearer <key>`. Omit if the backend does not require one. Either a literal key or a quoted `"${VAR}"` reference to an environment variable (see below). Give the bare key: a value such as `Bearer ${X}` would send "Bearer Bearer ...". |
+| `llm.providers.<name>.heads` | integer | unbounded | The warm context heads the operator declares for this server: on llama-server, its slots plus the prefixes `--cache-ram` holds (PRD §3.13.2). A positive integer; zero, a negative number, a float, a boolean or a string fails startup. Omitted means unbounded. Nothing schedules on it yet (#364): it is read and logged, and the lease scheduler is a later change. A `heads` on a provider used only by embedding profiles logs a warning at startup, because embedding calls take no lease. |
+| `llm.providers.<name>.max_retries` | integer | `3` | Maximum retry attempts on transient HTTP errors (429, 500, 502, 503, 504) and connection failures. Set to 0 to disable retries. After they run out, the turn sends the error reply and then retries itself (5 s doubling to 60 s) until the backend answers. |
+| `llm.providers.<name>.retry_base_delay` | float | `2.0` | Base delay in seconds for exponential backoff between retry attempts. |
+| `llm.providers.<name>.retry_max_delay` | float | `60.0` | Maximum delay cap in seconds for exponential backoff. |
+| `llm.providers.<name>.model_not_loaded_wait` | float | `60.0` | Total seconds to keep retrying when the server answers HTTP 400 "model is not loaded" (a llama-server router running `--no-models-autoload` with another model swapped in). Separate from `max_retries`; uses the same backoff, with at least 1 s between attempts (the last sleep is cut short to fit the remaining wait). Must be a finite, non-negative number, or startup fails. The turn waits for this long before replying, so set it a little longer than a model swap takes. `0` disables. When it runs out, the reply names the unloaded model instead of the generic error, and the turn then retries itself (5 s doubling to 60 s) until the model is loaded. |
+| `llm.providers.<name>.timeout` | float | `null` | Total HTTP timeout in seconds per LLM request. `null` means no timeout: the request waits as long as the server takes, and a connect to a host that drops packets waits until the OS gives up. |
+
+### Profile keys (`llm.profiles.<name>`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `llm.profiles.<name>.provider` | string | `llm.defaults.provider`, else `main` | The provider this profile sends to. Must name a defined provider; startup fails otherwise, listing the defined ones. A profile with no `provider:` and no `llm.defaults.provider` and no provider named `main` fails startup naming the profile. |
+| `llm.profiles.<name>.model` | string | — | Model identifier sent in each request. Required in every profile. For an embedding profile it is recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding. Config revert is the only remediation. |
+| `llm.profiles.<name>.kind` | `chat` \| `embedding` | `chat` | What the profile serves. A chat profile takes chat stages and main turns; an embedding profile takes the `embedding` stage and needs `dimensions`. An omitted `kind` means `chat`, applied after `extends` is merged, so a child of an embedding profile stays one. Any other value fails startup. |
+| `llm.profiles.<name>.extends` | string | — | Name of another profile to build on. See [Derived profiles](#derived-profiles-extends). Consumed by corvidae; never sent to the endpoint. |
+| `llm.profiles.<name>.extra_body` | mapping | `null` | Provider-specific fields merged into the request body. On llama.cpp, `reasoning_format: none` returns the reply's reasoning inline, for `raw_reasoning`. This is where a stage's reasoning budget (`reasoning_budget_tokens`) or token cap (`max_tokens`) goes. Corvidae passes the keys through without interpreting them. Where a channel's `set_settings` override and a fork's profile set the same key, the profile wins on a fork (see [`agent.forks`](#agentforks--background-processes-as-forks)); on a main turn the override wins. Pinning a llama-server slot with `extra_body.id_slot` works against the lease scheduler (PRD §3.13): it sends two requests to one slot behind the scheduler's back, and is operator error. |
+| `llm.profiles.<name>.raw_reasoning` | boolean | `false` | The endpoint returns reasoning inline in `content`, closed by `</think>` (llama.cpp with `extra_body.reasoning_format: none`). Corvidae splits it into `reasoning_content` itself and treats a reply with no `</think>` as cut off mid-reasoning: the turn is re-run once, then reported as failed (#355). A call that sends `response_format` (a fork or background stage's JSON schema) runs in the server's parsed mode instead: `reasoning_format` is dropped from that request and its reply is not split, so it gets no cut-off detection (#360). shortcut: this relies on the server's own default being a parsed mode; a llama-server started with `--reasoning-format none` still rejects schema calls; upgrade to an explicit per-call override if such a deployment appears. shortcut: set it only where the chat template forces thinking open; otherwise every non-reasoning reply reads as cut off. Upgrade when a per-reply signal replaces the template assumption. |
+| `llm.profiles.<name>.reasoning_reopened` | string | `truncate` | What happens to a final reply that reopens reasoning after its answer: a second `<think>`, or a stray `</think>`, after the first `</think>` (#348). Needs `raw_reasoning`: in parsed mode the client sees no tags to check. Either way the client cuts the reply at that tag, so the user never sees the text after it, and logs a warning with the channel and the full raw completion. `truncate` sends and stores the text before the tag. `rerun` throws the cut reply away and regenerates once with the same messages; if that reply reopens too, its cut text is used. A stray `</think>` has no start marker, so the second block's text before the tag survives the cut. Only the main turn loop reruns; forks, subagents and background stages always truncate. Schema calls (`response_format`) aren't split, so they aren't checked. An invalid value is logged as a warning and read as `truncate`; it never stops startup. Applies on restart. |
+| `llm.profiles.<name>.dimensions` | integer | — | **Required for an embedding profile** (any profile with `kind: embedding`, not only one named `embedding`). Fixed vector dimension of the embedding model; the `memory_vec` table schema depends on it. Validated at startup. |
+| `llm.profiles.<name>.document_prefix` | string | `""` | String prepended to every text when embedding stored content (`kind="document"`). Recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding. Config revert is the only remediation. Trailing space is the operator's responsibility (match the model card). |
+| `llm.profiles.<name>.query_prefix` | string | `""` | String prepended to every text when embedding a retrieval query (`kind="query"`). See `document_prefix` for mismatch semantics. |
+
+`dimensions`, `document_prefix` and `query_prefix` are embedding-only. An embedding profile must set `kind: embedding`: without it the block is a chat profile, and startup fails if it is the default embedding profile by name.
+
+### Defaults and stages
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `llm.defaults.chat`, `llm.defaults.embedding` | string | `main`, `embedding` | The default profile for each kind: what main turns and any unmapped stage of that kind use. Each must name a defined profile of that kind. A kind may have no default (no `llm.profiles.embedding` and no `llm.defaults.embedding`: memory degrades to keyword search unless `llm.stages.embedding` maps the stage); a chat default is required, so `defaults.chat: foo` with no `llm.profiles.main` boots and sends main turns to `foo`. |
+| `llm.defaults.provider` | string | — | The provider a profile with no `provider:` uses. Must name a defined provider. Omitted, such a profile uses the provider named `main`. Any key under `defaults` other than `chat`, `embedding` and `provider` fails startup. |
 | `llm.stages.<stage>` | string | — | The profile `<stage>` sends to. See [Stages](#stages). |
-| `llm.embedding.*` | — | — | The remaining keys (`api_key`, which also takes `"${VAR}"`, `max_retries`, ...) match `llm.main`. `document_prefix` and `query_prefix` are embedding-only — they do not exist on `llm.main`. |
 
-**API key from the environment.** Quote the reference so YAML keeps it as text: `api_key: "${OPENAI_API_KEY}"`. The variable is read from the environment the daemon runs in, so a tracked `agent.yaml` holds no secret. This works for every profile, `main` included, and uses the same `${VAR}` expansion as MCP `headers`. A literal key still works; a value with no `${NAME}` (including one containing a bare `$`) is used as is. If the variable is unset, empty or contains a newline or NUL (often a trailing newline), startup fails with an error naming `llm.<profile>.api_key` and the variable; set it in the environment corvidae runs in and restart. The key's value is never logged or put in an error or a reply. To pick up a changed environment, restart. A reload doesn't rebuild clients, so a changed variable or a newly referenced one is picked up only on restart.
+**API key from the environment.** Quote the reference so YAML keeps it as text: `api_key: "${OPENAI_API_KEY}"`. The variable is read from the environment the daemon runs in, so a tracked `agent.yaml` holds no secret. This works for every provider, `main` included, and uses the same `${VAR}` expansion as MCP `headers`. A literal key still works; a value with no `${NAME}` (including one containing a bare `$`) is used as is. If the variable is unset, empty or contains a newline or NUL (often a trailing newline), startup fails with an error naming `llm.providers.<name>.api_key` and the variable; set it in the environment corvidae runs in and restart. The key's value is never logged or put in an error or a reply. To pick up a changed environment, restart. A reload doesn't rebuild clients, so a changed variable or a newly referenced one is picked up only on restart.
 
-**Remote profiles.** Every profile is an OpenAI-compatible client, so any of them can point at a hosted endpoint. Whatever that profile is sent then leaves the host. A profile receives the main turns if it is the default chat profile, and everything the stages mapped to it send (see [Stages](#stages)): the agent's rendered view (the system prompt, CONTEXT blocks, tool calls and results, up to the channel's budget; compaction's fallback sends the uncapped prefix), the importance prior, subagent turns, memory embedding, retrieval and retention. Conversation content is in all of these inputs. Every stage `llm.stages` doesn't map goes to its kind's default profile, so with no `llm.stages` entries the default chat profile gets all of the chat stages and the default embedding profile gets the embedding stage. See `threat-model.md` finding 12. Hosted endpoints give no latency guarantee, so set `llm.<profile>.timeout` generously.
+**Remote providers.** Every provider is an OpenAI-compatible endpoint, so any of them can be a hosted one. Whatever its profiles are sent then leaves the host, so a hosted provider's `base_url` is where conversation content goes. A profile receives the main turns if it is the default chat profile, and everything the stages mapped to it send (see [Stages](#stages)): the agent's rendered view (the system prompt, CONTEXT blocks, tool calls and results, up to the channel's budget; compaction's fallback sends the uncapped prefix), the importance prior, subagent turns, memory embedding, retrieval and retention. Conversation content is in all of these inputs. Every stage `llm.stages` doesn't map goes to its kind's default profile, so with no `llm.stages` entries the default chat profile gets all of the chat stages and the default embedding profile gets the embedding stage. See `threat-model.md` finding 12. Hosted endpoints give no latency guarantee, so set `llm.providers.<name>.timeout` generously.
 
-At startup `LLMPlugin` logs where every registered stage resolves, for example `llm stages resolved: appraisal→main, compaction→main, consolidation→main, critique→main, embedding→embedding, rubric→main, subagent→main`. A stage with no profile (its kind has no default and the map doesn't name it) shows `→(none)`.
+At startup `LLMPlugin` logs one INFO line per provider, for example `llm provider main: http://host:8080/v1, heads 2, profiles forks, main` (`heads unbounded` when unset), so you can see which profiles share a server. At startup `LLMPlugin` logs where every registered stage resolves, for example `llm stages resolved: appraisal→main, compaction→main, consolidation→main, critique→main, embedding→embedding, rubric→main, subagent→main`. A stage with no profile (its kind has no default and the map doesn't name it) shows `→(none)`.
 
 Retry behavior applies to transient status codes (429, 500, 502, 503, 504) and connection errors. The `Retry-After` header (429 responses) is honored when present; otherwise exponential backoff is used. Retries do not apply to client errors (4xx) other than 429.
 
@@ -135,7 +166,7 @@ Retry behavior applies to transient status codes (429, 500, 502, 503, 504) and c
 - A child's `null` deletes the inherited key. With `extends: main` and `extra_body: {reasoning_effort: null}`, the derived profile has no `reasoning_effort`.
 - Chains resolve root first. `kind` is an ordinary key, so a child inherits its base's.
 
-Every resolved profile needs `base_url` and `model` after the merge (a base block that exists only to be extended is not supported), and an embedding profile needs `dimensions`. Startup fails, and a reload is refused, on an unknown base, an `extends` cycle, an unknown `kind`, a missing `base_url`, `model` or `dimensions`, a non-mapping profile, an unknown or wrong-kind `defaults` entry, no default chat profile, a `defaults` or `stages` value that isn't a profile name (a list or mapping), or a `stages` entry naming a missing profile. Each message names the key (`llm.forks.extends names unknown profile 'mian'; defined profiles: embedding, forks, main`).
+`extends` applies to profiles only; a provider has no base to extend. Every resolved profile needs `model` and a provider with a `base_url` after the merge (a base block that exists only to be extended is not supported), and an embedding profile needs `dimensions`. Startup fails, and a reload is refused, on an unknown base, an `extends` cycle, an unknown `kind`, a missing `model`, `dimensions` or provider `base_url`, a non-mapping profile, an unknown or wrong-kind `defaults` entry, no default chat profile, a `defaults` or `stages` value that isn't a profile name (a list or mapping), or a `stages` entry naming a missing profile. Each message names the key (`llm.profiles.forks.extends names unknown profile 'mian'; defined profiles: embedding, forks, main`).
 
 A change to a base is a change to every profile that extends it, but only at the next restart.
 
@@ -158,14 +189,6 @@ The `consolidation`, `rubric`, `appraisal`, `critique` and `embedding` stages be
 An `llm.stages` entry naming a profile that doesn't exist, or one of the wrong kind (a chat stage mapped to an embedding profile), fails startup. An entry naming no registered stage logs a warning and is ignored: a disabled plugin's stage is expected there, and so is a typo, so check the warning. If a kind has no default profile and some stage of that kind is unmapped, startup logs a warning naming those stages, which then have no client and degrade.
 
 Keeping a fork's cached prefix is the operator's job. A stage mapped to another endpoint or model sends a cold prefill, and a profile that sets a template-visible key (such as `reasoning_effort`) differently from main's also misses. Derive the stage's profile from `main` with `extends` and set only sampler-side keys to keep it. #440 reports misses.
-
-### Migration from the single `main` block
-
-- An `llm.embedding` block needs `kind: embedding`. Without it startup fails with `llm.embedding is a chat profile but is the default embedding profile by name; add kind: embedding to it, or set llm.defaults.embedding`.
-- `agent.forks.reasoning_budget_tokens` is removed, and leaving it in config is a startup error that names the key. To keep a budget, put `reasoning_budget_tokens` in the `extra_body` of a profile, and map the fork stages to it under `llm.stages`. An unmapped fork carries a budget only if the default chat profile's `extra_body` sets one; the old default of 2048 is gone.
-- `llm.background` has no special meaning. It was accepted but nothing used it; map a stage to it under `llm.stages` if you want it used.
-- `llm.main` is no longer hot-swapped on reload; restart to apply a change.
-- The `main_client` and `background_client` properties and `LLMPlugin.embedding_dimensions` are removed; use `get_client(stage)` and `profile_config(stage)`.
 
 ---
 
@@ -1136,7 +1159,7 @@ again.
 | `webhook.*` | `WebhookPlugin` reads its block in `on_init` and binds in `on_start`; it has no reload hook, so a change takes a restart. |
 | `web.host`, `web.port`, `web.allowed_origins`, adding or removing the `web` block | The listener is bound at startup. A reload logs `restart to apply` and keeps serving with the old values. |
 | Existing exact entries in `channels:` | Channels already registered retain their original `ChannelConfig` until restart, except `tools.disabled` (above). Transport-wide entries are live (above). |
-| `llm.*` (every profile, including `llm.main`, plus `llm.defaults` and `llm.stages`) | Read at startup. A reload that changes any of it logs a restart-only warning per changed key and `llm config changed; LLM profiles, llm.stages and llm.defaults apply on restart` and keeps the running clients. A malformed `llm:` section still refuses the whole reload. A reload is not checked against the registered stages, so a `llm.stages` entry of the wrong kind passes the reload and fails the next startup. |
+| `llm.*` (every provider and profile, including `llm.providers.main`, plus `llm.defaults` and `llm.stages`) | Read at startup. A reload that changes any of it logs a restart-only warning per changed key and `llm config changed; LLM providers, profiles, llm.stages and llm.defaults apply on restart` and keeps the running clients. A malformed `llm:` section still refuses the whole reload. A reload is not checked against the registered stages, so a `llm.stages` entry of the wrong kind passes the reload and fails the next startup. |
 | `memory.*` (including `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after`, `memory.consolidate_after_tokens`, `memory.entry_target_tokens` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts, and the token threshold is read once then. |
 | `heartbeat.after` | `HeartbeatPlugin` reads it at init and registers its idle watch at start. Putting the heartbeat to sleep or waking it takes a restart. |
 | `timepiece.*` | `TimepiecePlugin` reads its section in `on_init` and has no reload hook. |
@@ -1148,7 +1171,7 @@ again.
 At startup (not reload), a missing or malformed config file, or a rejected
 value in the `agent` or `channels` sections (e.g. a `channels.<id>.tools`
 block that is not `{disabled: [names]}`, or an unknown key such as
-`channels.<id>.max_turn`), in the `llm` section (profiles, `extends`, `llm.defaults`, `llm.stages`), or in `tools.call_timeout` / `tools.timeouts` / `tools.read_file_window_fraction`, prints
+`channels.<id>.max_turn`), in the `llm` section (providers, profiles, `extends`, `llm.defaults`, `llm.stages`), or in `tools.call_timeout` / `tools.timeouts` / `tools.read_file_window_fraction`, prints
 `Config error: <detail> — check <path>` to stderr and exits non-zero. The
 detail names the key, the rejected value and what is accepted. The file is
 read as UTF-8 whatever the locale: one that isn't valid UTF-8 says so, with
@@ -1159,7 +1182,7 @@ nested too deeply to load says to reduce the nesting.
 - **Not valid UTF-8, or YAML nested too deeply**: logged at `ERROR` naming the file, the cause (with the byte offset for UTF-8) and the remedy; reload is skipped and the running config stays in force.
 - **Rejected value in `agent:`, `daemon:` or `channels:`** (e.g. a malformed `channels.<id>.tools`): logged at `ERROR` naming the file. For `channels:` the message also names the key and the value and says "reload skipped"; for `agent:` and other `daemon:` keys the key is in the logged traceback (`daemon.shutdown_timeout` and `daemon.exit_timeout` are named in the message; see the next item). The reload is skipped whole: no section is applied and no plugin receives `on_config_reload`, so a typo in one `channels:` entry cannot change `agent:` values.
 - **Rejected `tools.call_timeout`, `tools.timeouts`, `tools.read_file_window_fraction`, `daemon.shutdown_timeout` or `daemon.exit_timeout`**: logged at `ERROR` naming the key and the value, with "reload skipped"; the running config is unchanged.
-- **Malformed `llm:` section** (an unknown `extends` base, an `extends` cycle, an unknown `kind`, an embedding profile with no `dimensions`, no default chat profile, an `llm.stages` entry naming a missing profile, and so on): logged at `ERROR` naming the key, with "reload skipped"; the running config is unchanged.
+- **Malformed `llm:` section** (a key in the wrong block, an unknown provider, a bad `heads`, an unknown `extends` base, an `extends` cycle, an unknown `kind`, an embedding profile with no `dimensions`, no default chat profile, an `llm.stages` entry naming a missing profile, and so on): logged at `ERROR` naming the key, with "reload skipped"; the running config is unchanged.
 - **Config file deleted**: logged at `WARNING`; polling continues. The file may reappear.
 - **Per-plugin failure in `on_config_reload`**: logged at `ERROR`; other plugins still receive the reload.
 
@@ -1410,9 +1433,12 @@ Put this in `~/corvidae-data/agent.yaml`:
 
 ```yaml
 llm:
-  main:
-    base_url: http://host.docker.internal:8080/v1   # your model server, on the Docker host
-    model: llama3
+  providers:
+    main:
+      base_url: http://host.docker.internal:8080/v1   # your model server, on the Docker host
+  profiles:
+    main:
+      model: llama3
 agent:
   system_prompt: "You are a helpful assistant."
 web:
@@ -1437,7 +1463,7 @@ Open that URL. Why the config looks like this: inside a container the page has t
 
 **The model server.** On a Linux host, `host.docker.internal` is the Docker host's bridge address, so a model server listening only on `127.0.0.1` can't be reached through it, and every turn fails to connect. Either make the server listen on an address the container can reach (mind your firewall), or run the container with `--network host` in place of the `-p` and `--add-host` lines, so it shares the host's loopback. In that case use `http://127.0.0.1:8080/v1` as the `base_url` and write the `web:` block as just `web: {}`: the default bind is loopback, and the wildcard and `allowed_origins` above would expose the page on every host address.
 
-**The batteries are on.** Because the image carries every extra, memory, appraisal, critique and goals run by default. Memory consolidation, appraisal and the critique forks make model calls of their own, which matters on a single-slot local server. Without an `llm.embedding` profile memory still works but stores records without vectors, which is what the startup warning about a missing embedding profile means ([cognition.md](cognition.md)). List plugins under `plugins.disabled`, as `agent.minimal.yaml.example` does, to turn any of them off. The `restart` tool ends the daemon with SIGTERM, which is why the run command has `--restart unless-stopped`. `goals_notify` is on too: a goal status change or retirement made from a channel other than the goal's own wakes that channel for a turn, another model call. Two other defaults are worth knowing: `timepiece` stamps each turn in the container's clock, which is UTC unless you add `-e TZ=…` or set `timepiece.timezone`, and `silence` lets the agent answer `NO_REPLY` and send nothing.
+**The batteries are on.** Because the image carries every extra, memory, appraisal, critique and goals run by default. Memory consolidation, appraisal and the critique forks make model calls of their own, which matters on a single-slot local server. Without an `llm.profiles.embedding` profile memory still works but stores records without vectors, which is what the startup warning about a missing embedding profile means ([cognition.md](cognition.md)). List plugins under `plugins.disabled`, as `agent.minimal.yaml.example` does, to turn any of them off. The `restart` tool ends the daemon with SIGTERM, which is why the run command has `--restart unless-stopped`. `goals_notify` is on too: a goal status change or retirement made from a channel other than the goal's own wakes that channel for a turn, another model call. Two other defaults are worth knowing: `timepiece` stamps each turn in the container's clock, which is UTC unless you add `-e TZ=…` or set `timepiece.timezone`, and `silence` lets the agent answer `NO_REPLY` and send nothing.
 
 **Discord.** The bot only connects out, so there is nothing to publish. Add a `discord:` block with your user id under `allow` (the default refuses everyone), and pass the bot token as `-e DISCORD_TOKEN=…` rather than writing it into `agent.yaml`. A new `discord:` block needs only `docker restart corvidae`, but `docker restart` keeps the old environment, so to add or change `DISCORD_TOKEN`, `docker rm -f corvidae` and run it again. Creating the application and inviting the bot are in [discord-ops.md](discord-ops.md). Two `voice will NOT be supported` warnings at startup are expected.
 

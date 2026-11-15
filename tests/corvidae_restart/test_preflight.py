@@ -14,9 +14,12 @@ from pathlib import Path
 # Minimal llm section: Runtime.start requires a default chat profile.
 MINIMAL_LLM = """\
 llm:
-  main:
-    base_url: http://localhost:8080/v1
-    model: test-model
+  providers:
+    main:
+      base_url: http://localhost:8080/v1
+  profiles:
+    main:
+      model: test-model
 """
 
 # The generic remedy carried by every "pre-flight failed:" line.

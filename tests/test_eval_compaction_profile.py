@@ -24,14 +24,20 @@ def eval_script():
     return module
 
 
-BASE = {"base_url": "http://base:8080", "model": "base-model"}
+BASE = {"model": "base-model"}
 
 
 def test_stage_profile_wins(eval_script):
     """R470.1: llm.stages.compaction names the profile to use."""
     llm = {
-        "main": {"base_url": "http://main:1", "model": "main-model"},
-        "foo": {"base_url": "http://foo:2", "model": "foo-model", "api_key": "k"},
+        "providers": {
+            "main": {"base_url": "http://main:1"},
+            "foo": {"base_url": "http://foo:2", "api_key": "k"},
+        },
+        "profiles": {
+            "main": {"model": "main-model"},
+            "foo": {"provider": "foo", "model": "foo-model"},
+        },
         "stages": {"compaction": "foo"},
     }
     resolved = eval_script.resolve_llm_defaults(llm)
@@ -43,7 +49,8 @@ def test_stage_profile_wins(eval_script):
 def test_defaults_chat_without_main(eval_script):
     """R470.2: no llm.main, but llm.defaults.chat names one."""
     llm = {
-        "foo": {"base_url": "http://foo:2", "model": "foo-model"},
+        "providers": {"main": {"base_url": "http://foo:2"}},
+        "profiles": {"foo": {"model": "foo-model"}},
         "defaults": {"chat": "foo"},
     }
     resolved = eval_script.resolve_llm_defaults(llm)
@@ -54,8 +61,11 @@ def test_defaults_chat_without_main(eval_script):
 def test_extends_inherits_keys(eval_script):
     """R470.3: a profile built with extends resolves its inherited keys."""
     llm = {
-        "base": dict(BASE),
-        "child": {"extends": "base", "model": "child-model"},
+        "providers": {"main": {"base_url": "http://base:8080"}},
+        "profiles": {
+            "base": dict(BASE),
+            "child": {"extends": "base", "model": "child-model"},
+        },
         "defaults": {"chat": "child"},
     }
     resolved = eval_script.resolve_llm_defaults(llm)
@@ -66,7 +76,9 @@ def test_extends_inherits_keys(eval_script):
 def test_malformed_llm_raises_a_config_error(eval_script):
     """R470.4: a malformed section is a ValueError naming the problem."""
     with pytest.raises(ValueError) as exc:
-        eval_script.resolve_llm_defaults({"main": {"model": "no-base-url"}})
+        eval_script.resolve_llm_defaults(
+            {"providers": {"main": {}}, "profiles": {"main": {"model": "no-base-url"}}}
+        )
 
     assert "base_url" in str(exc.value)
 
@@ -115,9 +127,14 @@ def test_api_key_environment_reference_is_expanded(eval_script, monkeypatch):
     """
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
     llm = {
-        "main": {"base_url": "http://main:1", "model": "main-model"},
-        "foo": {"base_url": "http://foo:2", "model": "foo-model",
-                "api_key": "${OPENAI_API_KEY}"},
+        "providers": {
+            "main": {"base_url": "http://main:1"},
+            "foo": {"base_url": "http://foo:2", "api_key": "${OPENAI_API_KEY}"},
+        },
+        "profiles": {
+            "main": {"model": "main-model"},
+            "foo": {"provider": "foo", "model": "foo-model"},
+        },
         "stages": {"compaction": "foo"},
     }
     resolved = eval_script.resolve_llm_defaults(llm)
@@ -128,13 +145,18 @@ def test_an_unset_api_key_variable_is_a_config_error(eval_script, monkeypatch):
     """An unset ${VAR} names the variable instead of sending the reference."""
     monkeypatch.delenv("CORVIDAE_EVAL_MISSING_KEY", raising=False)
     llm = {
-        "main": {"base_url": "http://main:1", "model": "m",
-                 "api_key": "${CORVIDAE_EVAL_MISSING_KEY}"},
+        "providers": {
+            "main": {"base_url": "http://main:1", "api_key": "${CORVIDAE_EVAL_MISSING_KEY}"},
+        },
+        "profiles": {"main": {"model": "m"}},
     }
     with pytest.raises(ValueError) as exc:
         eval_script.resolve_llm_defaults(llm)
 
     assert "CORVIDAE_EVAL_MISSING_KEY" in str(exc.value)
+    # The message names the provider path the key lives under, not the old
+    # llm.<profile> layout the parser now rejects (#362).
+    assert "llm.providers.main.api_key" in str(exc.value)
 
 
 def test_empty_agent_yaml_is_a_config_error_not_a_traceback(eval_script, tmp_path):
@@ -174,8 +196,14 @@ def test_a_missing_dependency_is_named_not_blamed_on_the_interpreter():
 def test_a_compaction_stage_mapped_to_an_embedding_profile_is_refused(eval_script):
     """#590: the daemon's own config error, naming the stage and the profile."""
     llm = {
-        "main": {"base_url": "http://main:1", "model": "main-model"},
-        "emb": {"base_url": "http://emb:2", "model": "e", "kind": "embedding", "dimensions": 8},
+        "providers": {
+            "main": {"base_url": "http://main:1"},
+            "emb": {"base_url": "http://emb:2"},
+        },
+        "profiles": {
+            "main": {"model": "main-model"},
+            "emb": {"provider": "emb", "model": "e", "kind": "embedding", "dimensions": 8},
+        },
         "stages": {"compaction": "emb"},
     }
     with pytest.raises(ValueError) as exc:

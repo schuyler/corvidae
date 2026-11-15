@@ -35,10 +35,13 @@ Put this in `agent.yaml` in the checkout:
 
 ```yaml
 llm:
-  main:
-    base_url: https://api.example.com/v1   # your provider's OpenAI-compatible endpoint
-    model: your-chat-model
-    api_key: "${LLM_API_KEY}"              # read from the environment, quotes and all
+  providers:
+    main:
+      base_url: https://api.example.com/v1   # your provider's OpenAI-compatible endpoint
+      api_key: "${LLM_API_KEY}"              # read from the environment, quotes and all
+  profiles:
+    main:
+      model: your-chat-model
 
 agent:
   system_prompt: "You are a helpful assistant."
@@ -115,7 +118,7 @@ If it doesn't work, `docker logs corvidae` is the first place to look:
 |---|---|
 | The page says `403 bad host` | The address in your browser isn't in `allowed_origins`. Add it (e.g. `http://localhost:8765`) and `docker restart corvidae`. |
 | `unable to open database file` at startup | uid 1000 can't write `~/corvidae-data`. Redo the `chown`. |
-| `llm.main.api_key` error at startup | `LLM_API_KEY` is unset or empty in the container. |
+| `llm.providers.main.api_key` error at startup | `LLM_API_KEY` is unset or empty in the container. |
 | Every reply is an error about the model | `base_url` or `model` is wrong, or the key is. `base_url` usually ends in `/v1`. |
 
 ### Add Discord
@@ -197,18 +200,23 @@ Local servers usually need no `api_key`, so leave it out.
 
 **Single-slot servers.** Memory, appraisal and critique make model calls in the background. On a server that handles one request at a time, those calls queue behind your chat turns. Either give the server more slots, or point those stages at a second, smaller model with `llm.stages` ([docs/configuration.md](docs/configuration.md#stages)).
 
-**An embedding model** turns on vector search for memory. Add a second profile:
+**An embedding model** turns on vector search for memory. Add a second provider and profile:
 
 ```yaml
 llm:
-  main:
-    base_url: http://127.0.0.1:8080/v1
-    model: your-chat-model
-  embedding:
-    kind: embedding
-    base_url: http://127.0.0.1:8081/v1   # llama-server with --embeddings, or the same Ollama
-    model: your-embedding-model
-    dimensions: 1024                     # must match the model exactly
+  providers:
+    main:
+      base_url: http://127.0.0.1:8080/v1
+    embedding:
+      base_url: http://127.0.0.1:8081/v1   # llama-server with --embeddings, or the same Ollama
+  profiles:
+    main:
+      model: your-chat-model
+    embedding:
+      provider: embedding
+      kind: embedding
+      model: your-embedding-model
+      dimensions: 1024                     # must match the model exactly
 ```
 
 Get `dimensions` right before the first start. Corvidae records the model and dimensions in its database. If you change either one later, vector memory switches off until you put the old values back. [docs/discord-remote-api.md](docs/discord-remote-api.md#measure-the-embedding-dimensions) shows how to ask the endpoint for the number.
@@ -274,11 +282,14 @@ Corvidae reads `agent.yaml` from its working directory. Two annotated examples s
 The shape of a typical config:
 
 ```yaml
-llm:                                  # model profiles; main is the default chat model
-  main:
-    base_url: https://api.example.com/v1
-    model: your-chat-model
-    api_key: "${LLM_API_KEY}"
+llm:                                  # providers are servers, profiles are models; main is the default of each
+  providers:
+    main:
+      base_url: https://api.example.com/v1
+      api_key: "${LLM_API_KEY}"
+  profiles:
+    main:
+      model: your-chat-model
 
 agent:
   system_prompt: "You are Corvus. You speak only in riddles."

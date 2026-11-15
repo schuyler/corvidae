@@ -197,7 +197,10 @@ class _Child:
 def _write_config(tmp_path: Path) -> Path:
     """An offline config with one cli channel and a 1 s graceful bound."""
     config = {
-        "llm": {"main": {"base_url": "http://127.0.0.1:9/v1", "model": "m"}},
+        "llm": {
+            "providers": {"main": {"base_url": "http://127.0.0.1:9/v1"}},
+            "profiles": {"main": {"model": "m"}},
+        },
         "daemon": {
             "session_db": str(tmp_path / "sessions.db"),
             "shutdown_timeout": 1,

@@ -776,7 +776,7 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text, trace_id)` | reject-wins (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `should_send_response(channel, text, emission, trace_id, annotations)` | reject-wins (broadcast) | `bool \| None` | Any `False` withholds the emission; anything else sends it |
-| `resolve_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and gives its remedy: a timeout or an HTTP error asks the user to try again, while an unreachable backend the daemon has scheduled a retry for says the answer will come when the model server is back. When no retry could be scheduled (no kernel clock registered), the unreachable message falls back to asking the user to try again rather than promising a retry that will not happen. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.main.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
+| `resolve_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and gives its remedy: a timeout or an HTTP error asks the user to try again, while an unreachable backend the daemon has scheduled a retry for says the answer will come when the model server is back. When no retry could be scheduled (no kernel clock registered), the unreachable message falls back to asking the user to try again rather than promising a retry that will not happen. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.providers.<name>.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
 | `resolve_compaction(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `transform_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
 | `transform_display_text(channel, text, result_message)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input text unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
@@ -1640,7 +1640,7 @@ Registered by `SubagentPlugin` (entry point name: `subagent`).
 |------|------------|--------------|
 | `subagent` | `instructions: str`, `description: str`, `_ctx: ToolContext` | Enqueues a background task that runs a full agent loop with `instructions` as its prompt. Returns immediately with the enqueued task ID. Results are delivered via `on_notify` when the task completes. |
 
-`subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry; nesting through other tools is bounded by `tools.max_agent_depth`. The subagent calls the model as the `subagent` stage, a `chat` stage, so it uses `llm.stages.subagent`, else the default chat profile (`llm.main` by default).
+`subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry; nesting through other tools is bounded by `tools.max_agent_depth`. The subagent calls the model as the `subagent` stage, a `chat` stage, so it uses `llm.stages.subagent`, else the default chat profile (`llm.profiles.main` by default).
 
 ### RuntimeSettingsPlugin tools
 
@@ -1901,14 +1901,16 @@ Owns the `LLMClient` instance lifecycle. Entry point name: `"llm"`. Other plugin
 Implements these lifecycle hooks:
 
 - `on_start` — broadcasts `register_llm_stages` to collect the model-calling
-  stages, parses the `llm:` section (`parse_llm_config`: profiles, `extends`,
+  stages, parses the `llm:` section (`parse_llm_config`: providers, profiles, `extends`,
   `llm.defaults`, `llm.stages`), checks the stage map against the registered
   stages, creates an `LLMClient` for each profile, starts their aiohttp
-  sessions, and logs where each stage resolves (`llm stages resolved: ...`).
+  sessions, logs one INFO line per provider (`llm provider <name>: <base_url>,
+  heads <N|unbounded>, profiles ...`), and logs where each stage resolves
+  (`llm stages resolved: ...`).
 - `on_stop` — closes all aiohttp sessions.
 - `on_config_reload` — swaps no client. A reload that changes `llm:` logs a
   warning, and the change applies on restart; nothing under `llm:` is
-  hot-reloaded, `llm.main` included.
+  hot-reloaded, `llm.providers.main` included.
 
 Each created client gets a hook observer injected that fires
 `on_llm_request`/`on_llm_response` (with the client's profile and the current
@@ -1916,7 +1918,9 @@ attribution snapshot) around every chat call. `corvidae/llm.py` itself
 stays free of plugin-system imports — the observer seam is a plain object
 with async `request`/`response` methods, defined in `llm_plugin.py`.
 
-Each key under `llm:` is a **profile**. A plugin that calls a model owns one
+`llm:` holds **providers** (an endpoint plus its credentials and capacity),
+**profiles** (a model and request parameters on one provider, each built into
+its own client), `defaults` and `stages`. A plugin that calls a model owns one
 or more **stages** and names them in `register_llm_stages`:
 
 ```python
@@ -1935,10 +1939,16 @@ llm = get_dependency(self.pm, "llm", LLMPlugin)
 client = llm.get_client("summarize")   # None if the stage resolves to no profile
 main = llm.get_client()                # the main-turn client (default chat profile)
 settings = llm.profile_config("summarize")  # the stage's resolved profile settings, read-only
+provider = llm.resolve_provider("summarize")  # the provider name the stage sends to, or None
+pconf = llm.provider_config(provider)         # that provider's block (base_url, heads, ...), read-only
 ```
 
 `get_client(stage)` raises `ValueError` for a name no plugin registered, and
 profile names count: `get_client("main")` raises, so use `get_client()`.
+`profile_config` includes its provider's client settings (`base_url`,
+`api_key`, `timeout`, retries) and a `provider` name; `heads` is read only
+through `provider_config` (absent or `None` when unbounded; `{}` for an unknown
+provider). Nothing schedules on it yet.
 Resolve the client when you call it, as the stages in this repo do, not in your
 own `on_start`: hooks run concurrently, so `LLMPlugin` may not have started
 yet. The `main_client` and `background_client` properties and
@@ -1947,25 +1957,31 @@ yet. The `main_client` and `background_client` properties and
 **Config:**
 ```yaml
 llm:
-  main:                        # required unless llm.defaults.chat names another profile
-    base_url: https://api.openai.com/v1
-    model: gpt-4o
-    api_key: sk-...            # optional; can also use environment variable
-    extra_body: {}             # optional: extra fields merged into request body
-    max_retries: 3             # optional (default 3)
-    retry_base_delay: 2.0      # optional (default 2.0)
-    retry_max_delay: 60.0      # optional (default 60.0)
-    timeout: 120               # optional: request timeout in seconds
-  embedding:                   # optional — the embedding stage gets no client without it
-    kind: embedding            # required for an embedding profile
-    base_url: http://localhost:8082/v1
-    model: nomic-embed-text
-    dimensions: 768            # required
+  providers:
+    main:                      # the provider a profile uses unless it names another
+      base_url: https://api.openai.com/v1
+      api_key: sk-...          # optional; can also use environment variable
+      max_retries: 3           # optional (default 3)
+      retry_base_delay: 2.0    # optional (default 2.0)
+      retry_max_delay: 60.0    # optional (default 60.0)
+      timeout: 120             # optional: request timeout in seconds
+      # heads: 2               # optional: warm context heads; omitted means unbounded
+    embedding:
+      base_url: http://localhost:8082/v1
+  profiles:
+    main:                      # required unless llm.defaults.chat names another profile
+      model: gpt-4o
+      extra_body: {}           # optional: extra fields merged into request body
+    embedding:                 # optional — the embedding stage gets no client without it
+      provider: embedding
+      kind: embedding          # required for an embedding profile
+      model: nomic-embed-text
+      dimensions: 768          # required
   # stages: {compaction: main}   # optional: map a stage to a defined profile
 ```
 
 See [`llm`](configuration.md#llm--llm-backend) for `kind`, `extends`,
-`defaults` and `stages`.
+`heads`, `defaults` (including `defaults.provider`) and `stages`.
 
 **Without this plugin:** `Agent` and `CompactionPlugin` cannot create LLM
 clients and will raise `RuntimeError` during startup.

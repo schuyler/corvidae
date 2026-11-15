@@ -1,49 +1,58 @@
 # LLM backend — OpenAI-compatible Chat Completions API (required)
-# Every key under llm: except defaults and stages is a profile, built into its
-# own client. Main turns go to the default chat profile (llm.main unless
-# llm.defaults.chat names another). A stage sends to the profile llm.stages
-# maps it to, else to its kind's default: chat stages (compaction,
-# consolidation, rubric, appraisal, critique, subagent) to the default chat
-# profile, the embedding stage to the default embedding profile (llm.embedding
-# unless llm.defaults.embedding names another), if there is one. Only a
-# default chat profile is required. All of llm: is read at startup; a change
-# needs a restart.
+# llm: has four sections. providers: are the servers (endpoint, key, timeout,
+# retries, heads); profiles: are what to ask a server for (model, kind,
+# extra_body), each built into its own client; defaults: and stages: pick
+# profiles. A profile uses the provider it names, else llm.defaults.provider,
+# else the provider named main. Main turns go to the default chat profile
+# (llm.profiles.main unless llm.defaults.chat names another). A stage sends to
+# the profile llm.stages maps it to, else to its kind's default: chat stages
+# (compaction, consolidation, rubric, appraisal, critique, subagent) to the
+# default chat profile, the embedding stage to the default embedding profile
+# (llm.profiles.embedding unless llm.defaults.embedding names another), if
+# there is one. Only a default chat profile is required. All of llm: is read
+# at startup; a change needs a restart.
 llm:
-  main:
-    base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
-    model: llama3                     # model name as the backend expects it
-    # api_key: sk-...                 # omit for local servers
-    # api_key: "${OPENAI_API_KEY}"    # or read it from the daemon's environment (quote it)
-    # extra_body:                      # optional: provider-specific request payload extensions
-    #   id_slot: 0                      # example: llama.cpp KV cache slot for parallelism
-    #   reasoning_format: none          # example: llama.cpp returns reasoning inline (pair with raw_reasoning)
-    # raw_reasoning: false             # endpoint returns <think>…</think> inline: corvidae splits it and re-runs a
-    #                                   # reply cut off mid-reasoning; only where the template forces thinking open.
-    #                                   # Calls sending response_format drop reasoning_format and aren't split
-    #                                   # (server default must be a parsed mode, not --reasoning-format none)
-    # reasoning_reopened: truncate     # raw_reasoning only: a reply that reopens reasoning after its answer is cut
-    #                                   # there and logged; truncate sends the cut text, rerun regenerates once (main turn only)
-    # max_retries: 3                   # max retry attempts on transient errors (429, 500, 502, 503, 504)
-    # retry_base_delay: 2.0            # base delay in seconds for exponential backoff
-    # retry_max_delay: 60.0            # maximum delay cap in seconds
-    # model_not_loaded_wait: 60.0      # seconds to wait out "model is not loaded" (llama-server router)
-    # timeout: null                    # HTTP timeout in seconds per request (null means no timeout)
-  # embedding:                         # optional: embedding model for memory retrieval
-  #   kind: embedding                  # REQUIRED for an embedding profile; an omitted kind means chat
-  #   base_url: http://localhost:8082/v1  # embedding servers are usually separate endpoints
-  #   model: nomic-embed-text
-  #   dimensions: 768                  # REQUIRED: fixed vector dimension of the model
-  #   # api_key: sk-...                # omit for local servers
-  #   # api_key: "${OPENAI_API_KEY}"   # or from the environment
-  # forks:                             # any other name is a profile: here one derived from main
-  #   extends: main                    # deep overlay: mappings merge, lists and scalars replace,
-  #                                    # a child's null deletes the inherited key
-  #   extra_body:
-  #     reasoning_budget_tokens: 2048  # a fork's think budget now lives in its profile
-  #     # reasoning_effort: null       # example: delete a key main sets
+  providers:
+    main:
+      base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
+      # api_key: sk-...                 # omit for local servers
+      # api_key: "${OPENAI_API_KEY}"    # or read it from the daemon's environment (quote it)
+      # heads: 2                        # optional: how many requests the server runs at once; omitted = unbounded
+      # max_retries: 3                   # max retry attempts on transient errors (429, 500, 502, 503, 504)
+      # retry_base_delay: 2.0            # base delay in seconds for exponential backoff
+      # retry_max_delay: 60.0            # maximum delay cap in seconds
+      # model_not_loaded_wait: 60.0      # seconds to wait out "model is not loaded" (llama-server router)
+      # timeout: null                    # HTTP timeout in seconds per request (null means no timeout)
+    # embedding:                         # optional: embedding servers are usually separate endpoints
+    #   base_url: http://localhost:8082/v1
+  profiles:
+    main:
+      model: llama3                     # model name as the backend expects it
+      # provider: main                  # optional: the provider to use (default: llm.defaults.provider, else main)
+      # extra_body:                      # optional: provider-specific request payload extensions
+      #   id_slot: 0                      # example: llama.cpp KV cache slot for parallelism (a request field only; corvidae does not schedule slots)
+      #   reasoning_format: none          # example: llama.cpp returns reasoning inline (pair with raw_reasoning)
+      # raw_reasoning: false             # endpoint returns <think>…</think> inline: corvidae splits it and re-runs a
+      #                                   # reply cut off mid-reasoning; only where the template forces thinking open.
+      #                                   # Calls sending response_format drop reasoning_format and aren't split
+      #                                   # (server default must be a parsed mode, not --reasoning-format none)
+      # reasoning_reopened: truncate     # raw_reasoning only: a reply that reopens reasoning after its answer is cut
+      #                                   # there and logged; truncate sends the cut text, rerun regenerates once (main turn only)
+    # embedding:                         # optional: embedding model for memory retrieval
+    #   provider: embedding              # the provider declared above
+    #   kind: embedding                  # REQUIRED for an embedding profile; an omitted kind means chat
+    #   model: nomic-embed-text
+    #   dimensions: 768                  # REQUIRED: fixed vector dimension of the model
+    # forks:                             # any other name is a profile: here one derived from main
+    #   extends: main                    # deep overlay: mappings merge, lists and scalars replace,
+    #                                    # a child's null deletes the inherited key
+    #   extra_body:
+    #     reasoning_budget_tokens: 2048  # a fork's think budget now lives in its profile
+    #     # reasoning_effort: null       # example: delete a key main sets
   # defaults:                          # optional: each kind's default profile
   #   chat: main                       # fallback when omitted (main turns and unmapped chat stages)
-  #   embedding: embedding             # when set, the profile must exist; omitted, llm.embedding is used if defined
+  #   embedding: embedding             # when set, the profile must exist; omitted, llm.profiles.embedding is used if defined
+  #   provider: main                   # the provider a profile without one uses (fallback: the provider named main)
   # stages:                            # optional: stage -> profile (default: the kind's default)
   #   compaction: forks                # stages: compaction, subagent, consolidation, rubric,
   #   consolidation: forks             # appraisal, critique (chat); embedding (embedding)

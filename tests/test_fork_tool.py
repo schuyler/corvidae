@@ -25,10 +25,8 @@ MY_PROMPT = "I am Lex. Researcher, software engineer, and collaborator on both."
 
 BASE_CONFIG = {
     "llm": {
-        "main": {
-            "base_url": "http://localhost:8080",
-            "model": "test-model",
-        },
+        "providers": {"main": {"base_url": "http://localhost:8080"}},
+        "profiles": {"main": {"model": "test-model"}},
     },
 }
 

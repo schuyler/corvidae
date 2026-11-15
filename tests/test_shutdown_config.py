@@ -119,7 +119,7 @@ async def test_startup_with_bad_value_prints_config_error_and_exits(
 
     config_path = tmp_path / "agent.yaml"
     config_path.write_text(
-        "llm:\n  main: {base_url: http://x, model: m}\n"
+        "llm:\n  providers:\n    main: {base_url: http://x}\n  profiles:\n    main: {model: m}\n"
         f"daemon:\n  {key}: {value}\n"
     )
     # Fully mocked pm, so that without the validation start() runs to the
@@ -158,7 +158,7 @@ async def test_stop_uses_configured_graceful_bound(tmp_path, caplog):
 
     config_path = tmp_path / "agent.yaml"
     config_path.write_text(
-        "llm:\n  main: {base_url: http://x, model: m}\n"
+        "llm:\n  providers:\n    main: {base_url: http://x}\n  profiles:\n    main: {model: m}\n"
         "daemon:\n  shutdown_timeout: 0.2\n"
     )
 

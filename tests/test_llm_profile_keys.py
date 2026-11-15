@@ -11,13 +11,23 @@ import pytest
 
 from corvidae.llm_plugin import parse_llm_config
 
-MAIN = {"base_url": "http://localhost:8080", "model": "m"}
+MAIN = {"model": "m"}
+
+
+def _llm(profiles: dict, **sections: dict) -> dict:
+    """An llm: section with one provider named main, the given profiles, and
+    any defaults / stages."""
+    return {
+        "providers": {"main": {"base_url": "http://localhost:8080"}},
+        "profiles": profiles,
+        **sections,
+    }
 
 
 def test_non_string_profile_key_names_the_key():
     """A profile key that is not a string is a config error naming it."""
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": MAIN, 2: MAIN})
+        parse_llm_config(_llm({"main": MAIN, 2: MAIN}))
 
     message = str(exc.value)
     assert "2" in message
@@ -27,13 +37,13 @@ def test_non_string_profile_key_names_the_key():
 def test_non_string_profile_key_does_not_raise_type_error():
     """The failure is a ValueError, which the reload path catches."""
     with pytest.raises(ValueError):
-        parse_llm_config({"main": MAIN, 2: MAIN})
+        parse_llm_config(_llm({"main": MAIN, 2: MAIN}))
 
 
 def test_non_string_key_under_defaults_names_the_key():
     """llm.defaults is validated the same way."""
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": MAIN, "defaults": {2: "main"}})
+        parse_llm_config(_llm({"main": MAIN}, defaults={2: "main"}))
 
     message = str(exc.value)
     assert "2" in message
@@ -43,7 +53,7 @@ def test_non_string_key_under_defaults_names_the_key():
 def test_non_string_key_under_stages_names_the_key():
     """llm.stages is validated the same way."""
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": MAIN, "stages": {2: "main"}})
+        parse_llm_config(_llm({"main": MAIN}, stages={2: "main"}))
 
     message = str(exc.value)
     assert "2" in message
@@ -60,7 +70,7 @@ def test_unrelated_error_path_does_not_raise_type_error():
     on, never a TypeError.
     """
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": {**MAIN, "extends": "nope"}, 2: MAIN})
+        parse_llm_config(_llm({"main": {**MAIN, "extends": "nope"}, 2: MAIN}))
 
     # Either message is acceptable; both name what the operator must fix.
     message = str(exc.value)
@@ -76,4 +86,4 @@ def test_non_string_key_reload_is_a_value_error():
     generic watcher error instead of "reload skipped".
     """
     with pytest.raises(ValueError):
-        parse_llm_config({"main": MAIN, 2: MAIN})
+        parse_llm_config(_llm({"main": MAIN, 2: MAIN}))

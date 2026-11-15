@@ -107,7 +107,7 @@ async def test_config_watcher_reads_poll_interval_from_config(tmp_path):
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n")
 
     pm = MagicMock()
     plugin = ConfigWatcherPlugin()
@@ -117,7 +117,10 @@ async def test_config_watcher_reads_poll_interval_from_config(tmp_path):
             "_config_path": config_file,
             "_cli_overrides": {},
             "daemon": {"config_poll_interval": 5.0},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -137,7 +140,7 @@ async def test_config_watcher_poll_interval_default(tmp_path):
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n")
 
     pm = MagicMock()
     plugin = ConfigWatcherPlugin()
@@ -146,7 +149,10 @@ async def test_config_watcher_poll_interval_default(tmp_path):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -171,7 +177,7 @@ async def test_config_watcher_detects_mtime_change(tmp_path):
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n")
 
     pm = MagicMock()
     plugin = ConfigWatcherPlugin()
@@ -180,7 +186,10 @@ async def test_config_watcher_detects_mtime_change(tmp_path):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -224,7 +233,7 @@ async def test_config_watcher_no_spurious_reload_on_start(tmp_path):
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n")
 
     actual_mtime = config_file.stat().st_mtime
 
@@ -235,7 +244,10 @@ async def test_config_watcher_no_spurious_reload_on_start(tmp_path):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -251,7 +263,10 @@ async def test_config_watcher_no_spurious_reload_on_start(tmp_path):
         await plugin.on_start(config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         })
 
     assert plugin._last_mtime == actual_mtime, (
@@ -270,7 +285,7 @@ async def test_config_watcher_reloads_yaml_on_change(tmp_path):
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m1\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m1}\n")
 
     pm = MagicMock()
     pm.hook.on_config_reload.get_hookimpls.return_value = []
@@ -280,12 +295,15 @@ async def test_config_watcher_reloads_yaml_on_change(tmp_path):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m1"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m1"}},
+            },
         },
     )
 
     # Write new YAML content
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m2\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m2}\n")
 
     # Patch _dispatch_config_reload to capture what config it receives
     dispatched_configs = []
@@ -298,7 +316,7 @@ async def test_config_watcher_reloads_yaml_on_change(tmp_path):
     await plugin._reload_config()
 
     assert dispatched_configs, "_reload_config must dispatch to plugins"
-    assert dispatched_configs[0].get("llm", {}).get("main", {}).get("model") == "m2", (
+    assert dispatched_configs[0].get("llm", {}).get("profiles", {}).get("main", {}).get("model") == "m2", (
         "Reloaded config must contain updated YAML values"
     )
 
@@ -313,9 +331,9 @@ async def test_config_watcher_applies_cli_overrides_on_reload(tmp_path):
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: from-yaml\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: from-yaml}\n")
 
-    cli_overrides = {"llm": {"main": {"model": "from-cli"}}}
+    cli_overrides = {"llm": {"profiles": {"main": {"model": "from-cli"}}}}
 
     pm = MagicMock()
     pm.hook.on_config_reload.get_hookimpls.return_value = []
@@ -325,7 +343,10 @@ async def test_config_watcher_applies_cli_overrides_on_reload(tmp_path):
         config={
             "_config_path": config_file,
             "_cli_overrides": cli_overrides,
-            "llm": {"main": {"base_url": "http://localhost", "model": "from-cli"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "from-cli"}},
+            },
         },
     )
 
@@ -339,7 +360,7 @@ async def test_config_watcher_applies_cli_overrides_on_reload(tmp_path):
     await plugin._reload_config()
 
     assert dispatched_configs, "_reload_config must dispatch"
-    merged_model = dispatched_configs[0].get("llm", {}).get("main", {}).get("model")
+    merged_model = dispatched_configs[0].get("llm", {}).get("profiles", {}).get("main", {}).get("model")
     assert merged_model == "from-cli", (
         f"CLI overrides must win over YAML content after merge. Got model={merged_model!r}"
     )
@@ -362,7 +383,7 @@ async def test_config_watcher_updates_channel_registry_agent_defaults(tmp_path):
 
     config_file = tmp_path / "agent.yaml"
     config_file.write_text(
-        "agent:\n  max_turns: 5\nllm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "agent:\n  max_turns: 5\nllm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n"
     )
 
     pm = MagicMock()
@@ -374,13 +395,16 @@ async def test_config_watcher_updates_channel_registry_agent_defaults(tmp_path):
             "_config_path": config_file,
             "_cli_overrides": {},
             "agent": {"max_turns": 5},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
     # Write updated YAML with new agent defaults
     config_file.write_text(
-        "agent:\n  max_turns: 20\nllm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "agent:\n  max_turns: 20\nllm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n"
     )
 
     async def no_op_dispatch(config: dict) -> None:
@@ -409,7 +433,7 @@ async def test_config_watcher_handles_invalid_yaml(tmp_path, caplog):
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n")
 
     pm = MagicMock()
     pm.hook.on_config_reload.get_hookimpls.return_value = []
@@ -419,7 +443,10 @@ async def test_config_watcher_handles_invalid_yaml(tmp_path, caplog):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -451,14 +478,17 @@ async def test_a_non_string_llm_key_refuses_the_reload(tmp_path, caplog):
     """
     from corvidae.config_watcher import ConfigWatcherPlugin
 
-    good = "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+    good = "llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n"
     config_file = tmp_path / "agent.yaml"
     config_file.write_text(good)
 
     pm = MagicMock()
     pm.hook.on_config_reload.get_hookimpls.return_value = []
     plugin = ConfigWatcherPlugin()
-    running = {"llm": {"main": {"base_url": "http://localhost", "model": "m"}}}
+    running = {"llm": {
+        "providers": {"main": {"base_url": "http://localhost"}},
+        "profiles": {"main": {"model": "m"}},
+    }}
     await plugin.on_init(
         pm=pm,
         config={
@@ -470,7 +500,7 @@ async def test_a_non_string_llm_key_refuses_the_reload(tmp_path, caplog):
 
     # An unquoted integer profile key, which YAML reads as an int.
     config_file.write_text(
-        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n"
         "  2:\n    base_url: http://other\n    model: n\n"
     )
 
@@ -498,7 +528,7 @@ async def _reload_refused(tmp_path: Path, caplog, payload: bytes):
 
     # Start from a valid config so there is a running config to keep.
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n")
     pm = MagicMock()
     pm.hook.on_config_reload.get_hookimpls.return_value = []
     plugin = ConfigWatcherPlugin()
@@ -507,7 +537,10 @@ async def _reload_refused(tmp_path: Path, caplog, payload: bytes):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -614,7 +647,7 @@ async def test_config_watcher_rejects_invalid_agent_config(tmp_path, caplog):
 
     config_file = tmp_path / "agent.yaml"
     config_file.write_text(
-        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n"
         "agent:\n  keep_thinking_in_history: true\n"
     )
 
@@ -628,7 +661,10 @@ async def test_config_watcher_rejects_invalid_agent_config(tmp_path, caplog):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -658,7 +694,7 @@ async def test_reload_with_invalid_channels_entry_changes_nothing(tmp_path, capl
     config_file = tmp_path / "agent.yaml"
     # New file: changed agent.max_turns, changed wide entry, malformed tools.
     config_file.write_text(
-        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n"
         "agent:\n  max_turns: 99\n"
         "channels:\n"
         "  'irc:#a':\n    tools:\n      disabled: [web]\n"
@@ -688,7 +724,10 @@ async def test_reload_with_invalid_channels_entry_changes_nothing(tmp_path, capl
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -730,7 +769,7 @@ async def test_reload_with_unknown_channel_key_changes_nothing(tmp_path, caplog)
 
     config_file = tmp_path / "agent.yaml"
     config_file.write_text(
-        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n"
         "agent:\n  max_turns: 99\n"
         "channels:\n  'irc:#new':\n    max_tokens: 200\n"
     )
@@ -745,7 +784,10 @@ async def test_reload_with_unknown_channel_key_changes_nothing(tmp_path, caplog)
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
     try:
@@ -770,7 +812,7 @@ async def test_reload_with_removed_daemon_key_is_rejected(tmp_path, caplog):
 
     config_file = tmp_path / "agent.yaml"
     config_file.write_text(
-        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n"
         "agent:\n  max_turns: 10\n"
         "daemon:\n  idle_cooldown_seconds: 30\n"
     )
@@ -785,7 +827,10 @@ async def test_reload_with_removed_daemon_key_is_rejected(tmp_path, caplog):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -824,7 +869,10 @@ async def test_config_watcher_rejects_config_without_llm_main(tmp_path, caplog):
             "_config_path": config_file,
             "_cli_overrides": {},
             # Original config had llm.main
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -851,8 +899,8 @@ async def test_config_watcher_rejects_malformed_llm_section(tmp_path, caplog):
     config_file = tmp_path / "agent.yaml"
     config_file.write_text(
         "llm:\n"
-        "  main:\n    base_url: http://localhost\n    model: m\n"
-        "  forks:\n    extends: nope\n"
+        "  providers:\n    main: {base_url: http://localhost}\n"
+        "  profiles:\n    main: {model: m}\n    forks: {extends: nope}\n"
     )
 
     pm = MagicMock()
@@ -863,7 +911,10 @@ async def test_config_watcher_rejects_malformed_llm_section(tmp_path, caplog):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -878,7 +929,7 @@ async def test_config_watcher_rejects_malformed_llm_section(tmp_path, caplog):
         await plugin._reload_config()
 
     assert not dispatched, "A malformed llm section must not be dispatched"
-    assert "llm.forks.extends" in caplog.text
+    assert "llm.profiles.forks.extends" in caplog.text
 
 
 async def test_config_watcher_accepts_llm_section_with_defaults_chat_and_no_main(tmp_path):
@@ -889,7 +940,8 @@ async def test_config_watcher_accepts_llm_section_with_defaults_chat_and_no_main
     config_file = tmp_path / "agent.yaml"
     config_file.write_text(
         "llm:\n"
-        "  foo:\n    base_url: http://localhost\n    model: m\n"
+        "  providers:\n    main: {base_url: http://localhost}\n"
+        "  profiles:\n    foo: {model: m}\n"
         "  defaults:\n    chat: foo\n"
     )
 
@@ -901,8 +953,11 @@ async def test_config_watcher_accepts_llm_section_with_defaults_chat_and_no_main
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"foo": {"base_url": "http://localhost", "model": "m"},
-                    "defaults": {"chat": "foo"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"foo": {"model": "m"}},
+                "defaults": {"chat": "foo"},
+            },
         },
     )
 
@@ -928,7 +983,7 @@ async def test_config_watcher_on_stop_cancels_task(tmp_path):
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n")
 
     pm = MagicMock()
     plugin = ConfigWatcherPlugin()
@@ -937,7 +992,10 @@ async def test_config_watcher_on_stop_cancels_task(tmp_path):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -972,7 +1030,7 @@ async def test_config_watcher_per_plugin_error_isolation(tmp_path, caplog):
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n")
 
     # Create two mock hookimpls: first raises, second succeeds
     received_configs = []
@@ -1005,11 +1063,17 @@ async def test_config_watcher_per_plugin_error_isolation(tmp_path, caplog):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
-    test_config = {"llm": {"main": {"base_url": "http://localhost", "model": "m"}}}
+    test_config = {"llm": {
+        "providers": {"main": {"base_url": "http://localhost"}},
+        "profiles": {"main": {"model": "m"}},
+    }}
 
     with caplog.at_level(logging.ERROR, logger="corvidae.config_watcher"):
         await plugin._dispatch_config_reload(test_config)
@@ -1034,7 +1098,7 @@ async def test_dispatch_config_reload_filters_kwargs_by_argnames(tmp_path):
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n")
 
     called = []
 
@@ -1056,13 +1120,19 @@ async def test_dispatch_config_reload_filters_kwargs_by_argnames(tmp_path):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
     # Must not raise TypeError
     await plugin._dispatch_config_reload(
-        {"llm": {"main": {"base_url": "http://localhost", "model": "m"}}}
+        {"llm": {
+            "providers": {"main": {"base_url": "http://localhost"}},
+            "profiles": {"main": {"model": "m"}},
+        }}
     )
 
     assert called, "Plugin with no 'config' arg must still be called"
@@ -1079,12 +1149,18 @@ async def test_llm_plugin_on_config_reload_warns_and_keeps_client_on_change(capl
     from corvidae.llm_plugin import LLMPlugin
 
     plugin = LLMPlugin(pm=None)
-    stub_llm_config(plugin, {"main": {"base_url": "http://old", "model": "old-model"}})
+    stub_llm_config(plugin, {
+        "providers": {"main": {"base_url": "http://old"}},
+        "profiles": {"main": {"model": "old-model"}},
+    })
 
     old_client = MagicMock(name="old_client")
     plugin._clients["main"] = old_client
 
-    new_config = {"llm": {"main": {"base_url": "http://new", "model": "new-model"}}}
+    new_config = {"llm": {
+        "providers": {"main": {"base_url": "http://new"}},
+        "profiles": {"main": {"model": "new-model"}},
+    }}
 
     with patch.object(LLMPlugin, "_create_client") as create:
         with caplog.at_level(logging.WARNING, logger="corvidae.llm_plugin"):
@@ -1100,7 +1176,10 @@ async def test_llm_plugin_on_config_reload_no_change_no_warning(caplog):
     """A reload that leaves the llm section unchanged is silent."""
     from corvidae.llm_plugin import LLMPlugin
 
-    same_section = {"main": {"base_url": "http://localhost", "model": "m"}}
+    same_section = {
+        "providers": {"main": {"base_url": "http://localhost"}},
+        "profiles": {"main": {"model": "m"}},
+    }
     plugin = LLMPlugin(pm=None)
     stub_llm_config(plugin, same_section)
 
@@ -1123,14 +1202,20 @@ async def test_compaction_plugin_on_config_reload_updates_threshold():
     plugin = CompactionPlugin(pm=None)
     await plugin.on_init(
         pm=None,
-        config={"agent": {"compaction_threshold": 0.8}, "llm": {"main": {"base_url": "http://localhost", "model": "m"}}},
+        config={"agent": {"compaction_threshold": 0.8}, "llm": {
+            "providers": {"main": {"base_url": "http://localhost"}},
+            "profiles": {"main": {"model": "m"}},
+        }},
     )
 
     assert plugin._compaction_threshold == 0.8
 
     await plugin.on_config_reload(config={
         "agent": {"compaction_threshold": 0.9},
-        "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+        "llm": {
+            "providers": {"main": {"base_url": "http://localhost"}},
+            "profiles": {"main": {"model": "m"}},
+        },
     })
 
     assert plugin._compaction_threshold == 0.9, (
@@ -1233,7 +1318,10 @@ async def test_agent_on_config_reload_reborrow_llm_client():
     plugin._client = old_client
     plugin._mark_started()
 
-    await plugin.on_config_reload(config={"agent": {}, "llm": {"main": {"base_url": "http://localhost", "model": "m"}}})
+    await plugin.on_config_reload(config={"agent": {}, "llm": {
+        "providers": {"main": {"base_url": "http://localhost"}},
+        "profiles": {"main": {"model": "m"}},
+    }})
 
     assert plugin._client is new_mock_client, (
         "Agent.on_config_reload must re-borrow _client from LLMPlugin"
@@ -1251,7 +1339,7 @@ async def test_config_watcher_reads_config_path_from_reserved_key(tmp_path):
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n")
 
     pm = MagicMock()
     plugin = ConfigWatcherPlugin()
@@ -1260,7 +1348,10 @@ async def test_config_watcher_reads_config_path_from_reserved_key(tmp_path):
         config={
             "_config_path": config_file,
             "_cli_overrides": {"llm": {"main": {"api_key": "override-key"}}},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -1310,7 +1401,7 @@ async def test_config_watcher_on_start_creates_watcher_task(tmp_path):
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
-    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m\n")
+    config_file.write_text("llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n")
 
     pm = MagicMock()
     plugin = ConfigWatcherPlugin()
@@ -1319,7 +1410,10 @@ async def test_config_watcher_on_start_creates_watcher_task(tmp_path):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -1336,7 +1430,10 @@ async def test_config_watcher_on_start_creates_watcher_task(tmp_path):
     await plugin.on_start(config={
         "_config_path": config_file,
         "_cli_overrides": {},
-        "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+        "llm": {
+            "providers": {"main": {"base_url": "http://localhost"}},
+            "profiles": {"main": {"model": "m"}},
+        },
     })
 
     assert plugin._watcher_task is not None, (
@@ -1362,7 +1459,7 @@ async def test_reload_with_bad_tools_timeouts_is_rejected(tmp_path, caplog):
 
     config_file = tmp_path / "agent.yaml"
     config_file.write_text(
-        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n"
         "tools:\n  timeouts: [a]\n"
     )
 
@@ -1376,7 +1473,10 @@ async def test_reload_with_bad_tools_timeouts_is_rejected(tmp_path, caplog):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -1409,7 +1509,7 @@ async def test_reload_with_bad_read_file_window_fraction_is_rejected(tmp_path, c
 
     config_file = tmp_path / "agent.yaml"
     config_file.write_text(
-        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n"
         "tools:\n  read_file_window_fraction: 1.5\n"
     )
 
@@ -1422,7 +1522,10 @@ async def test_reload_with_bad_read_file_window_fraction_is_rejected(tmp_path, c
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -1450,7 +1553,7 @@ async def test_reload_with_bad_exit_timeout_is_rejected(tmp_path, caplog):
 
     config_file = tmp_path / "agent.yaml"
     config_file.write_text(
-        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n"
         "daemon:\n  exit_timeout: -1\n"
     )
 
@@ -1463,7 +1566,10 @@ async def test_reload_with_bad_exit_timeout_is_rejected(tmp_path, caplog):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -1492,7 +1598,7 @@ async def test_reload_with_bad_shutdown_timeout_is_rejected(tmp_path, caplog):
 
     config_file = tmp_path / "agent.yaml"
     config_file.write_text(
-        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m}\n"
         "daemon:\n  shutdown_timeout: 0\n"
     )
 
@@ -1505,7 +1611,10 @@ async def test_reload_with_bad_shutdown_timeout_is_rejected(tmp_path, caplog):
         config={
             "_config_path": config_file,
             "_cli_overrides": {},
-            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m"}},
+            },
         },
     )
 
@@ -1646,7 +1755,10 @@ class TestRestartOnlyWarning:
         cfg.write_text(
             yaml.safe_dump(
                 {
-                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "llm": {
+                        "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+                        "profiles": {"main": {"model": "m"}},
+                    },
                     "memory": {"retrieval": {"bands": [1, 2, 3]}},
                 }
             )
@@ -1655,7 +1767,10 @@ class TestRestartOnlyWarning:
         watcher.config = {
             "_config_path": str(cfg),
             "_base_dir": str(tmp_path),
-            "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+                "profiles": {"main": {"model": "m"}},
+            },
             "memory": {"retrieval": {"bands": [1, 2, 4]}},
         }
 
@@ -1665,7 +1780,10 @@ class TestRestartOnlyWarning:
             watcher._warn_restart_only_changes(
                 {
                     "_config_path": str(cfg),
-                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "llm": {
+                        "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+                        "profiles": {"main": {"model": "m"}},
+                    },
                     "memory": {"retrieval": {"bands": [1, 2, 3]}},
                 }
             )
@@ -1682,7 +1800,10 @@ class TestRestartOnlyWarning:
         cfg.write_text(
             yaml.safe_dump(
                 {
-                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "llm": {
+                        "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+                        "profiles": {"main": {"model": "m"}},
+                    },
                     "agent": {"compaction_threshold": 0.9},
                 }
             )
@@ -1691,7 +1812,10 @@ class TestRestartOnlyWarning:
         watcher.config = {
             "_config_path": str(cfg),
             "_base_dir": str(tmp_path),
-            "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+                "profiles": {"main": {"model": "m"}},
+            },
             "agent": {"compaction_threshold": 0.5},
         }
 
@@ -1699,7 +1823,10 @@ class TestRestartOnlyWarning:
             watcher._warn_restart_only_changes(
                 {
                     "_config_path": str(cfg),
-                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "llm": {
+                        "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+                        "profiles": {"main": {"model": "m"}},
+                    },
                     "agent": {"compaction_threshold": 0.9},
                 }
             )
@@ -1827,7 +1954,10 @@ class TestReloadableKeyRegistry:
         cfg.write_text(
             yaml.safe_dump(
                 {
-                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "llm": {
+                        "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+                        "profiles": {"main": {"model": "m"}},
+                    },
                     "memory": {"retrieval": {"bands": [1, 2, 3]}},
                 }
             )
@@ -1838,7 +1968,10 @@ class TestReloadableKeyRegistry:
         watcher.config = {
             "_config_path": str(cfg),
             "_base_dir": str(tmp_path),
-            "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+                "profiles": {"main": {"model": "m"}},
+            },
             "memory": {"retrieval": {"bands": [9, 9, 9]}},
         }
 
