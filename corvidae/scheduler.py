@@ -418,9 +418,14 @@ class JobSpec:
         a reload recomputes next_fire_at only when it actually changed."""
         if self.cron is not None:
             return f"cron={self.cron};tz={tz_name}"
+        # `weekday=` appears only for a weekday job, so a spec stored by an
+        # older corvidae stays byte-identical and `_sync_jobs` does not see a
+        # change and re-anchor every job on the first start after an upgrade
+        # (#770 review). Reading tolerates the key's absence (see `_parse`).
+        weekday = f"weekday={self.weekday};" if self.weekday is not None else ""
         return (
             f"every={self.interval_seconds!r};at={self.at or ''};"
-            f"weekday={self.weekday};tz={tz_name}"
+            f"{weekday}tz={tz_name}"
         )
 
     def first_fire(self, now: float, tz: tzinfo) -> float:

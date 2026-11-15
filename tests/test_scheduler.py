@@ -369,6 +369,40 @@ class TestConfigSync:
         (moved,) = await e.rows()
         assert datetime.fromtimestamp(moved.next_fire_at, LA).hour == 9
 
+    async def test_a_row_in_the_older_spec_format_is_not_rescheduled(self, memdb):
+        """An upgrade must not re-anchor every job (#770 review).
+
+        Main stores `every=86400.0;at=;tz=UTC`. A spec that added `weekday=None`
+        to every job meant `row.schedule_spec != schedule_spec` on the first
+        sync after upgrading, so each job was re-anchored from now — a 1d job due
+        in an hour moved a day out, and a job that came due while the daemon was
+        down lost its catch-up fire.
+        """
+        e = await Env(memdb, sched_config(jobs=[JOB])).init()
+        (row,) = await e.rows()
+        # The spec main writes for this job: no `weekday=` key at all.
+        assert "weekday=" not in row.schedule_spec, row.schedule_spec
+        assert row.schedule_spec.startswith("every=86400.0;at=08:30;tz=")
+        due_soon = e.clock.now() + 3600
+        await e.db.execute(
+            "UPDATE schedule SET next_fire_at = ? WHERE id = ?", (due_soon, row.id),
+        )
+        await e.db.commit()
+
+        await e.sched.on_config_reload(sched_config(jobs=[JOB]))
+
+        (after,) = await e.rows()
+        assert after.next_fire_at == due_soon, (
+            "a stored spec that matches the current one must not re-anchor"
+        )
+
+    async def test_a_weekday_job_names_its_weekday_in_the_spec(self, memdb):
+        """The key appears only where it is meaningful, so old rows stay equal."""
+        job = dict(JOB, every="7d", at="08:30", weekday="friday")
+        e = await Env(memdb, sched_config(jobs=[job])).init()
+        (row,) = await e.rows()
+        assert "weekday=4;" in row.schedule_spec, row.schedule_spec
+
     async def test_removed_job_is_disabled_and_stays_disabled(self, memdb):
         e = await Env(memdb, sched_config(jobs=[JOB])).init()
         await e.sched.on_config_reload(sched_config(jobs=[]))
