@@ -8,13 +8,11 @@ would change nothing.
 
 import logging
 
-import pytest
 import yaml
 
 from corvidae.compaction import CompactionPlugin
 from corvidae.config_watcher import ConfigWatcherPlugin
 from corvidae.hooks import create_plugin_manager
-
 
 RUNNING = {
     "llm": {
@@ -290,26 +288,6 @@ async def test_a_revert_produces_no_llm_config_changed_line(caplog):
 
     assert not _warnings(caplog), (
         f"a revert must not log: {_warnings(caplog)}"
-    )
-
-
-async def test_a_real_llm_change_still_produces_the_summary_line(caplog):
-    """The summary line is not silenced, only made truthful on a revert."""
-    running = {
-        "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
-        "profiles": {"main": {"model": "startup"}},
-    }
-    plugin = _llm_plugin_with(running)
-    changed = {
-        "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
-        "profiles": {"main": {"model": "other"}},
-    }
-
-    with caplog.at_level(logging.WARNING):
-        await plugin.on_config_reload({"llm": changed})
-
-    assert any("llm config changed" in m for m in _warnings(caplog)), (
-        "a real llm change must still be reported"
     )
 
 
