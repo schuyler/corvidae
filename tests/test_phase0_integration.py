@@ -61,7 +61,10 @@ async def _build_stack():
     plugin, channel, db = await build_plugin_and_channel()
     pm = plugin.pm
 
-    config = {"llm": {"main": {"base_url": "http://test", "model": "test-model"}}}
+    config = {"llm": {
+        "providers": {"main": {"base_url": "http://test"}},
+        "profiles": {"main": {"model": "test-model"}},
+    }}
     llm = LLMPlugin()
     pm.register(llm, name="llm")
     await llm.on_init(pm, config)

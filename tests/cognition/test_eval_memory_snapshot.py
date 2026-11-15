@@ -55,7 +55,10 @@ TEXT_C = "alpha eta theta iota"
 
 # A chat-only config: no embedding profile, so retrieval is FTS5-only.
 FTS_CONFIG: dict[str, Any] = {
-    "llm": {"main": {"base_url": "http://localhost:8080", "model": "chat"}},
+    "llm": {
+        "providers": {"main": {"base_url": "http://localhost:8080"}},
+        "profiles": {"main": {"model": "chat"}},
+    },
 }
 
 
@@ -334,7 +337,7 @@ def test_snapshot_reports_fts_fallback_on_encoder_mismatch(
     source = tmp_path / "sessions.db"
     ids = build_source(source, [TEXT_A, TEXT_B])
     other = copy.deepcopy(EMBED_CONFIG)
-    other["llm"]["embedding"]["model"] = "other-embedder"
+    other["llm"]["profiles"]["embedding"]["model"] = "other-embedder"
     config = write_config(tmp_path / "agent.yaml", other)
     labels = write_labels(tmp_path / "labels.json", [
         {"text": TEXT_A, "relevant": [ids[0]]},

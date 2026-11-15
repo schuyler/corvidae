@@ -288,8 +288,10 @@ class TestStopBoundFromConfig:
         mock_pm.get_plugin.return_value = mock_agent
 
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"llm": {"main": {"base_url": "http://localhost:8080",
-                                        "model": "m"}},
+            yaml.dump({"llm": {
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "m"}},
+            },
                        "daemon": {"shutdown_timeout": 1}}, f)
             config_path = f.name
         caplog.set_level(logging.DEBUG)

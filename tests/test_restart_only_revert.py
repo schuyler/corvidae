@@ -17,7 +17,10 @@ from corvidae.hooks import create_plugin_manager
 
 
 RUNNING = {
-    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "startup"}},
+    "llm": {
+        "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+        "profiles": {"main": {"model": "startup"}},
+    },
 }
 
 
@@ -41,13 +44,13 @@ def _watcher(tmp_path, running: dict) -> ConfigWatcherPlugin:
 
 
 def _new(**overrides) -> dict:
-    """A reloaded config: the running one with ``llm.main.model`` replaced."""
+    """A reloaded config: the running one with ``llm.profiles.main.model`` replaced."""
     return {
         "_config_path": "agent.yaml",
-        "llm": {"main": {
-            "base_url": "http://localhost:8080/v1",
-            "model": overrides.get("model", "startup"),
-        }},
+        "llm": {
+            "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+            "profiles": {"main": {"model": overrides.get("model", "startup")}},
+        },
     }
 
 
@@ -67,13 +70,13 @@ def test_reverting_a_key_to_the_running_value_does_not_warn(tmp_path, caplog):
 
     with caplog.at_level(logging.WARNING):
         watcher._warn_restart_only_changes(_new(model="changed"))
-        assert [m for m in _warnings(caplog) if "llm.main.model" in m], (
+        assert [m for m in _warnings(caplog) if "llm.profiles.main.model" in m], (
             "reload 1 must report the change"
         )
 
         caplog.clear()
         watcher._warn_restart_only_changes(_new(model="startup"))
-        reverted = [m for m in _warnings(caplog) if "llm.main.model" in m]
+        reverted = [m for m in _warnings(caplog) if "llm.profiles.main.model" in m]
 
     assert not reverted, (
         f"a key reverted to its running value must not warn; got {reverted}"
@@ -88,7 +91,7 @@ def test_a_pending_key_is_not_re_reported_while_it_stays_pending(tmp_path, caplo
         watcher._warn_restart_only_changes(_new(model="changed"))
         caplog.clear()
         watcher._warn_restart_only_changes(_new(model="changed"))
-        repeated = [m for m in _warnings(caplog) if "llm.main.model" in m]
+        repeated = [m for m in _warnings(caplog) if "llm.profiles.main.model" in m]
 
     assert not repeated, f"a still-pending key must not be re-reported: {repeated}"
 
@@ -101,7 +104,7 @@ def test_a_new_pending_value_is_reported_again(tmp_path, caplog):
         watcher._warn_restart_only_changes(_new(model="first"))
         caplog.clear()
         watcher._warn_restart_only_changes(_new(model="second"))
-        again = [m for m in _warnings(caplog) if "llm.main.model" in m]
+        again = [m for m in _warnings(caplog) if "llm.profiles.main.model" in m]
 
     assert again, "a changed pending value must be reported"
 
@@ -115,7 +118,7 @@ def test_a_reverted_key_can_warn_again_after_a_new_edit(tmp_path, caplog):
         watcher._warn_restart_only_changes(_new(model="startup"))  # reverted
         caplog.clear()
         watcher._warn_restart_only_changes(_new(model="third"))
-        again = [m for m in _warnings(caplog) if "llm.main.model" in m]
+        again = [m for m in _warnings(caplog) if "llm.profiles.main.model" in m]
 
     assert again, "after a revert, a fresh edit must be reported"
 
@@ -132,9 +135,12 @@ def test_a_key_removed_from_the_file_is_reported(tmp_path, caplog):
         # The reloaded file no longer names `model` at all.
         watcher._warn_restart_only_changes(
             {"_config_path": "agent.yaml",
-             "llm": {"main": {"base_url": "http://localhost:8080/v1"}}}
+             "llm": {
+                 "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+                 "profiles": {"main": {}},
+             }}
         )
-        messages = [m for m in _warnings(caplog) if "llm.main.model" in m]
+        messages = [m for m in _warnings(caplog) if "llm.profiles.main.model" in m]
 
     assert messages, "deleting a restart-only key must be reported"
 
@@ -143,24 +149,30 @@ def test_a_key_name_containing_a_dot_is_reported(tmp_path, caplog):
     """A profile name may contain a dot (harness models are `qwen3.6:35b`).
 
     The changed path is walked by key name, not by splitting a dotted string,
-    so `llm.qwen3.6.model` resolves and every change to it is reported.
+    so `llm.profiles.qwen3.6.model` resolves and every change to it is reported.
     Splitting it made the lookup read `_ABSENT` each time, which still lets
     the first change through, so one reload cannot tell the two apart: the
     second and third reloads are the ones the bug silenced (#473).
     """
-    running = {"llm": {"qwen3.6": {"base_url": "http://h:1", "model": "a"}}}
+    running = {"llm": {
+        "providers": {"main": {"base_url": "http://h:1"}},
+        "profiles": {"qwen3.6": {"model": "a"}},
+    }}
     watcher = _watcher(tmp_path, running)
 
     def reload_with(model: str) -> dict:
         return {"_config_path": "agent.yaml",
-                "llm": {"qwen3.6": {"base_url": "http://h:1", "model": model}}}
+                "llm": {
+                    "providers": {"main": {"base_url": "http://h:1"}},
+                    "profiles": {"qwen3.6": {"model": model}},
+                }}
 
     reported = []
     with caplog.at_level(logging.WARNING):
         for model in ("b", "c", "d"):
             caplog.clear()
             watcher._warn_restart_only_changes(reload_with(model))
-            reported.append([m for m in _warnings(caplog) if "llm.qwen3.6.model" in m])
+            reported.append([m for m in _warnings(caplog) if "llm.profiles.qwen3.6.model" in m])
 
     assert [bool(r) for r in reported] == [True, True, True], (
         f"every change to a dotted profile name must be reported; got {reported}"
@@ -172,7 +184,7 @@ def test_an_unchanged_file_does_not_warn(tmp_path, caplog):
 
     The reloaded config is the running one and nothing else: a fixture that
     added a key would produce a real warning for it, and filtering on
-    `llm.main.model` would then hide that warning and report green (review).
+    `llm.profiles.main.model` would then hide that warning and report green (review).
     """
     watcher = _watcher(tmp_path, RUNNING)
 
@@ -190,12 +202,18 @@ def test_a_non_string_key_reports_every_change(tmp_path, caplog):
     made `_leaf_value` miss the key and return `_ABSENT` every time, so only
     the first change was reported and later ones compared equal to it.
     """
-    running = {"llm": {1: {"base_url": "http://h:1", "model": "a"}}}
+    running = {"llm": {
+        "providers": {"main": {"base_url": "http://h:1"}},
+        "profiles": {1: {"model": "a"}},
+    }}
     watcher = _watcher(tmp_path, running)
 
     def reload_with(model: str) -> dict:
         return {"_config_path": "agent.yaml",
-                "llm": {1: {"base_url": "http://h:1", "model": model}}}
+                "llm": {
+                    "providers": {"main": {"base_url": "http://h:1"}},
+                    "profiles": {1: {"model": model}},
+                }}
 
     reported = []
     with caplog.at_level(logging.WARNING):
@@ -249,9 +267,15 @@ async def test_a_revert_produces_no_llm_config_changed_line(caplog):
     from the "nothing changed" case, and would pass even if `LLMPlugin` diffed
     against the previous reload -- the bug #473 exists to prevent (review).
     """
-    running = {"main": {"base_url": "http://localhost:8080/v1", "model": "startup"}}
+    running = {
+        "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+        "profiles": {"main": {"model": "startup"}},
+    }
     plugin = _llm_plugin_with(running)
-    changed = {"main": {"base_url": "http://localhost:8080/v1", "model": "other"}}
+    changed = {
+        "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+        "profiles": {"main": {"model": "other"}},
+    }
 
     with caplog.at_level(logging.WARNING):
         # Reload 1: a real change, which must be reported.
@@ -271,9 +295,15 @@ async def test_a_revert_produces_no_llm_config_changed_line(caplog):
 
 async def test_a_real_llm_change_still_produces_the_summary_line(caplog):
     """The summary line is not silenced, only made truthful on a revert."""
-    running = {"main": {"base_url": "http://localhost:8080/v1", "model": "startup"}}
+    running = {
+        "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+        "profiles": {"main": {"model": "startup"}},
+    }
     plugin = _llm_plugin_with(running)
-    changed = {"main": {"base_url": "http://localhost:8080/v1", "model": "other"}}
+    changed = {
+        "providers": {"main": {"base_url": "http://localhost:8080/v1"}},
+        "profiles": {"main": {"model": "other"}},
+    }
 
     with caplog.at_level(logging.WARNING):
         await plugin.on_config_reload({"llm": changed})

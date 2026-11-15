@@ -13,11 +13,23 @@ import pytest
 
 from helpers import LLMResponseRecorder, start_llm_plugin
 
-MAIN = {"base_url": "http://main.test/v1", "model": "main-m"}
+MAIN = {"model": "main-m"}
 EMBEDDING = {
-    "base_url": "http://embed.test/v1", "model": "embed-m",
+    "provider": "embed", "model": "embed-m",
     "kind": "embedding", "dimensions": 8,
 }
+# Endpoints the profiles above run on: main by default, embed by name.
+PROVIDERS = {
+    "main": {"base_url": "http://main.test/v1"},
+    "embed": {"base_url": "http://embed.test/v1"},
+}
+
+
+def llm_section(profiles: dict, **sections: dict) -> dict:
+    """An llm: section with the shared PROVIDERS, the given profiles, and any
+    defaults / stages."""
+    return {"providers": PROVIDERS, "profiles": profiles, **sections}
+
 STAGES = {
     "compaction": "chat",
     "consolidation": "chat",
@@ -62,13 +74,18 @@ def test_parse_resolves_a_child_over_its_base():
     from corvidae.llm_plugin import parse_llm_config
 
     llm = {
-        "main": {**MAIN, "max_retries": 3,
-                 "extra_body": {"reasoning_effort": "xhigh", "stop": ["a"]}},
-        "forks": {
-            "extends": "main",
-            "model": "forks-m",
-            "max_retries": None,
-            "extra_body": {"reasoning_effort": None, "stop": ["b"], "reasoning_budget_tokens": 8192},
+        "providers": {"main": {"base_url": "http://main.test/v1"}},
+        "profiles": {
+            "main": {
+                **MAIN, "raw_reasoning": True,
+                "extra_body": {"reasoning_effort": "xhigh", "stop": ["a"]},
+            },
+            "forks": {
+                "extends": "main",
+                "model": "forks-m",
+                "raw_reasoning": None,
+                "extra_body": {"reasoning_effort": None, "stop": ["b"], "reasoning_budget_tokens": 8192},
+            },
         },
     }
 
@@ -76,6 +93,7 @@ def test_parse_resolves_a_child_over_its_base():
 
     assert forks == {
         "base_url": "http://main.test/v1",
+        "provider": "main",
         "model": "forks-m",
         "kind": "chat",
         "extra_body": {"stop": ["b"], "reasoning_budget_tokens": 8192},
@@ -92,10 +110,10 @@ def test_extends_unknown_base_names_the_key():
     from corvidae.llm_plugin import parse_llm_config
 
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": MAIN, "forks": {"extends": "nope"}})
+        parse_llm_config(llm_section({"main": MAIN, "forks": {"extends": "nope"}}))
 
     message = str(exc.value)
-    assert "llm.forks.extends" in message
+    assert "llm.profiles.forks.extends" in message
     assert "nope" in message
 
 
@@ -103,9 +121,9 @@ def test_extends_cycle_names_the_key():
     """R2: two profiles that extend each other."""
     from corvidae.llm_plugin import parse_llm_config
 
-    llm = {"main": MAIN, "a": {"extends": "b"}, "b": {"extends": "a"}}
+    llm = llm_section({"main": MAIN, "a": {"extends": "b"}, "b": {"extends": "a"}})
 
-    with pytest.raises(ValueError, match=r"llm\.(a|b)\.extends forms a cycle"):
+    with pytest.raises(ValueError, match=r"llm\.profiles\.(a|b)\.extends forms a cycle"):
         parse_llm_config(llm)
 
 
@@ -114,10 +132,10 @@ def test_unknown_kind_names_the_key():
     from corvidae.llm_plugin import parse_llm_config
 
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": MAIN, "rr": {**MAIN, "kind": "rerank"}})
+        parse_llm_config(llm_section({"main": MAIN, "rr": {**MAIN, "kind": "rerank"}}))
 
     message = str(exc.value)
-    assert "llm.rr.kind" in message
+    assert "llm.profiles.rr.kind" in message
     assert "'rerank'" in message
     assert "chat" in message and "embedding" in message
 
@@ -126,10 +144,10 @@ def test_non_string_kind_names_the_key():
     from corvidae.llm_plugin import parse_llm_config
 
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": MAIN, "rr": {**MAIN, "kind": ["chat"]}})
+        parse_llm_config(llm_section({"main": MAIN, "rr": {**MAIN, "kind": ["chat"]}}))
 
     message = str(exc.value)
-    assert "llm.rr.kind" in message
+    assert "llm.profiles.rr.kind" in message
     assert "['chat']" in message
     assert "one of chat, embedding" in message
 
@@ -141,9 +159,9 @@ def test_embedding_profile_without_dimensions_names_the_key():
     emb = {key: value for key, value in EMBEDDING.items() if key != "dimensions"}
 
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": MAIN, "embedding": emb})
+        parse_llm_config(llm_section({"main": MAIN, "embedding": emb}))
 
-    assert "llm.embedding.dimensions" in str(exc.value)
+    assert "llm.profiles.embedding.dimensions" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +172,7 @@ def test_embedding_profile_without_dimensions_names_the_key():
 def test_block_without_kind_resolves_as_chat():
     from corvidae.llm_plugin import parse_llm_config
 
-    assert parse_llm_config({"main": MAIN}).profiles["main"]["kind"] == "chat"
+    assert parse_llm_config(llm_section({"main": MAIN})).profiles["main"]["kind"] == "chat"
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +184,7 @@ def test_defaults_chat_names_the_main_turn_profile_without_main():
     """R5 (parse): defaults.chat picks the chat default; no main is needed."""
     from corvidae.llm_plugin import parse_llm_config
 
-    config = parse_llm_config({"foo": MAIN, "defaults": {"chat": "foo"}})
+    config = parse_llm_config(llm_section({"foo": MAIN}, defaults={"chat": "foo"}))
 
     assert config.defaults["chat"] == "foo"
     assert config.profile_for(None, "chat") == "foo"
@@ -175,8 +193,11 @@ def test_defaults_chat_names_the_main_turn_profile_without_main():
 async def test_daemon_boots_with_defaults_chat_and_no_main_profile(monkeypatch):
     """R5: the plugin starts without llm.main and main turns go to the
     profile defaults.chat names."""
-    llm = {"foo": {"base_url": "http://foo.test/v1", "model": "foo-m"},
-           "defaults": {"chat": "foo"}}
+    llm = {
+        "providers": {"main": {"base_url": "http://foo.test/v1"}},
+        "profiles": {"foo": {"model": "foo-m"}},
+        "defaults": {"chat": "foo"},
+    }
     plugin, posts = await start_llm_plugin(monkeypatch, llm, STAGES)
     try:
         await plugin.get_client().chat(MESSAGES)
@@ -196,8 +217,11 @@ async def test_agent_main_turn_client_is_the_default_chat_profile(monkeypatch):
     from corvidae.tool import ToolRegistry
     from corvidae.tool_collection import ToolCollectionPlugin
 
-    llm = {"foo": {"base_url": "http://foo.test/v1", "model": "foo-m"},
-           "defaults": {"chat": "foo"}}
+    llm = {
+        "providers": {"main": {"base_url": "http://foo.test/v1"}},
+        "profiles": {"foo": {"model": "foo-m"}},
+        "defaults": {"chat": "foo"},
+    }
     pm = create_plugin_manager()
     pm.register(ChannelRegistry({}), name="registry")
     tools = ToolCollectionPlugin(pm)
@@ -222,17 +246,17 @@ def test_no_main_and_no_defaults_chat_is_an_error():
     from corvidae.llm_plugin import parse_llm_config
 
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"foo": MAIN})
+        parse_llm_config(llm_section({"foo": MAIN}))
 
     assert str(exc.value) == (
-        "no default chat profile: define llm.main or set llm.defaults.chat"
+        "no default chat profile: define llm.profiles.main or set llm.defaults.chat"
     )
 
 
 def test_chat_default_falls_back_to_main_without_defaults():
     from corvidae.llm_plugin import parse_llm_config
 
-    config = parse_llm_config({"main": MAIN, "foo": {**MAIN, "model": "foo-m"}})
+    config = parse_llm_config(llm_section({"main": MAIN, "foo": {**MAIN, "model": "foo-m"}}))
 
     assert config.defaults["chat"] == "main"
     assert config.profile_for(None, "chat") == "main"
@@ -242,7 +266,7 @@ async def test_embedding_stage_without_a_default_profile_warns(monkeypatch, capl
     """R5: a registered stage whose kind has no default is reported at
     startup, naming the stage."""
     with caplog.at_level(logging.WARNING, logger="corvidae.llm_plugin"):
-        plugin, _ = await start_llm_plugin(monkeypatch, {"main": MAIN}, STAGES)
+        plugin, _ = await start_llm_plugin(monkeypatch, llm_section({"main": MAIN}), STAGES)
     await plugin.on_stop()
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -257,7 +281,7 @@ async def test_embedding_stage_without_a_default_profile_warns(monkeypatch, capl
 def test_unmapped_stage_resolves_to_its_kinds_default():
     from corvidae.llm_plugin import parse_llm_config
 
-    config = parse_llm_config({"main": MAIN, "embedding": EMBEDDING})
+    config = parse_llm_config(llm_section({"main": MAIN, "embedding": EMBEDDING}))
 
     assert config.profile_for("compaction", "chat") == "main"
     assert config.profile_for("vectors", "embedding") == "embedding"
@@ -267,7 +291,7 @@ def test_stage_mapped_to_an_unknown_profile_names_the_key():
     from corvidae.llm_plugin import parse_llm_config
 
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": MAIN, "stages": {"compaction": "nope"}})
+        parse_llm_config(llm_section({"main": MAIN}, stages={"compaction": "nope"}))
 
     message = str(exc.value)
     assert "llm.stages.compaction" in message
@@ -279,7 +303,9 @@ def test_stage_mapped_to_a_non_string_names_the_key(value):
     from corvidae.llm_plugin import parse_llm_config
 
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"foo": MAIN, "defaults": {"chat": "foo"}, "stages": {"compaction": value}})
+        parse_llm_config(
+            llm_section({"foo": MAIN}, defaults={"chat": "foo"}, stages={"compaction": value})
+        )
 
     message = str(exc.value)
     assert "llm.stages.compaction" in message
@@ -293,7 +319,7 @@ def test_default_set_to_a_non_string_names_the_key(value):
     from corvidae.llm_plugin import parse_llm_config
 
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"foo": MAIN, "defaults": {"chat": value}})
+        parse_llm_config(llm_section({"foo": MAIN}, defaults={"chat": value}))
 
     message = str(exc.value)
     assert "llm.defaults.chat" in message
@@ -307,7 +333,7 @@ async def test_stage_mapped_to_a_profile_of_the_wrong_kind_is_a_startup_error(mo
     by LLMPlugin.on_start, rejects a chat stage mapped to an embedding profile."""
     from corvidae.llm_plugin import check_stage_map, parse_llm_config
 
-    llm = {"main": MAIN, "embedding": EMBEDDING, "stages": {"compaction": "embedding"}}
+    llm = llm_section({"main": MAIN, "embedding": EMBEDDING}, stages={"compaction": "embedding"})
     config = parse_llm_config(llm)
 
     with pytest.raises(ValueError) as exc:
@@ -323,7 +349,7 @@ async def test_stage_mapped_to_a_profile_of_the_wrong_kind_is_a_startup_error(mo
 def test_stage_entry_naming_an_unregistered_stage_warns_and_does_not_raise(caplog):
     from corvidae.llm_plugin import check_stage_map, parse_llm_config
 
-    config = parse_llm_config({"main": MAIN, "stages": {"ghost": "main"}})
+    config = parse_llm_config(llm_section({"main": MAIN}, stages={"ghost": "main"}))
 
     with caplog.at_level(logging.WARNING, logger="corvidae.llm_plugin"):
         check_stage_map(config, {"compaction": "chat"})
@@ -340,10 +366,10 @@ def test_embedding_block_without_kind_fails_telling_the_operator_to_add_it():
     legacy = {key: value for key, value in EMBEDDING.items() if key != "kind"}
 
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": MAIN, "embedding": legacy})
+        parse_llm_config(llm_section({"main": MAIN, "embedding": legacy}))
 
     message = str(exc.value)
-    assert "llm.embedding" in message
+    assert "llm.profiles.embedding" in message
     assert "kind: embedding" in message
 
 
@@ -352,8 +378,14 @@ def test_embedding_block_without_kind_fails_telling_the_operator_to_add_it():
 # ---------------------------------------------------------------------------
 
 MAPPED = {
-    "main": MAIN,
-    "forks": {"extends": "main", "base_url": "http://forks.test/v1", "model": "forks-m"},
+    "providers": {
+        "main": {"base_url": "http://main.test/v1"},
+        "forks": {"base_url": "http://forks.test/v1"},
+    },
+    "profiles": {
+        "main": MAIN,
+        "forks": {"extends": "main", "provider": "forks", "model": "forks-m"},
+    },
     "stages": {"compaction": "forks", "subagent": "forks", "rubric": "forks"},
 }
 

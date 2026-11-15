@@ -248,7 +248,7 @@ async def test_backoff_schedule_and_warning(caplog):
         assert channel.id in warnings[0]
         assert "ClientConnectionError" in warnings[0]
         assert f"retrying in {expected_next} s" in warnings[0]
-        assert "llm.main.base_url" in warnings[0]
+        assert "llm.providers.<provider>.base_url" in warnings[0]
     delays.append(await _next_retry_delay(clock))
 
     assert delays == [5, 10, 20, 40, 60, 60]
