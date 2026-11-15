@@ -29,8 +29,10 @@ DEBUG rather than as a stray hook implementation.
 Same-turn admission (#726): a promise submitted already done is admitted
 before that turn's model call, and a result that finishes after the funnel's
 sweep but before the same turn's collect is carried into that turn's drain
-rather than lost when the mixin submits again. A fast local source therefore
-needs no timing cooperation from its provider.
+rather than lost when the mixin submits again. The mixin itself still waits a
+turn: it submits an ``asyncio.ensure_future``, which is not done at submit
+time, so its result is admitted at the next turn's sweep. A source that wants
+no wait must submit a future it has already resolved.
 """
 
 from __future__ import annotations
@@ -232,8 +234,9 @@ class RecallSourceMixin:
     def render(self, hit: Any) -> str:
         """Render one hit as the line the funnel admits.
 
-        Overridden by the source. Render stably: the funnel dedupes on whole
-        text for now (#725), so a line that changes between turns defeats it.
+        Overridden by the source. Render stably: the mixin does not carry
+        dedupe keys yet, so the funnel falls back to whole-text containment and
+        a line that changes between turns defeats it (#725).
         """
         raise NotImplementedError(
             f"recall source {self.source_name!r} does not implement render(); "
