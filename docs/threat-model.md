@@ -1746,13 +1746,15 @@ tool, which lifts the veto for the rest of the calling turn's trace.
 
 What changes for untrusted text:
 
-- `speak_up` is offered in exactly the turns a quiet source drives, so the
-  quiet payload itself, a webhook body or a PR title, can tell the agent to call
-  it. The hatch lifts only this veto: the surfaced final still goes through the
+- Once the list is non-empty, `speak_up` is in the tool list of every turn,
+  including the turns a quiet source drives, so the quiet payload itself, a
+  webhook body or a PR title, can tell the agent to call it. Called in a turn
+  that isn't quiet, it lifts nothing but still records `outcomes.speak_up`.
+  `tools.disabled: [speak_up]` removes it, leaving a veto with no hatch. The hatch lifts only this veto: the surfaced final still goes through the
   salience floor (`gate.send.min_salience`), every other `should_send_response`
   implementation (silence, critique, `outbound_cap`) and the normal not-sent
   marker. A flood of hatch calls is therefore bounded by `outbound_cap`
-  (finding 19), not by this plugin. The call is recorded as
+  (finding 19) when that plugin is loaded and configured, not by this plugin. The call is recorded as
   `outcomes.speak_up` with its reason, so an operator can see which turns
   surfaced and why.
 - The hatch never sends anything itself. A design that sent directly would
@@ -1771,7 +1773,9 @@ Accepted residuals. Progress and thinking sent in the same response as the
 follow-up turn whose origin differs from the quiet turn (for example a
 `critique` wake) is not quiet. The tool appears or disappears only at restart;
 a hot reload changes the veto at once but not the tool list. The veto lives in
-`GatePlugin`, so disabling `gates` disables it.
+`GatePlugin`, so disabling `gates` disables it. The agent can create a
+scheduler job with an arbitrary `origin`; naming a quiet origin mutes that
+job's own turns, which fails toward silence rather than toward noise.
 
 ## Privilege separation
 

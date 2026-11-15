@@ -1736,6 +1736,7 @@ nothing.
   `gate.send.allow_thinking` (both default true) are off, recorded as
   `outcomes.suppressed = {"progress": true}` or `{"thinking": true}`. Core
   never writes the outcome log; the vetoing plugin does.
+- `error` and anything else: no opinion.
 
 **Quiet origins** (#790). `gate.send.quiet_origins` (operator config only,
 default empty) lists origins whose turns send nothing to the human, such as
@@ -1753,13 +1754,13 @@ reload applies on the next decision.
 When the list is non-empty at startup, the agent has a `speak_up(reason)`
 tool. Calling it marks the turn's trace as surfaced (a bounded LRU of 1024,
 never cleared explicitly, because a final's thinking is gated after the
-final) and records `outcomes.speak_up = <reason>`. A surfaced quiet final
+final) and records `outcomes.speak_up = <reason>` (cut to 200 characters; written
+only when `outcome_log` is loaded and the turn has a trace id). A surfaced quiet final
 then follows the normal non-user policy above, with `surfaced: true` in its
 record, so the salience floor still applies. Progress and thinking sent in
 the same response as the `speak_up` call are gated before the tool runs and
 stay withheld. If `speak_up` is in a batch cut off at `max_turns`, it never
 runs and the fallback final stays withheld.
-- `error` and anything else: no opinion.
 
 What the kernel does with a withheld final is in
 [design.md](design.md#the-output-gate). On the cognition side, critique still
