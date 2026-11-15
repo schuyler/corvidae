@@ -23,16 +23,17 @@ a server you are also in (that is how you can DM it), and your user id.
 ```yaml
 # agent.yaml
 llm:
-  main:
-    base_url: https://api.example.com/v1
-    model: your-chat-model
-    api_key: "${LLM_API_KEY}"
-  embedding:
-    kind: embedding
-    base_url: https://api.example.com/v1
-    model: your-embedding-model
-    dimensions: 1024                  # measure it, see below
-    api_key: "${LLM_API_KEY}"
+  providers:
+    main:
+      base_url: https://api.example.com/v1
+      api_key: "${LLM_API_KEY}"
+  profiles:
+    main:
+      model: your-chat-model
+    embedding:
+      kind: embedding
+      model: your-embedding-model
+      dimensions: 1024                # measure it, see below
 
 discord:
   allow:
@@ -45,7 +46,7 @@ export LLM_API_KEY='...' DISCORD_TOKEN='...'
 uv run corvidae serve                 # reads agent.yaml from the current directory
 ```
 
-Replace `base_url`, both `model` values, `dimensions` and the user id. The
+Replace `base_url`, both `model` values (both profiles use the `main` provider, so one endpoint and one key), `dimensions` and the user id. The
 token and the API key stay out of the file.
 
 On success the log shows `discord: connected as user id <id>`. DM the bot and
@@ -106,7 +107,7 @@ jq '.data[0].embedding | length' embed.json
 
 Read the raw response first. An error body has no `.data`, and jq prints `0`
 for that, which looks like a dimension but is not. If your model's card says
-to prefix queries or documents, set `llm.embedding.query_prefix` and
+to prefix queries or documents, set `llm.profiles.embedding.query_prefix` and
 `document_prefix` now, for the same reason.
 
 ## What the log says
@@ -123,7 +124,7 @@ Startup refuses, naming the problem (these go to stderr, so they are not in
 - `discord: no bot token`: neither `discord.token` nor `DISCORD_TOKEN` is set.
 - `the Discord SDK (discord-py) is not installed`: you have a `discord:` block
   and no SDK. Re-run `uv sync` with every extra named.
-- `llm.main.api_key references ${LLM_API_KEY}, which is not set in the
+- `llm.providers.main.api_key references ${LLM_API_KEY}, which is not set in the
   daemon's environment`: the variable never reached the process. Check the
   env file, or the shell you launched from.
 
@@ -148,7 +149,7 @@ The model endpoint fails:
 
 - `chat completion failed  status=401 body=...` at ERROR, and the bot replies
   in Discord with `LLM request failed with HTTP 401: the API key was
-  rejected`. A 404 says to check `llm.main.base_url` and `llm.main.model`.
+  rejected`. A 404 says to check `llm.providers.main.base_url` and `llm.profiles.main.model`.
   `base_url` usually needs its `/v1`, since corvidae appends `/chat/completions`
   to it.
 - `transient LLM error, retrying  status=503 attempt=1`, a WARNING: the
@@ -156,7 +157,7 @@ The model endpoint fails:
   three times, then logs `chat completion failed`, tells the channel `LLM
   request failed with HTTP 503: the provider rejected the request.` and drops
   the turn. It does not queue the message for later, so send another once the
-  endpoint is back. `llm.main.timeout` is unset by default, so an endpoint that
+  endpoint is back. `llm.providers.main.timeout` is unset by default, so an endpoint that
   stalls holds the turn until it answers; set one, and a timed-out attempt is
   retried like a 503.
 - `embeddings failed` is logged the same way for the embedding endpoint.

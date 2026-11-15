@@ -392,7 +392,7 @@ class LLMClient:
 
 `request_model` returns the `model` a `chat` call with that `extra_body` is
 sent with: the configured model, overridden by the instance `extra_body`
-and then the call's (`llm.<profile>.extra_body.model` can change the model).
+and then the call's (`llm.profiles.<name>.extra_body.model` can change the model).
 `chat` builds its payload's `model` from it. Memory consolidation stamps it
 on the records it writes ([cognition.md](cognition.md#record-stamps)).
 `embed` is deliberately not routed through it: it sends the configured
@@ -427,7 +427,7 @@ shape are not covered.
 
 **Raw reasoning (#355).** llama-server's parsed mode cannot tell a reply
 cut off mid-reasoning from a decline: both arrive with empty `content`. When
-the client has `raw_reasoning` (`llm.<profile>.raw_reasoning`; the operator
+the client has `raw_reasoning` (`llm.profiles.<name>.raw_reasoning`; the operator
 also configures the server to return reasoning inline, e.g. llama.cpp's
 `extra_body.reasoning_format: none`), `chat` splits the reply itself (`split_raw_reasoning`): an optional leading
 `<think>` is dropped, the text up to the first `</think>` becomes
@@ -450,7 +450,7 @@ tail is in neither `content` nor `reasoning_content`, so it reaches no
 transport, no row and no memory; the log is its only copy (PRD §3.3.9,
 §3.10). This runs on every profile's client. `AgentTurnResult.reasoning_reopened`
 carries the flag. `Agent._run_turn` checks it before the cut-off check:
-with `reasoning_reopened: rerun` on the main turn's profile (`llm.main` by
+with `reasoning_reopened: rerun` on the main turn's profile (`llm.profiles.main` by
 default), a final (no tool calls) that
 reopened is popped from the messages and regenerated once, and that result
 is used whatever it holds (a second reopen is already cut); then the
@@ -511,7 +511,7 @@ attempts do not fire `response`. Observer failures are individually
 caught and logged; they never break the call. `llm.py` stays free of
 pluggy imports — `LLMPlugin` injects a `_HookObserver` (defined in
 `llm_plugin.py`) that bridges to the `on_llm_request`/`on_llm_response`
-hooks with the client's profile (a key under `llm:`, such as `main`) and the
+hooks with the client's profile (a key under `llm.profiles`, such as `main`) and the
 current attribution snapshot.
 
 **Attribution.** `attribution.py` holds a single ContextVar dict
@@ -562,7 +562,7 @@ rows alone: in a self-join on `a.id < b.id`, two calls overlap when
 touch at an endpoint do not). `ended_at` is `started_at + total_ms / 1000`,
 so it comes from the monotonic duration and cannot disagree with
 `total_ms`. `latency_ms` is the final
-attempt only. When calls share a llama-server slot (a pinned `id_slot`, or
+attempt only. When calls share a llama-server slot (an operator-pinned `id_slot`, or
 a single-slot server), a call that arrives while another holds the slot
 waits inside the server, and that wait is part of its `latency_ms`. The
 server's own work is `prompt_ms + predicted_ms`; what remains is, approximately, the wait:
@@ -1130,7 +1130,7 @@ that trace.
    backend model it returns a message naming the model; for any non-2xx
    `LLMHTTPError` it names the status, an actionable hint (API key,
    quota, endpoint/model) and a short provider body; for connection and
-   timeout failures it points at `llm.main.base_url`. It defers (`None`)
+   timeout failures it points at `llm.providers.<name>.base_url`. It defers (`None`)
    on every other error, so the generic message still applies.
    **Retry when the backend is unreachable (#281).** When the failure
    satisfies `is_backend_unreachable` (the client has already spent its own
@@ -2309,7 +2309,7 @@ the template breaks the prefix and the cache with it. Only where the request
 goes differs: `stage` is a required keyword, and the call goes to
 `LLMPlugin.get_client(stage)`, the client of the profile `llm.stages` maps
 that stage to (else the default chat profile). Its endpoint, model and
-`extra_body` (e.g. `id_slot`) are the stage profile's, not the main turn's.
+`extra_body` are the stage profile's, not the main turn's.
 With no client for the stage, `Agent.fork` raises `ForkUnavailable`.
 `snapshot` (a `WindowSnapshot` from `corvidae.fork.snapshot_window`, #628)
 renders that copy of the window and its pending ids instead of the live
@@ -2618,15 +2618,19 @@ option for lookups that outgrow a full re-scan).
   registered stages (`check_stage_map`), then creates an `LLMClient` for
   each resolved profile and calls `start()` on it. It logs a WARNING for
   each kind that has stages falling back to a default that doesn't exist,
-  then logs where each stage resolves: `llm stages resolved: ...`
+  then logs one INFO line per provider, `llm provider <name>: <base_url>,
+  heads <N|unbounded>, profiles <a, b | (none)>`, with a WARNING
+  (`llm.providers.<name>.heads has no effect`) for a provider that sets
+  `heads` and is used only by embedding profiles, whose calls take no lease.
+  It then logs where each stage resolves: `llm stages resolved: ...`
   (`→(none)` for a stage with no profile).
 - `on_stop` — calls `stop()` on all clients.
 - `on_config_reload` — swaps no client. If the reloaded `llm:` section
   parses to something other than what the daemon started with, it logs one
   summary WARNING (ConfigWatcher's per-key restart-only warnings fire too,
-  since `LLMPlugin` declares no `reloadable_keys`): `llm config changed; LLM profiles, llm.stages and llm.defaults
-  apply on restart`. Everything under `llm:` is restart-only, `llm.main`
-  included. Live reload would need a rollback path, an ordering against the
+  since `LLMPlugin` declares no `reloadable_keys`): `llm config changed; LLM providers, profiles, llm.stages and llm.defaults
+  apply on restart`. Everything under `llm:` is restart-only,
+  `llm.providers.main` included. Live reload would need a rollback path, an ordering against the
   Agent re-borrowing its client, and an encoder re-check for embeddings, and
   nothing asked for it. PRD §3.6.1 says a change to a base profile reaches
   its derived ones on reload too; that gap is #465.
@@ -2638,18 +2642,26 @@ a reload that carries one is refused as a whole (logged at `ERROR`, nothing
 applied). The stage-map check that needs the registered stages runs in
 `on_start` only.
 
-`_create_client` expands `${VAR}` in a profile's `api_key` from the daemon's
+`_create_client` expands `${VAR}` in a provider's `api_key` from the daemon's
 environment (`corvidae/envref.py::expand_env_refs`, shared with MCP
 `headers`). An unset, empty or multi-line variable raises a `ValueError`
-naming `llm.<profile>.api_key` and the variable, never the value; `on_start`
+naming `llm.providers.<name>.api_key` and the variable, never the value; `on_start`
 goes through it. The resolved key lives only on the client, so
 `LLMConfig.profiles` keeps the raw `${VAR}` text. `extends`, `kind` and
 `dimensions` are consumed by `LLMPlugin` and never reach `LLMClient`.
 
 ### Client access
 
-Every key under `llm:` except `defaults` and `stages` is a **profile**,
-built into one client. A plugin that calls a model
+`llm:` has four sections. A **provider** (`llm.providers.<name>`) is one
+endpoint plus its credentials and capacity: `base_url`, `api_key`, `timeout`,
+the retry settings and `heads`. A **profile** (`llm.profiles.<name>`) is what
+to ask a provider for, built into one client: `model`, `kind`, `extra_body`
+and the other request parameters. `parse_llm_config` flattens a profile's
+provider keys (all but `heads`, which is scheduling state, not a client
+setting) and a `provider` name into the resolved profile, so
+`LLMConfig.profiles[...]` and `profile_config` readers see one flat dict;
+`LLMConfig.providers` keeps each provider block as written, `heads` included.
+A plugin that calls a model
 registers each call site as a **stage** through the `register_llm_stages`
 hook (`stages[name] = kind`, kind `"chat"` or `"embedding"`), which
 `LLMPlugin.on_start` broadcasts once. Core registers `compaction` and
@@ -2668,6 +2680,10 @@ no client and memory degrades to keyword search). An unregistered name
 raises `ValueError`, profile names such as `"main"` included.
 `resolve_profile(stage)` returns the profile name and `profile_config(stage)`
 the resolved settings (read-only; `Agent.fork` reads its `extra_body`).
+`resolve_provider(stage)` returns the provider name the stage's profile uses
+(`None` for no profile) and `provider_config(name)` the provider block, `heads`
+included (`{}` for an unknown name or before `on_start`; read-only). `heads`
+is read and logged only: nothing schedules on it yet (#364).
 Other plugins retrieve the plugin via `get_dependency(pm, "llm", LLMPlugin)`.
 `MemoryPlugin` reads the embedding stage's encoder identity, `dimensions` and
 prefixes the same way, with `parse_llm_config(config.get("llm"))` in its
@@ -2683,36 +2699,45 @@ included, because the profile's client carries its name.
 
 ```yaml
 llm:
-  main:                       # a profile; kind omitted means chat
-    base_url: "http://host:8080"
-    model: "model-name"
-    api_key: "optional"
-    extra_body: {}
-    max_retries: 3
-    retry_base_delay: 2.0
-    retry_max_delay: 60.0
-    model_not_loaded_wait: 60.0
-    timeout: null             # optional; no timeout if absent
-  forks:
-    extends: main             # deep overlay of main; null deletes an inherited key
-    extra_body:
-      reasoning_budget_tokens: 2048
-  embedding:                  # optional; absent means no embedding client
-    kind: embedding           # required for an embedding profile
-    base_url: "..."
-    model: "..."
-    dimensions: 768           # required
-    # same keys as main
-  defaults:                   # optional: kind -> default profile
-    chat: main                # these two are the fallbacks when omitted
+  providers:
+    main:                     # a provider: one endpoint plus its credentials and capacity
+      base_url: "http://host:8080"
+      api_key: "optional"
+      max_retries: 3
+      retry_base_delay: 2.0
+      retry_max_delay: 60.0
+      model_not_loaded_wait: 60.0
+      timeout: null           # optional; no timeout if absent
+      heads: 2                # optional positive integer; absent means unbounded
+    embedding:
+      base_url: "..."
+  profiles:
+    main:                     # a profile; kind omitted means chat, provider omitted means main
+      model: "model-name"
+      extra_body: {}
+    forks:
+      extends: main           # deep overlay of main; null deletes an inherited key
+      extra_body:
+        reasoning_budget_tokens: 2048
+    embedding:                # optional; absent means no embedding client
+      provider: embedding
+      kind: embedding         # required for an embedding profile
+      model: "..."
+      dimensions: 768         # required
+  defaults:                   # optional
+    chat: main                # kind -> default profile; these two are the fallbacks when omitted
     embedding: embedding
+    provider: main            # the provider a profile with no `provider:` uses; main is the fallback
   stages:                     # optional: stage -> profile
     compaction: forks
     consolidation: forks
 ```
 
-`defaults` and `stages` are reserved names; a profile can't use them. A
-profile block that is `null` is treated as absent.
+Any key directly under `llm:` outside `providers`, `profiles`, `defaults` and
+`stages` fails startup with a message saying where to move it. A provider or
+profile block that is `null` is treated as absent. `extends` applies to
+profiles only. A profile's provider is its `provider:`, else
+`llm.defaults.provider`, else the provider named `main`.
 
 **`kind` and `extends` (`merge_profile`).** `kind` is `chat` or `embedding`.
 An omitted `kind` means `chat`, applied after `extends` is merged, so a child
@@ -2720,16 +2745,16 @@ of an embedding profile stays an embedding profile. `extends: <profile>` lays
 the block over the named profile: mappings merge recursively, lists and
 scalars replace, and a child's `null` deletes the inherited key (unlike
 `runtime.deep_merge`, where `None` is a no-op). Chains resolve root first. A
-resolved profile must have `base_url` and `model` (a partial block that exists
-only to be extended is not supported) and, for an embedding profile,
-`dimensions`.
+resolved profile must have `model` (a partial block that exists only to be
+extended is not supported) and, for an embedding profile, `dimensions`; its
+provider must have a `base_url`.
 
 **Defaults.** `llm.defaults.<kind>` names each kind's default profile. When
 it is absent, chat defaults to `main` and embedding to `embedding`, if those
 exist. Only a default chat profile is required: `defaults.chat: foo` with no
 `main` boots and sends main turns to `foo`. A default, configured or by
 name, that names a profile of another kind is an error, which is how an
-existing `llm.embedding` block without `kind: embedding` fails startup
+`llm.profiles.embedding` block without `kind: embedding` fails startup
 instead of becoming a chat profile and silently dropping memory to keyword
 search.
 
@@ -2738,15 +2763,21 @@ on reload. Each error names the key:
 
 | Case | Error |
 |---|---|
-| unknown base | `llm.<name>.extends names unknown profile '<base>'; defined profiles: ...` |
-| cycle | `llm.<name>.extends forms a cycle: a → b → a; remove one extends` |
-| unknown kind | `llm.<name>.kind must be one of chat, embedding; got '<v>'` |
-| embedding, no dimensions | `llm.<name>.dimensions is required for an embedding profile ...` |
-| missing endpoint | `llm.<name>.base_url is required (after extends)` (also `model`) |
-| not a mapping | `llm.<name> must be a mapping; got <type>` (also `llm.defaults`, `llm.stages`) |
-| bad default | `llm.defaults.<kind> names unknown profile '<p>'`; `... names '<p>', a <k> profile`; `llm.defaults: unknown kind '<k>'` |
-| fallback of the wrong kind | `llm.<fallback> is a <k> profile but is the default <kind> profile by name; add kind: <kind> to it, or set llm.defaults.<kind>` |
-| no chat default | `no default chat profile: define llm.main or set llm.defaults.chat` |
+| old layout | `llm.<key> is not a section; profiles now live under llm.profiles and endpoints (base_url, api_key, timeout, retries, heads) under llm.providers; move llm.<key> there` |
+| key in the wrong block | `llm.providers.<name>.<key> is a profile key, ...` and `llm.profiles.<name>.<key> is a provider key, ...`, each naming the right block |
+| provider without endpoint | `llm.providers.<name>.base_url is required` |
+| bad heads | `llm.providers.<name>.heads must be a positive integer (or absent for unbounded); got <v>` |
+| unknown provider | `llm.profiles.<name>.provider names unknown provider '<p>'; defined providers: ...` (likewise `llm.defaults.provider`) |
+| no provider | `llm.profiles.<name> has no provider; defined providers: ...` and how to set one |
+| unknown base | `llm.profiles.<name>.extends names unknown profile '<base>'; defined profiles: ...` |
+| cycle | `llm.profiles.<name>.extends forms a cycle: a → b → a; remove one extends` |
+| unknown kind | `llm.profiles.<name>.kind must be one of chat, embedding; got '<v>'` |
+| embedding, no dimensions | `llm.profiles.<name>.dimensions is required for an embedding profile ...` |
+| missing model | `llm.profiles.<name>.model is required (after extends)` |
+| not a mapping | `llm.providers.<name>` or `llm.profiles.<name> must be a mapping; got <type>` (also `llm.defaults`, `llm.stages`) |
+| bad default | `llm.defaults.<kind> names unknown profile '<p>'`; `... names '<p>', a <k> profile`; `llm.defaults: unknown kind '<k>'` (`provider` is accepted alongside the kinds) |
+| fallback of the wrong kind | `llm.profiles.<fallback> is a <k> profile but is the default <kind> profile by name; add kind: <kind> to it, or set llm.defaults.<kind>` |
+| no chat default | `no default chat profile: define llm.profiles.main or set llm.defaults.chat` |
 | stage maps to a missing profile | `llm.stages.<stage> names unknown profile '<p>'; defined profiles: ...` |
 | default or stage value not a string | `llm.defaults.<kind> must be a profile name; got [...]; defined profiles: ...` (likewise `llm.stages.<stage>`) |
 | stage maps to the wrong kind (`on_start`) | `llm.stages.<stage> maps a <k> stage to '<p>', a <k2> profile; map it to a <k> profile` |
@@ -2990,7 +3021,7 @@ Declares `depends_on = {"llm", "tools"}`.
 ### LLM configuration
 
 Uses the `LLMClient` for the `subagent` stage from `LLMPlugin`: the profile
-`llm.stages.subagent` names, else the default chat profile (`llm.main` unless
+`llm.stages.subagent` names, else the default chat profile (`llm.profiles.main` unless
 `llm.defaults.chat` says otherwise). The client is retrieved at tool-call
 time, not captured at `on_start`. Runtime overrides don't reach a subagent,
 so the profile's `extra_body` applies as written.
@@ -4654,26 +4685,31 @@ daemon:
   session_db: sessions.db
 
 llm:
-  main:
-    base_url: "http://host:8080"
-    model: "model-name"
-    api_key: "optional"
-    extra_body: {}              # optional, passed through to LLM
-    max_retries: 3              # retry attempts on transient errors (default 3)
-    retry_base_delay: 2.0       # base exponential backoff delay in seconds
-    retry_max_delay: 60.0       # maximum retry delay cap in seconds
-    model_not_loaded_wait: 60.0 # seconds to wait out an unloaded router model
-    timeout: null               # HTTP timeout per request; null = no timeout
-  embedding:                    # optional embedding model for memory retrieval
-    kind: embedding             # required; an omitted kind means chat
-    base_url: "..."
-    model: "..."
-    dimensions: 768             # required
-    # same keys as main
-  # forks:                      # any other name is a profile too
-  #   extends: main             # deep overlay; a child's null deletes an inherited key
-  #   extra_body: {reasoning_budget_tokens: 2048}
-  # defaults: {chat: main, embedding: embedding}   # optional; these are the fallbacks
+  providers:
+    main:
+      base_url: "http://host:8080"
+      api_key: "optional"
+      max_retries: 3              # retry attempts on transient errors (default 3)
+      retry_base_delay: 2.0       # base exponential backoff delay in seconds
+      retry_max_delay: 60.0       # maximum retry delay cap in seconds
+      model_not_loaded_wait: 60.0 # seconds to wait out an unloaded router model
+      timeout: null               # HTTP timeout per request; null = no timeout
+      # heads: 2                  # warm context heads; absent = unbounded; nothing schedules on it yet
+    # embedding:                  # a separate embedding endpoint
+    #   base_url: "..."
+  profiles:
+    main:
+      model: "model-name"
+      extra_body: {}              # optional, passed through to LLM
+    embedding:                    # optional embedding model for memory retrieval
+      provider: embedding         # a profile with no provider uses defaults.provider, else main
+      kind: embedding             # required; an omitted kind means chat
+      model: "..."
+      dimensions: 768             # required
+    # forks:                      # any other name is a profile too
+    #   extends: main             # deep overlay; a child's null deletes an inherited key
+    #   extra_body: {reasoning_budget_tokens: 2048}
+  # defaults: {chat: main, embedding: embedding, provider: main}   # optional; these are the fallbacks
   # stages: {compaction: forks}                    # optional: stage -> profile
   # All of llm: is read at startup; a reload that changes it only logs a warning.
 

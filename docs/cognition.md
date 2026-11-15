@@ -201,7 +201,7 @@ range and passes it to the rubric fallback where it doesn't; the prior and
 the mean stage-2 valence read only
 the consolidating channel's own exchanges, and a failed `exchange_log` lookup is logged
 and falls back to the rubric prior and NULL valence), embeds every entry's
-narrative in one call on the `embedding` stage's profile (`llm.embedding` by default), and
+narrative in one call on the `embedding` stage's profile (`llm.profiles.embedding` by default), and
 commits one memory row per entry (each with its vec row and any near-duplicate
 merge) together with the watermark advance in one compare-and-set
 section. At insert the rows share the message range, `created_at`, importance,
@@ -565,7 +565,7 @@ rows that reference a redacted memory (below).
 `memory_fts` (flagged `degraded_to_fts=1`; the FTS query caps each
 blank-line-separated paragraph at 20 tokens, so every message of a burst
 keeps its own 20 and a single message is capped at 20 as before); sqlite-vec unloadable → FTS5
-with one clear startup warning; no embedding profile (the `embedding` stage isn't mapped under `llm.stages` and there is no default embedding profile: no `llm.embedding` and no `llm.defaults.embedding`) → records stored
+with one clear startup warning; no embedding profile (the `embedding` stage isn't mapped under `llm.stages` and there is no default embedding profile: no `llm.profiles.embedding` and no `llm.defaults.embedding`) → records stored
 with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
 config → ERROR and embeddings disabled rather than silently mixing
 encoders; fewer than 50 embedded records (or no spread) under `band_on:
@@ -746,7 +746,7 @@ Operator notes:
   profile (the daemon refuses one without), and the daemon's client setup
   expands every profile's `api_key`, so its `${VAR}` must be set in the
   environment even though no chat request is made. If it isn't, the run
-  stops with `Config error: llm.<profile>.api_key references ${VAR}, which
+  stops with `Config error: llm.providers.<name>.api_key references ${VAR}, which
   is not set … — check <config>`.
 - **Scores drift with the run date unless `--now` pins it.** Decay runs
   against the clock at query time, not a time taken from the snapshot, so
@@ -764,7 +764,7 @@ Operator notes:
   not a vector measurement — every similarity is FTS5's constant 0.6 — so
   after writing the file (`summary.all_degraded` marks it, and the scores are
   still worth reading) the run prints the cause and exits 1: a missing
-  `llm.embedding` profile, a snapshot whose `embedding_meta` names a different
+  `llm.profiles.embedding` profile, a snapshot whose `embedding_meta` names a different
   encoder, `sqlite-vec` not loading, or an embedding server that failed every
   call. A run where only some queries degraded still exits 0, and says how
   many on stdout (#662).
@@ -841,8 +841,8 @@ nullable `memory` columns:
   replies were unusable, #626; the prompt hash, model and trigger are the
   failed call's) or `direct`.
 - `model`: the model the call was sent with, after any
-  `llm.<profile>.extra_body.model` override, so a record says what actually
-  ran rather than what `llm.<profile>.model` names. `Agent.fork` always sets
+  `llm.profiles.<name>.extra_body.model` override, so a record says what actually
+  ran rather than what `llm.profiles.<name>.model` names. `Agent.fork` always sets
   `ForkResult.model` from `LLMClient.request_model`, so it is NULL only for a
   row written without a model (a pre-stamp row, or a `ForkResult` built
   without one).
@@ -1079,7 +1079,7 @@ hint=None)` takes the consolidation reply's own rating as the keyword-only
 `hint`; a replacement prior must accept it; it reads only the consolidating channel's own
 exchanges (message ids are global), logging a failed lookup and falling back to
 the rubric prior and NULL valence. Configuration is documented in
-[configuration.md](configuration.md) (`memory.*`, `llm.embedding`).
+[configuration.md](configuration.md) (`memory.*`, `llm.profiles.embedding`).
 
 The cognition distribution registers the `retrieval_candidate` scrubber
 (`corvidae_cognition.memory:redact_retrieval_candidates`) under the

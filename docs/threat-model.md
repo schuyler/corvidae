@@ -380,7 +380,7 @@ and per channel (#149). `write_file` writes anywhere
 the daemon user can, creating parent directories, including over
 `agent.yaml`, which `ConfigWatcherPlugin` reloads within two seconds. That
 lets the model clear `immutable_settings` immediately. It can also repoint
-any profile's `base_url`, add an MCP server whose `command` is anything,
+any provider's `base_url`, add an MCP server whose `command` is anything,
 disable plugins, or re-enable globally disabled tools; those keys are not
 hot-reloaded (nothing under `llm:` is), so they wait for the next restart,
 which makes the attack persistent and quiet rather than immediate. A channel's own
@@ -909,14 +909,19 @@ human removed. What bounds it:
 
 ### 12. A remote model endpoint receives that stage's inputs
 
-Every `llm:` profile is an OpenAI-compatible client, so any profile can point
-at a hosted provider. Doing so sends that profile's requests, conversation
-content included, to the provider. A stage sends to whatever profile
+Every `llm.providers` entry is an OpenAI-compatible endpoint, so any provider
+can be a hosted one. The provider owns the endpoint (`base_url`, `api_key`,
+`heads`); a profile only names which provider it sends to, so repointing a
+provider moves every profile on it. Pointing a profile at a hosted provider
+sends that profile's requests, conversation content included, to the
+provider. A stage sends to whatever profile
 `llm.stages` maps it to, and to its kind's default profile when the map
 doesn't name it (no fallback chains). Main turns go to the default chat
 profile. With no `llm.stages` entries that is two endpoints, the default chat
 profile's and the default embedding profile's; each mapping adds the stage's traffic to the mapped profile's
-endpoint and takes it off the default's. Weigh the endpoint per stage:
+endpoint and takes it off the default's. Two profiles on one provider share its endpoint, so
+mapping a stage to a profile on another provider is what moves its traffic.
+Weigh the endpoint per stage:
 
 | Stage | What it sends |
 |---|---|
@@ -930,12 +935,12 @@ endpoint and takes it off the default's. Weigh the endpoint per stage:
 
 The view is the whole window the agent held: the system prompt (identity and
 register), CONTEXT blocks, tool calls and their results, and earlier
-summaries. A remote profile is a disclosure decision for every stage mapped
+summaries. A remote provider is a disclosure decision for every stage mapped
 to it, and for main turns if it is the default chat profile.
 
 The provider also sees whatever untrusted text those stages carry. Treat a
 remote profile as a disclosure decision per stage, not only a cost one. All
-of `llm:` is read at startup, so a repointed profile or stage takes effect at
+of `llm:` is read at startup, so a repointed provider, profile or stage takes effect at
 the next restart, not when `agent.yaml` is saved.
 
 The key can live in the daemon's environment (`api_key: "${VAR}"`), which
@@ -1049,7 +1054,7 @@ What each kind of unlock costs:
   operator turned it on, it drops the entropy summary from the outcome log,
   which calibration reads. Any other request-body key falls here too, and
   some reach past the channel: a backend's slot or cache controls
-  (llama-server's `id_slot`, `cache_prompt`) can evict another channel's
+  (llama-server's `id_slot`, `cache_prompt`; a pinned `id_slot` also works against the lease scheduler, PRD §3.13) can evict another channel's
   cached prefix, and a forced `response_format` or grammar can stop the
   model emitting tool calls.
 - **Gate tunables and thresholds** (`gate.*`,
@@ -1087,8 +1092,9 @@ What each kind of unlock costs:
   if it is built (PRD §3.5.9), `agent.compaction_*`, the `tools.*` limits).
   Today these are reachable only through a writable `agent.yaml` (finding
   4); an unlock through a tool carries the same costs. A repointed
-  `base_url` on the default chat profile (`llm.main` unless
-  `llm.defaults.chat` names another) sends every conversation, and the API key, to a host
+  `base_url` on the provider the default chat profile uses (`llm.profiles.main` unless
+  `llm.defaults.chat` names another; its provider is `provider:`, else
+  `llm.defaults.provider`, else `main`) sends every conversation, and the API key, to a host
   of the attacker's choosing. `plugins.disabled` switches off the gates
   wholesale at the next restart. A scheduled job's prompt comes back
   framed as the operator's. A setting not named in this ledger falls under
