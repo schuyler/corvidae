@@ -175,8 +175,7 @@ ExecStart=/usr/local/bin/signal-cli \
     daemon \
     --socket /run/corvidae/signal.sock \
     --receive-mode=on-connection \
-    --no-receive-stdout \
-    --ignore-attachments
+    --no-receive-stdout
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes
@@ -198,10 +197,17 @@ deleted one until you restart it, so add `RuntimeDirectoryPreserve=yes`. The
 container's user also needs write permission on the socket to connect, so run it
 with `--user <uid>:<gid>` of the user running signal-cli.)
 
-`--ignore-attachments` keeps signal-cli from downloading attachment blobs
-corvidae is going to discard anyway. `--ignore-stories`, `--ignore-stickers`,
-and `--ignore-avatars` do the same for their respective clutter if you want
-them.
+`--ignore-attachments` is **not** safe to combine with corvidae's attachment
+handling: it tells signal-cli not to download the blobs of received messages
+(`signal-cli(1)`, the `daemon` section), and corvidae fetches them from the
+daemon with the `getAttachment` RPC *after* the allowlist passes (#520). With
+the flag set the blob was never stored, so the download fails and the message
+arrives carrying `[image: download failed]` instead of a path — the agent is
+told an attachment existed and never sees it. Leave the flag off. (Read from
+signal-cli's own documentation; not exercised against a live daemon here, so
+treat the exact failure text as the thing to check first if attachments stop
+arriving.) `--ignore-stories`, `--ignore-stickers` and `--ignore-avatars` are
+fine: corvidae reads none of them.
 
 **Do not pass `--send-read-receipts`.** It looks like exactly the flag you
 want, and it isn't: it sends a read receipt for *every* inbound data message,
