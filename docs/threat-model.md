@@ -1779,12 +1779,14 @@ What changes for untrusted text:
   flood; a message can also quiet a source the operator wants heard. The owner
   accepted this: the list is a guardrail against floods, not a security
   boundary. The recommended blocklist in configuration.md lists the key, and
-  `agent.immutable_settings` locks it. A lock blocks new writes, not an
-  override already set, so clear that with `set_settings` or a restart.
+  `agent.immutable_settings` locks it. A lock blocks new writes, null
+  included, but not an override already set, so a restart clears that (or
+  unlock, clear with `null`, and lock again).
   Un-quieting is bounded by `outbound_cap` when that plugin is configured.
 - `user` and `reminder` can never be quiet; listing them is ignored with a
   warning. A list that is not a list of strings fails open (nothing is quiet)
-  with a warning naming the key and the value, so a typo cannot mute the agent.
+  with a warning naming the key, the value and the channel, so a typo cannot
+  mute the agent.
 
 Accepted residuals. Progress and thinking sent in the same response as the
 `speak_up` call are gated before the tool runs, so they stay withheld. A

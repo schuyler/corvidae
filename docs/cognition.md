@@ -1760,8 +1760,8 @@ switches, recorded as `outcomes.suppressed = {<emission>: true}` plus
 `reminder` are never quiet; listing either is ignored with a warning, and a
 value that is not a list of strings fails open with a warning naming the
 channel. The list resolves like any tunable: a channel's `set_settings`
-override replaces it there, otherwise the config value applies, and a hot
-reload takes effect on the next decision.
+override replaces it there, otherwise the config value applies; a hot
+reload takes effect on the next decision except where an override holds.
 
 The agent always has a `speak_up(reason)` tool while `gates` is loaded,
 whatever the list holds, so an origin added by hot reload has its hatch

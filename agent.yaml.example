@@ -183,6 +183,7 @@ agent:
 #                                     # speak_up lets one turn through; set_settings can
 #                                     # override it per channel (see the recommended
 #                                     # blocklist); user/reminder ignored; reload applies
+#                                     # except on a channel with an override
 
 # Built-in tool settings (optional)
 # tools:
