@@ -678,24 +678,18 @@ class WebPlugin(TransportPlugin):
         ``/panel/<name>/static``. aiohttp accepts anything, so a relative path
         lands outside the prefix, ``/static/...`` is taken by the asset mount,
         and a ``..`` walks back out of the panel — each a route that silently
-        never runs. An empty path or ``/`` would mount, but at the panel's root,
-        and a panel has no page of its own: it is a sidebar section on the chat
-        page (PRD §Web, "not with pages of their own"), so ``GET
-        /panel/<name>/`` is a 404. A startup error naming the plugin beats
-        either silent outcome (#692).
+        never runs. A startup error naming the plugin beats a silent
+        non-route (#692).
+
+        ``""`` and ``/`` are deliberately allowed: both mount at
+        ``/panel/<name>/`` and serve, so they are not unreachable routes. The
+        PRD's "not with pages of their own" describes the console's shape, and
+        a route path cannot enforce it -- a handler at ``/data`` or a file in
+        the panel's ``static_dir`` can serve a full page just as well (owner
+        ruling, 2026-11-14).
         """
-        if path == "":
-            reason = (
-                "an empty path mounts at the panel's root, and a panel has no "
-                "page of its own: it is a sidebar section on the chat page"
-            )
-        elif not path.startswith("/"):
+        if not path.startswith("/") and path != "":
             reason = "it does not start with '/', so it mounts outside the panel"
-        elif path == "/":
-            reason = (
-                "a panel has no page of its own (it is a sidebar section on the "
-                "chat page, PRD §Web), so a route at its root would be one"
-            )
         elif path == "/static" or path.startswith("/static/"):
             reason = "that is where the panel's assets are mounted"
         elif ".." in path.split("/"):

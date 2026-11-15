@@ -2032,10 +2032,6 @@ class TestPanels:
 
     @pytest.mark.parametrize("path,expected", [
         ("data", "mounts outside the panel"),
-        # Reachable, but it would be a page of the panel's own, which the PRD
-        # does not allow: a panel is a sidebar section on the chat page (#692).
-        ("/", "no page of its own"),
-        ("", "no page of its own"),
         ("/static/app.js", "panel's assets"),
         ("/../escape", "walks up out of the panel"),
     ])
@@ -2052,6 +2048,24 @@ class TestPanels:
             await make_env(extra_plugins={"badpanel": bad})
         # The message names the plugin, so the author knows whose on_init to fix.
         assert "badpanel" in str(exc.value)
+
+    @pytest.mark.parametrize("path,url", [
+        ("/", "/panel/root/"),
+        ("", "/panel/root"),
+    ])
+    async def test_panel_root_route_is_allowed(self, make_env, tmp_path, path, url):
+        """#692 owner ruling: ``/`` and ``""`` mount at /panel/<name>/ and serve,
+        so neither is an unreachable route and neither is refused. The empty
+        path mounts without the trailing slash, which is the route aiohttp
+        registers, not a difference in reachability."""
+        async def handler(request):
+            return web.json_response({"ok": True})
+
+        panel = PanelPlugin("Root", tmp_path, [web.get(path, handler)])
+        env = await make_env(extra_plugins={"root": panel})
+        async with env.http.get(f"{env.base}{url}", headers=env.cookie()) as r:
+            assert r.status == 200
+            assert await r.json() == {"ok": True}
 
     async def test_two_panels_from_one_plugin_fails_startup(self, make_env, tmp_path):
         """A second Panel fights the first for the same prefix and asset mount."""
