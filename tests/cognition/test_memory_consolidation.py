@@ -1039,3 +1039,36 @@ class TestRubricPriorHint:
 
         assert await prior.score([{"role": "user", "content": "x"}], hint=None) == 0.85
         assert len(client.chat_calls) == 1
+
+
+    async def test_a_cancelled_run_closes_as_cancelled(self, caplog):
+        """A stage cancelled mid-flight closes as ``cancelled``, not ``ok``.
+
+        The close is gated on the start, so a cancellation after the start
+        still logs a timing record; reporting ``ok`` there is a lie a reader
+        cannot detect from the record (#469 round 7).
+        """
+        import corvidae_cognition.memory as memmod
+
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            async def cancelled(*args, **kwargs):
+                raise asyncio.CancelledError()
+
+            original = memmod.fetch_range_rows
+            memmod.fetch_range_rows = cancelled
+            try:
+                with caplog.at_level(logging.INFO):
+                    with pytest.raises(asyncio.CancelledError):
+                        await memory._consolidate_range(channel.id, 999, "idle")
+            finally:
+                memmod.fetch_range_rows = original
+
+            closes = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation timing"
+            ]
+            assert len(closes) == 1, [r.getMessage() for r in caplog.records]
+            assert closes[0].outcome == "cancelled", closes[0].outcome
+        finally:
+            await db.close()
