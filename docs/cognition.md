@@ -1395,9 +1395,14 @@ or a retirement commits, outside the database lock, and not for a no-op
 status change or an already-retired goal. `kind` is `"status"` or
 `"retired"`; `conclusion` is `None` for a status change; `actor_channel` is
 `""` when the turn has no channel (a background turn). A subscriber's
-exception is logged at WARNING and never undoes the change. Nothing in the
-tree subscribes yet, so state changes are silent; routing them to the origin
-channel is a follow-up (#841).
+exception is logged at WARNING and never undoes the change. Without a
+subscriber, state changes are silent. The `goals-notify` package (its own
+extra; the container image installs it by default) (#841,
+[design.md](design.md#goals-notifications-goals-notify-package)) subscribes:
+it sends each change to the goal's `origin_channel` through
+`notify_other_channel`, unless the goal has no origin (seeded goals) or the
+origin made the change itself (so a goal the heartbeat created stays silent
+while the heartbeat is the one changing it).
 
 **Goals entry:** `before_agent_turn` admits one CONTEXT entry through the
 funnel under the source `goals` (budget `funnel.budgets.goals`, falling
@@ -1433,8 +1438,11 @@ one record (the loser gets the `already retired` error) and racing status
 changes report a consistent chain of `old_status` values. The hooks fire
 after the lock is released, so a slow subscriber can receive two racing
 events out of commit order; a subscriber that tracks a goal's latest status
-should compare each event's `old_status` against its own state; ordered
-delivery is tracked with the routing subscriber in #841. `update_goal` takes
+should compare each event's `old_status` against its own state. The
+`goals-notify` subscriber accepts this: its messages can reach the origin
+channel out of commit order, and each names `old → new` so a reordering is
+visible to the receiving turn. Ordered delivery is the pubsub facility's
+(#937). `update_goal` takes
 the same lock around its check and update, so a retirement record always
 quotes the text the goal had when it was retired (#846). `add_goal` computes
 the new goal's `position` inside its INSERT, as `corvidae goals seed` does, so

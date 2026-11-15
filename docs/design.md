@@ -4515,6 +4515,43 @@ there too. The plugin depends on
 `"spill"`. Configuration is in
 [configuration.md](configuration.md#webhook_notify--webhook-deliveries-as-notifications).
 
+### Goals notifications (`goals-notify` package)
+
+`GoalsNotifyPlugin` (#841) implements `on_goals_state_changed`, the hook the
+goals plugin owns ([cognition.md](cognition.md)), and sends each committed
+change to the goal's `origin_channel` with one call to
+`cross_channel_send.notify_other_channel`. The goals plugin fires the hook
+inside the tool call that made the change, so `notify_other_channel` reads the
+changing turn's attribution: the notification carries `source="agent_send
+from <actor>"`, `origin: "agent_send"`, `source_channel`, `source_trace_id`
+and a carried-forward `hop_count`, and the `cross_channel_send.max_hops` guard
+bounds a loop exactly as it bounds any send. An origin that isn't live is
+resolved the way every `notify_other_channel` target is
+(`resolve_persisted_channel`).
+
+The text is `Goal #<id> changed status: <old> → <new>.` for a status change
+and `Goal #<id> retired (was <old>). Conclusion: <conclusion>` for a
+retirement; the goal's own text is not included (`list_goals` has it). Every
+change wakes the origin channel; that turn and the decide gate choose whether
+anything is said to the people there.
+
+Skipped before any send: a goal whose `origin_channel` is `None` (seeded with
+`corvidae goals seed`) and a change whose `actor_channel` is the origin (so a
+goal the heartbeat created and changes stays silent). One channel hears each
+goal. A refusal from `notify_other_channel` (it returns refusals as text: hop
+limit, channel not ready, no source channel) is logged at `WARNING` naming
+the goal and the channel; it never undoes the change. The hook fires after
+the goals lock is released, so two changes to one goal close together can
+arrive out of commit order; each message names `old → new`, and ordering is
+left to the pubsub facility (#937). Delivery bypasses the funnel, a PRD
+§3.5.10 variance recorded in #939.
+
+The plugin declares `depends_on = {"cross_channel_send"}` and
+`optional_depends_on = {"goals"}`: without goals the hookimpl never fires and
+the kernel logs it at `DEBUG`. It has no configuration; install the
+goals-notify extra to load it, and list `goals_notify` under
+`plugins.disabled` to switch it off.
+
 ### GitHub events (`github-webhook` package)
 
 `GithubWebhookPlugin` subscribes one handler to each endpoint in

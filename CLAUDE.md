@@ -4,7 +4,7 @@
 
 Dependencies are installed by `.claude/hooks/session-start.sh` in Claude Code on
 the web. If an import fails, run
-`uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap` —
+`uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify` —
 that installs the `dev` extra (pytest, pytest-asyncio), the `dev` dependency
 group (pytest-timeout), which the pytest config needs, the `acp` and `discord`
 extras, whose transport tests import the SDKs, the `cognition` extra
@@ -23,7 +23,9 @@ and list_channels tools), which `tests/test_cross_channel_send/` imports, and th
 (`packages/corvidae-inotify`: completion pings for background jobs), which
 `tests/test_inotify/` imports, and the `rss` extra
 (`packages/rss-reader`: RSS/Atom feed polling), which
-`packages/rss-reader/tests/` imports. The
+`packages/rss-reader/tests/` imports, and the `goals-notify` extra
+(`packages/goals-notify`: goal state changes to the goal's origin channel),
+which `tests/test_goals_notify/` imports. The
 `cognition` extra includes `sqlite-vec` through the distribution's `vec`
 sub-extra; leave it out to exercise the FTS5-only path (`docs/cognition.md`),
 which is what CI's `cognition-fts` job does. That is CI's `full`
@@ -31,14 +33,14 @@ job. The kernel alone is `--extra dev --extra acp`; CI's `kernel` job runs
 everything outside `tests/cognition/`, `tests/test_cross_channel_send/`,
 `tests/test_webhook_notify/`, `tests/test_github_webhook/`,
 `tests/test_context_panel/`, `tests/test_timepiece/`, `tests/test_inotify/`,
-`tests/test_outbound_cap/` and `tests/corvidae_restart/` (which needs the
+`tests/test_outbound_cap/`, `tests/test_goals_notify/` and `tests/corvidae_restart/` (which needs the
 `restart` extra) that way, so a kernel module must never import `corvidae_cognition`
 (`tests/test_kernel_boundary.py`).
 
 ```sh
-uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap  # everything
+uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify  # everything
 uv run pytest                    # full suite
-uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_github_webhook --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/rss-reader/tests --ignore=packages/corvidae-vision/tests  # the kernel suite
+uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_github_webhook --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/rss-reader/tests --ignore=packages/corvidae-vision/tests --ignore=tests/test_goals_notify  # the kernel suite
 uv run pytest tests/test_foo.py  # one file
 uv run pytest --run-eval         # include live-LLM eval tests (deselected by default)
 uv run ruff check .              # lint
