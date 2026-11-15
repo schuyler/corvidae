@@ -573,7 +573,7 @@ class ZulipPlugin(TransportPlugin):
                         "failed delivery; the rest is retried next time",
                         channel_id, msg["id"], extra={"channel": channel_id},
                     )
-                    break
+                    continue
         if moved:
             await self._save_cursor()
 
