@@ -1079,8 +1079,8 @@ What each kind of unlock costs:
   for a budget that small (the log keeps them); the over-budget WARNING is
   the signal. A large `max_turns` lets one injected tool loop run far
   longer before dispatch is suppressed. It keeps its lease on one of the
-  provider's heads until another queue is waiting while one of its tools
-  runs, or another queue reaches its latency bound (PRD §3.13.5), and it
+  provider's heads while no other queue waits for one, and gives it up at
+  its next call boundary when one does (PRD §3.13.5), and it
   spends tokens throughout (finding 14).
   `reasoning_history: keep` fills the window with reasoning and brings
   compaction sooner; `drop` (the shipped default) strips the reasoning a
