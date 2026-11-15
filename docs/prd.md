@@ -30,8 +30,8 @@ new or a tool do something new records it in the threat model (principle
 deployments that run the core/periphery strategy. It is accepted as the
 target, and conformance is checked from acceptance of its technical
 reference document (TRD). It adds principles 17–21 and amends, for those
-deployments, the requirements its §4 lists; its §0 says how its
-requirements read.
+deployments, the principles and requirements its §4 lists; its §0 says
+how its requirements read.
 
 ## 1. What it is
 

@@ -440,14 +440,17 @@ violates one is a bug even if its tests pass.
 6. The framework MUST let the core control queue multiplexing through
    tools: hold a queue, bring one forward, pin a context warm, or ask
    for a checkpoint. Waiting work alone MUST NOT change what the core
-   has directed. The slot-management plugin MUST turn the core's
+   has directed, except that base PRD §3.13.5's yield at a latency bound
+   applies to a context the core pinned or brought forward; a held queue
+   is stopped (§3.3.7), and a stop is not subject to it. The
+   slot-management plugin MUST turn the core's
    direction into memory placement: which contexts stay in VRAM, which
    move to RAM or disk, and when to restore one ahead of need. The
    plugin's decisions MUST be cheap enough to make at every call
    boundary (base PRD §3.13.8), and backend-specific operations MUST
-   live in it (Appendix A.4). A held queue MUST stay paused until the
-   core or the operator resumes it (§3.3.7). The core's own queue is the
-   one exception
+   live in it (Appendix A.4). The framework MUST keep a held queue
+   stopped until the core or the operator resumes it (§3.3.7). The
+   core's own queue is the one exception
    to "waiting work alone changes nothing": when the core has paged
    itself out or held its own queue, work arriving on that queue MUST
    make the slot-management plugin bring the core back, without a core
@@ -462,8 +465,8 @@ violates one is a bug even if its tests pass.
    resuming and ordering grants), not on contexts tracked apart from the
    leases. Which KV state paging preserves when more than one context
    extends one lease (a long-lived fork and its running parent, or a
-   paused parent whose state at the fork point is the checkpoint,
-   §3.5.4) is the plugin's design, not a requirement.
+   parent waiting on its fork, whose state at the fork point is the
+   checkpoint, §3.5.4) is the plugin's design, not a requirement.
 
 7. **Pausing and queue order.** Under this strategy the slot-management
    plugin replaces the kernel's default lease order (base PRD §3.13.7).
@@ -471,11 +474,12 @@ violates one is a bug even if its tests pass.
    requirement.
    - Pausing a channel is a stop (base PRD §3.13.7). The framework MUST
      keep a paused channel stopped until the core or the operator
-     resumes it. The framework MUST let the operator resume any channel
-     at any time without going through a channel's queue. The framework
-     MUST NOT let the agent's own actions leave the core unable to
-     receive work, so the agent still cannot pause itself into a state
-     no turn can leave (base PRD §3.13.7).
+     resumes it, except the core's own queue, which work arriving on it
+     brings back (§3.3.6). The framework MUST let the operator resume
+     any channel at any time without going through a channel's queue.
+     The framework MUST NOT let the agent's own actions leave the core
+     unable to receive work, so the agent still cannot pause itself into
+     a state no turn can leave (base PRD §3.13.7).
    - An active channel's queue MUST behave as base PRD §3.1 describes.
      Among active queues, the slot-management plugin MUST decide the
      order in which heads are granted, within base PRD §3.13.7's limits
@@ -496,8 +500,8 @@ violates one is a bug even if its tests pass.
    *Rationale:* The slot-management plugin orders active queues because
    it alone knows the cache resources and the cost of swapping them. It
    does so as a replacement order on the kernel's lease mechanism, so the
-   base PRD's latency bounds and its guarantees about pausing hold under
-   this strategy unchanged.
+   base PRD's latency bounds and its guarantees about stopping a queue
+   hold under this strategy unchanged.
 
 8. The framework MUST meet every requirement in this supplement when
    any context, core or peripheral, runs on a provider that offers no
@@ -619,9 +623,9 @@ sub-problem, explore a question, consolidate a thread of thought, or
 respond to an escalation.
 
 1. The framework MUST let the core fork its context window at any time,
-   for any reason. The core's notifications MUST keep going to the main
-   context unless the core routes them to a blocking long-lived fork
-   (item 7).
+   for any reason. The framework MUST keep delivering the core's
+   notifications to the main context unless the core routes them to a
+   blocking long-lived fork (item 7).
 
 2. The framework MAY let a fork direct attention to peripheral contexts
    (§3.3.6), retrieve memories, and use tools, and MUST give it the same
@@ -634,9 +638,10 @@ respond to an escalation.
    just learned."
 
 4. The framework MUST keep the core's state at the fork point as a
-   checkpoint; while the main context is paused for a fork (item 7), the
-   paused main context is the checkpoint. The framework MUST let the core abandon a fork and start
-   a new one from the same checkpoint. Abandoning a fork discards its
+   checkpoint; while the main context waits on a fork it has routed its
+   notifications to (item 7), that waiting context is the checkpoint.
+   The framework MUST let the core abandon a fork and start a new one
+   from the same checkpoint. Abandoning a fork discards its
    reasoning, not its effects: the parent MUST still receive a report
    of the fork's external actions (messages sent, tools run) and the
    notifications it handled. The framework MAY preserve long-running
@@ -664,8 +669,10 @@ respond to an escalation.
    either way for a long-lived fork:
    - **Blocking.** The core's next turn waits for the join. The
      framework MUST also let the core route its notifications to a
-     blocking fork until the join, pausing the main context; routing
-     implies blocking, but blocking does not imply routing. Where the
+     blocking fork until the join, so the main context takes none until
+     then; routing implies blocking, but blocking does not imply
+     routing. Routing does not stop the lease the fork shares with its
+     parent (§3.3.7). Where the
      core routes them, the join's report MUST cover the notifications
      the fork handled as well as its own work. The guarantee of §3.3.7
      that the agent's own actions cannot leave the core unable to
@@ -673,8 +680,8 @@ respond to an escalation.
      neither joins nor is abandoned is the case that guarantee is tested
      on.
    - **Non-blocking.** The core keeps working and receiving its
-     notifications, and a non-blocking fork MUST NOT delay the parent's
-     next turn.
+     notifications, and the framework MUST NOT make the parent's next
+     turn wait for a non-blocking fork's result.
 
    A background stage (stage-2 appraisal, critique, base PRD principle
    3) whose forks the operator sets to block makes its channel's next
@@ -792,9 +799,9 @@ With the goals plugin loaded:
 
 1. The framework MUST let the core direct any peripheral to contact the
    user on any channel the peripheral owns, without a user turn
-   mediating. Directing contact MUST resume the peripheral's channel if
-   it is paused (§3.3.7). The periphery composes and sends the message
-   from the core's instruction.
+   mediating. When the core directs contact, the framework MUST resume
+   the peripheral's channel if it is paused (§3.3.7). The periphery
+   composes and sends the message from the core's instruction.
 
    *Rationale:* This is how the core's agency reaches the user: when an
    idle notification arrives, it checks its goals, and if something
@@ -926,7 +933,8 @@ without modification:
 - **Agent lives between messages** (principle 13): the kernel turns three
   things into events; plugins decide what each means.
 - **One actor, one identity** (principle 14): identity, memory, and the
-  ability to act are the agent's, not the channel's.
+  ability to act are the agent's, not the channel's; how the agent
+  presents is softened as §4 lists.
 - **Self-modification** (principle 15): the agent can modify itself; the
   operator decides how far.
 - **Compute is finite** (principle 16): every provider's capacity is

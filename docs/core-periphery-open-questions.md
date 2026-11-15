@@ -319,8 +319,9 @@ issue.
    *Provisional answer:* moved to #979, with its review.
 
 6. **Goal block.** Listing every goal (§3.6.1) can conflict with the
-   size bound (§3.6.5). "Commitment floor" collides with the base PRD's
-   Commitment records, which are a different thing.
+   size bound (§3.6.5). "Commitment floor" collided with the base PRD's
+   Commitment records, which are a different thing; the supplement no
+   longer uses the term.
 
    *Provisional answer:* moved to #982, with its review.
 
