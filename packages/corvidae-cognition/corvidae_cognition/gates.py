@@ -16,6 +16,16 @@ The agent's right to silence, decided from the appraisal vector:
     ``gate.send.min_salience`` and ``gate.send.enforce`` is set — "adds
     nothing, stays silent". ``gate.send.allow_progress`` /
     ``allow_thinking`` suppress those emissions wholesale.
+  * The **quiet veto** (#790) sits in front of the salience policy. An
+    operator lists origins in ``gate.send.quiet_origins`` (config only: the
+    agent cannot change it through runtime overrides); a ``final``,
+    ``progress`` or ``thinking`` emission from a listed origin is withheld
+    whatever its salience, with no appraisal vector, and even with
+    ``gate.send.enforce`` off. ``error`` emissions are never vetoed.
+    ``user`` and ``reminder`` can never be quiet; an invalid value fails
+    open. When the list is non-empty the plugin offers a ``speak_up`` tool:
+    calling it marks the trace surfaced, which lifts the quiet veto for the
+    trace's later emissions (the final then follows the normal policy).
 
 Both gates PULL their vectors through AppraisalPlugin's compute API
 rather than relying on hook order: apluggy dispatches broadcast hooks
@@ -40,8 +50,10 @@ import asyncio
 import collections
 import logging
 
+from corvidae.attribution import get_attribution
 from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae.tuning import resolve_tunable
+from corvidae.tool import Tool, ToolContext, tool_to_schema
+from corvidae.tuning import config_value, resolve_tunable
 
 logger = logging.getLogger("corvidae.gates")
 
@@ -127,6 +139,10 @@ class GatePlugin(CorvidaePlugin):
         # Trace ids admitted via on_message_admitted: the plugin-side
         # definition of "user" origin, bounded so it can't grow forever.
         self._admitted: collections.OrderedDict[str, None] = collections.OrderedDict()
+        # Traces the agent surfaced through speak_up, bounded like _admitted.
+        # Never discarded explicitly: a final is gated before the same
+        # response's thinking, so the LRU bound evicts entries instead.
+        self._surfaced: collections.OrderedDict[str, None] = collections.OrderedDict()
         # Strong refs to fire-and-forget outcome writes, so a write is never
         # GC-dropped mid-flight and on_stop can drain them.
         self._record_tasks: set[asyncio.Task] = set()
@@ -151,6 +167,46 @@ class GatePlugin(CorvidaePlugin):
         # Let in-flight outcome writes land rather than abandoning them.
         while self._record_tasks:
             await asyncio.gather(*set(self._record_tasks), return_exceptions=True)
+
+    @hookimpl
+    def register_tools(self, tool_registry: list) -> None:
+        """Offer speak_up only when the operator configured a quiet origin."""
+        if not self._quiet_origins():
+            return
+        plugin = self
+
+        async def speak_up(reason: str = "", _ctx: ToolContext | None = None) -> str:
+            """Call this when a turn started by a quiet source (a webhook or other automated notification whose replies are normally withheld) has something that genuinely needs the human's attention. After it, your final reply of this turn is sent. reason: one short phrase on why."""
+            # Without a channel there is nothing to record against.
+            channel = _ctx.channel if _ctx is not None else None
+            if channel is None:
+                return (
+                    "Error: no channel context available; speak_up did nothing, "
+                    "so your reply stays withheld"
+                )
+            # Without a trace id the turn cannot be marked surfaced.
+            trace_id = get_attribution().get("trace_id")
+            if trace_id is None:
+                logger.warning(
+                    "gate: speak_up on %s has no trace id; the reply stays withheld",
+                    channel.id, extra={"channel": channel.id},
+                )
+                return (
+                    "Error: this turn has no trace id; speak_up did nothing, "
+                    "so your reply stays withheld"
+                )
+            # Mark the trace surfaced (bounded LRU) and record the call.
+            plugin._surfaced[trace_id] = None
+            plugin._surfaced.move_to_end(trace_id)
+            while len(plugin._surfaced) > ADMITTED_LRU_MAXSIZE:
+                plugin._surfaced.popitem(last=False)
+            plugin._record(trace_id, channel, {"speak_up": str(reason)[:200]})
+            return (
+                "Your final reply of this turn will be sent, subject to the "
+                "usual checks."
+            )
+
+        tool_registry.append(Tool(name="speak_up", fn=speak_up, schema=tool_to_schema(speak_up)))
 
     @hookimpl
     async def on_message_admitted(self, channel, trace_id: str, sender: str, text: str) -> None:
@@ -236,7 +292,20 @@ class GatePlugin(CorvidaePlugin):
         a broken gate never silences the agent.
         """
         try:
+            # The quiet veto comes first and needs no vector. Origin is only
+            # resolved for progress/thinking when a quiet set exists.
+            quiet = self._quiet_origins()
+            surfaced = trace_id is not None and trace_id in self._surfaced
             if emission in _EMISSION_SWITCHES:
+                if quiet and not surfaced:
+                    origin = await self._origin(trace_id, annotations)
+                    if origin in quiet:
+                        if trace_id is not None:
+                            self._record(trace_id, channel, {
+                                "suppressed": {emission: True},
+                                "quiet_origin": origin,
+                            })
+                        return False
                 key, default = _EMISSION_SWITCHES[emission]
                 if _bool_tunable(channel, self.config, key, default):
                     return None
@@ -248,7 +317,9 @@ class GatePlugin(CorvidaePlugin):
             if emission != "final":
                 return None
             origin = await self._origin(trace_id, annotations)
-            return await self._decide_final(channel, text, trace_id, origin)
+            return await self._decide_final(
+                channel, text, trace_id, origin, surfaced=surfaced, quiet=quiet,
+            )
         except Exception:
             logger.warning(
                 "decide gate failed for the %s emission of %s on %s; sending it",
@@ -257,8 +328,25 @@ class GatePlugin(CorvidaePlugin):
             )
             return None
 
-    async def _decide_final(self, channel, text, trace_id, origin) -> bool | None:
+    async def _decide_final(
+        self, channel, text, trace_id, origin, surfaced: bool = False,
+        quiet: frozenset[str] = frozenset(),
+    ) -> bool | None:
         """The final-emission policy; returns False to withhold."""
+        # Quiet origin: withhold before any vector is pulled, whatever the
+        # salience and whether or not the send gate enforces.
+        if origin in quiet and not surfaced:
+            if trace_id is not None:
+                self._record(trace_id, channel, {"send": {
+                    "emission": "final", "origin": origin, "vetoed": True,
+                    "reason": "quiet_origin", "surfaced": False,
+                }})
+            logger.info(
+                "decide gate withheld a quiet-origin final (%s) on %s",
+                origin, channel.id,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
+            return False
         min_salience = _float_tunable(
             channel, self.config, "gate.send.min_salience", SEND_MIN_SALIENCE_DEFAULT
         )
@@ -271,6 +359,9 @@ class GatePlugin(CorvidaePlugin):
             "min_salience": min_salience,
             "enforced": enforce,
         }
+        # A surfaced quiet final continues through the normal policy; say so.
+        if origin in quiet:
+            record["surfaced"] = True
 
         # Pull the outbound vector over the text that would be sent, plus
         # advisory context: the input-side stage 1 and the previous
@@ -354,6 +445,28 @@ class GatePlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _quiet_origins(self) -> frozenset[str]:
+        """The validated ``gate.send.quiet_origins`` set, from config alone
+        (never runtime overrides). Invalid values fail open to empty; origins
+        that are never withheld are dropped. Both are logged."""
+        key = "gate.send.quiet_origins"
+        value = config_value(self.config, key, [])
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            logger.warning(
+                "%s=%r is not valid (accepted: a list of origin strings); "
+                "no origin is quiet", key, value, extra={"key": key},
+            )
+            return frozenset()
+        # Drop origins whose finals are never withheld, naming each.
+        for origin in value:
+            if origin in _NEVER_WITHHELD_ORIGINS:
+                logger.warning(
+                    "%s=%r: ignoring %r, because %s finals are never withheld "
+                    "(a direct reply or an operator-scheduled reminder)",
+                    key, value, origin, origin, extra={"key": key},
+                )
+        return frozenset(v for v in value if v not in _NEVER_WITHHELD_ORIGINS)
 
     async def _origin(self, trace_id, annotations) -> str:
         """The exchange's origin, read from propagated state, never inferred
