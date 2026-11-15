@@ -180,8 +180,9 @@ agent:
 #     allow_progress: true            # false suppresses text sent alongside tool calls
 #     allow_thinking: true            # false suppresses reasoning
 #     quiet_origins: []               # origins whose turns never reply, e.g. [webhook:github];
-#                                     # speak_up lets one turn through; operator-only (not
-#                                     # set_settings), user/reminder ignored; reload applies
+#                                     # speak_up lets one turn through; set_settings can
+#                                     # override it per channel (see the recommended
+#                                     # blocklist); user/reminder ignored; reload applies
 
 # Built-in tool settings (optional)
 # tools:

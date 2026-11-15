@@ -1772,11 +1772,16 @@ What changes for untrusted text:
   surfaced and why.
 - The hatch never sends anything itself. A design that sent directly would
   have bypassed every gate, `outbound_cap` included.
-- The list is read from `agent.yaml` only, never from `runtime_overrides`, so
-  neither `set_settings` nor an injected instruction can un-quiet a source or
-  quiet one. This departs from the "persona may tune its own gates" default
-  (see configuration.md, runtime-tunable gate parameters) on purpose: an agent
-  that can un-mute its own noisiest source is the flood again.
+- The list is a per-channel runtime tunable like every other gate key
+  (#928), so `set_settings` can change it, and an injected instruction can
+  ask the agent to. A quiet turn's payload can tell the agent to un-quiet its
+  own source on that channel, which brings back the reply-per-notification
+  flood; a message can also quiet a source the operator wants heard. The owner
+  accepted this: the list is a guardrail against floods, not a security
+  boundary. The recommended blocklist in configuration.md lists the key, and
+  `agent.immutable_settings` locks it. A lock blocks new writes, not an
+  override already set, so clear that with `set_settings` or a restart.
+  Un-quieting is bounded by `outbound_cap` when that plugin is configured.
 - `user` and `reminder` can never be quiet; listing them is ignored with a
   warning. A list that is not a list of strings fails open (nothing is quiet)
   with a warning naming the key and the value, so a typo cannot mute the agent.
