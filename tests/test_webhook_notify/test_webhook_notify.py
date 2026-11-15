@@ -199,10 +199,12 @@ async def test_cut_delivery_to_three_channels_writes_one_file(tmp_path):
                                           "endpoints": {"github": ["irc:#a", "irc:#b", "irc:#c"]}})
     await plugin._deliver(delivery({"k": "x" * 42}))
     [path] = spill_dir(tmp_path).iterdir()
-    assert [cut_line(plugin, n) for n in range(3)] == [
-        f"[metadata: cut to the first 20 of 50 characters; the full text is in {path}; "
-        f"read it back with read_file length={page(plugin, n)}]" for n in range(3)
-    ]
+    # One file for the three channels, and every header names it. The wording
+    # of the cut line is the spill plugin's, asserted in tests/test_spill.py and
+    # tests/test_provenance.py; what this test owns is the fan-out.
+    lines = [cut_line(plugin, n) for n in range(3)]
+    assert len(set(lines)) == 1
+    assert str(path) in lines[0]
 
 
 # a sender-chosen delivery id does not shape the spill file's name or directory.
