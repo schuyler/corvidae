@@ -179,6 +179,26 @@ class TestAdvance:
         assert (local.day, local.hour, local.minute) == (1, 8, 30)
         assert nxt - start == 86400 + 3600
 
+    def test_weekly_job_keeps_wall_clock_across_both_dst_changes(self):
+        """The docstring's claim, tested: a 7d step lands on the same clock time.
+
+        08:30 on Fri 2026-10-30 is PDT; a week later DST has ended (Nov 1), so
+        the slot is 08:30 PST — 169 hours of elapsed time. Spring-forward the
+        same way: 08:30 PST on Fri 2027-03-12, then 08:30 PDT a week later, the
+        transition being Mar 14 — 167 hours.
+        """
+        autumn = datetime(2026, 10, 30, 8, 30, tzinfo=LA).timestamp()
+        next_autumn = advance(autumn, 7 * 86400, autumn + 60, LA)
+        got = datetime.fromtimestamp(next_autumn, LA)
+        assert (got.strftime("%a"), got.hour, got.minute) == ("Fri", 8, 30)
+        assert next_autumn - autumn == 7 * 86400 + 3600
+
+        spring = datetime(2027, 3, 12, 8, 30, tzinfo=LA).timestamp()
+        next_spring = advance(spring, 7 * 86400, spring + 60, LA)
+        got = datetime.fromtimestamp(next_spring, LA)
+        assert (got.strftime("%a"), got.hour, got.minute) == ("Fri", 8, 30)
+        assert next_spring - spring == 7 * 86400 - 3600
+
 
 # ---------------------------------------------------------------------------
 # Schema and readiness
