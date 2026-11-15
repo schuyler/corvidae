@@ -373,6 +373,15 @@ def parse_llm_config(section: dict | None) -> LLMConfig:
                 f"{pblock[key]!r}; move it to llm.profiles.<name>.{key} "
                 f"(accepted provider keys: {', '.join(sorted(PROVIDER_KEYS))})"
             )
+        # A key in neither block is a typo, and a typo here loses the
+        # operator's declaration silently: 'headz: 4' reads as unbounded.
+        unknown = sorted(k for k in pblock if k not in PROVIDER_KEYS)
+        if unknown:
+            listed = ", ".join(f"llm.providers.{pname}.{k}" for k in unknown)
+            raise ValueError(
+                f"{listed}: not a provider key; accepted: "
+                f"{', '.join(sorted(PROVIDER_KEYS))}"
+            )
         if pblock.get("base_url") is None:
             raise ValueError(
                 f"llm.providers.{pname}.base_url is required; set it to the "
@@ -404,6 +413,14 @@ def parse_llm_config(section: dict | None) -> LLMConfig:
                 f"llm.profiles.{name}.{key} is a provider key, got "
                 f"{block[key]!r}; move it to llm.providers.<name>.{key} "
                 f"(accepted profile keys: {', '.join(sorted(PROFILE_KEYS))})"
+            )
+        # Same for a profile: 'extra_bdy' would be dropped without a word.
+        unknown = sorted(k for k in block if k not in PROFILE_KEYS)
+        if unknown:
+            listed = ", ".join(f"llm.profiles.{name}.{k}" for k in unknown)
+            raise ValueError(
+                f"{listed}: not a profile key; accepted: "
+                f"{', '.join(sorted(PROFILE_KEYS))}"
             )
         blocks[name] = block
 

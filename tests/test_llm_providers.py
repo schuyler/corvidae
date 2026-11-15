@@ -273,6 +273,60 @@ def test_a4_old_layout_names_key_and_both_destinations():
 
 
 # ---------------------------------------------------------------------------
+# #964: a key that belongs to neither block is a typo, not silence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("section", "expected_path", "accepted_hint"),
+    [
+        (
+            {"providers": {"main": {"base_url": "http://h", "headz": 4}},
+             "profiles": {"main": {"model": "m"}}},
+            "llm.providers.main.headz",
+            "accepted: ",
+        ),
+        (
+            {"providers": {"main": {"base_url": "http://h"}},
+             "profiles": {"main": {"model": "m", "extra_bdy": {"a": 1}}}},
+            "llm.profiles.main.extra_bdy",
+            "accepted: ",
+        ),
+    ],
+)
+def test_a9_unknown_key_names_the_path_and_the_accepted_keys(
+    section, expected_path, accepted_hint
+):
+    """A9: a misspelled provider or profile key fails startup (#964).
+
+    Without this the typo is silent in the worst way: `headz: 4` reads as
+    heads absent, so the operator's capacity declaration disappears, and a
+    misspelled `extra_body` means the request goes out without it.
+    """
+    with pytest.raises(ValueError) as exc:
+        parse_llm_config(section)
+
+    message = str(exc.value)
+    assert expected_path in message
+    assert accepted_hint in message
+
+
+def test_a9_every_unknown_key_is_named_in_one_message():
+    """A9: two typos are both reported, so one round trip fixes both."""
+    section = {
+        "providers": {"main": {"base_url": "http://h", "headz": 4, "bas_url": "x"}},
+        "profiles": {"main": {"model": "m"}},
+    }
+
+    with pytest.raises(ValueError) as exc:
+        parse_llm_config(section)
+
+    message = str(exc.value)
+    assert "llm.providers.main.headz" in message
+    assert "llm.providers.main.bas_url" in message
+
+
+# ---------------------------------------------------------------------------
 # A5: no heads means unbounded, seen through the plugin accessor
 # ---------------------------------------------------------------------------
 
