@@ -549,10 +549,10 @@ class ZulipPlugin(TransportPlugin):
     ) -> list[dict]:
         """Messages after ``anchor`` in that narrow, oldest first, page by page.
 
-        Zulip narrows channels by *name*, not id, so a channel renamed since the
-        cursor was written fetches nothing: that channel's gap is lost and the
-        next live message reinstates it. There is no id-based channel operator to
-        do better with.
+        The narrow uses channel *ids*: "Narrows that use IDs" in Zulip's
+        construct-a-narrow doc lists ``channel:1234`` taking an integer operand,
+        so a renamed channel keeps its cursor. Unobserved on a live server —
+        FakeZulip accepts the same shape (#644).
         """
         out: list[dict] = []
         seen = anchor
@@ -1044,7 +1044,9 @@ class ZulipPlugin(TransportPlugin):
         # Where this message was found, kept beside its id so catch-up can ask
         # the same question later (#644). Zulip narrows a channel by name.
         if kind in ("stream", "channel"):
-            narrow = [{"operator": "channel", "operand": stream_name}]
+            # By id, not name: channels can be renamed, and a rename would
+            # silently invalidate a stored name (#644 review).
+            narrow = [{"operator": "channel", "operand": int(msg["stream_id"])}]
         else:
             narrow = [{"operator": "dm", "operand": [int(i) for i in scope[3:].split(",")]}]
         if self._remember_seen(f"zulip:{scope}", narrow, int(msg["id"])):

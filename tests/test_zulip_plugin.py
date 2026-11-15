@@ -94,7 +94,12 @@ def _matches_narrow(message: dict, narrow: list) -> bool:
         if operator == "channel":
             if message.get("type") not in ("stream", "channel"):
                 return False
-            if str(message.get("display_recipient") or "") != str(operand):
+            # The transport narrows by id; an integer operand is that, a string
+            # one is the name (both are valid to Zulip).
+            if isinstance(operand, int):
+                if int(message.get("stream_id") or 0) != operand:
+                    return False
+            elif str(message.get("display_recipient") or "") != str(operand):
                 return False
         elif operator == "dm":
             if message.get("type") not in ("private", "direct"):
@@ -1690,7 +1695,7 @@ class TestTyping:
 class TestCatchUp:
     """Messages sent while the event queue was gone reach the agent once each."""
 
-    NARROW = [{"operator": "channel", "operand": "general"}]
+    NARROW = [{"operator": "channel", "operand": 7}]
 
     async def _seed(self, h, tmp_path, last_id: int) -> str:
         """Point the plugin at a temp cursor dir holding one channel's place."""
