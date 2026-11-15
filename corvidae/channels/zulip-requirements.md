@@ -142,7 +142,9 @@ verified (see the last section).
     reply show two notices and each stop goes where its start did — never to a
     topic a later message moved the channel to. A refresh whose `start` was in
     flight when the final's `stop` went out sends a `stop` of its own, so typing
-    cannot reappear after it. It is never left on. A failed typing call is a
+    cannot reappear after it — but only when nothing is owed in that topic by
+    then: a message arriving in that window is a reply owed, and the loop keeps
+    refreshing instead of exiting (#643). It is never left on. A failed typing call is a
     WARNING and never costs the reply. [PRD 3.2.5, #643]
 33. One final releases every outstanding slot *on the channel* (it answers a
     coalesced burst, and a burst may span topics). That release is deliberately

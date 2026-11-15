@@ -105,6 +105,8 @@ class FakeZulip:
         # When set, a typing "start" waits on it inside the handler, so a test
         # can hold a refresh in flight across a final's stop (#643).
         self.block_typing_starts: asyncio.Event | None = None
+        # Hold a stop in flight, for the release window after a final.
+        self.block_typing_stops: asyncio.Event | None = None
         self._wake = asyncio.Event()
         self.server: TestServer | None = None
 
@@ -233,11 +235,11 @@ class FakeZulip:
         early = await self._begin(request)
         if early is not None:
             return early
-        if (
-            self.block_typing_starts is not None
-            and self.requests[-1].form.get("op") == "start"
-        ):
+        op = self.requests[-1].form.get("op")
+        if op == "start" and self.block_typing_starts is not None:
             await self.block_typing_starts.wait()
+        if op == "stop" and self.block_typing_stops is not None:
+            await self.block_typing_stops.wait()
         return web.json_response({"result": "success", "msg": ""})
 
     async def start(self) -> str:
@@ -1636,6 +1638,64 @@ class TestTyping:
             assert ops[-1] == "start", ops
             # The loop is still alive and refreshing, not exited.
             assert h.plugin._typing_tasks.get(key) is not None
+            seen = len(h.server.typing)
+            await _wait_until(lambda: len(h.server.typing) > seen)
+        finally:
+            await stop(h)
+
+    async def test_a_message_arriving_in_the_stops_flight_keeps_typing_on(
+        self, fast_typing,
+    ):
+        """The loop's own stop is a round trip, and a message can land inside it.
+
+        Round 5 closed the window around the in-flight `start`; one await later
+        the loop sends its `stop` and returns, and a message arriving during
+        that call finds the loop alive (so `_begin_typing` starts none) and then
+        loses its typing when the loop exits: outstanding 1, no task, last op
+        `stop` (#643 round 6).
+        """
+        h = await _start()
+        try:
+            await _deliver(
+                h, channel_msg("@**Corvidae Bot** hi", topic="plans"), flags=["mentioned"]
+            )
+            # Catch a refresh start in flight, so the final's epoch bump lands
+            # while the loop is waiting on the server.
+            blocked_start = asyncio.Event()
+            h.server.block_typing_starts = blocked_start
+            await _wait_until(
+                lambda: len([t for t in h.server.typing if t["op"] == "start"]) >= 2
+            )
+            h.server.block_typing_starts = None
+            channel = h.registry.get("zulip:7")
+            # The final's own stop goes out unblocked; the loop's stop, which
+            # the epoch bump makes it send when the held start returns, is the
+            # one held in flight.
+            await h.plugin.send_message(
+                channel, OutboundMessage(text="done", latency_ms=None)
+            )
+            blocked_stop = asyncio.Event()
+            h.server.block_typing_stops = blocked_stop
+            blocked_start.set()
+            await _wait_until(
+                lambda: len([t for t in h.server.typing if t["op"] == "stop"]) >= 2
+            )
+            h.server.block_typing_stops = None
+            # A message in the same topic, inside that stop's flight.
+            await _deliver(
+                h, channel_msg("@**Corvidae Bot** and again", topic="plans"),
+                flags=["mentioned"],
+            )
+            blocked_stop.set()
+            await asyncio.sleep(0.2)
+
+            key = (channel.id, "plans")
+            assert h.plugin._outstanding.get(key, 0) == 1, "a reply is still owed"
+            assert h.plugin._typing_tasks.get(key) is not None, (
+                "the loop exited while a reply was owed"
+            )
+            ops = [t["op"] for t in h.server.typing]
+            assert ops[-1] == "start", ops
             seen = len(h.server.typing)
             await _wait_until(lambda: len(h.server.typing) > seen)
         finally:

@@ -1103,6 +1103,12 @@ class ZulipPlugin(TransportPlugin):
                     if self._outstanding.get(key, 0) > 0:
                         continue
                     await self._send_typing(channel, "stop", topic)
+                    # That stop is a round trip of its own: a message can
+                    # arrive inside it, and it would find this loop alive and
+                    # start none, then lose its typing when the loop exits
+                    # (#643 round 6). Nothing owed means the loop is done.
+                    if self._outstanding.get(key, 0) > 0:
+                        continue
                     return
         finally:
             # Forget this loop only if it is still the tracked one, never a
