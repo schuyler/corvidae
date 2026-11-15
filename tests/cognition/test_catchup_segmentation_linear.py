@@ -183,11 +183,13 @@ async def test_segments_match_the_pre_396_algorithm(shape):
     assert len(expected) >= 5, f"{shape.__name__} cut only {len(expected)} segments"
     starts = [json.loads(seg.rows[0][1]) for seg in expected]
     if shape is several_runs:
-        assert sum("Summary of earlier" in json.dumps(seg.messages[1]) for seg in expected) >= 2
+        heads = [json.dumps(seg.messages[1]) for seg in expected]
+        assert any("first window" in h for h in heads) and any("second window" in h for h in heads)
     if shape is tool_cycles:
         assert any(m.get("tool_calls") for m in starts[1:]), "no segment opens on a call row"
     if shape is overflowing_units:
         assert any(len(seg.rows) == 1 and b"HUGE" in seg.rows[0][1] for seg in expected)
+        assert any(len(seg.rows) == 2 and b"BIGCALL" in seg.rows[0][1] for seg in expected)
 
     assert [s.end_id for s in got] == [s.end_id for s in expected]
     for k, (g, e) in enumerate(zip(got, expected)):
@@ -201,7 +203,8 @@ async def test_segments_match_the_pre_396_algorithm(shape):
 
 ROWS = 10_000
 CALLS_PER_ROW = 8      # message_tokens calls per row, many segments
-SCANNED_PER_ROW = 2    # rows handed to _fork_range_sentence per row
+SCANNED_PER_ROW = 4    # rows handed to _fork_range_sentence per row: room for the
+                       # finished instruction over each segment's fitted window
 
 
 async def test_ten_thousand_rows_cost_linear_work(monkeypatch):
