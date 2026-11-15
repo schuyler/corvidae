@@ -2532,8 +2532,8 @@ so a background call delays a waiting main turn by its own slot time;
 today only what the operator puts in a stage's profile's `extra_body` (a
 `reasoning_budget_tokens`, a `max_tokens`) bounds a fork's share of that; an
 unmapped fork is bounded by the default chat profile's. #181's target adds the
-rest: exchange-scoped forks run before the head passes to another queue (PRD
-principle 3; §3.13.4), and headroom (the window at the compaction threshold plus a
+rest: a channel that drains keeps its head until its exchange-scoped forks
+have run (PRD principle 3; §3.13.4), and headroom (the window at the compaction threshold plus a
 fork's instruction and its profile's caps fits the slot's
 context, so a fork just short of compaction still runs). #182 measures
 how long main turns wait today.

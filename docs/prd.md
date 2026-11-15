@@ -105,7 +105,7 @@ one is a bug even if its tests pass.
    work is done (§3.13.4), so traffic on other channels can't starve it
    and no other queue's context has displaced its prefix. A holder that
    yields its head first (§3.13.5) leaves the work it has not started to
-   wait for a lease. It does not hold back
+   wait for a lease. Background work does not hold back
    its own channel's next main turn, and its results shape a later turn.
    What a fork costs on a given backend is measured, not assumed (§3.8.6).
    Other background work (upkeep) waits its turn for a head when every
@@ -1719,9 +1719,9 @@ from warm heads, whether the agent sees its provider's state) are tracked in
    by time takes. A stopped holder gives up its head on that provider at
    its next call boundary, never mid-call, keeps any lease it holds on
    another provider, and its work waits (item 9) until the plugin or the
-   operator resumes it. Whether a stop also lapses by itself is not
-   decided (#366). No replacement order or deferral delays work past its
-   latency bound, and every
+   operator resumes it. A stop is not held to the latency bound for now,
+   and whether it lapses by itself is not decided (#366). No replacement
+   order or deferral delays work past its latency bound, and every
    deferral lapses by itself, at its deadline or at the bound. A pause
    never needs a turn to undo it, so the agent cannot pause itself into a
    state no turn can leave, and the operator can resume any channel
@@ -1778,7 +1778,7 @@ record that holds the reasoning.
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
 | Every provider keeps warm context heads, and the operator declares how many; queues lease heads and switch at call boundaries (drain or yield, latency classes); no spend or rate caps for now; single-slot is a deployment choice, not architecture; the lease order is pluggable | principle 16; §3.13; #296; operator, 2026-11-02 |
-| Leases are a kernel mechanism (a lease per provider and queue, stop and resume at a call boundary, the policy view) under a replaceable default order (FIFO, release on drain, yield to a waiter while a tool runs); by default an exchange's forks run before its lease passes on, and nothing orders them ahead of their own channel's next main turn, because what that order would save depends on how a provider manages its cache; a pool is a provider, not a separate concept | principle 3; §3.13.3–5, 7; #364; #362; owner, 2026-11-15 |
+| Leases are a kernel mechanism (a lease per provider and queue, stop and resume at a call boundary, the policy view) under a replaceable default order (FIFO, release on drain, yield to a waiter while a tool runs); by default a queue that drains keeps its lease until its exchange's forks have run, a holder that yields first leaves its unstarted forks to wait for a lease, and nothing orders forks ahead of their own channel's next main turn, because what that order would save depends on how a provider manages its cache; a pool is a provider, not a separate concept | principle 3; §3.13.3–5, 7; #364; #362; operator, 2026-11-15 |
 | Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
 | Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
 | Hedging vocabulary is persona, not architecture | §3.11.5; diverges from the Persyn spec |
