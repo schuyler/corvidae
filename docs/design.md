@@ -3456,8 +3456,8 @@ inline handling would deadlock the transport against its own request. The
 single-consumer processor also keeps rapid-succession messages in arrival
 order.
 
-**Identity.** A channel's scope is the sender's ACI — `signal:<aci>` —
-never their phone number. `sourceNumber` is absent whenever a sender has
+**Identity.** A channel created from an inbound message has the sender's ACI
+as its scope — `signal:<aci>` — never their phone number. `sourceNumber` is absent whenever a sender has
 phone-number privacy on, and channel ids are the persistence key for
 `sessions.db`, the jsonl logs, and memory; keying on a field that can
 vanish would fork one sender's history into two.
@@ -3658,7 +3658,11 @@ are about that tool — but `send_signal_attachment` already reaches any known
 it, is a way to speak on another channel today. The reach is registry
 membership only, as the threat model says (no cross-channel allowlist). What the
 operator can apply is a per-destination cap on how many messages the agent
-starts: `outbound_cap` (#791), opt-in and off by default. The neighbouring capability that does
+starts *through the send gate*: `outbound_cap` (#791), opt-in and off by
+default. It counts nothing this paragraph describes — `send_signal_attachment`
+and its caption bypass the gate (the cap's own Known gaps says so, naming the
+tool), and so do the reaction tools — so an operator who sets it has bounded
+replies, not outreach. The neighbouring capability that does
 exist is `notify_other_channel`, which leaves another channel's context a
 notification and wakes it (PRD §3.5.10; the cross-channel-send package).
 Neither is an allowlist: there is no cross-channel allowlist in corvidae, by
@@ -4018,11 +4022,15 @@ zeroes the count.
 Sending to a channel other than the turn's own has no general text tool: no
 `send_to_channel` exists (the scheduler's "Not in phase one" note and
 `docs/threat-model.md`). Two of this transport's tools do cross channels
-already, both against any registered `discord:` channel: `send_attachment`,
-whose caption is text, and `start_thread`. PRD §3.5.9 gates nothing about which
+already: `send_attachment`, whose caption is text, and `start_thread` — both
+against any registered `discord:` channel except a DM, which `start_thread`
+refuses. PRD §3.5.9 gates nothing about which
 channel a turn may speak on — there is no cross-channel allowlist — and the
-limit the operator may apply is a per-destination count of messages the agent
-starts, shipped as the `outbound_cap` plugin (#791).
+limit the operator may apply is a per-destination count of the messages the
+agent starts *through the send gate*, shipped as the `outbound_cap` plugin
+(#791). The file, caption and reaction tools above bypass the gate and are not
+counted: they are the plugin's "sends that bypass the gate" Known gap, not
+something this paragraph's cap reaches.
 
 Out of scope: voice, slash commands, embeds, and inbound reactions (the agent
 can add and remove its own reaction on the triggering message, see

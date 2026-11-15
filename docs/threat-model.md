@@ -691,8 +691,10 @@ name is generated text, so it also appears in the channel's thread list to
 everyone who can read the channel. Deleting a thread is not offered, so an
 agent that creates them in a loop leaves them; Discord archives them instead.
 
-No tool sends a *message* to the person on another channel yet (the
-cross-channel `notify_other_channel` of #234 queues a turn there instead). PRD §3.5.9 now requires one, with no
+No tool sends a *message* to the person on another channel yet, though two
+already send something: `send_attachment` and `send_signal_attachment` take a
+caption, which is text to a person on a channel the model chose (no cross-channel
+allowlist), and `notify_other_channel` (#234) queues a turn there instead. PRD §3.5.9 now requires one, with no
 allowlist of target channels: any turn may speak on any channel (#234).
 Finding 15 is its entry. PRD §3.9.7 also lets the agent set recurring
 reminders, which the tree doesn't yet: a recurring reminder set because of

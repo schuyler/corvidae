@@ -1304,7 +1304,7 @@ signal:
   message_chunk_size: 2000            # Max UTF-8 bytes per message (default 2000)
 ```
 
-Omitting the block leaves the plugin loaded but inert. Signal channel scopes are always the sender's ACI (`signal:8f2c1c9a-…`), never a phone number — `sourceNumber` is absent under phone-number privacy, and a scope that can vanish would fork the channel's persisted history. Numbers in config are resolved forward to ACIs after the transport connects. See [signal-ops.md](signal-ops.md) for provisioning and [configuration.md](configuration.md) for the full key reference.
+Omitting the block leaves the plugin loaded but inert. A Signal channel created from an inbound message has the sender's ACI as its scope (`signal:8f2c1c9a-…`), never a phone number — `sourceNumber` is absent under phone-number privacy, and a scope that can vanish would fork the channel's persisted history. Numbers in config are resolved forward to ACIs after the transport connects. See [signal-ops.md](signal-ops.md) for provisioning and [configuration.md](configuration.md) for the full key reference.
 
 ### `resolve_channel` for transport authors
 
