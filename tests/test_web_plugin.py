@@ -2032,6 +2032,7 @@ class TestPanels:
 
     @pytest.mark.parametrize("path,expected", [
         ("data", "mounts outside the panel"),
+        ("/static", "panel's assets"),
         ("/static/app.js", "panel's assets"),
         ("/../escape", "walks up out of the panel"),
     ])
