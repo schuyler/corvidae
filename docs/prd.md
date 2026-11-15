@@ -101,9 +101,11 @@ one is a bug even if its tests pass.
    Background work runs in the gaps between main turns. Deferral is bounded
    so interactivity can't starve it: an exchange's own background work
    (stage-2 appraisal, critique) forks the exchange's prefix and runs under
-   the same lease, which by default is not passed on until that work is
-   done (§3.13.4), so traffic on other channels can't starve it and no
-   other queue's context has displaced its prefix. It does not hold back
+   the same lease, which by default a drained queue keeps until that
+   work is done (§3.13.4), so traffic on other channels can't starve it
+   and no other queue's context has displaced its prefix. A holder that
+   yields its head first (§3.13.5) leaves the work it has not started to
+   wait for a lease. It does not hold back
    its own channel's next main turn, and its results shape a later turn.
    What a fork costs on a given backend is measured, not assumed (§3.8.6).
    Other background work (upkeep) waits its turn for a head when every
@@ -302,8 +304,7 @@ one is a bug even if its tests pass.
     in `docs/threat-model.md` (principle 9).
 
 16. **Compute is finite, and a context switch is what it costs.** Every
-    model endpoint is a provider with finite capacity. It keeps a limited
-    number of
+    provider's capacity is finite. A provider keeps a limited number of
     conversation prefixes warm, in its slots and, on llama-server, in host
     RAM (`--cache-ram`), and a call whose prefix isn't warm pays a full
     prefill, the expensive part of any call. When more queues are active
@@ -1645,9 +1646,8 @@ on turns or time, rate limits on hosted APIs, enforcing parallelism apart
 from warm heads, whether the agent sees its provider's state) are tracked in
 #296 and are not requirements until decided there.
 
-1. Every chat profile names a provider: one endpoint with its
-   credentials and its capacity. Profiles that name one provider share
-   it. A provider is one cost center: usage is accounted to the
+1. Every chat profile draws on a provider; profiles on one provider
+   share it. A provider is one cost center: usage is accounted to the
    provider, not per channel or per sender, and its capacity is declared
    on it, so no per-channel override changes it. Embedding calls are
    metered and attributed (item 10) but take no lease, since they extend
@@ -1669,17 +1669,22 @@ from warm heads, whether the agent sees its provider's state) are tracked in
    yields (item 5) or is stopped (item 7), and then releases it, and the
    next waiting queue's
    context is prefilled. Holding a lease across calls is what keeps a
-   prefix warm: a channel's tool cycle, its own compaction and the
-   continuations of its exchange run on the head it already has. Leases
+   prefix warm: a channel's tool cycle (while no other queue is waiting,
+   item 5), its own compaction and the continuations of its exchange run
+   on the head it already has. Leases
    go to waiting queues in FIFO order unless a scheduler plugin replaces
    the order (item 7).
 4. A fork runs under the lease that holds its prefix. Exchange-scoped
    background work (stage-2 appraisal, critique) forks the conversation
    (§3.8), so it runs under the lease of the queue whose head holds that
-   prefix. Under the kernel's default order (item 7) that lease is not
-   released or passed on until the exchange's forks have finished, so
+   prefix. Under the kernel's default order (item 7) a queue that drains
+   keeps that lease until the exchange's forks have finished, so
    other queues' traffic can't starve them and no other queue's context
-   has displaced their prefix in between (principle 3). The lease orders
+   has displaced their prefix in between (principle 3). The yields of
+   item 5 come first: a holder that yields gives up its head with forks
+   still pending. A head is never taken mid-call, so a fork already
+   running finishes, and one not yet started waits as the last sentence
+   of this item says. The lease orders
    other queues behind its holder; it does not hold back the holder's own
    next main turn. What a fork costs on a given backend is measured
    (item 10; §3.8.6), not assumed. A fork whose
@@ -1696,8 +1701,9 @@ from warm heads, whether the agent sees its provider's state) are tracked in
    goes to that queue. A holder may also yield of its own accord at any
    call boundary (consolidation between chunks, for example). A running
    tool is a call boundary: under the kernel's default order, a holder
-   waiting on a tool result gives up its head when another queue is
-   waiting for one, at any point in that wait, and keeps it when none is;
+   waiting on a tool result gives up its head on each provider where
+   another queue is waiting for one, at any point in that wait, and keeps
+   it where none is;
    it queues for a head again when the result arrives.
 6. While a provider has a free head, a queue with work takes it without
    waiting, background work included: background work runs beside a main
@@ -1712,9 +1718,10 @@ from warm heads, whether the agent sees its provider's state) are tracked in
    stop a lease holder and resume it later, which is what sharing a head
    by time takes. A stopped holder gives up its head on that provider at
    its next call boundary, never mid-call, keeps any lease it holds on
-   another provider, and its work waits (item 9) until it is resumed. No
-   replacement order, deferral or stop delays work past its latency
-   bound, and every
+   another provider, and its work waits (item 9) until the plugin or the
+   operator resumes it. Whether a stop also lapses by itself is not
+   decided (#366). No replacement order or deferral delays work past its
+   latency bound, and every
    deferral lapses by itself, at its deadline or at the bound. A pause
    never needs a turn to undo it, so the agent cannot pause itself into a
    state no turn can leave, and the operator can resume any channel

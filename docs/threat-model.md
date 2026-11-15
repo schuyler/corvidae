@@ -1073,10 +1073,10 @@ What each kind of unlock costs:
   window every turn to stay within budget, down to the newest row alone
   for a budget that small (the log keeps them); the over-budget WARNING is
   the signal. A large `max_turns` lets one injected tool loop run far
-  longer before dispatch is suppressed, holding its lease on one of the
-  provider's heads except while one of its tools runs and another queue is
-  waiting, or once another queue reaches its latency bound (PRD §3.13.5),
-  and spending tokens throughout (finding 14).
+  longer before dispatch is suppressed. It keeps its lease on one of the
+  provider's heads until another queue is waiting while one of its tools
+  runs, or another queue reaches its latency bound (PRD §3.13.5), and it
+  spends tokens throughout (finding 14).
   `reasoning_history: keep` fills the window with reasoning and brings
   compaction sooner; `drop` (the shipped default) strips the reasoning a
   tool chain in progress relies on, which degrades Qwen-family tool use
@@ -1108,7 +1108,7 @@ What each kind of unlock costs:
   stage's slot time on every exchange, which starves main turns on a
   single-slot server (PRD principle 3) and spends tokens on every exchange
   on a metered one. Stage output caps still have to fit the context (PRD
-  §3.8.4). A provider's declared heads (PRD §3.13.2) belong to the provider,
+  §3.8.4). Declared heads (PRD §3.13.2) belong to the provider,
   not to a channel, so no override moves them; a self-edit of the config
   that declares them can (the self-edit entry), and declaring more heads
   than the server keeps warm brings the thrashing back.
@@ -1121,9 +1121,13 @@ What each kind of unlock costs:
   operator wait longer. It can also pause the operator's channel, move its
   own ahead, stop the holder of a head so its own channel takes it, or
   push upkeep back. Every deferral and pause lapses by itself
-  and the operator can resume any channel, and no replacement order,
-  deferral or stop delays work past its latency bound (PRD §3.13.7), so the damage is delay and
-  prefill, not a wedged agent.
+  and the operator can resume any channel, and no replacement order or
+  deferral delays work past its latency bound (PRD §3.13.7), so the
+  damage from those is delay and prefill, not a wedged agent. A stop has
+  no such bound yet (#366): a stopped queue waits until the scheduler
+  plugin or the operator resumes it, so until that is decided a scheduler
+  plugin that stops a queue and never resumes it holds that queue's work
+  for as long as it runs.
 - **Skills.** The skills index sits in the stable prompt region, so a
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan
