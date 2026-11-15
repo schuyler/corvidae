@@ -171,7 +171,7 @@ async def test_truncation_marker_and_at_cap(tmp_path):
     [path] = spill_dir(tmp_path).iterdir()
     assert cut_line(plugin, 0) == (
         f"[metadata: cut to the first 20 of 50 characters; the full text is in {path}; "
-        f"read it back with read_file max_chars={page(plugin, 0)}]")
+        f"read it back with read_file length={page(plugin, 0)}]")
     rec.calls.clear()
     await plugin._deliver(delivery({"k": "x" * 12}))
     assert rec.calls[0]["text"] == '{"k":"' + "x" * 12 + '"}'
@@ -187,7 +187,7 @@ async def test_marker_survives_the_kernel_rendering(tmp_path):
     assert lines[0] == "[metadata: notification; not from this channel's human]"
     assert lines[1] == (
         f"[metadata: cut to the first 20 of 50 characters; the full text is in {path}; "
-        f"read it back with read_file max_chars={page(plugin, 0)}]")
+        f"read it back with read_file length={page(plugin, 0)}]")
     assert lines[2] == "[annotations: origin=webhook:github]"
     assert lines[3].startswith("[payload ") and lines[3].endswith(" begins]")
     assert lines[4] == rec.calls[0]["text"] and lines[5].endswith(" ends]")
@@ -201,7 +201,7 @@ async def test_cut_delivery_to_three_channels_writes_one_file(tmp_path):
     [path] = spill_dir(tmp_path).iterdir()
     assert [cut_line(plugin, n) for n in range(3)] == [
         f"[metadata: cut to the first 20 of 50 characters; the full text is in {path}; "
-        f"read it back with read_file max_chars={page(plugin, n)}]" for n in range(3)
+        f"read it back with read_file length={page(plugin, n)}]" for n in range(3)
     ]
 
 

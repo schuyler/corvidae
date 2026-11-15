@@ -200,7 +200,10 @@ def cut_text(
     subagent loop puts on a cut tool result, so both say the same thing.
     ``page`` names the ``read_file`` size that fits this channel's budget, when
     the caller worked one out: the rest of a spill is usually read back in
-    pages, and asking for it whole cuts and spills it again (#579).
+    pages, and asking for it whole cuts and spills it again (#579). The words
+    name ``length``, which the registered tool takes — ``max_chars`` is an
+    implementation keyword of ``corvidae.tools.files.read_file`` that a model
+    calling the tool cannot pass (#579 review).
     """
     text = f"cut to the first {shown} of {total} characters"
     if path:
@@ -210,7 +213,7 @@ def cut_text(
         else:
             text += f"; the first {spilled} characters are in {shown_path}"
         if page:
-            text += f"; read it back with read_file max_chars={page}"
+            text += f"; read it back with read_file length={page}"
     elif failed:
         text += "; the full text was not saved"
     return text

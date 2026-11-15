@@ -1448,7 +1448,7 @@ in code:
   text was not saved]` when the write failed; and `[metadata: cut to the
   first N of M characters]` when the channel has no tool that can read the
   file. A channel that gets the pointer also gets `; read it back with
-  read_file max_chars=<P>` (#579), where P is the page `read_file` sizes for
+  read_file length=<P>` (#579), where P is the page `read_file` sizes for
   that channel's budget (`tools.files.page_chars`, the same helper the tool
   uses), never above `tools.max_result_chars`: the rest of a spill is read
   back in pages, and asking for it whole cuts and spills it again. The number

@@ -25,7 +25,7 @@ from corvidae.hooks import create_plugin_manager, get_dependency, hookimpl
 from corvidae.context import ContextWindow, MessageType
 from corvidae.persistence import PersistencePlugin
 from corvidae.provenance import PROVENANCE_KEY, ItemMetadata, cut_text, encode, frame
-from corvidae.tool import Tool
+from corvidae.tool import Tool, execute_tool_call
 from corvidae.tool_collection import ToolCollectionPlugin
 from fake_clock import FakeClock, install_kernel_clock
 from corvidae.spill import SPILL_NAME, NotificationSpill
@@ -152,7 +152,7 @@ def pointer(path: str, shown: int = 10, total: int = 50, page: int | None = None
     has a budget to size one by.
     """
     line = f"[metadata: cut to the first {shown} of {total} characters; the full text is in {path}"
-    return line + (f"; read it back with read_file max_chars={page}]" if page else "]")
+    return line + (f"; read it back with read_file length={page}]" if page else "]")
 
 
 def plain_cut(shown: int = 10, total: int = 50) -> str:
@@ -307,8 +307,63 @@ async def test_content_over_the_cap_writes_exactly_cap_characters(make, tmp_path
     assert h.cut_lines() == {"irc:#a": (
         f"[metadata: cut to the first 10 of 250 characters; "
         f"the first 100 characters are in {path}; "
-        f"read it back with read_file max_chars={h.page_for('irc:#a')}]"
+        f"read it back with read_file length={h.page_for('irc:#a')}]"
     )}
+
+
+async def test_the_header_names_arguments_the_registered_read_file_takes(make, tmp_path):
+    """The hint is only useful if the tool accepts what it names (#579 review).
+
+    ``max_chars`` is a keyword of ``corvidae.tools.files.read_file``; the tool a
+    model actually calls takes ``path, offset, length, start_line, end_line``.
+    This calls the registered tool with the header's argument and with the one
+    that used to be named, so a hint that drifts fails here rather than in a
+    model's tool call.
+    """
+    h = await make(daemon={"notification_spill_dir": str(tmp_path / "spill"),
+                           "notification_spill_max_chars": 100})
+    text = "".join(chr(ord("a") + i % 26) for i in range(250))
+    path = await h.notify("irc:#a", text=text)
+    page = h.page_for("irc:#a")
+    assert f"read_file length={page}" in h.cut_lines()["irc:#a"]
+
+    # The harness registers a fake read_file; this is the real one, from the
+    # plugin that ships it.
+    from corvidae.tools import FileToolsPlugin
+
+    registered: list = []
+    FileToolsPlugin(h.pm).register_tools(registered)
+    tools = [
+        tool if isinstance(tool, Tool) else Tool.from_function(tool)
+        for tool in registered
+    ]
+    read_file = {tool.name: tool for tool in tools}["read_file"]
+    # The published schema is what a model reads: it must offer the argument
+    # the header names, and not the one it used to name.
+    properties = read_file.schema["function"]["parameters"]["properties"]
+    assert "length" in properties and "max_chars" not in properties
+
+    # And a call with that argument returns a page, not an error.
+    out = await execute_tool_call(
+        read_file.fn, {"path": path, "length": page},
+        channel=h.registry.get("irc:#a"), tool_call_id="call-1", task_queue=None,
+    )
+    assert "unexpected keyword" not in out and "Traceback" not in out
+    assert text[:10] in out
+    # The published schema is what a model reads and what the arguments are
+    # validated against: it must offer the argument the header names and not
+    # the one it used to name.
+    parameters = read_file.schema["function"]["parameters"]
+    properties = parameters["properties"]
+    assert "length" in properties and "max_chars" not in properties
+
+    # And it works with that argument: a page comes back, not an error.
+    out = await execute_tool_call(
+        read_file.fn, {"path": path, "length": page},
+        channel=h.registry.get("irc:#a"), tool_call_id="call-1", task_queue=None,
+    )
+    assert "Traceback" not in out and "unexpected keyword" not in out
+    assert "read_file" not in out.splitlines()[0], out
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +641,7 @@ async def test_tool_result_over_the_spill_cap_says_how_much_was_saved(make, tmp_
     assert rendered(h, item).split("\n")[0] == (
         f"[metadata: cut to the first 10 of 50 characters; "
         f"the first 20 characters are in {path}; "
-        f"read it back with read_file max_chars={h.page_for('irc:#a')}]"
+        f"read it back with read_file length={h.page_for('irc:#a')}]"
     )
 
 
@@ -1001,4 +1056,4 @@ async def test_a_cut_tool_result_names_a_page_too(make):
     )
     assert cut.page_chars == expected_page(30_000)
     words = cut_text(cut.shown, cut.total, cut.path, cut.spilled, cut.failed, cut.page_chars)
-    assert f"; read it back with read_file max_chars={cut.page_chars}" in words
+    assert f"; read it back with read_file length={cut.page_chars}" in words
