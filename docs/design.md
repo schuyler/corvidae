@@ -3649,14 +3649,16 @@ stop (#390). Since a reply to a coalesced burst already zeroes the count
 (#398), the early clear is total rather than one slot. This is
 [PRD §3.2.10](prd.md): a transport delivers every emission on a channel it
 owns, whatever originated the turn, and liveness and reply bookkeeping
-tolerate a reply that answers no outstanding message. Sending to a channel
-*other than* the turn's own is in the PRD (PRD §3.5.9: "Nothing gates which
-channel a turn may speak on") but no tool exposes it yet; see the scheduler's
-"Not in phase one: a `send_to_channel` tool" note under
-[SchedulerPlugin](#schedulerplugin) and the deferred entry in
-`docs/threat-model.md`. What does gate output is a per-destination cap on how
-many messages the agent starts, which the PRD lets the operator apply and which
-ships as the `outbound_cap` plugin (#791). The neighbouring capability that does
+tolerate a reply that answers no outstanding message. Sending to a channel *other than* the turn's own is in the PRD (PRD §3.5.9:
+"Nothing gates which channel a turn may speak on"). No general text
+`send_to_channel` tool exists — the scheduler's "Not in phase one" note under
+[SchedulerPlugin](#schedulerplugin) and `docs/threat-model.md`'s deferred entry
+are about that tool — but `send_signal_attachment` already reaches any known
+`signal:` contact, from a turn begun on any channel: a file, and a caption with
+it, is a way to speak on another channel today. The reach is registry
+membership only, as the threat model says (no cross-channel allowlist). What the
+operator can apply is a per-destination cap on how many messages the agent
+starts: `outbound_cap` (#791), opt-in and off by default. The neighbouring capability that does
 exist is `notify_other_channel`, which leaves another channel's context a
 notification and wakes it (PRD §3.5.10; the cross-channel-send package).
 Neither is an allowlist: there is no cross-channel allowlist in corvidae, by
@@ -3995,8 +3997,10 @@ Known limits of the splitter, none of which loses text:
 - A cut can fall inside a ZWJ emoji sequence or between a base character
   and its combining marks, because splitting is by codepoint.
 
-Outbound is text and one file. `send_message`, `send_progress` and the
-`send_attachment` tool (#521) are the ways out; `send_thinking` and
+Outbound is text and files. The ways out are `send_message`, `send_progress`,
+the `send_attachment` tool (#521, a file plus an optional caption),
+`start_thread` (which posts its starter message into the parent channel), and
+`discord_react` / `discord_unreact` (an emoji on a message). `send_thinking` and
 `send_tool_status` are still not overridden (the `TransportPlugin` no-ops
 apply), so reasoning and tool traffic never reach Discord.
 
@@ -4010,9 +4014,11 @@ from the channel id, so no inbound message is needed. The outstanding count
 is guarded at zero in `DiscordPlugin._release_all`, as on Signal,
 with the same early typing release (#101): any final, sent or withheld,
 zeroes the count.
-Sending to a channel other than the turn's own is not provided by the
-transport: no `send_to_channel` tool exists yet (the scheduler's "Not in phase
-one" note and `docs/threat-model.md`). PRD §3.5.9 gates nothing about which
+Sending to a channel other than the turn's own has no general text tool: no
+`send_to_channel` exists (the scheduler's "Not in phase one" note and
+`docs/threat-model.md`). Two of this transport's tools do cross channels
+already, both against any registered `discord:` channel: `send_attachment`,
+whose caption is text, and `start_thread`. PRD §3.5.9 gates nothing about which
 channel a turn may speak on — there is no cross-channel allowlist — and the
 limit the operator may apply is a per-destination count of messages the agent
 starts, shipped as the `outbound_cap` plugin (#791).
