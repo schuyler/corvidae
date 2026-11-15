@@ -2476,6 +2476,10 @@ class MemoryPlugin(CorvidaePlugin):
                 expected = segment.end_id
                 stored = f"message ids through {expected} are stored"
         except asyncio.CancelledError:
+            # A cancelled consolidation still closes, and says so: the finally
+            # below is gated on the start, and "ok" for a stage that never
+            # completed is a lie a reader cannot detect (#469 round 7).
+            close_outcome = "cancelled"
             raise
         except Exception:
             close_outcome = "failed"

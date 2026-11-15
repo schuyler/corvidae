@@ -1729,6 +1729,10 @@ class Agent(CorvidaePlugin):
             # 11. Log phase timing breakdown
             _total = time.monotonic() - _t0
             _phases["other"] = max(0, _total - sum(_phases.values()))
+            # Set before the log: a raise while building `extra` would otherwise
+            # reach the finally with the flag still false and close a second
+            # time (#469 round 7).
+            _closed = True
             logger.info(
                 "queue item timing",
                 extra={
@@ -1742,7 +1746,6 @@ class Agent(CorvidaePlugin):
                     "message_count": len(conv.messages) if conv else 0,
                 },
             )
-            _closed = True
         finally:
             # Every item that starts closes: an early return (an absorbed
             # tool result, a turn that produced no result, no conversation
@@ -1757,7 +1760,12 @@ class Agent(CorvidaePlugin):
                         "trace_id": item.trace_id,
                         "role": item.role.value,
                         "total_ms": round((time.monotonic() - _t0) * 1000),
+                        # The same keys the success record carries, so one
+                        # reader handles both shapes (#469 round 7).
+                        **{f"{k}_ms": round(v * 1000) for k, v in _phases.items()},
                         "outcome": _outcome,
+                        "prompt_tokens": None,
+                        "message_count": len(conv.messages) if conv else 0,
                     },
                 )
 
