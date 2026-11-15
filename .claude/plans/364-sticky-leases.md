@@ -65,7 +65,6 @@ Public API:
 class ProviderLeases:
     name: str; heads: int
     def call(self, key: str, attribution: dict) -> AbstractAsyncContextManager[float]  # yields wait seconds
-    def snapshot(self) -> ProviderView
     def close(self) -> None
 
 class LeaseManager:
@@ -87,9 +86,15 @@ withdrawn; the conftest fixture that reset the global goes with it.
 
 ### The call path (`ProviderLeases.call`)
 
+0. **Closed:** after `close()` every call raises the shutdown RuntimeError
+   (below) before touching the table, so no lease is taken that shutdown
+   will never release.
 1. **Pass through (R3m, S1, R6):** key holds a lease here, is not stopped,
-   has no yield pending, and no *eligible waiter* exists → `in_call += 1`,
-   wait 0. An eligible waiter is a waiter entry whose key is not stopped and
+   and no *eligible waiter* exists → `in_call += 1`, the lease's
+   attribution becomes this call's, wait 0. A pending voluntary yield does
+   not block pass-through: with no eligible waiter the yielder is already
+   at the front of the line (R9m), so blocking would order the key behind
+   its own in-flight calls (R6). An eligible waiter is a waiter entry whose key is not stopped and
    does not hold a lease here (the holder's own parked entry is not one).
 2. **Free head (R2):** key holds nothing here, not stopped, and
    `len(_leases) < heads` → new lease with `in_call = 1`; emit `lease.grant`.
@@ -104,11 +109,15 @@ withdrawn; the conftest fixture that reset the global goes with it.
 
 Loop until nothing changes:
 1. **Stop / cooperative (R8, R9m):** every holder with `in_call == 0` that is
-   stopped or has `yield_pending` loses its lease: emit `lease.yield`
-   reason `stop` / `cooperative`.
+   stopped loses its lease (`lease.yield` reason `stop`). Every holder with
+   `in_call == 0` and `yield_pending` loses its lease (`lease.yield` reason
+   `cooperative`) if an eligible waiter exists; with none, its
+   `yield_pending` is cleared (the yield is moot: no one is behind it). A
+   cooperative yielder gives way before step 3's least-recently-used
+   choice.
 2. **Grant free heads (R3p, R2):** while `len(_leases) < heads`, the first
    eligible waiter (FIFO) gets a lease with `in_call = waiter.calls`
-   (reservation, R11/N2); emit `lease.grant` and `lease.wait_ms`; resolve its
+   (reservation, R11); emit `lease.grant` and `lease.wait_ms`; resolve its
    future.
 3. **Contention (S2):** if an eligible waiter remains and no head is free,
    the idle holder (`in_call == 0`) with the smallest `last_end` loses its
@@ -126,23 +135,31 @@ the tail when it next calls (PRD §3.13.5).
 
 `yield_key(key)`: on every provider where `key` holds, set `yield_pending`,
 move the key's parked entry (if any) to the FIFO tail (R9m), `_settle()`.
-`yield_pending` lives on the lease, so it is cleared when the lease goes.
-With no waiter present the lease is still given up; the key's next call
-takes the free head at once (step 2), wait 0.
+`yield_pending` lives on the lease, so it is cleared when the lease goes,
+and by step 1 when no eligible waiter is left. With no waiter present a
+yield changes nothing: the holder keeps its head.
 
 ### Cancellation between grant and resume (R11)
 
-`except BaseException` around the shielded await: if the future already
-resolved (grant or admission reserved `in_call` for this call) decrement
-`in_call` and `last_end = now`; else `calls -= 1` and drop the entry at 0.
-Then `_settle()`, re-raise.
+When a waiting call's await ends in an exception (its own cancellation,
+or the shutdown failure `close()` sets on the future):
+- the call counts as granted only if the future completed with a result
+  (not cancelled, no exception set): then the grant or admission reserved
+  `in_call` for it, so decrement `in_call` on the key's lease if it still
+  exists and set `last_end = now`;
+- otherwise decrement the entry's `calls` and drop the entry at 0, if the
+  entry is still in the table (`close()` clears it);
+- then `_settle()` (a no-op once closed) and re-raise.
 
 ### Shutdown
 
-`close()`: remove every lease emitting `lease.release` (value: held ms,
-`reason="shutdown"`), fail every pending future with
+`close()`: mark the table closed, remove every lease emitting
+`lease.release` (value: held ms, `reason="shutdown"`), fail every pending
+future with
 `RuntimeError("LLM provider <name> is shutting down; the call was not sent")`.
-`LLMPlugin.on_stop` calls `manager.close()` before closing clients.
+`LLMPlugin.on_stop` calls `manager.close()` before closing clients, then
+awaits the metric emissions still in flight so the shutdown
+`lease.release` events reach `on_metrics` before the plugin stops.
 
 ### Metrics (R12)
 
@@ -150,10 +167,17 @@ Then `_settle()`, re-raise.
 `provider`, `lease_key`, `stage`, `channel` (from `channel_id`), `trigger`,
 plus `reason` on yield/release — the same attribution fields
 `MetricsPlugin.on_llm_response` uses. Values: grant 1.0; wait_ms the wait in
-ms; yield 1.0; release held ms. The attribution of a yield/release is that
-of the last call granted under the lease. `LeaseManager.emit` is fail-soft
-(WARNING naming metric, key, provider). `LLMPlugin._emit_metric` schedules
-`on_metrics` as a task (the lease code is sync) and keeps it referenced.
+ms; yield 1.0; release held ms. `lease.wait_ms` is emitted only for a call
+that waited (granted or admitted from the waiter list); a call that took a
+free head or passed through emits none, and its zero wait is on the
+per-call `llm.lease_wait_ms` (R13). The attribution of a yield/release is
+that of the last call that entered under the lease (granted, admitted or
+passed through); a shared waiter entry carries the attribution of its first
+call. The emitter is fail-soft at both ends: `LeaseManager.emit` logs a
+synchronous failure, and the task `LLMPlugin._emit_metric` schedules (the
+lease code is sync) catches and logs an `on_metrics` failure itself
+(WARNING naming the metric, key and provider); the plugin keeps each task
+referenced until it finishes.
 
 ### `LLMClient.chat` (R3m, R13)
 
@@ -172,6 +196,9 @@ once with the error and the wait so far, then re-raise. `embed()` passes
 - `UsageLogPlugin`: `lease_wait_ms REAL` in the CREATE and via
   `add_column_if_missing` (in place).
 - Existing tests that fire `on_llm_response` directly gain `lease_wait_ms=None`.
+- `tests/test_hook_arg_binding.py` already guards that hookimpls receive
+  every declared hookspec argument; it is checked for whether it covers the
+  new parameter, and extended only if it does not.
 
 ### `LLMPlugin` wiring
 
@@ -184,7 +211,7 @@ the `clock` plugin when registered, else `time.monotonic`.
 Taken (adapted): `lease.py` tables, FIFO, grant reservation, stop/resume,
 yield, snapshot, emitter, close; the `llm.py`, `llm_plugin.py`, `hooks.py`,
 `metrics.py` diffs; the `lease_wait_ms=None` test updates; unit tests for
-R2, R3m, R3p, R8, R9m, R10, R11, R12, N2 and the integration harness
+R2, R3m, R3p, R8, R9m, R10, R11 (incl. grant-reservation), R12 and the integration harness
 (`GatedSession`, `build`) for R1, R5, R6, R7, R13.
 
 Dropped: holds, `HoldKind`, scopes, `boundary()`, `task_entry`,
@@ -207,9 +234,12 @@ admission-under-tool, and tests/cognition/test_lease_memory.py.
   granted together and reserve together, so the policy cannot take the
   head back between the grant and the calls resuming.
 - **No deadlock argument**: a head is held against an eligible waiter only
-  while the holder has calls in flight; calls end (HTTP timeout), so every
-  waiter is granted within finitely many call ends. Stopped keys are the one
-  exception and nothing in the default policy stops a key (PRD §3.13.7).
+  while the holder has calls in flight, so every waiter is granted within
+  finitely many call ends. That rests on calls ending: with the shipped
+  `timeout: None` a backend that hangs holds the head for ever, as it
+  stalls the unbounded path today; setting `timeout` is the operator's
+  remedy. Stopped keys are the other exception, and nothing in the default
+  policy stops a key (PRD §3.13.7).
 
 ## Rejected alternatives
 
@@ -218,6 +248,14 @@ admission-under-tool, and tests/cognition/test_lease_memory.py.
   is shutdown only (R12).
 
 ## Deferred
+
+- The response observer (`on_llm_response`, incl. the usage_log write) runs
+  inside the lease, so under contention the head is held for hook time, and
+  a hook that made a chat call on the same provider would hang on
+  `heads: 1`. No hook does (only metrics.py implements it). Fix size: small
+  (exit the lease before the observer). Deferred: no reachable input.
+- A shared waiter entry tags `lease.grant`/`lease.wait_ms` with its first
+  call's attribution when a turn and a fork of one channel wait together.
 
 - Thrash under steady contention (two active keys switch per call): accepted
   by the ruling; backend-aware scheduling is #366.
