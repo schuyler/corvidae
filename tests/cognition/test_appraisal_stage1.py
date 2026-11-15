@@ -721,3 +721,44 @@ class TestLazyProbe:
             assert plugin._probe.connection is None
         finally:
             await _teardown(plugin, pm)
+
+
+async def test_the_absorbed_by_link_carries_its_message_rowid(tmp_path):
+    """The link's row must name its message, or redaction cannot find it (#908).
+
+    `_persist_absorbed_by` upserts before the row necessarily exists, so the
+    upsert can create it. If that creation leaves `message_rowid` NULL, the
+    by-message lookup in `_owning_trace_id` misses it, redaction falls back to
+    the positional walk, and the burst's claims are tombstoned on the wrong
+    exchange.
+    """
+    plugin, channel, db_path, pm = await build_appraisal(
+        tmp_path, summaries=["something"], with_outcome_log=True
+    )
+    try:
+        await pm.ahook.on_message_persisted(
+            channel=channel,
+            trace_id="absorbed-1",
+            rowid=4321,
+            text="an absorbed message",
+            annotations={"absorbed_by_trace": "owner-1"},
+        )
+        db = await aiosqlite.connect(db_path)
+        try:
+            async with db.execute(
+                "SELECT message_rowid, appraisal FROM exchange_log "
+                "WHERE trace_id = ?",
+                ("absorbed-1",),
+            ) as cursor:
+                row = await cursor.fetchone()
+        finally:
+            await db.close()
+
+        assert row is not None, "the link wrote no row at all"
+        assert row[0] == 4321, (
+            "the link's row has no message_rowid, so no lookup by message id "
+            f"will find it: {row[0]!r}"
+        )
+        assert json.loads(row[1])["absorbed_by"] == "owner-1"
+    finally:
+        await _teardown(plugin, pm)
