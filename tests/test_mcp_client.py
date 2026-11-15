@@ -23,16 +23,22 @@ Design assumptions (from plans/mcp-client-plugin.md):
 
 import asyncio
 import logging
-from contextlib import AsyncExitStack
-from fake_clock import clock_pm
+from contextlib import suppress
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fake_clock import clock_pm
 
 # The import under test — will raise ImportError until the file exists.
 import corvidae.mcp_client as mcp_client_mod
-from corvidae.mcp_client import McpClientPlugin, _McpServerState, _ServerOwner, _call_mcp_tool, _make_tool, _mcp_tool_to_schema
-
+from corvidae.mcp_client import (
+    McpClientPlugin,
+    _call_mcp_tool,
+    _make_tool,
+    _mcp_tool_to_schema,
+    _McpServerState,
+    _ServerOwner,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers for building mock MCP objects
@@ -1447,27 +1453,27 @@ class TestLiveness:
         finally:
             await plugin.on_stop()
 
-    async def test_a_cancelled_transport_is_requeued_not_left_registered(
+    async def test_a_transport_cancel_requeues_the_dead_server(
         self, pm, kernel_clock, sdk, caplog, monkeypatch,
     ):
-        """A bare CancelledError from the transport means dead (#477 review, 2).
+        """A cancel of the owner task means dead, unless we are stopping (#477).
 
-        The SDK's task group cancels the host task when a connection drops.
-        That cancel used to escape the ping's except tuple, so the owner exited
-        and the dead session stayed in ``_servers`` with no log line: #477's end
-        state, reached silently.
+        The SDK's task group cancels the owner task with a native
+        ``Task.cancel()``, so ``Task.cancelling()`` is 1 inside the handler for
+        this cancel *and* for on_stop's. The round-2 review caught a guard on
+        it: it re-raised for the internal cancel too, and the dead session
+        stayed in ``_servers`` with no log line — #477's end state. The two are
+        told apart by ``owner.stop``, which every deliberate close sets first.
         """
-        monkeypatch.setattr(mcp_client_mod, "_LIVENESS_PING_SECONDS", 0.02)
         monkeypatch.setattr(
             mcp_client_mod.McpClientPlugin, "_retry_loop", _park_retry_loop
         )
         sdk.up.add("a")
         plugin, _ = await _start_plugin(pm, _servers("a"))
         try:
-            session = plugin._servers[0].session
-            # Not a cancel of this task: `cancelling()` stays 0, which is how a
-            # task group's internal cancel arrives.
-            session.send_ping = AsyncMock(side_effect=asyncio.CancelledError())
+            owner = plugin._owners["a"]
+            assert not owner.stop.is_set(), "the fixture must not look like a stop"
+            owner.task.cancel()  # what the SDK's task group does
             for _ in range(100):
                 if "a" in plugin._pending_servers:
                     break
@@ -1481,6 +1487,32 @@ class TestLiveness:
             ), [r.getMessage() for r in caplog.records]
         finally:
             await plugin.on_stop()
+
+    async def test_a_cancel_during_stop_does_not_requeue(
+        self, pm, kernel_clock, sdk, caplog, monkeypatch,
+    ):
+        """on_stop's own cancel is shutdown, not death: nothing is requeued.
+
+        Same native cancel as the test above, decided the other way — which is
+        why the discriminator has to be the stop event and not the cancel
+        itself.
+        """
+        monkeypatch.setattr(
+            mcp_client_mod.McpClientPlugin, "_retry_loop", _park_retry_loop
+        )
+        sdk.up.add("a")
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        owner = plugin._owners["a"]
+        owner.stop.set()  # on_stop's first act for this owner
+        owner.task.cancel()
+        with suppress(asyncio.CancelledError):
+            await owner.task
+        await asyncio.sleep(0)
+        assert "a" not in plugin._pending_servers
+        assert not any(
+            "dropped its transport" in r.getMessage() for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+        await plugin.on_stop()
 
     async def test_on_stop_waits_for_an_owner_that_is_still_unwinding(
         self, pm, kernel_clock, sdk, monkeypatch,

@@ -1460,10 +1460,17 @@ class McpClientPlugin(CorvidaePlugin):
                     await self._requeue_dead_server(owner, name)
                     return
         except asyncio.CancelledError:
-            # A cancel from the SDK's task group means the transport died
-            # under us; on_stop's cancel means stop. Without this the dead
-            # session stayed registered with no log line, which is #477's end
-            # state exactly (#477 review).
+            # Two different things cancel this owner: the SDK's task group,
+            # when the transport dies under us, and on_stop, which is closing
+            # up on purpose. `Task.cancelling()` cannot tell them apart —
+            # anyio delivers the internal cancel with the same native
+            # `Task.cancel()`, so inside this handler it is always 1, and a
+            # guard on it re-raised for the internal cancel too, leaving the
+            # dead session registered with no log line: #477's end state
+            # exactly (#477 review, round 2). The stop event can tell them
+            # apart, because every deliberate close sets it first.
+            if owner.stop.is_set():
+                raise
             await self._requeue_after_internal_cancel(owner, name)
             return
 
@@ -1472,13 +1479,12 @@ class McpClientPlugin(CorvidaePlugin):
     ) -> None:
         """Drop a server whose transport died by cancelling this task.
 
-        The requeue has to survive the cancellation that revealed the death, so
-        it runs in its own task behind a shield; a second cancel of this frame
-        ends the frame, not the requeue.
+        The caller has already established this is not a shutdown (``owner.stop``
+        is unset), so there is nothing to decide here. The requeue has to
+        survive the cancellation that revealed the death, so it runs in its own
+        task behind a shield; a second cancel of this frame ends the frame, not
+        the requeue.
         """
-        if asyncio.current_task() is not None and asyncio.current_task().cancelling():
-            # on_stop is cancelling us: shutdown owns the teardown.
-            raise asyncio.CancelledError
         logger.warning(
             "MCP server %r dropped its transport (the session was cancelled); "
             "dropping the session and reconnecting it",
