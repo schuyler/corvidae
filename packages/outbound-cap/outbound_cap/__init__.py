@@ -155,6 +155,8 @@ class OutboundCapPlugin(CorvidaePlugin):
         self._window_withheld: dict[str, int] = {}
         # channel ids that have already logged their first WARNING this run
         self._warned: set[str] = set()
+        # Whether the no-clock fallback has been reported (#821 review).
+        self._no_clock_logged = False
         # Validate at startup so a bad value names itself here rather than
         # capping nothing at the first send.
         block = config.get("outbound_cap")
@@ -206,10 +208,11 @@ class OutboundCapPlugin(CorvidaePlugin):
         withheld = self._withheld.pop(channel_id, 0)
         if withheld:
             logger.warning(
-                "outbound_cap: a human message on %s reset the cap; %d message%s were withheld",
+                "outbound_cap: a human message on %s reset the cap; %d message%s %s withheld",
                 channel_id,
                 withheld,
                 "" if withheld == 1 else "s",
+                "was" if withheld == 1 else "were",
                 extra={"channel": channel_id},
             )
         # The between-human marker only: the window is not reset by a human,
@@ -267,15 +270,32 @@ class OutboundCapPlugin(CorvidaePlugin):
             )
 
     def _now(self) -> float:
-        """The kernel clock's time, or a monotonic fallback without one."""
+        """The kernel clock's time, or a monotonic fallback without one.
+
+        A plugin manager with no ``clock`` plugin — a bare one, or a test — falls
+        back to ``time.monotonic()``: the right kind of time for a sliding
+        window, just not a swappable one. The fallback says so once at INFO, so
+        a daemon running without the clock plugin is visible rather than merely
+        odd under test, and a plugin manager that cannot answer at all is logged
+        with its reason (#821 review).
+        """
         clock = None
         try:
             clock = self._pm.get_plugin("clock")
         except Exception:  # pragma: no cover - a pm without get_plugin
-            clock = None
+            logger.warning(
+                "outbound_cap: the plugin manager could not answer get_plugin('clock'); "
+                "timing the window on time.monotonic()",
+                exc_info=True,
+            )
+            return time.monotonic()
         if clock is None:
-            # No clock registered (a bare plugin manager): monotonic is the
-            # right kind of time for a sliding window, just not a swappable one.
+            if not self._no_clock_logged:
+                self._no_clock_logged = True
+                logger.info(
+                    "outbound_cap: no clock plugin; the sliding window runs on "
+                    "time.monotonic() and cannot be swapped in a test",
+                )
             return time.monotonic()
         return clock.now()
 
@@ -429,19 +449,27 @@ class OutboundCapPlugin(CorvidaePlugin):
         channel and limit warns; the rest are INFO, so a long cap does not fill
         the log.
         """
-        held = 0
+        counts: list[int] = []
         for which, _words, _count in reasons:
             if which == "window":
                 self._window_withheld[channel_id] = self._window_withheld.get(channel_id, 0) + 1
-                held = self._window_withheld[channel_id]
+                counts.append(self._window_withheld[channel_id])
             else:
                 self._withheld[channel_id] = self._withheld.get(channel_id, 0) + 1
-                held = self._withheld[channel_id]
+                counts.append(self._withheld[channel_id])
+        # When both limits withheld, report the larger count: the smaller one
+        # understates how much has been held back (#821 review).
+        held = max(counts) if counts else 0
 
         words = " and ".join(w for _which, w, _c in reasons)
-        first = f"{channel_id}\x00{reasons[0][0]}"
-        if first not in self._warned:
-            self._warned.add(first)
+        # Warn once per channel and limit; a veto from the between-human limit
+        # alone after a both-limits warning is its own first warning.
+        unwarned = [
+            f"{channel_id}\x00{which}" for which, _w, _c in reasons
+            if f"{channel_id}\x00{which}" not in self._warned
+        ]
+        if unwarned:
+            self._warned.update(unwarned)
             logger.warning(
                 "outbound_cap: withholding the %s emission for %s on %s: "
                 "%d withheld since the cap was reached, %s",

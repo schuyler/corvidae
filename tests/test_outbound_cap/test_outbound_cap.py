@@ -531,7 +531,9 @@ async def test_the_between_human_limit_alone_says_so(h, caplog):
 
     [warning] = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert f"set by {MAX_MESSAGES_KEY}" in warning
-    assert f"set by {WINDOW_LIMIT_KEY})" not in warning
+    # The words, not the key name: `outbound_cap.max_messages` is a substring of
+    # `outbound_cap.max_messages_per_window`, so a key test here cannot fail (#821 review).
+    assert "window limit" not in warning
 
 
 async def test_both_limits_reached_names_both(caplog):
@@ -552,7 +554,7 @@ async def test_both_limits_reached_names_both(caplog):
 
     [warning] = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert f"set by {MAX_MESSAGES_KEY}" in warning
-    assert f"set by {WINDOW_LIMIT_KEY})" not in warning
+    assert "window limit" not in warning
 
     # A window of 1 with M at 2: the window is reached first, at one emission.
     harness2 = WindowHarness()
@@ -566,7 +568,7 @@ async def test_both_limits_reached_names_both(caplog):
         assert await harness2.gate.send(channel2) is False
     [warning2] = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert f"set by {WINDOW_LIMIT_KEY}" in warning2
-    assert f"set by {MAX_MESSAGES_KEY})" not in warning2
+    assert "between-human limit" not in warning2
 
     # A window of 1 with M at 1: both are reached, and both are named.
     harness3 = WindowHarness()
@@ -635,13 +637,18 @@ async def test_an_emission_another_gate_vetoes_spends_no_window(w):
 
 
 async def test_a_per_channel_window_override_beats_the_global(w):
-    """set_settings writes runtime_overrides, which win for both keys."""
+    """set_settings writes runtime_overrides, and the window limit wins there.
+
+    The override is per channel: a second channel on the same transport keeps
+    the global value (#821 review: the docstring claimed both keys).
+    """
     channel = w.channel("signal:aci1")
     other = w.channel("signal:aci2")
     channel.runtime_overrides[WINDOW_LIMIT_KEY] = 1
 
     assert await w.gate.send(channel) is True
     assert await w.gate.send(channel) is False
+    # The global window limit is higher, so the other channel still sends.
     assert await w.gate.send(other) is True
 
 
