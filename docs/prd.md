@@ -26,6 +26,13 @@ this document changes. A plugin that lets untrusted text reach somewhere
 new or a tool do something new records it in the threat model (principle
 9) whether or not this document mentions the plugin.
 
+`docs/prd-core-periphery-supplement.md` is part of this document for
+deployments that run the core/periphery strategy. It is accepted as the
+target, and conformance is checked from acceptance of its technical
+reference document (TRD). It adds principles 17–21 and amends, for those
+deployments, the requirements its §4 lists; its §0 says how its
+requirements read.
+
 ## 1. What it is
 
 Corvidae is a personal agent daemon: one Python asyncio process on one
@@ -242,7 +249,10 @@ one is a bug even if its tests pass.
     knowledge and the ability to act are the agent's, not the channel's.
     The agent presents the same identity on every channel; what changes
     from one channel to the next is register (§3.3.10), never who it is
-    (§3.3.8). Any turn can speak on any channel a transport owns, leave a
+    (§3.3.8). Under the core/periphery strategy, where contexts run
+    different models, the framework gives every context the one identity
+    and how well the agent presents it is measured (supplement §3.8.2),
+    not required. Any turn can speak on any channel a transport owns, leave a
     note for another channel's context, and read another channel's recent
     conversation (§3.5.9–11), and retrieval spans the whole memory. There
     are no channel walls to configure: the per-channel queue and window
@@ -1793,6 +1803,7 @@ record that holds the reasoning.
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
 | Every provider keeps warm context heads, and the operator declares how many; queues lease heads and switch at call boundaries (drain or yield, latency classes); no spend or rate caps for now; single-slot is a deployment choice, not architecture; the lease order is pluggable (release on drain superseded 2026-11-15, row below) | principle 16; §3.13; #296; operator, 2026-11-02 |
 | Leases are a kernel mechanism (a lease per provider and queue, stop and resume at a call boundary, the policy view) under a replaceable default order: FIFO grants, a holder keeps its head across calls while no other queue waits and gives it up at its next call boundary when one does (sticky until contention). That keeps prefixes warm on a best-effort basis and cannot deadlock, since a head is held against a waiter only until the calls already in flight end; backend-aware optimisation is a scheduler plugin's job. It replaces an earlier default that kept a lease until the queue drained and its exchange's forks had run, which needed the kernel to infer when a queue still had work coming and kept finding ways to hold a head its own work was waiting for. Nothing orders forks ahead of their own channel's next main turn, because what that order would save depends on how a provider manages its cache; a pool is a provider, not a separate concept | principle 3; §3.13.3–5, 7; #364; #362; operator, 2026-11-15 |
+| Core/periphery: one deliberative core context and a peripheral per channel, as a plugin strategy beside the base topology. Whether a fork blocks names only whether its parent's next turn waits for its result; every fork shares its parent's lease, and leases are the scheduler's handle for paging context heads. The strategy's pauses are the base's stop and its ordering a replacement lease order, so it amends nothing in §3.13. Trust passes through the core. Accepted as the target; conformance is checked from TRD acceptance | supplement; #16, #296, #527; operator, 2026-11-07 and 2026-11-15 |
 | Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
 | Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
 | Hedging vocabulary is persona, not architecture | §3.11.5; diverges from the Persyn spec |

@@ -1,28 +1,25 @@
 # Corvidae: product requirements supplement — core/periphery architecture
 
-**Status: accepted 2026-11-07.** This supplement is part of the product
-requirements: its principles and requirements bind, and `docs/prd.md`
-§4 records the decision. Implementation is gated on acceptance of the
-technical reference document (TRD) that will say how these outcomes are
-met and in what order; until the TRD is accepted, no work is measured
-against this supplement, and the prerequisites it names (the kernel
-rename, #16; pools and leases, #362–#364) are measured against the base
-PRD alone.
+**Status: accepted as the target; conformance is checked from TRD
+acceptance.** This supplement is part of the product requirements for
+deployments that run the core/periphery strategy, and `docs/prd.md` §4
+records the decision. A technical reference document (TRD) will say how
+these outcomes are met and in what order. No work is measured against
+this supplement until the TRD is accepted. Its prerequisites are measured
+against the base PRD alone: the kernel rename (#16), providers and warm
+heads (#362), lease scopes (#363), and the lease mechanism with its
+default order and metrics (#364, #367).
 
 This supplement reframes the requirements in `docs/prd.md` around a
 core/periphery architecture. It specifies desired outcomes, not
-implementation mechanisms. Where it and the base PRD
-disagree, the base PRD's principles (especially 2, 3, 8, 13, 14, 16)
-still bind; this supplement adds the architectural frame within which
-those principles operate.
+implementation mechanisms. The base PRD's principles still bind, except
+where §4 lists an amendment; this supplement adds the architectural frame
+within which those principles operate.
 
 Terminology: in this supplement, **core** means the System Two context
 (§3.1) and never the framework. The framework's centre is the
-**kernel**, as in base PRD principle 1. Code names in which "core" means
-the kernel (`core_tools`, `CoreToolsPlugin`, `CORE_LLM_STAGES`,
-`CorePluginManager` and the like) MUST be renamed to "kernel" as part of
-implementing this supplement, with no compatibility aliases (base PRD
-§1). GitHub issue #16 carries the rename.
+**kernel**, as in base PRD principle 1; no code name uses "core" for the
+kernel (#16).
 
 The base PRD describes a system of independent channel contexts. This
 supplement describes a system of one cognitive center and many sensory
@@ -352,7 +349,7 @@ violates one is a bug even if its tests pass.
    full or compressed, is open question 9, and how well it works is
    measured by tone continuity (§3.8.2).
 
-   *Note:* base principle 14 was amended at acceptance (§4): the
+   *Note:* §4 softens base principle 14 for this strategy: the
    framework gives every context the one identity, and where contexts
    run different models, how the agent presents is measured, not
    required. Principle 17 of this supplement reads the same way: giving
@@ -422,7 +419,8 @@ violates one is a bug even if its tests pass.
    preserve long-running core thinking (§3.5.4).
 
 3. The slot-management plugin MUST keep resident contexts within the
-   pool capacity the operator declares (base PRD principle 16, §3.13),
+   warm heads the operator declares on each provider (base PRD principle
+   16, §3.13),
    following the core's direction. The framework MUST give the core the
    authority and the information to direct attention, and the plugin
    the information to place contexts. The specific policy is a design
@@ -430,15 +428,14 @@ violates one is a bug even if its tests pass.
 
 4. When the model endpoint is a frontier API that manages its own cache,
    the slot-management plugin has nothing to place, and only the base
-   PRD's lease rules (§3.13, as amended in §3.3.7) MUST apply.
+   PRD's lease rules (§3.13) MUST apply.
 
    *Rationale:* The hierarchy degenerates to the API's scheduling; the
    core optimizes for prefix reuse and fewer context switches, not tier
    management (base PRD principle 16).
 
-5. The base PRD's pool capacity requirements (leases, warm heads,
-   background work bounds, §3.13) MUST hold whether tiers are managed or
-   not, except where §3.3.7 amends them.
+5. The base PRD's provider capacity requirements (leases, warm heads,
+   latency bounds, §3.13) MUST hold whether tiers are managed or not.
 
 6. The framework MUST let the core control queue multiplexing through
    tools: hold a queue, bring one forward, pin a context warm, or ask
@@ -449,7 +446,8 @@ violates one is a bug even if its tests pass.
    plugin's decisions MUST be cheap enough to make at every call
    boundary (base PRD §3.13.8), and backend-specific operations MUST
    live in it (Appendix A.4). A held queue MUST stay paused until the
-   core releases it (§3.3.7). The core's own queue is the one exception
+   core or the operator resumes it (§3.3.7). The core's own queue is the
+   one exception
    to "waiting work alone changes nothing": when the core has paged
    itself out or held its own queue, work arriving on that queue MUST
    make the slot-management plugin bring the core back, without a core
@@ -457,40 +455,49 @@ violates one is a bug even if its tests pass.
    guard against the core wedging itself (§3.3.7), not a rule about the
    order in which active queues are granted heads.
 
-7. **Pausing and queue order.** This item amends base PRD §3.13.5,
-   §3.13.6 and §3.13.7 (§4).
-   - A paused channel MUST stay paused until the core unpauses it; a
-     pause MUST NOT lapse at a latency bound. The framework MUST let the
-     operator unpause any channel at any time without going through a
-     channel's queue (base PRD §3.13.7). The framework MUST NOT let the
-     agent's own actions leave the core unable to receive work, so the
-     agent still cannot pause itself into a state no turn can leave
-     (base PRD §3.13.7).
+   Leases are the kernel's handle on context heads (base PRD §3.13), and
+   paging is what this strategy does with them: the slot-management
+   plugin is a scheduler plugin in the sense of base PRD §3.13.7, and it
+   MUST page a context by acting on the lease that holds it (stopping,
+   resuming and ordering grants), not on contexts tracked apart from the
+   leases. Which KV state paging preserves when more than one context
+   extends one lease (a long-lived fork and its running parent, or a
+   paused parent whose state at the fork point is the checkpoint,
+   §3.5.4) is the plugin's design, not a requirement.
+
+7. **Pausing and queue order.** Under this strategy the slot-management
+   plugin replaces the kernel's default lease order (base PRD §3.13.7).
+   This item says what that replacement does; it amends no base
+   requirement.
+   - Pausing a channel is a stop (base PRD §3.13.7). The framework MUST
+     keep a paused channel stopped until the core or the operator
+     resumes it. The framework MUST let the operator resume any channel
+     at any time without going through a channel's queue. The framework
+     MUST NOT let the agent's own actions leave the core unable to
+     receive work, so the agent still cannot pause itself into a state
+     no turn can leave (base PRD §3.13.7).
    - An active channel's queue MUST behave as base PRD §3.1 describes.
      Among active queues, the slot-management plugin MUST decide the
-     order: a queue keeps its head until it drains, and the next waiting
-     queue takes it then (drain-or-yield, base PRD §3.13.3). Base PRD
-     §3.13.5's yield at a latency bound MUST NOT apply; queues the core
-     leaves active share by draining in turn.
-   - The operator MAY give any queue a latency bound; a queue without
-     one is never overdue. The framework MUST log a warning and notify
-     the core, rate-limited, when a queue's waiting work passes its
-     bound.
+     order in which heads are granted, within base PRD §3.13.7's limits
+     on a replacement order: no replacement order delays work past its
+     latency bound, so base PRD §3.13.5's yield at a latency bound still
+     applies.
+   - The framework MUST log a warning and notify the core, rate-limited,
+     when a queue's waiting work passes its latency bound.
    - An upkeep stream (consolidation, retention sweeps and the like)
      MUST yield its head at every chunk boundary (base PRD §3.13.5's
-     yield of a holder's own accord, which this item keeps). Together
-     with the fork rule of §3.5.7, this is what bounds a main turn's
-     wait on a contended pool once the latency-bound yield is gone: a
-     main turn waits at most one call behind upkeep, and never behind a
-     non-blocking fork.
+     yield of a holder's own accord).
+
+   *Note (explanatory):* base PRD §3.13.7 leaves a stop unbounded for
+   now and leaves open whether it lapses by itself (#366). This item
+   relies on a stop that does not lapse; if #366 decides otherwise, this
+   item goes back to the owner.
 
    *Rationale:* The slot-management plugin orders active queues because
-   it alone knows the cache resources and the cost of swapping them. Base
-   PRD §3.13.5 bounded a main turn's wait by preempting the holder at the
-   waiter's latency bound; under this strategy the bound comes from
-   holders giving up the head at natural boundaries instead, and from the
-   slot-management plugin swapping contexts where the backend has the
-   levers (§3.3.6), so that a wait never silently becomes a prefill.
+   it alone knows the cache resources and the cost of swapping them. It
+   does so as a replacement order on the kernel's lease mechanism, so the
+   base PRD's latency bounds and its guarantees about pausing hold under
+   this strategy unchanged.
 
 8. The framework MUST meet every requirement in this supplement when
    any context, core or peripheral, runs on a provider that offers no
@@ -582,18 +589,24 @@ The fork's rows MUST stay in the log (base PRD principle 4) and MUST NOT
 enter the parent's window.
 
 Whatever its kind, every fork is either **blocking** or **non-blocking**,
-and the choice is made when the fork is taken (item 7). A blocking fork
-pauses the context it forked from until it joins or is abandoned; a
-non-blocking fork runs beside it, in parallel or interleaved, and its
-result re-enters the parent, if it re-enters at all, only by tail-append
-(base PRD principle 2). The choice decides the lease: a blocking fork
-runs under its parent's lease, since the parent is paused and nothing
-contends for the head; a non-blocking fork takes a lease like any other
-queue (base PRD §3.13.3), and if its prefix is no longer warm when it
-gets one, it misses, as base PRD §3.8.2 and §3.8.5 define, rather than
-delaying the parent. The rest of this section concerns long-lived
-forks; base PRD §3.8 governs one-shot forks on every point item 7 does
-not amend.
+and the choice is made when the fork is taken (item 7). Blocking names
+only the join dependency: the parent's next turn waits for a blocking
+fork's result, and does not wait for a non-blocking fork's, whose result
+re-enters the parent, if it re-enters at all, only by tail-append on a
+later turn (base PRD principle 2).
+
+The choice does not decide the lease. A fork starts from its parent's
+whole context, so it belongs on the head that holds that prefix: every
+fork shares its parent's lease, as base PRD §3.13.4 says, and runs under
+its parent's lease key (#363). A long-lived fork takes a
+lease of its own once it no longer shares that prefix: at its compaction
+boundary, where its window is rebuilt, or when the scheduler takes the
+shared lease back (a stop or a yield, base PRD §3.13.5, §3.13.7) and the
+fork has to queue for a head again. From then on it runs under a lease
+key of its own, which the TRD names.
+
+The rest of this section concerns long-lived forks; base PRD §3.8
+governs one-shot forks on every point item 7 does not amend.
 
 *Rationale:* A long-lived fork lets the core spend window depth on a
 focused task without forcing compaction of its longer horizon. The
@@ -606,9 +619,8 @@ sub-problem, explore a question, consolidate a thread of thought, or
 respond to an escalation.
 
 1. The framework MUST let the core fork its context window at any time,
-   for any reason. For a blocking fork the framework MUST pause the main
-   context and deliver the core's notifications to the fork; for a
-   non-blocking fork it MUST keep delivering them to the main context
+   for any reason. The core's notifications MUST keep going to the main
+   context unless the core routes them to a blocking long-lived fork
    (item 7).
 
 2. The framework MAY let a fork direct attention to peripheral contexts
@@ -622,8 +634,8 @@ respond to an escalation.
    just learned."
 
 4. The framework MUST keep the core's state at the fork point as a
-   checkpoint; for a blocking fork, the paused main context is the
-   checkpoint. The framework MUST let the core abandon a fork and start
+   checkpoint; while the main context is paused for a fork (item 7), the
+   paused main context is the checkpoint. The framework MUST let the core abandon a fork and start
    a new one from the same checkpoint. Abandoning a fork discards its
    reasoning, not its effects: the parent MUST still receive a report
    of the fork's external actions (messages sent, tools run) and the
@@ -647,35 +659,36 @@ respond to an escalation.
    it is taken, by whoever takes it. A plugin that forks (compaction,
    critique, appraisal, consolidation) MUST have a default for its
    forks, which the operator MAY change per stage; a fork the agent
-   takes is the agent's choice each time. The framework MUST let the
-   core choose either way for a long-lived fork:
-   - **Blocking.** The core's main context pauses until the join. The
-     framework MUST run the fork under the core's lease, extending the
-     core's warm prefix, and MUST deliver the core's notifications to it
-     until the join. The join's report MUST cover the notifications the
-     fork handled as well as its own work. The guarantee of §3.3.7 that
-     the agent's own actions cannot leave the core unable to receive
-     work holds through a blocking fork, so a blocking fork that neither
-     joins nor is abandoned is the case that guarantee is tested on.
+   takes is the agent's choice each time. Either way the fork shares
+   its parent's lease (§3.5). The framework MUST let the core choose
+   either way for a long-lived fork:
+   - **Blocking.** The core's next turn waits for the join. The
+     framework MUST also let the core route its notifications to a
+     blocking fork until the join, pausing the main context; routing
+     implies blocking, but blocking does not imply routing. Where the
+     core routes them, the join's report MUST cover the notifications
+     the fork handled as well as its own work. The guarantee of §3.3.7
+     that the agent's own actions cannot leave the core unable to
+     receive work holds through a blocking fork, so a blocking fork that
+     neither joins nor is abandoned is the case that guarantee is tested
+     on.
    - **Non-blocking.** The core keeps working and receiving its
-     notifications. The framework MUST make the fork wait for a lease of
-     its own like any other queue (base PRD §3.13.3), and a non-blocking
-     fork MUST NOT delay the parent's next turn.
+     notifications, and a non-blocking fork MUST NOT delay the parent's
+     next turn.
 
-   This amends base PRD §3.13.4 (§4): a stage's exchange-scoped forks
-   run under the holding lease before it is released only when that
-   stage's forks block, which is a default the operator can change,
-   not a kernel rule. A stage that blocks trades one call of delay on
-   the channel's next turn for a warm prefix; a stage that does not
-   trades the delay away for a miss rate under contention. Both are
-   measured (base PRD §3.8.6).
+   A background stage (stage-2 appraisal, critique, base PRD principle
+   3) whose forks the operator sets to block makes its channel's next
+   turn wait for the fork's result, which amends base PRD principle 3
+   for that stage (§4).
 
-   *Rationale:* The trade between latency and misses is a per-stage
-   policy, and the two deployments may want it set differently. Making
-   it one axis chosen at fork time, rather than a property of the fork's
-   kind, lets the same rule cover compaction's inline summary (blocking
-   today), critique's background objections (non-blocking today, and
-   re-entering as CONTEXT) and the core's long-lived forks.
+   *Rationale:* Whether the next turn waits for a fork's result is a
+   per-stage policy, and the two deployments may want it set
+   differently. Making it one axis chosen at fork time, rather than a
+   property of the fork's kind, lets the same rule cover compaction's
+   inline summary (blocking), critique's background objections
+   (non-blocking, re-entering as CONTEXT on a later turn) and the core's
+   long-lived forks. What a fork costs on the head it shares is the
+   scheduler's concern (§3.3.6), not the fork's.
 
 ### 3.6 Goal block
 
@@ -760,26 +773,26 @@ With the goals plugin loaded:
    deployment, llama.cpp's llama-server (Appendix A.4), switching
    between them MUST NOT reload a model each time, and the KV cache
    allocation (§3.3) MUST cover both. Other providers MUST work through
-   the base PRD's provider-neutral profiles and pools (§3.6, §3.13); a
-   provider without the tier levers gets the degenerate case (§3.3.4).
+   the base PRD's provider-neutral profiles and providers (§3.6, §3.13);
+   a provider without the tier levers gets the degenerate case (§3.3.4).
 
-6. The core/periphery strategy MUST stay correct on a pool of one warm
-   head, in the same-model case (§3.8.4). Its performance on such a pool
-   is not a requirement. This amends base PRD §1's single-slot clause:
-   correctness on one slot, not speed.
+6. The core/periphery strategy MUST stay correct on a provider with one
+   warm head, in the same-model case (§3.8.4). Its performance on such a
+   provider is not a requirement. This amends base PRD §1's single-slot
+   clause: correctness on one slot, not speed.
 
    *Rationale:* On one warm head, where the backend has the tier levers,
    a switch costs the slot-management plugin a save and a restore of KV
    state (§3.3.6, Appendix A.4), not a fresh prefill; only a backend
    without the levers pays a prefill per switch. Either way nothing
-   fails. The performance expectations assume a pool large enough to
-   keep the core and the active peripherals warm.
+   fails. The performance expectations assume a provider with enough
+   heads to keep the core and the active peripherals warm.
 
 ### 3.9 Core-initiated exchanges
 
 1. The framework MUST let the core direct any peripheral to contact the
    user on any channel the peripheral owns, without a user turn
-   mediating. Directing contact MUST unpause the peripheral's channel if
+   mediating. Directing contact MUST resume the peripheral's channel if
    it is paused (§3.3.7). The periphery composes and sends the message
    from the core's instruction.
 
@@ -865,8 +878,8 @@ supplement amends them:
 - base §1's single-slot clause holds as correctness, not speed (§3.8.6);
 - base principle 14's "presents the same identity on every channel" is
   softened: the framework gives every context the one identity, and
-  where contexts run different models, presentation is measured, not
-  required (§3.2.5);
+  where contexts run different models, presentation is measured (§3.8.2),
+  not required (§3.2.5);
 - the core takes over the heartbeat's role, and its idle-started turns
   lose the heartbeat's critique exemption, amending base §3.7
   Heartbeat and §3.7 Critique 3 (§3.1.2);
@@ -876,23 +889,14 @@ supplement amends them:
 - the core MAY give a task-bound peripheral fewer tools than it holds,
   amending base §3.5.7's full inherited set (§3.2.8);
 - base §3.8 governs one-shot forks; long-lived forks follow §3.5;
-- base §3.13.4's rule that exchange-scoped background work runs under the
-  holding lease before release becomes each stage's default blocking
-  choice, which the operator MAY change per stage; a non-blocking fork
-  takes its own lease and misses rather than delays (§3.5.7);
-- upkeep streams yield at every chunk boundary, which with the fork rule
-  is what bounds a main turn's wait once the latency-bound yield is gone
-  (§3.3.7);
-- pauses do not lapse, amending base §3.13.5, §3.13.6 and §3.13.7
-  (§3.3.7);
-- base principles 3 and 13, §3.1.16 and §3.13.5 are replaced, for this
-  strategy, by: some work is latency-sensitive, and queues MAY have a
-  defined latency bound. Work past its bound does not preempt other
-  work, but it MUST NOT wait unnoticed: the framework MUST log a
-  warning and surface the overdue queue to whatever directs attention,
-  which under this strategy is the core (§3.3.7). Whether upkeep and
-  idle work run under traffic therefore rests on that attention, not
-  on the lease rules.
+- base principle 3's "background work does not hold back its own
+  channel's next main turn" is a default: the operator MAY set a
+  background stage's forks to block, and then the channel's next turn
+  waits for that stage's result (§3.5.7).
+
+The strategy's scheduling amends none of base §3.13: its pauses are the
+base's stop, and its ordering of active queues is a replacement order
+held to base §3.13.7's limits (§3.3.7).
 
 Under the core/periphery strategy the framework MUST serve each
 transport channel by a peripheral and run the core as a channel of its
@@ -925,13 +929,13 @@ without modification:
   ability to act are the agent's, not the channel's.
 - **Self-modification** (principle 15): the agent can modify itself; the
   operator decides how far.
-- **Compute is finite** (principle 16): every model endpoint is a
-  resource pool; a context switch is what it costs.
+- **Compute is finite** (principle 16): every provider's capacity is
+  finite; a context switch is what it costs.
 
 The base PRD's kernel (§3.1), transport (§3.2), context window (§3.3),
 persistence (§3.4), tool (§3.5), LLM client (§3.6), cognition (§3.7),
 fork (§3.8), scheduler (§3.9), observability (§3.10), configuration
-(§3.11), evaluation (§3.12), and resource pool (§3.13) requirements
+(§3.11), evaluation (§3.12), and provider (§3.13) requirements
 carry over on those terms.
 
 ## 5. Open questions
@@ -1004,7 +1008,7 @@ can use to tune the periphery's judgment prompt over time.
 The reference deployment is llama.cpp's llama-server. This appendix
 records the levers it offers, not a comparison with other servers; other
 providers are supported through the base PRD's provider-neutral profiles
-and pools (§3.6, §3.13) and get the degenerate case of §3.3.4 when they
+and providers (§3.6, §3.13) and get the degenerate case of §3.3.4 when they
 lack these levers. Flags and endpoints below are from the llama-server
 README (`tools/server/README.md` in ggml-org/llama.cpp) as of
 2026-11-05; the TRD should confirm them against the pinned build.
@@ -1076,9 +1080,9 @@ sensitivity plugins, locks under principle 15, the floors of principle
 
 ---
 
-*This supplement is accepted requirements, not a build plan. It specifies
+*This supplement is the accepted target, not a build plan. It specifies
 desired outcomes for the core/periphery architecture. The TRD will specify
-how those outcomes are achieved and in what order, and implementation is
-gated on its acceptance. Appendix A collects the research and design ideas
+how those outcomes are achieved and in what order, and conformance is
+checked from its acceptance. Appendix A collects the research and design ideas
 that informed the requirements; the TRD may adopt, modify, or discard any
 of them.*
