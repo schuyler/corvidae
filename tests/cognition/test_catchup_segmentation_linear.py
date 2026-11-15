@@ -42,8 +42,25 @@ from corvidae.thinking import strip_reasoning_content
 
 CHANNEL = "irc:#segments"
 SYSTEM = "IDENTITY\n\nREGISTER"
-FORK_PROMPT = consolidation_instruction(
-    DEFAULT_CONSOLIDATION_FORK_PROMPT, DEFAULT_ENTRY_TARGET_TOKENS
+# Frozen copy of the instruction the shipped prompt produced when this oracle
+# was written: the segment cuts it asserts must not move when production
+# wording changes, and pinning the length keeps the fixture sizes valid
+# (#561 round 1).
+FORK_PROMPT = (
+    '[Memory consolidation] Pause the conversation here and write a record of part of it for your long-term autobiographical memory, in the first person, as yourself. This record is your private memory, not a message to anyone on the channel: no one there will read it, so write it for yourself.\n'
+    'Narrate this stretch of the conversation from your own point of view, step by step, in your own words: what was said, what you did, what you learned, and what was decided or left open. Don\'t quote anyone verbatim, but keep facts and opinions exactly as they were expressed, and who expressed each (names, numbers, dates, identifiers, preferences, commitments, corrections), so you can recall them accurately later. Keep what you were told apart from what you inferred or speculated ("so-and-so told me...", "I guessed that..."). Say what you did with tools and what it told you, not their raw output. Bracketed CONTEXT blocks are things you recalled or were shown, not new events; don\'t record them as if they happened now. Skip pleasantries and chatter.\n'
+    'Write one entry for each distinct stretch or topic, in order, and keep each entry to its topic: an entry that wanders across several topics is hard to find again. Each entry must make sense read on its own, months from now, with nothing else: name the people, projects and things involved rather than "he" or "it". Don\'t attribute a fact from one entry\'s topic to another\'s.\n'
+    'Then rate how important this stretch is to remember long-term, from 0 (routine) to 1 (essential). Do not call tools.\n'
+    'Respond with a single JSON object, nothing else:\n'
+    '{\n'
+    '  "entries": [\n'
+    '    {"narrative": "<first-person narrative of one stretch or topic>",\n'
+    '     "topic_tags": ["<short topic tag>", "..."]}\n'
+    '  ],\n'
+    '  "participants": ["<sender name>", "..."],\n'
+    '  "importance": "<number from 0 to 1>"\n'
+    '}\n'
+    "Keep each entry's narrative to about 192 words or fewer; if one topic needs more, give it consecutive entries rather than one long one.\n"
 )
 
 
