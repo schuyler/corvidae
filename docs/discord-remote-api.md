@@ -149,7 +149,7 @@ The model endpoint fails:
 
 - `chat completion failed  status=401 body=...` at ERROR, and the bot replies
   in Discord with `LLM request failed with HTTP 401: the API key was
-  rejected`. A 404 says to check `llm.providers.main.base_url` and `llm.profiles.main.model`.
+  rejected`. A 404 says to check the provider's `base_url` and the profile's `model` (`llm.providers.<provider>.base_url`, `llm.profiles.<profile>.model`).
   `base_url` usually needs its `/v1`, since corvidae appends `/chat/completions`
   to it.
 - `transient LLM error, retrying  status=503 attempt=1`, a WARNING: the

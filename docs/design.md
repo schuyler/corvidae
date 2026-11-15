@@ -4695,8 +4695,8 @@ llm:
       model_not_loaded_wait: 60.0 # seconds to wait out an unloaded router model
       timeout: null               # HTTP timeout per request; null = no timeout
       # heads: 2                  # warm context heads; absent = unbounded; nothing schedules on it yet
-    # embedding:                  # a separate embedding endpoint
-    #   base_url: "..."
+    embedding:                    # optional: a separate embedding endpoint
+      base_url: "..."
   profiles:
     main:
       model: "model-name"

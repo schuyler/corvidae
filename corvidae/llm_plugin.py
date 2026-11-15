@@ -607,7 +607,7 @@ class LLMPlugin(CorvidaePlugin):
         """
         if parse_llm_config(config.get("llm")) != self._config:
             logger.warning(
-                "llm config changed; LLM profiles, llm.stages and llm.defaults "
+                "llm config changed; LLM providers, profiles, llm.stages and llm.defaults "
                 "apply on restart"
             )
 

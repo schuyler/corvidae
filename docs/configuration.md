@@ -71,7 +71,7 @@ A misspelled entry is not an error: it blocks nothing, the daemon starts normall
 
 ## `llm` — LLM backend
 
-`llm:` has exactly four sections, and a key in any other place is a startup error:
+`llm:` has exactly four sections, and any other key directly under `llm:` is a startup error:
 
 - `llm.providers.<name>` is a **provider**: one endpoint plus its credentials and capacity. It holds `base_url`, `api_key`, `timeout`, the retry settings and `heads`.
 - `llm.profiles.<name>` is a **profile**: what to ask a provider for. It holds the `model`, the `kind`, `extra_body` and the other request parameters, and is built into its own client. A profile uses the provider named by its `provider:` key, else `llm.defaults.provider`, else the provider named `main`.
