@@ -3999,7 +3999,8 @@ Known limits of the splitter, none of which loses text:
 
 Outbound is text and files. The ways out are `send_message`, `send_progress`,
 the `send_attachment` tool (#521, a file plus an optional caption),
-`start_thread` (which posts its starter message into the parent channel), and
+`start_thread` (which starts a thread on a registered channel and may post its first
+message into the new thread, never into the parent), and
 `discord_react` / `discord_unreact` (an emoji on a message). `send_thinking` and
 `send_tool_status` are still not overridden (the `TransportPlugin` no-ops
 apply), so reasoning and tool traffic never reach Discord.
