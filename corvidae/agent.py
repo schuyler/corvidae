@@ -1423,13 +1423,30 @@ class Agent(CorvidaePlugin):
                 return
         _t0 = time.monotonic()
         _phases: dict[str, float] = {}
-        # The start of the item's stage run (#469) is logged once the item is
-        # known to do real work: a routine early return (no conversation
-        # message, a tool result absorbed into a pending batch) opens no stage,
-        # because every batched tool result would otherwise log two INFO lines
-        # (#469 round 3). "queue item timing" below closes it, and the trace id
-        # pairs the two even when two channels' items interleave.
-        _started = False
+        # One INFO line per item that does real work, at the moment the item
+        # starts (#469): "queue item timing" below closes it, and the trace id
+        # pairs the two even when two channels' items interleave. A tool result
+        # absorbed into a pending batch (step 4b) does no work, so it opens no
+        # stage and logs neither record - otherwise every batched result costs
+        # two INFO lines (#469 round 3). The predicate is computed here, before
+        # step 4, so the pair still spans the whole item: the persistence and
+        # conversation build inside that span are part of the stage being timed
+        # (#469 round 4). Retries skip those steps and still open a stage.
+        _started = not (
+            not item.retry
+            and item.role == QueueItemRole.NOTIFICATION
+            and item.tool_call_id
+            and (channel.pending_tool_call_ids - {item.tool_call_id})
+        )
+        if _started:
+            logger.info(
+                "queue item start",
+                extra={
+                    "channel": item.channel.id,
+                    "trace_id": item.trace_id,
+                    "role": item.role.value,
+                },
+            )
 
         # The outcome the finally below reports when the run stops before
         # the completion record: "failed" unless a path says otherwise, because
@@ -1526,15 +1543,6 @@ class Agent(CorvidaePlugin):
                         _outcome = "buffered"
                         return
 
-                _started = True
-                logger.info(
-                    "queue item start",
-                    extra={
-                        "channel": item.channel.id,
-                        "trace_id": item.trace_id,
-                        "role": item.role.value,
-                    },
-                )
 
                 # 5. Compact if approaching context limit
                 _t_compact_start = time.monotonic()
@@ -1917,6 +1925,9 @@ class Agent(CorvidaePlugin):
         # the mode, so a stage pairs with the turn that caused it.
         trace_id = get_attribution().get("trace_id")
         seq = next(self._fork_seq)
+        # Attribution before the start record: a raise in set_attribution would
+        # otherwise orphan a start with no close (#469 round 4).
+        token = set_attribution(channel_id=channel.id, mode="fork")
         started = time.monotonic()
         logger.info(
             "stage start",
@@ -1925,7 +1936,6 @@ class Agent(CorvidaePlugin):
                 "trace_id": trace_id, "seq": seq,
             },
         )
-        token = set_attribution(channel_id=channel.id, mode="fork")
         # ok means the fork produced a result: a refusal is a stage that ran and
         # cost its time without producing one, so it is not ok either.
         ok = False

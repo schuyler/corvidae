@@ -734,20 +734,19 @@ class TestQueueItemStartLine:
 class TestQueueItemPairing:
     """Every "queue item start" is closed, whatever way the item ends."""
 
-    async def test_an_item_with_no_conversation_message_opens_no_stage(
+    async def test_an_item_with_no_conversation_message_closes_as_no_message(
         self, plugin_and_channel, caplog,
     ):
-        """A routine early return is not a stage, so it logs neither record.
+        """The early return after the start still closes, with its own outcome.
 
-        Round 2's fix logged a start before the early returns and closed it,
-        which paired but put two INFO lines on every absorbed tool result
-        (#469 round 3). The start now happens once the item does real work, and
-        the close is gated on it, so nothing can dangle.
+        Only the absorbed-tool-result path opens no stage; everything that
+        starts gets a close, so the outcome field says what happened.
         """
         plugin, channel, db = plugin_and_channel
+        trace = mint_trace_id()
         item = QueueItem(
             role=QueueItemRole.USER, content="hi", channel=channel, sender="alice",
-            trace_id=mint_trace_id(),
+            trace_id=trace,
         )
 
         # No conversation message: the body returns before the completion
@@ -757,9 +756,40 @@ class TestQueueItemPairing:
         with caplog.at_level(logging.INFO):
             await plugin._process_queue_item_attributed(item, channel, [])
 
-        names = [r.getMessage() for r in caplog.records]
-        assert "queue item start" not in names, names
-        assert "queue item timing" not in names, names
+        starts = [r for r in caplog.records if r.getMessage() == "queue item start"]
+        timings = [r for r in caplog.records if r.getMessage() == "queue item timing"]
+        assert len(starts) == len(timings) == 1
+        assert timings[0].outcome == "no_message"
+        assert timings[0].trace_id == starts[0].trace_id == trace
+
+    async def test_a_retried_item_opens_and_closes_a_stage(
+        self, plugin_and_channel, caplog,
+    ):
+        """A retry skips steps 4-6 and still runs the turn, so it needs a pair.
+
+        Round 3's noise fix put the start inside the not-retry branch, so a
+        retried turn logged a close with no start: the issue's own defect on a
+        live path, and nothing tested `item.retry` at all (#469 round 4).
+        """
+        plugin, channel, db = plugin_and_channel
+        trace = mint_trace_id()
+        item = QueueItem(
+            role=QueueItemRole.USER, content="hi", channel=channel, sender="alice",
+            trace_id=trace, retry=True,
+        )
+        from corvidae.agent import _TurnRetry
+
+        plugin._turn_retries[channel.id] = _TurnRetry(item=item, attempt=1, timer=None)
+
+        with caplog.at_level(logging.INFO):
+            await plugin._process_queue_item_attributed(item, channel, [])
+
+        starts = [r for r in caplog.records if r.getMessage() == "queue item start"]
+        timings = [r for r in caplog.records if r.getMessage() == "queue item timing"]
+        assert len(starts) == len(timings) == 1, (
+            f"a retried item must pair: {[r.getMessage() for r in caplog.records]}"
+        )
+        assert timings[0].trace_id == starts[0].trace_id == trace
 
     async def test_an_item_that_raises_closes_as_failed(
         self, plugin_and_channel, caplog,

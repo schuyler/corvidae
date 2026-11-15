@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
-from corvidae.attribution import get_attribution
+from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel
 from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
@@ -504,6 +504,9 @@ def find_consolidated_record(caplog):
     return matches[0]
 
 
+TRACE_ID = "trace-469-consolidation"
+
+
 class TestConsolidationStageLogLines:
     """#469: consolidation logs its start, so its duration is derivable.
 
@@ -533,6 +536,16 @@ class TestConsolidationStageLogLines:
             done = find_consolidated_record(caplog)
             assert done.channel_id == channel.id
             assert done.trigger == "idle"
+            # And the stage closes: without this the start could be orphaned by
+            # a broken `finally` and the test would still pass (#469 round 4).
+            timings = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation timing"
+            ]
+            assert len(timings) == 1, (
+                f"expected one close; got {[r.getMessage() for r in caplog.records]!r}"
+            )
+            assert timings[0].outcome == "ok"
         finally:
             await db.close()
 
@@ -540,6 +553,7 @@ class TestConsolidationStageLogLines:
         """The start line says which trigger opened the stage, so a compaction
         consolidation is not mistaken for an idle one in the log."""
         memory, persistence, stub, channel, db = await build_consolidation_env()
+        token = set_attribution(trace_id=TRACE_ID)
         try:
             with caplog.at_level(logging.INFO):
                 await drive_compaction_consolidation(memory, persistence, channel)
@@ -559,10 +573,13 @@ class TestConsolidationStageLogLines:
             assert len(timings) == 1
             assert timings[0].channel_id == channel.id
             assert timings[0].trigger == "compaction"
-            assert timings[0].trace_id == starts[0].trace_id
+            # A real trace, so the pairing assertion compares two values the
+            # test set rather than None to None (#469 round 4).
+            assert starts[0].trace_id == timings[0].trace_id == TRACE_ID
             assert timings[0].outcome == "ok"
             assert timings[0].records == 1
         finally:
+            reset_attribution(token)
             await db.close()
 
     async def test_a_failure_before_the_start_logs_no_close(self, caplog):
@@ -597,7 +614,7 @@ class TestConsolidationStageLogLines:
         memory, persistence, stub, channel, db = await build_consolidation_env()
         try:
             async def slow_wait(channel_id):
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.5)
 
             memory._wait_for_inflight = slow_wait
             with caplog.at_level(logging.INFO):
@@ -607,7 +624,7 @@ class TestConsolidationStageLogLines:
                 if r.getMessage() == "memory consolidation timing"
             ]
             assert len(timings) == 1
-            assert timings[0].duration_ms < 200, (
+            assert timings[0].duration_ms < 250, (
                 "duration_ms must not include the in-flight wait"
             )
         finally:

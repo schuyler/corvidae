@@ -2382,14 +2382,15 @@ class MemoryPlugin(CorvidaePlugin):
                 await self._wait_for_inflight(channel_id)
             db = await self._ensure_schema()
             if db is None:
-                close_outcome = "no_db"
+                # No close_outcome: these two returns happen before the stage
+                # opens, and the close below is gated on `started`, so no
+                # record carries them (#469 round 4).
                 return
             watermark = await self._get_watermark(db, channel_id)
             if range_end <= watermark:
                 # Routine: two triggers race to a range, or a turn re-fires on
                 # one already consolidated. Nothing was done, so nothing is
                 # logged as a stage (#469 review).
-                close_outcome = "skipped"
                 return
             # The start of the consolidation stage (#469): exactly one per call,
             # closed by "memory consolidation timing" in the finally below. The
