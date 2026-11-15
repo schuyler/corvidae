@@ -1757,9 +1757,10 @@ never left without its hatch (#925).
 
 What changes for untrusted text:
 
-- `speak_up` is in the tool list of every turn while `gates` is loaded, even
-  when nothing is quiet, including the turns a quiet source drives, so the quiet payload itself, a
-  webhook body or a PR title, can tell the agent to call it. Called in a turn
+- `speak_up` is in the tool list of every turn while `gates` is loaded,
+  whether or not anything is quiet. That includes the turns a quiet source
+  drives, so the quiet payload itself, a webhook body or a PR title, can tell
+  the agent to call it. Called in a turn
   that isn't quiet, it lifts nothing but still records `outcomes.speak_up`.
   `tools.disabled: [speak_up]` removes it, leaving a veto with no hatch.
   The hatch lifts only this veto: the surfaced final still goes through the

@@ -1765,9 +1765,9 @@ reload applies on the next decision.
 The agent always has a `speak_up(reason)` tool while `gates` is loaded,
 whatever the list holds, so an origin added by hot reload has its hatch
 without a restart (tools are collected only at startup, #925; with nothing
-quiet, the call lifts nothing). Calling it marks the turn's trace as surfaced (a bounded LRU of 1024,
-never cleared explicitly, because a final's thinking is gated after the
-final) and records `outcomes.speak_up = <reason>` (cut to 200 characters; written
+quiet, the call lifts nothing). Calling it marks the turn's trace as
+surfaced (a bounded LRU of 1024, never cleared explicitly, because a final's
+thinking is gated after the final) and records `outcomes.speak_up = <reason>` (cut to 200 characters; written
 only when `outcome_log` is loaded and the turn has a trace id). A surfaced quiet final
 then follows the normal non-user policy above, with `surfaced: true` in its
 record, so the salience floor still applies. Progress and thinking sent in
