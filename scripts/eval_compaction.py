@@ -91,7 +91,7 @@ def resolve_llm_defaults(llm_section: dict | None) -> dict:
             api_key = expand_env_refs(api_key)
         except EnvRefError as exc:
             raise ValueError(
-                f"llm.{profile}.api_key references ${{{exc.var}}}, which is "
+                f"llm.providers.{resolved.get('provider')}.api_key references ${{{exc.var}}}, which is "
                 f"{'not set' if exc.reason == 'unset' else 'unusable'} in this "
                 f"environment; set {exc.var} and re-run"
             ) from None

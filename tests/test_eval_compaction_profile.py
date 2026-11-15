@@ -154,6 +154,9 @@ def test_an_unset_api_key_variable_is_a_config_error(eval_script, monkeypatch):
         eval_script.resolve_llm_defaults(llm)
 
     assert "CORVIDAE_EVAL_MISSING_KEY" in str(exc.value)
+    # The message names the provider path the key lives under, not the old
+    # llm.<profile> layout the parser now rejects (#362).
+    assert "llm.providers.main.api_key" in str(exc.value)
 
 
 def test_empty_agent_yaml_is_a_config_error_not_a_traceback(eval_script, tmp_path):

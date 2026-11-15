@@ -374,7 +374,10 @@ def parse_llm_config(section: dict | None) -> LLMConfig:
                 f"(accepted provider keys: {', '.join(sorted(PROVIDER_KEYS))})"
             )
         if pblock.get("base_url") is None:
-            raise ValueError(f"llm.providers.{pname}.base_url is required")
+            raise ValueError(
+                f"llm.providers.{pname}.base_url is required; set it to the "
+                "endpoint's URL, e.g. http://localhost:8080/v1"
+            )
         heads = pblock.get("heads")
         if heads is not None and (
             isinstance(heads, bool) or not isinstance(heads, int) or heads < 1
