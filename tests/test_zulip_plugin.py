@@ -1792,3 +1792,32 @@ class TestCatchUp:
             await _wait_until(lambda: len(h.server.polls) > polls)
         finally:
             await stop(h)
+
+
+async def test_a_failed_delivery_does_not_mark_the_message_seen(tmp_path):
+    """A message whose delivery raised must be fetched again, not skipped.
+
+    The cursor advances before the allowlist so a refusal cannot be re-fetched
+    forever; that makes an error the one path that must put it back (#644
+    review).
+    """
+    h = await _start()
+    try:
+        # The plugin's hook relay is the real sender: make that one raise.
+        h.pm.ahook.on_message = AsyncMock(side_effect=RuntimeError("boom"))
+        h.server.push_backlog(
+            channel_msg("@**Corvidae Bot** unhandleable", topic="plans"),
+            flags=["mentioned"],
+        )
+        h.plugin._cursor_dir = tmp_path
+        channel_id = "zulip:7"
+        h.plugin._cursor = {
+            channel_id: {"last": 0, "narrow": [{"operator": "channel", "operand": 7}]}
+        }
+
+        await h.plugin._catch_up()
+
+        got = h.plugin._cursor.get(channel_id, {}).get("last", 0)
+        assert got == 0, f"a failed delivery was recorded as seen: cursor={got}"
+    finally:
+        await stop(h)

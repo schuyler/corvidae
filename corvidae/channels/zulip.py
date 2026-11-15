@@ -500,6 +500,14 @@ class ZulipPlugin(TransportPlugin):
         # stray file wherever the process happened to start (tests included).
         base_dir = config.get("_base_dir")
         self._cursor_dir = Path(base_dir) if base_dir is not None else None
+        if self._cursor_dir is None:
+            # INFO, not WARNING: a clean config must warn about nothing, and the
+            # daemon always passes a base dir (#644 review).
+            logger.info(
+                "zulip: no base dir is configured, so the catch-up cursor has "
+                "nowhere to live: messages sent while this bot is down are lost "
+                "as before (#644)",
+            )
         await self._load_cursor()
         self._connect_task = asyncio.create_task(self._connection_loop())
 
@@ -512,12 +520,14 @@ class ZulipPlugin(TransportPlugin):
         """Fetch what each known channel missed while the queue was gone.
 
         Runs after every successful register: a restart and a garbage-collected
-        queue look identical from here, and dedupe by message id makes the
-        fetch cheap when nothing was missed (#644).
+        queue look identical from here. Dedupe is the anchor alone — each channel
+        asks only for what follows its stored id — so nothing is replayed unless
+        a cursor save failed, in which case the next catch-up re-delivers what
+        was already answered (#644).
         """
         if not self._cursor:
             return
-        moved = False
+        moved = True  # every handled message saves its own cursor
         for channel_id, entry in list(self._cursor.items()):
             try:
                 messages = await self._fetch_after(
@@ -538,9 +548,21 @@ class ZulipPlugin(TransportPlugin):
                     "message": msg,
                     "flags": msg.get("flags") or [],
                 }
-                await self._handle_event(event)
-                if self._remember_seen(channel_id, entry["narrow"], int(msg["id"])):
-                    moved = True
+                try:
+                    await self._handle_event(event)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Belt and braces: _handle_event already contains a bad
+                    # message, but if anything here escapes, the loop must not
+                    # take the register that follows it with it (#644 review).
+                    logger.warning(
+                        "zulip: catch-up could not handle a message in %s",
+                        channel_id, exc_info=True, extra={"channel": channel_id},
+                    )
+                # _handle_message advances the cursor for every message it
+                # looks at, and rewinds it when delivery fails; advancing again
+                # here would undo that rewind (#644 review).
         if moved:
             await self._save_cursor()
 
@@ -1011,6 +1033,19 @@ class ZulipPlugin(TransportPlugin):
         else:
             raise ValueError(f"unknown message type {kind!r}")
 
+        # Looked at from here on, so the cursor advances even if the mention or
+        # allowlist rules refuse it: an unadvanced refusal would be re-fetched
+        # on every catch-up forever (#644). The id form survives a rename.
+        if kind in ("stream", "channel"):
+            narrow = [{"operator": "channel", "operand": int(msg["stream_id"])}]
+        else:
+            narrow = [{"operator": "dm", "operand": [int(i) for i in scope[3:].split(",")]}]
+        # Held so a delivery that fails can put the cursor back: a message that
+        # errored is not seen and must be fetched again, not skipped.
+        previous = self._cursor.get(f"zulip:{scope}")
+        if self._remember_seen(f"zulip:{scope}", narrow, int(msg["id"])):
+            await self._save_cursor()
+
         # The server's `mentioned` flag: a direct mention, or one through a user
         # group the bot is in. A wildcard (@all, @topic) pages everyone, not us.
         mentioned = "mentioned" in flags
@@ -1035,22 +1070,12 @@ class ZulipPlugin(TransportPlugin):
         if self._mention_re is not None:
             text = self._mention_re.sub("", text)
         text = text.strip()
-        # Backlog says how old it is, as Signal's does (#644, PRD 3.2).
-        text = maybe_prefix_stale(text, _ms_of(msg.get("timestamp")), time.time() * 1000)
         if not text:
             logger.debug("zulip: ignoring message with no text content")
             return
-
-        # Where this message was found, kept beside its id so catch-up can ask
-        # the same question later (#644). Zulip narrows a channel by name.
-        if kind in ("stream", "channel"):
-            # By id, not name: channels can be renamed, and a rename would
-            # silently invalidate a stored name (#644 review).
-            narrow = [{"operator": "channel", "operand": int(msg["stream_id"])}]
-        else:
-            narrow = [{"operator": "dm", "operand": [int(i) for i in scope[3:].split(",")]}]
-        if self._remember_seen(f"zulip:{scope}", narrow, int(msg["id"])):
-            await self._save_cursor()
+        # Backlog says how old it is, as Signal's does (#644, PRD 3.2). After
+        # the empty check: a prefix must not turn an empty body into content.
+        text = maybe_prefix_stale(text, _ms_of(msg.get("timestamp")), time.time() * 1000)
 
         # The allowlist is checked before the channel is resolved, so a refused
         # sender never adds a registry entry (PRD 3.2 item 6).
@@ -1094,6 +1119,17 @@ class ZulipPlugin(TransportPlugin):
                 text=text,
                 trace_id=trace_id,
             )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Whatever went wrong, this message was not handled: put the cursor
+            # back so the next catch-up retries it.
+            if previous is None:
+                self._cursor.pop(f"zulip:{scope}", None)
+            else:
+                self._cursor[f"zulip:{scope}"] = previous
+            await self._save_cursor()
+            raise
         finally:
             # Admission fires before on_message returns. Anything not admitted
             # by then (gate veto, agent not ready, an exception, cancellation)
