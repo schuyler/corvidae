@@ -362,3 +362,43 @@ async def test_turn_hook_returns_while_fork_is_blocked(make_env):
         hook.close()
         agent.gate.set()
         await env.memory.wait_for_background_tasks()
+
+
+async def test_on_stop_refuses_a_late_turn_trigger(make_env):
+    """#663: a reply that arrives while or after on_stop gathers spawns nothing.
+
+    Such a task would not be in the gathered set, so it would run past the
+    gather and could write on the connection on_stop closes.
+    """
+    env = await make_env(1)  # threshold 1: any un-consolidated range forks
+
+    await env.memory.on_stop()
+    await env.memory.on_agent_response(channel=env.channel)
+
+    assert not env.memory._tasks, "no task may be spawned after on_stop began"
+    assert not env.stub.chat_calls, "no consolidation call may be made"
+
+
+async def test_on_stop_refuses_a_late_compaction_trigger(make_env):
+    """#663: the compaction trigger is refused the same way."""
+    env = await make_env(1)
+
+    await env.memory.on_stop()
+    await env.memory.on_compaction(
+        channel=env.channel, summary_msg={}, retain_count=0, compacted_ids=env.ids
+    )
+
+    assert not env.memory._tasks, "no task may be spawned after on_stop began"
+
+
+async def test_a_spawn_refused_after_on_stop_closes_its_coroutine(make_env):
+    """#663: refusing closes the coroutine, so Python logs no never-awaited warning."""
+    env = await make_env(1)
+    await env.memory.on_stop()
+
+    async def work():
+        raise AssertionError("a refused coroutine must never run")
+
+    coro = work()
+    assert env.memory._spawn(coro) is None
+    assert coro.cr_frame is None, "the coroutine was closed, not left un-awaited"
