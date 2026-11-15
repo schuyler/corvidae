@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlsplit
@@ -1096,6 +1097,8 @@ class ZulipPlugin(TransportPlugin):
         """
         key = self._typing_key(channel, topic)
         wake = self._typing_wakeup(key)
+        # When the notice showing on the server next needs re-sending.
+        next_refresh = 0.0
         try:
             while True:
                 owed = self._outstanding.get(key, 0) > 0
@@ -1104,6 +1107,7 @@ class ZulipPlugin(TransportPlugin):
                     if not await self._send_typing(channel, "start", topic):
                         return
                     self._typing_showing[key] = True
+                    next_refresh = time.monotonic() + TYPING_REFRESH_SECONDS
                     # Look again: the count may have moved during the send.
                     continue
                 if not owed and showing:
@@ -1120,16 +1124,23 @@ class ZulipPlugin(TransportPlugin):
                     # them (and is seen) or runs after the task is forgotten
                     # below (and starts a new loop). Never neither.
                     return
-                # Still owed and still showing: wait for a refresh, unless
-                # something changes first.
-                wake.clear()
-                try:
-                    await asyncio.wait_for(
-                        wake.wait(), timeout=TYPING_REFRESH_SECONDS
-                    )
-                except TimeoutError:
-                    if not await self._send_typing(channel, "start", topic):
-                        return
+                # Still owed and still showing: refresh when the deadline
+                # falls due, or re-derive early if something changes. The
+                # deadline is absolute, so a spurious wake (a second message
+                # while one reply is already owed) cannot push it out: a busy
+                # topic would otherwise never refresh and the notice would
+                # expire under a reply that is owed (#888 round 7).
+                due = next_refresh - time.monotonic()
+                if due > 0:
+                    wake.clear()
+                    try:
+                        await asyncio.wait_for(wake.wait(), timeout=due)
+                    except TimeoutError:
+                        pass
+                    continue
+                if not await self._send_typing(channel, "start", topic):
+                    return
+                next_refresh = time.monotonic() + TYPING_REFRESH_SECONDS
         finally:
             # Forget this loop only if it is still the tracked one, never a
             # successor registered under the same channel id and topic.

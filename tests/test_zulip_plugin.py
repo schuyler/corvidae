@@ -2036,3 +2036,32 @@ class TestTopicRouting:
             assert not h.plugin._typing_showing.get((channel.id, "alpha"), False)
         finally:
             await stop(h)
+
+async def test_a_busy_topic_still_refreshes_its_typing(fast_typing):
+    """Messages arriving while a reply is already owed must not postpone the
+    refresh (#888 round 7).
+
+    The wake-up exists so state changes are seen early, but a second message
+    changes nothing the loop acts on. If each spurious wake restarted the
+    refresh wait, a topic taking a message every few seconds would refresh
+    never, Zulip would expire the notice, and typing would be dark with a reply
+    owed — in exactly the chatty-topic case this logic exists for.
+    """
+    h = await _start()
+    try:
+        topic_msg = channel_msg("@**Corvidae Bot** hi", topic="busy")
+        await _deliver(h, topic_msg, flags=["mentioned"])
+        await _wait_until(
+            lambda: len([t for t in h.server.typing if t["op"] == "start"]) >= 1
+        )
+        # Keep sending inside the refresh interval for several intervals' worth
+        # of time: each one wakes the loop without changing what it owes.
+        for _ in range(12):
+            await _deliver(h, topic_msg, flags=["mentioned"])
+            await asyncio.sleep(zmod.TYPING_REFRESH_SECONDS / 3)
+        await _wait_until(
+            lambda: len([t for t in h.server.typing if t["op"] == "start"]) >= 2,
+            timeout=zmod.TYPING_REFRESH_SECONDS * 4,
+        )
+    finally:
+        await stop(h)
