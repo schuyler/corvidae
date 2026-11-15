@@ -1015,13 +1015,15 @@ async def build_catchup_segments(
             raise ValueError(
                 f"catch-up for channel {channel_id}: a segment starts at message id "
                 f"{nxt}, below every range row after {after_id}; the view's row order "
-                "disagrees with id order, so the range cannot be split"
+                "disagrees with id order (a clock that stepped back), so the range "
+                "cannot be split; report it with the channel's message_log timestamps"
             )
         ends.append(all_ids[below - 1])
     ends.append(all_ids[-1])
 
     # 7. One request per segment.
     segments: list[CatchupSegment] = []
+    # The system prompt's size, as fit_to_budget counts it against the budget.
     fixed = count_tokens(inputs.system_prompt)
     start_after = after_id
     for (run_view, own, index, fit_sums), end_id in zip(plans, ends):
@@ -1053,7 +1055,8 @@ async def build_catchup_segments(
         # same own rows, without copying or measuring the history below s
         # (#396). When the whole prefix fits, s is 0 and nothing is skipped.
         over = fixed + fit_sums[end] - budget
-        s = bisect_left(fit_sums, over, 0, first_at(seg_ids) + 1) - 1
+        # Capped below end: the fit always keeps the newest row, so s may not pass it.
+        s = bisect_left(fit_sums, over, 0, min(first_at(seg_ids), end - 1) + 1) - 1
         s = index.prev_clean[s] if s > 0 else 0
         # Shallow copies: the policy's in-place stripping must not alter rows
         # a later segment reuses as context.

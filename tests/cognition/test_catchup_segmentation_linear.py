@@ -197,6 +197,31 @@ async def test_segments_match_the_pre_396_algorithm(shape):
         assert g.messages == e.messages, f"segment {k}: request differs"
 
 
+async def test_window_keeps_newest_row_when_span_holds_no_view_row():
+    """A clock that stepped back puts a segment's own row outside its id span,
+    which then holds only a corrupt row; with the system prompt and the
+    instruction over the budget, the window still keeps the newest row, as
+    the pre-#396 fit does (Green review C1)."""
+    db = await aiosqlite.connect(":memory:")
+    await db.execute(
+        "CREATE TABLE message_log (id INTEGER PRIMARY KEY, channel_id TEXT, "
+        "message TEXT, timestamp REAL, message_type TEXT)"
+    )
+    await db.executemany("INSERT INTO message_log VALUES (?, ?, ?, ?, ?)", [
+        (1, CHANNEL, "{corrupt", 0.0, "message"),
+        (2, CHANNEL, json.dumps({"role": "user", "content": "second, stamped later"}), 2.0, "message"),
+        (3, CHANNEL, json.dumps({"role": "user", "content": "third, clock stepped back"}), 1.0, "message"),
+    ])
+    try:
+        expected = await _oracle_build_catchup_segments(db, CHANNEL, 0, 3, inputs(50), FORK_PROMPT)
+        got = await build_catchup_segments(db, CHANNEL, 0, 3, inputs(50), FORK_PROMPT)
+    finally:
+        await db.close()
+    assert [(s.rows, s.end_id, s.messages) for s in got] == [
+        (s.rows, s.end_id, s.messages) for s in expected
+    ]
+
+
 # ---------------------------------------------------------------------------
 # R1: linear work at 10k rows, counted
 # ---------------------------------------------------------------------------
