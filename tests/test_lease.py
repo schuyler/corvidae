@@ -567,6 +567,8 @@ async def test_r12_release_event_is_emitted_only_at_shutdown() -> None:
     await a.leave()
     await spin()
     assert named(env, "lease.release") == []
+    # B holds 2 s in a call and 4 s idle: held ms counts both.
+    env.clock.advance(2.0)
     await b.leave()
     env.clock.advance(4.0)
 
@@ -575,7 +577,7 @@ async def test_r12_release_event_is_emitted_only_at_shutdown() -> None:
 
     releases = named(env, "lease.release")
     assert len(releases) == 1
-    assert releases[0][1] == 4000.0
+    assert releases[0][1] == 6000.0
     assert releases[0][2]["reason"] == "shutdown"
     assert releases[0][2]["lease_key"] == "B"
     assert has_tags(releases[0][2], tags_for("B"))
