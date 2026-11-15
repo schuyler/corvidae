@@ -406,8 +406,11 @@ ranks the FTS rows by the decayed score, never through the hybrid fusion. Only `
 and `search_memory` see everything. It is not a scope: other channels'
 records, and this channel's once their rows leave the window, are
 retrieved normally. Known limit: the bound assumes the window is a
-contiguous id suffix of the channel's log, which rows imported with old
-timestamps can break (#638).
+contiguous id suffix of the channel's log. Reload loads rows by
+timestamp, so a row with a newer id but an older timestamp breaks it:
+rows a database already holds from the nanobot importers (removed, #638),
+a corrupt row skipped on reload, or a backward wall-clock step. Such a
+record is hidden on its own channel until the window moves past it.
 
 Scores are `cosine_similarity × exp(-age_days / memory.half_life_days)`, where
 `age_days` runs from `created_at`, or from `max(created_at,
