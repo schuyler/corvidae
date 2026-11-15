@@ -405,9 +405,11 @@ contract:
   the whole budget is dropped with a warning, and `funnel.ingest_ttl` ages out
   a result nobody collected. Whether a hit is relevant enough to show is not
   decided here (#674).
-- **Render stably.** The funnel dedupes on a whole line for now (#725), so a
-  line that carries something that changes (an age, a rank) re-admits the same
-  hit every turn.
+- **Render stably.** `RecallSourceMixin` does not pass dedupe keys yet, so a
+  mixin source is deduped by whole-line containment, and a line that carries
+  something that changes (an age, a rank) re-admits the same hit every turn.
+  The funnel takes keys from a source that submits its own promise (#725), and
+  a keyed entry is deduped on the key instead.
 - **Without the funnel** nothing calls the hook and the source does nothing.
   The mixin lists `funnel` in `optional_depends_on`, so that is logged at DEBUG.
 - **One timing limit** (#726). A result is admitted at the turn after the one
