@@ -758,6 +758,53 @@ class TestQueueItemPairing:
         assert timings[0].outcome == "no_message"
         assert timings[0].total_ms >= 0
 
+    async def test_an_item_that_raises_closes_as_failed(
+        self, plugin_and_channel, caplog,
+    ):
+        """A crash was logged as `outcome: ok`, because "ok" was the default the
+        finally reported and the completion record was the only path that set
+        anything else (#469 review)."""
+        plugin, channel, db = plugin_and_channel
+        item = QueueItem(
+            role=QueueItemRole.USER, content="hi", channel=channel, sender="alice",
+        )
+        plugin._build_conversation_message = MagicMock(
+            side_effect=RuntimeError("boom")
+        )
+
+        with caplog.at_level(logging.INFO):
+            with pytest.raises(RuntimeError):
+                await plugin._process_queue_item_attributed(item, channel, [])
+
+        starts = [r for r in caplog.records if r.getMessage() == "queue item start"]
+        timings = [r for r in caplog.records if r.getMessage() == "queue item timing"]
+        assert len(starts) == 1
+        assert len(timings) == 1, "the raising path must still close its start"
+        assert timings[0].outcome == "failed"
+        assert "ok" not in [getattr(r, "outcome", None) for r in timings]
+
+    async def test_a_completed_item_says_so_on_its_completion_record(
+        self, plugin_and_channel, caplog,
+    ):
+        """`ok` has to appear somewhere, or the field means "not an early
+        return" rather than "succeeded" (#469 review)."""
+        plugin, channel, db = plugin_and_channel
+        response = _make_text_response("hi")
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=response)
+        plugin._client = mock_client
+        plugin._mark_started()
+
+        with caplog.at_level(logging.INFO, logger="corvidae.agent"):
+            await plugin.on_message(
+                channel=channel, sender="user", text="hi", trace_id=mint_trace_id()
+            )
+            await drain(plugin, channel)
+
+        timings = [r for r in caplog.records if r.getMessage() == "queue item timing"]
+        assert timings, "expected a 'queue item timing' record"
+        assert timings[-1].outcome == "ok"
+
 
 # ===========================================================================
 # Default LLM error message: names the failure class and tells the user what

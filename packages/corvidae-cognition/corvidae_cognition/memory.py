@@ -2369,7 +2369,12 @@ class MemoryPlugin(CorvidaePlugin):
         # range produced nothing (#469 review).
         close_outcome = "ok"
         records = 0
-        t0 = time.monotonic()
+        # The close pairs with the start record, so both are gated on it: an
+        # exception before the start (in _wait_for_inflight, _ensure_schema or
+        # _get_watermark) logs no close, and t0 is taken where the start lands
+        # so duration_ms does not include the wait (#469 review).
+        started = False
+        t0 = 0.0
         try:
             # Compaction lets an in-flight turn or idle consolidation finish
             # first and takes only what lies past it (#621).
@@ -2390,6 +2395,8 @@ class MemoryPlugin(CorvidaePlugin):
             # closed by "memory consolidation timing" in the finally below. The
             # "memory consolidated" lines between them are per stored record, so
             # a multi-segment catch-up has several (#469 review).
+            started = True
+            t0 = time.monotonic()
             logger.info(
                 "memory consolidation start",
                 extra={
@@ -2481,8 +2488,10 @@ class MemoryPlugin(CorvidaePlugin):
             )
         finally:
             # One close per start, whatever the outcome, so a duration is
-            # always derivable from the pair (#469).
-            if close_outcome not in ("skipped", "no_db"):
+            # always derivable from the pair (#469). Gated on the start rather
+            # than on a list of excluded outcomes: a failure before the start
+            # has nothing to close.
+            if started:
                 logger.info(
                     "memory consolidation timing",
                     extra={

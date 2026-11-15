@@ -507,8 +507,9 @@ def find_consolidated_record(caplog):
 class TestConsolidationStageLogLines:
     """#469: consolidation logs its start, so its duration is derivable.
 
-    "memory consolidated" closes the stage; this record opens it, and the
-    channel, trigger and range pair the two.
+    "memory consolidation start" opens the stage and "memory consolidation
+    timing" closes it; the channel, trigger, range and trace id pair the two.
+    The "memory consolidated" lines between them are per stored record.
     """
 
     async def test_idle_consolidation_logs_its_start(self, caplog):
@@ -549,7 +550,6 @@ class TestConsolidationStageLogLines:
             assert starts, "expected a start record for the compaction trigger"
             assert starts[0].trigger == "compaction"
             assert starts[0].channel_id == channel.id
-            assert starts[0].range_end == find_consolidated_record(caplog).msg_id_end
             # The pair is what makes the duration derivable: one timing close,
             # same channel, trigger and trace (#469 review).
             timings = [
@@ -565,18 +565,63 @@ class TestConsolidationStageLogLines:
         finally:
             await db.close()
 
+    async def test_a_failure_before_the_start_logs_no_close(self, caplog):
+        """A raise before the stage opens has nothing to close (#469 review).
+
+        The close used to be gated on a list of excluded outcomes, so an
+        exception from _ensure_schema logged a timing record with no start.
+        """
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            async def boom():
+                raise RuntimeError("schema unavailable")
+
+            memory._ensure_schema = boom
+            with caplog.at_level(logging.INFO):
+                await memory._consolidate_range(channel.id, 999, "turn")
+            names = [r.getMessage() for r in caplog.records]
+            # Fail-soft: the error is logged as a warning and nothing is closed.
+            assert any(n.startswith("consolidation failed for") for n in names), names
+            assert "memory consolidation start" not in names, names
+            assert "memory consolidation timing" not in names, names
+        finally:
+            await db.close()
+
+    async def test_compaction_duration_excludes_the_in_flight_wait(self, caplog):
+        """duration_ms is the work after the wait, not the wait itself.
+
+        The start record is logged after _wait_for_inflight, so a t0 taken
+        before it made the close disagree with the gap between the two records
+        (#469 review).
+        """
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            async def slow_wait(channel_id):
+                await asyncio.sleep(0.2)
+
+            memory._wait_for_inflight = slow_wait
+            with caplog.at_level(logging.INFO):
+                await drive_compaction_consolidation(memory, persistence, channel)
+            timings = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation timing"
+            ]
+            assert len(timings) == 1
+            assert timings[0].duration_ms < 200, (
+                "duration_ms must not include the in-flight wait"
+            )
+        finally:
+            await db.close()
+
     async def test_a_skipped_range_logs_no_stage(self, caplog):
         """A turn trigger re-firing on a consolidated range opens nothing (#469 review)."""
         memory, persistence, stub, channel, db = await build_consolidation_env()
         try:
             await drive_idle_consolidation(memory, persistence, channel, db)
             caplog.clear()
-            try:
-                with caplog.at_level(logging.INFO):
-                    watermark = await memory._get_watermark(db, channel.id)
-                    await memory._consolidate_range(channel.id, watermark, "turn")
-            finally:
-                pass
+            with caplog.at_level(logging.INFO):
+                watermark = await memory._get_watermark(db, channel.id)
+                await memory._consolidate_range(channel.id, watermark, "turn")
             names = [r.getMessage() for r in caplog.records]
             assert "memory consolidation start" not in names, names
             assert "memory consolidation timing" not in names, names

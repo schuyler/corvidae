@@ -317,10 +317,16 @@ says there is work, and `memory consolidation timing` closes it in a
 `finally`, carrying the same channel, `trigger`, `range_end` and `trace_id`
 plus `duration_ms`, how many records were stored, and an `outcome`
 (`ok`, `superseded` or `failed`) — so one start always has exactly one close
-and the duration is the gap between them (#469). The `memory consolidated`
-lines between them are per stored record, so a multi-segment catch-up logs
-several, each carrying `range_end` and `trace_id` to tie it to the pair. A
-range that is already consolidated logs neither: routine skip, no stage.
+and the duration is the gap between them. The close is gated on the start, not
+on a list of outcomes: a failure in `_wait_for_inflight`, `_ensure_schema` or
+`_get_watermark` happens before the stage opens, so it logs no close, and on
+the compaction trigger `duration_ms` is the work after the in-flight wait, not
+the wait (#469 review). The `memory consolidated` lines between them are per
+stored record, so a multi-segment catch-up logs several, each carrying its
+segment's `range_end` — the end of that segment, which differs from the call's
+on the start and timing records, so `trace_id` is what ties a line to the pair
+(#469 review). A range that is already consolidated logs neither: routine skip,
+no stage.
 
 ### Corrupt `exchange_log` rows
 

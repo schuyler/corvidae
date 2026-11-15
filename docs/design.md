@@ -2296,8 +2296,10 @@ carrying `stage`, `channel`, `trace_id`, and — on the done record —
 stage that later refuses (`ForkRefused`) still has a start; the pair is what
 makes a stage's duration derivable from the log without a clock. A stage run
 beside the main turn also has `queue item start` / `queue item timing`, whose
-close carries an `outcome` (`ok`, `no_message`, `buffered`, `no_result`) so
-every start is paired whatever way the item ended.
+close carries an `outcome`: `ok` on the step-11 completion record,
+`no_message`, `buffered` or `no_result` on the early returns, and `failed` when
+the item raised — so every start is paired whatever way the item ended, and a
+crash is not logged as a success (#469 review).
 
 **Prefix parity.** `Agent.fork(channel, instruction, *, stage, cut=None,
 extra_body=None, snapshot=None)` renders with exactly what step 7 of the agent loop uses:

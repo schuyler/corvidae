@@ -1431,8 +1431,10 @@ class Agent(CorvidaePlugin):
         )
 
         # The outcome the finally below reports when the run stops before
-        # the completion record: "ok" once that record has logged (#469).
-        _outcome = "ok"
+        # the completion record: "failed" unless a path says otherwise, because
+        # the only way to reach the finally with `_closed` false is an early
+        # return (which sets its own outcome) or an exception (#469 review).
+        _outcome = "failed"
         _closed = False
         try:
             # Build the conversation message based on item role
@@ -1702,6 +1704,7 @@ class Agent(CorvidaePlugin):
                     "role": item.role.value,
                     "total_ms": round(_total * 1000),
                     **{f"{k}_ms": round(v * 1000) for k, v in _phases.items()},
+                    "outcome": "ok",
                     "prompt_tokens": result.usage.get("prompt_tokens") if result.usage else None,
                     "message_count": len(conv.messages) if conv else 0,
                 },
