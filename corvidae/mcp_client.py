@@ -1020,6 +1020,14 @@ class McpClientPlugin(CorvidaePlugin):
                     owner.task.cancel()
             if pending:
                 await asyncio.wait(pending, timeout=_CANCEL_GRACE_SECONDS)
+                # Anything still pending ignored its cancellation. It is
+                # abandoned deliberately, and the loop may close under it, so
+                # silence asyncio's "Task was destroyed but it is pending":
+                # the WARNING above already says this happened, once, with the
+                # server's name (#477 review).
+                for task in pending:
+                    if not task.done():
+                        task._log_destroy_pending = False
         except asyncio.CancelledError:
             # on_stop itself was cancelled (stop budget spent): cancel the
             # owners so none outlives the daemon, then let it propagate.
