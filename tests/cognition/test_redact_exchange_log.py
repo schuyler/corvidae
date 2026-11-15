@@ -286,11 +286,15 @@ class TestBurstArrivingDuringAGeneration:
         try:
             await db.execute(EXCHANGE_LOG_DDL)
             await db.commit()
+            # uA is the turn already generating when the burst arrived; rA is
+            # its reply, and it lands between the burst's two messages.
+            before = await insert_message(db, "irc:#a", "user", "the founder asks")
             m1 = await insert_message(db, "irc:#a", "user", "the kestrel nests at Brannan")
             await insert_message(db, "irc:#a", "assistant", "answer A")
             m2 = await insert_message(db, "irc:#a", "user", "and Zebulon owes 40")
             await insert_message(db, "irc:#a", "assistant", "answer B")
-            await _add_absorbed_row(db, "eA", "irc:#a", m1, absorbed_by="eB")
+            await _add_exchange(db, "eA", "irc:#a", before)
+            await _add_absorbed_row(db, "e1", "irc:#a", m1, absorbed_by="eB")
             await _add_exchange(db, "eB", "irc:#a", m2)
 
             await redact_messages(db, [m1])
@@ -298,20 +302,28 @@ class TestBurstArrivingDuringAGeneration:
             # The turn that answered the burst restated m1's content.
             owner, _ = await _row(db, "eB")
             _assert_scrubbed(owner)
-            # The other turn's claims are its own reply's, not m1's.
-            async with db.execute(
-                "SELECT appraisal FROM exchange_log WHERE trace_id = 'eA'"
-            ) as cursor:
-                row = await cursor.fetchone()
-            assert "past_claims" not in json.dumps(json.loads(row[0]))
+            # The other turn's claims are its own reply's, not m1's, and it
+            # ran stage 2 before the burst arrived: they must survive.
+            other, _ = await _row(db, "eA")
+            assert other["stage2"]["past_claims"] == CLAIMS
         finally:
             await db.close()
 
-    async def test_a_burst_whose_owner_got_no_stage2_changes_nothing(self):
+    async def test_a_burst_whose_owner_got_no_stage2_leaves_earlier_claims(self):
+        """The owner never ran stage 2; an exchange before the burst keeps its
+        own claims.
+
+        A backward walk for "the nearest row that has stage 2" finds the
+        founder exchange below the burst and tombstone claims nothing derived
+        from the redacted message. The assertion is on claims that exist, so it
+        can fail (#423 review).
+        """
         db = await make_full_db(None)
         try:
             await db.execute(EXCHANGE_LOG_DDL)
             await db.commit()
+            founder = await insert_message(db, "irc:#a", "user", "the founder asks")
+            await _add_exchange(db, "founder", "irc:#a", founder)
             m1 = await insert_message(db, "irc:#a", "user", "the kestrel nests at Brannan")
             m2 = await insert_message(db, "irc:#a", "user", "and Zebulon owes 40")
             await _add_absorbed_row(db, "e1", "irc:#a", m1, absorbed_by="e2")
@@ -319,13 +331,16 @@ class TestBurstArrivingDuringAGeneration:
 
             await redact_messages(db, [m1])
 
-            for trace_id in ("e1", "e2"):
-                async with db.execute(
-                    "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
-                    (trace_id,),
-                ) as cursor:
-                    row = await cursor.fetchone()
-                assert "past_claims" not in json.dumps(json.loads(row[0])), trace_id
+            earlier, _ = await _row(db, "founder")
+            assert earlier["stage2"]["past_claims"] == CLAIMS
+
+            # And the case the backward walk was reached from: a reply whose
+            # own exchange has no stage 2. It must not reach the founder
+            # either.
+            reply = await insert_message(db, "irc:#a", "assistant", "an answer")
+            await redact_messages(db, [reply])
+            earlier, _ = await _row(db, "founder")
+            assert earlier["stage2"]["past_claims"] == CLAIMS
         finally:
             await db.close()
 

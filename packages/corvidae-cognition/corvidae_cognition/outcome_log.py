@@ -451,8 +451,10 @@ async def _owning_trace_id(
     async with db.execute(
         "SELECT trace_id, CASE WHEN json_valid(appraisal) THEN "
         "json_extract(appraisal, '$.absorbed_by') END "
+        # message_rowid is not unique in the schema, so name the winner rather
+        # than take whatever the scan returns first (#423 review).
         "FROM exchange_log WHERE channel_id = ? AND message_rowid = ? "
-        "LIMIT 1",
+        "ORDER BY rowid DESC LIMIT 1",
         (channel_id, msg_id),
     ) as cursor:
         row = await cursor.fetchone()
@@ -462,15 +464,14 @@ async def _owning_trace_id(
         # exchange's own.
         return row[1] or row[0]
     # No row of its own: the message is inside an exchange (an assistant
-    # reply, a tool row). The exchange that answered it is the nearest one at
-    # or before it that has stage-2 claims — main's rule, kept. Only a row
-    # *with* claims can own, so a turn whose stage 2 never ran owns nothing
-    # and no later exchange is reached (#423 review).
+    # reply, a tool row). The exchange is the nearest row at or before it —
+    # main's rule exactly, with no stage-2 filter. Filtering for claims walks
+    # *backwards* when the nearest row has none (a fork miss, a critique-origin
+    # turn), and tombstones an exchange that predates X and cannot have
+    # restated it; main no-opped there (#423 review).
     async with db.execute(
         "SELECT trace_id FROM exchange_log WHERE channel_id = ? "
         "AND message_rowid IS NOT NULL AND message_rowid <= ? "
-        "AND CASE WHEN json_valid(appraisal) THEN "
-        "json_extract(appraisal, '$.stage2.past_claims') END IS NOT NULL "
         "ORDER BY message_rowid DESC LIMIT 1",
         (channel_id, msg_id),
     ) as cursor:
@@ -487,10 +488,11 @@ async def redact_exchange_log(
 ) -> int | None:
     """Scrub exchange_log text derived from redacted messages in one channel.
 
-    For each redacted id X: the exchange that owns X (in the channel, the
-    largest message_rowid <= X whose row has stage-2 claims — or, for a message
-    a coalesced burst absorbed, the last row of that burst; see
-    _owning_trace_id) gets its stage-2 past_claims tombstoned.
+    For each redacted id X: the exchange that owns X gets its stage-2
+    past_claims tombstoned. The owner is X's own row when X has one, resolving
+    an absorbed burst message to the trace the kernel linked it to (#423);
+    otherwise it is the nearest row at or before X, as before. See
+    _owning_trace_id.
     Every exchange in the channel with message_rowid >= the smallest X loses
     its provenance_snapshot, since any later window may have carried X's
     text as CONTEXT. Exchanges with a NULL message_rowid are not reached.
