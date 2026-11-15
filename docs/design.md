@@ -1469,7 +1469,8 @@ in code:
   same cut line as a cut notification. On a fenced result it is the last
   header line, outside the fence; on any other result it is the only header
   line, followed by the content unfenced. Text in an unfenced (trusted)
-  result could imitate that line; shell output is trusted by declaration,
+  result could imitate that line, and only a tool that declares its own output
+  trusted is unfenced — `shell` and `task_pipeline` declare otherwise (#580) —
   so this is accepted (see threat-model.md).
 - Declared annotations follow as `[annotations: k=v, ...]`.
 
@@ -1503,8 +1504,10 @@ reads it and is strict (`is True`, so a truthy non-bool does not count). It
 is per callable and not a plugin class attribute because MCP tools are
 created per server at connect time and no class-level list could name them.
 Declared today: `read_file` (so a spill file read back is fenced, and so is
-any other file), `web_fetch`, `web_search`, and every tool `mcp_client`
-builds. `shell` and `task_pipeline` are not declared (#580).
+any other file), `web_fetch`, `web_search`, `shell` and `task_pipeline` (a
+command's output, or a `cat` of a spill file, is as much outside text as a
+file's contents are), and every tool `mcp_client` builds. A tool nobody
+declares is unfenced.
 
 The declaration is evaluated when the call is dispatched, not when the
 result arrives. `_dispatch_tool_calls` writes `Agent._dispatched_calls`,
