@@ -104,3 +104,39 @@ async def test_a_failed_save_warns_and_does_not_raise(plugin, tmp_path, caplog):
 
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert any("could not save the catch-up cursor" in m for m in warnings), warnings
+
+
+# ---------------------------------------------------------------------------
+# The shared backlog wording (#644): Signal's rule, one implementation
+# ---------------------------------------------------------------------------
+
+
+def test_a_stale_item_carries_its_send_time():
+    from corvidae.channels.stale import maybe_prefix_stale
+
+    now_ms = 1_700_000_000_000
+    old = now_ms - 6 * 60 * 1000
+    assert maybe_prefix_stale("hi", old, now_ms).startswith("[sent ")
+    assert maybe_prefix_stale("hi", old, now_ms).endswith("\nhi")
+
+
+def test_a_fresh_item_carries_nothing():
+    from corvidae.channels.stale import maybe_prefix_stale
+
+    now_ms = 1_700_000_000_000
+    assert maybe_prefix_stale("hi", now_ms - 1000, now_ms) == "hi"
+
+
+def test_an_item_with_no_timestamp_is_left_alone():
+    from corvidae.channels.stale import maybe_prefix_stale
+
+    assert maybe_prefix_stale("hi", None, 1_700_000_000_000) == "hi"
+
+
+def test_signal_still_renders_the_same_prefix():
+    """The move must not change Signal's wording, which users have read since
+    the transport existed."""
+    from corvidae.channels.signal import _format_stale_prefix
+    from corvidae.channels.stale import format_stale_prefix
+
+    assert _format_stale_prefix(1_700_000_000_000) == format_stale_prefix(1_700_000_000_000)
