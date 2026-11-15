@@ -86,6 +86,7 @@ import math
 import re
 import sqlite3
 import time
+from bisect import bisect_left, bisect_right
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -95,7 +96,13 @@ import aiosqlite
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.prompts import resolve_prompt
-from corvidae.context import ContextWindow, MessageType, count_tokens, message_tokens
+from corvidae.context import (
+    ContextWindow,
+    MessageType,
+    count_tokens,
+    message_tokens,
+    well_formed_calls,
+)
 from corvidae.fork import (
     ForkRefused,
     ViewInputs,
@@ -602,17 +609,32 @@ def _fork_range_sentence(prefix: list[dict], dialog_ids: set[int]) -> str:
     )
     before = prefix[:first]
     if all(m.get("_message_type") == MessageType.SUMMARY for m in before):
-        if before:
-            return "Record the conversation above that follows the summary at its top."
-        return "Record the whole conversation above."
+        return _range_sentence_text(True, bool(before), {})
     opener = next(
-        (
-            m for m in prefix[first:]
-            if m.get("role") in ("user", "assistant")
-            and isinstance(m.get("content"), str) and m["content"].strip()
-        ),
+        (m for m in prefix[first:] if _is_opener(m)),
         prefix[first] if first < len(prefix) else {},
     )
+    return _range_sentence_text(False, True, opener)
+
+
+def _is_opener(message: dict) -> bool:
+    """Whether a message can name where a range starts: real dialog text."""
+    return (
+        message.get("role") in ("user", "assistant")
+        and isinstance(message.get("content"), str) and bool(message["content"].strip())
+    )
+
+
+def _range_sentence_text(before_all_summary: bool, before_nonempty: bool, opener: dict) -> str:
+    """The range sentence's wording, given what precedes the range's first
+    dialog row and the message that opens it. Shared by the scanning
+    (``_fork_range_sentence``) and indexed (``_indexed_range_sentence``)
+    paths so the two can never word it differently; ``opener`` is read only
+    when something other than a summary precedes the range."""
+    if before_all_summary:
+        if before_nonempty:
+            return "Record the conversation above that follows the summary at its top."
+        return "Record the whole conversation above."
     return (
         "Record the conversation above from the message that begins "
         f"«{quote(opener.get('content'))}» onward. Earlier messages are "
@@ -727,69 +749,180 @@ class CatchupSegment:
     messages: list[dict]                # the finished background request
 
 
+@dataclass(frozen=True)
+class _RunIndex:
+    """What segmentation looks up in one run's view, built once in
+    O(len(view)) so no grow step or segment has to scan the prefix (#396).
+
+    Every list has ``len(view) + 1`` entries, indexed by view position or by
+    boundary (boundary ``s`` sits just before position ``s``).
+    """
+
+    pos: dict[int, int]       # _db_id -> the first view position carrying it
+    first_nonsummary: int     # first position that is not a summary (len(view) if none)
+    next_opener: list[int]    # [k] -> first position >= k that _is_opener (len(view) if none)
+    next_clean: list[int]     # [k] -> smallest clean boundary >= k
+    prev_clean: list[int]     # [k] -> largest clean boundary <= k
+
+
+def _run_index(view: list[dict]) -> _RunIndex:
+    """Index one run's view for segmentation.
+
+    A *clean* boundary is one no tool-call id spans: every row naming an id
+    (a call or a result) lies on one side of it. A kernel snap helper handed
+    a slice that ends on a clean boundary at or past its cut sees every call
+    it considers together with all of that call's results, so it answers as
+    it would on the whole view. Ids are collected from every well-formed call
+    and every string ``tool_call_id``: a superset of what the helpers read,
+    which can only mark more boundaries dirty.
+    """
+    n = len(view)
+    # First position of each row id: what a front-to-back scan finds first.
+    pos: dict[int, int] = {}
+    for k, m in enumerate(view):
+        db_id = m.get("_db_id")
+        if isinstance(db_id, int):
+            pos.setdefault(db_id, k)
+    first_nonsummary = next(
+        (k for k, m in enumerate(view) if m.get("_message_type") != MessageType.SUMMARY), n
+    )
+    # Next opener at or after each position, filled back to front.
+    next_opener = [n] * (n + 1)
+    for k in range(n - 1, -1, -1):
+        next_opener[k] = k if _is_opener(view[k]) else next_opener[k + 1]
+    # Each tool-call id's first and last position.
+    span: dict[str, list[int]] = {}
+    for k, m in enumerate(view):
+        ids = [c["id"] for c in well_formed_calls(m)]
+        call_id = m.get("tool_call_id")
+        if isinstance(call_id, str):
+            ids.append(call_id)
+        for call in ids:
+            span.setdefault(call, [k, k])[1] = k
+    # Boundary s is dirty when an id sits both before it and at or after it
+    # (first < s <= last): mark those ranges with a difference array.
+    depth = [0] * (n + 2)
+    for first, last in span.values():
+        if last > first:
+            depth[first + 1] += 1
+            depth[last + 1] -= 1
+    clean = []
+    open_spans = 0
+    for boundary in range(n + 1):
+        open_spans += depth[boundary]
+        clean.append(open_spans == 0)
+    # Nearest clean boundary on each side of every boundary.
+    prev_clean = [0] * (n + 1)
+    for boundary in range(n + 1):
+        prev_clean[boundary] = boundary if clean[boundary] else prev_clean[boundary - 1]
+    next_clean = [n] * (n + 1)
+    for boundary in range(n, -1, -1):
+        next_clean[boundary] = boundary if clean[boundary] else next_clean[boundary + 1]
+    return _RunIndex(pos, first_nonsummary, next_opener, next_clean, prev_clean)
+
+
+def _indexed_range_sentence(view: list[dict], index: _RunIndex, first: int, end: int) -> str:
+    """``_fork_range_sentence(view[:end], ids)`` in O(1), where ``first`` is
+    the position that call would find: the first position below ``end``
+    carrying one of ``ids`` (``end`` when none does)."""
+    # Only summaries before the range: the short forms.
+    if first <= index.first_nonsummary:
+        return _range_sentence_text(True, first > 0, {})
+    # Else quote the first opener in view[first:end], falling back as the scan does.
+    at = index.next_opener[first]
+    opener = view[at] if at < end else (view[first] if first < end else {})
+    return _range_sentence_text(False, True, opener)
+
+
 def _segment_run(
-    view: list[dict], own_ids: set[int], inputs: ViewInputs, fork_prompt: str
+    view: list[dict], own_ids: set[int], inputs: ViewInputs, fork_prompt: str,
+    index: _RunIndex,
 ) -> list[list[int]]:
     """Cut one run's view into segments that each fit the channel's budget.
 
     ``view`` is the run's messages (the summary in force first, if any);
-    ``own_ids`` the ids of the run's range rows. Returns, per segment, the
-    view indices of its own rows. A candidate segment fits when the system
-    prompt, the instruction on its untrimmed view and its own rows (plus a
-    context tool call whose results open the segment) total at most the
-    budget. A tool cycle straddling a cut goes whole into the next segment;
-    a unit that alone overflows becomes its own segment.
+    ``own_ids`` the ids of the run's range rows; ``index`` the view's
+    ``_run_index``. Returns, per segment, the view indices of its own rows. A
+    candidate segment fits when the system prompt, the instruction on its
+    untrimmed view and its own rows (plus a context tool call whose results
+    open the segment) total at most the budget. A tool cycle straddling a cut
+    goes whole into the next segment; a unit that alone overflows becomes its
+    own segment. Each grow step costs O(1): the totals are kept running
+    rather than re-summed (#396).
     """
     own_pos = [k for k, m in enumerate(view) if m.get("_db_id") in own_ids]
     sys_tokens = count_tokens(inputs.system_prompt)
     toks = [message_tokens(m) for m in view]
     # Where each tool call sits in the view, to find calls below a segment's start.
     call_at = {c["id"]: k for k, m in enumerate(view) for c in m.get("tool_calls") or []}
+    # The instruction's size by its range sentence: the sentence rarely
+    # changes as a segment grows, and the prompt is hundreds of tokens.
+    instruction_sizes: dict[str, int] = {}
 
-    def fits(a: int, b: int) -> bool:
-        """Whether own rows ``own_pos[a:b]`` fit the budget as one segment."""
-        idx = own_pos[a:b]
-        end = idx[-1] + 1
-        # A call below the segment's start whose results are own rows counts
-        # as an own row: the fit must keep the call and its results together.
-        ctx_calls = {
-            call_at[view[k]["tool_call_id"]] for k in idx
-            if view[k].get("role") == "tool"
-            and call_at.get(view[k].get("tool_call_id"), end) < idx[0]
-        }
-        own_tokens = sum(toks[k] for k in idx) + sum(toks[k] for k in ctx_calls)
-        dialog = {
-            view[k]["_db_id"] for k in idx if view[k].get("_message_type") == MessageType.MESSAGE
-        }
-        instruction = {
-            "role": "user",
-            "content": fork_prompt + "\n\n" + _fork_range_sentence(view[:end], dialog),
-        }
-        return sys_tokens + message_tokens(instruction) + own_tokens <= inputs.max_tokens
+    def instruction_size(first: int, end: int) -> int:
+        """Tokens of the instruction over ``view[:end]`` whose range starts at ``first``."""
+        sentence = _indexed_range_sentence(view, index, first, end)
+        size = instruction_sizes.get(sentence)
+        if size is None:
+            size = message_tokens({"role": "user", "content": fork_prompt + "\n\n" + sentence})
+            instruction_sizes[sentence] = size
+        return size
 
     segments: list[list[int]] = []
     a = 0
     while a < len(own_pos):
         # Grow the segment: ``b`` is the exclusive end (an index into
         # ``own_pos``) of the longest run of own rows from ``a`` that fits.
+        # Running totals: own-row tokens, the context calls already counted
+        # (by view position, so a call with several results counts once), and
+        # the first dialog position the range sentence names.
+        start = own_pos[a]
+        own_tokens = 0
+        ctx_calls: set[int] = set()
+        first_dialog: int | None = None
         b = a
-        while b < len(own_pos) and fits(a, b + 1):
+        while b < len(own_pos):
+            k = own_pos[b]
+            m = view[k]
+            add = toks[k]
+            # A call below the segment's start whose results are own rows
+            # counts as an own row: the fit keeps the call and results together.
+            ctx = None
+            if m.get("role") == "tool" and call_at.get(m.get("tool_call_id"), start) < start:
+                ctx = call_at[m["tool_call_id"]]
+                if ctx not in ctx_calls:
+                    add += toks[ctx]
+            dialog = first_dialog
+            if m.get("_message_type") == MessageType.MESSAGE:
+                at = index.pos[m["_db_id"]]
+                dialog = at if dialog is None else min(dialog, at)
+            end = k + 1
+            size = instruction_size(end if dialog is None else dialog, end)
+            if sys_tokens + size + own_tokens + add > inputs.max_tokens:
+                break
+            own_tokens += add
+            if ctx is not None:
+                ctx_calls.add(ctx)
+            first_dialog = dialog
             b += 1
         if b == len(own_pos):
             segments.append(own_pos[a:])
             break
         # The cut falls before own row b: back up to a straddling tool
-        # cycle's call (the cycle goes whole into the next segment).
-        first = own_pos[a]
-        sub = view[first:]
+        # cycle's call (the cycle goes whole into the next segment). The snap
+        # helpers get a slice ending on a clean boundary, which they answer
+        # as they would the rest of the view.
         count = 0
         if b > a:
-            boundary = first + snap_cut_to_tool_boundary(sub, own_pos[b] - first)
-            count = sum(1 for k in own_pos[a:b] if k < boundary)
+            cut = own_pos[b]
+            boundary = start + snap_cut_to_tool_boundary(
+                view[start:index.next_clean[cut]], cut - start
+            )
+            count = bisect_left(own_pos, boundary, a, b) - a
         if count == 0:
             # One row or cycle alone overflows: it is its own segment.
-            boundary = first + snap_cut_forward(sub, 1)
-            count = sum(1 for k in own_pos[a:] if k < boundary)
+            boundary = start + snap_cut_forward(view[start:index.next_clean[start + 1]], 1)
+            count = bisect_left(own_pos, boundary, a) - a
         # ``count`` own rows leave as this segment; the next starts after them.
         segments.append(own_pos[a:a + count])
         a += count
@@ -848,7 +981,7 @@ async def build_catchup_segments(
     view = await view_rows(db, channel_id, after_ts, through_id)
 
     # 4-5. Each run's view, then its segments (own-row view indices).
-    plans: list[tuple[list[dict], list[int], set[int]]] = []
+    plans: list[tuple[list[dict], list[int], _RunIndex, list[int]]] = []
     for in_force, run_rows in runs:
         last_id = run_rows[-1][0]
         if in_force is not None:
@@ -861,41 +994,75 @@ async def build_catchup_segments(
         else:
             run_view = [m for _, m in view if m["_db_id"] <= last_id]
         own_ids = {r[0] for r in run_rows}
-        for own in _segment_run(run_view, own_ids, inputs, fork_prompt):
-            plans.append((run_view, own, own_ids))
+        index = _run_index(run_view)
+        # Running sums of the view's sizes as fit_to_budget measures them
+        # (with the fence key), for choosing where a segment's window starts.
+        fit_sums = [0]
+        for m in run_view:
+            fit_sums.append(fit_sums[-1] + message_tokens(m, inputs.fence_key))
+        for own in _segment_run(run_view, own_ids, inputs, fork_prompt, index):
+            plans.append((run_view, own, index, fit_sums))
 
     # 6. Spans: segment k ends at the last range row before segment k+1's
     # first non-summary row; the last ends at the last range row.
     all_ids = [row[0] for row in range_rows]
-    firsts = [min(run_view[k]["_db_id"] for k in own) for run_view, own, _ in plans]
-    ends = [
-        max(i for i in all_ids if i < nxt) for nxt in firsts[1:]
-    ] + [all_ids[-1]]
+    firsts = [min(run_view[k]["_db_id"] for k in own) for run_view, own, _, _ in plans]
+    ends = []
+    for nxt in firsts[1:]:
+        # all_ids is ascending (ORDER BY id): the last id below nxt.
+        below = bisect_left(all_ids, nxt)
+        if below == 0:
+            raise ValueError(
+                f"catch-up for channel {channel_id}: a segment starts at message id "
+                f"{nxt}, below every range row after {after_id}; the view's row order "
+                "disagrees with id order (a clock that stepped back), so the range "
+                "cannot be split; report it with the channel's message_log timestamps"
+            )
+        ends.append(all_ids[below - 1])
+    ends.append(all_ids[-1])
 
     # 7. One request per segment.
     segments: list[CatchupSegment] = []
+    # The system prompt's size, as fit_to_budget counts it against the budget.
+    fixed = count_tokens(inputs.system_prompt)
     start_after = after_id
-    for (run_view, own, _), end_id in zip(plans, ends):
-        seg_rows = [r for r in range_rows if start_after < r[0] <= end_id]
+    for (run_view, own, index, fit_sums), end_id in zip(plans, ends):
+        seg_rows = range_rows[bisect_right(all_ids, start_after):bisect_right(all_ids, end_id)]
         start_after = end_id
         seg_ids = {r[0] for r in seg_rows if r[2] != "summary"}
         window = ContextWindow(channel_id)
         window.system_prompt = inputs.system_prompt
         window.fence_key = inputs.fence_key
-        # Shallow copies: the policy's in-place stripping must not alter rows
-        # a later segment reuses as context.
-        window.messages = [dict(m) for m in run_view[:own[-1] + 1]]
+        end = own[-1] + 1
         dialog_ids = _dialog_ids(seg_rows)
 
         def instruction() -> str:
             """The consolidation instruction over the window as it stands."""
             return fork_prompt + "\n\n" + _fork_range_sentence(window.messages, dialog_ids)
 
-        # I0: the instruction's size on the untrimmed window, reserved by
-        # fitting the window to what is left. Then the live loop's order:
-        # fit, then the reasoning_history policy.
-        reserve = message_tokens({"role": "user", "content": instruction()})
-        dropped, truncated = window.fit_to_budget(inputs.max_tokens - reserve)
+        def first_at(ids: set[int]) -> int:
+            """The first position in run_view[:end] carrying one of ``ids`` (end if none)."""
+            return min((index.pos[i] for i in ids if index.pos.get(i, end) < end), default=end)
+
+        # I0: the instruction's size on the untrimmed window run_view[:end],
+        # reserved by fitting the window to what is left.
+        sentence = _indexed_range_sentence(run_view, index, first_at(dialog_ids), end)
+        reserve = message_tokens({"role": "user", "content": fork_prompt + "\n\n" + sentence})
+        budget = inputs.max_tokens - reserve
+        # The window starts at the largest clean boundary s, at or before the
+        # segment's first own row, whose tail is still over the budget: the fit
+        # then cuts and snaps exactly as on the whole prefix, and drops the
+        # same own rows, without copying or measuring the history below s
+        # (#396). When the whole prefix fits, s is 0 and nothing is skipped.
+        over = fixed + fit_sums[end] - budget
+        # Capped below end: the fit always keeps the newest row, so s may not pass it.
+        s = bisect_left(fit_sums, over, 0, min(first_at(seg_ids), end - 1) + 1) - 1
+        s = index.prev_clean[s] if s > 0 else 0
+        # Shallow copies: the policy's in-place stripping must not alter rows
+        # a later segment reuses as context.
+        window.messages = [dict(m) for m in run_view[s:end]]
+        # Then the live loop's order: fit, then the reasoning_history policy.
+        dropped, truncated = window.fit_to_budget(budget)
         inputs.apply_reasoning_history(window.messages)
 
         # 8. Warnings: rows the view lost, truncation, residual overage.
