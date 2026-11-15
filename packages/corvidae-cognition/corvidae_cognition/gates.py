@@ -17,8 +17,9 @@ The agent's right to silence, decided from the appraisal vector:
     nothing, stays silent". ``gate.send.allow_progress`` /
     ``allow_thinking`` suppress those emissions wholesale.
   * The **quiet veto** (#790) sits in front of the salience policy. An
-    operator lists origins in ``gate.send.quiet_origins`` (config only: the
-    agent cannot change it through runtime overrides); a ``final``,
+    operator lists origins in ``gate.send.quiet_origins``, a per-channel
+    tunable like the other gate keys (#928: ``set_settings`` can override
+    it on one channel; ``agent.immutable_settings`` locks it); a ``final``,
     ``progress`` or ``thinking`` emission from a listed origin is withheld
     whatever its salience, with no appraisal vector, and even with
     ``gate.send.enforce`` off. ``error`` emissions are never vetoed.
@@ -56,7 +57,7 @@ import logging
 from corvidae.attribution import get_attribution
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool, ToolContext, tool_to_schema
-from corvidae.tuning import config_value, resolve_tunable
+from corvidae.tuning import resolve_tunable
 
 logger = logging.getLogger("corvidae.gates")
 
@@ -300,7 +301,7 @@ class GatePlugin(CorvidaePlugin):
         try:
             # The quiet veto comes first and needs no vector. Origin is only
             # resolved for progress/thinking when a quiet set exists.
-            quiet = self._quiet_origins()
+            quiet = self._quiet_origins(channel)
             surfaced = trace_id is not None and trace_id in self._surfaced
             if emission in _EMISSION_SWITCHES:
                 if quiet and not surfaced:
@@ -452,25 +453,28 @@ class GatePlugin(CorvidaePlugin):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _quiet_origins(self) -> frozenset[str]:
-        """The validated ``gate.send.quiet_origins`` set, from config alone
-        (never runtime overrides). Invalid values fail open to empty; origins
-        that are never withheld are dropped. Both are logged."""
+    def _quiet_origins(self, channel) -> frozenset[str]:
+        """The validated ``gate.send.quiet_origins`` set for ``channel``:
+        its runtime override, else config, else empty (#928). Invalid values
+        fail open to empty; origins that are never withheld are dropped.
+        Both are logged with the channel, since an override is per channel."""
         key = "gate.send.quiet_origins"
-        value = config_value(self.config, key, [])
+        value = resolve_tunable(channel, self.config, key, [])
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
             logger.warning(
-                "%s=%r is not valid (accepted: a list of origin strings); "
-                "no origin is quiet", key, value, extra={"key": key},
+                "%s=%r on %s is not valid (accepted: a list of origin strings); "
+                "no origin is quiet", key, value, channel.id,
+                extra={"key": key, "channel": channel.id},
             )
             return frozenset()
         # Drop origins whose finals are never withheld, naming each.
         for origin in value:
             if origin in _NEVER_WITHHELD_ORIGINS:
                 logger.warning(
-                    "%s=%r: ignoring %r, because %s finals are never withheld "
-                    "(a direct reply or an operator-scheduled reminder)",
-                    key, value, origin, origin, extra={"key": key},
+                    "%s=%r on %s: ignoring %r, because %s finals are never "
+                    "withheld (a direct reply or an operator-scheduled reminder)",
+                    key, value, channel.id, origin, origin,
+                    extra={"key": key, "channel": channel.id},
                 )
         return frozenset(v for v in value if v not in _NEVER_WITHHELD_ORIGINS)
 

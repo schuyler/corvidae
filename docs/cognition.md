@@ -1749,8 +1749,8 @@ nothing.
   never writes the outcome log; the vetoing plugin does.
 - `error` and anything else: no opinion.
 
-**Quiet origins** (#790). `gate.send.quiet_origins` (operator config only,
-default empty) lists origins whose turns send nothing to the human, such as
+**Quiet origins** (#790). `gate.send.quiet_origins` (default empty; a
+per-channel runtime tunable, #928) lists origins whose turns send nothing to the human, such as
 `webhook:github`. For such a turn the gate withholds the `final` before any
 salience check (no vector needed, `gate.send.enforce` ignored), recorded as
 `outcomes.send = {emission, origin, vetoed: true, reason: "quiet_origin",
@@ -1758,9 +1758,10 @@ surfaced: false}`, and withholds `progress` and `thinking` ahead of the allow
 switches, recorded as `outcomes.suppressed = {<emission>: true}` plus
 `quiet_origin: <origin>`. `error` emissions are not affected. `user` and
 `reminder` are never quiet; listing either is ignored with a warning, and a
-value that is not a list of strings fails open with a warning. The list is
-read through `config_value`, so `set_settings` cannot change it, and a hot
-reload applies on the next decision.
+value that is not a list of strings fails open with a warning naming the
+channel. The list resolves like any tunable: a channel's `set_settings`
+override replaces it there, otherwise the config value applies; a hot
+reload takes effect on the next decision except where an override holds.
 
 The agent always has a `speak_up(reason)` tool while `gates` is loaded,
 whatever the list holds, so an origin added by hot reload has its hatch
