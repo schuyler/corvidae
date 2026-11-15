@@ -4423,7 +4423,10 @@ The panel follows the hash. On a `#context_panel/<id>` hash it shows
 (no input control), and opens that channel's window. Any other hash hides
 the view, empties it and stops polling. Reloading on a tab hash reopens the same channel.
 
-The view holds a status line (with "show all" when older rows are cut),
+The view holds a status line (with "show all" when older rows are cut, and a
+`rendered` toggle that fetches `/rendered` — `build_prompt()`'s output for the
+selected window — and swaps the entries for it; polling pauses while it is
+shown, because that body is not append-mostly and has no cursor to tail),
 the entries and the live area. Each entry is a collapsed `<details>` except
 user and assistant rows, which start open. Categories are colored by token,
 light and dark: system prompt and tools, inserted (summaries, context rows,
