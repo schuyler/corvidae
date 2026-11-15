@@ -760,6 +760,45 @@ captures `contextvars.copy_context()` at creation and the TaskQueue worker
 runs the work inside that context — attribution set by the enqueuer is
 visible in the task body.
 
+#### Lease scopes
+
+Every model call belongs to a queue, and the attribution field `lease_key`
+names it. `corvidae.attribution.lease_scope(key=None)` is a context
+manager that sets it:
+
+```python
+from corvidae.attribution import lease_scope
+
+with lease_scope(f"upkeep:myplugin:digest"):
+    await client.chat(messages)
+```
+
+With no key, `lease_scope()` inherits the enclosing scope's key. With a
+key it overrides, and on exit restores the parent's key. Contextvars carry
+it into tasks and forks, so work started inside a scope belongs to it.
+
+Three key formats:
+
+- the channel id, for channel work: the turn, its forks, appraisal,
+  critique, consolidation at compaction, and the `fork` tool;
+- `subagent:<task_id>` for a subagent run;
+- `upkeep:<plugin>:<tag>` for work a plugin owns, such as
+  `upkeep:memory:consolidation` for catch-up consolidation.
+
+The kernel opens a scope at five sites: the channel turn, `Agent.fork`,
+the subagent `work()`, the `fork` tool's `work()` and
+`MemoryPlugin._consolidate_range`. Everything else, vision included,
+inherits the caller's key. A plugin must open its own scope when it makes
+model calls outside a channel turn (a timer, a background loop, a startup
+task) and give it an `upkeep:<plugin>:<tag>` key. Work inside a turn
+needs nothing.
+
+A chat call with no key runs unleased and logs a WARNING naming the stage,
+once per stage per process; later calls log at DEBUG. Embedding calls need
+no key and never warn. The key is recorded in `usage_log.lease_key` and as
+the `lease_key` tag on `on_metrics` events (`""` with no key). No lease is
+taken yet; the key only names the queue.
+
 `on_metrics` carries a named numeric value with dimensional tags
 (StatsD/OpenTelemetry common denominator; dotted names like
 `llm.tokens.prompt`, `llm.latency_ms`). Emit metrics from any hook or tool
@@ -922,7 +961,7 @@ line in this guide.
 |---|---|
 | `corvidae.hooks` | `CorvidaePlugin`, `TransportPlugin`, `hookimpl`, `get_dependency`, `resolve_single_result`, `final_was_unsent` |
 | `corvidae.fork` | `fork_agent`, `quote`, `window_db_ids`, `ViewInputs`, `view_agent`, `view_call`, `ForkRefused`, `build_fork_prompt`, `snap_cut_forward`, `snap_cut_to_tool_boundary` (see [Forking the window](#forking-the-window) and [The view call](#the-view-call)) |
-| `corvidae.attribution` | `get_attribution`, `set_attribution`, `reset_attribution` |
+| `corvidae.attribution` | `get_attribution`, `set_attribution`, `reset_attribution`, `lease_scope` |
 | `corvidae.tuning` | `config_value`, `resolve_tunable` |
 | `corvidae.channel` | `ChannelRegistry`, `resolve_persisted_channel`, `ChannelNotReady` |
 | `corvidae.channels.webhook` | `WebhookDelivery`, `WebhookHandler` (for subscribers to the webhook ingress) |
