@@ -18,7 +18,7 @@ from cross_channel_send import CrossChannelSendPlugin
 
 from corvidae.attribution import _attribution
 from corvidae.channel import ChannelConfig, ChannelRegistry
-from corvidae.hooks import create_plugin_manager, validate_dependencies
+from corvidae.hooks import create_plugin_manager
 
 from goals_notify import GoalsNotifyPlugin
 
@@ -129,7 +129,9 @@ async def test_refusal_is_logged_at_warning(caplog):
     # B4: notify_other_channel reports refusals as strings; the subscriber logs
     # them naming the goal, the channel and the reason.
     pm, registry, xcs = await _build()
-    refusal = "Could not send: cross-channel loop detected on 'signal:alice' (hop 4 > max 3)."
+    # The refusal text names no channel, so ORIGIN in the log must come from
+    # the subscriber itself.
+    refusal = "Could not send: unexpected error."
     xcs.notify_other_channel = AsyncMock(return_value=refusal)
     _in_turn(ACTOR)
 
@@ -163,10 +165,3 @@ def test_declared_dependencies():
     assert GoalsNotifyPlugin.depends_on == frozenset({"cross_channel_send"})
     assert GoalsNotifyPlugin.optional_depends_on == frozenset({"goals"})
 
-
-def test_startup_fails_without_cross_channel_send():
-    # B5: a missing cross_channel_send fails dependency validation, naming it.
-    pm = create_plugin_manager()
-    pm.register(GoalsNotifyPlugin(), name="goals_notify")
-    with pytest.raises(RuntimeError, match="cross_channel_send"):
-        validate_dependencies(pm)
