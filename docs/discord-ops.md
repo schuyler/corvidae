@@ -152,7 +152,8 @@ default-deny turns that into a user who simply never gets an answer. Startup
 fails instead, naming the entry you typed (`allow.schuyler` for an alias,
 `allow.2` for a list index) and the value it rejected, so the typo is
 findable. Two aliases naming one id is also refused, naming both: it reads as
-two people admitted, and deleting one line then silently revokes that person.
+two people admitted, and deleting one line then silently leaves that person
+admitted.
 
 `allow` is default-deny. An empty or missing list means nobody can use the
 bot, and it will not tell them so.

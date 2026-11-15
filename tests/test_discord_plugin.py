@@ -476,19 +476,6 @@ class TestConfig:
         assert "discord:408709225498542081" in message
         assert "no leading zeros and no prefix" in message
 
-    async def test_allow_list_of_ids_still_starts(self):
-        """Validating list entries must not refuse a list that is already right."""
-        h = await _start_plugin(discord_overrides={"allow": [AUTH_ID, str(OTHER_ID)]})
-        try:
-            ch = h.registry.get_or_create("discord", f"dm:{AUTH_ID}")
-            assert await _drive_gate(
-                h.pm, channel=ch, sender=str(AUTH_ID), text="x") is True
-            assert await _drive_gate(
-                h.pm, channel=ch, sender=str(OTHER_ID), text="x") is True
-            assert await _drive_gate(h.pm, channel=ch, sender="1", text="x") is False
-        finally:
-            await h.plugin.on_stop()
-
     async def test_two_aliases_naming_one_id_is_refused(self):
         """One person, two aliases: the allowlist would be ambiguous to read, and
         removing one line would silently keep them admitted (#702)."""
@@ -522,7 +509,10 @@ class TestConfig:
         await h.plugin.on_stop()
 
     async def test_int_allow_entries_are_normalized_to_str(self):
-        """YAML parses ids as ints; the gate compares them to str(author.id)."""
+        """YAML parses ids as ints; the gate compares them to str(author.id).
+
+        It also guards the #702 list validation: a list of valid ids must still start.
+        """
         h = await _start_plugin(discord_overrides={"allow": [AUTH_ID, str(OTHER_ID)]})
         try:
             ch = h.registry.get_or_create("discord", f"dm:{AUTH_ID}")

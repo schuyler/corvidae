@@ -358,9 +358,9 @@ def _allow_list_from_map(allow: dict) -> list[str]:
 
     The alias is documentation for whoever edits agent.yaml: it is never used
     for matching and never reaches the model. Only the value matters, so only
-    the value is validated -- and a bad one names its own alias, because the
-    person who typed ``schuyler: 4087O9225...`` (letter O) needs to know which
-    line to look at, not which id was rejected.
+    the value is validated -- and a bad one names its own alias as well as the
+    rejected value, because the person who typed ``schuyler: 4087O9225...``
+    (letter O) needs to know which line to look at.
     """
     ids: list[str] = []
     for alias, value in allow.items():
