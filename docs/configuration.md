@@ -419,6 +419,7 @@ Requires the cognition extra. `GatePlugin` (entry point `gates`) reads these per
 | `gate.send.min_salience` | `0.15` | A final from a non-user origin (reminder, heartbeat, task, critique) whose outbound salience is below this is withheld: stored as `unsent`, never sent. A reply to a user is never withheld by this key. |
 | `gate.send.allow_progress` | `true` | False suppresses the intermediate text sent alongside tool calls. |
 | `gate.send.allow_thinking` | `true` | False suppresses reasoning (`OutboundThinking`). |
+| `gate.send.quiet_origins` | `[]` | Origins whose turns send nothing to the human, e.g. `[webhook:github]`: their final, progress and thinking are withheld whatever their salience, and the agent gets a `speak_up` tool to let one turn's final through the normal policy (#790). Origins are matched exactly (`webhook:<endpoint>`, `heartbeat`, `inotify`, …). `user` and `reminder` are ignored with a warning; a value that is not a list of strings fails open with a warning. **Operator-only:** read from this file, never from `set_settings` overrides; hot reload changes the veto on the next decision, but the `speak_up` tool appears or disappears only at restart. |
 
 ```yaml
 gate:
@@ -428,6 +429,7 @@ gate:
   send:
     enforce: true
     min_salience: 0.15
+    quiet_origins: []  # e.g. [webhook:github]
 ```
 
 ### `agent.context_compact` — removed

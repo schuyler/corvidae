@@ -1735,6 +1735,49 @@ the filing turn's "only if missing" check is the agent's judgement, not a
 verification. The knowledge base directory must be writable by the daemon,
 which also makes it writable by anything else running as the daemon's user.
 
+### 22. Quiet origins and `speak_up`: a notification source can be muted, and the mute can be lifted from inside the turn (#790)
+
+`gate.send.quiet_origins` lists origins (for example `webhook:github`) whose
+turns send nothing to the human: the decide gate withholds their `final`,
+`progress` and `thinking` emissions whatever their salience. It exists because
+the 2026-11-12 flood (finding 19) was the agent answering CI notifications one
+by one. When the list is non-empty the agent also gets a `speak_up(reason)`
+tool, which lifts the veto for the rest of the calling turn's trace.
+
+What changes for untrusted text:
+
+- Once the list is non-empty, `speak_up` is in the tool list of every turn,
+  including the turns a quiet source drives, so the quiet payload itself, a
+  webhook body or a PR title, can tell the agent to call it. Called in a turn
+  that isn't quiet, it lifts nothing but still records `outcomes.speak_up`.
+  `tools.disabled: [speak_up]` removes it, leaving a veto with no hatch. The hatch lifts only this veto: the surfaced final still goes through the
+  salience floor (`gate.send.min_salience`), every other `should_send_response`
+  implementation (silence, critique, `outbound_cap`) and the normal not-sent
+  marker. A flood of hatch calls is therefore bounded by `outbound_cap`
+  (finding 19) when that plugin is loaded and configured, not by this plugin. The call is recorded as
+  `outcomes.speak_up` with its reason, so an operator can see which turns
+  surfaced and why.
+- The hatch never sends anything itself. A design that sent directly would
+  have bypassed every gate, `outbound_cap` included.
+- The list is read from `agent.yaml` only, never from `runtime_overrides`, so
+  neither `set_settings` nor an injected instruction can un-quiet a source or
+  quiet one. This departs from the "persona may tune its own gates" default
+  (see configuration.md, runtime-tunable gate parameters) on purpose: an agent
+  that can un-mute its own noisiest source is the flood again.
+- `user` and `reminder` can never be quiet; listing them is ignored with a
+  warning. A list that is not a list of strings fails open (nothing is quiet)
+  with a warning naming the key and the value, so a typo cannot mute the agent.
+
+Accepted residuals. Progress and thinking sent in the same response as the
+`speak_up` call are gated before the tool runs, so they stay withheld. A
+follow-up turn whose origin differs from the quiet turn (for example a
+`critique` wake) is not quiet. The tool appears or disappears only at restart;
+a hot reload changes the veto at once but not the tool list. The veto lives in
+`GatePlugin`, so disabling `gates` disables it. The agent can set a
+scheduler job's origin to `heartbeat` (the only other origin the scheduler
+accepts besides `reminder`); if `heartbeat` is quiet, that mutes the job's
+own turns, which fails toward silence rather than toward noise.
+
 ## Privilege separation
 
 There isn't any. Transports, the LLM loop, tool execution, the SQLite

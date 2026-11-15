@@ -1430,9 +1430,17 @@ one record (the loser gets the `already retired` error) and racing status
 changes report a consistent chain of `old_status` values. The hooks fire
 after the lock is released, so a slow subscriber can receive two racing
 events out of commit order; a subscriber that tracks a goal's latest status
-should compare each event's `old_status` against its own state. The lock is shared by every goal, and a
-retirement holds it across the record's embedding call; retirements are rare,
-so a per-goal lock is the upgrade if they stop being.
+should compare each event's `old_status` against its own state; ordered
+delivery is tracked with the routing subscriber in #841. `update_goal` takes
+the same lock around its check and update, so a retirement record always
+quotes the text the goal had when it was retired (#846). `add_goal` computes
+the new goal's `position` inside its INSERT, as `corvidae goals seed` does, so
+the seed CLI running beside the daemon cannot tie two positions. The lock is
+shared by every goal, and a retirement holds it across the record's embedding
+call; retirements are rare, so a per-goal lock is the upgrade if they stop
+being. `set_goal_status` writes without the memory plugin's `_db_lock`, unlike
+the other goal tools; that is harmless while the memory plugin has its own
+write connection, and matters only if it falls back to the shared one.
 
 **Retirement record:** `retire_goal` calls `MemoryPlugin.write_record` first
 and updates the goal only once that succeeds, so no goal is retired without
@@ -1740,6 +1748,30 @@ nothing.
   `outcomes.suppressed = {"progress": true}` or `{"thinking": true}`. Core
   never writes the outcome log; the vetoing plugin does.
 - `error` and anything else: no opinion.
+
+**Quiet origins** (#790). `gate.send.quiet_origins` (operator config only,
+default empty) lists origins whose turns send nothing to the human, such as
+`webhook:github`. For such a turn the gate withholds the `final` before any
+salience check (no vector needed, `gate.send.enforce` ignored), recorded as
+`outcomes.send = {emission, origin, vetoed: true, reason: "quiet_origin",
+surfaced: false}`, and withholds `progress` and `thinking` ahead of the allow
+switches, recorded as `outcomes.suppressed = {<emission>: true}` plus
+`quiet_origin: <origin>`. `error` emissions are not affected. `user` and
+`reminder` are never quiet; listing either is ignored with a warning, and a
+value that is not a list of strings fails open with a warning. The list is
+read through `config_value`, so `set_settings` cannot change it, and a hot
+reload applies on the next decision.
+
+When the list is non-empty at startup, the agent has a `speak_up(reason)`
+tool. Calling it marks the turn's trace as surfaced (a bounded LRU of 1024,
+never cleared explicitly, because a final's thinking is gated after the
+final) and records `outcomes.speak_up = <reason>` (cut to 200 characters; written
+only when `outcome_log` is loaded and the turn has a trace id). A surfaced quiet final
+then follows the normal non-user policy above, with `surfaced: true` in its
+record, so the salience floor still applies. Progress and thinking sent in
+the same response as the `speak_up` call are gated before the tool runs and
+stay withheld. If `speak_up` is in a batch cut off at `max_turns`, it never
+runs and the fallback final stays withheld.
 
 What the kernel does with a withheld final is in
 [design.md](design.md#the-output-gate). On the cognition side, critique still

@@ -179,6 +179,9 @@ agent:
 #     min_salience: 0.15              # a reply to a user is never withheld
 #     allow_progress: true            # false suppresses text sent alongside tool calls
 #     allow_thinking: true            # false suppresses reasoning
+#     quiet_origins: []               # origins whose turns never reply, e.g. [webhook:github];
+#                                     # adds a speak_up tool; operator-only (not set_settings),
+#                                     # user/reminder ignored; tool list changes at restart
 
 # Built-in tool settings (optional)
 # tools:

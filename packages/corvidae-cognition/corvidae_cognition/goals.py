@@ -118,8 +118,8 @@ class GoalsPlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self._schema_ready = False
-        # Serializes the read-check-write of a goal's state: retire_goal and
-        # set_goal_status take it from their check through their UPDATE, so two
+        # Serializes the read-check-write of a goal's state: retire_goal,
+        # set_goal_status and update_goal take it from their check through their UPDATE, so two
         # racing calls can't both pass the check (an orphan retirement record, or
         # two changes reporting the same old_status). Hooks fire after release.
         # shortcut: one lock for every goal, and retire_goal holds it across the
@@ -306,20 +306,17 @@ class GoalsPlugin(CorvidaePlugin):
                 _ctx.channel.id if _ctx is not None and _ctx.channel is not None else None
             )
             async with plugin._memory()._db_lock:
-                if position == "prepend":
-                    async with db.execute("SELECT MIN(position) FROM goals") as cur:
-                        row = await cur.fetchone()
-                    min_pos = row[0] if row and row[0] is not None else 0.0
-                    new_pos = min_pos - 1.0
-                else:
-                    async with db.execute("SELECT MAX(position) FROM goals") as cur:
-                        row = await cur.fetchone()
-                    max_pos = row[0] if row and row[0] is not None else 0.0
-                    new_pos = max_pos + 1.0
+                # One INSERT picks the position in a subquery, so no other writer can
+                # slip between reading the edge position and inserting at it.
+                edge = (
+                    "COALESCE((SELECT MIN(position) FROM goals), 0) - 1"
+                    if position == "prepend"
+                    else "COALESCE((SELECT MAX(position) FROM goals), 0) + 1"
+                )
                 cursor = await db.execute(
                     "INSERT INTO goals (text, created_at, updated_at, position, origin_channel) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (text, now, now, new_pos, origin_channel),
+                    f"VALUES (?, ?, ?, {edge}, ?)",
+                    (text, now, now, origin_channel),
                 )
                 await db.commit()
             return f"Goal #{cursor.lastrowid} added."
@@ -331,21 +328,20 @@ class GoalsPlugin(CorvidaePlugin):
             if not text:
                 return "Error: text is empty; say what the goal is now"
             db = await plugin._require_db()
-            checked = await plugin._check_open(db, id)
-            if isinstance(checked, str):
-                return checked
-            async with plugin._memory()._db_lock:
-                cursor = await db.execute(
-                    "UPDATE goals SET text = ?, updated_at = ? "
-                    "WHERE id = ? AND retired_at IS NULL",
-                    (text, plugin._now(), id),
-                )
-                await db.commit()
-            # A concurrent retire between the check and the UPDATE.
-            if cursor.rowcount == 0:
-                return (
-                    f"Error: goal #{id} is already retired; add a new goal instead"
-                )
+            # Hold the state lock from the open check through the UPDATE, so a
+            # concurrent retire_goal can't land between them (lock order: state
+            # lock, then memory's db lock, as in retire_goal).
+            async with plugin._state_lock:
+                checked = await plugin._check_open(db, id)
+                if isinstance(checked, str):
+                    return checked
+                async with plugin._memory()._db_lock:
+                    await db.execute(
+                        "UPDATE goals SET text = ?, updated_at = ? "
+                        "WHERE id = ? AND retired_at IS NULL",
+                        (text, plugin._now(), id),
+                    )
+                    await db.commit()
             return f"Goal #{id} updated."
 
         async def retire_goal(id: int, conclusion: str, _ctx=None) -> str:

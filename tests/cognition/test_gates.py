@@ -761,3 +761,190 @@ class TestOrigin:
             # So its final is never withheld, and the record doesn't relabel the row.
             assert await _final(gate, channel, trace_id="old") is None
             assert log.writes[-1]["origin"] is None
+
+
+# ---------------------------------------------------------------------------
+# #790 — quiet origins (gate.send.quiet_origins) and the speak_up tool
+# ---------------------------------------------------------------------------
+
+_QUIET = {"gate": {"send": {"quiet_origins": ["webhook:github"]}}}
+_GITHUB = {"origin": "webhook:github"}
+
+
+def _quiet_config(**send):
+    """A config naming webhook:github quiet, plus extra gate.send keys."""
+    return {"gate": {"send": {"quiet_origins": ["webhook:github"], **send}}}
+
+
+async def _gate_with_tools(config, *, appraisal=None):
+    """A gate on stubs after on_init, plus the tools register_tools offers."""
+    gate, log, channel = await _gate(config, appraisal=appraisal)
+    await gate.on_init(pm=gate.pm, config=config)
+    registry: list = []
+    gate.register_tools(tool_registry=registry)
+    return gate, log, channel, {tool.name: tool for tool in registry}
+
+
+async def _speak_up(tools, channel, trace_id="t1", **kwargs):
+    """Call speak_up as the kernel's tool Task does: the turn's trace id in
+    the attribution and a ToolContext for ``channel``."""
+    from corvidae.attribution import reset_attribution, set_attribution
+    from corvidae.tool import ToolContext
+
+    ctx = ToolContext(channel=channel, tool_call_id="call-1", task_queue=None)
+    token = set_attribution(trace_id=trace_id)
+    try:
+        return await tools["speak_up"].fn(_ctx=ctx, **kwargs)
+    finally:
+        reset_attribution(token)
+
+
+async def _emit(gate, channel, emission, annotations=None, trace_id="t1"):
+    verdict = await gate.should_send_response(
+        channel=channel, text="x", emission=emission,
+        trace_id=trace_id, annotations=annotations or {},
+    )
+    await asyncio.gather(*set(gate._record_tasks))
+    return verdict
+
+
+def _merged_outcomes(log) -> dict:
+    """Every outcomes fragment the stub log received, merged by top-level key."""
+    merged: dict = {}
+    for write in log.writes:
+        merged.update(write.get("outcomes", {}))
+    return merged
+
+
+class TestQuietOrigins:
+    @pytest.mark.parametrize(
+        "appraisal, config",
+        [
+            (_StubAppraisal(0.9), _quiet_config()),
+            (None, _quiet_config()),
+            (_StubAppraisal(0.9), _quiet_config(enforce=False)),
+        ],
+        ids=["high_salience", "no_appraisal", "enforce_off"],
+    )
+    async def test_q1_listed_origin_final_is_withheld(self, appraisal, config):
+        gate, log, channel = await _gate(config, appraisal=appraisal)
+        assert await _final(gate, channel, _GITHUB) is False
+        send = log.writes[-1]["outcomes"]["send"]
+        assert send["reason"] == "quiet_origin"
+        assert send["vetoed"] is True
+        assert send["surfaced"] is False
+
+    @pytest.mark.parametrize("emission", ["progress", "thinking"])
+    async def test_q2_progress_and_thinking_are_vetoed(self, emission):
+        config = _quiet_config(allow_progress=True, allow_thinking=True)
+        gate, log, channel = await _gate(config, appraisal=_StubAppraisal(0.9))
+        assert await _emit(gate, channel, emission, _GITHUB) is False
+        assert log.writes[-1]["outcomes"] == {
+            "suppressed": {emission: True}, "quiet_origin": "webhook:github",
+        }
+
+    async def test_q2_error_emission_is_not_vetoed(self):
+        gate, log, channel = await _gate(_QUIET, appraisal=_StubAppraisal(0.9))
+        assert await _emit(gate, channel, "error", _GITHUB) is None
+
+    async def test_q3_speak_up_lifts_the_veto_for_that_trace(self):
+        gate, log, channel, tools = await _gate_with_tools(
+            _QUIET, appraisal=_StubAppraisal(0.9)
+        )
+        await _speak_up(tools, channel, trace_id="t1", reason="build is broken")
+        assert await _final(gate, channel, _GITHUB, trace_id="t1") is None
+        send = _merged_outcomes(log)["send"]
+        assert send["surfaced"] is True
+        # Another trace from the same origin stays quiet.
+        assert await _final(gate, channel, _GITHUB, trace_id="t2") is False
+
+    async def test_q3_normal_policy_still_applies_after_speak_up(self):
+        config = _quiet_config(min_salience=0.5)
+        gate, log, channel, tools = await _gate_with_tools(
+            config, appraisal=_StubAppraisal(0.05)
+        )
+        await _speak_up(tools, channel, trace_id="t1")
+        assert await _final(gate, channel, _GITHUB, trace_id="t1") is False
+        send = log.writes[-1]["outcomes"]["send"]
+        assert send["reason"] == "below_threshold"
+        assert send["surfaced"] is True
+
+    async def test_q3_thinking_after_a_surfaced_final_is_not_vetoed(self):
+        """The final is gated before the same response's thinking, so the
+        surfaced mark must outlive the final's decision."""
+        gate, _log, channel, tools = await _gate_with_tools(
+            _QUIET, appraisal=_StubAppraisal(0.9)
+        )
+        await _speak_up(tools, channel, trace_id="t1")
+        assert await _final(gate, channel, _GITHUB, trace_id="t1") is None
+        assert await _emit(gate, channel, "thinking", _GITHUB, trace_id="t1") is None
+
+    @pytest.mark.parametrize("origin", ["user", "reminder"])
+    async def test_q4_user_and_reminder_cannot_be_quiet(self, origin, caplog):
+        config = {"gate": {"send": {"quiet_origins": ["user", "reminder"]}}}
+        gate, _log, channel = await _gate(config, appraisal=_StubAppraisal(0.9))
+        with caplog.at_level("WARNING", logger="corvidae.gates"):
+            assert await _final(gate, channel, {"origin": origin}) is None
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "gate.send.quiet_origins" in text
+        assert origin in text
+
+    async def test_q5_absent_key_changes_nothing_and_offers_no_tool(self):
+        gate, _log, channel, tools = await _gate_with_tools(
+            {}, appraisal=_StubAppraisal(0.9)
+        )
+        assert await _final(gate, channel, _GITHUB) is None
+        assert "speak_up" not in tools
+
+    async def test_q5_valid_list_registers_speak_up(self):
+        _gate_obj, _log, _channel, tools = await _gate_with_tools(_QUIET)
+        assert "speak_up" in tools
+
+    async def test_q5_only_never_quiet_origins_registers_no_tool(self):
+        config = {"gate": {"send": {"quiet_origins": ["user"]}}}
+        _gate_obj, _log, _channel, tools = await _gate_with_tools(config)
+        assert "speak_up" not in tools
+
+    async def test_q6_runtime_override_cannot_lift_the_veto(self):
+        gate, _log, channel = await _gate(_QUIET, appraisal=_StubAppraisal(0.9))
+        channel.runtime_overrides["gate.send.quiet_origins"] = []
+        assert await _final(gate, channel, _GITHUB) is False
+
+    async def test_q6_runtime_override_cannot_add_a_quiet_origin(self):
+        gate, _log, channel = await _gate({}, appraisal=_StubAppraisal(0.9))
+        channel.runtime_overrides["gate.send.quiet_origins"] = ["webhook:github"]
+        assert await _final(gate, channel, _GITHUB) is None
+
+    @pytest.mark.parametrize("value", ["webhook:github", 5, ["webhook:github", 5]])
+    async def test_q7_non_list_fails_open_with_a_warning(self, value, caplog):
+        config = {"gate": {"send": {"quiet_origins": value}}}
+        gate, _log, channel = await _gate(config, appraisal=_StubAppraisal(0.9))
+        with caplog.at_level("WARNING", logger="corvidae.gates"):
+            assert await _final(gate, channel, _GITHUB) is None
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "gate.send.quiet_origins" in text
+        assert str(value) in text
+        assert "list" in text
+
+    async def test_q8_speak_up_is_recorded_on_the_trace(self):
+        gate, log, channel, tools = await _gate_with_tools(_QUIET)
+        result = await _speak_up(tools, channel, trace_id="t1", reason="build is broken")
+        await asyncio.gather(*set(gate._record_tasks))
+        assert log.writes[-1]["trace_id"] == "t1"
+        assert log.writes[-1]["outcomes"] == {"speak_up": "build is broken"}
+
+    async def test_q8_speak_up_without_a_trace_says_the_reply_stays_withheld(self):
+        gate, log, channel, tools = await _gate_with_tools(_QUIET)
+        result = await _speak_up(tools, channel, trace_id=None)
+        assert "trace" in result
+        assert "withheld" in result
+        assert log.writes == []
+
+    async def test_q8_speak_up_without_a_channel_returns_error_text(self):
+        from corvidae.tool import ToolContext
+
+        _gate_obj, _log, _channel, tools = await _gate_with_tools(_QUIET)
+        ctx = ToolContext(channel=None, tool_call_id="call-1", task_queue=None)
+        result = await tools["speak_up"].fn(_ctx=ctx, reason="x")
+        assert "channel" in result
+        assert "withheld" in result
