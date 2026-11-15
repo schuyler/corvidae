@@ -11,10 +11,14 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same branch or PR cancels the run it supersedes.
+# A newer push to a PR cancels that PR's superseded run. A push to main never
+# cancels another: each merged commit gets its own result (#922). Main runs get
+# a group of their own (the run id), because GitHub keeps one pending run per
+# group and cancels an older pending one even with cancel-in-progress off, so a
+# shared per-ref group would still drop all but the last of a burst of merges.
 concurrency:
-  group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  group: tests-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # The kernel alone: no cognition extra, no Discord SDK. This job is the
