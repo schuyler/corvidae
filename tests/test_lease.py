@@ -182,8 +182,9 @@ async def test_r2_two_heads_serve_two_keys_without_waiting() -> None:
     await spin()
     b = await take(env, "B")
 
-    # B took the free head; idle A was not displaced.
+    # B took the free head without waiting; idle A was not displaced.
     assert b.entered.is_set() and b.wait_s == 0.0
+    assert named(env, "lease.wait_ms") == []
     assert holder_keys(env) == ["A", "B"]
     assert named(env, "lease.yield") == []
     await b.leave()
@@ -197,10 +198,14 @@ async def test_r3m_holders_second_call_does_not_wait_and_second_key_waits() -> N
     a1 = await take(env, "A", "A1")
     await a1.leave()
     a2 = await take(env, "A", "A2")
+
+    # A's second call went straight through on its lease: no second grant.
+    assert a2.entered.is_set() and a2.wait_s == 0.0
+    assert len(named(env, "lease.grant")) == 1
+    assert named(env, "lease.wait_ms") == []
     b = await take(env, "B")
 
-    # A's second call went straight through; B stays behind A's call.
-    assert a2.entered.is_set() and a2.wait_s == 0.0
+    # B stays behind A's call.
     assert env.log == ["A1", "A2"]
     assert not b.entered.is_set()
     # The head frees up when A's call ends: B takes it.
