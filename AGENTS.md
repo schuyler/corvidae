@@ -46,7 +46,7 @@ the string it will print.
 # Review loops
 
 * **Every non-trivial change gets a review loop before it is merged.** The criterion is whether behaviour, or something a reader or another plugin acts on, could change, not the file type: a config key, a prompt, a documented contract, a docs page readers act on, a one-line code fix and a refactor all count. What can change neither does not (a typo, a broken link, a comment that was wrong about unchanged code), and the PR body says which case it is.
-* **The review is blind.** The reviewer gets the diff; the requirement as written -- the issue or the owner's words, never the author's paraphrase; the PR body, as claims to check; the severity rules below, verbatim; any owner rulings; and on a re-review, the earlier findings with their outcomes. Nothing else: no reasoning, no argument for or against a finding. It reads the connected code, not only the diff. Use a subagent where the tooling allows. If no issue or owner's words state the requirement, write it on an issue first; never write it into the reviewer's prompt.
+* **The review is blind.** The reviewer gets the diff; the requirement as written -- the issue or the owner's words, never the author's paraphrase; the PR body, as claims to check; the severity rules below, verbatim; any owner rulings, as settled (disagreement goes to the owner and does not change the verdict); and on a re-review, the earlier findings with their outcomes. Nothing else: no reasoning beyond what the PR body states, no argument for or against a finding. It reads the connected code, not only the diff. Use a subagent where the tooling allows. If no issue or owner's words state the requirement, write it on an issue first; never write it into the reviewer's prompt.
 
 ## Severity
 
@@ -73,6 +73,7 @@ Findings are rated by consequence, not reachability (PRD principle 12).
 
 ## Rounds
 
+* **Severity sets the verdict; the author's triage ends the loop.** The loop ends when every critical and important finding is fixed or disclosed as skipped, and nothing has changed since the last round.
 * **Re-review is cold, never a conversation with the first reviewer.** The new reviewer checks that the fixes landed, marks a finding that comes back as a recurrence, and does not reopen the rest.
 * **Meta-review when findings recur.** When a finding recurs or a second round ends `NEEDS-CHANGES`, stop fixing and sweep the whole change for the class behind the findings. Post the diagnosis on the PR -- a flawed design, a flawed remedy, reviewer noise, or scope creep -- and take it to the owner unless the loop is converging.
 * **From the third round on, a round ending `NEEDS-CHANGES` stops the loop** until the owner says to continue.
