@@ -14,6 +14,8 @@ and metadata):
     annotations: dict — the opaque, plugin-owned annotations of the turn.
     agent_depth: int — how many background agents deep this operation is
         (absent or 0 for a main turn); see next_agent_depth (#816).
+    lease_key: str — the queue this work would lease a head for (#363); see
+        lease_scope. Absent means the call runs unleased.
 
 Propagation rule: contextvars snapshot at ``asyncio.create_task`` time.
 A task created before ``set_attribution`` was called never sees the
@@ -24,7 +26,10 @@ SerialQueue consumer is the opposite: it starts in an empty context, because
 whichever code first enqueues to it may be running inside another turn.
 """
 
+import contextlib
 import contextvars
+from collections.abc import Iterator
+from typing import Final
 
 # The single attribution ContextVar. The default is an empty dict so
 # get_attribution() never returns None.
@@ -80,3 +85,29 @@ def agent_depth_refusal(max_depth: int) -> str:
         f"Error: nested agent depth {max_depth} reached (tools.max_agent_depth); "
         "do this work in the current task instead."
     )
+
+
+# The attribution field holding the lease key (#363).
+LEASE_KEY_FIELD: Final = "lease_key"
+
+
+@contextlib.contextmanager
+def lease_scope(key: str | None = None) -> Iterator[None]:
+    """Run the enclosed work under a lease key (the queue it belongs to).
+
+    With a key, the key is carried through the attribution ContextVar (so it
+    reaches TaskQueue workers by captured context) and the parent's attribution
+    is restored on exit. With no key, nothing is set and code inside sees the
+    enclosing key. Scopes nest with other attribution tokens in LIFO order.
+    No lease is taken here; leaving a scope only restores the parent's key.
+    """
+    # No key: inherit whatever scope encloses this one.
+    if key is None:
+        yield
+        return
+    # Explicit key: set it, and restore the parent's on the way out.
+    token = set_attribution(**{LEASE_KEY_FIELD: key})
+    try:
+        yield
+    finally:
+        reset_attribution(token)

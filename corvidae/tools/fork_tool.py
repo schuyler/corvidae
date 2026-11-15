@@ -22,6 +22,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from corvidae.attribution import (
+    lease_scope,
     agent_depth_refusal,
     next_agent_depth,
     reset_attribution,
@@ -159,14 +160,17 @@ class ForkToolPlugin(CorvidaePlugin):
                 stage="fork", channel_id=channel.id, agent_depth=depth
             )
             try:
-                result = await run_agent_loop(
-                    client, messages, tools_dict, tool_schemas,
-                    channel=channel,
-                    task_queue=task_queue,
-                    max_turns=self._max_turns,
-                    max_result_chars=max_result_chars,
-                    call_timeouts=call_timeouts,
-                )
+                # A fork takes the channel's key even when a subagent spawned
+                # it, so it does not inherit the subagent's key (#363).
+                with lease_scope(channel.id):
+                    result = await run_agent_loop(
+                        client, messages, tools_dict, tool_schemas,
+                        channel=channel,
+                        task_queue=task_queue,
+                        max_turns=self._max_turns,
+                        max_result_chars=max_result_chars,
+                        call_timeouts=call_timeouts,
+                    )
             finally:
                 reset_attribution(attribution_token)
             return strip_thinking(result)

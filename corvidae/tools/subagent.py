@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Callable
 from corvidae.prompts import resolve_prompt
 from corvidae.turn import run_agent_turn
 from corvidae.attribution import (
+    lease_scope,
     agent_depth_refusal,
     next_agent_depth,
     reset_attribution,
@@ -318,14 +319,17 @@ class SubagentPlugin(CorvidaePlugin):
                 stage="subagent", channel_id=channel.id, agent_depth=depth
             )
             try:
-                result = await run_agent_loop(
-                    client, messages, tools_dict, tool_schemas,
-                    channel=channel,
-                    task_queue=task_queue,
-                    max_turns=self._max_turns,
-                    max_result_chars=max_result_chars,
-                    call_timeouts=call_timeouts,
-                )
+                # A subagent run is its own queue, keyed by its task id; the
+                # id is bound by the time work() runs (#363).
+                with lease_scope(f"subagent:{task.task_id}"):
+                    result = await run_agent_loop(
+                        client, messages, tools_dict, tool_schemas,
+                        channel=channel,
+                        task_queue=task_queue,
+                        max_turns=self._max_turns,
+                        max_result_chars=max_result_chars,
+                        call_timeouts=call_timeouts,
+                    )
             finally:
                 reset_attribution(attribution_token)
             return strip_thinking(result)

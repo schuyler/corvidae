@@ -46,7 +46,12 @@ from corvidae.llm import LLMHTTPError, is_backend_unreachable
 if TYPE_CHECKING:
     from corvidae.tool_collection import ToolCollectionPlugin
 from corvidae.turn import AgentTurnResult, run_agent_turn
-from corvidae.attribution import get_attribution, reset_attribution, set_attribution
+from corvidae.attribution import (
+    get_attribution,
+    lease_scope,
+    reset_attribution,
+    set_attribution,
+)
 from corvidae.channel import (
     Channel,
     ChannelConfig,
@@ -1340,7 +1345,11 @@ class Agent(CorvidaePlugin):
                 trace_id=item.trace_id, annotations=item.annotations,
             )
             try:
-                await self._process_queue_item_attributed(item, channel, absorbed)
+                # The turn's model calls lease this channel's queue (#363).
+                with lease_scope(channel.id):
+                    await self._process_queue_item_attributed(
+                        item, channel, absorbed
+                    )
             finally:
                 reset_attribution(attribution_token)
         finally:
@@ -1863,9 +1872,14 @@ class Agent(CorvidaePlugin):
         token = set_attribution(channel_id=channel.id, mode="fork")
         try:
             # The channel's own schemas: a fork must share the turn's prefix.
-            response = await client.chat(
-                messages, tools=self._tool_view(channel).schemas or None, extra_body=body
-            )
+            # A fork extends this channel's prefix, so it takes the channel's
+            # key whatever key the caller holds (#363).
+            with lease_scope(channel.id):
+                response = await client.chat(
+                    messages,
+                    tools=self._tool_view(channel).schemas or None,
+                    extra_body=body,
+                )
         finally:
             reset_attribution(token)
 
