@@ -4215,12 +4215,19 @@ per-panel code:
   answers HEAD) with the route's `name` kwarg dropped, since route names
   are app-wide and two panels could collide.
 
-A plugin registers one panel; a second panel from the same plugin is not
-supported. The app is frozen once running, so a handler can't add routes,
-middlewares or signals through `request.app`.
+A plugin registers one panel; a second one from the same plugin fails startup
+with a `PluginValidationError` naming it, because the sidebar section, the asset
+mount and the route prefix are all keyed by the plugin name. A panel's routes
+must be sub-paths of `/panel/<name>` (#692): a relative path or one with a `..`
+segment would mount where its author did not mean, one under `/static` collides
+with the assets; `/` and an empty path mount at the panel's root and serve,
+which is allowed (owner ruling, 2026-11-14: the PRD's "not with pages of their
+own" describes the console's shape, and a route path cannot enforce it). The app
+is frozen once running, so a handler can't add routes, middlewares or signals
+through `request.app`.
 
-A panel has no page of its own: `GET /panel/<name>/` is a 404, and the
-sidebar carries no navigation. `on_start` renders `index.html` once
+The console offers a panel no page of its own: the sidebar carries no
+navigation, and no link points at `GET /panel/<name>/`. `on_start` renders `index.html` once
 (`_render_index`) and serves it from that string. Two markers are filled,
 panels in name order, `name` and `title` HTML-escaped:
 - `<!--panel-assets-->`, in `<head>` after the `app.js` tag, becomes per
