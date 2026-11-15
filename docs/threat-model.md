@@ -655,6 +655,20 @@ operator-configured in agent.yaml, so the same file-permission
 discipline applies. A body cap and a defusedxml dependency are
 follow-ups.
 
+The goals-notify plugin (packages/goals-notify, #841) sends each goal state
+change to the channel that created the goal, through `notify_other_channel`.
+A retirement carries the model-authored `conclusion`, so text reasoned from
+one channel's conversation (a private DM, or a fetched page that steered the
+turn) reaches the origin channel's window and wakes a turn there, which may
+be a room people the operator never allowed can read. It is the same reach as
+any `notify_other_channel` call (finding 15), made without the model choosing
+to send: the target is fixed by where the goal was created. It bypasses the
+funnel, so the note is not framed or trust-labelled the way PRD §3.5.10
+requires (a variance, #939), and no sensitivity filter (PRD §3.7) applies to
+it. The `hop_count` guard bounds loops. Controls: leave the extra uninstalled
+or list `goals_notify` under `plugins.disabled`; don't create goals from
+channels whose readers shouldn't see their conclusions.
+
 `discord.send_attachment` (issue #521) and `send_signal_attachment` (issue
 #544) are the first tools that send a *file* to a channel the model chooses
 (the cross-channel `notify_other_channel` of #234 also takes a model-chosen channel,

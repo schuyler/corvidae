@@ -1194,6 +1194,12 @@ Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv 
 
 ---
 
+## `goals_notify` — goal state changes to the origin channel
+
+Requires the goals-notify extra (`--extra goals-notify` on your `uv sync` line), which brings in cross-channel-send; the goals plugin (cognition extra) supplies the events. There are no keys. Each goal status change or retirement made from a channel other than the one that created the goal is sent there as a `notify_other_channel` note, so `cross_channel_send.max_hops` applies. Seeded goals and changes made on the goal's own channel are silent, and messages can arrive out of order (each names the old and new status). To switch it off with the extra installed, list `goals_notify` under `plugins.disabled`. See [design.md](design.md#goals-notifications-goals-notify-package).
+
+---
+
 ## `webhook_notify` — webhook deliveries as notifications
 
 Requires the webhook-notify extra (`--extra webhook-notify` on your `uv sync` line) and the `webhook` ingress. Deliveries on a listed endpoint are sent to every channel listed for it as notifications: the payload as compact JSON, fenced, with `origin=webhook:<endpoint>` in the header; an over-long payload is cut and spilled to a file (see `daemon.notification_spill_*`). Restart to apply a change.
