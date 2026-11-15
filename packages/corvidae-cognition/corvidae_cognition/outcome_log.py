@@ -449,7 +449,7 @@ async def _owning_trace_id(
     """
     async with db.execute(
         "SELECT trace_id, CASE WHEN json_valid(appraisal) THEN "
-        "json_extract(appraisal, '$.stage2.past_claims') END "
+        "json_extract(appraisal, '$.stage2.past_claims') END, message_rowid "
         "FROM exchange_log WHERE channel_id = ? AND message_rowid IS NOT NULL "
         "AND message_rowid <= ? ORDER BY message_rowid DESC LIMIT 1",
         (channel_id, msg_id),
@@ -461,6 +461,13 @@ async def _owning_trace_id(
     # provenance rather than protect it.
     if row is not None and row[1] is not None:
         return row[0]
+    # Only a message that *is* a row of its own can have been absorbed by a
+    # burst. When the nearest row belongs to an earlier message — X is an
+    # assistant reply, or a row with no addressable exchange — walking forward
+    # would bound at the next turn's reply and reach the next exchange's user
+    # row, tombstoning claims nothing derived from X (#423 review).
+    if row is None or row[2] != msg_id:
+        return None
     # The first reply after this message bounds the burst it belongs to.
     async with db.execute(
         "SELECT MIN(id) FROM message_log WHERE channel_id = ? "

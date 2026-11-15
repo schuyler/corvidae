@@ -132,7 +132,7 @@ class TestCoalescedBurst:
     tombstone and the owner is the nearest *later* appraised row.
     """
 
-    async def _db_with_burst(self):
+    async def _db_with_burst(self, *, snapshot: str | None = "secret context"):
         db = await make_full_db(None)
         await db.execute(EXCHANGE_LOG_DDL)
         await db.commit()
@@ -142,7 +142,7 @@ class TestCoalescedBurst:
         reply = await insert_message(db, "irc:#a", "assistant", "I make nothing of it")
         await _add_absorbed_row(db, "b1", "irc:#a", m1)
         await _add_absorbed_row(db, "b2", "irc:#a", m2)
-        await _add_exchange(db, "b3", "irc:#a", m3)
+        await _add_exchange(db, "b3", "irc:#a", m3, snapshot=snapshot)
         return db, {"m1": m1, "m2": m2, "m3": m3, "reply": reply}
 
     async def test_redacting_an_absorbed_message_scrubs_the_owner(self):
@@ -202,7 +202,7 @@ class TestCoalescedBurst:
             await db.commit()
             m1 = await insert_message(db, "irc:#a", "user", "absorbed one")
             m2 = await insert_message(db, "irc:#a", "user", "absorbed two")
-            reply = await insert_message(db, "irc:#a", "assistant", "the answer")
+            await insert_message(db, "irc:#a", "assistant", "the answer")
             later_user = await insert_message(db, "irc:#a", "user", "a later question")
             await _add_absorbed_row(db, "b1", "irc:#a", m1)
             await _add_absorbed_row(db, "b2", "irc:#a", m2)  # the owner, stage 1 only
@@ -216,18 +216,48 @@ class TestCoalescedBurst:
             # rule still clears that — deliberately, and by message id rather
             # than by proximity. The claims are the part that must not move.
             assert snapshot is None
-            assert reply  # the reply bounds the burst
+        finally:
+            await db.close()
+
+    async def test_redacting_a_reply_does_not_reach_the_next_exchange(self):
+        """u1 a1 u2 a2, where e1 has stage 1 only and e2 has stage 2.
+
+        The nearest row at or before a1 is e1's, and the forward walk's bound
+        (the first assistant row after a1) is a2 — so the walk crossed u2 and
+        tombstoned e2's claims. Main left e2 alone, and #423 says a plain
+        exchange is redacted exactly as before (#423 review).
+        """
+        db = await make_full_db(None)
+        try:
+            await db.execute(EXCHANGE_LOG_DDL)
+            await db.commit()
+            u1 = await insert_message(db, "irc:#a", "user", "first question")
+            a1 = await insert_message(db, "irc:#a", "assistant", "first answer")
+            u2 = await insert_message(db, "irc:#a", "user", "second question")
+            await insert_message(db, "irc:#a", "assistant", "second answer")
+            await _add_absorbed_row(db, "e1", "irc:#a", u1)  # stage 1 only
+            await _add_exchange(db, "e2", "irc:#a", u2)
+
+            await redact_messages(db, [a1])
+
+            e2, _snapshot = await _row(db, "e2")
+            assert e2["stage2"]["past_claims"] == CLAIMS
         finally:
             await db.close()
 
     async def test_a_dry_run_counts_the_burst_owner_without_changing_it(self):
-        db, ids = await self._db_with_burst()
+        """The count has to come from the walk, not from the snapshot rule.
+
+        With a snapshot on the owner's row the count is 1 either way, so the
+        test proves only that a dry run writes nothing (#423 review).
+        """
+        db, ids = await self._db_with_burst(snapshot=None)
         try:
             changed = await redact_exchange_log(
                 db, "irc:#a", [ids["m1"]], dry_run=True, tombstone="[redacted]")
             # The owner's row is the only one with anything to change here: the
-            # absorbed rows carry no snapshot and no stage 2, so the count a
-            # dry run reports is the count the write would change.
+            # absorbed rows carry no snapshot and no stage 2, and the owner has
+            # no snapshot, so only the walk can find it.
             assert changed == 1
             owner, _ = await _row(db, "b3")
             assert owner["stage2"]["past_claims"] == CLAIMS
