@@ -421,7 +421,7 @@ class JobSpec:
         # `weekday=` appears only for a weekday job, so a spec stored by an
         # older corvidae stays byte-identical and `_sync_jobs` does not see a
         # change and re-anchor every job on the first start after an upgrade
-        # (#770 review). Reading tolerates the key's absence (see `_parse`).
+        # (#770 review). Specs are only ever compared as whole strings.
         weekday = f"weekday={self.weekday};" if self.weekday is not None else ""
         return (
             f"every={self.interval_seconds!r};at={self.at or ''};"
