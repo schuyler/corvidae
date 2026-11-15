@@ -503,6 +503,13 @@ _CREDENTIAL_MARKERS = ("@", "?", "://")
 _URL_IN_TEXT = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
 # Reconnect backoff ladder for servers that failed at startup; the same
 # 10 s doubling to 300 s as the IRC, Signal and Discord transports.
+# Liveness: a connected server is pinged this often, and a ping this slow is
+# a dead session (#477). The interval is deliberately longer than any call
+# timeout, so an ordinary slow tool call is never mistaken for a dead
+# transport.
+_LIVENESS_PING_SECONDS = 30.0
+_LIVENESS_PING_TIMEOUT = 10.0
+
 _INITIAL_BACKOFF = 10
 _BACKOFF_MULTIPLIER = 2
 _BACKOFF_CAP = 300
@@ -736,6 +743,9 @@ class _ServerOwner:
     stack: AsyncExitStack = field(default_factory=AsyncExitStack)
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task | None = None
+    # Its own config, kept so a dead transport can go back on the retry
+    # ladder without re-reading the daemon's config (#477).
+    cfg: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -1152,7 +1162,7 @@ class McpClientPlugin(CorvidaePlugin):
 
         # The owner task opens and (later) closes everything this server
         # needs; `ready` carries its handshake result back to this task.
-        owner = _ServerOwner(name=name)
+        owner = _ServerOwner(name=name, cfg=cfg)
         ready: asyncio.Future = asyncio.get_running_loop().create_future()
         owner.task = asyncio.create_task(
             self._run_owner(
@@ -1339,7 +1349,7 @@ class McpClientPlugin(CorvidaePlugin):
             tools=tools,
         ))
         try:
-            await owner.stop.wait()
+            await self._serve_until_unhealthy(owner, session, name)
         finally:
             try:
                 await stack.aclose()
@@ -1354,6 +1364,69 @@ class McpClientPlugin(CorvidaePlugin):
                     extra={"server": name},
                     exc_info=True,
                 )
+
+    async def _serve_until_unhealthy(
+        self, owner: _ServerOwner, session: object, name: str,
+    ) -> None:
+        """Hold the transport open until on_stop, or until it stops answering.
+
+        Waiting on ``owner.stop`` alone is what let a restarting streamable-http
+        server hang every later call (#477): the client's read stream stays tied
+        to the dead process, the POST is accepted with a 202, and the result
+        never arrives, so each call waits out its own timeout while the session
+        looks connected. A ping is the public-API signal for that, and unlike
+        watching the SDK's private receive task it also catches a half-open
+        transport whose read stream never ends.
+        """
+        while True:
+            try:
+                await asyncio.wait_for(
+                    owner.stop.wait(), timeout=_LIVENESS_PING_SECONDS)
+                return
+            except TimeoutError:
+                pass
+            if not await self._ping_alive(session, name):
+                await self._requeue_dead_server(owner, name)
+                return
+
+    async def _ping_alive(self, session: object, name: str) -> bool:
+        """One bounded ping. False means the transport is gone, not slow."""
+        try:
+            async with asyncio.timeout(_LIVENESS_PING_TIMEOUT):
+                await session.send_ping()
+        # The SDK raises through anyio, so a dead transport can arrive as an
+        # ExceptionGroup; a cancel of this owner task is not a dead server.
+        except (Exception, BaseExceptionGroup) as exc:
+            if asyncio.current_task().cancelling():
+                raise
+            logger.warning(
+                "MCP server %r stopped answering (%s); dropping the session "
+                "and reconnecting it",
+                name, _exc_type_names(exc),
+                extra={"server": name},
+            )
+            return False
+        return True
+
+    async def _requeue_dead_server(self, owner: _ServerOwner, name: str) -> None:
+        """Drop a dead server's session and put it back on the retry ladder.
+
+        The owner is about to close its stack, so the session must leave
+        ``_servers`` first: a tool call that reached it would hang on the dead
+        read stream. The registry is rebuilt so the agent's next turn sees the
+        server's tools gone, and the backoff loop reconnects it.
+        """
+        if self._stopping:
+            # on_stop has already cleared _owners and owns the shutdown.
+            return
+        self._servers = [state for state in self._servers if state.name != name]
+        self._owners.pop(name, None)
+        self._cached_tools = self._build_tool_list()
+        self._pending_servers[name] = owner.cfg
+        if self._retry_task is None or self._retry_task.done():
+            self._retry_task = asyncio.create_task(
+                self._retry_loop(), name="mcp-retry-loop")
+        await self._rebuild_shared_registry([name], "reconnecting")
 
     async def _close_failed_server(
         self, stack: AsyncExitStack

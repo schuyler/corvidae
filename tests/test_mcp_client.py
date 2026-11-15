@@ -1292,6 +1292,72 @@ def _owner_tasks() -> list[asyncio.Task]:
     ]
 
 
+class TestLiveness:
+    """#477: a server that dies mid-session is noticed and re-queued.
+
+    Waiting on the owner's stop event alone left a restarted streamable-http
+    server registered with a dead read stream, so every call hung to its
+    timeout. A failed ping now drops the session and puts the server back on
+    the retry ladder.
+    """
+
+    async def test_a_server_that_stops_answering_is_requeued(
+        self, pm, kernel_clock, sdk, caplog, monkeypatch,
+    ):
+        monkeypatch.setattr(mcp_client_mod, "_LIVENESS_PING_SECONDS", 0.02)
+        sdk.up.add("a")
+        plugin, tools = await _start_plugin(pm, _servers("a"))
+        try:
+            assert [s.name for s in plugin._servers] == ["a"]
+            session = plugin._servers[0].session
+            session.send_ping = AsyncMock(side_effect=ConnectionError("gone"))
+            for _ in range(100):
+                if "a" in plugin._pending_servers:
+                    break
+                await asyncio.sleep(0.02)
+            assert plugin._servers == []
+            assert "a" not in plugin._owners
+            assert list(plugin._pending_servers) == ["a"]
+            assert plugin._retry_task is not None
+            assert plugin._cached_tools == []
+            # on_start's "connected" rebuild, then the drop's.
+            assert tools.rebuilds == 2
+            assert any(
+                "stopped answering" in r.message and "a" in r.args
+                for r in caplog.records if r.levelname == "WARNING"
+            ), [r.getMessage() for r in caplog.records]
+        finally:
+            await plugin.on_stop()
+
+    async def test_a_server_that_answers_stays_connected(
+        self, pm, kernel_clock, sdk, monkeypatch,
+    ):
+        monkeypatch.setattr(mcp_client_mod, "_LIVENESS_PING_SECONDS", 0.02)
+        sdk.up.add("a")
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        try:
+            session = plugin._servers[0].session
+            session.send_ping = AsyncMock(return_value=None)
+            await asyncio.sleep(0.12)
+            assert [s.name for s in plugin._servers] == ["a"]
+            assert "a" in plugin._owners
+            assert plugin._pending_servers == {}
+            assert session.send_ping.await_count >= 2
+        finally:
+            await plugin.on_stop()
+
+    async def test_on_stop_wins_over_a_late_requeue(self, pm, kernel_clock, sdk):
+        sdk.up.add("a")
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        plugin._stopping = True
+        owner = plugin._owners["a"]
+        await plugin._requeue_dead_server(owner, "a")
+        assert plugin._pending_servers == {}
+        assert plugin._retry_task is None
+        plugin._stopping = False
+        await plugin.on_stop()
+
+
 class TestRetryLoop:
     async def test_all_down_server_recovers_without_a_tool_call(
         self, pm, kernel_clock, sdk
