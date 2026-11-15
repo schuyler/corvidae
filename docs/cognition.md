@@ -1396,7 +1396,8 @@ status change or an already-retired goal. `kind` is `"status"` or
 `"retired"`; `conclusion` is `None` for a status change; `actor_channel` is
 `""` when the turn has no channel (a background turn). A subscriber's
 exception is logged at WARNING and never undoes the change. Without a
-subscriber, state changes are silent. The opt-in `goals-notify` package (#841,
+subscriber, state changes are silent. The `goals-notify` package (its own
+extra; the container image installs it by default) (#841,
 [design.md](design.md#goals-notifications-goals-notify-package)) subscribes:
 it sends each change to the goal's `origin_channel` through
 `notify_other_channel`, unless the goal has no origin (seeded goals) or the
