@@ -1863,3 +1863,41 @@ async def test_a_failed_delivery_stops_the_batch_rather_than_being_skipped(tmp_p
         )
     finally:
         await stop(h)
+
+
+async def test_a_renamed_channel_still_catches_up(tmp_path):
+    """The stored narrow is a channel id, so a rename cannot lose a cursor.
+
+    Zulip narrows a channel by name or by id; the id form is what makes the
+    stored cursor survive the rename. A name-based narrow would fetch
+    nothing here and the gap would be lost silently (#644).
+    """
+    h = await _start()
+    try:
+        # The message arrives under the channel's new name, same id, and later
+        # in the channel's history than the live one below.
+        renamed = channel_msg(
+            "@**Corvidae Bot** after the rename",
+            topic="plans",
+            stream="renamed-channel",
+        )
+        renamed["id"] = 900_000
+        h.server.push_backlog(renamed, flags=["mentioned"])
+        # A live message under the old name is what writes the cursor, so
+        # the narrow stored is the one _handle_message builds.
+        h.plugin._cursor_dir = tmp_path
+        h.server.push(channel_msg("@**Corvidae Bot** before the rename"),
+                      flags=["mentioned"])
+        await _wait_until(lambda: h.on_message.await_count == 1)
+        channel_id = "zulip:7"
+        assert h.plugin._cursor[channel_id]["narrow"] == [
+            {"operator": "channel", "operand": 7}
+        ], h.plugin._cursor[channel_id]["narrow"]
+
+        await h.plugin._catch_up()
+
+        texts = [c.kwargs["text"] for c in h.on_message.await_args_list]
+        assert texts == ["before the rename", "after the rename"], texts
+        assert h.plugin._cursor[channel_id]["last"] > 0
+    finally:
+        await stop(h)
