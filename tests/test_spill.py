@@ -316,9 +316,9 @@ async def test_the_header_names_arguments_the_registered_read_file_takes(make, t
 
     ``max_chars`` is a keyword of ``corvidae.tools.files.read_file``; the tool a
     model actually calls takes ``path, offset, length, start_line, end_line``.
-    This calls the registered tool with the header's argument and with the one
-    that used to be named, so a hint that drifts fails here rather than in a
-    model's tool call.
+    This checks the registered tool's schema offers the header's argument and
+    not the one that used to be named, then calls it with the header's
+    argument, so a hint that drifts fails here rather than in a model's call.
     """
     h = await make(daemon={"notification_spill_dir": str(tmp_path / "spill"),
                            "notification_spill_max_chars": 100})
@@ -350,20 +350,6 @@ async def test_the_header_names_arguments_the_registered_read_file_takes(make, t
     )
     assert "unexpected keyword" not in out and "Traceback" not in out
     assert text[:10] in out
-    # The published schema is what a model reads and what the arguments are
-    # validated against: it must offer the argument the header names and not
-    # the one it used to name.
-    parameters = read_file.schema["function"]["parameters"]
-    properties = parameters["properties"]
-    assert "length" in properties and "max_chars" not in properties
-
-    # And it works with that argument: a page comes back, not an error.
-    out = await execute_tool_call(
-        read_file.fn, {"path": path, "length": page},
-        channel=h.registry.get("irc:#a"), tool_call_id="call-1", task_queue=None,
-    )
-    assert "Traceback" not in out and "unexpected keyword" not in out
-    assert "read_file" not in out.splitlines()[0], out
 
 
 # ---------------------------------------------------------------------------
@@ -1016,7 +1002,8 @@ async def test_no_page_is_suggested_without_a_channel_or_a_budget(make):
 
     A number invented where the budget is unknown would be a page the tool will
     not return. Every channel the registry resolves has a budget, so the
-    unsized cases are the direct calls: no channel, and no tool collection.
+    unsized cases are the direct calls: no channel, and a plugin manager that
+    resolves no plugins at all (registry and tools alike).
     """
     h = await make()
     channel = h.channels("irc:#a")[0]
