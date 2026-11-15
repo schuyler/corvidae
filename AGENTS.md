@@ -59,6 +59,18 @@ the string it will print.
 * **An emergency merge without the loop** needs the owner's agreement recorded before it happens; it says so at the top of the PR body and is reviewed immediately afterwards, before anything else starts.
 * **Say what was reviewed in the PR body:** the rounds it took.
 
+# The review loop
+
+A change is reviewed blind: by someone who reads the requirement and the diff, not the author's reasoning. The loop below is what both agents run, so that a review is a gate rather than an opinion.
+
+* **Three verdicts, not two.** `SOUND` means no blocking finding. `APPROVE WITH FOLLOW-UPS` means nits and non-blocking notes only: they are listed, the author has them in hand, and the PR may merge. `NEEDS-CHANGES` means a CRITICAL or IMPORTANT finding: a route that still fails, a test that cannot fail, a doc claim the code contradicts, scope beyond the issue. A nit never blocks a merge; it is written down and tracked, not re-reviewed.
+* **The author's evidence comes before round one.** Every new behavioural test is shown to fail with the fix reverted, and the body carries the pairs: this test, this mutation, nothing else breaks. An assertion that also passes on the parent commit is not a test of this change. An assertion that compares two values the test itself never set proves nothing at all.
+* **Code first, words last.** Rounds one and two read the diff and its tests. `docs/`, the PR body and the review comments are reviewed once the code is final. Prose restated in every round drifts in every round, and a doc finding costs the same round as a bug.
+* **The body describes the shipped design.** Not the design as it was drafted, and not the one an earlier round rejected. A body narrating a superseded approach misleads whoever reads the commit next, and costs a round to correct.
+* **A rejected third round triggers a meta-analysis.** Before a fourth review: are the findings shrinking in scope and severity, or is one mechanism producing them? If it is one mechanism — an invariant checked at call sites instead of at a single choke point, a race window one `await` narrower each time — stop fixing and say so in the channel. Change the design, or hand it to the owner with the finding. A loop finding instances of one pattern is not converging, and a fourth round will find the next instance.
+* **Three rounds with a blocking finding is a stop.** Write the open finding on the PR, hand it to the owner, and say plainly that the loop has not converged. Whether to keep going is the owner's decision.
+* **Reviewing is the reviewer's to do; merging is the owner's.** A review never waits for permission. A merge always does.
+
 # Process instructions
 
 * Read `docs/prd.md` before implementing anything. The PRD is the reference for what must be true; issues, plans, design docs and the existing code derive from it.
