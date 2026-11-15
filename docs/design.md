@@ -553,8 +553,8 @@ waiting keys (one entry per key, whose concurrent calls share one future)
 and the stopped keys. `LLMClient.chat` with a table and a `lease_key` sends
 its POST, retries included, inside `leases.call(key, attribution)`:
 
-- a holder's call passes straight through while no other key waits (a
-  waiter that is stopped, or already holds here, doesn't count);
+- a holder that isn't stopped passes straight through while no other key
+  waits (a waiter that is stopped, or already holds here, doesn't count);
 - a key that holds nothing takes a free head at once;
 - otherwise the call joins its key's waiter entry and waits.
 
@@ -622,7 +622,7 @@ ten children per level is still many tasks.
 
 **Sinks.** `metrics.py` provides `MetricsPlugin` (translates
 `on_llm_response` into `on_metrics` events: `llm.tokens.*`,
-`llm.latency_ms`, `llm.errors`, and `llm.lease_wait_ms` for a call that waited for or took a lease, each tagged with the call's `lease_key`, `""` when it had none), `UsageLogPlugin` (one `usage_log` row
+`llm.latency_ms`, `llm.errors`, and `llm.lease_wait_ms` for a call that waited for or took a lease or that shutdown failed, each tagged with the call's `lease_key`, `""` when it had none), `UsageLogPlugin` (one `usage_log` row
 per call), and `MetricsJsonlPlugin` (JSONL event sink, config
 `daemon.metrics_jsonl`). `outcome_log.py` owns the `exchange_log` table:
 one row per exchange, written by `OutcomeLogPlugin`'s hookimpls at

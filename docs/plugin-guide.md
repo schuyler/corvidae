@@ -1941,7 +1941,7 @@ logged with a traceback and never breaks an LLM call.
   and emits `on_metrics` events: `llm.tokens.prompt`, `llm.tokens.completion`,
   `llm.tokens.total` (each skipped if the usage dict lacks it),
   `llm.latency_ms` (always), `llm.errors` (value 1.0, on terminal
-  failure), and `llm.lease_wait_ms` (only for a call that waited for or took a lease). Tags: `{"profile", "model", "stage", "channel", "lease_key"}` —
+  failure), and `llm.lease_wait_ms` (only for a call that waited for or took a lease, or that shutdown failed). Tags: `{"profile", "model", "stage", "channel", "lease_key"}` —
   stage, channel and lease key come from the call's attribution snapshot
   (`lease_key` is `""` for an unleased call).
 - **`UsageLogPlugin`** (entry point `"usage_log"`, depends on
