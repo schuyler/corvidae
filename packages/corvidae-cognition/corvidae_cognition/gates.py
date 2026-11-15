@@ -23,9 +23,12 @@ The agent's right to silence, decided from the appraisal vector:
     whatever its salience, with no appraisal vector, and even with
     ``gate.send.enforce`` off. ``error`` emissions are never vetoed.
     ``user`` and ``reminder`` can never be quiet; an invalid value fails
-    open. When the list is non-empty the plugin offers a ``speak_up`` tool:
-    calling it marks the trace surfaced, which lifts the quiet veto for the
-    trace's later emissions (the final then follows the normal policy).
+    open. The plugin always offers a ``speak_up`` tool, whatever the list
+    holds, so a hot reload that adds a quiet origin never leaves the veto
+    without its hatch (tools are collected only at startup, #925): calling
+    it marks the trace surfaced, which lifts the quiet veto for the trace's
+    later emissions (the final then follows the normal policy). With no
+    quiet origin it lifts nothing.
 
 Both gates PULL their vectors through AppraisalPlugin's compute API
 rather than relying on hook order: apluggy dispatches broadcast hooks
@@ -170,9 +173,12 @@ class GatePlugin(CorvidaePlugin):
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
-        """Offer speak_up only when the operator configured a quiet origin."""
-        if not self._quiet_origins():
-            return
+        """Offer speak_up whatever gate.send.quiet_origins holds.
+
+        Tools are collected once at startup while the quiet list is re-read
+        on every decision, so registering only for a non-empty list would
+        leave a reload-added quiet origin with no hatch until restart (#925).
+        """
         plugin = self
 
         async def speak_up(reason: str = "", _ctx: ToolContext | None = None) -> str:

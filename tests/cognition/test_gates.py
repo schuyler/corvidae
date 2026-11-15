@@ -889,21 +889,43 @@ class TestQuietOrigins:
         assert "gate.send.quiet_origins" in text
         assert origin in text
 
-    async def test_q5_absent_key_changes_nothing_and_offers_no_tool(self):
+    async def test_q5_absent_key_changes_nothing_but_still_offers_the_tool(self):
+        """speak_up is offered with no quiet origin at startup, so a reload
+        that adds one never leaves a veto without its hatch (#925)."""
         gate, _log, channel, tools = await _gate_with_tools(
             {}, appraisal=_StubAppraisal(0.9)
         )
         assert await _final(gate, channel, _GITHUB) is None
-        assert "speak_up" not in tools
-
-    async def test_q5_valid_list_registers_speak_up(self):
-        _gate_obj, _log, _channel, tools = await _gate_with_tools(_QUIET)
         assert "speak_up" in tools
 
-    async def test_q5_only_never_quiet_origins_registers_no_tool(self):
+    async def test_q5_only_never_quiet_origins_still_offers_the_tool(self):
         config = {"gate": {"send": {"quiet_origins": ["user"]}}}
         _gate_obj, _log, _channel, tools = await _gate_with_tools(config)
-        assert "speak_up" not in tools
+        assert "speak_up" in tools
+
+    async def test_q5_speak_up_with_nothing_quiet_changes_no_decision(self):
+        """With no quiet origin, a surfaced trace gets the same verdict and
+        reason as one that never called speak_up."""
+        config = {"gate": {"send": {"min_salience": 0.5}}}
+        gate, log, channel, tools = await _gate_with_tools(
+            config, appraisal=_StubAppraisal(0.05)
+        )
+        await _speak_up(tools, channel, trace_id="t1")
+        assert await _final(gate, channel, _GITHUB, trace_id="t1") is False
+        surfaced_reason = log.writes[-1]["outcomes"]["send"]["reason"]
+        assert await _final(gate, channel, _GITHUB, trace_id="t2") is False
+        assert log.writes[-1]["outcomes"]["send"]["reason"] == surfaced_reason
+
+    async def test_q5_reload_adding_an_origin_has_a_working_hatch(self):
+        """A quiet origin added by hot reload is vetoed at once, and the tool
+        registered at startup lifts that veto with no restart (#925)."""
+        gate, _log, channel, tools = await _gate_with_tools(
+            {}, appraisal=_StubAppraisal(0.9)
+        )
+        await gate.on_config_reload(config=_QUIET)
+        assert await _final(gate, channel, _GITHUB, trace_id="t1") is False
+        await _speak_up(tools, channel, trace_id="t2")
+        assert await _final(gate, channel, _GITHUB, trace_id="t2") is None
 
     async def test_q6_runtime_override_cannot_lift_the_veto(self):
         gate, _log, channel = await _gate(_QUIET, appraisal=_StubAppraisal(0.9))
