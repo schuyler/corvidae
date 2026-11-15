@@ -1044,8 +1044,13 @@ class ZulipPlugin(TransportPlugin):
         key = self._typing_key(channel, topic)
         count = self._outstanding.get(key, 0)
         if count > 0:
+            if count == 1:
+                # Delete rather than leave a zero behind: the dict is keyed by
+                # (channel, topic), so a channel with many topics would grow it
+                # forever (#643 review).
+                del self._outstanding[key]
+                return True
             self._outstanding[key] = count - 1
-            return count - 1 == 0
         return False
 
     def _release_all(self, channel: Channel) -> list[Optional[str]]:
@@ -1088,6 +1093,9 @@ class ZulipPlugin(TransportPlugin):
             # successor registered under the same channel id and topic.
             if self._typing_tasks.get(key) is asyncio.current_task():
                 del self._typing_tasks[key]
+                # Nothing is left to notice a bump once this loop is gone, so
+                # the epoch goes with it (#643 review).
+                self._typing_epoch.pop(key, None)
 
     def _typing_form(
         self, channel: Channel, op: str, topic: Optional[str] = None
@@ -1348,7 +1356,11 @@ class ZulipPlugin(TransportPlugin):
         """Deliver a final reply in the topic of the message it answers, then
         close out every outstanding slot: one reply answers a coalesced burst."""
         await self._deliver(channel, event.text, event.trace_id)
-        self._forget_topic(event.trace_id)
+        # The mapping stays: a turn whose reply failed to reach the model is
+        # re-queued with the same trace id (#643 review), and the fallback error
+        # send has already been delivered by then. Forgetting it here sent the
+        # retry's real reply to whatever topic was newest. `_remember_topic`'s
+        # 512-entry bound evicts it instead.
         for released_topic in self._release_all(channel):
             await self._send_typing(channel, "stop", released_topic)
 

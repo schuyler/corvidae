@@ -1672,6 +1672,39 @@ class TestTopicRouting:
         finally:
             await stop(h)
 
+    async def test_a_retried_turn_still_replies_in_its_original_topic(self):
+        """The error fallback is delivered first, and the retry keeps the trace.
+
+        Forgetting the mapping on delivery sent the retry's real reply to the
+        newest topic — the misrouting this PR exists to fix (#643 review).
+        """
+        h = await _start()
+        try:
+            await _deliver(
+                h,
+                channel_msg("in alpha", topic="alpha"),
+                channel_msg("in beta", topic="beta"),
+                flags=["mentioned"],
+            )
+            traces = self._traces(h)
+            alpha_trace = traces["in alpha"]
+            channel = h.registry.get("zulip:7")
+            # The LLM was unreachable: the fallback error reply goes out.
+            await h.plugin.send_message(
+                channel,
+                OutboundMessage(text="model unavailable", trace_id=alpha_trace),
+            )
+            assert h.server.sent[-1]["topic"] == "alpha"
+            # The retry reuses the same trace id and must not land in beta.
+            await h.plugin.send_message(
+                channel,
+                OutboundMessage(text="the real answer", trace_id=alpha_trace),
+            )
+            assert h.server.sent[-1]["topic"] == "alpha"
+            assert h.server.sent[-1]["content"] == "the real answer"
+        finally:
+            await stop(h)
+
     async def test_a_reply_with_no_trace_still_uses_the_newest_topic(self):
         """A proactive send (reminder, heartbeat) has no message to answer; the
         newest allowed topic is what it used before, and still is."""
