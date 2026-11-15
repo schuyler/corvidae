@@ -672,19 +672,30 @@ class WebPlugin(TransportPlugin):
 
     @staticmethod
     def _refuse_unreachable_panel_route(plugin: object, name: str, path: str) -> None:
-        """Refuse a panel route that aiohttp would mount where its author can't reach.
+        """Refuse a panel route that could not be the route its author meant.
 
-        Panels are mounted at ``/panel/<name><path>``, beside the shell page at
-        ``/panel/<name>/`` and the asset mount at ``/panel/<name>/static``. aiohttp
-        accepts anything, so a relative path lands outside the prefix, "/" is
-        shadowed by the shell, "/static/..." by the asset mount, and a ".." walks
-        back out of the panel. Each one is a route that silently never runs, which
-        is a worse afternoon than a startup error naming the plugin (#692).
+        Panels are mounted at ``/panel/<name><path>``, beside the asset mount at
+        ``/panel/<name>/static``. aiohttp accepts anything, so a relative path
+        lands outside the prefix, ``/static/...`` is taken by the asset mount,
+        and a ``..`` walks back out of the panel — each a route that silently
+        never runs. An empty path or ``/`` would mount, but at the panel's root,
+        and a panel has no page of its own: it is a sidebar section on the chat
+        page (PRD §Web, "not with pages of their own"), so ``GET
+        /panel/<name>/`` is a 404. A startup error naming the plugin beats
+        either silent outcome (#692).
         """
-        if not path.startswith("/"):
-            reason = "it does not start with '/'"
+        if path == "":
+            reason = (
+                "an empty path mounts at the panel's root, and a panel has no "
+                "page of its own: it is a sidebar section on the chat page"
+            )
+        elif not path.startswith("/"):
+            reason = "it does not start with '/', so it mounts outside the panel"
         elif path == "/":
-            reason = "that is where the panel's own page is mounted"
+            reason = (
+                "a panel has no page of its own (it is a sidebar section on the "
+                "chat page, PRD §Web), so a route at its root would be one"
+            )
         elif path == "/static" or path.startswith("/static/"):
             reason = "that is where the panel's assets are mounted"
         elif ".." in path.split("/"):
@@ -693,9 +704,9 @@ class WebPlugin(TransportPlugin):
             return
         raise pluggy.PluginValidationError(
             plugin,
-            f"web: plugin '{name}' registered panel route {path!r}, which cannot "
-            f"work: {reason}. A panel is mounted at /panel/{name}<path>, so use "
-            f"a sub-path such as '/data'",
+            f"web: plugin '{name}' registered panel route {path!r}, which is "
+            f"refused: {reason}. A panel route lives at /panel/{name}<path>, so "
+            f"use a sub-path such as '/data'",
         )
 
     def _build_app(self) -> web.Application:

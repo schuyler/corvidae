@@ -2031,15 +2031,19 @@ class TestPanels:
             await make_env(extra_plugins={"badpanel": bad})
 
     @pytest.mark.parametrize("path,expected", [
-        ("data", "does not start with '/'"),
-        ("/", "panel's own page"),
+        ("data", "mounts outside the panel"),
+        # Reachable, but it would be a page of the panel's own, which the PRD
+        # does not allow: a panel is a sidebar section on the chat page (#692).
+        ("/", "no page of its own"),
+        ("", "no page of its own"),
         ("/static/app.js", "panel's assets"),
         ("/../escape", "walks up out of the panel"),
     ])
     async def test_unreachable_panel_route_fails_startup_naming_plugin(
         self, make_env, tmp_path, path, expected,
     ):
-        """#692: a route aiohttp would mount somewhere its author can't reach."""
+        """#692: a route aiohttp would mount where its author can't reach, or
+        where the panel's contract says it must not be."""
         async def handler(request):
             return web.json_response({})
 
