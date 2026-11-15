@@ -108,29 +108,33 @@ class ProviderLeases:
         # Step 0: a closed provider takes no new lease shutdown would never release.
         if self._closed:
             raise self._shutdown_error()
-        await self._acquire(key, attribution)
+        waited = await self._acquire(key, attribution)
+        # The call runs between yield and finally; its exit is the call boundary.
         try:
-            yield self._mgr.monotonic() - started
+            yield self._mgr.monotonic() - started if waited else 0.0
         finally:
             self._end_call(key)
             self._settle()
 
-    async def _acquire(self, key: str, attribution: dict) -> None:
-        """Pass through, take a free head, or wait in the FIFO."""
+    async def _acquire(self, key: str, attribution: dict) -> bool:
+        """Pass through, take a free head, or wait in the FIFO.
+
+        Returns whether the call waited.
+        """
         lease = self._leases.get(key)
         if lease is not None:
             # Step 1: a holder passes through while no other key waits.
             if key not in self._stopped and not self._eligible_waiter():
                 lease.in_call += 1
                 lease.attribution = attribution
-                return
+                return False
         elif key not in self._stopped and len(self._leases) < self.heads:
             # Step 2: a free head is taken without waiting.
             self._leases[key] = _Lease(
                 self._mgr.monotonic(), 1, self._mgr.monotonic(), attribution
             )
             self._emit("lease.grant", 1.0, key, attribution)
-            return
+            return False
 
         # Step 3: join the key's shared waiter entry (or the FIFO tail).
         waiter = self._waiter(key)
@@ -157,6 +161,7 @@ class ProviderLeases:
                     self._waiters.remove(waiter)
             self._settle()
             raise
+        return True
 
     def _end_call(self, key: str) -> None:
         """One call of ``key`` is over: drop its in-call count if the lease lives."""
@@ -305,12 +310,14 @@ class ProviderLeases:
         Safe to call twice: the second call finds nothing left.
         """
         self._closed = True
+        # Every lease goes, each with a release event naming how long it was held.
         for key, lease in list(self._leases.items()):
             del self._leases[key]
             held_ms = (self._mgr.monotonic() - lease.since) * 1000.0
             self._emit(
                 "lease.release", held_ms, key, lease.attribution, reason="shutdown"
             )
+        # Every waiting call fails with the shutdown error; none is left parked.
         for waiter in self._waiters:
             if not waiter.future.done():
                 waiter.future.set_exception(self._shutdown_error())
@@ -367,12 +374,14 @@ class LeaseManager:
         """Stop ``key`` on ``provider``: it gives up its head at a call boundary
         and its work waits until ``resume`` (R8)."""
         table = self._bounded(provider)
+        # Mark the key stopped; settling gives up its head if it is idle now.
         table._stopped.add(key)
         table._settle()
 
     def resume(self, provider: str, key: str) -> None:
         """Undo ``stop``: the key's parked work is admitted or granted."""
         table = self._bounded(provider)
+        # Unmark the key; settling admits or grants its parked calls.
         table._stopped.discard(key)
         table._settle()
 
