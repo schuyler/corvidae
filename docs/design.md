@@ -1469,7 +1469,8 @@ in code:
   same cut line as a cut notification. On a fenced result it is the last
   header line, outside the fence; on any other result it is the only header
   line, followed by the content unfenced. Text in an unfenced (trusted)
-  result could imitate that line; shell output is trusted by declaration,
+  result could imitate that line, and only a tool that declares its own output
+  trusted is unfenced — `shell` and `task_pipeline` declare otherwise (#580) —
   so this is accepted (see threat-model.md).
 - Declared annotations follow as `[annotations: k=v, ...]`.
 
