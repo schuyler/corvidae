@@ -33,8 +33,13 @@ import time
 from typing import TYPE_CHECKING
 
 from corvidae.attribution import reset_attribution, set_attribution
-from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType, count_tokens, message_tokens
-from corvidae.prompts import resolve_prompt
+from corvidae.context import (
+    DEFAULT_CHARS_PER_TOKEN,
+    SUMMARY_LABEL,
+    MessageType,
+    count_tokens,
+    message_tokens,
+)
 from corvidae.fork import (
     build_fork_prompt,
     fork_agent,
@@ -45,6 +50,7 @@ from corvidae.fork import (
 )
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm import is_backend_unreachable
+from corvidae.prompts import resolve_prompt
 
 if TYPE_CHECKING:
     # Only for annotations; compaction must not import these at runtime.
@@ -315,7 +321,7 @@ class CompactionPlugin(CorvidaePlugin):
         )
         summary_msg = {
             "role": summary_role,
-            "content": f"[Summary of earlier conversation]\n{summary_text}",
+            "content": f"{SUMMARY_LABEL}\n{summary_text}",
         }
 
         # The window still holds everything about to be dropped, and the

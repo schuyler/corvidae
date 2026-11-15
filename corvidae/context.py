@@ -105,6 +105,10 @@ DEFAULT_CHARS_PER_TOKEN: float = 3.5
 #: vocabulary: any bracketed line start goes inert, so a header the kernel
 #: adds later is covered without another rule. Invisible in the text, and a
 #: pure function of the row, so the prompt stays stable across turns.
+# The first line of every summary is written by the kernel, not by the model:
+# it names the row. It stays legible; the text after it is what can forge a
+# header, so only that is defanged (#561 review).
+SUMMARY_LABEL = "[Summary of earlier conversation]"
 SUMMARY_BRACKET_RE = re.compile(r"^\[", re.MULTILINE)
 SUMMARY_BRACKET_DEFANGED = "[\u200b"
 
@@ -462,8 +466,9 @@ class ContextWindow:
         if msg.get("_message_type") == MessageType.SUMMARY:
             content = out.get("content")
             if isinstance(content, str):
-                out["content"] = SUMMARY_BRACKET_RE.sub(
-                    SUMMARY_BRACKET_DEFANGED, content)
+                head = SUMMARY_LABEL if content.startswith(SUMMARY_LABEL) else ""
+                out["content"] = head + SUMMARY_BRACKET_RE.sub(
+                    SUMMARY_BRACKET_DEFANGED, content[len(head):])
         if "tool_calls" not in out:
             return out
         kept = well_formed_calls(msg)
