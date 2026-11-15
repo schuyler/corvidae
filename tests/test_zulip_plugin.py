@@ -1654,61 +1654,51 @@ class TestTyping:
     async def test_a_message_arriving_in_the_stops_flight_keeps_typing_on(
         self, fast_typing,
     ):
-        """The loop's own stop is a round trip, and a message can land inside it.
+        """A message inside the stop's round trip must leave typing on.
 
-        Round 5 closed the window around the in-flight `start`; one await later
-        the loop sends its `stop` and returns, and a message arriving during
-        that call finds the loop alive (so `_begin_typing` starts none) and then
-        loses its typing when the loop exits: outstanding 1, no task, last op
-        `stop` (#643 round 6).
+        One writer (#643 rounds 5-6): the loop sends the stop, then returns to
+        the top of its body and re-derives. A message that landed during the
+        stop has raised what is owed, so the pass that would have exited starts
+        the notice again. There is no window to patch, because nothing is
+        decided anywhere except at the top of the loop.
         """
         h = await _start()
         try:
             await _deliver(
                 h, channel_msg("@**Corvidae Bot** hi", topic="plans"), flags=["mentioned"]
             )
-            # Catch a refresh start in flight, so the final's epoch bump lands
-            # while the loop is waiting on the server.
-            blocked_start = asyncio.Event()
-            h.server.block_typing_starts = blocked_start
             await _wait_until(
-                lambda: len([t for t in h.server.typing if t["op"] == "start"]) >= 2
+                lambda: len([t for t in h.server.typing if t["op"] == "start"]) >= 1
             )
-            h.server.block_typing_starts = None
             channel = h.registry.get("zulip:7")
-            # The final's own stop goes out unblocked; the loop's stop, which
-            # the epoch bump makes it send when the held start returns, is the
-            # one held in flight.
+            # Hold the loop's stop (the only stop there is) in the handler.
+            blocked_stop = asyncio.Event()
+            h.server.block_typing_stops = blocked_stop
             await h.plugin.send_message(
                 channel, OutboundMessage(text="done", latency_ms=None)
             )
-            blocked_stop = asyncio.Event()
-            h.server.block_typing_stops = blocked_stop
-            blocked_start.set()
             await _wait_until(
-                lambda: len([t for t in h.server.typing if t["op"] == "stop"]) >= 2
+                lambda: len([t for t in h.server.typing if t["op"] == "stop"]) >= 1
             )
-            h.server.block_typing_stops = None
             # A message in the same topic, inside that stop's flight.
             await _deliver(
                 h, channel_msg("@**Corvidae Bot** and again", topic="plans"),
                 flags=["mentioned"],
             )
+            h.server.block_typing_stops = None
             blocked_stop.set()
-            await asyncio.sleep(0.2)
+            await _wait_until(
+                lambda: h.server.typing and h.server.typing[-1]["op"] == "start"
+            )
 
             key = (channel.id, "plans")
             assert h.plugin._outstanding.get(key, 0) == 1, "a reply is still owed"
             assert h.plugin._typing_tasks.get(key) is not None, (
                 "the loop exited while a reply was owed"
             )
-            ops = [t["op"] for t in h.server.typing]
-            assert ops[-1] == "start", ops
-            seen = len(h.server.typing)
-            await _wait_until(lambda: len(h.server.typing) > seen)
+            assert h.plugin._typing_showing.get(key) is True
         finally:
             await stop(h)
-
     async def test_progress_text_does_not_release_typing(self, fast_typing):
         """Intermediate text is delivered but the final still owes the slot."""
         h = await _start()
@@ -2017,30 +2007,32 @@ class TestTopicRouting:
     async def test_a_refresh_start_that_lost_the_race_sends_its_own_stop(
         self, fast_typing
     ):
-        """A start already in flight when the final's stop goes out must not
-        leave typing showing: the loop stops the topic itself afterwards."""
+        """A start in flight when the reply is released is followed by a stop:
+        the same loop sends it on its next pass, because nothing else does."""
         h = await _start()
         try:
             await _deliver(h, channel_msg("in alpha", topic="alpha"), flags=["mentioned"])
-            await _wait_until(lambda: len([t for t in h.server.typing if t["op"] == "start"]) >= 1)
+            await _wait_until(
+                lambda: len([t for t in h.server.typing if t["op"] == "start"]) >= 1
+            )
             channel = h.registry.get("zulip:7")
             trace = self._traces(h)["in alpha"]
-
-            # Block the next refresh start inside the handler, so it is in
-            # flight (and already recorded) while the final is sent.
+            # Hold the next refresh start in the handler, so it is in flight
+            # (and already recorded) when the release happens.
             gate = asyncio.Event()
             h.server.block_typing_starts = gate
             await _wait_until(
                 lambda: len([t for t in h.server.typing if t["op"] == "start"]) >= 2
             )
+            h.server.block_typing_starts = None
             await h.plugin.send_message(
                 channel, OutboundMessage(text="done", trace_id=trace)
             )
-            assert h.server.typing[-1]["op"] == "stop"
-
             gate.set()
-            await _wait_until(lambda: len([t for t in h.server.typing if t["op"] == "stop"]) >= 2)
-            assert h.server.typing[-1]["op"] == "stop"
+            await _wait_until(
+                lambda: h.server.typing and h.server.typing[-1]["op"] == "stop"
+            )
             assert h.server.typing[-1]["topic"] == "alpha"
+            assert not h.plugin._typing_showing.get((channel.id, "alpha"), False)
         finally:
             await stop(h)
