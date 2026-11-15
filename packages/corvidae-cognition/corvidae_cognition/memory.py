@@ -2365,17 +2365,11 @@ class MemoryPlugin(CorvidaePlugin):
         # The message-id range and what is already stored, for the failure log.
         range_desc = f"up to {range_end}"
         stored = "nothing was stored"
-        # The start of the consolidation stage (#469): "memory consolidated"
-        # below closes it, and the channel, trigger and range pair the two.
-        logger.info(
-            "memory consolidation start",
-            extra={
-                "channel_id": channel_id,
-                "trigger": trigger,
-                "range_end": range_end,
-                "trace_id": get_attribution().get("trace_id"),
-            },
-        )
+        # Set at every early return, so the close in the finally says why the
+        # range produced nothing (#469 review).
+        close_outcome = "ok"
+        records = 0
+        t0 = time.monotonic()
         try:
             # Compaction lets an in-flight turn or idle consolidation finish
             # first and takes only what lies past it (#621).
@@ -2383,10 +2377,28 @@ class MemoryPlugin(CorvidaePlugin):
                 await self._wait_for_inflight(channel_id)
             db = await self._ensure_schema()
             if db is None:
+                close_outcome = "no_db"
                 return
             watermark = await self._get_watermark(db, channel_id)
             if range_end <= watermark:
+                # Routine: two triggers race to a range, or a turn re-fires on
+                # one already consolidated. Nothing was done, so nothing is
+                # logged as a stage (#469 review).
+                close_outcome = "skipped"
                 return
+            # The start of the consolidation stage (#469): exactly one per call,
+            # closed by "memory consolidation timing" in the finally below. The
+            # "memory consolidated" lines between them are per stored record, so
+            # a multi-segment catch-up has several (#469 review).
+            logger.info(
+                "memory consolidation start",
+                extra={
+                    "channel_id": channel_id,
+                    "trigger": trigger,
+                    "range_end": range_end,
+                    "trace_id": get_attribution().get("trace_id"),
+                },
+            )
 
             # Fetch the working range and keep only real dialog.
             rows = await fetch_range_rows(db, channel_id, watermark, range_end)
@@ -2450,12 +2462,15 @@ class MemoryPlugin(CorvidaePlugin):
                 )
                 if not committed:
                     # A concurrent task won; the rest is discarded (OPT-1a-2).
+                    close_outcome = "superseded"
                     return
+                records += 1
                 expected = segment.end_id
                 stored = f"message ids through {expected} are stored"
         except asyncio.CancelledError:
             raise
         except Exception:
+            close_outcome = "failed"
             # Fail-soft: the write transaction rolled back and the watermark
             # did not advance past what is stored, so a later trigger retries.
             logger.warning(
@@ -2465,6 +2480,21 @@ class MemoryPlugin(CorvidaePlugin):
                 channel_id, trigger, range_desc, stored, exc_info=True,
             )
         finally:
+            # One close per start, whatever the outcome, so a duration is
+            # always derivable from the pair (#469).
+            if close_outcome not in ("skipped", "no_db"):
+                logger.info(
+                    "memory consolidation timing",
+                    extra={
+                        "channel_id": channel_id,
+                        "trigger": trigger,
+                        "range_end": range_end,
+                        "trace_id": get_attribution().get("trace_id"),
+                        "duration_ms": round((time.monotonic() - t0) * 1000),
+                        "records": records,
+                        "outcome": close_outcome,
+                    },
+                )
             reset_attribution(attribution_token)
 
     async def _commit(
@@ -2625,6 +2655,8 @@ class MemoryPlugin(CorvidaePlugin):
                 "channel_id": channel_id,
                 "memory_ids": memory_ids,
                 "entries": len(memory_ids),
+                "range_end": new_wm,
+                "trace_id": get_attribution().get("trace_id"),
                 "msg_id_start": rows[0][0],
                 "msg_id_end": rows[-1][0],
                 "embedded": sum(e is not None for e in embeddings),

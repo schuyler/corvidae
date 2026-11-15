@@ -312,9 +312,15 @@ attribution snapshot for that call, into `MetricsPlugin`'s emitted tags,
 the `usage_log.trigger` column, and the `memory consolidated` completion
 log line, which carries `memory_ids`, `entries` (their count), `embedded`
 (how many were stored with a vector), the message range and `trigger`. A
-`memory consolidation start` record, naming the same channel, `trigger` and
-`range_end`, opens the stage at `_consolidate_range`'s entry, so its duration
-is the gap between the two (#469).
+`memory consolidation start` record opens the stage once the watermark check
+says there is work, and `memory consolidation timing` closes it in a
+`finally`, carrying the same channel, `trigger`, `range_end` and `trace_id`
+plus `duration_ms`, how many records were stored, and an `outcome`
+(`ok`, `superseded` or `failed`) — so one start always has exactly one close
+and the duration is the gap between them (#469). The `memory consolidated`
+lines between them are per stored record, so a multi-segment catch-up logs
+several, each carrying `range_end` and `trace_id` to tie it to the pair. A
+range that is already consolidated logs neither: routine skip, no stage.
 
 ### Corrupt `exchange_log` rows
 

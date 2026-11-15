@@ -727,6 +727,39 @@ class TestQueueItemStartLine:
 
 
 # ===========================================================================
+# Queue item start/end pairing (#469 review)
+# ===========================================================================
+
+
+class TestQueueItemPairing:
+    """Every "queue item start" is closed, whatever way the item ends."""
+
+    async def test_an_item_with_no_conversation_message_still_closes(
+        self, plugin_and_channel, caplog,
+    ):
+        """The first early return used to leave the start unpaired (#469)."""
+        plugin, channel, db = plugin_and_channel
+        item = QueueItem(
+            role=QueueItemRole.USER, content="hi", channel=channel, sender="alice",
+        )
+
+        # No conversation message: the body returns before the completion
+        # record, which is the gap the review named.
+        plugin._build_conversation_message = lambda _item: None
+
+        with caplog.at_level(logging.INFO):
+            await plugin._process_queue_item_attributed(item, channel, [])
+
+        starts = [r for r in caplog.records if r.getMessage() == "queue item start"]
+        timings = [r for r in caplog.records if r.getMessage() == "queue item timing"]
+        assert len(starts) == 1
+        assert len(timings) == 1, "the start must be paired with a close"
+        assert timings[0].trace_id == starts[0].trace_id
+        assert timings[0].outcome == "no_message"
+        assert timings[0].total_ms >= 0
+
+
+# ===========================================================================
 # Default LLM error message: names the failure class and tells the user what
 # to do next. The message must stay calm and must not leak Python type names.
 # ===========================================================================

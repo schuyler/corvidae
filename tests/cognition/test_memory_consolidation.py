@@ -550,6 +550,36 @@ class TestConsolidationStageLogLines:
             assert starts[0].trigger == "compaction"
             assert starts[0].channel_id == channel.id
             assert starts[0].range_end == find_consolidated_record(caplog).msg_id_end
+            # The pair is what makes the duration derivable: one timing close,
+            # same channel, trigger and trace (#469 review).
+            timings = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation timing"
+            ]
+            assert len(timings) == 1
+            assert timings[0].channel_id == channel.id
+            assert timings[0].trigger == "compaction"
+            assert timings[0].trace_id == starts[0].trace_id
+            assert timings[0].outcome == "ok"
+            assert timings[0].records == 1
+        finally:
+            await db.close()
+
+    async def test_a_skipped_range_logs_no_stage(self, caplog):
+        """A turn trigger re-firing on a consolidated range opens nothing (#469 review)."""
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            await drive_idle_consolidation(memory, persistence, channel, db)
+            caplog.clear()
+            try:
+                with caplog.at_level(logging.INFO):
+                    watermark = await memory._get_watermark(db, channel.id)
+                    await memory._consolidate_range(channel.id, watermark, "turn")
+            finally:
+                pass
+            names = [r.getMessage() for r in caplog.records]
+            assert "memory consolidation start" not in names, names
+            assert "memory consolidation timing" not in names, names
         finally:
             await db.close()
 
