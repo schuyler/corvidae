@@ -450,7 +450,7 @@ violates one is a bug even if its tests pass.
    boundary (base PRD §3.13.8), and backend-specific operations MUST
    live in it (Appendix A.4). The framework MUST keep a held queue
    stopped until the core or the operator resumes it (§3.3.7). The
-   core's own queue is the one exception
+   core's own queue is a further exception
    to "waiting work alone changes nothing": when the core has paged
    itself out or held its own queue, work arriving on that queue MUST
    make the slot-management plugin bring the core back, without a core
