@@ -1593,6 +1593,54 @@ class TestTyping:
         finally:
             await stop(h)
 
+    async def test_a_message_arriving_in_the_release_window_keeps_typing_on(
+        self, fast_typing,
+    ):
+        """A final's release and a new message in the same topic can interleave.
+
+        ``_release_all`` bumps the topic's epoch so a refresh in flight sends a
+        stop of its own. If a new message arrives in that same topic before the
+        in-flight start returns, the loop is still the topic's only one: sending
+        the stop and exiting left typing off with a reply owed and nothing to
+        turn it back on (#643 round 5).
+        """
+        h = await _start()
+        try:
+            # The first start goes out; the refresh after it is held in flight.
+            await _deliver(
+                h, channel_msg("@**Corvidae Bot** hi", topic="plans"), flags=["mentioned"]
+            )
+            blocked = asyncio.Event()
+            h.server.block_typing_starts = blocked
+            await _wait_until(
+                lambda: len([t for t in h.server.typing if t["op"] == "start"]) >= 2
+            )
+            # Later starts answer at once; only the one already in flight waits.
+            h.server.block_typing_starts = None
+
+            channel = h.registry.get("zulip:7")
+            await h.plugin.send_message(
+                channel, OutboundMessage(text="done", latency_ms=None)
+            )
+            # A second message in the same topic, inside the release window.
+            await _deliver(
+                h, channel_msg("@**Corvidae Bot** and again", topic="plans"),
+                flags=["mentioned"],
+            )
+            blocked.set()
+            await asyncio.sleep(0.2)
+
+            key = (channel.id, "plans")
+            assert h.plugin._outstanding.get(key, 0) == 1, "a reply is still owed"
+            ops = [t["op"] for t in h.server.typing]
+            assert ops[-1] == "start", ops
+            # The loop is still alive and refreshing, not exited.
+            assert h.plugin._typing_tasks.get(key) is not None
+            seen = len(h.server.typing)
+            await _wait_until(lambda: len(h.server.typing) > seen)
+        finally:
+            await stop(h)
+
     async def test_progress_text_does_not_release_typing(self, fast_typing):
         """Intermediate text is delivered but the final still owes the slot."""
         h = await _start()

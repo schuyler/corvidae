@@ -1094,6 +1094,14 @@ class ZulipPlugin(TransportPlugin):
                 # flight, in which case the start landed after the stop and the
                 # topic would show typing with nothing owed.
                 if self._typing_epoch.get(key, 0) != epoch:
+                    # The epoch moved under the start that just landed, which
+                    # means a final released this topic. A new message in the
+                    # same topic may have arrived in that window and be owed a
+                    # reply already: stopping here would turn typing off with
+                    # nothing left to turn it back on, since this loop is still
+                    # the topic's only one (#643 round 5).
+                    if self._outstanding.get(key, 0) > 0:
+                        continue
                     await self._send_typing(channel, "stop", topic)
                     return
         finally:
