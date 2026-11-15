@@ -733,7 +733,8 @@ wholesale. Observer failures are logged and never break the LLM call.
 `attribution` is a snapshot of `corvidae.attribution.get_attribution()` —
 a contextvar dict describing what the current code path is doing on whose
 behalf. Built-in callers set `stage` (`"turn"`, `"compaction"`,
-`"subagent"`, `"consolidation"`) and `channel_id`; the dict is open for
+`"subagent"`, `"consolidation"`), `channel_id` and, through
+`lease_scope`, `lease_key` (see Lease scopes below); the dict is open for
 plugin-defined fields. `MemoryPlugin`'s consolidation stage adds `trigger`
 (`"compaction"`, `"idle"` or `"turn"`; `"eval"` when
 `scripts/eval_memory.py` drives it), naming which consolidation trigger
@@ -769,23 +770,25 @@ manager that sets it:
 ```python
 from corvidae.attribution import lease_scope
 
-with lease_scope(f"upkeep:myplugin:digest"):
+with lease_scope("upkeep:myplugin:digest"):
     await client.chat(messages)
 ```
 
 With no key, `lease_scope()` inherits the enclosing scope's key. With a
 key it overrides, and on exit restores the parent's key. Contextvars carry
-it into tasks and forks, so work started inside a scope belongs to it.
+it into tasks, so a task started inside a scope belongs to it. Forks are
+the exception: `Agent.fork` and the `fork` tool always run under the
+channel id, whatever key the caller holds.
 
 Three key formats:
 
-- the channel id, for channel work: the turn, its forks, appraisal,
-  critique, consolidation at compaction, and the `fork` tool;
+- the channel id, for channel work: the turn, its forks (appraisal,
+  critique, and the consolidation fork at compaction), and the `fork` tool;
 - `subagent:<task_id>` for a subagent run;
 - `upkeep:<plugin>:<tag>` for work a plugin owns, such as
   `upkeep:memory:consolidation` for catch-up consolidation.
 
-The kernel opens a scope at five sites: the channel turn, `Agent.fork`,
+Five built-in sites open a scope: the channel turn, `Agent.fork`,
 the subagent `work()`, the `fork` tool's `work()` and
 `MemoryPlugin._consolidate_range`. Everything else, vision included,
 inherits the caller's key. A plugin must open its own scope when it makes
@@ -1899,8 +1902,9 @@ logged with a traceback and never breaks an LLM call.
   and emits `on_metrics` events: `llm.tokens.prompt`, `llm.tokens.completion`,
   `llm.tokens.total` (each skipped if the usage dict lacks it),
   `llm.latency_ms` (always), and `llm.errors` (value 1.0, on terminal
-  failure). Tags: `{"profile", "model", "stage", "channel"}` — stage and
-  channel come from the call's attribution snapshot.
+  failure). Tags: `{"profile", "model", "stage", "channel", "lease_key"}` —
+  stage, channel and lease key come from the call's attribution snapshot
+  (`lease_key` is `""` for an unleased call).
 - **`UsageLogPlugin`** (entry point `"usage_log"`, depends on
   `"persistence"`) — consumes `on_llm_response` and writes one row per LLM
   call into the `usage_log` SQLite table (in the persistence plugin's
@@ -1916,6 +1920,8 @@ logged with a traceback and never breaks an LLM call.
   `prompt_ms` and `predicted_ms` (prefill and decode time of the final
   attempt, NULL when the backend reports none). Subtracting those two
   from `latency_ms` approximates the time a call queued in the server.
+  `lease_key` names the queue the call ran for (#363); it is NULL for an
+  unleased call and for rows written before the column existed.
   The table is created lazily on first use (`CREATE TABLE IF NOT EXISTS`).
 - **`MetricsJsonlPlugin`** (entry point `"metrics_jsonl"`) — consumes
   `on_metrics` and appends one JSON line per event

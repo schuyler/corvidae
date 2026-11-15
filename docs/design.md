@@ -532,7 +532,7 @@ captures `contextvars.copy_context()` at creation and the worker runs
 `lease_key` names the queue a call belongs to (#363). `lease_scope(key=None)`
 sets it: no key inherits the enclosing one, a key overrides and the parent's
 is restored on exit. Keys are the channel id (turn, forks, appraisal,
-critique, consolidation at compaction, the `fork` tool),
+critique, the consolidation fork at compaction, the `fork` tool),
 `subagent:<task_id>`, and `upkeep:<plugin>:<tag>` (catch-up consolidation is
 `upkeep:memory:consolidation`). Five sites open a scope: the channel turn in
 `_process_queue_item`, `Agent.fork`, the subagent `work()`, the `fork` tool's
