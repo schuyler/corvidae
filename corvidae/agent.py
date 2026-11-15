@@ -300,8 +300,9 @@ class Agent(CorvidaePlugin):
             self.pm = pm
         self._client = None
         # A per-call discriminator for the stage records (#469 review): a
-        # trace can fork more than once under one stage (critique's lenses), so
-        # (trace_id, stage) alone cannot pair a start with its done.
+        # trace can fork more than once under one stage (a plugin may run one
+        # stage several times per trace), so (trace_id, stage) alone cannot
+        # pair a start with its done.
         self._fork_seq = itertools.count(1)
         self._tools: dict[str, Callable] = {}
         self._tool_schemas: list[dict] = []
