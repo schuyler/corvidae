@@ -102,8 +102,13 @@ withdrawn; the conftest fixture that reset the global goes with it.
    FIFO tail if none), `calls += 1`, `_settle()`, await the shared future
    under `asyncio.shield` so one call's cancellation never cancels the
    key's other waiting calls.
-4. On exit (normal, raise or cancel): `in_call -= 1`, `last_end = now`,
-   `_settle()` — the call boundary (R11).
+4. On exit (normal, raise or cancel): on the key's lease if it still
+   exists (`close()` may have removed it), `in_call -= 1`, `last_end = now`;
+   then `_settle()` — the call boundary (R11).
+
+Each call measures its own wait from its own start (the value `call()`
+yields and `lease_wait_ms` records); `lease.wait_ms` is the shared entry's
+wait, measured from the entry's `since`.
 
 ### `_settle()` — the default policy, re-run after every state change
 
@@ -211,7 +216,7 @@ the `clock` plugin when registered, else `time.monotonic`.
 Taken (adapted): `lease.py` tables, FIFO, grant reservation, stop/resume,
 yield, snapshot, emitter, close; the `llm.py`, `llm_plugin.py`, `hooks.py`,
 `metrics.py` diffs; the `lease_wait_ms=None` test updates; unit tests for
-R2, R3m, R3p, R8, R9m, R10, R11 (incl. grant-reservation), R12 and the integration harness
+R2, R3m, R3p, S1, S2 (incl. the LRU case), R8, R9m, R10, R11 (incl. grant-reservation), R12 and the integration harness
 (`GatedSession`, `build`) for R1, R5, R6, R7, R13.
 
 Dropped: holds, `HoldKind`, scopes, `boundary()`, `task_entry`,
@@ -254,6 +259,12 @@ admission-under-tool, and tests/cognition/test_lease_memory.py.
   a hook that made a chat call on the same provider would hang on
   `heads: 1`. No hook does (only metrics.py implements it). Fix size: small
   (exit the lease before the observer). Deferred: no reachable input.
+- Several idle cooperative yielders and fewer eligible waiters: step 1
+  strips all of them, leaving a head free until a yielder's next call takes
+  it. Nothing hangs. Dropped: no requirement covers it.
+- Shutdown `lease.release` events reach `on_metrics` only if its consumers
+  have not stopped first (`on_stop` order across plugins is not fixed):
+  best effort, documented in design.md.
 - A shared waiter entry tags `lease.grant`/`lease.wait_ms` with its first
   call's attribution when a turn and a fork of one channel wait together.
 
