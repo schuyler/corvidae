@@ -38,6 +38,7 @@ class GoalsNotifyPlugin(CorvidaePlugin):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        # The cross_channel_send plugin, resolved in on_start.
         self._send: CrossChannelSendPlugin | None = None
 
     @hookimpl
