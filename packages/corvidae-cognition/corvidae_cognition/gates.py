@@ -22,7 +22,10 @@ The agent's right to silence, decided from the appraisal vector:
     it on one channel; ``agent.immutable_settings`` locks it); a ``final``,
     ``progress`` or ``thinking`` emission from a listed origin is withheld
     whatever its salience, with no appraisal vector, and even with
-    ``gate.send.enforce`` off. ``error`` emissions are never vetoed.
+    ``gate.send.enforce`` off, and so is the turn's ``error`` fallback —
+    an outage during a burst of quiet notifications is the same flood in
+    error text (#936); the failure is logged by the kernel before this hook,
+    so nothing is lost.
     ``user`` and ``reminder`` can never be quiet; an invalid value fails
     open. The plugin always offers a ``speak_up`` tool, whatever the list
     holds, so a hot reload that adds a quiet origin never leaves the veto
@@ -81,6 +84,15 @@ SEND_ALLOW_THINKING_DEFAULT = True     # gate.send.allow_thinking
 
 # Bound on the admitted-trace set that defines "user" origin.
 ADMITTED_LRU_MAXSIZE = 1024
+
+# Emissions the quiet veto covers (#936): everything a quiet turn might make
+# noise with. `error` belongs here because a model outage during a burst of
+# quiet notifications otherwise sends one "model call failed" per turn, which is
+# the flood the veto exists to stop, in error text. The failure itself is still
+# logged at ERROR by the kernel before this gate runs.
+# The final is not here: `_decide_final` owns it, because a quiet final records
+# the richer `outcomes.send` row (#790).
+_QUIET_VETOABLE = frozenset({"progress", "thinking", "error"})
 
 # The per-emission switches, by emission name.
 _EMISSION_SWITCHES = {
@@ -294,8 +306,9 @@ class GatePlugin(CorvidaePlugin):
         """Decide whether an outbound emission reaches the channel.
 
         "final": origin-conditional salience policy over the outbound
-        vector. "progress"/"thinking": the allow switches. Anything else
-        (including "error") is no opinion. Any unexpected error fails open:
+        vector. "progress"/"thinking": the allow switches. Any of those, and
+        "error", is withheld outright when its origin is a quiet one (#790,
+        #936). Anything else is no opinion. Any unexpected error fails open:
         a broken gate never silences the agent.
         """
         try:
@@ -303,16 +316,19 @@ class GatePlugin(CorvidaePlugin):
             # resolved for progress/thinking when a quiet set exists.
             quiet = self._quiet_origins(channel)
             surfaced = trace_id is not None and trace_id in self._surfaced
+            # The quiet veto covers every emission a quiet turn can make,
+            # including its error fallback (#936). Logging happens in the kernel
+            # before this hook, so withholding the message loses nothing.
+            if emission in _QUIET_VETOABLE and quiet and not surfaced:
+                origin = await self._origin(trace_id, annotations)
+                if origin in quiet:
+                    if trace_id is not None:
+                        self._record(trace_id, channel, {
+                            "suppressed": {emission: True},
+                            "quiet_origin": origin,
+                        })
+                    return False
             if emission in _EMISSION_SWITCHES:
-                if quiet and not surfaced:
-                    origin = await self._origin(trace_id, annotations)
-                    if origin in quiet:
-                        if trace_id is not None:
-                            self._record(trace_id, channel, {
-                                "suppressed": {emission: True},
-                                "quiet_origin": origin,
-                            })
-                        return False
                 key, default = _EMISSION_SWITCHES[emission]
                 if _bool_tunable(channel, self.config, key, default):
                     return None
