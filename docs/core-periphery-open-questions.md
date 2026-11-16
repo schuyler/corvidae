@@ -644,4 +644,5 @@ the TRD's configuration section.
 write-ahead log), #234 (speaking on any channel), #235 (reading another
 channel) and #365 (latency bounds) are open, and the strategy stands on
 each. The owner accepted the first three as prerequisites in session;
-#365 was found afterwards, while drafting.
+#365 was found afterwards, while drafting. #366 (the order hook) is
+unlisted too and is C6's subject.

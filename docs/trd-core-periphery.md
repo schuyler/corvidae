@@ -123,7 +123,7 @@ is written.
 
 | Entry-point name | Role | Depends on |
 |---|---|---|
-| `core` | A `TransportPlugin` that owns `core:*` channels. Registers the core's channel at startup, receives idle events, serves the observables, mints uids. | `registry`, `idle`, `llm` |
+| `core` | A `TransportPlugin` that owns `core:*` channels. Registers the core's channel at startup, receives idle events, serves the observables, mints uids, and registers `hold_queue` and `resume_queue` (TRD §8.3). | `registry`, `idle`, `llm` |
 | `periphery` | Supplies peripheral settings and prompt sections, the `escalate` tool, the pre-model checks, prompt revisions. | `core`, `registry` |
 | `forks` | Long-lived forks: fork channels, the fork record, joins, blocking, routing, pass-through. | `core`, `registry` |
 | `slots` | The slot-management plugin: lease order, paging, saved slot files. | `core`, `llm`; #366 |
@@ -139,7 +139,7 @@ package's `pyproject.toml`, and CI gains a job as
 |---|---|
 | `heartbeat` (cognition) | Must not be loaded. If it is, `core.on_init` aborts startup with `Config error: core_periphery is configured and the heartbeat plugin is loaded — add "heartbeat" to plugins.disabled in agent.yaml`. Its trigger and diff logic move to a shared module that both import (TRD §5.3). |
 | `subagent` (kernel tool) | Becomes the task-bound peripheral, extended (TRD §6.6). |
-| `fork` tool (kernel) | Unchanged. It starts from a fresh window (`corvidae/tools/fork_tool.py`), so it is neither of §3.5's two forks. |
+| `fork` tool (kernel) | Unchanged but for its call to the admission seam (K1). It starts from a fresh window (`corvidae/tools/fork_tool.py`), so it is neither of §3.5's two forks. |
 | cross-channel-send | Optional. `notify_other_channel` calls the admission seam and carries the chain (TRD §9.3). |
 | `goals`, `memory`, `critique`, `appraisal`, `outcome_log` | Changed: TRD §6.4 (`outcome_log`), §10.1 (`goals`), §10.3 (the rest). |
 
@@ -236,8 +236,8 @@ layer beneath every operator entry.
   `channel.runtime_overrides`, then global config. It gains the plugin
   layer between the two, so a plugin can default a dotted tunable for a class of channels. A
   plugin default therefore outranks the global value in `agent.yaml`.
-  The two defaults set this way (TRD §10.3) have no operator override
-  in this design.
+  For the two defaults set this way (TRD §10.3), the global key does
+  not reach those channels; a channel's `runtime_overrides` still does.
 
 ### K4. A queue can be held (§3.5.7)
 
@@ -377,7 +377,8 @@ for a fork its parent, age and blocking state. Reading it starts
 nothing.
 
 `core` samples the same values every `observables_period` (60 s) and
-logs them at info (§3.10.5). It enqueues an `anomaly` notification for:
+logs them at info (§3.10.5). It logs a warning and enqueues an
+`anomaly` notification for:
 
 - a queue whose depth has grown over three samples with nothing served;
 - a queue past its latency bound (needs #365);
@@ -470,11 +471,14 @@ does nothing on a channel that is pass-through (K5). For such a message
 it escalates with reason `structural`, with no model deciding it, when
 the message has an attachment, the sender has no earlier row on the
 channel, or the message is longer than `structural.max_chars` (1500;
-`null` turns the rule off). The other two rules have an on/off key. It appends one CONTEXT row at the peripheral's tail saying the
-message was escalated, and the periphery's turn runs as usual.
+`null` turns the rule off). The other two rules have an on/off key. It
+appends one CONTEXT row at the peripheral's tail saying the message was
+escalated, and the periphery's turn runs as usual.
 
 **The eval switch (§3.11.1).** `core_periphery.periphery.force` is
-`always`, `never`, or unset. `always` escalates every person's message by the same path; `never` removes the tool and skips the structural rules.
+`always`, `never`, or unset. `always` escalates every person's message
+by the same path; `never` removes the tool and skips the structural
+rules.
 
 **Not delivered.** There are two cases. In both the plugin sends the
 status text itself, as an ordinary emission on the user's channel, so
@@ -687,8 +691,10 @@ Detail of a long fork beyond its report is in the raw log only.
 
 ## 8. The slot manager
 
-Everything in this section waits for #366, and no lever in it has been
-run on the pinned build (#1009).
+Everything in this section waits for #366, except `hold_queue` and
+`resume_queue` (TRD §8.3), which `core` builds in phase 5 on the
+kernel's stop and resume (TRD decision C6). No lever in it has been run
+on the pinned build (#1009).
 
 ### 8.1 Scope of the first build (TRD decision A8)
 
@@ -728,7 +734,9 @@ context is in the slot or in a file `slots` wrote.
 Work arriving on the core's own queue while the core is paged out or
 stopped by its own direction resumes it: `slots` watches `on_notify`
 for the core's channel and calls `LeaseManager.resume`
-(`corvidae/lease.py`), with no core turn deciding it (§3.3.6).
+(`corvidae/lease.py`), with no core turn deciding it (§3.3.6). While
+`slots` is not loaded nothing would bring the core back, so `hold_queue`
+refuses the core's own channel (TRD §8.3).
 
 An upkeep stream yields at each chunk boundary with
 `LeaseManager.yield_key`. Nothing calls it today; memory consolidation
@@ -740,17 +748,27 @@ On the core and on forks:
 
 | Tool | Effect |
 |---|---|
-| `hold_queue(channel_id)` | `LeaseManager.stop` for the channel's key on every provider; stored in `cp_stops` |
+| `hold_queue(channel_id)` | `LeaseManager.stop` for the channel's key on every provider that declares `heads`; stored in `cp_stops` |
 | `resume_queue(channel_id)` | `LeaseManager.resume`; removes the `cp_stops` row |
 | `bring_forward(channel_id)` | marks the key directed now, and next in order |
 | `pin_context(channel_id, on)` | the key is not chosen to give way, except at a latency bound (base §3.13.5) |
 | `checkpoint(channel_id)` | a save that keeps the slot |
 | `page_out(channel_id)` | save and release at the next call boundary |
 
-`hold_queue` and `resume_queue` work on every provider, because stop
-and resume are the kernel's. The other four, on a provider `slots` does
-not manage, return `No effect: provider "<name>" has no slot control`
-and the turn continues (§3.3.8).
+`hold_queue` and `resume_queue` are `core`'s and need no `slots`. They
+act on every provider that declares `heads`, because stop and resume
+are the kernel's. A provider with no heads has no leases and so no stop
+(`corvidae/lease.py`, `_bounded`): the result of either tool names each
+such provider with `No effect on provider "<name>": it has no heads, so
+no queue can be held there`, and the turn continues (§3.3.8). When no
+provider declares heads, no `cp_stops` row is stored. The other four,
+on a provider `slots` does not manage, return `No effect: provider
+"<name>" has no slot control` in the same way.
+
+While `slots` is not loaded, `hold_queue` on the core's own channel is
+refused with `Not held: nothing would resume the core's own queue —
+load the slots plugin, or hold another channel`, because the guard of
+TRD §8.2 is the slot manager's (§3.3.6, §3.3.7).
 
 ### 8.4 Saved files (open question 15, gap 4)
 
@@ -779,7 +797,8 @@ row id.
 Each page-in, page-out and checkpoint logs the context id, the
 transition, the trigger, and the core direction it followed if any. On
 a provider `slots` does not manage, the lease manager's existing
-`lease.grant` and yield metrics are the context-switch record.
+`lease.grant` and yield metrics are the context-switch record; a
+provider with no heads emits none and has no switch to record.
 
 ## 9. Limits and trust
 
@@ -926,7 +945,7 @@ plugin that owns them.
 |---|---|---|
 | `cp_state` | `core` | `key`, `value` (holds `core_uid`) |
 | `cp_forks` | `forks` | `uid`, `parent`, `fork_point`, `blocking`, `route`, `wait_started`, `own_lease`, `state`, `ended_at` |
-| `cp_stops` | `forks`, `slots` | `channel_id`, `kind` (`stop` or `pass_through`), `set_at`, `set_by` |
+| `cp_stops` | `core`, `forks` | `channel_id`, `kind` (`stop` or `pass_through`), `set_at`, `set_by` |
 | `cp_prompt_revisions` | `periphery` | `id`, `channel_id`, `text`, `trace_id`, `chain_id`, `state`, `verdict_ok`, `verdict_reason`, `created_at`, `applied_at` |
 | `cp_work` | `core` | `id`, `kind`, `channel_id`, `chain_id`, `started_at`, `ended_at`, `outcome` |
 | `cp_requests` | `core` | `id`, `command`, `argument`, `created_at`, `applied_at` |
@@ -1034,9 +1053,9 @@ order.
 | 0 | Critique's `add_eligible_origin` | — | a turn whose origin a plugin registered is critiqued; one nobody registered is not |
 | 1 | K1, K3, K4, K5, K6; `limits` | #814 | a task started at `max_waiting` returns the refusal text and a warning is logged; a tool result at the same depth is accepted |
 | 2 | `core`: channel, uid, idle beat, `cp_work`, observables; goal block | phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
-| 3 | K2; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window |
+| 3 | K2; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains, the `notify_other_channel` change of TRD §9.3 | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window |
 | 4 | K7; tail import; criteria rewrites | #235, phase 3 | a subagent given `tools=["read_file"]` has no other tool in its request; a rewrite is absent from the peripheral's prompt before its next compaction and present after; a frozen channel refuses |
-| 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `hold_queue` and `resume_queue` (TRD §8.3, on the kernel's stop and resume), the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel |
+| 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `hold_queue` and `resume_queue` in `core` (TRD §8.3, on the kernel's stop and resume), the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel; `hold_queue` on the core's own channel returns the refusal text and stores no `cp_stops` row |
 | 6 | `slots` on one head: order, paging, stamped saves, shutdown save, the other four tools of TRD §8.3; consolidation's yield | #366, #365, phase 5 | after a page-out and page-in the next call's `cache_n` is within 5% of the prompt length; a file with a changed stamp is deleted with a warning and the call prefills; `pin_context` on a hosted provider returns the no-effect text |
 | 7 | Two models on separate providers, more heads, router mode: not designed | #1009's report, phase 6 | alternating a core and a periphery call loads neither model twice (§3.8.5) |
 | 8 | Trust stamping | #138 | an instruction written after an untrusted escalation carries the untrusted level |
@@ -1066,7 +1085,7 @@ means an existing base mechanism meets it and nothing is built.
 | Principle 21 | TRD §5.4 | 3 |
 | §3.1.1 | TRD §5.1, §5.2 | 2 |
 | §3.1.2 | TRD §3.3, §5.3; §2 (critique) | 0, 2 |
-| §3.1.3 | TRD §8.3 | 6 |
+| §3.1.3 | TRD §8.3 | 5, 6 |
 | §3.1.4 | TRD §10.1 | 2 |
 | §3.1.5 | TRD §6.5 | 4 |
 | §3.1.6 | TRD §5.4 | 3 |
@@ -1081,8 +1100,8 @@ means an existing base mechanism meets it and nothing is built.
 | §3.2.8 | K3, K7, TRD §6.1 | 1, 3, 4 |
 | §3.2.9 | K7, TRD §6.6 | 4 |
 | §3.3.1–3 | TRD §8.2, §8.3 | 6 |
-| §3.3.4, §3.3.5, §3.3.8 | TRD §8.1, §8.3 | 6 |
-| §3.3.6 | TRD §8.2, §8.3 | 6 |
+| §3.3.4, §3.3.5, §3.3.8 | TRD §8.1, §8.3 | 5, 6 |
+| §3.3.6 | TRD §8.2, §8.3 | 5, 6 |
 | §3.3.7 | TRD §7.3, §8.2, §11; #365, #366 | 5, 6 |
 | §3.4.2, §3.4.3 | TRD §6.3 | 3 |
 | §3.4.4 | TRD §6.5 | 4 |
@@ -1129,9 +1148,16 @@ means an existing base mechanism meets it and nothing is built.
   (TRD §2).
 - **The ceiling's treatment of stopped channels** (TRD §9.2) is the
   agent's judgment.
+- **A hold on a provider with no heads has no effect** (TRD §8.3). The
+  kernel has no stop there, and §3.3.7's "keep a paused channel
+  stopped" is then met only as §3.3.8's no-effect report. K4's queue
+  hold could serve instead, if the owner wants pausing to hold on
+  hosted providers.
+- **TRD decision C4 calls the revision table append-only**, and TRD
+  §6.5 updates a row's `state` in place. Either the wording or the
+  design gives way.
 
 ### 15.2 Not designed here
-
 
 - **The editor as a pass-through peripheral.** It needs `corvidae acp`
   to relay to the daemon, a base PRD change (open question 13).
