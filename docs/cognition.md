@@ -1542,10 +1542,11 @@ appraisal, and critique for calibration. Entry point name:
 Implements the message-lifecycle hooks (`on_message_admitted`,
 `on_message_rejected`, `on_message_persisted`) to record the identity row
 for every exchange (origin, channel, originating message rowid). The
-remaining columns — retrieval score/raw similarity/hit count, appraisal probe score and
-stage-2 JSON, critique's provenance snapshot, and merged outcomes — are
-filled in by `MemoryPlugin`, `AppraisalPlugin`, `CritiquePlugin`, `GatePlugin`
-and `SilencePlugin` through the writer API below, not by `OutcomeLogPlugin` itself.
+remaining columns — retrieval score/raw similarity/hit count, appraisal
+probe score and stage-2 JSON, and merged outcomes — are filled in by
+`MemoryPlugin`, `AppraisalPlugin`, `CritiquePlugin`, `GatePlugin` and
+`SilencePlugin` through the writer API below, not by `OutcomeLogPlugin`
+itself.
 
 A message refused by a transport gate (an allowlist refusing a stranger)
 leaves no row: both insert paths (`record_exchange` and `upsert_exchange`)
@@ -1559,8 +1560,8 @@ channels (the engagement gate) keep their `gate: rejected` row, with a null
 It also registers the `exchange_log` scrubber (`redact_exchange_log`)
 under the `corvidae.redact` entry-point group. When `corvidae redact`
 tombstones a message, the owning exchange's stage-2 `past_claims` text is
-tombstoned (claim and query counts kept), and every snapshot in that
-channel from the message on is dropped (see "Operator redaction" in
+tombstoned (claim and query counts kept), and so is the provenance and
+critique objection detail in its `outcomes` (see "Operator redaction" in
 [design.md](design.md)).
 
 The table is created in `on_start` when the DB is already open. At boot it
@@ -1666,10 +1667,9 @@ model makes both language judgments; the code only fetches evidence:
    when it wrote it: the system prompt, the exchange's own rows (tool
    results included), and the CONTEXT admitted for it. Rows written after
    the reply aren't in it. The instruction appended to that prefix lists
-   each claim with its search hits and the CONTEXT snapshot recorded for
-   the exchange. A hit longer than 500 characters is shown around its
-   matched terms, not from its start, so support deep in a long tool result
-   still reaches the judge. The judge is told the search shows near
+   each claim with its search hits. A hit longer than 500 characters is
+   shown around its matched terms, not from its start, so support deep in
+   a long tool result still reaches the judge. The judge is told the search shows near
    matches, not proof of absence, and marks a claim unsupported only when
    nothing supports it, judged by meaning rather than wording. The system prompt and
    every tool result, this exchange's included, are records. The agent's

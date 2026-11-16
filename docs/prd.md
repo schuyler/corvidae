@@ -1255,10 +1255,10 @@ deciding only what to newly append and in what order.
    leave a channel unable to answer (principle 9).
 
 **Outcome log.** One `exchange_log` row per trace (origin, originating
-rowid, retrieval profile, probe score, both appraisal stages, provenance
-snapshot, outcomes), written at admission or rejection and merged in place
-by every writer with a single-statement atomic merge. Rejected messages
-keep their row with a null rowid.
+rowid, retrieval profile, probe score, both appraisal stages, outcomes),
+written at admission or rejection and merged in place by every writer
+with a single-statement atomic merge. Rejected messages keep their row
+with a null rowid.
 
 **Calibration and corrections.** `corvidae calibrate` reports rates per
 gate from the outcome log and suggests threshold changes; the command

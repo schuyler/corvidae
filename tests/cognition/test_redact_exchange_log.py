@@ -5,14 +5,12 @@ scrubber under the ``corvidae.redact`` entry-point group, which the kernel
 redact CLI runs after tombstoning. These tests go through the real entry
 point.
 
-exchange_log holds text copied out of the conversation in two columns:
+exchange_log holds text copied out of the conversation in
 ``appraisal.stage2.past_claims`` (claims quoted from the reply, plus search
-phrases built from them) and ``provenance_snapshot`` (the CONTEXT messages
-in the window at the turn). Redacting message X in channel C must scrub:
-
-- past_claims on the exchange that owns X (in C, the largest
-  message_rowid <= X), keeping the number of claims and queries;
-- provenance_snapshot on every exchange in C with message_rowid >= X.
+phrases built from them). Redacting message X in channel C must scrub
+past_claims on the exchange that owns X (in C, the largest
+message_rowid <= X), keeping the number of claims and queries, and the
+detail text in that exchange's outcomes.
 """
 
 import asyncio
@@ -27,7 +25,7 @@ from corvidae.commands.redact import (
     redact_memory_id,
     redact_messages,
 )
-from corvidae_cognition.outcome_log import EXCHANGE_LOG_DDL
+from corvidae_cognition.outcome_log import EXCHANGE_LOG_DDL, redact_exchange_log
 
 from cognition.test_redact_cascade import insert_memory, insert_message, make_full_db
 
@@ -39,31 +37,30 @@ CLAIMS = [
 
 async def _add_exchange(
     db, trace_id: str, channel_id: str, message_rowid: int,
-    *, claims=CLAIMS, snapshot: str | None = "secret context",
+    *, claims=CLAIMS,
 ) -> None:
-    """Insert an exchange_log row with stage-2 claims and a snapshot."""
+    """Insert an exchange_log row with stage-2 claims."""
     appraisal = {
         "stage1": {"score": 0.4},
         "stage2": {"valence": 0.1, "correction": False, "past_claims": claims},
     }
     await db.execute(
         "INSERT INTO exchange_log (trace_id, channel_id, origin, message_rowid, "
-        "created_at, appraisal, provenance_snapshot) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "created_at, appraisal) VALUES (?, ?, ?, ?, ?, ?)",
         (trace_id, channel_id, "user", message_rowid, time.time(),
-         json.dumps(appraisal),
-         None if snapshot is None else json.dumps([{"content": snapshot}])),
+         json.dumps(appraisal)),
     )
     await db.commit()
 
 
-async def _row(db, trace_id: str) -> tuple[dict, str | None]:
-    """Return (appraisal dict, provenance_snapshot) for an exchange."""
+async def _row(db, trace_id: str) -> dict:
+    """Return the appraisal dict for an exchange."""
     async with db.execute(
-        "SELECT appraisal, provenance_snapshot FROM exchange_log WHERE trace_id = ?",
+        "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
         (trace_id,),
     ) as cursor:
-        appraisal, snapshot = await cursor.fetchone()
-    return json.loads(appraisal), snapshot
+        (appraisal,) = await cursor.fetchone()
+    return json.loads(appraisal)
 
 
 def _assert_scrubbed(appraisal: dict) -> None:
@@ -107,10 +104,10 @@ class TestPastClaims:
         db, ids = await _db_with_dialog()
         try:
             await redact_messages(db, [ids["u1"]])
-            appraisal, _ = await _row(db, "t1")
+            appraisal = await _row(db, "t1")
             _assert_scrubbed(appraisal)
             # The later exchange's claims are its own reply's, not X's.
-            later, _ = await _row(db, "t2")
+            later = await _row(db, "t2")
             assert later["stage2"]["past_claims"] == CLAIMS
         finally:
             await db.close()
@@ -121,31 +118,12 @@ class TestPastClaims:
             # a2 is the reply in t2's exchange; t1 is earlier and untouched.
             # tx (irc:#b) sits between u2 and a2 by id but owns nothing in #a.
             await redact_messages(db, [ids["a2"]])
-            appraisal, _ = await _row(db, "t2")
+            appraisal = await _row(db, "t2")
             _assert_scrubbed(appraisal)
-            earlier, _ = await _row(db, "t1")
+            earlier = await _row(db, "t1")
             assert earlier["stage2"]["past_claims"] == CLAIMS
-            foreign, foreign_snapshot = await _row(db, "tx")
+            foreign = await _row(db, "tx")
             assert foreign["stage2"]["past_claims"] == CLAIMS
-            assert foreign_snapshot is not None
-        finally:
-            await db.close()
-
-    async def test_owning_exchange_without_stage2_still_scrubs_snapshot(self):
-        # Many exchanges never get stage 2: the claims step has nothing to do,
-        # and the snapshot step still runs.
-        db, ids = await _db_with_dialog()
-        try:
-            await db.execute(
-                "UPDATE exchange_log SET appraisal = NULL WHERE trace_id = 't1'"
-            )
-            await db.commit()
-            result = await redact_messages(db, [ids["u1"]])
-            async with db.execute(
-                "SELECT provenance_snapshot FROM exchange_log WHERE trace_id = 't1'"
-            ) as cursor:
-                assert (await cursor.fetchone())[0] is None
-            assert result["scrubbed"]["exchange_log"] == 2
         finally:
             await db.close()
 
@@ -174,22 +152,16 @@ class TestCorruptAppraisalRow:
                 # cascade has a valid row to continue onto after a corrupt
                 # one (a break instead of continue would leave t2 unscrubbed).
                 result = await redact_messages(db, [ids["u1"], ids["u2"]])
-            # t1's snapshot still scrubs (the corrupt appraisal only skips
-            # the claims step); t2's claims and snapshot both scrub.
-            assert result["scrubbed"]["exchange_log"] == 2
+            # Only t2 changes: t1's corrupt appraisal is skipped.
+            assert result["scrubbed"]["exchange_log"] == 1
             async with db.execute(
                 "SELECT appraisal FROM exchange_log WHERE trace_id = 't1'"
             ) as cursor:
                 assert (await cursor.fetchone())[0] == "not json{"
-            t2_claims = (await _row(db, "t2"))[0]["stage2"]["past_claims"]
+            t2_claims = (await _row(db, "t2"))["stage2"]["past_claims"]
             assert all("redacted" in c["claim"] for c in t2_claims), t2_claims
             for word in ("kestrel", "Brannan", "Zebulon", "40"):
                 assert word not in json.dumps(t2_claims), t2_claims
-            async with db.execute(
-                "SELECT provenance_snapshot FROM exchange_log "
-                "WHERE trace_id = 't2'"
-            ) as cursor:
-                assert (await cursor.fetchone())[0] is None
             warnings = [
                 r.getMessage() for r in caplog.records
                 if r.name == "corvidae.outcome_log"
@@ -219,9 +191,9 @@ class TestCorruptAppraisalRow:
                 logging.WARNING, logger="corvidae.outcome_log"
             ):
                 result = await redact_messages(db, [ids["u1"], ids["u2"]])
-            # t1's snapshot still scrubs; t2's claims and snapshot both scrub.
-            assert result["scrubbed"]["exchange_log"] == 2
-            t2_claims = (await _row(db, "t2"))[0]["stage2"]["past_claims"]
+            # Only t2 changes: t1's undecodable appraisal is skipped.
+            assert result["scrubbed"]["exchange_log"] == 1
+            t2_claims = (await _row(db, "t2"))["stage2"]["past_claims"]
             assert all("redacted" in c["claim"] for c in t2_claims), t2_claims
             warnings = [
                 r.getMessage() for r in caplog.records
@@ -235,35 +207,13 @@ class TestCorruptAppraisalRow:
             await db.close()
 
 
-class TestProvenanceSnapshot:
-    async def test_snapshots_from_x_onward_in_channel_are_nulled(self):
-        db, ids = await _db_with_dialog()
-        try:
-            await redact_messages(db, [ids["a1"]])
-            # t1 owns a1 (message_rowid u1 < a1) but starts before it, so its
-            # snapshot predates X; t2 is at or after X.
-            _, t1_snapshot = await _row(db, "t1")
-            _, t2_snapshot = await _row(db, "t2")
-            _, tx_snapshot = await _row(db, "tx")
-            _, tb_snapshot = await _row(db, "tb")
-            assert t1_snapshot is not None
-            assert t2_snapshot is None
-            # Another channel's exchanges are never touched.
-            assert tx_snapshot is not None
-            assert tb_snapshot is not None
-        finally:
-            await db.close()
-
-
 class TestFormsAndReporting:
     async def test_memory_form_scrubs_exchange_log(self):
         db, ids = await _db_with_dialog()
         try:
             mem_id = await insert_memory(db, "irc:#a", "kestrel nest", ids["u1"], ids["a1"])
             await redact_memory_id(db, mem_id)
-            appraisal, t1_snapshot = await _row(db, "t1")
-            _assert_scrubbed(appraisal)
-            assert t1_snapshot is None
+            _assert_scrubbed(await _row(db, "t1"))
         finally:
             await db.close()
 
@@ -272,11 +222,10 @@ class TestFormsAndReporting:
         try:
             mem_id = await insert_memory(db, "irc:#a", "kestrel nest", ids["u1"], ids["a1"])
             result = await redact_memory_id(db, mem_id, dry_run=True)
-            # t1 (claims + snapshot) and t2 (snapshot).
-            assert result["scrubbed"]["exchange_log"] == 2
-            appraisal, snapshot = await _row(db, "t1")
+            # Only t1's claims would change.
+            assert result["scrubbed"]["exchange_log"] == 1
+            appraisal = await _row(db, "t1")
             assert appraisal["stage2"]["past_claims"] == CLAIMS
-            assert snapshot is not None
         finally:
             await db.close()
 
@@ -284,11 +233,10 @@ class TestFormsAndReporting:
         db, ids = await _db_with_dialog()
         try:
             result = await redact_messages(db, [ids["u1"]], dry_run=True)
-            # t1 (claims + snapshot) and t2 (snapshot) would change.
-            assert result["scrubbed"]["exchange_log"] == 2
-            appraisal, snapshot = await _row(db, "t1")
+            # Only t1's claims would change.
+            assert result["scrubbed"]["exchange_log"] == 1
+            appraisal = await _row(db, "t1")
             assert appraisal["stage2"]["past_claims"] == CLAIMS
-            assert snapshot is not None
         finally:
             await db.close()
 
@@ -296,7 +244,7 @@ class TestFormsAndReporting:
         db, ids = await _db_with_dialog()
         try:
             result = await redact_messages(db, [ids["u1"]])
-            assert result["scrubbed"]["exchange_log"] == 2
+            assert result["scrubbed"]["exchange_log"] == 1
         finally:
             await db.close()
 
@@ -313,7 +261,25 @@ class TestFormsAndReporting:
             redact_command, ["--db", path, "message", str(u1)]
         )
         assert result.exit_code == 0, result.output
-        assert "2 exchange_log rows" in result.output, result.output
+        assert "1 exchange_log rows" in result.output, result.output
+
+    async def test_scrub_is_committed(self, tmp_path):
+        """The scrubber commits its own writes: the CLI closes the connection
+        after the scrubbers run, and a later scrubber's commit can't be relied
+        on to persist them. Called directly, so no other scrubber commits."""
+        path = str(tmp_path / "s.db")
+
+        # Scrub u1's exchange on a file-backed DB, then close without committing.
+        db, ids = await _db_with_dialog(path)
+        await redact_exchange_log(db, "irc:#a", [ids["u1"]], False, "[redacted]")
+        await db.close()
+
+        # A fresh connection sees t1's claims tombstoned.
+        db = await make_full_db(path)
+        try:
+            _assert_scrubbed(await _row(db, "t1"))
+        finally:
+            await db.close()
 
     def test_cli_range_form_reports_exchange_log_rows(self, tmp_path):
         path = str(tmp_path / "s.db")
@@ -328,7 +294,7 @@ class TestFormsAndReporting:
             redact_command, ["--db", path, "range", str(start), str(end)]
         )
         assert result.exit_code == 0, result.output
-        assert "2 exchange_log rows" in result.output, result.output
+        assert "1 exchange_log rows" in result.output, result.output
 
     def test_cli_memory_form_reports_exchange_log_rows(self, tmp_path):
         path = str(tmp_path / "s.db")
@@ -344,7 +310,7 @@ class TestFormsAndReporting:
             redact_command, ["--db", path, "memory", str(mem_id)]
         )
         assert result.exit_code == 0, result.output
-        assert "2 exchange_log rows" in result.output, result.output
+        assert "1 exchange_log rows" in result.output, result.output
 
 
 class TestOutcomesDetail:

@@ -43,7 +43,6 @@ CREATE TABLE IF NOT EXISTS exchange_log (
     retrieval_hit_count INTEGER,
     probe_score REAL,
     appraisal TEXT,
-    provenance_snapshot TEXT,
     outcomes TEXT
 )
 """
@@ -64,7 +63,6 @@ UPDATABLE_COLUMNS = frozenset(
         "retrieval_hit_count",
         "probe_score",
         "appraisal",
-        "provenance_snapshot",
         "outcomes",
     }
 )
@@ -436,10 +434,9 @@ async def redact_exchange_log(
     """Scrub exchange_log text derived from redacted messages in one channel.
 
     For each redacted id X: the exchange that owns X (in the channel, the
-    largest message_rowid <= X) gets its stage-2 past_claims tombstoned.
-    Every exchange in the channel with message_rowid >= the smallest X loses
-    its provenance_snapshot, since any later window may have carried X's
-    text as CONTEXT. Exchanges with a NULL message_rowid are not reached.
+    largest message_rowid <= X) gets its stage-2 past_claims and its
+    outcomes objection detail tombstoned.
+    Exchanges with a NULL message_rowid are not reached.
 
     Registered as the ``exchange_log`` scrubber in the ``corvidae.redact``
     entry-point group, which ``corvidae redact`` runs per channel over the
@@ -527,20 +524,7 @@ async def redact_exchange_log(
                     (scrubbed_outcomes, trace_id),
                 )
 
-    # Drop every snapshot in the channel from the first redacted id on.
-    snapshot_where = (
-        "WHERE channel_id = ? AND message_rowid >= ? "
-        "AND provenance_snapshot IS NOT NULL"
-    )
-    snapshot_args = (channel_id, min(msg_ids))
-    async with db.execute(
-        f"SELECT trace_id FROM exchange_log {snapshot_where}", snapshot_args
-    ) as cursor:
-        changed.update(row[0] for row in await cursor.fetchall())
+    # Persist the scrubbed rows in one transaction.
     if not dry_run:
-        await db.execute(
-            f"UPDATE exchange_log SET provenance_snapshot = NULL {snapshot_where}",
-            snapshot_args,
-        )
         await db.commit()
     return len(changed)

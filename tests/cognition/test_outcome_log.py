@@ -195,6 +195,16 @@ class TestRetrievalTopSimilarity:
         assert "retrieval_top_similarity" in cols
 
 
+class TestFreshTable:
+    async def test_fresh_table_has_no_provenance_snapshot(self, db):
+        """A new exchange_log has no provenance_snapshot column (#1001)."""
+        await _setup(db)
+        async with db.execute("PRAGMA table_info(exchange_log)") as cursor:
+            cols = {row[1] for row in await cursor.fetchall()}
+        assert cols
+        assert "provenance_snapshot" not in cols
+
+
 class TestRfc7386NoneDeletes:
     """Pin the RFC 7386 cross-WP contract (WP2.1 review-gate follow-up):
     a None value inside a merge fragment DELETES that key from the

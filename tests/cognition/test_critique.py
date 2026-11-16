@@ -1,7 +1,5 @@
 """Tests for CritiquePlugin (WP2.7; the provenance check redesigned in #155).
 
-- provenance snapshot of CONTEXT messages under the trace id
-  (before_agent_turn);
 - eligibility by PROPAGATED origin (trap #3): user/reminder eligible;
   critique/heartbeat/task exempt (the recursion brake); a user exchange
   ending on a tool-result turn is critiqued against the original user text;
@@ -290,49 +288,6 @@ class TestSessionDbBaseDirResolution:
             )
         finally:
             await plugin.on_stop()
-
-
-# ---------------------------------------------------------------------------
-# 1. Provenance snapshot (before_agent_turn)
-# ---------------------------------------------------------------------------
-
-
-class TestProvenanceSnapshot:
-    async def test_snapshots_context_messages(self, tmp_path):
-        env = await build_critique(tmp_path)
-        await env.outcome.record_exchange("ks", env.channel.id, origin="user")
-        env.channel.conversation.append(
-            {"role": "system", "content": "<<memory>> the plan is X <</memory>>"},
-            MessageType.CONTEXT,
-        )
-        env.channel.conversation.append(
-            {"role": "user", "content": "what is the plan?"}, MessageType.MESSAGE,
-        )
-        await env.plugin.before_agent_turn(env.channel, "ks", {})
-        async with env.db.execute(
-            "SELECT provenance_snapshot FROM exchange_log WHERE trace_id = ?",
-            ("ks",),
-        ) as cursor:
-            row = await cursor.fetchone()
-        snap = json.loads(row[0])
-        assert len(snap) == 1
-        assert "the plan is X" in snap[0]["content"]
-        await _teardown(env)
-
-    async def test_no_context_no_snapshot(self, tmp_path):
-        env = await build_critique(tmp_path)
-        await env.outcome.record_exchange("kn", env.channel.id, origin="user")
-        env.channel.conversation.append(
-            {"role": "user", "content": "hi"}, MessageType.MESSAGE,
-        )
-        await env.plugin.before_agent_turn(env.channel, "kn", {})
-        async with env.db.execute(
-            "SELECT provenance_snapshot FROM exchange_log WHERE trace_id = ?",
-            ("kn",),
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row[0] is None
-        await _teardown(env)
 
 
 # ---------------------------------------------------------------------------
@@ -1235,15 +1190,21 @@ class TestProvenanceEvidence:
 class TestProvenanceCritic:
     """The provenance check runs as a fork of the window (#164)."""
 
-    async def test_fork_sees_claims_evidence_and_snapshot(self, tmp_path):
+    async def test_fork_sees_claims_and_evidence_not_window_context(self, tmp_path):
+        # The window is already in the fork's prefix, so the instruction
+        # carries the claim and the search evidence and no copy of the
+        # window's CONTEXT rows (#1001).
         env = await _provenance_env(tmp_path)
         agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
         try:
             ex = await _provenance_exchange(
                 env, agent, support="Heads up: the quarterly audit deadline is Thursday.")
-            await env.outcome.update_exchange(
-                "kp", provenance_snapshot=json.dumps([{"content": "memory: audits are quarterly"}]),
-            )
+            # A CONTEXT row with text found nowhere else in the exchange.
+            env.channel.conversation.messages.insert(0, {
+                "role": "system", "content": "memory: zanzibar ledger is audited quarterly",
+                "_message_type": MessageType.CONTEXT,
+            })
+            await env.plugin.before_agent_turn(env.channel, "kp", {})
             await _run_provenance(env)
             [call] = agent.calls
             instruction = call["instruction"]
@@ -1251,7 +1212,8 @@ class TestProvenanceCritic:
             assert "confabulated memory" in instruction
             assert CLAIM["claim"] in instruction
             assert "Heads up: the quarterly audit deadline is Thursday." in instruction
-            assert "memory: audits are quarterly" in instruction
+            assert "zanzibar ledger" not in instruction
+            assert "snapshot" not in instruction.lower()
             assert call["stage"] == "critique"
             assert call["attribution"]["stage"] == "critique"
             assert env.stub.chat_calls == []
@@ -1599,7 +1561,7 @@ class TestProvenancePrompts:
     def test_own_earlier_statement_is_not_a_record_of_a_fact(self):
         prompt = _provenance_fork_prompt()
         assert "shows only that it was said" in prompt
-        assert "a user message, a tool result, a summary or the snapshot" in prompt
+        assert "a user message, a tool result, a summary or retrieved CONTEXT" in prompt
 
     def test_summary_rows_are_labelled_summary_not_assistant(self):
         # Compaction stores a summary as an assistant turn; shown to the

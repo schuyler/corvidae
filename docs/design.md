@@ -707,7 +707,6 @@ CREATE TABLE exchange_log (
     retrieval_hit_count INTEGER,    -- written by MemoryPlugin retrieval
     probe_score REAL,               -- written by AppraisalPlugin stage 1
     appraisal TEXT,                 -- JSON; written by AppraisalPlugin stage 2
-    provenance_snapshot TEXT,       -- JSON; written by CritiquePlugin
     outcomes TEXT                   -- JSON; merged by multiple writers
 );
 ```
@@ -1960,13 +1959,9 @@ creates schema; schema is daemon-owned.
   largest `message_rowid <= X`) has every `appraisal.stage2.past_claims`
   claim and query replaced with the tombstone text. The number of claims
   and queries is kept for calibration, and the other appraisal fields are
-  untouched. Every exchange in the channel with `message_rowid >=` the
-  smallest redacted id has its `provenance_snapshot` set to NULL. That
-  deliberately over-scrubs: the snapshot holds the CONTEXT in the window
-  at the turn, nothing maps it back to rows, and any later window may
-  have carried X's text. Exchanges with a NULL `message_rowid` aren't
-  reached. The CLI prints `<N> <name> rows` per scrubber, here
-  `<N> exchange_log rows` (distinct exchanges changed; a re-run that
+  untouched. Exchanges with a NULL `message_rowid` aren't reached. The
+  CLI prints `<N> <name> rows` per scrubber, here `<N> exchange_log rows`
+  (distinct exchanges changed; a re-run that
   changes nothing counts zero), and the result dict carries the counts
   as `scrubbed: {name: N}`. The cognition extra also registers
   `retrieval_candidate` (`corvidae_cognition.memory:redact_retrieval_candidates`,
@@ -2566,8 +2561,8 @@ starts ("the whole conversation above", "what follows the summary at its
 top", or a quote of the first new message when rows below the watermark
 are still in view). Appraisal appends the exchange quotes and the
 retrieval profile. Critique appends the exchange quotes, and the
-provenance check also passes the CONTEXT snapshot inline, along with each
-past claim and its closest earlier messages.
+provenance check also passes each past claim and its closest earlier
+messages.
 
 `ForkResult.model` is the model the fork request was sent with
 (`LLMClient.request_model` of the fork's body, so an `extra_body` override
