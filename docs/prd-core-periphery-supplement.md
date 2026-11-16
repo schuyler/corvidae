@@ -768,7 +768,9 @@ With the goals plugin loaded:
    for every context too, except that consolidation does not run for a
    task-bound peripheral: it writes no memory of its own (§3.2.9, open
    question 17), and its work is remembered through the core's
-   consolidation of its result.
+   consolidation of its result. Nor does it run for a
+   long-lived fork, whose work is remembered through the consolidation
+   of its join report in its parent's window (§3.5; owner, 2026-11-16).
 
 2. With the appraisal plugin loaded, appraisal MUST run in the core
    (§3.1.10).

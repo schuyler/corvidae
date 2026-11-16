@@ -97,9 +97,10 @@ yet. `CritiquePlugin._eligible`
 (`packages/corvidae-cognition/corvidae_cognition/critique.py`) admits
 only origin `reminder`, or no origin on an admitted trace. Every origin
 this strategy adds would be exempt, against gap 1's decision and
-§3.1.2. Critique's eligibility becomes a list of exempt origins
-(`critique`, `task`, and whatever base §3.7 Critique 3 names) with
-everything else eligible.
+§3.1.2. Critique gains `add_eligible_origin(name: str)`, which a plugin
+calls from `on_start`, and the strategy's plugins register the origins
+of TRD §5.2. An origin nobody registers stays exempt, so the base
+topology and base §3.7 Critique 3 are unchanged.
 
 ## 3. Components
 
@@ -139,15 +140,16 @@ package's `pyproject.toml`, and CI gains a job as
 | `heartbeat` (cognition) | Must not be loaded. If it is, `core.on_init` aborts startup with `Config error: core_periphery is configured and the heartbeat plugin is loaded — add "heartbeat" to plugins.disabled in agent.yaml`. Its trigger and diff logic move to a shared module that both import (TRD §5.3). |
 | `subagent` (kernel tool) | Becomes the task-bound peripheral, extended (TRD §6.6). |
 | `fork` tool (kernel) | Unchanged. It starts from a fresh window (`corvidae/tools/fork_tool.py`), so it is neither of §3.5's two forks. |
-| cross-channel-send | Unchanged and optional. Its sends pass the admission seam (TRD §9.3). |
-| `goals`, `memory`, `critique`, `appraisal`, `outcome_log` | Changed as TRD §10 lists. |
+| cross-channel-send | Optional. `notify_other_channel` calls the admission seam and carries the chain (TRD §9.3). |
+| `goals`, `memory`, `critique`, `appraisal`, `outcome_log` | Changed: TRD §6.4 (`outcome_log`), §10.1 (`goals`), §10.3 (the rest). |
 
 ## 4. Kernel changes
 
 The kernel changes below are contracts other plugins rely on, so each
 needs the owner's approval before it is built (AGENTS.md, "Process
-instructions"). K1 was agreed in session on 2026-11-16; its signature
-was not. The others are new in this document.
+instructions"). K1 was agreed in session on 2026-11-16, and a refusal that
+carries its reason with it (TRD decision A7). K7 follows TRD decision
+C3. K2 to K6 are new in this document.
 
 ### K1. Admission seam for internal work (§3.12 item 2)
 
@@ -169,11 +171,14 @@ async def should_start_work(
     """Veto. None is no opinion; the first WorkRefusal wins."""
 ```
 
-- **Who calls it.** The code that starts the work, before enqueuing:
-  `TaskQueue.enqueue` for a task a tool started, the strategy's tools,
-  and `notify_other_channel`.
-- **What is never offered.** A notification carrying a `tool_call_id`.
-  That is a result arriving, and §3.10.1 forbids refusing it.
+- **Who calls it.** The tool that starts the work, before it enqueues
+  anything: `subagent`, `fork`, the strategy's `escalate`, `instruct`
+  and `fork_context`, and `notify_other_channel`. The Task that carries
+  an ordinary tool call (base §3.1.2) is not offered.
+- **What is never offered.** The result of work already started: a
+  notification carrying a `tool_call_id`, a fork's join or abandonment
+  report, and an item moved to a parent as late. §3.12 item 2 forbids
+  refusing those.
 - **A refusal** becomes the starting tool's result,
   `Not started: <limit> reached — <remedy>`, and is logged at warning
   with the kind, both channels and the limit.
@@ -202,9 +207,7 @@ Proposed base PRD text, for §3.1, to be added when this is built:
 
 `Agent` takes one client for every channel's main turn
 (`llm.get_client()` in `corvidae/agent.py`), and `ChannelConfig`
-(`corvidae/channel.py`) has no profile field. A per-channel `model`
-override changes the request body only, so two models would share one
-provider's `heads`.
+(`corvidae/channel.py`) has no profile field.
 
 `ChannelConfig` gains `profile: str | None`, added to
 `CHANNEL_ENTRY_KEYS`. The main turn uses `llm.get_client(profile)` when
@@ -219,8 +222,20 @@ set defaults for channels another transport owns:
 `set_wide_entries` replaces the operator's entries whole.
 
 `ChannelRegistry.set_plugin_defaults(source: str, config: ChannelConfig,
-applies: Callable[[str], bool])` adds a layer beneath every operator
-entry. Operator config always wins over it.
+tunables: dict[str, object], applies: Callable[[str], bool])` adds a
+layer beneath every operator entry.
+
+- **Settings** in `config` apply where no operator entry sets the field.
+- **Tools.** `Channel.disabled_tools` is a union of every layer
+  (`corvidae/channel.py`), so a default that joined the union could
+  never be undone. The plugin layer's `disabled_tools` applies only to a
+  channel for which no operator entry, its own or a matching wide one,
+  has a `tools` key. An operator who sets `tools.disabled` for a
+  peripheral replaces the default list (§3.2.8).
+- **Tunables.** `resolve_tunable` (`corvidae/tuning.py`) reads
+  `channel.runtime_overrides`, then global config. It gains the plugin
+  layer between the two, so a plugin can default a dotted tunable for a
+  class of channels.
 
 ### K4. A queue can be held (§3.5.7)
 
@@ -240,12 +255,19 @@ admitted inbound message at the tail of the channel's window, fires
 `on_message_persisted`, and makes no model call. A turn already in
 flight is not interrupted.
 
-### K6. The starting subcommand is visible (TRD decision A6)
+### K6. A channel can take its window's head from another (§3.5)
 
-`corvidae acp` builds its own `Runtime` (`corvidae/channels/acp.py`)
-from the same config, and no plugin can tell which subcommand started
-it. `Runtime` sets `config["runtime"]["command"]` to the subcommand's
-name before `on_init`. Only `Runtime` writes that key.
+At conversation init the Agent resolves a channel's system prompt and
+tool view for that channel's own id (`corvidae/agent.py`, where
+`channel.conversation is None`), outside `resolve_conversation`. A fork
+channel would get a head built for itself, with no goal block, and
+share no prefix with its parent.
+
+`Channel.head_from: str | None`. When it names a channel with a live
+conversation, the Agent copies that conversation's `system_prompt` and
+`tool_view` in place of resolving its own. At the channel's first
+compaction the head is resolved for the channel itself, as for any
+channel.
 
 ### K7. `subagent` arguments (§3.2.8, §3.2.9; TRD decision C3)
 
@@ -256,7 +278,8 @@ name before `on_init`. Only `Runtime` writes that key.
   unknown name is refused, naming it and the accepted names.
 - `append_prompt` is appended after the persona-neutral prompt.
 - The loop's messages are persisted to `message_log` under
-  `core:task:<uid>`, and the uid is in the tool's result.
+  `core:task:<uid>`, and the uid is in the tool's result. The id is a log key only: it is
+  written under every topology and needs no `core` transport.
 
 The arguments exist under every topology. That widens §4's "fewer
 tools" amendment from this strategy to the base; the owner accepted it
@@ -265,8 +288,8 @@ subagent fewer tools than its own set, never more."
 
 ### Changes other issues already carry
 
-#318, #234, #235, #365, #366 and #814 are kernel work with their own
-issues (TRD §2). This document adds nothing to their scope except one
+#318, #234, #235, #365, #366 and #814 have their own issues (TRD §2);
+#234 and #235 are plugin work (base §3.5.11). This document adds nothing to their scope except one
 ruling on #366: a stop never lapses, and a deferral is the pause that
 does (owner, 2026-11-16; TRD decision C6). Proposed base text for
 §3.13.7, replacing "whether it lapses by itself is not decided": "A stop
@@ -316,8 +339,10 @@ notification on the core's channel, made of:
    resolved by `resolve_prompt` (`corvidae/prompts.py`).
 
 Open goals are not repeated; they are in the goal block (TRD §10.1). The
-diff state and back-off are the heartbeat's, moved to
-`corvidae_cognition/idle_beat.py` and imported by both plugins.
+diff state is the heartbeat's, moved to
+`corvidae_cognition/idle_beat.py` and imported by both plugins. The
+repeat while the system stays idle is the idle tracker's
+(`corvidae/idle.py`).
 
 Base §3.7 Commitments routes dormant commitments and long-quiet
 relationships to the heartbeat as goal candidates. Nothing implements
@@ -334,6 +359,9 @@ Two tools, on the core and on forks:
   records the message in the target channel's history through that
   channel's queue, so the peripheral's context holds it (principle 21),
   and it passes `should_send_response`, so §3.9.4's limits apply.
+
+A reply a periphery composes from an instruction is that channel's
+ordinary final emission, so it passes the same gate.
 
 The strategy builds no send path of its own (TRD decision A9).
 
@@ -383,7 +411,7 @@ from `core_periphery.periphery`:
 | Key | Default | Meaning |
 |---|---|---|
 | `profile` | unset | the peripheral's main-turn profile (K2); unset means the core's |
-| `tools.disabled` | `shell`, `write_file`, and every tool whose plugin declares it as changing things outside the conversation | §3.2.8 |
+| `tools.disabled` | `shell`, `write_file` | §3.2.8; the operator extends or replaces the list (K3) |
 | `max_context_tokens` | unset | the existing per-channel key (open question 5) |
 
 A channel-bound peripheral gets the identity in full (open question 9)
@@ -429,22 +457,30 @@ The notification the core receives is built by `periphery`:
 It is framed as data from the source channel by the kernel's prompt
 build, like any notification from another channel (§3.4.6).
 
-**Before the model runs.** `periphery` checks structural rules in
-`before_agent_turn` and, on a match, escalates with reason
-`structural` without a model call: the message has an attachment, the
-sender has no earlier row on the channel, or the message is longer than
-`structural_max_chars` (1500). Each rule has an on/off key.
+**Structural rules.** `periphery` implements `on_message_persisted`,
+which fires for inbound messages only, and escalates with reason
+`structural`, with no model deciding it, when the message has an
+attachment, the sender has no earlier row on the channel, or the message
+is longer than `structural.max_chars` (1500). Each rule has an on/off
+key. It appends one CONTEXT row at the peripheral's tail saying the
+message was escalated, and the periphery's turn runs as usual.
 
 **The eval switch (§3.11.1).** `core_periphery.periphery.force` is
-`always`, `never`, or unset. `always` escalates every message in
-`before_agent_turn`; `never` removes the tool and skips the structural
-rules.
+`always`, `never`, or unset. `always` escalates every inbound message by
+the same path; `never` removes the tool and skips the structural rules.
 
-**Refused or unreachable.** If the admission seam refuses an
-escalation, or the core's last `error_threshold` turns failed for an
-unreachable model, the periphery's turn gets that as the tool result
-and tells the user the request is waiting. An accepted escalation stays
-queued (open question 11).
+**Not delivered.** There are two cases. In both the plugin sends the
+status text itself, as an ordinary emission on the user's channel, so
+telling the user does not depend on what a model writes (§3.12 item 2).
+
+- *Refused.* The admission seam refused the escalation, at a limit or
+  at zero hops (TRD §9.3). Nothing is queued. The user is told the
+  request was not passed on and why. Where a tool made the call, its
+  result says the same.
+- *Core unreachable.* The escalation was accepted, and the core's last
+  `error_threshold` turns failed for an unreachable model. It stays
+  queued, and the user is told once that it is waiting (open question
+  11).
 
 ### 6.4 Escalation quality (§3.4.5, §3.10.2, gap 8)
 
@@ -482,7 +518,8 @@ Rates per peripheral and by `reason` are queries over the table.
    new method that forks the core's window with the rewrite. `Verdict`
    has `ok: bool` and `reason: str`. A verdict that is not ok sets the
    revision `rejected`.
-4. At the peripheral's next compaction boundary (`on_compaction`), the
+4. At the peripheral's next compaction boundary (`on_compaction`) or
+   conversation start, the
    newest pending revision is applied if critique is not loaded or its
    verdict is ok: the text is written to the channel's criteria file,
    the row becomes `applied`, older pending rows become `superseded`,
@@ -527,10 +564,11 @@ and on forks. `route=True` with `blocking=False` is refused.
    parent's last `message_log` id (the fork point), `blocking`, `route`,
    the time, state `running`.
 2. It registers `core:fork:<uid>` with the parent's config and
-   implements `resolve_conversation` for it: the parent's window rows up
-   to the fork point, then the fork's own rows. Prompt build is a pure
-   function of the rows (base principle 2), so the fork's prompt begins
-   with what the parent's slot holds.
+   `head_from` set to the parent (K6), and implements
+   `resolve_conversation` for it: the parent's window rows up to the
+   fork point, then the fork's own rows. The head is the parent's, and
+   prompt build is a pure function of the rows after it (base principle
+   2), so the fork's prompt begins with what the parent's slot holds.
 3. It enqueues `task` on the fork's queue with origin `fork`.
 
 A fork has the core's identity, tools and memory access (§3.5.2).
@@ -666,7 +704,8 @@ call boundary because it reads only the lease view and its own table:
 3. then FIFO.
 
 The holder that gives way is the least recently directed, and never the
-core's own key unless the core asked (`page_out` on its own channel).
+core's own key unless the core asked (`page_out` on its own channel) or
+a waiter is past its latency bound (base §3.13.5).
 
 - **Page-out**: when a holder's lease is removed at a call boundary,
   `POST /slots/0?action=save` to a file named for the lease key.
@@ -684,7 +723,8 @@ for the core's channel and calls `LeaseManager.resume`
 (`corvidae/lease.py`), with no core turn deciding it (§3.3.6).
 
 An upkeep stream yields at each chunk boundary with
-`LeaseManager.yield_key`, as memory consolidation does today.
+`LeaseManager.yield_key`. Nothing calls it today; memory consolidation
+gains the call (TRD §10.3).
 
 ### 8.3 Tools (§3.1.3, §3.3.6, §3.3.8)
 
@@ -751,41 +791,59 @@ No per-response tool-call cap is built; `max_turns` and
 `limits` implements `should_start_work` (K1) and refuses new work when
 the sum of `Agent.waiting_work()` is at `limits.max_waiting` (200).
 
+The sum leaves out channels that are stopped. Messages held on a
+stopped channel would otherwise fill the ceiling and refuse every
+escalation, which is the lockout gap 9 removed from the inbound caps.
+No decision states this rule; it is the agent's judgment.
+
 ### 9.3 Chains and hops (gap 1; TRD decision C2)
 
-Every crossing carries `annotations["chain_id"]` and
-`annotations["hops_left"]`, set by the plugin that enqueues it, never
-by a tool argument.
+Three crossings start work on another context: an escalation, an
+instruction and a fork's start. Each carries `annotations["chain_id"]`
+and `annotations["hops_left"]`, set by the plugin that enqueues it,
+never by a tool argument.
 
-- An item that starts a chain (a user message, an idle event, a
-  scheduler firing) has no `chain_id`. The first crossing it causes
-  mints one and sets `hops_left` to `limits.max_hops` (4).
-- A crossing caused by a turn that carries a chain copies its
-  `chain_id` and subtracts one.
+- A turn's annotations ride every Task it starts and every completion
+  that returns to it (base §3.1.4), so a turn woken by a subagent's or
+  a tool's result is still in the chain it was in.
+- An item that arrives with no chain (a user message, an idle event, a
+  scheduler firing) starts one at its first crossing: the plugin mints a
+  `chain_id`, sets `hops_left` to `limits.max_hops` (4), and records the
+  user's channel, if there is one, as `chain_channel`.
+- A crossing from a turn that carries a chain copies its annotations
+  and subtracts one from `hops_left`.
 - At zero, `limits` refuses the crossing at the admission seam. The
-  refusal is the tool's result; on a peripheral, the turn tells the
-  user that the request stopped after too many hand-offs.
+  plugin whose crossing was refused sends the status text on
+  `chain_channel` (TRD §6.3, "Not delivered").
 
-Each crossing starts its own exchange: a fresh trace, a fresh
+Each of the three starts its own exchange: a fresh trace, a fresh
 `max_turns` budget and its own origin (TRD §5.2). That differs from
 base §3.1.3 and §3.5.10, where a note-woken turn is charged to the
 chain's budget and carries the chain's origin; §4 of the supplement
-lists the amendment (owner, 2026-11-16).
+lists the amendment (owner, 2026-11-16). A note keeps the base rule.
+
+Join and abandonment reports, late items and anomaly notices carry the
+`chain_id` so records can be linked. They are never counted and never
+refused (K1).
 
 The count survives a restart once annotations are stored with accepted
 items (#318). Before that it holds within one run.
 
 `notify_other_channel` keeps its own `hop_count` and
-`cross_channel_send.max_hops`. It also calls the admission seam with
-kind `note`, so `limits` counts its sends in the same chain.
+`cross_channel_send.max_hops`. It gains two things: a call to the
+admission seam with kind `note`, and, when the sending turn carries a
+chain, the chain's annotations on the note with `hops_left` reduced. A
+loop cannot then alternate between notes and instructions to stay under
+both counts (TRD decision C2).
 
 ### 9.4 Trust (§3.4.6, §3.4.7, gap 2)
 
 Nothing here is built until the trust plugin exists (#138): rows carry
 no trust level today.
 
-When it does, the plugin that enqueues an instruction, a join report, a
-task result or a core memory stamps it with the lowest trust level of
+When it does, an escalation is stamped with the trust level of the
+message that triggered it (§3.4.6), and the plugin that enqueues an
+instruction, a join report, a task result or a core memory stamps it with the lowest trust level of
 any row in the source window since that window's last compaction. No
 tool takes a citation. Most instructions will be low-trust; that is the
 cost of §3.4.7.
@@ -815,22 +873,26 @@ pinning and the byte stability of §3.6.2–3.
 
 | | core | peripheral | fork | task-bound |
 |---|---|---|---|---|
-| compaction | yes | yes | yes | no (bounded by `subagent.max_turns`) |
+| compaction | yes | yes | yes | no; open, TRD §15.1 |
 | critique | yes | yes | yes | no (base exemption for `task`) |
 | consolidation | yes | yes | no | no |
 | appraisal | yes | no | no | no |
-| goal block | yes | no | inherited in the copied window | no |
+| goal block | yes | no | the parent's, through K6, until the fork's first compaction | no |
 
 ### 10.3 Switches the cognition plugins need
 
 - **memory**: a per-channel tunable `memory.consolidate` (default
   true), read with `resolve_tunable` (`corvidae/tuning.py`). `forks`
-  sets it false on fork channels, and memory skips channel ids under
-  `core:task:`. The three triggers are unchanged (open question 16),
-  and idle consolidation stays upkeep under its own lease key.
-- **appraisal**: a per-channel tunable `appraisal.enabled`; `periphery`
-  sets it false in its defaults.
-- **critique**: the eligibility change of TRD §2, and `review_text`
+  defaults it false for `core:fork:*` through K3's tunables layer, and
+  memory skips channel ids under `core:task:`. The three triggers are
+  unchanged (open question 16), and idle consolidation stays upkeep
+  under its own lease key. Consolidation gains a
+  `LeaseManager.yield_key` call at each chunk boundary (§3.3.7), in
+  phase 6.
+- **appraisal**: a per-channel tunable `appraisal.enabled` (default
+  true). `periphery` defaults it false for peripheral channels and
+  `forks` for `core:fork:*`, both through K3.
+- **critique**: `add_eligible_origin` (TRD §2) and `review_text`
   (TRD §6.5).
 
 ### 10.4 Two memories of one exchange (open question 14)
@@ -878,10 +940,11 @@ redact` writes to the same database. `core` reads the table every
 applies each row. No channel queue is involved.
 
 **Editor sessions (open question 13; TRD decision A6).** Every strategy
-plugin returns from `on_init` without acting unless
-`config["runtime"]["command"]` (K6) is `serve`. An editor session runs
-the base topology, so there is one core and one idle actor per goal
-store.
+plugin returns from `on_init` without acting when `config["_acp_mode"]`
+is set, which `corvidae acp` does (`corvidae/channels/acp.py`), and
+logs one info line saying so. An editor session runs the base topology,
+so there is one core and one idle actor per goal store. `corvidae
+serve` and `corvidae cli` both run the strategy.
 
 ## 12. Configuration
 
@@ -898,7 +961,9 @@ core_periphery:
     error_threshold: 3
     request_poll: 5
   periphery:
-    profile: small             # K2; unset = the core's
+        profile: small             # K2; unset = the core's
+    tools:
+      disabled: [shell, write_file]
     prompt: {file: prompts/periphery.md}
     criteria: {file: prompts/periphery-criteria.md}
     force: null                # always | never
@@ -924,8 +989,15 @@ core_periphery:
 limits:
   inbound_per_channel: 50
   notice_interval: 300
-  max_waiting: 200
+    max_waiting: 200
   max_hops: 4
+goals:
+  block_share: 0.05            # share of the core's max_context_tokens
+memory:
+  consolidate: true            # per-channel tunable; false on forks
+appraisal:
+  enabled: true                # per-channel tunable; false on peripherals and forks
+# <stage>.fork_blocking: true | false   # per forking stage; unset keeps today's behaviour
 ```
 
 Every key is validated at startup; a bad value aborts with the key, the
@@ -943,18 +1015,18 @@ order.
 
 | Phase | Builds | Needs | Probe |
 |---|---|---|---|
-| 0 | Critique eligibility by exemption list | — | a turn with an origin critique has never seen is critiqued |
+| 0 | Critique's `add_eligible_origin` | — | a turn whose origin a plugin registered is critiqued; one nobody registered is not |
 | 1 | K1, K3, K4, K5, K6; `limits` | #814 | a task started at `max_waiting` returns the refusal text and a warning is logged; a tool result at the same depth is accepted |
-| 2 | `core`: channel, uid, idle beat, `cp_work`, observables; goal block | phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
-| 3 | `periphery`: settings, sections, `escalate`, structural rules, `force`, `instruct`, exact wording, labels, chains | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window |
+| 2 | `core`: channel, uid, idle beat, `cp_work`, observables, `corvidae resume` and `cp_requests`; goal block | phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
+| 3 | K2; `periphery`: settings, sections, `escalate`, structural rules, `force`, `instruct`, exact wording, labels, chains | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window |
 | 4 | K7; tail import; criteria rewrites | #235, phase 3 | a subagent given `tools=["read_file"]` has no other tool in its request; a rewrite is absent from the peripheral's prompt before its next compaction and present after; a frozen channel refuses |
-| 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel |
-| 6 | `slots` on one head: order, paging, stamped saves, shutdown save, tools | #366, #365, phase 5 | after a page-out and page-in the next call's `cache_n` is within 5% of the prompt length; a file with a changed stamp is deleted with a warning and the call prefills; `pin_context` on a hosted provider returns the no-effect text |
-| 7 | K2 in use: two models, more heads, router mode | #1009's report, phase 6 | alternating a core and a periphery call loads neither model twice (§3.8.5) |
+| 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel |
+| 6 | `slots` on one head: order, paging, stamped saves, shutdown save, tools; consolidation's yield | #366, #365, phase 5 | after a page-out and page-in the next call's `cache_n` is within 5% of the prompt length; a file with a changed stamp is deleted with a warning and the call prefills; `pin_context` on a hosted provider returns the no-effect text |
+| 7 | Two models on separate providers, more heads, router mode: not designed | #1009's report, phase 6 | alternating a core and a periphery call loads neither model twice (§3.8.5) |
 | 8 | Trust stamping | #138 | an instruction written after an untrusted escalation carries the untrusted level |
 
-Phase 7 is the first to need a second model. Until #1009 reports, its
-design is the README's account of router mode and nothing more.
+Phase 7 is not designed here. Until #1009 reports, all that exists is
+the README's account of router mode.
 
 Each phase updates `docs/design.md`, `docs/configuration.md`,
 `docs/plugin-guide.md` and `docs/threat-model.md` for what it adds. The
@@ -969,6 +1041,8 @@ means an existing base mechanism meets it and nothing is built.
 
 | Supplement | Met by | Phase |
 |---|---|---|
+| §1 (the strategy is plugins; the base topology stays) | TRD §3.1 | 2 |
+| §4 (a peripheral per transport channel; the core a channel) | TRD §5.1, §6.1 | 2, 3 |
 | Principle 17 | TRD §5.1, §6.1, §6.6 | 2, 3, 4 |
 | Principle 18 | TRD §8 | 6 |
 | Principle 19 | TRD §6.3 | 3 |
@@ -988,7 +1062,7 @@ means an existing base mechanism meets it and nothing is built.
 | §3.2.1, §3.2.7 | K2, TRD §6.1 | 3, 7 |
 | §3.2.4 | TRD §6.2, §6.5 | 3, 4 |
 | §3.2.5, §3.2.6 | Base; TRD §6.1 | 3 |
-| §3.2.8 | K3, K7, TRD §6.1 | 1, 4 |
+| §3.2.8 | K3, K7, TRD §6.1 | 1, 3, 4 |
 | §3.2.9 | K7, TRD §6.6 | 4 |
 | §3.3.1–3 | TRD §8.2, §8.3 | 6 |
 | §3.3.4, §3.3.5, §3.3.8 | TRD §8.1, §8.3 | 6 |
@@ -997,7 +1071,7 @@ means an existing base mechanism meets it and nothing is built.
 | §3.4.2, §3.4.3 | TRD §6.3 | 3 |
 | §3.4.4 | TRD §6.5 | 4 |
 | §3.4.5 | TRD §6.4 | 3 |
-| §3.4.6 | TRD §6.3 | 3 |
+| §3.4.6 | TRD §6.3; the trust label, TRD §9.4 | 3, 8 |
 | §3.4.7 | TRD §9.4 | 8 |
 | §3.5 preamble | TRD §7.1, §7.2, §7.4 | 5 |
 | §3.5.1–3 | TRD §7.1, §7.4 | 5 |
@@ -1006,10 +1080,10 @@ means an existing base mechanism meets it and nothing is built.
 | §3.5.6 | K5, TRD §7.6 | 5 |
 | §3.5.7 | K4, TRD §7.3 | 5 |
 | §3.6.1–3, §3.6.5 | TRD §10.1 | 2 |
-| §3.7.1–3 | TRD §10.2, §10.3 | 3, 5 |
-| §3.8.1 | K2 | 7 |
+| §3.7.1–3 | TRD §10.2, §10.3; compaction of a task-bound peripheral is open (TRD §15.1) | 3, 5 |
+| §3.8.1 | K2 | 3, 7 |
 | §3.8.4, §3.8.6 | TRD §13 (phases 1–5 run this way) | 2–5 |
-| §3.8.5 | TRD §13 phase 7 | 7 |
+| §3.8.5 | not designed; waits for #1009 (TRD §13) | 7 |
 | §3.9.1 | TRD §5.4 | 3 |
 | §3.9.3 | Base (`on_notify`) | — |
 | §3.9.4 | Base §3.5.9 through #234 | 3 |
@@ -1022,7 +1096,25 @@ means an existing base mechanism meets it and nothing is built.
 | §3.12.1 | TRD §9.1, §9.2 | 1 |
 | §3.12.2 | K1, TRD §9.2, §9.3 | 1, 3 |
 
-## 15. Not in this document
+## 15. Open, and not in this document
+
+### 15.1 Open for the owner
+
+- **Compaction of a task-bound peripheral.** §3.7.1 says compaction
+  runs for every context, core and peripheral, and excepts only
+  consolidation. The `subagent` loop has no compaction and is bounded by
+  `subagent.max_turns`. Either §3.7.1 gains the exception or K7 gains
+  compaction. This document builds neither. It recommends the
+  exception: a task that outgrows its window is better split by its
+  launcher.
+- **K2 to K6** need approval as kernel contracts (TRD §4).
+- **#365** was not among the prerequisites accepted in session
+  (TRD §2).
+- **The ceiling's treatment of stopped channels** (TRD §9.2) is the
+  agent's judgment.
+
+### 15.2 Not designed here
+
 
 - **The editor as a pass-through peripheral.** It needs `corvidae acp`
   to relay to the daemon, a base PRD change (open question 13).
