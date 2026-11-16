@@ -21,7 +21,7 @@ base PRD's; "TRD §5" is this document's.
 - The owner's decisions in the TRD session of 2026-11-16, recorded in
   `docs/core-periphery-open-questions.md` §5. This document cites them as
   "TRD decision A1" to "A11" and "C1" to "C6", and those taken after
-  the draft merged as "D1" to "D3".
+  the draft merged as "D1" to "D4".
 - The tree. Every statement about current code names a file, and was
   read at `23490ae`. Nothing here was run: no statement about
   llama-server is verified on the pinned build (#1009).
@@ -151,7 +151,8 @@ needs the owner's approval before it is built (AGENTS.md, "Process
 instructions"). K1 was agreed in session on 2026-11-16, with a refusal
 that carries its reason (TRD decision A7). K7 follows TRD decision
 C3. K2 to K6, K8 and K9 are new in this document, and the owner
-approved them on 2026-11-16 ("I approve K2–K6, K8 and K9").
+approved them on 2026-11-16 ("I approve K2–K6, K8 and K9"), and K2's
+rule for forks later the same day (TRD decision D4).
 
 ### K1. Admission seam for internal work (§3.12 item 2)
 
@@ -214,16 +215,22 @@ Proposed base PRD text, for §3.1, to be added when this is built:
 `ChannelConfig` gains `profile: str | None`, added to
 `CHANNEL_ENTRY_KEYS`. When it is set, the main turn uses that profile's
 client; `get_client` takes a stage today (`corvidae/llm_plugin.py`), so
-it gains a lookup by profile. A fork of that channel's window uses its stage's profile as
-now: `Agent` takes the fork's client from `llm.get_client(stage)`
-(`corvidae/agent.py`), which resolves a stage through `llm.stages` or
-its kind's default profile and never through the channel.
+it gains a lookup by profile.
 
-**Extension, not approved (TRD §15.1).** A stage that `llm.stages` does
-not map forks on the forked channel's profile, when the channel names
-one. Without it, on a deployment with two models every fork of a
-peripheral's window (critique, consolidation, compaction) runs on the
-default profile and prefills that window from cold.
+A fork of a channel's window takes its client from
+`llm.get_client(stage)` today (`corvidae/agent.py`), which resolves a
+stage through `llm.stages` or its kind's default profile and never
+through the channel. For a channel that names a profile that changes
+(TRD decision D4):
+
+- a stage that `llm.stages` maps runs on the mapped profile, as now;
+- a chat stage it does not map forks on the forked channel's profile,
+  in place of the kind's default.
+
+A channel with no profile is unchanged, and so is the base topology.
+Without the rule, on a deployment with two models every fork of a
+peripheral's window (critique, consolidation, compaction) would run on
+the default profile and prefill that window from cold.
 
 ### K3. Plugin defaults for channel settings (§3.2.8)
 
@@ -597,12 +604,11 @@ an `instruction` and the verdict is bad, `periphery` enqueues an
 `anomaly` notification on the core, rate-limited as in TRD §5.5.
 
 A critique fork runs on the critique stage's profile, which is one
-profile for every channel (K2). Under K2's extension an unmapped
-critique stage forks on the peripheral's own profile, so a small
-periphery model reviews its own expansion. Mapping the stage to the
-core's profile gets a better judge at the cost of a cold prefill on
-every review. That is the operator's choice, and under the extension
-the default is the weaker check.
+profile for every channel today. Under K2 an unmapped critique stage
+forks on the peripheral's own profile, so a small periphery model
+reviews its own expansion. Mapping the stage to the core's profile
+gets a better judge at the cost of a cold prefill on every review.
+That is the operator's choice, and the default is the weaker check.
 
 ## 7. Long-lived forks
 
@@ -999,8 +1005,9 @@ by the funnel and decides nothing yet.
 ### 10.5 Bounded awareness (§3.1.13, §3.7.4; TRD decisions D2, D3)
 
 The core learns what the peripherals handled themselves through their
-memories, delivered at its tail. Two delays lie between a peripheral
-exchange and the core holding it, and each has a bound.
+memories, admitted at its tail. Two delays lie between a peripheral
+exchange and the core holding it. This section says what each is made
+of; it claims no single number.
 
 **From exchange to memory.** `MemoryPlugin` gains a fourth trigger and
 a per-channel tunable for it, `memory.consolidate_max_age` (seconds;
@@ -1016,19 +1023,24 @@ unset, the default, turns the trigger off), read with `resolve_tunable`.
   committed, was skipped or failed, and at startup for every channel
   with the tunable set. A timer is in memory only, so startup is what
   restores it.
-- **When it fires,** memory consolidates the channel's un-consolidated
-  range up to the newest row, by forking the window as the turn and
-  idle triggers do (`docs/cognition.md`, "Consolidation (write path)").
-  The token threshold of the turn trigger does not apply to it.
+- **When it fires,** memory runs the consolidation the idle trigger
+  runs (`docs/cognition.md`, "Consolidation (write path)"), over the
+  channel's un-consolidated range up to the newest row, with the age as
+  its condition in place of quiet. So, as for idle, a range wholly in
+  the live window is forked, and a range that is not, as after a
+  restart or behind a lagging watermark, is written from its rendered
+  view (base §3.7 Memory item 1). The turn trigger's token threshold
+  does not apply.
 - **A turn in flight** on the channel when it fires is not interrupted:
   the consolidation runs when that turn ends.
-- **After a failure or a skip** that leaves the watermark where it was,
-  the next attempt is one age later, not at once, and memory's existing
+- **After an attempt that leaves the watermark where it was,** a
+  failure or a skip, the timer stands for one age after that attempt
+  ended, and a new message does not bring it forward. Memory's existing
   warning names the channel and the range.
-- **It forks, so it needs forks on** for the `consolidation` stage, as
-  the turn trigger does (base §3.7 Memory item 1). With them off,
-  `periphery` logs one warning at startup naming both keys, and the
-  bound below does not hold.
+- **Forks.** A live-window range needs forks on for the
+  `consolidation` stage; with them off memory skips it every time
+  (`memory.py`, `_live_record`). §3.7.4 is conditional on them. With
+  them off, `periphery` logs one warning at startup naming both keys.
 
 `periphery` defaults the tunable for peripheral channels through K3,
 from `core_periphery.periphery.consolidate_max_age` (300). It is unset
@@ -1037,72 +1049,87 @@ triggers are unchanged.
 
 Proposed base text for §3.7 Memory item 1, to be added when this is
 built: "A channel may also set an age, `memory.consolidate_max_age`:
-its un-consolidated messages are then consolidated once the oldest
-reaches that age."
+once its oldest un-consolidated message reaches that age, its
+un-consolidated messages are consolidated as on idle."
 
 **From memory to the core.** `core` implements `before_agent_turn`
-(`corvidae/hooks.py`) for `core:main:<uid>` and no other channel. That
-hook fires before each model call, tool-result turns included, except
-the re-run of a turn after an unreachable backend (`corvidae/agent.py`,
+(`corvidae/hooks.py`) for `core:main:<uid>` and no other channel, and
+acts only with the memory and funnel plugins loaded. That hook fires
+before each model call, tool-result turns included, except the re-run
+of a turn after an unreachable backend (`corvidae/agent.py`,
 `if not item.retry`).
 
-- `MemoryPlugin.since(after_id: int, limit: int, exclude_prefix: str)
-  -> list[dict]` is new: the indexed, unredacted memories with an id
-  above `after_id`, oldest first, leaving out those whose channel id
-  starts with `exclude_prefix`. `core` passes `core:`, so the core's own
-  memories and its forks' are not echoed back. Each dict has what
-  `MemoryPlugin.recent` returns today (`id`, `summary`, `channel_id`,
-  `age_seconds`) and one more, `oldest_age_seconds`: the age of the
-  first message of the record's range. `age_seconds` is counted from
-  the last (`memory.py`, `source_timestamp`), and §3.7.4's bound is
-  counted from the oldest.
-- When the call returns any, `core` appends one CONTEXT row at the
-  core's tail: one line per memory with its channel id, age and
-  summary, framed as data from other channels. It then stores the
-  highest id delivered as `digest_memory_id` in `cp_state` (TRD §11).
-  At the strategy's first start the watermark is the highest memory
-  id there is, so history is not replayed into the core.
-- `limit` is `core_periphery.core.digest_max` (20). When more are
-  waiting, they come on the following calls, and one warning per
-  `anomaly_interval` names the count held back and the key.
-- Each row appended is logged at info with its count and the largest
-  `oldest_age_seconds` in it. That is the measured lag of §3.7.4.
-- Nothing is enqueued, so no turn starts. A core with no call to make
-  is told at its next idle beat (TRD §5.3), whose notification starts a
-  turn and so a call.
+- **Reading.** `MemoryPlugin.since(after_id: int, limit: int,
+  exclude_prefix: str) -> list[dict]` is new: the indexed, unredacted
+  memories with an id above `after_id`, oldest first, leaving out those
+  whose channel id starts with `exclude_prefix`. `core` passes `core:`,
+  so the core's own memories and its forks' are not echoed back. Each
+  dict has what `MemoryPlugin.recent` returns today (`id`, `summary`,
+  `channel_id`, `age_seconds`) and one more, `oldest_age_seconds`: the
+  age of the first message of the record's range. `age_seconds` is
+  counted from the last (`memory.py`, `source_timestamp`), and §3.7.4's
+  lag is counted from the oldest.
+- **Admitting.** The memories go in through the funnel, as base §3.7
+  requires of every subsystem's output: `core` calls `funnel.admit`
+  (`funnel.py`) with source `digest`, one line per memory (its channel
+  id, `oldest_age_seconds` and summary), oldest first, and each
+  memory's id as its dedupe key. The funnel frames them as data,
+  appends and persists the CONTEXT row, and applies the source's budget
+  (`funnel.budgets.digest`, else `funnel.default_budget`). That budget
+  is §3.1.13's bound on what one call is given.
+- **The watermark.** `digest_memory_id` in `cp_state` (TRD §11) is the
+  id below which every memory was admitted or dropped as a duplicate.
+  `core` stores it after `admit` returns. An entry the budget left out
+  stops it, so that entry and the ones after it are offered again on
+  the next call; those already in the window are dropped by their key.
+  A line that alone is over the budget is cut to fit, so no memory can
+  hold the watermark for good. At the strategy's first start the
+  watermark is the highest memory id there is, so history is not
+  replayed into the core.
+- **Duplicates.** The funnel matches a key against the same source's
+  rows only. A memory the core's own retrieval admitted under source
+  `memory` can therefore also arrive once under `digest`.
+- **Logging.** Each admission is logged at info with its count and the
+  largest `oldest_age_seconds` in it: the measured lag of §3.7.4. When
+  the budget leaves any out, one warning per `anomaly_interval` names
+  the count and the budget's key.
+- **No turn.** Nothing is enqueued. A core with no call to make is told
+  at its next idle beat (TRD §5.3), whose notification starts a turn
+  and so a call.
 
-**The bound.** At each model call on `core:main:<uid>` that the hook
-precedes, the core holds every peripheral memory indexed before that
-call, less what `digest_max` holds back. By the rule above, a
-consolidation of a peripheral message starts no later than
-`consolidate_max_age` after the message was persisted. These add to
-it, each with a bound of its own:
+**What the lag is made of.** At each model call on `core:main:<uid>`
+that the hook precedes, the core has been offered every peripheral
+memory indexed before that call, less what the budget left out. A
+peripheral message's consolidation is due `consolidate_max_age` after
+the message was persisted. These add to that:
 
-- a consolidation of the channel already running at that time, by its
-  duration: the rule is re-evaluated when it ends, and fires at once;
+- a consolidation of the channel already running, by its duration: the
+  rule is re-evaluated when it ends, and fires at once;
 - a peripheral turn in flight, by that turn;
 - the consolidation's own wait for a head and its run;
-- a consolidation that fails or is skipped, by one more age for each
-  attempt;
+- each attempt that fails or is skipped, by one more age. Their number
+  has no limit; each logs a warning;
+- time the daemon is down, in full;
 - a blocking fork, during which `core:main:<uid>` makes no call, by
   `fork.blocking_wait` (TRD §7.3). The fork itself reaches the memories
   by retrieval (TRD §7.7);
-- a backlog above `digest_max`, by the calls it takes to drain.
+- a backlog over the budget, by the calls it takes to drain.
 
-**What the rows cost.** A CONTEXT row is never summarised and leaves
-the window when a compaction's cut passes it; a row in the tail a
-compaction retains stays (`docs/design.md`). So a digest row lives
-through at least one compaction boundary and leaves at a later one,
-and the digest's share of the core's window is what arrives over that
-span. After that the memory is reached by retrieval, like any other. Base §3.7 Memory item 1 leaves CONTEXT rows out of the count
-of un-consolidated messages, so a digest row does not by itself start
-a consolidation in the core.
+**What the rows cost.** A CONTEXT row is never summarised, and it
+leaves the window when a compaction's cut passes it (`docs/design.md`).
+After that the memory is reached by retrieval, like any other. Base
+§3.7 Memory item 1 leaves CONTEXT rows out of the count of
+un-consolidated messages, so a digest row does not by itself start a
+consolidation in the core.
 
 **Cost on the periphery.** An active channel costs one consolidation
-call per `consolidate_max_age`. The call forks the channel's window, so
-it prefills only the new tail when it runs on the model that holds that
-window. With one model, as in phases 1 to 5, it does. With two, it does
-only under K2's extension (TRD §4, TRD §15.1).
+call per `consolidate_max_age`. A fork of the channel's window prefills
+only the new tail when it runs on the model that holds that window.
+With one model, as in phases 1 to 5, it does. With two, K2 has an
+unmapped `consolidation` stage fork on the peripheral's profile, so it
+does there too. An operator who maps the stage in `llm.stages` puts
+every channel's consolidation on that one profile and loses this for
+the channels on the other.
 
 ## 11. Storage and restarts
 
@@ -1164,7 +1191,6 @@ core_periphery:
     anomaly_interval: 900
     error_threshold: 3
     request_poll: 5
-    digest_max: 20             # peripheral memories given to the core per model call
   periphery:
     profile: small             # K2; unset = the core's
     tools:
@@ -1198,6 +1224,9 @@ limits:
   notice_interval: 300
   max_waiting: 200
   max_hops: 4
+funnel:
+  budgets:
+    digest: null               # tokens of peripheral memories per core call; unset = funnel.default_budget
 goals:
   block_share: 0.05            # share of the core's max_context_tokens
 memory:
@@ -1226,7 +1255,7 @@ order.
 | 0 | Critique's `add_eligible_origin` | — | a turn whose origin a plugin registered is critiqued; one nobody registered is not |
 | 1 | K1, K3, K4, K5, K6, K8; `limits` | #814 | a task started at `max_waiting` returns the refusal text and a warning is logged; a tool result at the same depth is accepted |
 | 2 | K9; `core`: channel, uid, `attach_cli`, idle beat, `cp_work`, observables; goal block | phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
-| 3 | K2; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains, the `notify_other_channel` change of TRD §9.3; the age trigger and the digest (TRD §10.5) | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window; a peripheral message that is not escalated is in a CONTEXT row at the core's tail by the core's first call after `consolidate_max_age` and the consolidation's duration, and no core turn was started for it |
+| 3 | K2; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains, the `notify_other_channel` change of TRD §9.3; the age trigger and the digest (TRD §10.5) | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window; a peripheral message that is not escalated is in a CONTEXT row at the core's tail by the core's first call after `consolidate_max_age` and the consolidation's duration, and no core turn was started for it; with the peripheral on a second profile and the `consolidation` stage unmapped, that consolidation's request goes to the peripheral's profile |
 | 4 | K7; tail import; criteria rewrites | #235, phase 3 | a subagent given `tools=["read_file"]` has no other tool in its request; a rewrite is absent from the peripheral's prompt before its next compaction and present after; a frozen channel refuses |
 | 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `hold_queue` and `resume_queue` in `core` (TRD §8.3, on the kernel's stop and resume), the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel; `hold_queue` on the core's own channel returns the refusal text and stores no `cp_stops` row; after `hold_queue` on a fork that shared its parent's lease, the parent's next call is granted |
 | 6 | `slots` on one head: order, paging, stamped saves, shutdown save, the other four tools of TRD §8.3; consolidation's yield | #366, #365, phase 5; deferred (D1) | after a page-out and page-in the next call's `cache_n` is within 5% of the prompt length; a file with a changed stamp is deleted with a warning and the call prefills; `pin_context` on a hosted provider returns the no-effect text |
@@ -1326,9 +1355,6 @@ means an existing base mechanism meets it and nothing is built.
   of TRD §7.2 applies from the fork's next call.
 - **#365** was not among the prerequisites accepted in session
   (TRD §2).
-- **K2's extension** (TRD §4) is a kernel contract and is not
-  approved. Without it, on two models a peripheral's consolidation
-  runs on the default profile and is not cheap (TRD §10.5).
 - **A consolidation of very little.** The age trigger consolidates a
   range however small (§3.7.4), so a channel with one short message
   per period writes one memory per message. Whether such a range

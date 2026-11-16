@@ -654,7 +654,7 @@ unlisted too and is C6's subject.
 K6, K8 and K9 in session on 2026-11-16 ("I approve K2–K6, K8 and K9").
 K1 and K7 follow A7 and C3.
 
-**After the TRD merged (2026-11-16).** Three more decisions, taken in
+**After the TRD merged (2026-11-16).** Four more decisions, taken in
 the live session that merged the draft.
 
 - **D1. The slot manager is deferred.** TRD phase 6 is not on the path
@@ -673,3 +673,7 @@ the live session that merged the draft.
   peripheral instruction to bump complex topics upstairs." This adds a
   fourth consolidation trigger for peripheral channels and so amends
   the decision on question 16, which kept three. Supplement §3.7.4.
+- **D4. K2's rule for forks.** "I approve the K2 extension." For a
+  channel that names a profile, a stage the operator has not mapped
+  forks on that channel's profile, so a peripheral's consolidation and
+  critique run on the model that holds its window. A kernel contract.

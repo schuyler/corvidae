@@ -309,9 +309,10 @@ violates one is a bug even if its tests pass.
 
 13. With the memory plugin loaded, the framework MUST give the core
     the memories that channel-bound peripherals have consolidated since
-    the last it was given: appended at the tail of its window before a
-    model call it was going to make anyway, framed as data from the
-    channel each came from. Doing so MUST NOT start a turn. The framework
+    the last it was given: admitted at the tail of its window before a
+    model call it was going to make anyway, through the funnel as any
+    tail context is (base PRD §3.7 Funnel), each labelled with the
+    channel it came from. Doing so MUST NOT start a turn. The framework
     MUST bound how much one call is given, deliver what is held back on
     later calls, oldest first, and log a warning when it holds any back.
 
@@ -801,17 +802,19 @@ With the goals plugin loaded:
    own window, the agent forms separate memories of a peripheral exchange and of the
    core's decision about it (open question 14).
 
-4. With the memory plugin loaded, the framework MUST start
+4. With the memory plugin loaded and forks enabled for consolidation
+   (base PRD §3.7 Memory item 1), the framework MUST start
    consolidating a channel-bound peripheral's un-consolidated
    conversation no later than an operator-set age after its oldest
    un-consolidated message, however little conversation there is and
    whether or not the channel goes quiet; a turn or a consolidation
    already running on that channel MAY finish first. With §3.1.13,
    what the core holds at one of its model calls then lags a
-   peripheral by that age, the work that had to finish, the time the
-   consolidation takes, and whatever §3.1.13 held back: the core's
-   awareness of the peripherals is eventually consistent, within a
-   bound the TRD states. The framework MUST log the lag it measures,
+   peripheral by that age and by what the TRD lists as adding to it,
+   among them work that had to finish, the consolidation's own time,
+   attempts that fail, time the daemon is down, and what §3.1.13 held
+   back: the core's awareness of the peripherals is eventually
+   consistent. The framework MUST log the lag it measures,
    counted from the oldest message.
 
    *Rationale:* The bound is a time and not an amount of conversation.
