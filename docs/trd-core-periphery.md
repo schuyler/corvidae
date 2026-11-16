@@ -108,7 +108,7 @@ topology and base §3.7 Critique 3 are unchanged.
 
 The kernel has no concept of a strategy. The core/periphery strategy is
 a distribution, `packages/corvidae-core-periphery`, behind a
-`core-periphery` extra. Its plugins do nothing without a
+`core-periphery` extra. Its plugins, `limits` aside (TRD §3.2), do nothing without a
 `core_periphery:` block in `agent.yaml`, as base principle 5 says of any
 plugin with no config block. The base topology is what runs when the
 block is absent or the plugins are in `plugins.disabled`. Changing
@@ -235,8 +235,9 @@ layer beneath every operator entry.
 - **Tunables.** `resolve_tunable` (`corvidae/tuning.py`) reads
   `channel.runtime_overrides`, then global config. It gains the plugin
   layer between the two, so a plugin can default a dotted tunable for a class of channels. A
-  plugin default therefore outranks the global value in `agent.yaml`;
-  the operator overrides it with the plugin's own config block.
+  plugin default therefore outranks the global value in `agent.yaml`.
+  The two defaults set this way (TRD §10.3) have no operator override
+  in this design.
 
 ### K4. A queue can be held (§3.5.7)
 
@@ -821,9 +822,11 @@ never by a tool argument.
   scheduler firing) starts one at its first crossing: the plugin mints a
   `chain_id`, sets `hops_left` to `limits.max_hops` (4), and records the
   user's channel, if there is one, as `chain_channel`.
-- Only the three crossings above subtract one from `hops_left`. A
-  report, a late item or a notice carries the count unchanged, so the
-  next crossing its turn makes subtracts from it.
+- Only those three, and a note sent with `notify_other_channel`
+  (below), subtract one from `hops_left`. A chain's first crossing
+  subtracts too, so it leaves `max_hops` less one. A report, a late item
+  or a notice carries the count unchanged, so the next crossing its
+  turn makes subtracts from it.
 - At zero, `limits` refuses the crossing at the admission seam. The
   plugin whose crossing was refused sends the status text on
   `chain_channel` (TRD §6.3, "Not delivered").
@@ -843,9 +846,10 @@ items (#318). Before that it holds within one run.
 `notify_other_channel` keeps its own `hop_count` and
 `cross_channel_send.max_hops`. It gains two things: a call to the
 admission seam with kind `note`, and, when the sending turn carries a
-chain, the chain's annotations on the note with `hops_left` reduced. A
-loop cannot then alternate between notes and instructions to stay under
-both counts (TRD decision C2).
+chain, the chain's annotations on the note with `hops_left` reduced. At zero
+the note is refused like the other three. A loop cannot then alternate
+between notes and instructions to stay under both counts (TRD decision
+C2).
 
 ### 9.4 Trust (§3.4.6, §3.4.7, gap 2)
 
@@ -1030,10 +1034,10 @@ order.
 | 0 | Critique's `add_eligible_origin` | — | a turn whose origin a plugin registered is critiqued; one nobody registered is not |
 | 1 | K1, K3, K4, K5, K6; `limits` | #814 | a task started at `max_waiting` returns the refusal text and a warning is logged; a tool result at the same depth is accepted |
 | 2 | `core`: channel, uid, idle beat, `cp_work`, observables; goal block | phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
-| 3 | K2; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, `instruct`, exact wording, labels, chains | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window |
+| 3 | K2; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window |
 | 4 | K7; tail import; criteria rewrites | #235, phase 3 | a subagent given `tools=["read_file"]` has no other tool in its request; a rewrite is absent from the peripheral's prompt before its next compaction and present after; a frozen channel refuses |
-| 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel |
-| 6 | `slots` on one head: order, paging, stamped saves, shutdown save, tools; consolidation's yield | #366, #365, phase 5 | after a page-out and page-in the next call's `cache_n` is within 5% of the prompt length; a file with a changed stamp is deleted with a warning and the call prefills; `pin_context` on a hosted provider returns the no-effect text |
+| 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `hold_queue` and `resume_queue` (TRD §8.3, on the kernel's stop and resume), the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel |
+| 6 | `slots` on one head: order, paging, stamped saves, shutdown save, the other four tools of TRD §8.3; consolidation's yield | #366, #365, phase 5 | after a page-out and page-in the next call's `cache_n` is within 5% of the prompt length; a file with a changed stamp is deleted with a warning and the call prefills; `pin_context` on a hosted provider returns the no-effect text |
 | 7 | Two models on separate providers, more heads, router mode: not designed | #1009's report, phase 6 | alternating a core and a periphery call loads neither model twice (§3.8.5) |
 | 8 | Trust stamping | #138 | an instruction written after an untrusted escalation carries the untrusted level |
 
