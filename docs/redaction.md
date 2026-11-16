@@ -55,8 +55,7 @@ In short, `corvidae redact` reaches:
   deleted;
 - every table a plugin has registered a scrubber for. The cognition package
   registers `exchange_log` (`past_claims` and the `provenance` and
-  `critique` sections of `outcomes` detail; `provenance_snapshot` is
-  dropped) and `retrieval_candidate`.
+  `critique` sections of `outcomes` detail) and `retrieval_candidate`.
 
 Every completed run, real or `--dry-run`, ends with a notice naming what it
 does not reach and pointing here.
