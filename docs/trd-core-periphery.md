@@ -1079,20 +1079,18 @@ of a turn after an unreachable backend (`corvidae/agent.py`,
   memories with an id above `after_id`, oldest first, leaving out those
   whose channel id starts with `exclude_prefix`. `core` passes `core:`,
   so the core's own memories and its forks' are not echoed back, and a
-  `limit` of 20, a constant of the plugin; more than that wait for
-  the next call. Each
-  dict has what `MemoryPlugin.recent` returns today (`id`, `summary`,
-  `channel_id`, `age_seconds`) and one more, `oldest_age_seconds`: the
-  age of the first message the record's own consolidation covered.
-  Memory stores that time with the record when it is written, in a new
-  `memory.range_started_at` column; a record no consolidation wrote
-  (`write_record`) carries its `created_at` there. The stored range
-  will not do, because
-  a near-duplicate merge widens the stored range back to the older
-  record's start (`memory.py`, `_insert_record`) and would make a new
-  exchange look as old as the one it resembles. `age_seconds` is
-  counted from the last (`memory.py`, `source_timestamp`), and §3.7.4's
-  lag is counted from the oldest.
+  `limit` of 20, a constant of the plugin; more than that wait for the
+  next call. Each dict has what `MemoryPlugin.recent` returns today
+  (`id`, `summary`, `channel_id`, `age_seconds`) and one more,
+  `oldest_age_seconds`: the age of the first message the record's own
+  consolidation covered. Memory stores that time with the record when it
+  is written, in a new `memory.range_started_at` column; a record no
+  consolidation wrote (`write_record`) carries its `created_at` there.
+  The stored range will not do, because a near-duplicate merge widens
+  the stored range back to the older record's start (`memory.py`,
+  `_insert_record`) and would make a new exchange look as old as the one
+  it resembles. `age_seconds` is counted from the last (`memory.py`,
+  `source_timestamp`), and §3.7.4's lag is counted from the oldest.
 - **Admitting.** The memories go in through the funnel, as base §3.7
   requires of every subsystem's output: `core` calls
   `funnel.admit_detailed` (`funnel.py`) with source `digest` and one

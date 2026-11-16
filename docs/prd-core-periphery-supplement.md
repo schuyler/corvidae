@@ -310,11 +310,12 @@ violates one is a bug even if its tests pass.
 13. With the memory and funnel plugins loaded, the framework MUST give
     the core the memories that channel-bound peripherals have
     consolidated since the last it was given: admitted at the tail of
-    its window before a model call it was going to make anyway, through the funnel as any
-    tail context is (base PRD §3.7 Funnel), each labelled with the
-    channel it came from. Doing so MUST NOT start a turn. The framework
-    MUST bound how much one call is given, deliver what is held back on
-    later calls, oldest first, and log a warning when it holds any back.
+    its window before a model call it was going to make anyway, through
+    the funnel as any tail context is (base PRD §3.7 Funnel), each
+    labelled with the channel it came from. Doing so MUST NOT start a
+    turn. The framework MUST bound how much one call is given, deliver
+    what is held back on later calls, oldest first, and log a warning
+    when it holds any back.
 
     *Rationale:* The core is the one context that keeps a common
     awareness of every channel. Escalation (§3.4) brings it what a
