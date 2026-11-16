@@ -768,9 +768,11 @@ names it. `corvidae.attribution.lease_scope(key=None)` is a context
 manager that sets it:
 
 ```python
+import uuid
 from corvidae.attribution import lease_scope
 
-with lease_scope("myplugin:digest:<uid>"):   # one key per run; <uid> below
+run_id = uuid.uuid4().hex            # or the work's trace id, when it has one
+with lease_scope(f"myplugin:digest:{run_id}"):   # one key per run
     await client.chat(messages)
 ```
 
@@ -833,7 +835,7 @@ from corvidae.llm_plugin import LLMPlugin
 
 llm = get_dependency(self.pm, "llm", LLMPlugin)  # declare depends_on = frozenset({"llm"})
 if llm.leases is not None:                       # None: no provider declares heads
-    llm.leases.yield_key("myplugin:digest:<uid>")
+    llm.leases.yield_key(f"myplugin:digest:{run_id}")   # the same per-run key
 ```
 
 `yield_key` gives up the key's head on every provider where it holds one,
