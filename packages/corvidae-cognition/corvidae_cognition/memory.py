@@ -3835,16 +3835,6 @@ class MemoryPlugin(CorvidaePlugin):
                 # FTS_SIMILARITY_PROXY, not from the query (#705).
                 "measured": memory_id in measured,
             })
-        # Per-list ranks for the candidate log (#1023): the vec rank is the
-        # 1-based position in the decayed-cosine order; the FTS rank is the
-        # 1-based position in the bm25 order. NULL when the candidate is not
-        # in that list.
-        vec_ranked = sorted(vec_keys.items(), key=lambda x: x[1], reverse=True)
-        vec_rank_map = {mid: i + 1 for i, (mid, _) in enumerate(vec_ranked)}
-        fts_rank_map = {mid: i + 1 for i, mid in enumerate(fts_order)}
-        for c in candidates:
-            c["vec_rank"] = vec_rank_map.get(c["id"])
-            c["fts_rank"] = fts_rank_map.get(c["id"])
         # Split off the in-window rows; the rest is the ranked pool.
         pool_rows = [c for c, w in zip(candidates, in_window_flags) if not w]
         in_window_rows = [c for c, w in zip(candidates, in_window_flags) if w]
@@ -3854,6 +3844,56 @@ class MemoryPlugin(CorvidaePlugin):
         else:
             # Vec-only or degraded: rank by the decayed score, as before #666.
             keys = {c["id"]: (c["score"],) for c in candidates}
+        # Per-list ranks for the candidate log (#1023): computed from the
+        # same filtered lists the fusion consumes, so the logged ranks
+        # exactly replay the fusion. Pool rows get their rank among the
+        # pool; in-window rows get their would-be rank (the rank they would
+        # have had among the pool rows). NULL when the candidate is not in
+        # that list.
+        pool_ids = {c["id"] for c in pool_rows}
+        if fts_order:
+            vec_list = sorted(
+                (i for i in pool_ids if i in vec_keys),
+                key=lambda i: vec_keys[i], reverse=True,
+            )
+            vec_rank_map = {i: n for n, i in enumerate(vec_list, start=1)}
+            fts_list = [i for i in fts_order if i in pool_ids]
+            fts_rank_map = {i: n for n, i in enumerate(fts_list, start=1)}
+            fts_position = {i: n for n, i in enumerate(fts_order)}
+            for c in in_window_rows:
+                if c["id"] in vec_keys:
+                    c["vec_rank"] = 1 + sum(
+                        1 for i in vec_list if vec_keys[i] >= vec_keys[c["id"]]
+                    )
+                else:
+                    c["vec_rank"] = None
+                if c["id"] in fts_position:
+                    c["fts_rank"] = 1 + sum(
+                        1 for i in fts_list if fts_position[i] < fts_position[c["id"]]
+                    )
+                else:
+                    c["fts_rank"] = None
+        else:
+            # Vec-only or degraded: rank by the decayed score order.
+            vec_rank_map = {
+                c["id"]: n for n, c in enumerate(
+                    sorted(pool_rows, key=lambda c: c["score"], reverse=True),
+                    start=1,
+                )
+            }
+            fts_rank_map = {}
+            for c in in_window_rows:
+                if c["id"] in vec_keys:
+                    c["vec_rank"] = 1 + sum(
+                        1 for p in pool_rows
+                        if p["score"] >= c["score"]
+                    )
+                else:
+                    c["vec_rank"] = None
+                c["fts_rank"] = None
+        for c in pool_rows:
+            c["vec_rank"] = vec_rank_map.get(c["id"])
+            c["fts_rank"] = fts_rank_map.get(c["id"])
         ranked = sorted(pool_rows, key=lambda c: keys[c["id"]], reverse=True)
         # A candidate with no measured similarity cannot be admitted on its
         # own relevance — it bands weak (#409: no keyword-only floor), its
