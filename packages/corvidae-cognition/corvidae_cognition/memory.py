@@ -3861,6 +3861,8 @@ class MemoryPlugin(CorvidaePlugin):
             fts_rank_map = {i: n for n, i in enumerate(fts_list, start=1)}
             fts_position = {i: n for n, i in enumerate(fts_order)}
             for c in in_window_rows:
+                if c["id"] in pool_ids:
+                    continue  # defensive: pool rows get their rank below
                 if c["id"] in vec_keys:
                     c["vec_rank"] = 1 + sum(
                         1 for i in vec_list if vec_keys[i] >= vec_keys[c["id"]]
@@ -3875,18 +3877,15 @@ class MemoryPlugin(CorvidaePlugin):
                     c["fts_rank"] = None
         else:
             # Vec-only or degraded: rank by the decayed score order.
-            vec_rank_map = {
-                c["id"]: n for n, c in enumerate(
-                    sorted(pool_rows, key=lambda c: c["score"], reverse=True),
-                    start=1,
-                )
-            }
+            sorted_pool = sorted(pool_rows, key=lambda c: c["score"], reverse=True)
+            vec_rank_map = {c["id"]: n for n, c in enumerate(sorted_pool, start=1)}
             fts_rank_map = {}
             for c in in_window_rows:
+                if c["id"] in pool_ids:
+                    continue  # defensive: pool rows get their rank below
                 if c["id"] in vec_keys:
                     c["vec_rank"] = 1 + sum(
-                        1 for p in pool_rows
-                        if p["score"] >= c["score"]
+                        1 for p in sorted_pool if p["score"] >= c["score"]
                     )
                 else:
                     c["vec_rank"] = None
