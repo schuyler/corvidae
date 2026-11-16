@@ -39,6 +39,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
@@ -52,6 +53,7 @@ from corvidae.channel import (
 )
 from corvidae.channels._registers import shipped_register
 from corvidae.channels.split import split_message
+from corvidae.channels.stale import maybe_prefix_stale
 from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress
 from corvidae.trace import mint_trace_id
@@ -172,6 +174,17 @@ class _Rejected(_ZulipError):
         self.msg = msg
 
 
+#: Durable catch-up cursor (#644): the last message id the transport has looked
+#: at, per channel id, with the narrow it was found under. Written atomically
+#: beside the keys and databases it outlives.
+CURSOR_FILE = "zulip_cursor.json"
+
+
+def _ms_of(seconds: object) -> Optional[int]:
+    """Zulip timestamps are integer seconds; the shared prefix wants millis."""
+    return int(seconds) * 1000 if isinstance(seconds, (int, float)) else None
+
+
 @dataclass
 class _EventQueue:
     """A registered event queue and our place in it."""
@@ -239,6 +252,14 @@ class ZulipPlugin(TransportPlugin):
         self._mention_re: Optional[re.Pattern[str]] = None
         self._server_max_len: Optional[int] = None
         self._empty_topic_label: str = "general chat"
+
+        # Catch-up state: {channel id: {"last": <message id>, "narrow": [[...]]}},
+        # loaded from CURSOR_FILE and saved after every admission (#644).
+        self._cursor: dict[str, dict] = {}
+        # Set when a delivery failed and the cursor was put back, so catch-up
+        # stops the batch instead of advancing past the failed message.
+        self._cursor_rewound = False
+        self._cursor_dir: Optional[Path] = None
 
         # Connection state.
         self._session: Optional[aiohttp.ClientSession] = None
@@ -512,7 +533,213 @@ class ZulipPlugin(TransportPlugin):
         # every version; Zulip reads the credentials as UTF-8.
         token = base64.b64encode(f"{self._email}:{self._api_key}".encode()).decode("ascii")
         self._session = aiohttp.ClientSession(headers={"Authorization": f"Basic {token}"})
+        # Where the catch-up cursor lives, beside the rest of the durable state.
+        # Only when the runtime names a base dir: with none, a plugin has no
+        # durable home to write to, and guessing the working directory puts a
+        # stray file wherever the process happened to start (tests included).
+        base_dir = config.get("_base_dir")
+        self._cursor_dir = Path(base_dir) if base_dir is not None else None
+        if self._cursor_dir is None:
+            # INFO, not WARNING: a clean config must warn about nothing, and the
+            # daemon always passes a base dir (#644 review).
+            logger.info(
+                "zulip: no base dir is configured, so the catch-up cursor has "
+                "nowhere to live: messages sent while this bot is down are lost "
+                "as before (#644)",
+            )
+        await self._load_cursor()
         self._connect_task = asyncio.create_task(self._connection_loop())
+
+    #: How many messages one catch-up page asks for, and how many a single
+    #: channel will fetch before it says so and stops (#644).
+    CATCH_UP_PAGE = 100
+    CATCH_UP_MAX = 1000
+
+    async def _catch_up(self) -> None:
+        """Fetch what each known channel missed while the queue was gone.
+
+        Runs after every successful register: a restart and a garbage-collected
+        queue look identical from here. Dedupe is the anchor alone — each channel
+        asks only for what follows its stored id — so nothing is replayed unless
+        a cursor save failed, in which case the next catch-up re-delivers what
+        was already answered (#644).
+        """
+        if not self._cursor:
+            return
+        for channel_id, entry in list(self._cursor.items()):
+            try:
+                messages = await self._fetch_after(
+                    entry["narrow"], int(entry["last"]), channel_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "zulip: could not catch up on %s as %s for %s: %s: %s",
+                    self._site, self._email, channel_id,
+                    type(exc).__name__, exc,
+                    extra={"channel": channel_id}, exc_info=True,
+                )
+                continue
+            for msg in messages:
+                event = {
+                    "type": "message",
+                    "message": msg,
+                    "flags": msg.get("flags") or [],
+                }
+                self._cursor_rewound = False
+                try:
+                    await self._handle_event(event)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Belt and braces: _handle_event already contains a bad
+                    # message, but if anything here escapes, the loop must not
+                    # take the register that follows it with it (#644 review).
+                    logger.warning(
+                        "zulip: catch-up could not handle a message in %s",
+                        channel_id, exc_info=True, extra={"channel": channel_id},
+                    )
+                # A rewind means this message's delivery failed: stop here, or
+                # the next message in the batch advances past it and the failed
+                # one is never fetched again (#644 round 2).
+                if self._cursor_rewound:
+                    logger.warning(
+                        "zulip: catch-up on %s stopped at message %s after a "
+                        "failed delivery; the rest is retried next time",
+                        channel_id, msg["id"], extra={"channel": channel_id},
+                    )
+                    break
+
+    async def _fetch_after(
+        self, narrow: list, anchor: int, channel_id: str
+    ) -> list[dict]:
+        """Messages after ``anchor`` in that narrow, oldest first, page by page.
+
+        The narrow uses channel *ids*: "Narrows that use IDs" in Zulip's
+        construct-a-narrow doc lists ``channel:1234`` taking an integer operand,
+        so a renamed channel keeps its cursor. Unobserved on a live server —
+        FakeZulip accepts the same shape (#644).
+        """
+        out: list[dict] = []
+        seen = anchor
+        while len(out) < self.CATCH_UP_MAX:
+            body = await self._request(
+                "GET",
+                "/messages",
+                query={
+                    "anchor": str(seen),
+                    "num_before": "0",
+                    "num_after": str(self.CATCH_UP_PAGE),
+                    "include_anchor": "false",
+                    "apply_markdown": "false",
+                    "narrow": json.dumps(narrow),
+                },
+            )
+            batch = body.get("messages")
+            batch = [
+                m for m in batch
+                if isinstance(m, dict) and isinstance(m.get("id"), int)
+            ] if isinstance(batch, list) else []
+            fresh = [m for m in batch if m["id"] > seen]
+            if not fresh:
+                break
+            out.extend(fresh)
+            seen = fresh[-1]["id"]
+            if body.get("found_newest") is True or len(batch) < self.CATCH_UP_PAGE:
+                break
+        if len(out) >= self.CATCH_UP_MAX:
+            logger.warning(
+                "zulip: catch-up on %s as %s stopped at %d messages for %s; "
+                "anything older is not replayed",
+                self._site, self._email, len(out), channel_id,
+                extra={"channel": channel_id},
+            )
+        return out
+
+    # -----------------------------------------------------------------
+    # Catch-up cursor (#644)
+    # -----------------------------------------------------------------
+
+    def _cursor_path(self) -> Optional[Path]:
+        """The cursor file's path, or None before on_start has set the dir."""
+        return None if self._cursor_dir is None else self._cursor_dir / CURSOR_FILE
+
+    async def _load_cursor(self) -> None:
+        """Read the persisted cursor. A missing file is a first run; a corrupt
+        one costs one gap rather than failing every restart."""
+        path = self._cursor_path()
+        if path is None:
+            return
+        try:
+            raw = await asyncio.to_thread(path.read_text)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning(
+                "zulip: could not read the catch-up cursor at %s (%s); starting "
+                "from now, so messages sent while this bot was down are not replayed",
+                path, type(exc).__name__,
+            )
+            return
+        try:
+            loaded = json.loads(raw)
+        except ValueError:
+            loaded = None
+        if not isinstance(loaded, dict):
+            logger.warning(
+                "zulip: the catch-up cursor at %s is not a JSON object; starting "
+                "from now, so messages sent while this bot was down are not replayed",
+                path,
+            )
+            return
+        kept: dict[str, dict] = {}
+        for channel_id, entry in loaded.items():
+            if (
+                isinstance(channel_id, str)
+                and isinstance(entry, dict)
+                and isinstance(entry.get("last"), int)
+                and isinstance(entry.get("narrow"), list)
+            ):
+                kept[channel_id] = {"last": entry["last"], "narrow": entry["narrow"]}
+        dropped = len(loaded) - len(kept)
+        if dropped:
+            logger.warning(
+                "zulip: the catch-up cursor at %s has %d unreadable entr%s; "
+                "those channels start from now",
+                path, dropped, "y" if dropped == 1 else "ies",
+            )
+        self._cursor = kept
+
+    async def _save_cursor(self) -> None:
+        """Write the cursor atomically: a half-written file would cost every
+        channel's place at once."""
+        path = self._cursor_path()
+        if path is None:
+            return
+        tmp = path.with_name(path.name + ".tmp")
+        payload = json.dumps(self._cursor, sort_keys=True)
+        try:
+            await asyncio.to_thread(self._write_atomic, tmp, path, payload)
+        except OSError as exc:
+            logger.warning(
+                "zulip: could not save the catch-up cursor at %s (%s); a restart "
+                "will replay messages from the last saved point",
+                path, type(exc).__name__,
+            )
+
+    @staticmethod
+    def _write_atomic(tmp: Path, path: Path, payload: str) -> None:
+        tmp.write_text(payload)
+        os.replace(tmp, path)
+
+    def _remember_seen(self, channel_id: str, narrow: list, message_id: int) -> bool:
+        """Record that this message has been looked at. True when the cursor
+        moved, so the caller can skip a save for a repeat."""
+        entry = self._cursor.get(channel_id)
+        if entry is not None and entry.get("last", -1) >= message_id:
+            return False
+        self._cursor[channel_id] = {"last": message_id, "narrow": narrow}
+        return True
 
     @hookimpl
     async def on_stop(self) -> None:
@@ -731,6 +958,8 @@ class ZulipPlugin(TransportPlugin):
                 if queue is None:
                     queue = await self._register()
                     backoff = _INITIAL_BACKOFF
+                    # A new queue means a gap: a lost queue or a restart (#644).
+                    await self._catch_up()
                 events = await self._get_events(queue)
                 # Process in order; ack only after handling, so a crash replays.
                 for event in sorted(events, key=lambda e: e.get("id", 0)):
@@ -818,6 +1047,7 @@ class ZulipPlugin(TransportPlugin):
             logger.debug("zulip: ignoring our own message %s", msg.get("id"))
             return
 
+
         flags = event.get("flags") or msg.get("flags") or []
         kind = msg["type"]
         topic: Optional[str] = None
@@ -847,6 +1077,19 @@ class ZulipPlugin(TransportPlugin):
         else:
             raise ValueError(f"unknown message type {kind!r}")
 
+        # Looked at from here on, so the cursor advances even if the mention or
+        # allowlist rules refuse it: an unadvanced refusal would be re-fetched
+        # on every catch-up forever (#644). The id form survives a rename.
+        if kind in ("stream", "channel"):
+            narrow = [{"operator": "channel", "operand": int(msg["stream_id"])}]
+        else:
+            narrow = [{"operator": "dm", "operand": [int(i) for i in scope[3:].split(",")]}]
+        # Held so a delivery that fails can put the cursor back: a message that
+        # errored is not seen and must be fetched again, not skipped.
+        previous = self._cursor.get(f"zulip:{scope}")
+        if self._remember_seen(f"zulip:{scope}", narrow, int(msg["id"])):
+            await self._save_cursor()
+
         # The server's `mentioned` flag: a direct mention, or one through a user
         # group the bot is in. A wildcard (@all, @topic) pages everyone, not us.
         mentioned = "mentioned" in flags
@@ -874,6 +1117,9 @@ class ZulipPlugin(TransportPlugin):
         if not text:
             logger.debug("zulip: ignoring message with no text content")
             return
+        # Backlog says how old it is, as Signal's does (#644, PRD 3.2). After
+        # the empty check: a prefix must not turn an empty body into content.
+        text = maybe_prefix_stale(text, _ms_of(msg.get("timestamp")), time.time() * 1000)
 
         # The allowlist is checked before the channel is resolved, so a refused
         # sender never adds a registry entry (PRD 3.2 item 6).
@@ -920,6 +1166,18 @@ class ZulipPlugin(TransportPlugin):
                 text=text,
                 trace_id=trace_id,
             )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Whatever went wrong, this message was not handled: put the cursor
+            # back so the next catch-up retries it.
+            if previous is None:
+                self._cursor.pop(f"zulip:{scope}", None)
+            else:
+                self._cursor[f"zulip:{scope}"] = previous
+            self._cursor_rewound = True
+            await self._save_cursor()
+            raise
         finally:
             # Admission fires before on_message returns. Anything not admitted
             # by then (gate veto, agent not ready, an exception, cancellation)

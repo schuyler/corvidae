@@ -84,6 +84,34 @@ class Seen:
     auth: str | None
 
 
+def _matches_narrow(message: dict, narrow: list) -> bool:
+    """Does this message fall in that narrow? Only the two operators the
+    transport writes: a channel by name, and a DM by participant ids."""
+    for term in narrow:
+        if not isinstance(term, dict):
+            return False
+        operator, operand = term.get("operator"), term.get("operand")
+        if operator == "channel":
+            if message.get("type") not in ("stream", "channel"):
+                return False
+            # The transport narrows by id; an integer operand is that, a string
+            # one is the name (both are valid to Zulip).
+            if isinstance(operand, int):
+                if int(message.get("stream_id") or 0) != operand:
+                    return False
+            elif str(message.get("display_recipient") or "") != str(operand):
+                return False
+        elif operator == "dm":
+            if message.get("type") not in ("private", "direct"):
+                return False
+            ids = sorted(int(p["id"]) for p in message.get("display_recipient") or [])
+            if ids != sorted(int(i) for i in operand or []):
+                return False
+        else:
+            return False
+    return True
+
+
 class FakeZulip:
     """The slice of the Zulip REST API the transport talks to.
 
@@ -99,6 +127,8 @@ class FakeZulip:
         self.empty_topic_label = "general chat"
         self.requests: list[Seen] = []
         self.pending: list[dict] = []
+        # Messages the org holds but no queue delivered (see push_backlog).
+        self.backlog: list[dict] = []
         self._next_event_id = 0
         self.scripts: dict[str, deque] = defaultdict(deque)
         self.polls: list[int] = []
@@ -111,6 +141,14 @@ class FakeZulip:
         self.server: TestServer | None = None
 
     # -- test-side helpers -------------------------------------------------
+
+    def push_backlog(self, message: dict, flags: list[str] | None = None) -> None:
+        """Store a message the org already holds, without queueing an event.
+
+        What a message sent while the queue was lost looks like afterwards: it
+        exists for ``GET /messages`` and never arrived as an event (#644).
+        """
+        self.backlog.append({**message, "flags": list(flags or [])})
 
     def push(self, message: dict, flags: list[str] | None = None) -> None:
         """Queue a message event for the next ``GET /events``."""
@@ -231,6 +269,32 @@ class FakeZulip:
             {"result": "success", "msg": "", "id": len(self.of("/api/v1/messages"))}
         )
 
+    async def get_messages(self, request: web.Request) -> web.Response:
+        """``GET /api/v1/messages``: the backlog, filtered by narrow and anchor.
+
+        Only the shape the transport asks for: an id anchor, ``num_after``
+        forwards, and ``found_newest`` so a paging loop can stop (#644).
+        """
+        early = await self._begin(request)
+        if early is not None:
+            return early
+        anchor = int(request.query.get("anchor", 0))
+        num_after = int(request.query.get("num_after", 100))
+        narrow = json.loads(request.query.get("narrow", "[]") or "[]")
+        matching = [m for m in self.backlog if _matches_narrow(m, narrow)]
+        after = sorted(
+            (m for m in matching if m["id"] > anchor), key=lambda m: m["id"]
+        )
+        page = after[:num_after]
+        return web.json_response(
+            {
+                "result": "success",
+                "msg": "",
+                "messages": page,
+                "found_newest": len(after) <= len(page),
+            }
+        )
+
     async def typing_handler(self, request: web.Request) -> web.Response:
         early = await self._begin(request)
         if early is not None:
@@ -249,6 +313,7 @@ class FakeZulip:
         app.router.add_post("/api/v1/register", self.register)
         app.router.add_get("/api/v1/events", self.events)
         app.router.add_post("/api/v1/messages", self.messages)
+        app.router.add_get("/api/v1/messages", self.get_messages)
         app.router.add_post("/api/v1/typing", self.typing_handler)
         self.server = TestServer(app)
         await self.server.start_server()
@@ -1737,6 +1802,221 @@ class TestTyping:
 
 
 # ---------------------------------------------------------------------------
+# Catch-up after a lost queue or a restart (#644)
+# ---------------------------------------------------------------------------
+
+
+class TestCatchUp:
+    """Messages sent while the event queue was gone reach the agent once each."""
+
+    NARROW = [{"operator": "channel", "operand": 7}]
+
+    async def _seed(self, h, tmp_path, last_id: int) -> str:
+        """Point the plugin at a temp cursor dir holding one channel's place."""
+        h.plugin._cursor_dir = tmp_path
+        channel_id = "zulip:7"
+        h.plugin._cursor = {channel_id: {"last": last_id, "narrow": self.NARROW}}
+        return channel_id
+
+    async def test_messages_missed_while_the_queue_was_gone_arrive_once(
+        self, tmp_path
+    ):
+        """Two messages sent during the gap reach on_message, in id order."""
+        h = await _start()
+        try:
+            h.server.push_backlog(channel_msg("@**Corvidae Bot** first", topic="plans"),
+                                  flags=["mentioned"])
+            h.server.push_backlog(channel_msg("@**Corvidae Bot** second", topic="plans"),
+                                  flags=["mentioned"])
+            channel_id = await self._seed(h, tmp_path, 0)
+
+            await h.plugin._catch_up()
+
+            texts = [c.kwargs["text"] for c in h.on_message.await_args_list]
+            assert texts == ["first", "second"], texts
+            assert h.plugin._cursor[channel_id]["last"] > 0
+            assert (tmp_path / "zulip_cursor.json").exists()
+        finally:
+            await stop(h)
+
+    async def test_a_second_catch_up_delivers_nothing(self, tmp_path):
+        """The saved place is what a restart reads, so nothing is replayed."""
+        h = await _start()
+        try:
+            h.server.push_backlog(channel_msg("@**Corvidae Bot** once", topic="plans"),
+                                  flags=["mentioned"])
+            await self._seed(h, tmp_path, 0)
+            await h.plugin._catch_up()
+            assert h.on_message.await_count == 1
+
+            # A fresh process: same state file, same backlog, nothing new.
+            fresh = ZulipPlugin(h.pm)
+            fresh._cursor_dir = tmp_path
+            await fresh._load_cursor()
+            fresh._handle_event = AsyncMock()
+            fresh._site, fresh._email = h.plugin._site, h.plugin._email
+            fresh._session = h.plugin._session
+            await fresh._catch_up()
+
+            assert fresh._handle_event.await_count == 0
+        finally:
+            await stop(h)
+
+    async def test_old_backlog_says_when_it_was_sent(self, tmp_path):
+        """Six minutes late reads as backlog; a fresh message does not (#644)."""
+        import time as _time
+
+        h = await _start()
+        try:
+            stale = channel_msg("@**Corvidae Bot** old", topic="plans")
+            stale["timestamp"] = int(_time.time()) - 6 * 60
+            fresh = channel_msg("@**Corvidae Bot** new", topic="plans")
+            fresh["timestamp"] = int(_time.time())
+            h.server.push_backlog(stale, flags=["mentioned"])
+            h.server.push_backlog(fresh, flags=["mentioned"])
+            await self._seed(h, tmp_path, 0)
+
+            await h.plugin._catch_up()
+
+            texts = [c.kwargs["text"] for c in h.on_message.await_args_list]
+            assert texts[0].startswith("[sent "), texts
+            assert texts[1] == "new", texts
+        finally:
+            await stop(h)
+
+    async def test_a_failed_fetch_warns_and_the_live_loop_carries_on(
+        self, tmp_path, caplog
+    ):
+        """A catch-up that cannot fetch names the site and bot, and nothing else
+        stops: the queue keeps polling."""
+        h = await _start()
+        try:
+            await self._seed(h, tmp_path, 0)
+            h.server.script("/api/v1/messages", 500, {"result": "error"})
+
+            with caplog.at_level(logging.WARNING, logger="corvidae.zulip"):
+                await h.plugin._catch_up()
+
+            warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+            assert any(
+                "could not catch up on" in m and h.plugin._site in m
+                for m in warnings
+            ), warnings
+            polls = len(h.server.polls)
+            await _wait_until(lambda: len(h.server.polls) > polls)
+        finally:
+            await stop(h)
+
+
+async def test_a_failed_delivery_does_not_mark_the_message_seen(tmp_path):
+    """A message whose delivery raised must be fetched again, not skipped.
+
+    The cursor advances before the allowlist so a refusal cannot be re-fetched
+    forever; that makes an error the one path that must put it back (#644
+    review).
+    """
+    h = await _start()
+    try:
+        # The plugin's hook relay is the real sender: make that one raise.
+        h.pm.ahook.on_message = AsyncMock(side_effect=RuntimeError("boom"))
+        h.server.push_backlog(
+            channel_msg("@**Corvidae Bot** unhandleable", topic="plans"),
+            flags=["mentioned"],
+        )
+        h.plugin._cursor_dir = tmp_path
+        channel_id = "zulip:7"
+        h.plugin._cursor = {
+            channel_id: {"last": 0, "narrow": [{"operator": "channel", "operand": 7}]}
+        }
+
+        await h.plugin._catch_up()
+
+        got = h.plugin._cursor.get(channel_id, {}).get("last", 0)
+        assert got == 0, f"a failed delivery was recorded as seen: cursor={got}"
+    finally:
+        await stop(h)
+
+
+async def test_a_failed_delivery_stops_the_batch_rather_than_being_skipped(tmp_path):
+    """The message after a failed one must not advance past it.
+
+    The rewind puts the cursor back to the last good message; if the batch then
+    carried on, the next message would move it forward again and the failed one
+    would never be fetched (#644 round 2).
+    """
+    h = await _start()
+    try:
+        ok, bad, later = (
+            channel_msg("@**Corvidae Bot** one", topic="plans"),
+            channel_msg("@**Corvidae Bot** two", topic="plans"),
+            channel_msg("@**Corvidae Bot** three", topic="plans"),
+        )
+        h.server.push_backlog(ok, flags=["mentioned"])
+        h.server.push_backlog(bad, flags=["mentioned"])
+        h.server.push_backlog(later, flags=["mentioned"])
+
+        calls = {"n": 0}
+
+        async def _fail_on_the_second(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("boom")
+
+        h.pm.ahook.on_message = AsyncMock(side_effect=_fail_on_the_second)
+        h.plugin._cursor_dir = tmp_path
+        channel_id = "zulip:7"
+        h.plugin._cursor = {
+            channel_id: {"last": 0, "narrow": [{"operator": "channel", "operand": 7}]}
+        }
+
+        await h.plugin._catch_up()
+
+        assert calls["n"] == 2, "the batch carried on past a failed delivery"
+        assert h.plugin._cursor[channel_id]["last"] == ok["id"], (
+            "the cursor moved past the message that failed"
+        )
+    finally:
+        await stop(h)
+
+
+async def test_a_renamed_channel_still_catches_up(tmp_path):
+    """The stored narrow is a channel id, so a rename cannot lose a cursor.
+
+    Zulip narrows a channel by name or by id; the id form is what makes the
+    stored cursor survive the rename. A name-based narrow would fetch
+    nothing here and the gap would be lost silently (#644).
+    """
+    h = await _start()
+    try:
+        # The message arrives under the channel's new name, same id, and later
+        # in the channel's history than the live one below.
+        renamed = channel_msg(
+            "@**Corvidae Bot** after the rename",
+            topic="plans",
+            stream="renamed-channel",
+        )
+        renamed["id"] = 900_000
+        h.server.push_backlog(renamed, flags=["mentioned"])
+        # A live message under the old name is what writes the cursor, so
+        # the narrow stored is the one _handle_message builds.
+        h.plugin._cursor_dir = tmp_path
+        h.server.push(channel_msg("@**Corvidae Bot** before the rename"),
+                      flags=["mentioned"])
+        await _wait_until(lambda: h.on_message.await_count == 1)
+        channel_id = "zulip:7"
+        assert h.plugin._cursor[channel_id]["narrow"] == [
+            {"operator": "channel", "operand": 7}
+        ], h.plugin._cursor[channel_id]["narrow"]
+
+        await h.plugin._catch_up()
+
+        texts = [c.kwargs["text"] for c in h.on_message.await_args_list]
+        assert texts == ["before the rename", "after the rename"], texts
+        assert h.plugin._cursor[channel_id]["last"] > 0
+    finally:
+        await stop(h)
+
+
 # Reply and typing routing per topic (#643)
 # ---------------------------------------------------------------------------
 
