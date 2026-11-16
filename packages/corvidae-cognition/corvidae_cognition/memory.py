@@ -1078,32 +1078,30 @@ async def build_catchup_segments(
         for own in _segment_run(run_view, own_ids, inputs, fork_prompt, index):
             plans.append((run_view, own, index, fit_sums))
 
-    # 6. Spans: segment k ends at the last range row before segment k+1's
-    # first non-summary row; the last ends at the last range row.
-    all_ids = [row[0] for row in range_rows]
-    firsts = [min(run_view[k]["_db_id"] for k in own) for run_view, own, _, _ in plans]
-    ends = []
-    for nxt in firsts[1:]:
-        # all_ids is ascending (ORDER BY id): the last id below nxt.
-        below = bisect_left(all_ids, nxt)
-        if below == 0:
-            raise ValueError(
-                f"catch-up for channel {channel_id}: a segment starts at message id "
-                f"{nxt}, below every range row after {after_id}; the view's row order "
-                "disagrees with id order (a clock that stepped back), so the range "
-                "cannot be split; report it with the channel's message_log timestamps"
-            )
-        ends.append(all_ids[below - 1])
-    ends.append(all_ids[-1])
+    # 6. Each segment's rows are its own range rows, assigned by membership
+    # via a single-pass row→segment map: every non-summary range row is in
+    # exactly one segment, so the map and the per-segment lists are O(n). The
+    # view is in timestamp order when no summary is in force, so a segment's
+    # id-span is not necessarily contiguous and a span slice would take the
+    # wrong rows when the clock stepped back. The end_id is the max id in the
+    # segment's rows — the watermark after it commits.
+    row_to_seg = {}
+    for seg_i, (run_view, own, _, _) in enumerate(plans):
+        for k in own:
+            row_to_seg[run_view[k]["_db_id"]] = seg_i
+    seg_row_lists: list[list[tuple]] = [[] for _ in plans]
+    for row in range_rows:
+        seg_i = row_to_seg.get(row[0])
+        if seg_i is not None:
+            seg_row_lists[seg_i].append(row)
 
     # 7. One request per segment.
     segments: list[CatchupSegment] = []
     # The system prompt's size, as fit_to_budget counts it against the budget.
     fixed = count_tokens(inputs.system_prompt)
-    start_after = after_id
-    for (run_view, own, index, fit_sums), end_id in zip(plans, ends):
-        seg_rows = range_rows[bisect_right(all_ids, start_after):bisect_right(all_ids, end_id)]
-        start_after = end_id
+    for (run_view, own, index, fit_sums), seg_rows in zip(plans, seg_row_lists):
+        # range_rows is id-ordered, so the segment's max id is its last row.
+        end_id = seg_rows[-1][0]
         seg_ids = {r[0] for r in seg_rows if r[2] != "summary"}
         window = ContextWindow(channel_id)
         window.system_prompt = inputs.system_prompt
@@ -1170,6 +1168,11 @@ async def build_catchup_segments(
                 channel_id, seg_rows[0][0], end_id, measured, inputs.max_tokens,
             )
         segments.append(CatchupSegment(seg_rows, end_id, messages))
+    # The watermark advances by id: commit the segments in end_id order so a
+    # range whose timestamps are out of id order still advances the watermark
+    # monotonically. The view stays in timestamp order; only the commit order
+    # changes, so what the model reads is untouched.
+    segments.sort(key=lambda seg: seg.end_id)
     return segments
 
 
