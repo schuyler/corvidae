@@ -1132,12 +1132,16 @@ What each kind of unlock costs:
   its own channel's latency class makes that channel preempt others at
   every call boundary, and each preemption is a context switch someone
   pays prefill for; loosening the operator's channel's class makes the
-  operator wait longer. It can also pause the operator's channel, move its
+  operator wait longer, and removing it leaves the operator's channel
+  with no bound, so a replacement order may delay it indefinitely and
+  nothing reports it overdue (PRD §3.13.5, 7). It can also pause the operator's channel, move its
   own ahead, stop the holder of a head so its own channel takes it, or
   push upkeep back. Every deferral and pause lapses by itself
   and the operator can resume any channel, and no replacement order or
   deferral delays work past its latency bound (PRD §3.13.7), so the
-  damage from those is delay and prefill, not a wedged agent. A stop has
+  damage from those is delay and prefill, not a wedged agent; a channel
+  with no bound, whether a transport's default or an injection's doing,
+  can be delayed without limit by a replacement order. A stop has
   no such bound yet (#366): a stopped queue waits until the scheduler
   plugin or the operator resumes it, so until that is decided a scheduler
   plugin that stops a queue and never resumes it holds that queue's work
@@ -1242,8 +1246,8 @@ principle 16 nothing in corvidae will for now. It schedules a provider's warm
 heads but doesn't cap tokens or spend; rate limits on hosted APIs are a
 future improvement (#296). `usage_log` records every call, and rate limits
 are met only by retrying (PRD §3.6.2). Once built, latency classes (PRD
-§3.13.5) bound how long a flooded channel can hold a head another queue is
-waiting for, at the price of a context switch each time it yields; they
+§3.13.5) bound how long a flooded channel can hold a head a queue with a
+bound is waiting for, at the price of a context switch each time it yields; they
 don't bound its total.
 
 On a metered endpoint, set a spend limit with the provider, and keep
