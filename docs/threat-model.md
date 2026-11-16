@@ -1275,7 +1275,7 @@ decision (2026-11-01), and these are its costs.
   Everyone in a Discord guild channel or a public IRC channel reads them.
   Something said on a private Signal channel can come back in a reply
   there: through retrieval, `search_memory`, `recall_raw` (which replays
-  another channel's raw dialog, by record or by message range), or
+  another channel's raw dialog, by record or by message range),
   `search_transcripts` (keyword search over every channel's raw messages,
   private and direct-message channels included, tool results as far as
   they sit in `content`, so a secret a tool printed (#508) is one keyword
@@ -1286,7 +1286,7 @@ decision (2026-11-01), and these are its costs.
   it into the window. The sensitivity plugin (#138) is the capability an
   operator can load against this: it filters what enters a window
   (retrieval, notes, reads, the goals entry, and the memory tools' raw
-  replays) by who is present, though not
+  reads, `search_transcripts` and `recall_raw`) by who is present, though not
   text already in the window. It is off unless loaded, and it isn't built.
   **Without it, this gap is accepted:**
   keep the agent out of rooms where people you haven't allowed can read it,
