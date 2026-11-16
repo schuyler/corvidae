@@ -912,7 +912,7 @@ carries a code-generated sentence naming where
 the range starts, which can quote the first new message. That sentence is
 left out of the stamp: `memory_prompt` is outside `corvidae redact`'s
 cascade, so storing conversation text there would put it where redaction
-can't reach (PRD §3.7 Memory 8). `memory_prompt` holds configured
+can't reach ([redaction.md](redaction.md)). `memory_prompt` holds configured
 instructions plus the static size sentence only. The stamp is the consolidation instruction, not the
 agent's system prompt and window that frame a fork.
 

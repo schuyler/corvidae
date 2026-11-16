@@ -123,7 +123,7 @@ Built-in `corvidae acp` (from `corvidae.channels.acp:acp_command`) starts an ACP
 
 ## Registering a redact scrubber
 
-`corvidae redact` (see "Operator redaction" in [design.md](design.md)) tombstones `message_log` rows and cascades to memory. A plugin package that copies conversation text into a table of its own registers a scrubber under the `corvidae.redact` entry-point group, so a redaction reaches that copy too. The kernel never names the table.
+`corvidae redact` (see "Operator redaction" in [design.md](design.md)) tombstones `message_log` rows and cascades to memory. A plugin package that copies conversation text into a table of its own registers a scrubber under the `corvidae.redact` entry-point group, so a redaction reaches that copy too. The kernel never names the table. Redaction is on hold pending an overhaul, because no scrubber can find a paraphrase ([redaction.md](redaction.md)); scrubbers still run, and still narrow the gap, so keep registering one.
 
 ```toml
 [project.entry-points."corvidae.redact"]

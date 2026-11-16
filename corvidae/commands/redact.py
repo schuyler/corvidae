@@ -45,6 +45,23 @@ logger = logging.getLogger("corvidae.redact")
 _TOMBSTONE_TEXT = "[redacted by operator {date}]"
 _MEMORY_TOMBSTONE = "[redacted by operator]"
 
+# Printed after every completed run, real or dry (#1005). Redaction is on
+# hold because it cannot be made complete in this framework: it reaches the
+# stores named here and nothing else, and the operator must not take a
+# redaction as complete. docs/redaction.md has the full account.
+_COVERAGE_NOTE = (
+    "Coverage: redact reaches the message_log rows, any FTS index present, "
+    "memory records (and their vectors) whose range covers a redacted "
+    "message on that message's own channel, and the registered plugin "
+    "copies counted above. It does not reach the JSONL and daemon logs, "
+    "backups and exports, copies on other channels, the running daemon's "
+    "context window, or restatements in later replies, memories, goals and "
+    "notes. A running daemon's window still holds the text and a compaction "
+    "could write it back, so stop the daemon before redacting; if it was "
+    "running, stop it and run this again. "
+    "See https://github.com/schuyler/corvidae/blob/main/docs/redaction.md"
+)
+
 
 def _iso_date() -> str:
     return datetime.now(timezone.utc).date().isoformat()
@@ -618,6 +635,8 @@ def _message_cmd(ctx, ids):
                     click.echo(await _verify_fts_clean(conn, sample_token))
                 else:
                     click.echo("FTS check skipped: no sample token (row empty or corrupt)")
+            # Say what this run did not reach (#1005), real or dry run.
+            click.echo(_COVERAGE_NOTE)
         finally:
             await conn.close()
 
@@ -672,6 +691,8 @@ def _memory_cmd(ctx, memory_id):
                     click.echo(await _verify_fts_clean(conn, sample_token))
                 else:
                     click.echo("FTS check skipped: no sample token (row empty or corrupt)")
+            # Say what this run did not reach (#1005), real or dry run.
+            click.echo(_COVERAGE_NOTE)
         finally:
             await conn.close()
 
@@ -727,6 +748,8 @@ def _range_cmd(ctx, start_id, end_id):
                     click.echo(await _verify_fts_clean(conn, sample_token))
                 else:
                     click.echo("FTS check skipped: no sample token (row empty or corrupt)")
+            # Say what this run did not reach (#1005), real or dry run.
+            click.echo(_COVERAGE_NOTE)
         finally:
             await conn.close()
 
