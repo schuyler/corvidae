@@ -1548,10 +1548,11 @@ line is plain text in the result, with no kernel header at all.
   with sqlite-vec) makes every form refuse until the cognition extra is
   reinstalled (#198). That keeps a half-finished redaction from happening,
   at the cost of the only deletion path while the extra is missing.
-- `exchange_log` copies conversation text into two columns: stage-2
-  `past_claims` (quoted from the reply) and `provenance_snapshot` (the
-  CONTEXT in the window). `corvidae redact` scrubs both (#160), through
-  the `exchange_log` scrubber the cognition extra registers under
+- `exchange_log` copies conversation text into two places: stage-2
+  `past_claims` (quoted from the reply) and the objection detail critique
+  records in `outcomes`. `corvidae redact` scrubs the claims and the
+  provenance and critique detail (#160), but not proactivity detail
+  (#1003), through the `exchange_log` scrubber the cognition extra registers under
   `corvidae.redact`. A plugin that keeps its own copy of conversation text
   and registers no scrubber is not reached. `retrieval_candidate` (#407)
   copies no text, only memory ids and scores, but a row naming a redacted
@@ -1561,9 +1562,8 @@ line is plain text in the result, with no kernel header at all.
   row for it (#654: the insert checks the flag itself), but the funnel may
   already have admitted its summary into that turn's prompt and bumped its
   access count; the window copy ages out with compaction like any CONTEXT. For
-  `exchange_log`, the owning exchange's claims are tombstoned with their counts kept, and
-  every snapshot in the channel from the redacted message on is
-  dropped. What `redact` still doesn't reach: exchanges whose
+  `exchange_log`, the owning exchange's claims are tombstoned with their
+  counts kept. What `redact` still doesn't reach: exchanges whose
   `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
   taken out of `sessions.db` (a calibration export, a backup), and, under
   PRD §3.7 Memory 8, copies on other channels: a read of the redacted
