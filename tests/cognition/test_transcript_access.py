@@ -530,3 +530,34 @@ class TestSchemaRetry:
         assert _hit(result, rid) is not None, result
         assert len(calls) >= 3
         await db.close()
+
+    async def test_schema_never_available_returns_error(self, monkeypatch):
+        """Both new read paths give up with the schema error once the
+        retries run out, rather than raising."""
+        import corvidae_cognition.memory_tools as memory_tools_module
+
+        memory, memory_tools, db = await build_tools_env()
+        tools = get_tools(memory_tools)
+        search = await _search_tool(memory_tools)
+
+        # The schema never appears; count the attempts and skip the waits.
+        calls = []
+
+        async def never():
+            calls.append(1)
+            return None
+
+        monkeypatch.setattr(memory, "_ensure_schema", never)
+        monkeypatch.setattr(memory_tools_module, "_SCHEMA_RETRY_DELAY", 0)
+        attempts = memory_tools_module._SCHEMA_RETRY_ATTEMPTS
+
+        searched = await search("okapi")
+        assert searched == "Error: memory schema not available", searched
+        assert len(calls) == attempts
+
+        replayed = await tools["recall_raw"](
+            memory_id=None, channel="irc:#a", start_id=1, end_id=2,
+        )
+        assert replayed == "Error: memory schema not available", replayed
+        assert len(calls) == 2 * attempts
+        await db.close()
