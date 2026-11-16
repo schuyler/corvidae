@@ -206,8 +206,8 @@ violates one is a bug even if its tests pass.
    MUST deliver escalations from peripherals, idle events, task
    completions, and scheduler firings. The operator MAY also attach the
    CLI to the core's channel; the framework MUST default to leaving it
-   unattached, and MUST NOT let any other user-facing transport reach
-   the core (open question 8).
+   unattached, and MUST NOT attach any other user-facing transport to
+   the core's channel (open question 8).
 
    *Rationale:* The core runs a single context that favours depth over
    latency. It performs deliberative reasoning, multi-step tasks, goal
@@ -775,8 +775,8 @@ With the goals plugin loaded:
    holds MUST be in scope, including the core's instructions and the
    messages it worded itself.
 
-   *Rationale:* Because each context consolidates its own window, the
-   agent forms separate memories of a peripheral exchange and of the
+   *Rationale:* Because each context that consolidates does so over its
+   own window, the agent forms separate memories of a peripheral exchange and of the
    core's decision about it (open question 14).
 
 ### 3.8 Model requirements

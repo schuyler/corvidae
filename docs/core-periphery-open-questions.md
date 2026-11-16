@@ -64,12 +64,14 @@ decision here:
   2 below still lists the total cap, as it was discussed.
 
 That list is what review noticed, not an audit: the TRD should still
-check each decision against the supplement.
+check each decision against the supplement. Explanatory text in the
+supplement was brought up to date as well, among it principle 20's
+rationale and Appendix A.2 to A.4.
 
-Two decisions reach beyond one item. Identifiers a plugin owns follow
+Two decisions are cross-cutting rather than any one item's. Identifiers a plugin owns follow
 `<plugin>:<component>:<uid>`, channel ids included (questions 8 and 10).
-For a channel that is the base PRD's `transport:scope` id with nothing
-to reconcile: the strategy's transport plugin is named `core`, and
+For a channel, that is the base PRD's `transport:scope` id, with
+nothing to reconcile: the strategy's transport plugin is named `core`, and
 `<component>:<uid>` is its scope (owner, 2026-11-16).
 And the kernel supplies seams, not verdicts: where an answer needs a
 policy, a plugin holds it (question 21, gaps 3 and 4).
