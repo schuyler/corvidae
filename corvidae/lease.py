@@ -161,6 +161,10 @@ class ProviderLeases:
                     self._waiters.remove(waiter)
             self._settle()
             raise
+        # Granted, but close() ran before this call resumed: close() already
+        # dropped the lease, so sending now would run with no head held (#990).
+        if self._closed:
+            raise self._shutdown_error()
         return True
 
     def _end_call(self, key: str) -> None:
