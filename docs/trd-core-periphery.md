@@ -298,7 +298,8 @@ lets a plugin name another key. A fork channel would always lease as
 itself, never under its parent's key.
 
 `Channel.lease_key: str | None`. When it is set, the Agent uses it in
-place of the channel's id at both sites, and reads it at each model
+place of the channel's id at both sites, as does the kernel `fork` tool
+at its own (`corvidae/tools/fork_tool.py`), and reads it at each model
 call, so a change takes effect at the channel's next call. `forks` sets
 it when a fork starts and clears it at the switch of TRD §7.2.
 
@@ -334,8 +335,8 @@ are routed to a fork (TRD §7.3) it returns the fork's channel.
 
 `core_periphery.core.attach_cli: false` is the default. Set true,
 `core.on_start` attaches the CLI transport to the core's channel (K9),
-and startup fails naming the key if that transport is not loaded. No other transport
-can be attached, and a config that names one fails startup.
+and startup fails naming the key if that transport is not loaded. No
+other transport can be attached.
 
 ### 5.2 Origins and what the core receives
 
@@ -382,7 +383,8 @@ Two tools, on the core and on forks:
 
 - `instruct(channel_id, text)` enqueues an `instruction` notification on
   the peripheral's queue. The periphery's turn composes and sends. If
-  the channel is stopped, `instruct` resumes it first (§3.9.1).
+  the channel is stopped, `instruct` resumes it first and removes its
+  `cp_stops` row (§3.9.1).
 - **Exact wording** is base §3.5.9's send tool (#234), unchanged. It
   records the message in the target channel's history through that
   channel's queue, so the peripheral's context holds it (principle 21),
@@ -649,6 +651,8 @@ never joins (§3.3.7).
 A plugin's own forks (compaction, critique, appraisal, consolidation)
 are one-shot forks under base §3.8. Each keeps its present behaviour as
 its default, and `<stage>.fork_blocking` overrides it (§3.5.7).
+Compaction's key is read in the kernel (`corvidae/compaction.py`); no
+other plugin relies on it.
 
 ### 7.4 Join and abandonment (§3.5.3, §3.5.4, gap 11)
 
@@ -988,8 +992,9 @@ plugin that owns them.
 
 **At startup:**
 
-- `core` registers the core's channel and every fork in state
-  `running`; each replays from the log like any channel (gap 4), and
+- `core` registers the core's channel, and `forks` every fork in state
+  `running`, with its `head_from` and `lease_key` as recorded; each
+  replays from the log like any channel (gap 4), and
   queued items return once #318 lands.
 - `forks` re-holds the queue of each parent still inside its wait
   bound, and applies the bound at once to any past it.
@@ -1005,7 +1010,8 @@ registers two subcommands in the `corvidae.commands` entry-point group:
 Each writes a `cp_requests` row from a second process, as `corvidae
 redact` writes to the same database. `core` reads the table every
 `request_poll` (5 s) with `Clock.call_later` (`corvidae/clock.py`) and
-applies each row. No channel queue is involved.
+applies each row; a resume removes the `cp_stops` row. No channel queue
+is involved.
 
 **Editor sessions (open question 13; TRD decision A6).** Every plugin in the
 strategy's distribution except `limits` returns from `on_init` without acting when `config["_acp_mode"]`
@@ -1146,8 +1152,8 @@ means an existing base mechanism meets it and nothing is built.
 | §3.5.1–3 | TRD §7.1, §7.4 | 5 |
 | §3.5.4 | TRD §7.4, §7.5 | 5 |
 | §3.5.5 | TRD §5.4, §5.6, §7.1 | 3, 5 |
-| §3.5.6 | K5, TRD §7.6 | 5 |
-| §3.5.7 | K4, TRD §7.3 | 5 |
+| §3.5.6 | K5, TRD §7.6 | 1, 5 |
+| §3.5.7 | K4, TRD §7.3 | 1, 5 |
 | §3.6.1–3, §3.6.5 | TRD §10.1 | 2 |
 | §3.7.1–3 | TRD §10.2, §10.3; compaction and critique of a task-bound peripheral are open (TRD §15.1) | 3, 5 |
 | §3.8.1 | K2 | 3, 7 |
