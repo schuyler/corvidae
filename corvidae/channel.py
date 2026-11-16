@@ -339,6 +339,10 @@ class Channel:
     #: included) and dispatches the channel's messages one at a time. Core reads
     #: it once, at admission; it is never persisted on the channel.
     addressed: bool | None = None
+    #: The main turn's rendered prompt (messages as sent to the LLM), stored
+    #: so forks can append an instruction without re-rendering the window.
+    #: A re-render produces different tokens, breaking the KV cache prefix.
+    last_prompt: "list[dict] | None" = None
 
     @property
     def id(self) -> str:

@@ -1578,6 +1578,7 @@ class Agent(CorvidaePlugin):
             frozenset(channel.pending_tool_call_ids),
             mid_conversation_system_role=self._mid_conversation_system_role,
         )
+        channel.last_prompt = messages
         llm_overrides = self._llm_overrides(channel)
         if self._request_logprobs:
             llm_overrides["logprobs"] = True
@@ -1856,13 +1857,20 @@ class Agent(CorvidaePlugin):
             )
         profile_body = llm.profile_config(stage).get("extra_body")
 
-        messages = build_fork_prompt(
-            conv,
-            cut,
-            instruction,
-            pending,
-            self._mid_conversation_system_role,
-        )
+        if channel.last_prompt is not None and cut is None:
+            # Reuse the main turn's rendered prompt: token-identical prefix,
+            # so the KV cache serves it. Only the instruction is new.
+            messages = list(channel.last_prompt)
+            messages.append({"role": "user", "content": instruction})
+        else:
+            # Snapshot forks or cut forks still need the render.
+            messages = build_fork_prompt(
+                conv,
+                cut,
+                instruction,
+                pending,
+                self._mid_conversation_system_role,
+            )
         # The profile beats the overrides; the stage's body and tool_choice
         # none come last.
         body = fork_body(self._llm_overrides(channel), profile_body, extra_body)
