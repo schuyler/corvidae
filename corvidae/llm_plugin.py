@@ -367,6 +367,8 @@ def parse_llm_config(section: dict | None) -> LLMConfig:
             raise ValueError(
                 f"llm.providers.{pname} must be a mapping; got {type(pblock).__name__}"
             )
+        for key in pblock:
+            _require_string_key(key, f"llm.providers.{pname}", "key")
         for key in sorted(k for k in pblock if k in PROFILE_KEYS):
             raise ValueError(
                 f"llm.providers.{pname}.{key} is a profile key, got "
@@ -408,6 +410,8 @@ def parse_llm_config(section: dict | None) -> LLMConfig:
             raise ValueError(
                 f"llm.profiles.{name} must be a mapping; got {type(block).__name__}"
             )
+        for key in block:
+            _require_string_key(key, f"llm.profiles.{name}", "key")
         for key in sorted(k for k in block if k in PROVIDER_KEYS):
             raise ValueError(
                 f"llm.profiles.{name}.{key} is a provider key, got "

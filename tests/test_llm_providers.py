@@ -469,3 +469,26 @@ def test_a7_provider_config_is_empty_before_on_start():
     """A7: before on_start there is no config, so the accessor returns {}."""
     assert LLMPlugin().provider_config("main") == {}
 
+
+
+def test_a_mixed_type_key_is_rejected_without_a_typeerror():
+    """A non-string key must raise ValueError, not crash building the message.
+
+    YAML turns an unquoted ``2:`` into an int, and the unknown-key check sorts
+    the key set to list it. Mixed types make that sort raise TypeError, which
+    escapes the Config error handler at startup and the reload path's
+    ``except ValueError`` — the failure mode #471 already fixed once (#964).
+    """
+    from corvidae.llm_plugin import parse_llm_config
+
+    for config, wanted in (
+        ({"providers": {"main": {"base_url": "http://h", "headz": 4, 2: "y"}}},
+         "llm.providers.main"),
+        ({"profiles": {"main": {"model": "m", 1: "a"}}, "providers": {}},
+         "llm.profiles.main"),
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            parse_llm_config(config)
+        message = str(excinfo.value)
+        assert wanted in message, message
+        assert "must be a string" in message, message
