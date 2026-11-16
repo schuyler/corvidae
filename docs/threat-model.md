@@ -20,7 +20,7 @@ through DOMPurify under a strict CSP.
 
 Memory spans every channel: the PRD makes the agent one identity across
 channels, with no compartments and no cross-channel allowlist, and retrieval,
-`search_memory`, `recall_raw`, near-duplicate merge, the provenance critic's
+`search_memory`, `search_transcripts`, `recall_raw`, near-duplicate merge, the provenance critic's
 evidence search and the heartbeat's review all reach the whole memory (#168).
 Finding 15 records what that costs, including a gap the operator has
 accepted.
@@ -557,13 +557,14 @@ remains a pass-through hook.
 
 **What is fenced and what is not.** Fenced as untrusted outside content: the
 results of `read_file` (spill files read back included), `web_fetch`,
-`web_search`, `shell` and `task_pipeline`, and every MCP tool. A tool declares this for itself
+`web_search`, `shell` and `task_pipeline`, every MCP tool, and the memory
+tools `search_transcripts` and `recall_raw` (both forms; #648). A tool declares this for itself
 (`returns_untrusted`, read when the call is dispatched and stored on the
 result), so a result of a tool no plugin declares is unfenced unless it acts on
 another channel. Result rows stored before #557 carry no flag and stay
 unfenced on reload. Unfenced today:
-`recall_raw` and `search_memory` replays of earlier content, which can carry
-text that was untrusted when it first arrived; the results inside a
+`search_memory` results, which are the agent's own record summaries but can
+paraphrase text that was untrusted when it first arrived; the results inside a
 subagent's own loop, which reach the subagent's model with no frame; and the
 subagent's final report to the main model, which can repeat what the
 subagent read. The header names the spill source for a read-back when the log
@@ -1273,14 +1274,19 @@ decision (2026-11-01), and these are its costs.
   allowlists say who may *drive* the agent, not who reads its replies.
   Everyone in a Discord guild channel or a public IRC channel reads them.
   Something said on a private Signal channel can come back in a reply
-  there: through retrieval or `search_memory`/`recall_raw` (which replays
-  another channel's raw dialog), a goal (finding 10), a note, or the agent
+  there: through retrieval, `search_memory`, `recall_raw` (which replays
+  another channel's raw dialog, by record or by message range),
+  `search_transcripts` (keyword search over every channel's raw messages,
+  private and direct-message channels included, tool results as far as
+  they sit in `content`, so a secret a tool printed (#508) is one keyword
+  away), a goal (finding 10), a note, or the agent
   reading the Signal conversation because a question on the public channel
   made it relevant. The provenance critic's evidence search also quotes
   other channels' raw dialog to the critic, so a critique objection can carry
   it into the window. The sensitivity plugin (#138) is the capability an
   operator can load against this: it filters what enters a window
-  (retrieval, notes, reads, the goals entry) by who is present, though not
+  (retrieval, notes, reads, the goals entry, and the memory tools' raw
+  reads, `search_transcripts` and `recall_raw`) by who is present, though not
   text already in the window. It is off unless loaded, and it isn't built.
   **Without it, this gap is accepted:**
   keep the agent out of rooms where people you haven't allowed can read it,

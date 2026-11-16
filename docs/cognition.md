@@ -30,7 +30,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | Plugin | Entry point | What it does |
 |---|---|---|
 | `MemoryPlugin` | `memory` | Consolidates conversation (at turn ends, on idle, and at compaction) into durable memories and retrieves them into context; owns `sqlite-vec` |
-| `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
+| `MemoryToolsPlugin` | `memory_tools` | `search_memory`, `search_transcripts` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
 | `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), and the provenance check |
@@ -230,7 +230,7 @@ the row):
   row included. A range whose only rows are corrupt advances the watermark
   with no record and no LLM call.
 - **`recall_raw`** returns the valid rows of the range in order and omits the
-  corrupt one.
+  corrupt one; **`search_transcripts`** drops it from its hits the same way.
 - **The `message_fts` backfill** indexes every valid row and indexes a corrupt
   row as empty text, so it is not retried on every start.
 
@@ -1155,19 +1155,19 @@ whole memory budget for a turn.
 
 ### MemoryToolsPlugin (`packages/corvidae-cognition/corvidae_cognition/memory_tools.py`)
 
-Registers the `search_memory` and `recall_raw` agent tools — the active
-memory surface ("remember harder"). Entry point
+Registers the `search_memory`, `search_transcripts` and `recall_raw` agent
+tools — the active memory surface ("remember harder"). Entry point
 name: `"memory_tools"`; `depends_on = frozenset({"memory"})`. Reaches the
 DB through `get_dependency(pm, "memory", MemoryPlugin)`.
 
 Implements one hook:
 
-- `register_tools` — appends `search_memory` and `recall_raw` to
-  `tool_registry`.
+- `register_tools` — appends `search_memory`, `search_transcripts` and
+  `recall_raw` to `tool_registry`.
 
-**Whole memory:** both tools span every channel's records, as passive
-retrieval does (PRD principle 14, #168); neither takes the calling channel
-into account, so neither declares `_ctx`. They reach further than passive
+**Whole memory:** all three tools span every channel, as passive
+retrieval does (PRD principle 14, #168); none takes the calling channel
+into account, so none declares `_ctx`. They reach further than passive
 retrieval in *status* (demoted, superseded, and redacted-tombstone records),
 and they don't apply passive retrieval's window exclusion (#634).
 `search_memory`'s optional `channel=` argument narrows to one channel's
@@ -1176,6 +1176,29 @@ written on simply matches nothing. `recall_raw` replays a record's raw range
 from the record's own channel: `message_log` ids are global, so the range
 holds other channels' interleaved rows and the `channel_id` predicate keeps
 them out.
+
+**Raw transcripts without a record (#648).** Consolidation is lossy, so the
+agent can also reach `message_log` directly. `search_transcripts` is a
+keyword search over `message_fts` (FTS5 over each row's `$.content`,
+trigger-synced) across every channel, in bm25 order; each hit names its
+`message_log` id, channel, UTC timestamp and role, with a snippet around the
+match. A hit is widened with `recall_raw`'s range form, `channel` +
+`start_id` + `end_id`, which replays that channel's rows in the inclusive
+id range exactly as the record form does. It covers the rows `recall_raw`
+replays: dialogue, compaction summaries, CONTEXT rows (so a hit can be an
+injected memory or note line rather than something said) and withheld rows,
+labelled. Corrupt rows and unknown types are skipped with the standard
+warning. Neither touches access statistics. Redaction needs nothing of its
+own: `corvidae redact` rewrites the row, and the `message_log_au` trigger
+re-indexes the tombstone, so the original text is neither found nor
+replayed. The index holds only `content`, so tool-call arguments are not
+searchable, and the `unicode61` tokenizer limits (#158) apply.
+
+**Fencing.** `search_transcripts` and `recall_raw` declare
+`returns_untrusted`: their output reaches the model fenced as untrusted
+outside content, because replayed rows carry whatever the original senders
+wrote. Both `recall_raw` forms are fenced. `search_memory` is not: it
+returns the agent's own record summaries.
 
 **Search by meaning (#667).** With the vector path up, `search_memory`
 embeds the query (`kind="query"`) and ranks two lists over the same filters
@@ -1208,7 +1231,7 @@ paraphrase may have been missed. If that FTS5 query fails as well, it falls
 back to a `LIKE` scan over record summaries instead of returning an internal
 error. Tool searches write no `retrieval_log` rows.
 
-Both tools retry briefly when the memory schema is still being created by
+All three tools retry briefly when the memory schema is still being created by
 another task.
 
 **Tools:**
@@ -1216,17 +1239,20 @@ another task.
 | Tool | Parameters | What it does |
 |------|------------|--------------|
 | `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | Search by meaning and keywords (above). Returns a list `id. score (age)[flags] summary`, led by each memory id (for `recall_raw`), best match first, capped at approximately `max_tokens`. The score is the cosine similarity to the query (two decimals), or `kw` for a keyword hit with no vector. In keyword-only fallback the first line says so, results are in FTS order, and the score is the negated bm25 rank. `channel` narrows to one channel's records by exact id; a channel with no records matches nothing. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
-| `recall_raw` | `memory_id: int`, `max_tokens: int` (default `1000`) | Replays the raw `message_log` dialog for the record's `[msg_id_start, msg_id_end]` range using `WHERE channel_id = record.channel_id AND id BETWEEN ...` — the channel predicate is load-bearing because the `message_log` id sequence is global across all channels. Returns a participants header (`[memory N: messages S–E, participants: {...}]`) followed by verbatim `role: content` lines, truncated at `max_tokens` with an explicit marker. Works on demoted, superseded, and tombstoned records. Reaches any channel's record. **Bumps `retrieval_count` and `last_retrieved_at`** on the record — the bump is what makes the record eligible for re-promotion by the next retention job run. |
+| `search_transcripts` | `query: str`, `channel: str\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `max_tokens: int` (default `2000`) | Keyword search over every channel's `message_log` content (above). Returns up to 50 lines `id. [timestamp] channel role: snippet`, best bm25 match first, the match wrapped in `**`, capped at approximately `max_tokens`. `channel` narrows by exact id; `after`/`before` parse as for `search_memory` and compare against the row's `timestamp`. A query with no word tokens, no hits (naming the channel filter when set) and a failing FTS query (logged at WARNING; retry with a simpler query) each return a plain message. **Does not update access stats.** Fenced. |
+| `recall_raw` | `memory_id: int\|None`, `channel: str\|None`, `start_id: int\|None`, `end_id: int\|None` (all default `None`), `max_tokens: int` (default `1000`) | Two forms; exactly one per call, or an error naming both forms and what was passed. **By range** (`channel`, `start_id`, `end_id`): replays that channel's rows with `start_id ≤ id ≤ end_id` under a `[channel C: messages S–E]` header; says so when the range holds none; bumps nothing. **By record** (`memory_id`): replays the raw `message_log` dialog for the record's `[msg_id_start, msg_id_end]` range using `WHERE channel_id = record.channel_id AND id BETWEEN ...` — the channel predicate is load-bearing because the `message_log` id sequence is global across all channels. Returns a participants header (`[memory N: messages S–E, participants: {...}]`) followed by verbatim `role: content` lines, truncated at `max_tokens` with an explicit marker. Works on demoted, superseded, and tombstoned records. Reaches any channel's record. **Bumps `retrieval_count` and `last_retrieved_at`** on the record — the bump is what makes the record eligible for re-promotion by the next retention job run. |
 
-**Recall-stat semantics:** `recall_raw` bumps the record's access stats;
-`search_memory` does not. `search_memory` is a catalog for choosing what
+**Recall-stat semantics:** `recall_raw` by record bumps the record's access
+stats; `search_memory`, `search_transcripts` and `recall_raw` by range do
+not (no record is involved in the last two). `search_memory` is a catalog for choosing what
 to recall; bumping every listed record would inflate scores for marginal
 matches and distort retention scoring. The re-promotion path is:
 `search_memory` surfaces a demoted record (flagged `[demoted]`) → agent
 calls `recall_raw` → next retention job run finds the score above the
 demotion threshold and re-promotes.
 
-**Without this plugin:** the `search_memory` and `recall_raw` tools are
+**Without this plugin:** the `search_memory`, `search_transcripts` and
+`recall_raw` tools are
 not available. Memory records are still formed and passively retrieved
 by `MemoryPlugin`; only the agent's active access surface is absent.
 
@@ -1836,8 +1862,8 @@ runs and the fallback final stays withheld.
 What the kernel does with a withheld final is in
 [design.md](design.md#the-output-gate). On the cognition side, critique still
 judges a withheld `user` or `reminder` final, its provenance probe doesn't
-count a withheld row as a record of anything said, and `recall_raw` labels
-withheld rows `(withheld, not sent)`.
+count a withheld row as a record of anything said, and `recall_raw` and
+`search_transcripts` label withheld rows `(withheld, not sent)`.
 
 Every tunable resolves through `resolve_tunable` at decision time, so a
 `set_settings` override or a hot config reload applies on the next
