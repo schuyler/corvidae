@@ -1596,8 +1596,9 @@ created per server at connect time and no class-level list could name them.
 Declared today: `read_file` (so a spill file read back is fenced, and so is
 any other file), `web_fetch`, `web_search`, `shell` and `task_pipeline` (a
 command's output, or a `cat` of a spill file, is as much outside text as a
-file's contents are), and every tool `mcp_client` builds. A tool nobody
-declares is unfenced.
+file's contents are), every tool `mcp_client` builds, and the memory tools
+`search_transcripts` and `recall_raw` (replayed `message_log` rows carry
+whatever their senders wrote; #648). A tool nobody declares is unfenced.
 
 The declaration is evaluated when the call is dispatched, not when the
 result arrives. `_dispatch_tool_calls` writes `Agent._dispatched_calls`,
@@ -1849,7 +1850,8 @@ or redact the row (#232):
 - **Web history replay** (`_fetch_history_rows` / `_rows_to_frames`): a corrupt
   row, or one with an unknown `message_type`, among the newest rows is skipped
   and the other rows still replay; it no longer blanks the channel's history.
-- **Memory** (consolidation, `recall_raw`, the `message_fts` backfill): see
+- **Memory** (consolidation, `recall_raw`, `search_transcripts`, the
+  `message_fts` backfill): see
   [cognition.md](cognition.md#corrupt-message_log-rows).
 - **Redact** (below): the tool that fixes a corrupt row works on it.
 
@@ -5111,7 +5113,7 @@ packages/corvidae-cognition/   # the cognition extra (docs/cognition.md)
 └── corvidae_cognition/
     ├── memory.py         # MemoryPlugin (consolidation + retrieval + message_fts schema)
     ├── retention.py      # run_retention_job(), retention_score()
-    ├── memory_tools.py   # MemoryToolsPlugin, search_memory, recall_raw
+    ├── memory_tools.py   # MemoryToolsPlugin, search_memory, search_transcripts, recall_raw
     ├── funnel.py         # FunnelPlugin (context-admission funnel)
     ├── appraisal.py      # AppraisalPlugin
     ├── critique.py       # CritiquePlugin

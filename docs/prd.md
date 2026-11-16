@@ -842,7 +842,7 @@ Per transport:
 1. Built-in tools: `shell`, `read_file`, `write_file`, `web_fetch`,
    `web_search`, `task_pipeline`, `task_status`, `set_settings`,
    `subagent`, `fork`, the scheduler's `remind_me`/`list_reminders`/
-   `cancel_reminder`, memory's `search_memory`/`recall_raw`, and the
+   `cancel_reminder`, memory's `search_memory`/`search_transcripts`/`recall_raw`, and the
    send, note and read tools (§3.5.9–11). Schemas
    are generated from type hints and docstrings; `_`-prefixed parameters
    are injected (`ToolContext`: channel, tool-call id, task queue), never
@@ -1137,6 +1137,11 @@ only through the funnel.
    reachable from a hook the model can influence.
 9. The epistemic-calibration prompt fragment is documented and never
    auto-injected.
+10. The agent can reach its raw conversation history without a record:
+    keyword search over every channel's `message_log` content, and
+    verbatim replay of a channel's message range. Neither changes access
+    statistics; replay respects redaction tombstones, and both return
+    their output fenced as untrusted.
 
 **Funnel.** The single admission chokepoint for tail CONTEXT: dedupe
 against CONTEXT already in the window, on the entry's key when its source
@@ -1318,8 +1323,9 @@ facts need no gate of their own: they are memory-tier data, re-entering
 only through the funnel's framing, and trust inheritance plus the
 provenance-gate exclusion already answer a poisoned one. The self-model
 below is the exception, because it is the one agent-authored write outside
-that framing. Epistemic framing at consolidation plus the append-only log
-with `recall_raw` are named anti-self-manipulation machinery, not style.
+that framing. Epistemic framing at consolidation plus the append-only log, reachable
+directly through `search_transcripts` and `recall_raw` (by record or by
+message range), are named anti-self-manipulation machinery, not style.
 Audience filtering is a capability, not a requirement: the framework can
 filter by who is present, and the operator decides whether it does
 (principle 15). With the sensitivity plugin loaded, anything that enters a
