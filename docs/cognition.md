@@ -188,14 +188,19 @@ that ignore `response_format` still get the prompt's JSON instruction:
 - `importance` is a number, or a string `float()` accepts (`"0.7"`), if it
   is finite and within [0, 1]. A bool, a non-number, `nan`, or a value
   outside [0, 1] (a rating on another scale, such as `7` or `"1e3"`) counts
-  as absent, so the rubric rates the range instead (#655).
+  as absent, so the rubric rates the range instead (#655). A key that is
+  present but unusable logs one WARNING naming the channel, the message-id
+  range, the rejected value (truncated) and the accepted `[0, 1]`, because an
+  operator otherwise sees the extra model call with no reason for it (#929).
+  An absent key is the normal case and logs nothing.
 
 The task then scores an importance prior through the pluggable
 `MemoryPlugin.importance_prior`, once for the whole range, passing the
 reply's `importance` as `hint` (default: cheap-model `RubricPrior`,
 which returns the hint clamped to [0, 1] with no model call, and
 otherwise asks the model, schema-constrained to `{"importance": number}`,
-0.5 on failure; `AppraisalPlugin` wraps it in `AppraisalPrior` when
+0.5 on failure, and that call carries `mode="rubric"` in its `usage_log` row so
+it is distinguishable from a pre-stamp row (#929); `AppraisalPlugin` wraps it in `AppraisalPrior` when
 appraisal is enabled, which ignores the hint where appraisal covers the
 range and passes it to the rubric fallback where it doesn't; the prior and
 the mean stage-2 valence read only
