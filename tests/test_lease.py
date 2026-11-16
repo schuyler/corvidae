@@ -516,6 +516,30 @@ async def test_r11_call_cancelled_between_grant_and_resume_gives_the_grant_back(
     await c.leave()
 
 
+async def test_r11_call_granted_before_close_but_resumed_after_is_not_sent() -> None:
+    """R11 (#990): a call granted its head just before close() but not yet
+    resumed raises the shutdown error when it resumes, instead of running its
+    body (the POST) with no lease held."""
+    env = make()
+    a_cm = env.prov.call("A", {})
+    await a_cm.__aenter__()
+    b = Probe(env, "B")
+    await spin()
+
+    # A leaves by hand, so B is granted; close() runs before B gets a turn.
+    await a_cm.__aexit__(None, None, None)
+    assert not b.entered.is_set()
+    # B would leave at once if it ever entered, so the bug fails the
+    # assertion below rather than hanging.
+    b.finish.set()
+    env.mgr.close()
+    await asyncio.gather(b.task, return_exceptions=True)
+
+    assert not b.entered.is_set(), "a call resumed after close() must not run its body"
+    assert isinstance(b.error, RuntimeError)
+    assert str(b.error) == "LLM provider main is shutting down; the call was not sent"
+
+
 async def test_r11_shutdown_releases_leases_and_fails_waiters() -> None:
     """R11: close() releases every lease and fails each waiting call with an
     error naming the provider, so nothing hangs."""

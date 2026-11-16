@@ -35,7 +35,7 @@ from llm_response_fixtures import (
 )
 from test_lease_scopes import STAGES, _Response, install_spawn_tools
 
-from corvidae.attribution import get_attribution
+from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.hooks import hookimpl
 from corvidae.metrics import MetricsPlugin, UsageLogPlugin
@@ -494,6 +494,35 @@ async def test_r13_call_that_waited_records_its_lease_wait(make_stack) -> None:
     waited = [v for n, v, t in metrics.events
               if n == "llm.lease_wait_ms" and t.get("lease_key") == stack.b.id]
     assert waited == [7000.0]
+
+
+async def test_keyless_call_counts_against_heads_under_a_synthetic_key(make_stack) -> None:
+    """#986: heads 1: a chat call made outside any lease_scope (a plugin that
+    forgot to wrap it) waits behind A's head under 'unleased:<stage>' instead
+    of reaching the server alongside A's call, and goes out once A's call ends."""
+    stack = await make_stack(1)
+    script(stack, {}, parked={"A1"})
+
+    await send(stack, stack.a, "A1")
+    a1 = await stack.session.started(lambda c: c.text == "A1", "A1")
+
+    async def keyless() -> None:
+        """A chat call attributed to a stage, with no lease key."""
+        token = set_attribution(stage="plugin_x")
+        try:
+            await stack.llm.get_client().chat([{"role": "user", "content": "K1"}])
+        finally:
+            reset_attribution(token)
+
+    task = asyncio.create_task(keyless())
+    await queued(stack, "unleased:plugin_x")
+    assert stack.session.texts() == ["A1"], "the keyless call must wait for the head"
+
+    a1.release.set()
+    k1 = await stack.session.started(lambda c: c.text == "K1", "K1")
+    assert k1.key == "unleased:plugin_x"
+    await task
+    assert stack.session.max_in_flight == 1
 
 
 async def test_r13_unbounded_provider_records_null_lease_wait(make_stack) -> None:

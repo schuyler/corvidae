@@ -196,6 +196,13 @@ def unleased_records(caplog: pytest.LogCaptureFixture, level: int | None = None)
     ]
 
 
+def loud_unleased_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """Unleased records at WARNING or above, whatever level the check logs at
+    (#986 raised it to ERROR): a keyed call site's guard asserts this is empty,
+    so the guard does not go quiet when the level changes."""
+    return [r for r in unleased_records(caplog) if r.levelno >= logging.WARNING]
+
+
 async def settle(stack: Stack) -> None:
     """Let a turn's tool tasks, their notifications and the follow-up turns finish."""
     for _ in range(4):
@@ -291,29 +298,35 @@ async def chat_in_stage(stack: Stack, stage: str) -> None:
         reset_attribution(token)
 
 
-async def test_unleased_call_warns_once_per_stage_then_debug(
+async def test_unleased_call_logs_error_once_per_stage_then_debug(
     stack: Stack, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """AC4: the first unleased call for a stage logs one WARNING naming the
-    stage and the lease_scope remedy; the second logs DEBUG; a new stage warns
-    again; every call still reaches the server."""
+    """AC4, #986: the first unleased call for a stage logs one ERROR naming the
+    stage, the synthetic key it runs under and the lease_scope remedy; the
+    second logs DEBUG; a new stage logs ERROR again; every call still reaches
+    the server (more than a warning, not a failure)."""
     caplog.set_level(logging.DEBUG, logger="corvidae.llm")
 
     await chat_in_stage(stack, "x")
     await chat_in_stage(stack, "x")
 
-    warnings = unleased_records(caplog, logging.WARNING)
+    errors = unleased_records(caplog, logging.ERROR)
     debugs = unleased_records(caplog, logging.DEBUG)
-    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
-    assert re.search(r"\bx\b", warnings[0].getMessage())
-    assert "lease_scope" in warnings[0].getMessage()
+    assert len(errors) == 1, [r.getMessage() for r in caplog.records]
+    assert re.search(r"\bx\b", errors[0].getMessage())
+    assert "unleased:x" in errors[0].getMessage()
+    # Channel and model too: the stack's call has no channel, model main-m.
+    assert "(none)" in errors[0].getMessage()
+    assert "main-m" in errors[0].getMessage()
+    assert "lease_scope" in errors[0].getMessage()
     assert len(debugs) == 1
+    assert unleased_records(caplog, logging.WARNING) == []
 
     await chat_in_stage(stack, "y")
 
-    warnings = unleased_records(caplog, logging.WARNING)
-    assert len(warnings) == 2
-    assert re.search(r"\by\b", warnings[1].getMessage())
+    errors = unleased_records(caplog, logging.ERROR)
+    assert len(errors) == 2
+    assert re.search(r"\by\b", errors[1].getMessage())
     # Unleased is not refused: all three requests were sent.
     assert len(stack.session.posts) == 3
 
@@ -334,10 +347,10 @@ async def test_embed_without_key_logs_no_unleased_record(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("key,expected", [("k", "k"), (None, None)])
-async def test_usage_row_records_lease_key(stack: Stack, key: str | None, expected: str | None) -> None:
-    """AC6: a call inside lease_scope("k") writes lease_key 'k'; a call with
-    no key writes NULL."""
+@pytest.mark.parametrize("key,expected", [("k", "k"), (None, "unleased:turn")])
+async def test_usage_row_records_lease_key(stack: Stack, key: str | None, expected: str) -> None:
+    """AC6, #986: a call inside lease_scope("k") writes lease_key 'k'; a call
+    with no key writes the synthetic key it ran under, 'unleased:<stage>'."""
     from corvidae.attribution import lease_scope
 
     if key is None:
@@ -362,10 +375,10 @@ class _MetricsRecorder:
         self.tags.append(dict(tags))
 
 
-@pytest.mark.parametrize("key,expected", [("k", "k"), (None, "")])
+@pytest.mark.parametrize("key,expected", [("k", "k"), (None, "unleased:turn")])
 async def test_metrics_events_tag_lease_key(stack: Stack, key: str | None, expected: str) -> None:
-    """AC6: every on_metrics event for the call carries tags["lease_key"]:
-    the key inside a scope, "" with none."""
+    """AC6, #986: every on_metrics event for the call carries
+    tags["lease_key"]: the key inside a scope, 'unleased:<stage>' with none."""
     from corvidae.attribution import lease_scope
 
     pm = stack.plugin.pm
@@ -469,7 +482,7 @@ async def test_main_turn_is_keyed_by_channel(stack: Stack, caplog: pytest.LogCap
     await stack.plugin._process_queue_item(user_item(stack, "hello"))
 
     assert keys_of(await usage_rows(stack.db), "turn") == [stack.channel.id]
-    assert unleased_records(caplog, logging.WARNING) == []
+    assert loud_unleased_records(caplog) == []
 
 
 async def test_fork_from_foreign_key_context_is_keyed_by_channel(
@@ -488,7 +501,7 @@ async def test_fork_from_foreign_key_context_is_keyed_by_channel(
 
     rows = await usage_rows(stack.db)
     assert rows == [("consolidation", stack.channel.id, "fork")]
-    assert unleased_records(caplog, logging.WARNING) == []
+    assert loud_unleased_records(caplog) == []
 
 
 def long_window(channel_id: str) -> ContextWindow:
@@ -517,7 +530,7 @@ async def test_compaction_fork_is_keyed_by_channel(stack: Stack, caplog: pytest.
 
     rows = await usage_rows(stack.db)
     assert rows == [("compaction", stack.channel.id, "fork")]
-    assert unleased_records(caplog, logging.WARNING) == []
+    assert loud_unleased_records(caplog) == []
 
 
 async def test_compaction_view_fallback_is_keyed_by_channel(
@@ -543,7 +556,7 @@ async def test_compaction_view_fallback_is_keyed_by_channel(
         ("compaction", stack.channel.id, "standalone"),
         ("turn", stack.channel.id, None),
     ]
-    assert unleased_records(caplog, logging.WARNING) == []
+    assert loud_unleased_records(caplog) == []
 
 
 async def install_spawn_tools(stack: Stack) -> None:
@@ -625,7 +638,7 @@ async def test_fork_tool_from_turn_is_keyed_by_channel(
 
     rows = await usage_rows(stack.db)
     assert keys_of(rows, "fork") == [stack.channel.id]
-    assert unleased_records(caplog, logging.WARNING) == []
+    assert loud_unleased_records(caplog) == []
 
 
 async def test_fork_tool_from_subagent_is_keyed_by_channel_not_subagent(
@@ -643,7 +656,7 @@ async def test_fork_tool_from_subagent_is_keyed_by_channel_not_subagent(
     rows = await usage_rows(stack.db)
     assert keys_of(rows, "fork") == [stack.channel.id]
     assert set(keys_of(rows, "subagent")) == {f"subagent:{subagent_task_id(stack)}"}
-    assert unleased_records(caplog, logging.WARNING) == []
+    assert loud_unleased_records(caplog) == []
 
 
 async def test_subagent_tool_is_keyed_by_its_task_id(
@@ -671,4 +684,4 @@ async def test_subagent_tool_is_keyed_by_its_task_id(
 
     rows = await usage_rows(stack.db)
     assert keys_of(rows, "subagent") == [f"subagent:{subagent_task_id(stack)}"]
-    assert unleased_records(caplog, logging.WARNING) == []
+    assert loud_unleased_records(caplog) == []

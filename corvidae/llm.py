@@ -24,7 +24,7 @@ from typing import Any
 
 import aiohttp
 
-from corvidae.attribution import get_attribution
+from corvidae.attribution import get_attribution, lease_scope
 from corvidae.lease import ProviderLeases
 
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -39,7 +39,7 @@ MODEL_NOT_LOADED_MARKER = "model is not loaded"
 
 logger = logging.getLogger(__name__)
 
-# Stages already warned about for an unleased chat call (#363). Module scope is
+# Stages already logged for an unleased chat call (#363, #986). Module scope is
 # process scope: clients are rebuilt on config reload and must not re-warn.
 _unleased_warned_stages: set[str] = set()
 
@@ -358,21 +358,40 @@ class LLMClient:
         if self.session is None:
             raise RuntimeError("LLMClient.start() must be called before chat()")
 
-        # A chat call with no lease key runs unleased: warn once per stage per
-        # process, then DEBUG. embed() never reaches here, so it never warns.
+        # A keyed call goes straight to the request path under its own key.
         attribution = get_attribution()
-        if not attribution.get("lease_key"):
-            stage = attribution.get("stage") or "(none)"
-            level = logging.DEBUG if stage in _unleased_warned_stages else logging.WARNING
-            _unleased_warned_stages.add(stage)
-            logger.log(
-                level,
-                "chat call for stage %s on channel %s (model %s) has no lease "
-                "key and runs unleased; open corvidae.attribution.lease_scope("
-                "<queue key>) around it (warned once per stage; later calls "
-                "log at DEBUG)",
-                stage, attribution.get("channel_id") or "(none)", self.model,
-            )
+        if attribution.get("lease_key"):
+            return await self._chat(messages, tools, extra_body)
+
+        # No lease key: a plugin forgot its lease_scope. The call is not
+        # refused (fail soft), but it runs under a synthetic per-stage key so
+        # it counts against a bounded provider's heads, and the miss is logged
+        # at ERROR once per stage per process, then DEBUG (#986). embed()
+        # never reaches here, so it never logs this.
+        stage = attribution.get("stage") or "(none)"
+        synthetic_key = f"unleased:{stage}"
+        level = logging.DEBUG if stage in _unleased_warned_stages else logging.ERROR
+        _unleased_warned_stages.add(stage)
+        logger.log(
+            level,
+            "chat call for stage %s on channel %s (model %s) has no lease key; "
+            "it runs under the synthetic key %s instead. Open "
+            "corvidae.attribution.lease_scope(<queue key>) around it (logged "
+            "once per stage at ERROR; later calls log at DEBUG)",
+            stage, attribution.get("channel_id") or "(none)", self.model,
+            synthetic_key,
+        )
+        with lease_scope(synthetic_key):
+            return await self._chat(messages, tools, extra_body)
+
+    async def _chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None,
+        extra_body: dict | None,
+    ) -> dict:
+        """The request path of ``chat``, run once the call has a lease key."""
+        attribution = get_attribution()
 
         logger.debug(
             "chat completion request",
