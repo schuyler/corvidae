@@ -447,3 +447,24 @@ async def test_a_new_message_makes_the_next_idle_firing_retry(
 
     assert len(agent.calls) == 2, agent.calls
     assert len(_skip_warnings(caplog)) == 2
+
+
+async def test_the_suppression_holds_for_every_later_firing(
+    env_with_persistence, caplog,
+):
+    """#342 option B: quiet means quiet, not one firing in two.
+
+    ``pop``ing the record suppresses exactly one firing and then retries, so a
+    quiet channel alternates skip/suppress: half the wasted forks and half the
+    repeated warnings, which is not what the ruling says and not what the title
+    says. Reading it instead holds for every firing until something changes.
+    """
+    memory, persistence, stub, channel, db, ids = env_with_persistence
+    agent = _use(memory, FakeForkAgent({"consolidation"}, error=RuntimeError("down")))
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        for _ in range(4):
+            await _idle_firing(memory, channel.id)
+
+    assert len(agent.calls) == 1, agent.calls
+    assert len(_skip_warnings(caplog)) == 1

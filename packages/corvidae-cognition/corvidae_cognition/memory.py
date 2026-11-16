@@ -2262,10 +2262,13 @@ class MemoryPlugin(CorvidaePlugin):
             if max_id <= watermark:
                 return
             # An unchanged range that already skipped: nothing has happened
-            # since, so this firing neither forks nor warns (#342, option B).
+            # since, so this firing neither forks nor warns (#342, option B) --
+            # and neither does the next one, which is why this reads rather than
+            # pops: popping suppresses one firing and then retries, so a quiet
+            # channel would alternate skip/suppress forever (#342 review).
             # A new message raises max_id and a consolidation raises the
-            # watermark; either drops the entry and the next firing retries.
-            skipped = self._idle_skips.pop(channel_id, None)
+            # watermark; either breaks the pair and the next firing retries.
+            skipped = self._idle_skips.get(channel_id)
             if skipped == (watermark, max_id):
                 return
             task = self._spawn(self._consolidate_range(channel_id, max_id, "idle"))
