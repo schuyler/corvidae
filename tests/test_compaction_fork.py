@@ -248,7 +248,7 @@ async def test_fork_miss_summarizes_from_main_view(agent):
     conv = _straddling_window()
     plugin, channel, main, background, llm = _view_rig(agent, text="view summary")
     # The view the fork would have sent, rendered before the window changes.
-    expected = build_fork_prompt(conv, 6, CompactionPlugin.DEFAULT_FORK_PROMPT, frozenset(), "system")
+    expected = build_fork_prompt(conv, CompactionPlugin.DEFAULT_FORK_PROMPT, frozenset(), "system", cut=6)
 
     assert await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
 

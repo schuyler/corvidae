@@ -330,6 +330,6 @@ def test_build_fork_prompt_accepts_a_tool_call_with_no_id() -> None:
         {"role": "assistant", "content": "", "tool_calls": [CALL_NO_ID]},
         {"role": "user", "content": "hi"},
     ])
-    prompt = build_fork_prompt(conv, None, "summarize", frozenset(), "system")
+    prompt = build_fork_prompt(conv, "summarize", frozenset(), "system")
     assert prompt[0]["role"] == "system"
     assert prompt[-1] == {"role": "user", "content": "summarize"}

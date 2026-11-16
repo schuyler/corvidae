@@ -221,7 +221,7 @@ def test_nonces_are_stable_across_renders_and_a_reload_and_differ_by_row(tmp_pat
     assert [fenced("same", i, key) in first[i]["content"] for i in (1, 2)] == [True, True]
     assert nonce(1, key) not in first[2]["content"]
     # A fork prefix renders the window's nonces.
-    assert build_fork_prompt(window(*rows, key=key), None, "go", frozenset(), "system")[:-1] == first
+    assert build_fork_prompt(window(*rows, key=key), "go", frozenset(), "system")[:-1] == first
 
 
 def test_a_lost_key_is_recreated_and_an_unreadable_one_degrades(tmp_path, caplog):

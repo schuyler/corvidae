@@ -97,6 +97,37 @@ def test_fork_prompt_is_prefix_and_pure():
     assert conv.messages == before
 
 
+def test_fork_cut_renders_call_pending_at_cut():
+    """A result landing after the reply must not turn the call into 'abandoned' (#185)."""
+    from corvidae.context import TOOL_RESULT_PENDING
+
+    conv = _straddle_window()
+    prompt = build_fork_prompt(conv, INSTRUCTION, frozenset(), "system", cut=3)
+    assert _tool_content(prompt, "c1") == TOOL_RESULT_PENDING
+
+
+def test_fork_cut_leaves_unanswered_call_abandoned():
+    """No result anywhere and not live-pending stays 'abandoned'."""
+    from corvidae.context import TOOL_RESULT_ABANDONED
+
+    conv = _straddle_window(with_result=False)
+    prompt = build_fork_prompt(conv, INSTRUCTION, frozenset(), "system", cut=3)
+    assert _tool_content(prompt, "c1") == TOOL_RESULT_ABANDONED
+
+
+def test_fork_cut_after_result_renders_the_result():
+    """A call whose result is before the cut renders that result."""
+    conv = _straddle_window()
+    prompt = build_fork_prompt(conv, INSTRUCTION, frozenset(), "system", cut=4)
+    assert _tool_content(prompt, "c1") == "late"
+
+
+@pytest.mark.parametrize("cut", [-1, 10])
+def test_fork_prompt_rejects_out_of_range_cut(cut):
+    with pytest.raises(ValueError, match="outside"):
+        build_fork_prompt(_tool_window(), INSTRUCTION, frozenset(), "system", cut=cut)
+
+
 @pytest.mark.parametrize("cut,back,forward", [
     (0, 0, 0), (2, 2, 2), (3, 2, 6), (4, 2, 6), (5, 2, 6), (6, 6, 6), (9, 9, 9),
 ])

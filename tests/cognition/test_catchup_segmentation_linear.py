@@ -477,7 +477,7 @@ async def _oracle_build_catchup_segments(
                 channel_id, window.messages[-1].get("_db_id"), inputs.max_tokens,
             )
         messages = build_fork_prompt(
-            window, None, instruction(), frozenset(), inputs.mid_role
+            window, instruction(), frozenset(), inputs.mid_role
         )
         measured = _measured_size(messages)
         if measured > inputs.max_tokens:

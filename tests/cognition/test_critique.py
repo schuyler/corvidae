@@ -942,7 +942,7 @@ class RenderingForkAgent(FakeForkAgent):
 
         if channel.conversation is not None:
             self.requests.append(build_fork_prompt(
-                channel.conversation, cut, instruction, frozenset(), "system"))
+                channel.conversation, instruction, frozenset(), "system", cut=cut))
         return await super().fork(
             channel, instruction, stage=stage, cut=cut, extra_body=extra_body)
 
@@ -1495,7 +1495,7 @@ async def _real_path_env(tmp_path, replies, past_claims):
         forks.append({
             "instruction": instruction, "cut": cut,
             "request": build_fork_prompt(
-                ch.conversation, cut, instruction, frozenset(), "system"),
+                ch.conversation, instruction, frozenset(), "system", cut=cut),
         })
         # Stage 2 (a fork too, #320) answers with the claims; critique with
         # an unsupported verdict.

@@ -36,7 +36,7 @@ async def test_turn_fork_does_not_see_a_message_appended_after_the_hook(make_env
     # One fork, cut just past the range: the late message isn't rendered.
     [call] = agent.calls
     assert call["cut"] == len(DIALOG)
-    prompt = build_fork_prompt(channel.conversation, call["cut"], "X", frozenset(), "system")
+    prompt = build_fork_prompt(channel.conversation, "X", frozenset(), "system", cut=call["cut"])
     assert all(LATE[1] not in str(m.get("content")) for m in prompt)
     # The record and the watermark stop at range_end.
     [record] = await fetch_stamped_memories(env.db)
