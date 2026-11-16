@@ -1,17 +1,20 @@
 # Core/periphery supplement: open questions, contradictions and gaps
 
 Companion to `docs/prd-core-periphery-supplement.md`. Nothing here is a
-requirement. It holds three kinds of unfinished business, kept out of
-the supplement so the supplement stays a statement of what is decided:
+requirement. It holds three kinds of business the supplement left
+unfinished, kept out of the supplement so the supplement stays a
+statement of what is required. Most of it has since been decided (see
+"Decisions" below):
 
 - **Contradictions** (§1): places where the supplement, as written,
   disagrees with the base PRD (`docs/prd.md`) without listing the
-  disagreement as an amendment in its §4. These need an owner decision
-  before a TRD is written against the supplement.
+  disagreement as an amendment in its §4. All nine are resolved.
 - **Open questions** (§2): design questions the TRD must answer,
   numbered as the supplement cites them.
 - **Gaps and ideas** (§3, §4): problems found in review, and design
-  ideas discussed while looking at them. Neither is decided. The fuller
+  ideas discussed while looking at them. The gaps were decided on
+  2026-11-16; the ideas are not decided as written, though the
+  decisions took up several of them (§4). The fuller
   drafts of the ideas are in the history of #527's branch,
   `claude/clever-darwin-4b33xi` (commits `b133a2a` through `8d8bce2`).
 
@@ -19,14 +22,25 @@ Section numbers like §3.5 refer to the supplement; references to the
 base PRD say "base".
 
 **Decisions.** The owner settled the open questions and gaps in a live
-session on 2026-11-16, except open question 12 and gap 10, which have no
-ruling yet. Each item below ends with a short statement of what was
-decided. The full record, with the reasoning and what was checked, is
-the owner-decision comment of that date on the item's design issue: #979
-(scheduling, paging and forks), #980 (periphery and escalation), #981
-(trust and provenance) and #982 (memory, goals and cognition). The
-decisions are inputs to the TRD. They are not requirements, and where
-one changes a requirement the supplement says so itself.
+session on 2026-11-16. The exceptions are open question 4, decided on
+2026-11-07; open question 12 and gap 10, which have no ruling yet; and
+gap 12, which was withdrawn. Each item below ends with a short
+statement of what was decided. The full record, with the reasoning and
+what was checked, is in the owner-decision comments of 2026-11-16 on
+the item's design issue: #979 (scheduling, paging and forks; two
+comments), #980 (periphery and escalation), #981 (trust and
+provenance) and #982 (memory, goals and cognition).
+
+The decisions are inputs to the TRD, not requirements. A requirement
+in the supplement stands as written until the supplement itself is
+edited, and three still disagree with a decision here:
+
+- §3.1.3 and §3.3.6 name VRAM, RAM and disk; questions 1 and 6 leave
+  two tiers, a slot and a saved slot file.
+- §3.6.1 lists every open goal; gap 6 shows the highest-priority
+  lines and a count of the rest once the block passes its bound.
+- §3.12's note and idea 2 below still offer a total inbound cap
+  across channels as a candidate; gap 9 keeps caps per channel.
 
 Two of them reach beyond one item. Identifiers a plugin owns follow
 `<plugin>:<component>:<uid>`, channel ids included (questions 8 and 10).
@@ -100,7 +114,9 @@ policy, a plugin holds it (question 21, gaps 3 and 4).
    requirement, §4 softens base principle 14 for this strategy and lists
    the conditional amendment to base §3.3.8. Original finding:
    open question 9 contemplates a compressed identity for peripheries;
-   base §3.3.8 says no setting replaces the identity.
+   base §3.3.8 says no setting replaces the identity. *Since
+   (2026-11-16):* open question 9 settled on the full identity, so the
+   conditional amendment was dropped from §4 and base §3.3.8 stands.
 
 9. **Scope of the inbound caps.** *Resolved:* the caps became one
    candidate under a general, all-strategies requirement to guard
@@ -117,7 +133,7 @@ policy, a plugin holds it (question 21, gaps 3 and 4).
 
    *Decided (owner, 2026-11-16):* the simple rule ships. Page a lease in
    when work arrives for its queue or the core directs attention to it;
-   page out at a call boundary, least recently directed first; never
+   page out only at a call boundary, least recently directed first; never
    evict the core's lease except on the core's direction. The tiers are
    slots and saved slot files (question 6). Which KV state survives when
    a fork and its parent share a lease is left to the TRD. Recorded on
@@ -172,8 +188,9 @@ policy, a plugin holds it (question 21, gaps 3 and 4).
    *Decided (owner, 2026-11-16):* `--cache-ram` is off, so the plugin
    controls every placement. A context in a slot is resident, a saved
    slot file is paged out, and a checkpoint is a save that keeps its
-   slot. The router-mode levers are unverified; #1009 checks them and
-   blocks neither the TRD nor the implementation. Recorded on #979.
+   slot. No lever has been exercised on the pinned build; #1009 checks
+   them, the router-mode ones in particular, and blocks neither the TRD
+   nor the implementation. Recorded on #979.
 
 7. **Channel-to-peripheral mapping.** One peripheral per channel, or can
    a peripheral serve multiple channels?
@@ -192,7 +209,8 @@ policy, a plugin holds it (question 21, gaps 3 and 4).
    `<plugin>:<component>:<uid>`. The uid is minted once at first start
    and persisted, because a channel id is a persistence key. The channel
    is registered at startup. Attaching the CLI to it is an operator-only
-   option, off by default. Recorded on #981.
+   option, off by default. The owner accepted the uid rule "for now".
+   Recorded on #981.
 
 9. **Identity files for peripheries.** Full files or compressed version?
    The full files are large; a compressed version would be cheaper but
@@ -220,8 +238,8 @@ policy, a plugin holds it (question 21, gaps 3 and 4).
     *Decided (owner, 2026-11-16):* the provisional list on #980 is the
     harness probe list, with three fixes. The core's queue gets a default
     latency bound, so a waiting escalation can be reported overdue. A
-    corrupted context is discarded and prefilled from the log, with no
-    "safe mode". A case is added for a core model that cannot be reached:
+    corrupted context's saved file is discarded and the context
+    prefills from the log, with no "safe mode". A case is added for a core model that cannot be reached:
     the periphery tells the user and the escalation stays queued.
     Recorded on #980.
 
@@ -474,6 +492,12 @@ policy, a plugin holds it (question 21, gaps 3 and 4).
     lease (supplement §3.5), so there is nothing to add to #364's test.
 
 ## 4. Ideas discussed
+
+The text below is as it was discussed, before the decisions of
+2026-11-16. Those took up idea 1 (gap 1 and question 21), the
+per-channel capacity in idea 2 but not its total cap (gap 9), idea 4
+as a recommendation without a ruling (question 12), and idea 5's rule
+(gap 2).
 
 1. **A hop count for loops** (gap 1). Each item that crosses between
    contexts carries a count one lower than the item that caused it,

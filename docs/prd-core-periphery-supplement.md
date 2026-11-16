@@ -738,8 +738,9 @@ With the goals plugin loaded:
    narrative memory, base PRD §3.7 Memory) and critique (evaluating the
    quality of responses and decisions, base PRD §3.7 Critique) MUST run
    for every context too, except that consolidation does not run for a
-   task-bound peripheral: it has no memory of its own (§3.2.5), and its
-   work is remembered through the core's consolidation of its result.
+   task-bound peripheral: it writes no memory of its own (§3.2.5, open
+   question 17), and its work is remembered through the core's
+   consolidation of its result.
 
 2. With the appraisal plugin loaded, appraisal MUST run in the core
    (§3.1.10).
@@ -1029,7 +1030,8 @@ providers are supported through the base PRD's provider-neutral profiles
 and providers (§3.6, §3.13) and get the degenerate case of §3.3.4 when they
 lack these levers. Flags and endpoints below are from the llama-server
 README (`tools/server/README.md` in ggml-org/llama.cpp) as of
-2026-11-05; the TRD should confirm them against the pinned build.
+2026-11-05, and the `--cache-ram 0`, slot selection and `id_slot` entries
+as of 2026-11-16; the TRD should confirm them against the pinned build.
 
 - **VRAM tier:** server slots (`-np, --parallel`), each holding one
   resident context. Prefix reuse within a slot is `--cache-prompt` (on by
@@ -1040,8 +1042,9 @@ README (`tools/server/README.md` in ggml-org/llama.cpp) as of
   `--cache-idle-slots` (A.2).
 - **Slot selection:** by default the server picks a slot by prompt
   similarity (`--slot-prompt-similarity`), which could put a request in
-  a slot holding another context, so the plugin names the slot on each
-  call (`id_slot`).
+  a slot holding another context. The plugin would name the slot on
+  each call (`id_slot`); whether the chat completions endpoint honours
+  it is check 4 on #1009, and nothing is decided until then.
 - **Disk tier and checkpoints:** `POST /slots/{id}?action=save` and
   `?action=restore` write and read a slot's prompt cache under
   `--slot-save-path`.
