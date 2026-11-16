@@ -53,8 +53,9 @@ In short, `corvidae redact` reaches:
   it: summary tombstoned, `redacted = 1`, removed from the index, vector
   deleted;
 - every table a plugin has registered a scrubber for. The cognition package
-  registers `exchange_log` (`past_claims` and the critique `outcomes`
-  detail; `provenance_snapshot` is dropped) and `retrieval_candidate`.
+  registers `exchange_log` (`past_claims` and the `provenance` and
+  `critique` sections of `outcomes` detail; `provenance_snapshot` is
+  dropped) and `retrieval_candidate`.
 
 Every completed run, real or `--dry-run`, ends with a notice naming what it
 does not reach and pointing here.
@@ -95,11 +96,11 @@ is the one to keep complete.
   trace to the trace that answered it, which the kernel doesn't record, and
   the alternative changes which exchange the scrubber treats as a message's
   owner. Either is a design call, so it waits.
-- **Prevention is not redaction.** #508 stops secrets before they are
-  written anywhere, at the one point a tool result passes through before it
-  enters the conversation (`transform_tool_result`). Because a secret is
-  copied verbatim or not at all, an exact-match filter there doesn't have
-  the paraphrase problem. It falls outside the hold.
+- **Prevention is not redaction.** #508 asks for secrets to be stopped
+  before they are written anywhere, by filtering what gets persisted. It
+  is open and not yet designed. Because a secret is copied verbatim or not
+  at all, an exact-match filter applied before text enters the conversation
+  wouldn't have the paraphrase problem. It falls outside the hold.
 - **Scrubbers keep working.** A plugin that copies conversation text into
   its own table should still register one ([plugin-guide.md](plugin-guide.md#registering-a-redact-scrubber));
   a scrubber narrows the gap even though it can't close it.
