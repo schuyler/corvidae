@@ -547,6 +547,8 @@ class MemoryToolsPlugin(CorvidaePlugin):
             max_tokens: int = 1000,
         ) -> str:
             """Replay raw dialog messages, either by memory_id (from a memory line's "(age, memory <id>)" or search_memory; updates access stats) or by channel with start_id and end_id (message ids from search_transcripts hits; no stat update); pass null for the arguments of the form you don't use."""
+            # Classify the call: the record form (memory_id alone) or the
+            # range form (channel, start_id and end_id together).
             forms = (
                 "recall_raw takes either memory_id alone, or channel, "
                 "start_id and end_id together"
