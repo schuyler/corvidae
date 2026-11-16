@@ -385,6 +385,92 @@ class TestRubricPrior:
         assert await prior.score([{"role": "user", "content": "x"}]) == 1.0
 
 
+class TestImportanceFallbackIsVisible:
+    """#929: neither half of the rubric fallback was visible in the logs.
+
+    An unusable ``importance`` was dropped in silence, and the rubric call it
+    caused wrote a ``usage_log`` row whose ``mode`` was NULL — which the schema
+    already means as "pre-stamp row".
+    """
+
+    async def test_an_unusable_importance_warns_with_the_range(
+        self, caplog,
+    ):
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            ids = await seed_dialog(persistence, channel, [
+                ("user", "the kestrel nests at Brannan"),
+                ("assistant", "noted"),
+            ])
+            # 7 is a rating on another scale: dropped, so the rubric rates it.
+            stub.chat_text = json.dumps({
+                "summary": "kestrel's nesting site is Brannan",
+                "importance": 7,
+            })
+            with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+                await memory._consolidate_range(channel.id, ids[-1], "idle")
+            warnings = [
+                r.getMessage() for r in caplog.records
+                if "importance is unusable" in r.getMessage()
+            ]
+            assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+            text = warnings[0]
+            assert channel.id in text
+            assert f"{ids[0]}-{ids[-1]}" in text
+            assert "7" in text
+            assert "[0, 1]" in text
+            assert "rubric" in text
+        finally:
+            await db.close()
+
+    async def test_an_absent_importance_is_silent(self, caplog):
+        """A prompt that asks for no importance is the normal case."""
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            ids = await seed_dialog(persistence, channel, [
+                ("user", "hi"), ("assistant", "hello"),
+            ])
+            with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+                await memory._consolidate_range(channel.id, ids[-1], "idle")
+            assert not [
+                r for r in caplog.records
+                if "importance is unusable" in r.getMessage()
+            ]
+        finally:
+            await db.close()
+
+    async def test_the_rubric_call_carries_its_own_mode(self):
+        """The row MetricsPlugin writes takes its mode from the attribution,
+        so the call must see ``mode="rubric"`` and the consolidation call must
+        keep its own (``fork`` or ``standalone``)."""
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            ids = await seed_dialog(persistence, channel, [
+                ("user", "the kestrel nests at Brannan"),
+                ("assistant", "noted"),
+            ])
+            stub.chat_text = json.dumps({
+                "summary": "kestrel's nesting site is Brannan",
+                "importance": 7,
+            })
+            # The env pins a mocked prior; this test needs the real rubric,
+            # because the mode is stamped around its model call.
+            memory.importance_prior = RubricPrior(lambda: stub)
+            await memory._consolidate_range(channel.id, ids[-1], "idle")
+            modes = [call["attribution"].get("mode") for call in stub.chat_calls]
+            # Two calls: the consolidation reply, then the rubric rating.
+            assert len(modes) == 2, modes
+            assert modes[0] == "standalone"
+            assert modes[1] == "rubric"
+            # The stage and channel survive: the rubric row is still a
+            # consolidation row, not a stray one.
+            rubric = stub.chat_calls[1]["attribution"]
+            assert rubric["stage"] == "consolidation"
+            assert rubric["channel_id"] == channel.id
+        finally:
+            await db.close()
+
+
 class TestResponseFormat:
     """#199: consolidation and the rubric constrain output with a schema."""
 
