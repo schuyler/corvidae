@@ -843,9 +843,29 @@ class TestQuietOrigins:
             "suppressed": {emission: True}, "quiet_origin": "webhook:github",
         }
 
-    async def test_q2_error_emission_is_not_vetoed(self):
+    async def test_q2b_error_fallback_is_withheld_from_a_quiet_turn(self):
+        """A model outage during a burst of notifications is the same flood in
+        error text (#936): the fallback is withheld and the veto recorded, so
+        the missing message ties back to the quiet origin."""
         gate, log, channel = await _gate(_QUIET, appraisal=_StubAppraisal(0.9))
-        assert await _emit(gate, channel, "error", _GITHUB) is None
+        assert await _emit(gate, channel, "error", _GITHUB) is False
+        assert log.writes[-1]["outcomes"] == {
+            "suppressed": {"error": True}, "quiet_origin": "webhook:github",
+        }
+
+    async def test_q2b_error_fallback_after_speak_up_is_sent(self):
+        gate, log, channel, tools = await _gate_with_tools(
+            _QUIET, appraisal=_StubAppraisal(0.9)
+        )
+        await _speak_up(tools, channel, trace_id="t1", reason="build is broken")
+        assert await _emit(gate, channel, "error", _GITHUB, trace_id="t1") is None
+
+    @pytest.mark.parametrize("origin", ["heartbeat", "user", "reminder"])
+    async def test_q2b_error_fallback_from_a_speaking_origin_is_sent(self, origin):
+        """Only a quiet origin loses its error fallback: every other origin,
+        including a user or reminder turn, still hears what failed."""
+        gate, _log, channel = await _gate(_QUIET, appraisal=_StubAppraisal(0.9))
+        assert await _emit(gate, channel, "error", {"origin": origin}) is None
 
     async def test_q3_speak_up_lifts_the_veto_for_that_trace(self):
         gate, log, channel, tools = await _gate_with_tools(

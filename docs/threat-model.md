@@ -1798,7 +1798,9 @@ which also makes it writable by anything else running as the daemon's user.
 
 `gate.send.quiet_origins` lists origins (for example `webhook:github`) whose
 turns send nothing to the human: the decide gate withholds their `final`,
-`progress` and `thinking` emissions whatever their salience. It exists because
+`progress`, `thinking` and `error` emissions whatever their salience (the error
+fallback too, since a model outage during such a burst is the same flood in
+error text, #936; the kernel logs the failure at ERROR regardless). It exists because
 the 2026-11-12 flood (finding 19) was the agent answering CI notifications one
 by one. While `gates` is loaded the agent also has a `speak_up(reason)`
 tool, which lifts the veto for the rest of the calling turn's trace. It is

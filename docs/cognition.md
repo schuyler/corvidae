@@ -1780,16 +1780,24 @@ nothing.
   `gate.send.allow_thinking` (both default true) are off, recorded as
   `outcomes.suppressed = {"progress": true}` or `{"thinking": true}`. Core
   never writes the outcome log; the vetoing plugin does.
-- `error` and anything else: no opinion.
+- `error`: withheld only from a quiet origin (above, #936); otherwise no
+  opinion.
+- Anything else: no opinion.
 
 **Quiet origins** (#790). `gate.send.quiet_origins` (default empty; a
 per-channel runtime tunable, #928) lists origins whose turns send nothing to the human, such as
 `webhook:github`. For such a turn the gate withholds the `final` before any
 salience check (no vector needed, `gate.send.enforce` ignored), recorded as
 `outcomes.send = {emission, origin, vetoed: true, reason: "quiet_origin",
-surfaced: false}`, and withholds `progress` and `thinking` ahead of the allow
-switches, recorded as `outcomes.suppressed = {<emission>: true}` plus
-`quiet_origin: <origin>`. `error` emissions are not affected. `user` and
+surfaced: false}`, and withholds `progress`, `thinking` and `error` ahead of the
+allow switches, recorded as `outcomes.suppressed = {<emission>: true}` plus
+`quiet_origin: <origin>`. Withholding `error` (#936) is what keeps a model
+outage during a burst of notifications from sending one failure message per
+turn; the kernel logs the exception at ERROR, with its traceback, before this
+hook runs, and records `error fallback not sent: vetoed by should_send_response`
+at INFO. Neither kernel line names the origin, so what ties the missing message
+to it is this row: `outcomes.suppressed = {"error": true}` together with
+`quiet_origin`. `user` and
 `reminder` are never quiet; listing either is ignored with a warning, and a
 value that is not a list of strings fails open with a warning naming the
 channel. The list resolves like any tunable: a channel's `set_settings`
