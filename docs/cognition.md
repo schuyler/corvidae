@@ -473,7 +473,9 @@ it a z-gated retrieval and a fallback retrieval look identical once the
 fallback's once-per-process warning has gone quiet. Rows written before the
 column read `NULL`. `eval_memory --snapshot` records the same value per query
 and counts them in `banding_paths`, so an eval run shows how many queries the
-fallback banded.
+fallback banded. A retrieval that ran before the schema existed is bucketed as
+`no_db` in `banding_paths` and writes no log row, because the insert needs the
+database.
 
 **The candidate log (#407).** `retrieval_log` says what a retrieval
 returned; `retrieval_candidate` says what it considered and what happened
