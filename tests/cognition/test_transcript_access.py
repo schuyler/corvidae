@@ -500,3 +500,33 @@ class TestOutputAndErrors:
             for r in caplog.records
         ), [r.getMessage() for r in caplog.records]
         await db.close()
+
+
+class TestSchemaRetry:
+    """search_transcripts waits out a schema still being created, as the
+    other memory tools do."""
+
+    async def test_search_transcripts_retries_while_schema_initializes(
+        self, monkeypatch,
+    ):
+        """A None schema may be a concurrent initializer; retry before failing."""
+        memory, memory_tools, db = await build_tools_env()
+        search = await _search_tool(memory_tools)
+        rid = await seed_message_log_row(db, "irc:#a", "user", "okapi retry probe")
+
+        # Report no schema twice, then hand back the real one.
+        real = memory._ensure_schema
+        calls = []
+
+        async def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                return None
+            return await real()
+
+        monkeypatch.setattr(memory, "_ensure_schema", flaky)
+        result = await search("okapi")
+
+        assert _hit(result, rid) is not None, result
+        assert len(calls) >= 3
+        await db.close()
