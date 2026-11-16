@@ -441,24 +441,20 @@ async def _oracle_build_catchup_segments(
         for own in _oracle_segment_run(run_view, own_ids, inputs, fork_prompt):
             plans.append((run_view, own, own_ids))
 
-    # 6. Each segment's rows are its own range rows, assigned by membership
-    # via a single-pass row→segment map (every non-summary range row is in
-    # exactly one segment, so O(n)). The end_id is the max id in the segment's
-    # rows. Must stay in lockstep with build_catchup_segments (R10).
-    row_to_seg = {}
-    for seg_i, (run_view, own, _) in enumerate(plans):
-        for k in own:
-            row_to_seg[run_view[k]["_db_id"]] = seg_i
-    seg_row_lists: list[list[tuple]] = [[] for _ in plans]
-    for row in range_rows:
-        seg_i = row_to_seg.get(row[0])
-        if seg_i is not None:
-            seg_row_lists[seg_i].append(row)
+    # 6. Spans: segment k ends at the last range row before segment k+1's
+    # first non-summary row; the last ends at the last range row.
+    all_ids = [row[0] for row in range_rows]
+    firsts = [min(run_view[k]["_db_id"] for k in own) for run_view, own, _ in plans]
+    ends = [
+        max(i for i in all_ids if i < nxt) for nxt in firsts[1:]
+    ] + [all_ids[-1]]
 
     # 7. One request per segment.
     segments: list[CatchupSegment] = []
-    for (run_view, own, _), seg_rows in zip(plans, seg_row_lists):
-        end_id = seg_rows[-1][0]
+    start_after = after_id
+    for (run_view, own, _), end_id in zip(plans, ends):
+        seg_rows = [r for r in range_rows if start_after < r[0] <= end_id]
+        start_after = end_id
         seg_ids = {r[0] for r in seg_rows if r[2] != "summary"}
         window = ContextWindow(channel_id)
         window.system_prompt = inputs.system_prompt
@@ -509,5 +505,4 @@ async def _oracle_build_catchup_segments(
                 channel_id, seg_rows[0][0], end_id, measured, inputs.max_tokens,
             )
         segments.append(CatchupSegment(seg_rows, end_id, messages))
-    segments.sort(key=lambda seg: seg.end_id)
     return segments
