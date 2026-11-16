@@ -1,6 +1,6 @@
 # Threat model
 
-The record of the risks and costs the PRD's decisions create (principle 9:
+This document is the record of the risks and costs the PRD's decisions create (principle 9:
 "the standing record of what that costs"), kept current whenever untrusted
 text can reach somewhere new or a tool can do something new. It derives
 from the PRD: a finding records a cost the PRD accepted, not a requirement
@@ -11,7 +11,7 @@ change belongs in the PRD.
 
 First written from a security review conducted 2026-10-22 of the tree at
 commit `cca7604`, then updated for the documentation fixes that landed
-alongside it.
+alongside that review.
 
 ## The short version
 
