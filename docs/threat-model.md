@@ -1,10 +1,17 @@
 # Threat model
 
-What can go wrong when corvidae reads text it didn't write, and what the
-code does about it. Written from a security review, conducted 2026-10-22,
-of the tree at commit `cca7604`, then updated for the documentation fixes
-that landed alongside it. It is a snapshot, not a policy: when the code
-moves, this document is wrong until someone fixes it.
+The record of the risks and costs the PRD's decisions create (principle 9:
+"the standing record of what that costs"), kept current whenever untrusted
+text can reach somewhere new or a tool can do something new. It derives
+from the PRD: a finding records a cost the PRD accepted, not a requirement
+the PRD imposes. A mitigation described here is an option the operator can
+apply, or a statement of what the tree does now — neither is a requirement
+unless the PRD states it. If a finding implies something must be built, the
+change belongs in the PRD.
+
+First written from a security review conducted 2026-10-22 of the tree at
+commit `cca7604`, then updated for the documentation fixes that landed
+alongside it.
 
 ## The short version
 
