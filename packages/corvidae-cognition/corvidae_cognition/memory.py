@@ -1618,6 +1618,8 @@ CREATE TABLE IF NOT EXISTS retrieval_candidate (
     outcome      TEXT NOT NULL,
     source       TEXT,               -- vec | fts | both (#666); NULL on rows from before it
     z            REAL,               -- band_on: relative z-score (#409); NULL when none was computed
+    vec_rank     INTEGER,            -- 1-based rank in the vec list (decayed cosine); NULL when not in the vec list (#1023)
+    fts_rank     INTEGER,            -- 1-based rank in the FTS list (bm25 order); NULL when not in the FTS list (#1023)
     PRIMARY KEY (retrieval_id, memory_id)
 ) WITHOUT ROWID
 """
@@ -3584,20 +3586,23 @@ class MemoryPlugin(CorvidaePlugin):
                             outcome = "dropped_budget"
                     rows.append((retrieval_id, c["id"], c["similarity"],
                                  c["score"], c["band"], i + 1, outcome,
-                                 c["source"], c["z"]))
+                                 c["source"], c["z"],
+                                 c.get("vec_rank"), c.get("fts_rank")))
                 # Excluded in-window records carry their would-be rank.
                 for would_be_rank, c in pool.excluded:
                     rows.append((retrieval_id, c["id"], c["similarity"],
                                  c["score"], c["band"], would_be_rank,
-                                 "excluded_in_window", c["source"], c["z"]))
+                                 "excluded_in_window", c["source"], c["z"],
+                                 c.get("vec_rank"), c.get("fts_rank")))
                 # A memory the redact CLI flagged after it was scored gets no
                 # row (#654): the flag check is part of the insert itself, so
                 # either the flag is visible here or the scrubber, which runs
                 # after the flag commits, deletes the row.
                 await db.executemany(
                     "INSERT INTO retrieval_candidate (retrieval_id, memory_id, "
-                    "similarity, score, band, rank, outcome, source, z) "
-                    "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? "
+                    "similarity, score, band, rank, outcome, source, z, "
+                    "vec_rank, fts_rank) "
+                    "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
                     "WHERE (SELECT redacted FROM memory WHERE id = ?) = 0",
                     [(*row, row[1]) for row in rows],
                 )
@@ -3830,6 +3835,16 @@ class MemoryPlugin(CorvidaePlugin):
                 # FTS_SIMILARITY_PROXY, not from the query (#705).
                 "measured": memory_id in measured,
             })
+        # Per-list ranks for the candidate log (#1023): the vec rank is the
+        # 1-based position in the decayed-cosine order; the FTS rank is the
+        # 1-based position in the bm25 order. NULL when the candidate is not
+        # in that list.
+        vec_ranked = sorted(vec_keys.items(), key=lambda x: x[1], reverse=True)
+        vec_rank_map = {mid: i + 1 for i, (mid, _) in enumerate(vec_ranked)}
+        fts_rank_map = {mid: i + 1 for i, mid in enumerate(fts_order)}
+        for c in candidates:
+            c["vec_rank"] = vec_rank_map.get(c["id"])
+            c["fts_rank"] = fts_rank_map.get(c["id"])
         # Split off the in-window rows; the rest is the ranked pool.
         pool_rows = [c for c, w in zip(candidates, in_window_flags) if not w]
         in_window_rows = [c for c, w in zip(candidates, in_window_flags) if w]
@@ -4465,6 +4480,8 @@ class MemoryPlugin(CorvidaePlugin):
         await add_column_if_missing(db, "retrieval_candidate", "source", "TEXT")
         # #409: the relative gate's z-score; old rows read NULL.
         await add_column_if_missing(db, "retrieval_candidate", "z", "REAL")
+        await add_column_if_missing(db, "retrieval_candidate", "vec_rank", "INTEGER")
+        await add_column_if_missing(db, "retrieval_candidate", "fts_rank", "INTEGER")
         await db.execute(RETRIEVAL_CANDIDATE_INDEX_DDL)
         # Phase 1b: message_fts and retention_meta
         await db.execute(MESSAGE_FTS_DDL)
