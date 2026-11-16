@@ -307,7 +307,8 @@ violates one is a bug even if its tests pass.
     escalation summary (§3.4.3), or compose an instruction with full
     context.
 
-13. With the memory plugin loaded, the framework MUST give the core
+13. With the memory and funnel plugins loaded, the framework MUST give
+    the core
     the memories that channel-bound peripherals have consolidated since
     the last it was given: admitted at the tail of its window before a
     model call it was going to make anyway, through the funnel as any

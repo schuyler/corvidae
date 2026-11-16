@@ -1083,7 +1083,11 @@ of a turn after an unreachable backend (`corvidae/agent.py`,
   the next call. Each
   dict has what `MemoryPlugin.recent` returns today (`id`, `summary`,
   `channel_id`, `age_seconds`) and one more, `oldest_age_seconds`: the
-  age of the first message of the record's range. `age_seconds` is
+  age of the first message the record's own consolidation covered.
+  Memory stores that time with the record when it is written, because
+  a near-duplicate merge widens the stored range back to the older
+  record's start (`memory.py`, `_insert_record`) and would make a new
+  exchange look as old as the one it resembles. `age_seconds` is
   counted from the last (`memory.py`, `source_timestamp`), and §3.7.4's
   lag is counted from the oldest.
 - **Admitting.** The memories go in through the funnel, as base §3.7
@@ -1129,7 +1133,8 @@ of a turn after an unreachable backend (`corvidae/agent.py`,
 
 **What the lag is made of.** At each model call on `core:main:<uid>`
 that the hook precedes, the core has been offered every peripheral
-memory indexed before that call, less what the budget left out. A
+memory indexed before that call, less what the budget or the page of
+20 left out. A
 peripheral message's consolidation is due `consolidate_max_age` after
 the message was persisted. These add to that:
 
@@ -1143,8 +1148,8 @@ the message was persisted. These add to that:
 - a blocking fork, during which `core:main:<uid>` makes no call, by
   `fork.blocking_wait` (TRD §7.3). The fork itself reaches the memories
   by retrieval (TRD §7.7);
-- a backlog over the budget, by the calls it takes to drain, or over a
-  window cap, until a compaction makes room.
+- a backlog over the budget or the page of 20, by the calls it takes
+  to drain, or over a window cap, until a compaction makes room.
 
 **What the rows cost.** A CONTEXT row is never summarised, and it
 leaves the window when a compaction's cut passes it (`docs/design.md`).
@@ -1255,9 +1260,9 @@ limits:
   notice_interval: 300
   max_waiting: 200
   max_hops: 4
-funnel:
-  budgets:
-    digest: null               # tokens of peripheral memories per core call; unset = funnel.default_budget
+# funnel:
+#   budgets:
+#     digest: 512              # tokens of peripheral memories per core call; absent = funnel.default_budget
 goals:
   block_share: 0.05            # share of the core's max_context_tokens
 memory:
@@ -1393,6 +1398,9 @@ means an existing base mechanism meets it and nothing is built.
   per period writes one memory per message. Whether such a range
   should be held for the next is not decided; the measured lag and
   the memories written are the evidence.
+- **Phase 7 is deferred with phase 6** (TRD §8). The owner named
+  phase 6; phase 7 needs it.
+- **`consolidate_max_age` defaults to 300 s**, unmeasured.
 - **The digest's default budget is small.** At `funnel.default_budget`
   (512 tokens) and memory's entry target (256), one or two memories go
   in per core call. `funnel.budgets.digest` is unmeasured like the

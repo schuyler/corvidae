@@ -658,10 +658,11 @@ K1 and K7 follow A7 and C3.
 the live session that merged the draft.
 
 - **D1. The slot manager is deferred.** TRD phase 6 is not on the path
-  for now, and phase 7, which needs it, waits with it: "the current arrangement with llama CPP and its
+  for now: "the current arrangement with llama CPP and its
   cache ram setting will handle workloads adequately for now. The main
   piece is having a central dispatcher that can maintain a common
-  awareness between different channels."
+  awareness between different channels." The owner named phase 6;
+  phase 7 needs it and waits with it, which is the agent's inference.
 - **D2. Bounded awareness.** The core learns what peripherals handled
   themselves through their memories: "Frequent and relatively cheap
   consolidations on the periphery, so that what the core sees is
