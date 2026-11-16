@@ -354,7 +354,8 @@ violates one is a bug even if its tests pass.
    as the core. Task-bound peripherals are the exception (§3.2.9).
 
    *Intent (measured):* a channel-bound peripheral presents as the same
-   agent as the core. A peripheral gets the identity in full (open
+   agent as the core. A channel-bound peripheral gets the identity in
+   full (open
    question 9, decided), and how well it works is measured by tone
    continuity (§3.8.2).
 
@@ -580,8 +581,9 @@ violates one is a bug even if its tests pass.
    stamp that level itself, never from anything the model wrote. Where
    the framework cannot tell which content an instruction was written
    from, it MUST use the lowest trust in the core's window since its
-   last compaction. How the framework learns what an instruction answers
-   is a design decision (`docs/core-periphery-open-questions.md`, gap 2).
+   last compaction. The framework takes nothing the model cites as
+   telling it, so in practice that fallback is the rule
+   (`docs/core-periphery-open-questions.md`, gap 2).
 
    *Rationale:* Item 6 frames an escalation as data, but an attacker
    who waits one turn would otherwise reach a periphery through an
@@ -734,7 +736,7 @@ With the goals plugin loaded:
    (compaction point) and MUST be **byte-stable between boundaries**. A
    goal created, changed or retired between boundaries MUST be appended
    at the tail as a CONTEXT entry that supersedes that goal's line in
-   the block (base PRD §3.7 Goals), and the next rebuild MUST fold those
+   the block, where the block shows one (base PRD §3.7 Goals), and the next rebuild MUST fold those
    entries into the block.
 
    *Rationale:* The tail entries mean the core never acts on a stale
@@ -761,7 +763,7 @@ With the goals plugin loaded:
    narrative memory, base PRD §3.7 Memory) and critique (evaluating the
    quality of responses and decisions, base PRD §3.7 Critique) MUST run
    for every context too, except that consolidation does not run for a
-   task-bound peripheral: it writes no memory of its own (§3.2.5, open
+   task-bound peripheral: it writes no memory of its own (§3.2.9, open
    question 17), and its work is remembered through the core's
    consolidation of its result.
 
@@ -900,14 +902,36 @@ With the goals plugin loaded:
    accepted work (base PRD §3.4.8) keeps its promise that nothing
    accepted is lost. Inbound caps are per channel only: a total across
    channels could fill with held messages and lock every sender out
-   (gap 9). Other candidates (a bound on loops between the core and
-   peripherals, a per-response tool-call cap) are in
+   (gap 9). Loops between contexts are bounded by item 2. A
+   per-response tool-call cap remains a candidate, in
    `docs/core-periphery-open-questions.md`.
 
    *Rationale:* Resource exhaustion doesn't depend on topology, so this
    holds under every strategy. Stating the outcome rather than a set of
    caps leaves the TRD to choose limits that fit together, instead of
    accumulating mechanisms one finding at a time.
+
+2. **(All strategies.)** The kernel MUST give plugins a seam at which
+   internal work that is about to start (a task, a fork, an
+   instruction, an escalation) is offered for a verdict, as the
+   inbound gate and the output gate already offer messages, and MUST
+   let plugins read how much accepted work is waiting. The kernel
+   supplies the seam; a plugin gives the verdict. Work refused there
+   MUST come back to whatever tried to start it as a result naming the
+   limit and the remedy, and the refusal MUST be logged at warning. The
+   result of work already started MUST NOT be refused there (§3.10.1).
+   Under the core/periphery strategy, each item that crosses between
+   contexts MUST carry a hop count stored with the item, and the
+   framework MUST suppress a crossing at zero and tell the user so.
+
+   *Rationale:* A ceiling on waiting work catches producers that
+   outrun consumers, and a hop count catches a steady loop that never
+   builds a backlog; each misses what the other catches. Refusing at
+   the start of work, never at the arrival of a result, keeps the
+   promise that no work disappears silently. The base PRD has no such
+   seam today; it is stated here, where nothing is measured until the
+   TRD is accepted, and the TRD carries it into the base PRD (open
+   question 21, gap 1).
 
 ## 4. What carries over
 

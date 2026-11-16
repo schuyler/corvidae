@@ -13,7 +13,7 @@ statement of what is required. Most of it has since been decided (see
   numbered as the supplement cites them.
 - **Gaps and ideas** (§3, §4): problems found in review, and design
   ideas discussed while looking at them. The gaps were decided on
-  2026-11-16, except gap 10 (no ruling) and gap 12 (withdrawn); the
+  2026-11-16, except gap 12 (withdrawn); the
   ideas are not decided as written, though the decisions took up
   several of them (§4). The fuller
   drafts of the ideas are in the history of #527's branch,
@@ -24,8 +24,9 @@ base PRD say "base".
 
 **Decisions.** The owner settled the open questions and gaps in a live
 session on 2026-11-16. The exceptions are open question 4, decided on
-2026-11-07; open question 12 and gap 10, which have no ruling yet; and
-gap 12, which was withdrawn. Each open question and gap below ends
+2026-11-07; open question 12 and gap 10, on which the owner had no
+opinion and directed the agent to apply its own judgment; and gap 12,
+which was withdrawn. Each open question and gap below ends
 with a short statement of its outcome. For the items decided that
 day, the full record, with the reasoning and what was checked, is in
 the owner-decision comments of 2026-11-16 on the item's design issue: #979 (scheduling, paging and forks; two
@@ -59,6 +60,8 @@ decision here:
 - §4 listed a conditional amendment to base §3.3.8 for a compressed
   identity; it is removed, the full identity having been chosen
   (question 9).
+- §3.12 had no requirement on internal work; item 2 now states the
+  admission seam and the hop count (question 21, gap 1).
 - §3.12's implementation note (explanatory) offered a total inbound
   cap across channels; it now says caps are per channel (gap 9). Idea
   2 below still lists the total cap, as it was discussed.
@@ -188,8 +191,8 @@ policy, a plugin holds it (question 21, gaps 3 and 4).
    the existing mechanism (`docs/configuration.md`, "Prompt key
    format"), with the escalation criteria as a key of their own. The
    supplement adds two things to that mechanism: a revision history, and
-   a rewrite that applies at the next compaction boundary without a
-   restart. The wording stays out of the TRD. Recorded on #980.
+   a rewrite that applies at a compaction boundary without a restart
+   (gap 7 adds the critique condition). The wording stays out of the TRD. Recorded on #980.
 
 4. **Tone continuity test.** Empirical comparison of 4B and 27B outputs
    on the same telegraphic instructions. If the 4B's output is clearly
@@ -277,10 +280,13 @@ policy, a plugin holds it (question 21, gaps 3 and 4).
     context? Complementary to the source-channel trust boundary.
     Deferred to post-architecture-redesign.
 
-    *No ruling (2026-11-16).* The recommendation on #981 stands until the
-    owner rules: cryptographic provenance stays deferred (#507), a
-    notification's origin is set by plugin code and never by a tool
-    argument, and #814 is a prerequisite for the strategy.
+    *Decided (2026-11-16, by the agent's judgment at the owner's direction):*
+    cryptographic provenance stays deferred (#507). Inside one process,
+    a notification's origin, in both `source` and
+    `annotations["origin"]`, is set by plugin code and never taken from
+    a tool argument. Work a tool creates on the model's behalf gets an
+    origin that says so, and that origin is never exempt from critique.
+    #814 is a prerequisite for the strategy. Recorded on #981.
 
 13. **Editor sessions and the core.** Should an editor session reach the
     daemon's core as a peripheral? That needs communication between
@@ -503,7 +509,8 @@ policy, a plugin holds it (question 21, gaps 3 and 4).
     Critique's exemption by origin is meant to be "unbypassable by tool
     use" (base §3.7 Critique 3).
 
-    *No ruling (2026-11-16).* See open question 12.
+    *Decided (2026-11-16, by the agent's judgment at the owner's direction):*
+    as open question 12. Recorded on #981.
 
 11. **Requirements on model-written content.** Some requirements bind
     what a model writes ("same values", an escalation "with its
