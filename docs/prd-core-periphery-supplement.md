@@ -174,9 +174,10 @@ violates one is a bug even if its tests pass.
     be delivered to that same context.
 
     *Rationale:* When the core receives an idle notification, it reads
-    its goals and decides what needs attention. There is no separate
-    purpose-generating mechanism; the goals *are* the purpose, and they
-    are already in the window. This is base PRD principle 13 (the agent
+    its goals and decides what needs attention. The notification carries
+    an idle prompt, which the operator can change (open question 20),
+    but no separate context generates purpose: the goals the prompt
+    points at are already in the window. This is base PRD principle 13 (the agent
     lives between messages) realized directly: the context that
     receives the idle event is the same context that holds the goals.
 
@@ -345,9 +346,9 @@ violates one is a bug even if its tests pass.
    as the core. Task-bound peripherals are the exception (§3.2.9).
 
    *Intent (measured):* a channel-bound peripheral presents as the same
-   agent as the core. How the identity is rendered for a peripheral, in
-   full or compressed, is open question 9, and how well it works is
-   measured by tone continuity (§3.8.2).
+   agent as the core. A peripheral gets the identity in full (open
+   question 9, decided), and how well it works is measured by tone
+   continuity (§3.8.2).
 
    *Note:* §4 softens base principle 14 for this strategy: the
    framework gives every context the one identity, and where contexts
@@ -701,7 +702,7 @@ respond to an escalation.
 
 With the goals plugin loaded:
 
-1. The goal block MUST list every open commitment, compactly enough to
+1. The goal block MUST list every open goal, compactly enough to
    stay within the bound of item 5.
 
 2. The goal block MUST be **pinned**: compaction MUST NOT touch it.
@@ -717,7 +718,9 @@ With the goals plugin loaded:
    goal list without breaking the cached prefix.
 
 4. *(Explanatory.)* The goal block is the core's answer to "what should
-   I be doing?" during idle. It is the real thing, not a proxy.
+   I be doing?" during idle. It is the real thing, not a proxy. What the
+   core is asked to do with it is the idle prompt's business (§3.1.2,
+   open question 20).
 
 5. The goal block MUST stay within a bounded share of the core's window,
    set in operator config with a default. The framework MUST log a
@@ -734,7 +737,9 @@ With the goals plugin loaded:
    loaded, consolidation (converting raw conversation logs into
    narrative memory, base PRD §3.7 Memory) and critique (evaluating the
    quality of responses and decisions, base PRD §3.7 Critique) MUST run
-   for every context too.
+   for every context too, except that consolidation does not run for a
+   task-bound peripheral: it has no memory of its own (§3.2.5), and its
+   work is remembered through the core's consolidation of its result.
 
 2. With the appraisal plugin loaded, appraisal MUST run in the core
    (§3.1.10).
@@ -891,8 +896,6 @@ supplement amends them:
   lose the heartbeat's critique exemption, amending base §3.7
   Heartbeat and §3.7 Critique 3 (§3.1.2);
 - goals sit in a pinned block with tail updates (base §3.7 Goals; §3.6);
-- if open question 9 settles on a compressed identity for peripheries,
-  that amends base §3.3.8's identity heading every prompt (§3.2.5);
 - the core MAY give a task-bound peripheral fewer tools than it holds,
   amending base §3.5.7's full inherited set (§3.2.8);
 - base §3.8 governs one-shot forks; long-lived forks follow §3.5;
@@ -985,16 +988,23 @@ models; that hazard is accepted until it shows up as a problem.
 
 ### A.2 KV cache tier design
 
-When context memory can be managed (local LLM deployments), a
-three-tier hierarchy is the working model:
-- **VRAM (hot):** Active contexts. Fast access, limited capacity.
-- **RAM (warm):** Recently active contexts. Slower access, larger
+When context memory can be managed (local LLM deployments), the working
+model is two tiers, both under the slot-management plugin's control
+(open question 6, decided):
+- **Slot (hot):** a context resident in VRAM. Fast access, limited
   capacity.
-- **Disk (cold):** Inactive contexts. Slowest access, largest capacity.
+- **Saved slot file (cold):** a context paged out to a file the plugin
+  wrote. Slower access, largest capacity.
 
-The slot-management plugin carries out four operations: page-in (RAM/disk →
-VRAM), page-out (VRAM → RAM/disk), checkpoint (core context → RAM/disk for
-rollback/resumption), and reheat (disk → VRAM on new notification).
+The model server's own RAM prompt cache is turned off (A.4): the plugin
+cannot see what it holds, so it could not tell whether a paged-out
+context would return from RAM or need a restore. An earlier draft of
+this appendix had it as a middle tier.
+
+The slot-management plugin carries out three operations: page-in (file →
+slot, when work arrives for a context or the core directs attention to
+it), page-out (slot → file), and checkpoint (a save that keeps its slot,
+for rollback or resumption).
 
 A tail-invalidation benchmark showed that any in-place mutation triggers
 full re-prefill at ~26x cost, which constrains the swap policy.
@@ -1024,8 +1034,14 @@ README (`tools/server/README.md` in ggml-org/llama.cpp) as of
 - **VRAM tier:** server slots (`-np, --parallel`), each holding one
   resident context. Prefix reuse within a slot is `--cache-prompt` (on by
   default) and `--cache-reuse` (KV shifting).
-- **RAM tier:** the prompt cache, `--cache-ram` (MiB; default 8192), with
-  `--cache-idle-slots` saving idle slots into it on a new task.
+- **RAM prompt cache, turned off:** `--cache-ram` (MiB; default 8192;
+  0 disables it), with `--cache-idle-slots` saving idle slots into it on
+  a new task. The deployment sets `--cache-ram 0`, which also disables
+  `--cache-idle-slots` (A.2).
+- **Slot selection:** by default the server picks a slot by prompt
+  similarity (`--slot-prompt-similarity`), which could put a request in
+  a slot holding another context, so the plugin names the slot on each
+  call (`id_slot`).
 - **Disk tier and checkpoints:** `POST /slots/{id}?action=save` and
   `?action=restore` write and read a slot's prompt cache under
   `--slot-save-path`.
@@ -1039,12 +1055,20 @@ README (`tools/server/README.md` in ggml-org/llama.cpp) as of
 - **Suspend and resume.** Because slots can be saved to disk, an agent
   can be suspended, or suspend itself and exit, and later be restored
   with its contexts warm instead of re-prefilled. This should be the
-  default, except when the agent starts in safe mode, which rebuilds
-  every context from the log and prefills it fresh. The log stays the
-  source of truth either way (base PRD §3.4.8); a restored cache only
-  saves the prefill. A saved cache is valid only for the model, build
-  and prompt it was saved with; the TRD should confirm whether
-  llama-server refuses a mismatched restore.
+  default: on a graceful shutdown the plugin saves every resident
+  context, and restores each when it is next granted a slot. The log
+  stays the source of truth either way (base PRD §3.4.8); a restored
+  cache only saves the prefill. A saved cache is valid only for the
+  model, build and prompt it was saved with, so the plugin stamps each
+  file and restores only on a match; a file that does not match is
+  discarded with a warning and its context prefilled from the log.
+  There is no separate safe mode (open question 15, decided). What
+  llama-server itself does with a mismatched restore is one of the
+  checks on #1009.
+
+None of these levers has been exercised on the pinned build. #1009 lists
+the checks, the router-mode ones in particular, and blocks neither the
+TRD nor the implementation.
 
 ### A.5 Goal block size
 
