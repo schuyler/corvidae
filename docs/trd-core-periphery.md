@@ -590,7 +590,7 @@ A fork's calls run under `lease_scope(key)`, where `key` is:
 
 - the key its parent is using, until the fork's first compaction or
   until a `lease.yield` or stop removes the shared lease while the fork
-  has a call to send;
+  has a call to send, or until the fork itself is held (TRD §8.3);
 - its own channel id from then on.
 
 `cp_forks.own_lease` records the switch, so a restart does not undo it.
@@ -733,7 +733,9 @@ context is in the slot or in a file `slots` wrote.
 
 Work arriving on the core's own queue while the core is paged out or
 stopped by its own direction resumes it: `slots` watches `on_notify`
-for the core's channel and calls `LeaseManager.resume`
+and `on_message_admitted` for the core's channel, the second because an
+attached CLI's input arrives as a message (TRD §5.1), and calls
+`LeaseManager.resume`
 (`corvidae/lease.py`), with no core turn deciding it (§3.3.6). While
 `slots` is not loaded nothing would bring the core back, so `hold_queue`
 refuses the core's own channel (TRD §8.3).
@@ -764,6 +766,11 @@ no queue can be held there`, and the turn continues (§3.3.8). When no
 provider declares heads, no `cp_stops` row is stored. The other four,
 on a provider `slots` does not manage, return `No effect: provider
 "<name>" has no slot control` in the same way.
+
+The key a hold stops is the channel's own id. A fork still on its
+parent's lease is moved to its own first (TRD §7.2), so holding a fork
+never stops its parent. The core's own channel, here and in TRD §8.2,
+is `core:main:<uid>`, whichever channel `core_channel()` returns.
 
 While `slots` is not loaded, `hold_queue` on the core's own channel is
 refused with `Not held: nothing would resume the core's own queue —
@@ -1055,7 +1062,7 @@ order.
 | 2 | `core`: channel, uid, idle beat, `cp_work`, observables; goal block | phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
 | 3 | K2; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains, the `notify_other_channel` change of TRD §9.3 | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window |
 | 4 | K7; tail import; criteria rewrites | #235, phase 3 | a subagent given `tools=["read_file"]` has no other tool in its request; a rewrite is absent from the peripheral's prompt before its next compaction and present after; a frozen channel refuses |
-| 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `hold_queue` and `resume_queue` in `core` (TRD §8.3, on the kernel's stop and resume), the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel; `hold_queue` on the core's own channel returns the refusal text and stores no `cp_stops` row |
+| 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `hold_queue` and `resume_queue` in `core` (TRD §8.3, on the kernel's stop and resume), the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel; `hold_queue` on the core's own channel returns the refusal text and stores no `cp_stops` row; after `hold_queue` on a fork that shared its parent's lease, the parent's next call is granted |
 | 6 | `slots` on one head: order, paging, stamped saves, shutdown save, the other four tools of TRD §8.3; consolidation's yield | #366, #365, phase 5 | after a page-out and page-in the next call's `cache_n` is within 5% of the prompt length; a file with a changed stamp is deleted with a warning and the call prefills; `pin_context` on a hosted provider returns the no-effect text |
 | 7 | Two models on separate providers, more heads, router mode: not designed | #1009's report, phase 6 | alternating a core and a periphery call loads neither model twice (§3.8.5) |
 | 8 | Trust stamping | #138 | an instruction written after an untrusted escalation carries the untrusted level |
@@ -1152,7 +1159,9 @@ means an existing base mechanism meets it and nothing is built.
   kernel has no stop there, and §3.3.7's "keep a paused channel
   stopped" is then met only as §3.3.8's no-effect report. K4's queue
   hold could serve instead, if the owner wants pausing to hold on
-  hosted providers.
+  hosted providers. Where only some providers declare heads, a channel
+  served by one that does not is recorded as stopped while nothing
+  holds it.
 - **TRD decision C4 calls the revision table append-only**, and TRD
   §6.5 updates a row's `state` in place. Either the wording or the
   design gives way.
