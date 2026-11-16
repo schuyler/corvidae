@@ -25,7 +25,7 @@ from corvidae.commands.redact import (
     redact_memory_id,
     redact_messages,
 )
-from corvidae_cognition.outcome_log import EXCHANGE_LOG_DDL
+from corvidae_cognition.outcome_log import EXCHANGE_LOG_DDL, redact_exchange_log
 
 from cognition.test_redact_cascade import insert_memory, insert_message, make_full_db
 
@@ -263,32 +263,23 @@ class TestFormsAndReporting:
         assert result.exit_code == 0, result.output
         assert "1 exchange_log rows" in result.output, result.output
 
-    def test_cli_scrub_is_committed(self, tmp_path):
-        """The CLI closes its connection after the scrubbers run, so the
-        scrub must be committed: a fresh connection sees the tombstones."""
+    async def test_scrub_is_committed(self, tmp_path):
+        """The scrubber commits its own writes: the CLI closes the connection
+        after the scrubbers run, and a later scrubber's commit can't be relied
+        on to persist them. Called directly, so no other scrubber commits."""
         path = str(tmp_path / "s.db")
 
-        # Build the dialog DB on disk and note the id to redact.
-        async def build() -> int:
-            db, ids = await _db_with_dialog(path)
+        # Scrub u1's exchange on a file-backed DB, then close without committing.
+        db, ids = await _db_with_dialog(path)
+        await redact_exchange_log(db, "irc:#a", [ids["u1"]], False, "[redacted]")
+        await db.close()
+
+        # A fresh connection sees t1's claims tombstoned.
+        db = await make_full_db(path)
+        try:
+            _assert_scrubbed(await _row(db, "t1"))
+        finally:
             await db.close()
-            return ids["u1"]
-
-        u1 = asyncio.run(build())
-        result = CliRunner().invoke(
-            redact_command, ["--db", path, "message", str(u1)]
-        )
-        assert result.exit_code == 0, result.output
-
-        # Reopen the file and read t1's claims back.
-        async def read_back() -> dict:
-            db = await make_full_db(path)
-            try:
-                return await _row(db, "t1")
-            finally:
-                await db.close()
-
-        _assert_scrubbed(asyncio.run(read_back()))
 
     def test_cli_range_form_reports_exchange_log_rows(self, tmp_path):
         path = str(tmp_path / "s.db")
