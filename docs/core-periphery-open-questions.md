@@ -42,7 +42,8 @@ decision here:
   paged out to saved state (questions 1 and 6).
 - §3.6.1 listed every open goal and §3.6.5 warned when the block
   passed its bound; the block now leaves out what does not fit, says
-  how many, and the warning fires then (gap 6).
+  how many, and the warning fires then. Each line also shows the goal's
+  state and how long it has been in it (gap 6).
 - §3.5.6 forbade the periphery to respond while a fork works its
   channel; it now describes pass-through and lets a turn already in
   flight finish (gap 5).
@@ -53,18 +54,23 @@ decision here:
   ends it past a bound (gap 3).
 - §3.1.1 left a user-facing transport for the core open; it now allows
   the CLI as an operator option, off by default (question 8).
+- §3.7.1, §3.7.3 and §3.1.10 had consolidation run for every context;
+  it no longer runs for a task-bound peripheral (question 17).
+- §4 listed a conditional amendment to base §3.3.8 for a compressed
+  identity; it is removed, the full identity having been chosen
+  (question 9).
 - §3.12's implementation note (explanatory) offered a total inbound
   cap across channels; it now says caps are per channel (gap 9). Idea
   2 below still lists the total cap, as it was discussed.
 
 That list is what review noticed, not an audit: the TRD should still
-check each decision against the supplement. Decisions that add a
-mechanism without contradicting a requirement (the admission hook,
-the hop count, stamped saves, the escalation envelope) are not
-written into the supplement; they are the TRD's to specify.
+check each decision against the supplement.
 
 Two decisions reach beyond one item. Identifiers a plugin owns follow
 `<plugin>:<component>:<uid>`, channel ids included (questions 8 and 10).
+For a channel that is the base PRD's `transport:scope` id with nothing
+to reconcile: the strategy's transport plugin is named `core`, and
+`<component>:<uid>` is its scope (owner, 2026-11-16).
 And the kernel supplies seams, not verdicts: where an answer needs a
 policy, a plugin holds it (question 21, gaps 3 and 4).
 

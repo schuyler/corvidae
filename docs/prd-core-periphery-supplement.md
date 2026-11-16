@@ -206,8 +206,8 @@ violates one is a bug even if its tests pass.
    MUST deliver escalations from peripherals, idle events, task
    completions, and scheduler firings. The operator MAY also attach the
    CLI to the core's channel; the framework MUST default to leaving it
-   unattached, and no other user-facing transport reaches the core
-   (open question 8).
+   unattached, and MUST NOT let any other user-facing transport reach
+   the core (open question 8).
 
    *Rationale:* The core runs a single context that favours depth over
    latency. It performs deliberative reasoning, multi-step tasks, goal
@@ -277,7 +277,7 @@ violates one is a bug even if its tests pass.
 10. With the appraisal plugin loaded, appraisal (base PRD §3.7 Appraisal)
     MUST run in the core, over patterns across channels and over time,
     in addition to the consolidation, compaction, and critique that run
-    for every context (§3.7).
+    under §3.7.
 
 11. The framework MUST let the core read the system's **channel
     observables** whenever it asks, without waking it to show them. The
@@ -668,8 +668,8 @@ respond to an escalation.
    results back. While that fork is active the channel is
    **pass-through**: the framework MUST keep recording what arrives on
    it in the channel's peripheral context, MUST deliver a copy to the
-   fork framed as data from that channel (§3.1.12), and the channel's
-   periphery MUST NOT start a response on it. A periphery turn already
+   fork framed as data from that channel (§3.1.12), and MUST NOT start
+   a periphery response on it. A periphery turn already
    in flight when the fork takes the channel finishes and sends. What
    the fork says on the channel MUST go out as exact wording (§3.1.9),
    so it appears in the peripheral's context (principle 21).
@@ -686,8 +686,8 @@ respond to an escalation.
    either way for a long-lived fork:
    - **Blocking.** The core's next turn waits for the join. The
      framework MUST also let the core route its notifications to a
-     blocking fork until the join, so the main context takes none until
-     then; routing implies blocking, but blocking does not imply
+     blocking fork until the join or the bound below, so the main
+     context takes none until then; routing implies blocking, but blocking does not imply
      routing. Routing does not stop the lease the fork shares with its
      parent (§3.3.7). Where the
      core routes them, the join's report MUST cover the notifications
