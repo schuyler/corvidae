@@ -79,8 +79,9 @@ does not reach and pointing here.
 - Goal text (`goals` table).
 - Any plugin table with no registered scrubber.
 
-[threat-model.md](threat-model.md) carries the same list from the security
-side (finding 10 for goals; "Smaller things" for the rest).
+[threat-model.md](threat-model.md) covers the same ground from the security
+side (finding 10 for goals; "Smaller things" for the rest). This page's list
+is the one to keep complete.
 
 ## What may change during the hold
 
@@ -90,8 +91,10 @@ side (finding 10 for goals; "Smaller things" for the rest).
   gets a review loop.
 - **Redesigns wait for the overhaul.** Anything that needs a new kernel
   contract, a new hook, or a new way of finding derived copies waits. #423
-  is one: fixing it needs a link from an absorbed message's trace to the
-  trace that answered it, which the kernel doesn't record.
+  is one: the fix proposed in #416 needs a link from an absorbed message's
+  trace to the trace that answered it, which the kernel doesn't record, and
+  the alternative changes which exchange the scrubber treats as a message's
+  owner. Either is a design call, so it waits.
 - **Prevention is not redaction.** #508 stops secrets before they are
   written anywhere, at the one point a tool result passes through before it
   enters the conversation (`transform_tool_result`). Because a secret is

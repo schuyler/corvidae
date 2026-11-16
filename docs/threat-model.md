@@ -1563,7 +1563,10 @@ line is plain text in the result, with no kernel header at all.
   already have admitted its summary into that turn's prompt and bumped its
   access count; the window copy ages out with compaction like any CONTEXT. For
   `exchange_log`, the owning exchange's claims are tombstoned with their
-  counts kept. What `redact` still doesn't reach: exchanges whose
+  counts kept (but not when the message was coalesced into a burst
+  answered by a later message's turn, #423, and proactivity objection
+  detail in `outcomes` is left in place, #1003). What `redact` still
+  doesn't reach: exchanges whose
   `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
   taken out of `sessions.db` (a calibration export, a backup), copies on
   other channels (a read of the redacted message, a note or send that
