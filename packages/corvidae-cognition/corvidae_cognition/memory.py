@@ -201,7 +201,12 @@ CANDIDATES_CHOICES = ("hybrid", "vector")
 # it flattens the head so one list's #1 can't outweigh agreement.
 # shortcut: a constant with equal list weights; make it (or per-list
 # weights) a memory.retrieval key if the labelled set shows a need.
-RRF_C = 60
+# 20 (was 60): the 60 flattens the head too much — rank 1 (0.0164) and
+# rank 50 (0.0091) are only 1.8x apart, so topic-word FTS matches rank
+# near true cosine hits. 20 widens the dynamic range to 3.3x
+# (rank 1 = 0.0476, rank 50 = 0.0143) while still preventing a single
+# list's #1 from dominating (#181).
+RRF_C = 20
 # Common words the hybrid side's FTS query leaves out (#666), so a chatty
 # message can't buy fusion rank on "what" or "the". Matched lowercased.
 # shortcut: a small English list; a deployment conversing in another
