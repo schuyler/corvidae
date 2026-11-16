@@ -986,8 +986,12 @@ the `restart` extra; see [Restart plugin](#restart-plugin)); without it, the
 agent can restart only by way of `shell` or a tool an MCP server provides.
 There is no deferred application either:
 a `reasoning_history` override applies to the whole window from the next
-call. None of these can be unlocked yet (#292). Context leases, latency
-classes and scheduling policy (PRD §3.13) aren't built at all (#296). On a
+call. None of these can be unlocked yet (#292). Context leases are built
+(#364) with the kernel's default order only; latency classes and a
+replaceable scheduling policy (PRD §3.13) aren't (#296). No tool, command or
+setting reaches the lease controls: `stop`, `resume` and `yield_key` are a
+plugin-only API on `LLMPlugin.leases`, and `heads` is operator config like
+the rest of `llm.providers`. On a
 channel that still has `write_file` or `shell`, the agent can already get
 around all of them by rewriting `agent.yaml` or a system-prompt file
 (finding 4), unless the files are read-only to the daemon.

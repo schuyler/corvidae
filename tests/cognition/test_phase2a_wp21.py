@@ -804,6 +804,7 @@ class TestUsageLogAttributionWiring:
                 attempts=1,
                 message_count=1,
                 tool_count=0,
+                lease_wait_ms=None,
             )
             return _make_text_response("hi")
 

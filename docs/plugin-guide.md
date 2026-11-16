@@ -706,7 +706,7 @@ Producers that start a background task in `on_start` and inject notifications sh
 | Hook | Type | When |
 |------|------|------|
 | `on_llm_request(profile, model, request_id, message_count, tool_count, attribution)` | async broadcast | Immediately before an LLM chat-completion call |
-| `on_llm_response(profile, model, request_id, usage, latency_ms, attribution, error, timings, started_at, total_ms, attempts, message_count, tool_count)` | async broadcast | Exactly once per LLM call, after success or terminal failure |
+| `on_llm_response(profile, model, request_id, usage, latency_ms, attribution, error, timings, started_at, total_ms, attempts, message_count, tool_count, lease_wait_ms)` | async broadcast | Exactly once per LLM call, after success or terminal failure |
 | `on_metrics(name, value, tags)` | async broadcast | Whenever any plugin emits a metric event |
 
 `on_llm_request` / `on_llm_response` fire from the `LLMClient` chokepoint
@@ -800,8 +800,50 @@ needs nothing.
 A chat call with no key runs unleased and logs a WARNING naming the stage,
 once per stage per process; later calls log at DEBUG. Embedding calls need
 no key and never warn. The key is recorded in `usage_log.lease_key` and as
-the `lease_key` tag on `on_metrics` events (`""` with no key). No lease is
-taken yet; the key only names the queue.
+the `lease_key` tag on `on_metrics` events (`""` with no key).
+
+#### Leases
+
+On a provider that declares `heads`, a keyed chat call is sent only while
+its key holds a lease on one of those heads (PRD §3.13). The default order:
+a key keeps its head across calls while no other key waits, gives it up at
+its next call boundary (no call in flight) when one does, and waiting keys
+are served first come, first served. A plugin needs nothing beyond its
+`lease_scope` for this; the wait happens inside `LLMClient.chat`.
+`on_llm_response` fires while its call still counts as in flight, so an
+implementation must not make a chat call on the same bounded provider from
+inside it: on `heads: 1` that call waits for a head its own caller holds,
+and never gets it.
+
+Long upkeep can step aside of its own accord between chunks:
+
+```python
+from corvidae.hooks import get_dependency
+from corvidae.llm_plugin import LLMPlugin
+
+llm = get_dependency(self.pm, "llm", LLMPlugin)  # declare depends_on = frozenset({"llm"})
+if llm.leases is not None:                       # None: no provider declares heads
+    llm.leases.yield_key("upkeep:myplugin:digest")
+```
+
+`yield_key` gives up the key's head on every provider where it holds one,
+at once if no call of the key is in flight, else when the last one ends,
+and puts the key's waiting calls at the end of the line. If no other key is
+waiting once the key is idle, the yield is dropped and the key keeps its
+head: it is already first. Under the default order
+a yield is rarely needed, since contention already moves the head at every
+call boundary; it is for work that wants to give way ahead of the
+least-recently-used choice.
+
+`llm.leases.snapshot(provider)` returns a `ProviderView` (declared heads;
+holders with how long they have held and whether a call is in flight;
+waiters in order with how long they have waited) without any I/O.
+`stop(provider, key)` and `resume(provider, key)` exist for a scheduler
+plugin (#366): a stopped key gives up its head at once if idle, else when
+its calls in flight end, and
+its calls wait until it is resumed, with no timer. A plugin that stops a key
+owns resuming it. An unknown or unbounded provider raises `ValueError`
+naming the bounded ones.
 
 `on_metrics` carries a named numeric value with dimensional tags
 (StatsD/OpenTelemetry common denominator; dotted names like
@@ -1902,8 +1944,8 @@ logged with a traceback and never breaks an LLM call.
 - **`MetricsPlugin`** (entry point `"metrics"`) — consumes `on_llm_response`
   and emits `on_metrics` events: `llm.tokens.prompt`, `llm.tokens.completion`,
   `llm.tokens.total` (each skipped if the usage dict lacks it),
-  `llm.latency_ms` (always), and `llm.errors` (value 1.0, on terminal
-  failure). Tags: `{"profile", "model", "stage", "channel", "lease_key"}` —
+  `llm.latency_ms` (always), `llm.errors` (value 1.0, on terminal
+  failure), and `llm.lease_wait_ms` (only for a call that waited for or took a lease, or that shutdown failed). Tags: `{"profile", "model", "stage", "channel", "lease_key"}` —
   stage, channel and lease key come from the call's attribution snapshot
   (`lease_key` is `""` for an unleased call).
 - **`UsageLogPlugin`** (entry point `"usage_log"`, depends on
@@ -1923,6 +1965,9 @@ logged with a traceback and never breaks an LLM call.
   from `latency_ms` approximates the time a call queued in the server.
   `lease_key` names the queue the call ran for (#363); it is NULL for an
   unleased call and for rows written before the column existed.
+  `lease_wait_ms` is how long the call waited for a lease (#364): 0.0 when
+  it did not wait, NULL when it took none and on older rows; a call that
+  shutdown failed while it waited records the time it waited.
   The table is created lazily on first use (`CREATE TABLE IF NOT EXISTS`).
 - **`MetricsJsonlPlugin`** (entry point `"metrics_jsonl"`) — consumes
   `on_metrics` and appends one JSON line per event
@@ -1994,7 +2039,7 @@ profile names count: `get_client("main")` raises, so use `get_client()`.
 `profile_config` includes its provider's client settings (`base_url`,
 `api_key`, `timeout`, retries) and a `provider` name; `heads` is read only
 through `provider_config` (absent or `None` when unbounded; `{}` for an unknown
-provider). Nothing schedules on it yet.
+provider). It sizes the provider's lease table (see Leases).
 Resolve the client when you call it, as the stages in this repo do, not in your
 own `on_start`: hooks run concurrently, so `LLMPlugin` may not have started
 yet. The `main_client` and `background_client` properties and
