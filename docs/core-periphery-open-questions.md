@@ -646,3 +646,7 @@ channel) and #365 (latency bounds) are open, and the strategy stands on
 each. The owner accepted the first three as prerequisites in session;
 #365 was found afterwards, while drafting. #366 (the order hook) is
 unlisted too and is C6's subject.
+
+**Kernel contracts.** The owner approved the TRD's kernel changes K2 to
+K6, K8 and K9 in session on 2026-11-16 ("I approve K2–K6, K8 and K9").
+K1 and K7 follow A7 and C3.

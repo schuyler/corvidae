@@ -149,7 +149,8 @@ The kernel changes below are contracts other plugins rely on, so each
 needs the owner's approval before it is built (AGENTS.md, "Process
 instructions"). K1 was agreed in session on 2026-11-16, with a refusal
 that carries its reason (TRD decision A7). K7 follows TRD decision
-C3. K2 to K6, K8 and K9 are new in this document.
+C3. K2 to K6, K8 and K9 are new in this document, and the owner
+approved them on 2026-11-16 ("I approve K2–K6, K8 and K9").
 
 ### K1. Admission seam for internal work (§3.12 item 2)
 
@@ -1183,8 +1184,8 @@ means an existing base mechanism meets it and nothing is built.
   This document builds neither. It recommends the exceptions: a task
   that outgrows its window is better split by its launcher, and its
   result is critiqued in the launcher's window, where it lands.
-- **K2 to K6, K8 and K9** need approval as kernel contracts (TRD §4).
-  K8 leaves one edge undesigned: a fork's call already waiting under
+- **K8 leaves one edge undesigned.** The owner approved K2 to K6, K8
+  and K9 as kernel contracts on 2026-11-16 (TRD §4). The edge: a fork's call already waiting under
   the shared key when that key is stopped waits with it, and the switch
   of TRD §7.2 applies from the fork's next call.
 - **#365** was not among the prerequisites accepted in session
