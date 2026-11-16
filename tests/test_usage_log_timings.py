@@ -58,6 +58,7 @@ async def _fire_timed_response(pm, *, request_id="req1", started_at=1000.0,
         attempts=attempts,
         message_count=message_count,
         tool_count=tool_count,
+        lease_wait_ms=None,
     )
 
 

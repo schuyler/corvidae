@@ -1131,6 +1131,7 @@ class AgentSpec:
         attempts: int,
         message_count: int,
         tool_count: int,
+        lease_wait_ms: float | None,
     ) -> None:
         """Fired exactly once per LLM call, after it succeeds or terminally fails.
 
@@ -1164,6 +1165,11 @@ class AgentSpec:
                 embeddings, the number of texts).
             tool_count: Number of tool schemas in the request payload (0 for
                 embeddings).
+            lease_wait_ms: Milliseconds the call waited for a context lease
+                before it was sent (PRD §3.13.10); 0.0 for a leased call that
+                did not wait, None when the call took no lease (unkeyed,
+                embedding, or a provider with no ``heads``); for a call that
+                shutdown failed while waiting, the time it waited.
         """
 
     @hookspec
