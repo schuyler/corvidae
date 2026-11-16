@@ -271,6 +271,12 @@ async def test_late_message_consolidated_exactly_once(make_env):
     once, by the next consolidation (the #664 outcome that was never tested)."""
     agent = GatedForkAgent({"consolidation"}, text=REPLY)
     env = await make_env(tokens_of(DIALOG), agent=agent)
+    # Disable the near-dup merge: the embed stub returns a fixed vector, so
+    # every record is a near-duplicate of the first, and the merge would widen
+    # the second record's range to overlap the first — hiding the mutation the
+    # ticket names (the late id skipped, the fillers consolidated). With the
+    # merge off, the second record's range is exactly (watermark, range_end].
+    env.memory._dup_threshold = 2.0
 
     # First turn: the hook fixes the range at the hook-time window end.
     await env.memory.on_agent_response(channel=env.channel)
@@ -314,9 +320,11 @@ async def test_late_message_consolidated_exactly_once(make_env):
     agent.gate.set()
     await env.memory.wait_for_background_tasks()
 
-    # The late message falls in exactly one record's range. (The near-dup
-    # merge can widen the second record's range to overlap the first, so the
-    # assertion is on containment, not on the record's start.)
+    # The late message falls in exactly one record's range, and that record
+    # starts at the late message (past the first record's end) — not
+    # overlapping the first record, which is the mutation the ticket names.
+    # (The near-dup merge is disabled above, so the second record's range is
+    # exactly (watermark, range_end].)
     rows = await fetch_stamped_memories(env.db)
     containing = [
         r for r in rows
@@ -325,6 +333,10 @@ async def test_late_message_consolidated_exactly_once(make_env):
     assert len(containing) == 1, (
         f"late message {late_id} in {len(containing)} records: "
         f"{[(r['msg_id_start'], r['msg_id_end']) for r in rows]}"
+    )
+    assert containing[0]["msg_id_start"] == late_id, (
+        f"containing record starts at {containing[0]['msg_id_start']}, "
+        f"expected {late_id} (past the first record's end {env.ids[-1]})"
     )
     # The watermark moves past the late message (through the filler window).
     assert await fetch_watermark(env.db, env.channel.id) > late_id
