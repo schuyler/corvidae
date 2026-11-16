@@ -378,3 +378,53 @@ async def test_legacy_summary_reply_reads_as_one_entry(env):
     [row] = await fetch_memories(db)
     assert row["summary"] == "I fixed kestrel's wifi."
     assert json.loads(row["topic_tags"]) == ["wifi", "esp32"]
+
+
+# --- #929: the fork paths must name the range the reply was rated over ------
+
+
+def _unusable_importance_reply() -> str:
+    return json.dumps({
+        "summary": "I told kestrel it was the brownout detector.",
+        "topic_tags": ["wifi"], "participants": ["kestrel"],
+        # 7 is a rating on another scale: dropped, so the rubric rates it.
+        "importance": 7,
+    })
+
+
+async def _importance_warning(caplog, run) -> str:
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await run()
+    [text] = [r.getMessage() for r in caplog.records
+              if "importance is unusable" in r.getMessage()]
+    return text
+
+
+async def test_compaction_fork_warns_with_the_real_range(env, caplog):
+    """Removing ``msg_id_range=(rows[0][0], range_end)`` from the compaction
+    fork's ``_fork_record`` call leaves this the only failing test: the warning
+    then says "message ids unknown" and an operator cannot find the range."""
+    memory, stub, channel, db, ids = env
+    _use(memory, FakeForkAgent({"consolidation"}, text=_unusable_importance_reply()))
+
+    text = await _importance_warning(
+        caplog, lambda: _compaction(memory, channel, ids[:3], cut=3),
+    )
+
+    assert channel.id in text
+    assert f"{ids[0]}-{ids[2]}" in text, text
+    assert "unknown" not in text
+
+
+async def test_idle_fork_warns_with_the_real_range(env, caplog):
+    """Same for the live/idle fork's ``_fork_record`` call."""
+    memory, stub, channel, db, ids = env
+    _use(memory, FakeForkAgent({"consolidation"}, text=_unusable_importance_reply()))
+
+    text = await _importance_warning(
+        caplog, lambda: memory._consolidate_range(channel.id, ids[-1], "idle"),
+    )
+
+    assert channel.id in text
+    assert f"{ids[0]}-{ids[-1]}" in text, text
+    assert "unknown" not in text
