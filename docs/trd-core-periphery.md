@@ -149,7 +149,7 @@ The kernel changes below are contracts other plugins rely on, so each
 needs the owner's approval before it is built (AGENTS.md, "Process
 instructions"). K1 was agreed in session on 2026-11-16, with a refusal
 that carries its reason (TRD decision A7). K7 follows TRD decision
-C3. K2 to K6 are new in this document.
+C3. K2 to K6, K8 and K9 are new in this document.
 
 ### K1. Admission seam for internal work (§3.12 item 2)
 
@@ -210,8 +210,9 @@ Proposed base PRD text, for §3.1, to be added when this is built:
 (`corvidae/channel.py`) has no profile field.
 
 `ChannelConfig` gains `profile: str | None`, added to
-`CHANNEL_ENTRY_KEYS`. The main turn uses `llm.get_client(profile)` when
-it is set. A fork of that channel's window uses its stage's profile as
+`CHANNEL_ENTRY_KEYS`. When it is set, the main turn uses that profile's
+client; `get_client` takes a stage today (`corvidae/llm_plugin.py`), so
+it gains a lookup by profile. A fork of that channel's window uses its stage's profile as
 now.
 
 ### K3. Plugin defaults for channel settings (§3.2.8)
@@ -242,8 +243,8 @@ layer beneath every operator entry.
 ### K4. A queue can be held (§3.5.7)
 
 `SerialQueue` (`corvidae/queue.py`) has no hold. A lease stop cannot
-serve, because a blocking fork shares its parent's lease and would be
-stopped with it.
+serve: a blocking fork shares its parent's lease, and §3.5.7 says
+routing does not stop that lease.
 
 `SerialQueue.hold(reason: str)` and `release()` are added. A held queue
 accepts items and starts none. A hold is in memory; the plugin that set
@@ -289,6 +290,29 @@ tools" amendment from this strategy to the base; the owner accepted it
 (TRD decision C3). Proposed base text for §3.5.7: "A caller may give a
 subagent fewer tools than its own set, never more."
 
+### K8. A channel can run under another's lease key (§3.5)
+
+The Agent wraps each turn of a channel, and each one-shot fork of its
+window, in `lease_scope(channel.id)` (`corvidae/agent.py`), and no hook
+lets a plugin name another key. A fork channel would always lease as
+itself, never under its parent's key.
+
+`Channel.lease_key: str | None`. When it is set, the Agent uses it in
+place of the channel's id at both sites, and reads it at each model
+call, so a change takes effect at the channel's next call. `forks` sets
+it when a fork starts and clears it at the switch of TRD §7.2.
+
+### K9. The CLI can be attached to another channel (§3.1.1)
+
+`CLIPlugin` routes stdin to `cli:local` always
+(`corvidae/channels/cli.py`, `_read_loop`), and `TransportPlugin.owns`
+matches a transport's own channels only (`corvidae/hooks.py`), so the
+CLI neither reads for a `core:*` channel nor writes to one.
+
+`CLIPlugin.attach(channel: Channel)`: stdin goes to that channel in
+place of `cli:local`, and the CLI also delivers that channel's outbound
+events. The channel keeps its id, so its history stays the core's.
+
 ### Changes other issues already carry
 
 #318, #234, #235, #365, #366 and #814 have their own issues (TRD §2);
@@ -308,8 +332,9 @@ comes from `core_periphery.core`. Nothing hard-codes the id:
 `core.core_channel() -> Channel` is the lookup, and while notifications
 are routed to a fork (TRD §7.3) it returns the fork's channel.
 
-`core_periphery.core.attach_cli: false` is the default. Set true, the
-CLI transport reads and writes the core's channel. No other transport
+`core_periphery.core.attach_cli: false` is the default. Set true,
+`core.on_start` attaches the CLI transport to the core's channel (K9),
+and startup fails naming the key if that transport is not loaded. No other transport
 can be attached, and a config that names one fails startup.
 
 ### 5.2 Origins and what the core receives
@@ -586,11 +611,13 @@ A fork has the core's identity, tools and memory access (§3.5.2).
 
 ### 7.2 Lease key (§3.5; TRD decision A2)
 
-A fork's calls run under `lease_scope(key)`, where `key` is:
+A fork's calls run under `lease_scope(key)`, where `key` is set through
+K8 and is:
 
 - the key its parent is using, until the fork's first compaction or
   until a `lease.yield` or stop removes the shared lease while the fork
-  has a call to send, or until the fork itself is held (TRD §8.3);
+  has a call to send, or until the fork itself is held (TRD §8.3),
+  which is the scheduler taking the shared lease back (§3.5);
 - its own channel id from then on.
 
 `cp_forks.own_lease` records the switch, so a restart does not undo it.
@@ -734,9 +761,9 @@ context is in the slot or in a file `slots` wrote.
 Work arriving on the core's own queue while the core is paged out or
 stopped by its own direction resumes it: `slots` watches `on_notify`
 and `on_message_admitted` for the core's channel, the second because an
-attached CLI's input arrives as a message (TRD §5.1), and calls
-`LeaseManager.resume`
-(`corvidae/lease.py`), with no core turn deciding it (§3.3.6). While
+attached CLI's input arrives as a message (TRD §5.1), calls
+`LeaseManager.resume` (`corvidae/lease.py`) and removes the `cp_stops`
+row, with no core turn deciding it (§3.3.6). While
 `slots` is not loaded nothing would bring the core back, so `hold_queue`
 refuses the core's own channel (TRD §8.3).
 
@@ -1058,8 +1085,8 @@ order.
 | Phase | Builds | Needs | Probe |
 |---|---|---|---|
 | 0 | Critique's `add_eligible_origin` | — | a turn whose origin a plugin registered is critiqued; one nobody registered is not |
-| 1 | K1, K3, K4, K5, K6; `limits` | #814 | a task started at `max_waiting` returns the refusal text and a warning is logged; a tool result at the same depth is accepted |
-| 2 | `core`: channel, uid, idle beat, `cp_work`, observables; goal block | phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
+| 1 | K1, K3, K4, K5, K6, K8; `limits` | #814 | a task started at `max_waiting` returns the refusal text and a warning is logged; a tool result at the same depth is accepted |
+| 2 | K9; `core`: channel, uid, `attach_cli`, idle beat, `cp_work`, observables; goal block | phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
 | 3 | K2; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains, the `notify_other_channel` change of TRD §9.3 | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window |
 | 4 | K7; tail import; criteria rewrites | #235, phase 3 | a subagent given `tools=["read_file"]` has no other tool in its request; a rewrite is absent from the peripheral's prompt before its next compaction and present after; a frozen channel refuses |
 | 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `hold_queue` and `resume_queue` in `core` (TRD §8.3, on the kernel's stop and resume), the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel; `hold_queue` on the core's own channel returns the refusal text and stores no `cp_stops` row; after `hold_queue` on a fork that shared its parent's lease, the parent's next call is granted |
@@ -1090,7 +1117,7 @@ means an existing base mechanism meets it and nothing is built.
 | Principle 19 | TRD §6.3 | 3 |
 | Principle 20 | TRD §5.3, §10.1 | 2 |
 | Principle 21 | TRD §5.4 | 3 |
-| §3.1.1 | TRD §5.1, §5.2 | 2 |
+| §3.1.1 | K9, TRD §5.1, §5.2 | 2 |
 | §3.1.2 | TRD §3.3, §5.3; §2 (critique) | 0, 2 |
 | §3.1.3 | TRD §8.3 | 5, 6 |
 | §3.1.4 | TRD §10.1 | 2 |
@@ -1115,7 +1142,7 @@ means an existing base mechanism meets it and nothing is built.
 | §3.4.5 | TRD §6.4 | 3 |
 | §3.4.6 | TRD §6.3; the trust label, TRD §9.4 | 3, 8 |
 | §3.4.7 | TRD §9.4 | 8 |
-| §3.5 preamble | TRD §7.1, §7.2, §7.4 | 5 |
+| §3.5 preamble | K6, K8, TRD §7.1, §7.2, §7.4 | 1, 5 |
 | §3.5.1–3 | TRD §7.1, §7.4 | 5 |
 | §3.5.4 | TRD §7.4, §7.5 | 5 |
 | §3.5.5 | TRD §5.4, §5.6, §7.1 | 3, 5 |
@@ -1150,7 +1177,10 @@ means an existing base mechanism meets it and nothing is built.
   This document builds neither. It recommends the exceptions: a task
   that outgrows its window is better split by its launcher, and its
   result is critiqued in the launcher's window, where it lands.
-- **K2 to K6** need approval as kernel contracts (TRD §4).
+- **K2 to K6, K8 and K9** need approval as kernel contracts (TRD §4).
+  K8 leaves one edge undesigned: a fork's call already waiting under
+  the shared key when that key is stopped waits with it, and the switch
+  of TRD §7.2 applies from the fork's next call.
 - **#365** was not among the prerequisites accepted in session
   (TRD §2).
 - **The ceiling's treatment of stopped channels** (TRD §9.2) is the
