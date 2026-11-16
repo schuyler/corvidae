@@ -35,6 +35,8 @@ def far_east_tz(monkeypatch):
     time instead of UTC would move every boundary by fourteen hours."""
     monkeypatch.setenv("TZ", "Pacific/Kiritimati")
     time.tzset()
+    # Without tzdata the zone silently falls back to UTC and proves nothing.
+    assert time.strftime("%z") == "+1400", "Pacific/Kiritimati tzdata missing"
     yield
     monkeypatch.undo()
     time.tzset()
