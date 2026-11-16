@@ -828,6 +828,10 @@ async def run_snapshot_evaluation(
                 "relevant": query.relevant,
                 "unscorable": unscorable,
                 "degraded": pool.degraded,
+                # Which banding path ran for this query (#931), so a run says
+                # how many queries the relative gate banded on z and how many
+                # it banded on the raw-similarity fallback.
+                "banding_path": pool.banding_path,
                 "negative": negative,
                 "false_admits": probe_false_admits,
                 "recall_at_k": recall,
@@ -863,6 +867,11 @@ async def run_snapshot_evaluation(
         recalls = [r["recall_at_k"] for r in results if r["recall_at_k"] is not None]
         mrrs = [r["mrr"] for r in results if r["mrr"] is not None]
         degraded = sum(1 for r in results if r["degraded"])
+        # The banding paths across the run: the count is the number a fallback
+        # has to be read from, since the gate's own warning is once per process.
+        banding_paths: dict[str, int] = {}
+        for r in results:
+            banding_paths[r["banding_path"]] = banding_paths.get(r["banding_path"], 0) + 1
         # A pool in which nothing was measured but keyword search. The run
         # still writes the file, marked, and then exits non-zero (#662): an
         # FTS-only pool is not a vector measurement, and its 0.6 similarities
@@ -891,6 +900,7 @@ async def run_snapshot_evaluation(
             "scored": len(recalls),
             "degraded": degraded,
             "all_degraded": all_degraded,
+            "banding_paths": banding_paths,
             "mean_recall_at_k": mean(recalls),
             "mean_mrr": mean(mrrs),
             "query_context": memory._query_context,
