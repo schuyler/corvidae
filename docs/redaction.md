@@ -3,8 +3,9 @@
 **Status: on hold (#1005). Nothing in this document is a requirement.**
 The PRD keeps one binding stub (§3.7 Memory 8): `corvidae redact` is the
 operator-only deletion path, it tombstones `message_log` content in place,
-and it is never a registered tool or reachable from a hook the model can
-influence. Everything else a redaction does, or was once required to do, is
+it asserts WAL, probes for schema before touching it, never creates schema
+and reports found-of-requested, and it is never a registered tool or
+reachable from a hook the model can influence. Everything else a redaction does, or was once required to do, is
 recorded here so the overhaul can start from it. This page is not a
 requirements document. It says why redaction is on hold, what the shipped
 command does and doesn't reach, what may change while the hold lasts, and
@@ -126,12 +127,8 @@ These are candidates, not decisions. None has been designed or tested.
   the way a person who heard something can't unhear it. This is true today;
   the question is whether it is enough.
 
-Open questions for the overhaul:
+Open question for the overhaul:
 
-- Should the deletion path's safety properties (assert WAL, probe for
-  schema, never create schema, report found-of-requested) go back into the
-  PRD with the binding stub? They were moved out with the rest of Memory 8;
-  they concern safety, not completeness.
 - What does an operator need redaction for in practice: a secret pasted
   into a channel, a conversation someone asked to have forgotten, or legal
   erasure? Each sets a different bar.
@@ -149,6 +146,11 @@ PRD §3.7 Memory 8, verbatim, before #1005:
 >    reports found-of-requested, and verifies its own completeness with an
 >    FTS probe for a sample token. It is never a registered tool and never
 >    reachable from a hook the model can influence.
+
+The stub keeps the safety properties from that text (assert WAL, probe
+for schema, never create schema, report found-of-requested), because they
+concern safety rather than completeness. The cascade, the channel scope
+and the completeness probe are what moved here.
 
 The rest of the PRD's references to redaction stay, because they hold under
 the stub: principle 4 (the tombstone is the log's one sanctioned mutation),

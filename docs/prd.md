@@ -1127,8 +1127,10 @@ only through the funnel.
    type's job (below), not a retrieval dimension, and the harness
    conflation probe is what says whether that holds.
 8. `corvidae redact` is the operator-only deletion path (principle 4): it
-   tombstones `message_log` content in place. It is never a registered
-   tool and never reachable from a hook the model can influence. What else
+   tombstones `message_log` content in place. It asserts WAL, probes for
+   schema before touching it, never creates schema, and reports
+   found-of-requested. It is never a registered tool and never reachable
+   from a hook the model can influence. What else
    a redaction reaches (derived memory, indexes, plugin copies, other
    channels) is not a requirement: redaction can't be made complete while
    any later output may restate what the model read, so it is on hold

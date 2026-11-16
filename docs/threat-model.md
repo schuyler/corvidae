@@ -1576,7 +1576,7 @@ line is plain text in the result, with no kernel header at all.
   goal or note that paraphrases the message. Redaction can't be made
   complete for that last reason, and it is on hold pending an overhaul;
   [redaction.md](redaction.md) keeps the full list and the PRD requires
-  only the tombstone (#1005).
+  no reach beyond the tombstone (#1005).
 
 ### 17. A markdown folder is a new untrusted-text ingress (#719)
 

@@ -1875,7 +1875,7 @@ model can influence.
 
 Redaction is on hold pending a systematic overhaul (#1005): it can't be made
 complete while any later output may restate what the model read, and the
-PRD requires only the tombstone. This section describes what the shipped
+PRD requires only the tombstone and the command's safety properties. This section describes what the shipped
 command does. [redaction.md](redaction.md) says why it is on hold, lists
 what it does not reach, and says what may change during the hold.
 
