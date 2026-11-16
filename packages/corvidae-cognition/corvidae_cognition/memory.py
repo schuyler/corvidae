@@ -1685,6 +1685,8 @@ class MemoryPlugin(CorvidaePlugin):
     def __init__(self, pm=None) -> None:
         if pm is not None:
             self.pm = pm
+        # Set first thing in on_stop: after it, nothing new may be spawned (#663).
+        self._stopping = False
         self._schema_ready = False
         # Dedicated write connection (#221): opened in on_start once the
         # schema exists (or lazily on first write), closed in on_stop.
@@ -1971,6 +1973,8 @@ class MemoryPlugin(CorvidaePlugin):
     @hookimpl
     async def on_stop(self) -> None:
         """Cancel the watches and timers, then tracked background tasks."""
+        # First, before any await: no trigger may spawn after this point.
+        self._stopping = True
         # Stop the idle watches so no new consolidation or retention starts.
         for watch in (self._idle_watch, self._retention_watch):
             if watch is not None:
@@ -2035,6 +2039,8 @@ class MemoryPlugin(CorvidaePlugin):
         task = self._spawn(
             self._compaction_fork(agent, channel, snapshot, cut, range_end)
         )
+        if task is None:
+            return
         self._stash_put((channel.id, range_end), task)
 
     async def _compaction_fork(
@@ -2230,6 +2236,8 @@ class MemoryPlugin(CorvidaePlugin):
             if max_id <= watermark:
                 return
             task = self._spawn(self._consolidate_range(channel_id, max_id, "idle"))
+            if task is None:
+                return
             spawned = True
             self._track_inflight(channel_id, task, "idle")
             # The task's end frees the channel, however it ends.
@@ -2263,6 +2271,8 @@ class MemoryPlugin(CorvidaePlugin):
         if not ids:
             return
         task = self._spawn(self._turn_consolidation(channel, max(ids)))
+        if task is None:
+            return
         # Claim the channel right after the spawn (no await between); the
         # task's end frees it, however it ends.
         self._idle_inflight.add(channel.id)
@@ -2322,8 +2332,20 @@ class MemoryPlugin(CorvidaePlugin):
     # Background task tracking (§2.3 — silent, never the TaskQueue)
     # ------------------------------------------------------------------
 
-    def _spawn(self, coro) -> asyncio.Task:
-        """Run a coroutine as a tracked background task with full logging."""
+    def _spawn(self, coro) -> asyncio.Task | None:
+        """Run a coroutine as a tracked background task with full logging.
+
+        Refuses once ``on_stop`` has begun (#663): a consolidation triggered by
+        a late reply or a late compaction would otherwise run untracked, past
+        the gather, and could write on the connection on_stop closes. The
+        coroutine is closed rather than left un-awaited, so no runtime warning.
+        """
+        if self._stopping:
+            coro.close()
+            logger.debug(
+                "memory: not spawning a background task after on_stop began",
+            )
+            return None
         task = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._on_task_done)
