@@ -204,8 +204,10 @@ violates one is a bug even if its tests pass.
 1. The framework MUST run the core as a channel with an input queue.
    Its transports MUST include the internal notification bus, which
    MUST deliver escalations from peripherals, idle events, task
-   completions, and scheduler firings (open question 8 asks whether it
-   also gets a user-facing one).
+   completions, and scheduler firings. The operator MAY also attach the
+   CLI to the core's channel; the framework MUST default to leaving it
+   unattached, and no other user-facing transport reaches the core
+   (open question 8).
 
    *Rationale:* The core runs a single context that favours depth over
    latency. It performs deliberative reasoning, multi-step tasks, goal
@@ -230,9 +232,9 @@ violates one is a bug even if its tests pass.
 
 3. The framework MUST let the core direct KV cache allocation through
    tools that control queue multiplexing, and the slot-management plugin
-   MUST decide from that direction which contexts are resident in VRAM,
-   RAM, or disk, and when they are paged in, paged out, or checkpointed
-   (§3.3.6).
+   MUST decide from that direction which contexts are resident in fast
+   memory and which are paged out to saved state, and when they are
+   paged in, paged out, or checkpointed (§3.3.6).
 
 4. The goal block MUST be part of the core's context (§3.6).
 
@@ -335,8 +337,14 @@ violates one is a bug even if its tests pass.
    edits are self-modification (base PRD principle 15): the framework
    MUST let the operator freeze the periphery prompts or bound what the
    core may change, and operator config MUST be able to lift any such
-   lock. A rewrite MUST take effect at the periphery's next compaction
-   boundary or conversation start, not mid-window (base PRD §3.3.8).
+   lock. Where the framework lets the core edit the prompt, it MUST
+   default to allowing the edits; the operator MAY lock them. A
+   rewrite MUST NOT take effect mid-window: it is applied at a
+   compaction boundary or conversation start of the periphery (base
+   PRD §3.3.8). With the critique plugin loaded, a rewrite MUST stay
+   pending until critique has returned a verdict on it, and MUST NOT
+   be applied on a bad verdict; a rewrite still pending at a boundary
+   waits for a later one.
 
    *Rationale:* The periphery's prompt is a living artifact. The core
    observes a mis-escalation, diagnoses which part of the judgment
@@ -403,7 +411,7 @@ violates one is a bug even if its tests pass.
 10. *(Explanatory.)* The periphery is meant to communicate with the core
     concisely: an escalation carries what the core needs and nothing
     more, as the core's instructions to the periphery do (§3.1.8). Its
-    format is open question 19.
+    format was settled under open question 19.
 
 ### 3.3 KV cache allocation
 
@@ -445,8 +453,9 @@ violates one is a bug even if its tests pass.
    applies to a context the core pinned or brought forward; a held queue
    is stopped (§3.3.7), and a stop is not subject to it. The
    slot-management plugin MUST turn the core's
-   direction into memory placement: which contexts stay in VRAM, which
-   move to RAM or disk, and when to restore one ahead of need. The
+   direction into memory placement: which contexts stay resident, which
+   are paged out to saved state, and when to restore one ahead of need.
+   The
    plugin's decisions MUST be cheap enough to make at every call
    boundary (base PRD §3.13.8), and backend-specific operations MUST
    live in it (Appendix A.4). The framework MUST keep a held queue
@@ -594,7 +603,8 @@ The fork's rows MUST stay in the log (base PRD principle 4) and MUST NOT
 enter the parent's window.
 
 Whatever its kind, every fork is either **blocking** or **non-blocking**,
-and the choice is made when the fork is taken (item 7). Blocking names
+and the choice is made when the fork is taken (item 7, which also
+bounds a blocking wait on a long-lived fork). Blocking names
 only the join dependency: the parent's next turn waits for a blocking
 fork's result, and does not wait for a non-blocking fork's, whose result
 re-enters the parent, if it re-enters at all, only by tail-append on a
@@ -655,8 +665,14 @@ respond to an escalation.
 
 6. The framework MUST let the core work a channel directly in a fork,
    with the peripheral's context brought in (§3.3.6), and join the
-   results back. While that fork is active, the channel's periphery
-   MUST NOT respond on it.
+   results back. While that fork is active the channel is
+   **pass-through**: the framework MUST keep recording what arrives on
+   it in the channel's peripheral context, MUST deliver a copy to the
+   fork framed as data from that channel (§3.1.12), and the channel's
+   periphery MUST NOT start a response on it. A periphery turn already
+   in flight when the fork takes the channel finishes and sends. What
+   the fork says on the channel MUST go out as exact wording (§3.1.9),
+   so it appears in the peripheral's context (principle 21).
 
    *Rationale:* Some exchanges (a complex multi-turn conversation the
    periphery can't handle) need the core itself.
@@ -679,7 +695,11 @@ respond to an escalation.
      that the agent's own actions cannot leave the core unable to
      receive work holds through a blocking fork, so a blocking fork that
      neither joins nor is abandoned is the case that guarantee is tested
-     on.
+     on. The strategy MUST bound the core's blocking wait on a
+     long-lived fork, with a default the operator MAY change. Past the
+     bound the fork becomes non-blocking: any routing ends, so the
+     core's notifications return to its main context, the fork keeps
+     running, and the framework MUST log a warning.
    - **Non-blocking.** The core keeps working and receiving its
      notifications, and the framework MUST NOT make the parent's next
      turn wait for a non-blocking fork's result.
@@ -702,8 +722,11 @@ respond to an escalation.
 
 With the goals plugin loaded:
 
-1. The goal block MUST list every open goal, compactly enough to
-   stay within the bound of item 5.
+1. The goal block MUST list the open goals, one line each, with each
+   goal's state and how long it has been in that state. When listing
+   every open goal would exceed the bound of item 5, the block MUST
+   list the highest-priority goals that fit and say how many it left
+   out.
 
 2. The goal block MUST be **pinned**: compaction MUST NOT touch it.
 
@@ -724,7 +747,7 @@ With the goals plugin loaded:
 
 5. The goal block MUST stay within a bounded share of the core's window,
    set in operator config with a default. The framework MUST log a
-   warning when a rebuild exceeds it.
+   warning when a rebuild leaves goals out to stay within it.
 
    *Rationale:* The bound is meant to leave wide margin; Appendix A.5
    gives a reference measurement.
@@ -745,8 +768,9 @@ With the goals plugin loaded:
 2. With the appraisal plugin loaded, appraisal MUST run in the core
    (§3.1.10).
 
-3. Critique, consolidation and compaction MUST each run over each
-   context's own window independently, as base PRD §3.7 and §3.8
+3. Critique, consolidation and compaction MUST each run over the window
+   of each context item 1 has them run for, independently, as base PRD
+   §3.7 and §3.8
    describe; nothing about them changes. Whatever a context's window
    holds MUST be in scope, including the core's instructions and the
    messages it worded itself.
@@ -874,9 +898,11 @@ With the goals plugin loaded:
    operator config, with a message that would exceed it rejected at the
    inbound gate before it is accepted, so the write-ahead log of
    accepted work (base PRD §3.4.8) keeps its promise that nothing
-   accepted is lost. Other candidates (a total cap across channels, a
-   bound on loops between the core and peripherals, a per-response
-   tool-call cap) are in `docs/core-periphery-open-questions.md`.
+   accepted is lost. Inbound caps are per channel only: a total across
+   channels could fill with held messages and lock every sender out
+   (gap 9). Other candidates (a bound on loops between the core and
+   peripherals, a per-response tool-call cap) are in
+   `docs/core-periphery-open-questions.md`.
 
    *Rationale:* Resource exhaustion doesn't depend on topology, so this
    holds under every strategy. Stating the outcome rather than a set of
@@ -1012,7 +1038,10 @@ full re-prefill at ~26x cost, which constrains the swap policy.
 
 ### A.3 Escalation detection
 
-The initial design combines two signals:
+Open question 2 settled on the periphery model's own judgment, expressed
+as an `escalate` tool call, with structural rules checked before the
+model runs and a confidence signal waiting for labels to calibrate
+against. The earlier sketch, kept for reference, combined two signals:
 - **Message-type rules** for obvious cases: questions about goals,
   requests for decisions, multi-step tasks → always escalate.
 - **Confidence signal** for the rest: the periphery's implicit
@@ -1033,7 +1062,7 @@ README (`tools/server/README.md` in ggml-org/llama.cpp) as of
 2026-11-05, and the `--cache-ram 0`, slot selection and `id_slot` entries
 as of 2026-11-16; the TRD should confirm them against the pinned build.
 
-- **VRAM tier:** server slots (`-np, --parallel`), each holding one
+- **Slots (resident):** server slots (`-np, --parallel`), each holding one
   resident context. Prefix reuse within a slot is `--cache-prompt` (on by
   default) and `--cache-reuse` (KV shifting).
 - **RAM prompt cache, turned off:** `--cache-ram` (MiB; default 8192;
@@ -1045,7 +1074,7 @@ as of 2026-11-16; the TRD should confirm them against the pinned build.
   a slot holding another context. The plugin would name the slot on
   each call (`id_slot`); whether the chat completions endpoint honours
   it is check 4 on #1009, and nothing is decided until then.
-- **Disk tier and checkpoints:** `POST /slots/{id}?action=save` and
+- **Saved slot files and checkpoints:** `POST /slots/{id}?action=save` and
   `?action=restore` write and read a slot's prompt cache under
   `--slot-save-path`.
 - **Multiple models:** router mode (`--models-dir` or `--models-preset`),

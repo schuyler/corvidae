@@ -25,33 +25,43 @@ base PRD say "base".
 **Decisions.** The owner settled the open questions and gaps in a live
 session on 2026-11-16. The exceptions are open question 4, decided on
 2026-11-07; open question 12 and gap 10, which have no ruling yet; and
-gap 12, which was withdrawn. Each item below ends with a short
-statement of what was decided. The full record, with the reasoning and
-what was checked, is in the owner-decision comments of 2026-11-16 on
-the item's design issue: #979 (scheduling, paging and forks; two
+gap 12, which was withdrawn. Each open question and gap below ends
+with a short statement of its outcome. For the items decided that
+day, the full record, with the reasoning and what was checked, is in
+the owner-decision comments of 2026-11-16 on the item's design issue: #979 (scheduling, paging and forks; two
 comments), #980 (periphery and escalation), #981 (trust and
 provenance) and #982 (memory, goals and cognition).
 
 The decisions are inputs to the TRD, not requirements. A requirement
 in the supplement stands as written until the supplement itself is
-edited. Review found the places below where the supplement's text
-disagrees with a decision here. The list is what was noticed, not an
-audit, and the TRD should check each decision against the supplement.
+edited. On the owner's instruction (2026-11-16) the supplement was
+edited in the places review had found its text disagreeing with a
+decision here:
 
-- §3.1.3 and §3.3.6 (requirements) name VRAM, RAM and disk; questions
-  1 and 6 leave two tiers, a slot and a saved slot file.
-- §3.6.1 (a requirement) lists every open goal; gap 6 shows the
-  highest-priority lines and a count of the rest once the block passes
-  its bound.
-- §3.5.6 (a requirement) says the channel's periphery does not respond
-  while a fork works the channel; gap 5 lets a periphery turn already
-  in flight finish and send.
-- §3.2.4 (a requirement) has a rewrite take effect at the periphery's
-  next compaction boundary; gap 7 applies it there only with a critique
-  verdict that is not bad, and otherwise holds or drops it.
-- §3.12's implementation note (explanatory) and idea 2 below still
-  offer a total inbound cap across channels as a candidate; gap 9 keeps
-  caps per channel.
+- §3.1.3 and §3.3.6 named VRAM, RAM and disk; they now say resident or
+  paged out to saved state (questions 1 and 6).
+- §3.6.1 listed every open goal and §3.6.5 warned when the block
+  passed its bound; the block now leaves out what does not fit, says
+  how many, and the warning fires then (gap 6).
+- §3.5.6 forbade the periphery to respond while a fork works its
+  channel; it now describes pass-through and lets a turn already in
+  flight finish (gap 5).
+- §3.2.4 had a rewrite take effect at the next compaction boundary; it
+  now stays pending until critique's verdict, and the core's edits are
+  allowed by default (gap 7).
+- §3.5.7 let a blocking wait last until the join; the strategy now
+  ends it past a bound (gap 3).
+- §3.1.1 left a user-facing transport for the core open; it now allows
+  the CLI as an operator option, off by default (question 8).
+- §3.12's implementation note (explanatory) offered a total inbound
+  cap across channels; it now says caps are per channel (gap 9). Idea
+  2 below still lists the total cap, as it was discussed.
+
+That list is what review noticed, not an audit: the TRD should still
+check each decision against the supplement. Decisions that add a
+mechanism without contradicting a requirement (the admission hook,
+the hop count, stamped saves, the escalation envelope) are not
+written into the supplement; they are the TRD's to specify.
 
 Two decisions reach beyond one item. Identifiers a plugin owns follow
 `<plugin>:<component>:<uid>`, channel ids included (questions 8 and 10).
@@ -506,7 +516,8 @@ policy, a plugin holds it (question 21, gaps 3 and 4).
 
 The text below is as it was discussed, before the decisions of
 2026-11-16. Those took up idea 1 (gap 1 and question 21), the
-per-channel capacity in idea 2 but not its total cap (gap 9), idea 4
+per-channel capacity and the log ceiling in idea 2 but not its total
+cap (gap 9, question 21), idea 4
 as a recommendation without a ruling (question 12), and idea 5's rule
 (gap 2).
 
