@@ -1805,6 +1805,7 @@ class Agent(CorvidaePlugin):
         instruction: str,
         *,
         stage: str,
+        cut: int | None = None,
         extra_body: dict | None = None,
         snapshot: WindowSnapshot | None = None,
     ) -> ForkResult:
@@ -1860,6 +1861,7 @@ class Agent(CorvidaePlugin):
             instruction,
             pending,
             self._mid_conversation_system_role,
+            cut=cut,
         )
         # The profile beats the overrides; the stage's body and tool_choice
         # none come last.

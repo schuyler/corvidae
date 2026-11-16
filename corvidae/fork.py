@@ -189,15 +189,37 @@ def build_fork_prompt(
     instruction: str,
     pending_ids: frozenset,
     mid_role: str,
+    cut: int | None = None,
 ) -> list[dict]:
     """``build_prompt(window)`` plus one appended user instruction.
 
-    Renders the original window object directly — same object, same
-    build_prompt call, same tokens as the main turn. The KV cache serves
-    the prefix; only the instruction is new (#994). A throwaway
-    ContextWindow copy re-renders the tokens, breaking the cache prefix.
+    When ``cut`` is None (the common case), renders the original window
+    object directly — same object, same build_prompt call, same tokens as
+    the main turn. The KV cache serves the prefix; only the instruction is
+    new (#994). A throwaway ContextWindow copy re-renders the tokens,
+    breaking the cache prefix.
+
+    When ``cut`` is an integer (compaction), renders a prefix window
+    holding the first ``cut`` messages.
     """
-    prompt = conv.build_prompt(pending_ids, mid_conversation_system_role=mid_role)
+    if cut is None:
+        prompt = conv.build_prompt(pending_ids, mid_conversation_system_role=mid_role)
+    else:
+        n = len(conv.messages)
+        if not 0 <= cut <= n:
+            raise ValueError(f"fork cut {cut} outside 0..{n}")
+        prefix = ContextWindow(conv.channel_id, chars_per_token=conv.chars_per_token)
+        prefix.system_prompt = conv.system_prompt
+        prefix.fence_key = conv.fence_key
+        prefix.messages = conv.messages[:cut]
+        result_at = _first_result_index(conv.messages)
+        pending_at_cut = {
+            c["id"]
+            for m in prefix.messages
+            for c in well_formed_calls(m)
+            if result_at.get(c["id"], -1) >= cut
+        }
+        prompt = prefix.build_prompt(pending_ids | pending_at_cut, mid_conversation_system_role=mid_role)
     prompt.append({"role": "user", "content": instruction})
     return prompt
 
