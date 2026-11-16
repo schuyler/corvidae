@@ -1473,6 +1473,9 @@ class Agent(CorvidaePlugin):
         # return (which sets its own outcome) or an exception (#469 review).
         _outcome = "failed"
         _closed = False
+        # Bound before the try: the close in the finally reads it, and an early
+        # return (no conversation message) leaves before step 1 assigns it.
+        conv: ContextWindow | None = None
         try:
             # Build the conversation message based on item role
             msg_result = self._build_conversation_message(item)
