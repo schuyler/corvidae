@@ -536,8 +536,10 @@ captures `contextvars.copy_context()` at creation and the worker runs
 sets it: no key inherits the enclosing one, a key overrides and the parent's
 is restored on exit. Keys are the channel id (turn, forks, appraisal,
 critique, the consolidation fork at compaction, the `fork` tool),
-`subagent:<task_id>`, and `upkeep:<plugin>:<tag>` (catch-up consolidation is
-`upkeep:memory:consolidation`). Five sites open a scope: the channel turn in
+`subagent:<task_id>`, and `<plugin>:<process tag>:<UID>` (one id per run, so a
+scheduler can tell runs apart; the run's trace id when it has one, a minted id
+when it doesn't — catch-up consolidation is `memory:consolidation:<id>`, #985).
+Five sites open a scope: the channel turn in
 `_process_queue_item`, `Agent.fork`, the subagent `work()`, the `fork` tool's
 `work()` and `MemoryPlugin._consolidate_range`; everything else inherits.
 `LLMClient.chat` with no key is a plugin bug, but the call is not refused:
@@ -692,7 +694,7 @@ CREATE TABLE usage_log (
     max_context_tokens INTEGER, -- the channel's budget in force when the row is written; NULL with no channel, no registry or an unknown channel
     prompt_ms REAL,             -- llama-server timings.prompt_ms: the final attempt's prefill time; NULL from other providers and on failure
     predicted_ms REAL,          -- llama-server timings.predicted_ms: the final attempt's decode time; NULL likewise
-    lease_key TEXT,             -- the queue the call belongs to (#363): channel id, 'subagent:<task_id>', 'upkeep:<plugin>:<tag>', or 'unleased:<stage>' for a chat call made with no key (#986); an embedding call has the enclosing scope's key, NULL outside any scope; NULL on older rows
+    lease_key TEXT,             -- the queue the call belongs to (#363): channel id, 'subagent:<task_id>', '<plugin>:<process tag>:<UID>' (one id per run), or 'unleased:<stage>' for a chat call made with no key (#986); an embedding call has the enclosing scope's key, NULL outside any scope; NULL on older rows
     lease_wait_ms REAL          -- ms the call waited for a lease before it was sent (#364); 0.0 when it did not wait; NULL when it took none (no heads, embedding) and on older rows
 );
 

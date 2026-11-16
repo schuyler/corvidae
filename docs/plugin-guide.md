@@ -770,7 +770,7 @@ manager that sets it:
 ```python
 from corvidae.attribution import lease_scope
 
-with lease_scope("upkeep:myplugin:digest"):
+with lease_scope("myplugin:digest:<uid>"):   # one key per run; <uid> below
     await client.chat(messages)
 ```
 
@@ -786,16 +786,23 @@ Three key formats:
 - the channel id, for channel work: the turn, its forks (appraisal,
   critique, and the consolidation fork at compaction), and the `fork` tool;
 - `subagent:<task_id>` for a subagent run;
-- `upkeep:<plugin>:<tag>` for work a plugin owns, such as
-  `upkeep:memory:consolidation` for catch-up consolidation.
+- `<plugin>:<process tag>:<UID>` for work a plugin owns, such as
+  `memory:consolidation:<id>` for catch-up consolidation (#985). The `<UID>`
+  is one id per run, so a scheduler can stop or resume one run without the
+  others: use the run's trace id when the work has one (a turn does), and mint
+  one (a uuid) when it doesn't. A subscriber that wants all of a plugin's runs
+  — a policy plugin under #366, a metrics query — matches on the stable
+  `<plugin>:<process tag>:` prefix; that prefix is part of the contract. The
+  `lease.*` events tag `lease_key`, so a per-run key adds one tag value per
+  run; no in-tree sink aggregates by tag today (#366 should account for it).
 
 Five built-in sites open a scope: the channel turn, `Agent.fork`,
 the subagent `work()`, the `fork` tool's `work()` and
 `MemoryPlugin._consolidate_range`. Everything else, vision included,
 inherits the caller's key. A plugin must open its own scope when it makes
 model calls outside a channel turn (a timer, a background loop, a startup
-task) and give it an `upkeep:<plugin>:<tag>` key. Work inside a turn
-needs nothing.
+task) and give it a `<plugin>:<process tag>:<UID>` key (one per run). Work
+inside a turn needs nothing.
 
 A chat call with no key is a bug in the plugin that made it, but it is not
 refused: it runs under the synthetic key `unleased:<stage>`, so on a
@@ -826,7 +833,7 @@ from corvidae.llm_plugin import LLMPlugin
 
 llm = get_dependency(self.pm, "llm", LLMPlugin)  # declare depends_on = frozenset({"llm"})
 if llm.leases is not None:                       # None: no provider declares heads
-    llm.leases.yield_key("upkeep:myplugin:digest")
+    llm.leases.yield_key("myplugin:digest:<uid>")
 ```
 
 `yield_key` gives up the key's head on every provider where it holds one,
