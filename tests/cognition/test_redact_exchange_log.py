@@ -132,8 +132,9 @@ class TestCoalescedBurst:
     """#423: redacting an absorbed burst message reaches the turn that answered.
 
     m1, m2 and m3 coalesce into one turn owned by m3. Each message has its own
-    row; only m3's row is appraised, so the nearest row to m1 has no claims to
-    tombstone and the owner is the nearest *later* appraised row.
+    row; only m3's row is appraised, so a by-message lookup from m1's row finds
+    nothing and the absorbed message's own ``appraisal.absorbed_by`` link names
+    the owner instead.
     """
 
     async def _db_with_burst(self, *, snapshot: str | None = "secret context"):
@@ -178,8 +179,9 @@ class TestCoalescedBurst:
     async def test_an_absorbed_message_never_scrubs_an_earlier_exchange(self):
         """Claims of an exchange before the burst were not derived from it.
 
-        The forward search has no earlier fallback: with no appraised row after
-        the absorbed message, the claims step changes nothing.
+        With no link and no appraised row after the absorbed message, the
+        fallback resolves to the nearest row at or before it, so the claims
+        step changes nothing.
         """
         db = await make_full_db(None)
         try:

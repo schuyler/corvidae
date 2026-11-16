@@ -1121,3 +1121,19 @@ class TestAppraisalPriorHint:
             fallback.score.assert_awaited_once()
             assert fallback.score.await_args.kwargs["hint"] == 0.2
         await _teardown(env)
+    async def test_no_rowid_writes_no_unfindable_link(self, tmp_path):
+        """A link needs a row a by-message lookup can find (#423 review).
+
+        ``on_message_persisted``'s rowid may be None whatever persistence did.
+        A link written then lands on a row born NULL, ``_owning_trace_id`` drops
+        to the positional walk, and that walk tombstones another turn's claims.
+        Writing nothing keeps the fallback no worse than before #423.
+        """
+        env = await build_env(tmp_path)
+        await env.appraisal.on_message_persisted(
+            channel=env.channel, trace_id="absorbed-none", rowid=None,
+            text="the absorbed message", annotations={"absorbed_by_trace": "owner-1"},
+        )
+        appraisal = await _read_appraisal(env.db, "absorbed-none")
+        assert "absorbed_by" not in (appraisal or {})
+        await _teardown(env)

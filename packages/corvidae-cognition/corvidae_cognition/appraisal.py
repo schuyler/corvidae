@@ -655,11 +655,16 @@ class AppraisalPlugin(CorvidaePlugin):
         # next turn's. Best-effort, like stage 1, and logged when it fails.
         owner = (annotations or {}).get("absorbed_by_trace")
         if owner:
-            # The rowid matters: without it the link lands on a row born with a
-            # NULL rowid, which no lookup by message id ever finds, so redaction
-            # falls back to the positional walk and tombstones the wrong
-            # exchange (#423 review).
-            await self._persist_absorbed_by(channel, trace_id, owner, rowid)
+            # The link is only useful on a row a by-message lookup can find, so
+            # it needs the rowid: written without one it lands on a row born
+            # NULL (or leaves stage 1's NULL in place), `_owning_trace_id` drops
+            # to the positional walk, and for m1, rA, m2, rB that walk tombstones
+            # the other turn's claims (#423 review). With no rowid there is no
+            # link to write, and the fallback is no worse than before #423 --
+            # which is the honest thing to do rather than write a link that
+            # cannot be found.
+            if rowid is not None:
+                await self._persist_absorbed_by(channel, trace_id, owner, rowid)
         self._originating_text[trace_id] = text
         self._originating_text.move_to_end(trace_id)
         while len(self._originating_text) > ORIGINATING_TEXT_LRU_MAXSIZE:
@@ -672,7 +677,7 @@ class AppraisalPlugin(CorvidaePlugin):
                 self._originating_rowid.popitem(last=False)
 
     async def _persist_absorbed_by(
-        self, channel, trace_id: str, owner: str, rowid: int | None = None
+        self, channel, trace_id: str, owner: str, rowid: int
     ) -> None:
         """Upsert ``appraisal.absorbed_by`` onto an absorbed message's row.
 
