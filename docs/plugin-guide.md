@@ -835,6 +835,8 @@ from corvidae.llm_plugin import LLMPlugin
 
 llm = get_dependency(self.pm, "llm", LLMPlugin)  # declare depends_on = frozenset({"llm"})
 if llm.leases is not None:                       # None: no provider declares heads
+    # run_id: this run's stored id — the one used to open the lease_scope
+    # at the start of the run (see the example above)
     llm.leases.yield_key(f"myplugin:digest:{run_id}")   # the same per-run key
 ```
 
