@@ -4,7 +4,8 @@
 acceptance.** This supplement is part of the product requirements for
 deployments that run the core/periphery strategy, and `docs/prd.md` §4
 records the decision. A technical reference document (TRD) will say how
-these outcomes are met and in what order. No work is measured against
+these outcomes are met and in what order; its draft is
+`docs/trd-core-periphery.md`. No work is measured against
 this supplement until the TRD is accepted. Its prerequisites are measured
 against the base PRD alone: the kernel rename (#16), providers and warm
 heads (#362), lease scopes (#363), and the lease mechanism with its
@@ -506,7 +507,9 @@ violates one is a bug even if its tests pass.
    *Note (explanatory):* base PRD §3.13.7 leaves a stop unbounded for
    now and leaves open whether it lapses by itself (#366). This item
    relies on a stop that does not lapse; if #366 decides otherwise, this
-   item goes back to the owner.
+   item goes back to the owner. The owner ruled on 2026-11-16 that a
+   stop does not lapse and that a deferral is the pause that does; base
+   §3.13.7 reads as undecided until #366 edits it.
 
    *Rationale:* The slot-management plugin orders active queues because
    it alone knows the cache resources and the cost of swapping them. It
@@ -765,7 +768,9 @@ With the goals plugin loaded:
    for every context too, except that consolidation does not run for a
    task-bound peripheral: it writes no memory of its own (§3.2.9, open
    question 17), and its work is remembered through the core's
-   consolidation of its result.
+   consolidation of its result. Nor does it run for a
+   long-lived fork, whose work is remembered through the consolidation
+   of its join report in its parent's window (§3.5; owner, 2026-11-16).
 
 2. With the appraisal plugin loaded, appraisal MUST run in the core
    (§3.1.10).
@@ -953,7 +958,13 @@ supplement amends them:
 - base principle 3's "background work does not hold back its own
   channel's next main turn" is a default: the operator MAY set a
   background stage's forks to block, and then the channel's next turn
-  waits for that stage's result (§3.5.7).
+  waits for that stage's result (§3.5.7);
+- an escalation or an instruction starts an exchange of its own, with
+  its own turn budget and its own origin, and the hop count of §3.12.2
+  bounds the chain. Base §3.1.3 and §3.5.10 charge a turn that a note
+  wakes to the budget of the chain that woke it and give it that
+  chain's origin; they keep doing so for notes, and do not apply to
+  escalations and instructions (gap 1; owner, 2026-11-16).
 
 The strategy's scheduling amends none of base §3.13: its pauses are the
 base's stop, and its ordering of active queues is a replacement order

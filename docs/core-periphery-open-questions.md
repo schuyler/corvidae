@@ -18,6 +18,8 @@ statement of what is required. Most of it has since been decided (see
   several of them (§4). The fuller
   drafts of the ideas are in the history of #527's branch,
   `claude/clever-darwin-4b33xi` (commits `b133a2a` through `8d8bce2`).
+- **Decisions of the TRD session** (§5): design calls the items above
+  left to the TRD, settled by the owner while the TRD was drafted.
 
 Section numbers like §3.5 refer to the supplement; references to the
 base PRD say "base".
@@ -568,3 +570,83 @@ as a recommendation without a ruling (question 12), and idea 5's rule
    quarantined as a low-trust note is. Likely to make many instructions
    low-trust; per-row provenance would be finer but needs the core to
    cite its sources.
+
+## 5. Decisions of the TRD session (2026-11-16)
+
+While `docs/trd-core-periphery.md` was drafted, the agent listed the
+design calls the items above had left to the TRD, proposed an answer to
+each, and the owner accepted the proposals in the live session ("I
+accept your proposals"; then, for the second set, "I will adopt your
+judgment on all counts"). They are recorded here because no issue holds
+them. The TRD cites them by the labels below and gives each its
+mechanism. The owner can overturn any of them.
+
+**Unaddressed by the earlier record (C).**
+
+- **C1. Strategy selection.** The kernel has no concept of a strategy.
+  A strategy is a distribution of plugins that does nothing without its
+  config block. A peripheral is the existing per-channel agent loop
+  with settings the strategy supplies. Startup aborts if the strategy
+  is configured and the heartbeat plugin is loaded.
+- **C2. Links and the base PRD.** Gap 1's decision (a fresh budget and
+  an origin of its own for each link) contradicted base §3.1.3 and
+  §3.5.10. The owner accepted an amendment, now in the supplement's §4.
+  `escalate` and `instruct` are the strategy's own tools, not built on
+  `notify_other_channel`, whose sends pass the admission seam so one
+  count sees every crossing. Critique's eligibility has to change, or
+  every new origin is exempt.
+- **C3. Task-bound peripherals.** They are the existing `subagent`
+  tool, extended with a narrowing `tools` argument, appended prompt
+  text and log rows. The `tools` argument exists under every topology.
+- **C4. Revision history.** An append-only table in `sessions.db`. The
+  live criteria text stays in a file, written when a revision is
+  applied.
+- **C5. Bounding rewrites.** The core writes only a per-channel
+  override of the criteria. The operator can freeze all channels or
+  listed ones, and cap the text's length.
+- **C6. #366.** A stop never lapses; a deferral is the pause that does.
+  Stop and resume are enough for the phases before the slot manager,
+  which needs #366's order hook.
+
+**Left to the TRD by the earlier record (A).**
+
+- **A1. KV state under a shared lease.** Paging saves what the slot
+  holds, which is the last caller's sequence. The other context reuses
+  the common prefix.
+- **A2. A fork's own lease key.** Its channel id.
+- **A3. Machinery on fork channels.** Log rows, compaction, critique
+  and memory retrieval run. Consolidation and idle-started turns do
+  not, and a fork is not in `list_channels`.
+- **A4. The §3.5.4 checkpoint.** A position in the log: the parent
+  channel and its row id at the fork point. A saved slot file is an
+  optimisation on top of it.
+- **A5. The operator's resume.** A subcommand that writes a request to
+  `sessions.db`, which the strategy applies on a timer.
+- **A6. Editor sessions.** The strategy does nothing under
+  `corvidae acp`.
+- **A7. The admission seam.** A veto hook, `should_start_work`, whose
+  refusal carries the limit and the remedy.
+- **A8. Slot pinning.** The first build pages only on a provider
+  declared with one head.
+- **A9. Exact wording.** It is base §3.5.9's send. An instruction is a
+  notification on the peripheral's queue.
+- **A10. Limits.** One plugin holds the per-channel inbound cap, the
+  ceiling on waiting work and the hop count. No per-response tool-call
+  cap is built.
+- **A11. The audit** this document's "Decisions" paragraph asks for is
+  the TRD's table of requirements to sections.
+
+**Defaults (B).** Every number the decisions left open ships as a
+commented best guess in operator config (base principle 7), listed in
+the TRD's configuration section.
+
+**Prerequisites the earlier record did not list.** #318 (the
+write-ahead log), #234 (speaking on any channel), #235 (reading another
+channel) and #365 (latency bounds) are open, and the strategy stands on
+each. The owner accepted the first three as prerequisites in session;
+#365 was found afterwards, while drafting. #366 (the order hook) is
+unlisted too and is C6's subject.
+
+**Kernel contracts.** The owner approved the TRD's kernel changes K2 to
+K6, K8 and K9 in session on 2026-11-16 ("I approve K2–K6, K8 and K9").
+K1 and K7 follow A7 and C3.
