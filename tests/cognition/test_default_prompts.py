@@ -5,6 +5,7 @@ names an operator)."""
 import ast
 from pathlib import Path
 
+from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS
 from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT
 
 REPO = Path(__file__).resolve().parents[2]
@@ -29,6 +30,17 @@ def test_consolidation_instruction_says_private_memory():
 
     assert PRIVATE_MEMORY_SENTENCE in _flat(DEFAULT_CONSOLIDATION_FORK_PROMPT)
     assert PRIVATE_MEMORY_SENTENCE in _flat(copy)
+
+
+def test_provenance_fork_prompt_has_no_snapshot():
+    """#1001: the provenance fork default mentions no snapshot, and the body
+    of its documented copy (below the ``---`` line) matches the default."""
+    default = DEFAULT_FORK_PROMPTS["provenance"]
+    copy = (REPO / "prompts" / "critique_provenance_fork.md").read_text()
+    body = copy.split("\n---\n", 1)[1]
+
+    assert "snapshot" not in default.lower()
+    assert _flat(body) == _flat(default)
 
 
 def _prompt_strings(path: Path) -> list[tuple[str, str]]:

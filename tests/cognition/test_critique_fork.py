@@ -1,6 +1,6 @@
 """Critique lenses as forks of the window (GitHub issue #51, phase 5):
 each lens forks while the exchange is in the window (checked per lens),
-the provenance lens keeps its snapshot and evidence inline, and a lens whose
+the provenance lens keeps its evidence inline, and a lens whose
 fork misses skips alone with a warning and no standalone call (#320, PRD
 §3.8.5); a run where every lens missed records no outcome."""
 
