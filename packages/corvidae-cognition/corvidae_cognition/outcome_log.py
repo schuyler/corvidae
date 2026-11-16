@@ -434,7 +434,8 @@ async def redact_exchange_log(
     """Scrub exchange_log text derived from redacted messages in one channel.
 
     For each redacted id X: the exchange that owns X (in the channel, the
-    largest message_rowid <= X) gets its stage-2 past_claims tombstoned.
+    largest message_rowid <= X) gets its stage-2 past_claims and its
+    outcomes objection detail tombstoned.
     Exchanges with a NULL message_rowid are not reached.
 
     Registered as the ``exchange_log`` scrubber in the ``corvidae.redact``

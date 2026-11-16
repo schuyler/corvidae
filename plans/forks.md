@@ -13,6 +13,9 @@ Where the implementation differs from the text below:
   so stage names are opaque strings in `corvidae/fork.py`.
 - The fork instruction keys are static config (`tuning.config_value`), not
   `resolve_tunable` keys, which is how they land on the immutable side (§9).
+- The provenance lens passes no CONTEXT snapshot (§4): the fork's window
+  already holds every CONTEXT row up to the reply, and an inline copy
+  re-sends them uncached, about 40k tokens on a ~170k-token window (#1001).
 - Any fork failure (exception, `ForkRefused`, empty or unparseable reply)
   falls back to the stage's standalone call, compaction included.
 - The tool-block snap (§3) applies with forks off too: it fixes the
