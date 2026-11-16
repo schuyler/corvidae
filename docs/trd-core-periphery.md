@@ -227,6 +227,21 @@ through the channel. For a channel that names a profile that changes
 - a chat stage it does not map forks on the forked channel's profile,
   in place of the kind's default.
 
+The same profile serves the stage's other work for that channel, such
+as a consolidation written from the rendered view (TRD §10.5), so the
+stage still has one profile on every path it takes for a channel. The
+owner's approval named forks; the other paths follow from base §3.8
+item 4 and are listed in TRD §15.1. Work with no channel is unchanged.
+
+That amends base §3.6 item 5 and §3.8 item 4, and §4 of the supplement
+lists it. Proposed base text for §3.6 item 5, in place of "A stage the
+operator hasn't mapped uses the deployment's default profile for its
+kind": "A stage the operator hasn't mapped uses the deployment's
+default profile for its kind, or, for work on a channel that names a
+profile, that channel's." And for §3.8 item 4, in place of "Each
+background stage has one profile": "Each background stage has one
+profile for a given channel".
+
 A channel with no profile is unchanged, and so is the base topology.
 Without the rule, on a deployment with two models every fork of a
 peripheral's window (critique, consolidation, compaction) would run on
@@ -1063,27 +1078,37 @@ of a turn after an unreachable backend (`corvidae/agent.py`,
   exclude_prefix: str) -> list[dict]` is new: the indexed, unredacted
   memories with an id above `after_id`, oldest first, leaving out those
   whose channel id starts with `exclude_prefix`. `core` passes `core:`,
-  so the core's own memories and its forks' are not echoed back. Each
+  so the core's own memories and its forks' are not echoed back, and a
+  `limit` of 20, a constant of the plugin: the budget, not this,
+  decides how many go in. Each
   dict has what `MemoryPlugin.recent` returns today (`id`, `summary`,
   `channel_id`, `age_seconds`) and one more, `oldest_age_seconds`: the
   age of the first message of the record's range. `age_seconds` is
   counted from the last (`memory.py`, `source_timestamp`), and §3.7.4's
   lag is counted from the oldest.
 - **Admitting.** The memories go in through the funnel, as base §3.7
-  requires of every subsystem's output: `core` calls `funnel.admit`
-  (`funnel.py`) with source `digest`, one line per memory (its channel
-  id, `oldest_age_seconds` and summary), oldest first, and each
-  memory's id as its dedupe key. The funnel frames them as data,
-  appends and persists the CONTEXT row, and applies the source's budget
-  (`funnel.budgets.digest`, else `funnel.default_budget`). That budget
-  is §3.1.13's bound on what one call is given.
+  requires of every subsystem's output: `core` calls
+  `funnel.admit_detailed` (`funnel.py`) with source `digest` and one
+  line per memory, oldest first: a marker naming the memory's id, its
+  channel id, `oldest_age_seconds` and its summary. The funnel frames
+  them as data, appends and persists the CONTEXT row, and applies the
+  source's budget (`funnel.budgets.digest`, else
+  `funnel.default_budget`). That budget is §3.1.13's bound on what one
+  call is given.
+- **The key.** The funnel finds a duplicate by looking for the key's
+  text in the source's rows, so the key has to be in the line. Each
+  line's key is its marker, in a form no other id's marker contains, as
+  memory's own `memory <id>)` is (`memory.py`).
 - **The watermark.** `digest_memory_id` in `cp_state` (TRD §11) is the
-  id below which every memory was admitted or dropped as a duplicate.
-  `core` stores it after `admit` returns. An entry the budget left out
-  stops it, so that entry and the ones after it are offered again on
-  the next call; those already in the window are dropped by their key.
-  A line that alone is over the budget is cut to fit, so no memory can
-  hold the watermark for good. At the strategy's first start the
+  id below which every memory was admitted or dropped as a duplicate,
+  both of which `admit_detailed` reports. `core` stores it after the
+  call returns. An entry the budget left out stops it, so that entry
+  and the ones after it are offered again on the next call; those
+  already in the window are dropped by their key. A line that alone is
+  over the budget is cut to fit, so no memory can hold the watermark
+  for good. The funnel reports an entry admitted even when persisting
+  its row failed (`funnel.py`), so such a row is in the live window and
+  lost at a restart. At the strategy's first start the
   watermark is the highest memory id there is, so history is not
   replayed into the core.
 - **Duplicates.** The funnel matches a key against the same source's
@@ -1091,8 +1116,9 @@ of a turn after an unreachable backend (`corvidae/agent.py`,
   `memory` can therefore also arrive once under `digest`.
 - **Logging.** Each admission is logged at info with its count and the
   largest `oldest_age_seconds` in it: the measured lag of §3.7.4. When
-  the budget leaves any out, one warning per `anomaly_interval` names
-  the count and the budget's key.
+  any are left out, one warning per `anomaly_interval` names the count
+  and the funnel keys that limit the source (`funnel.budgets.digest`,
+  `funnel.window_budgets.digest`).
 - **No turn.** Nothing is enqueued. A core with no call to make is told
   at its next idle beat (TRD §5.3), whose notification starts a turn
   and so a call.
@@ -1360,6 +1386,13 @@ means an existing base mechanism meets it and nothing is built.
   per period writes one memory per message. Whether such a range
   should be held for the next is not decided; the measured lag and
   the memories written are the evidence.
+- **The digest's default budget is small.** At `funnel.default_budget`
+  (512 tokens) and memory's entry target (256), about two memories go
+  in per core call. `funnel.budgets.digest` is unmeasured like the
+  other defaults.
+- **D4 beyond forks.** The owner approved the rule for forks; K2 also
+  applies it to a stage's other work for the same channel, so that
+  base §3.8 item 4's one profile per stage holds per channel.
 - **Trust on a digest row** (TRD §10.5) waits for #138 like the rest
   of TRD §9.4: the row would carry the lowest trust level of its
   memories.

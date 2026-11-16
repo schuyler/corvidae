@@ -319,7 +319,8 @@ violates one is a bug even if its tests pass.
     *Rationale:* The core is the one context that keeps a common
     awareness of every channel. Escalation (§3.4) brings it what a
     peripheral cannot handle. This brings it the rest: what the
-    peripherals handled themselves, late but within a bound (§3.7.4).
+    peripherals handled themselves, late by the age of §3.7.4 and what
+    adds to it.
     Delivery at the tail costs no turn and leaves the core's cached
     prefix as it was (base PRD principle 2). Owner, 2026-11-16.
 
@@ -808,7 +809,8 @@ With the goals plugin loaded:
    conversation no later than an operator-set age after its oldest
    un-consolidated message, however little conversation there is and
    whether or not the channel goes quiet; a turn or a consolidation
-   already running on that channel MAY finish first. With §3.1.13,
+   already running on that channel MAY finish first, and time the
+   daemon is not running is not counted. With §3.1.13,
    what the core holds at one of its model calls then lags a
    peripheral by that age and by what the TRD lists as adding to it,
    among them work that had to finish, the consolidation's own time,
@@ -1008,7 +1010,12 @@ supplement amends them:
   (§3.7.4). Base §3.7 Memory item 1 names three triggers (compaction,
   idle, the end of a turn); this adds a fourth for peripheral channels
   and changes none of the three (owner, 2026-11-16, amending the
-  decision on open question 16).
+  decision on open question 16);
+- a background stage the operator has not mapped does its work for a
+  channel that names a profile on that channel's profile. Base §3.6
+  item 5 gives an unmapped stage the default profile for its kind, and
+  base §3.8 item 4 gives a stage one profile on every path; under this
+  strategy that is one profile per channel (TRD K2; owner, 2026-11-16).
 
 The strategy's scheduling amends none of base §3.13: its pauses are the
 base's stop, and its ordering of active queues is a replacement order
