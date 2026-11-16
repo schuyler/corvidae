@@ -1084,7 +1084,10 @@ of a turn after an unreachable backend (`corvidae/agent.py`,
   dict has what `MemoryPlugin.recent` returns today (`id`, `summary`,
   `channel_id`, `age_seconds`) and one more, `oldest_age_seconds`: the
   age of the first message the record's own consolidation covered.
-  Memory stores that time with the record when it is written, because
+  Memory stores that time with the record when it is written, in a new
+  `memory.range_started_at` column; a record no consolidation wrote
+  (`write_record`) carries its `created_at` there. The stored range
+  will not do, because
   a near-duplicate merge widens the stored range back to the older
   record's start (`memory.py`, `_insert_record`) and would make a new
   exchange look as old as the one it resembles. `age_seconds` is
