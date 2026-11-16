@@ -13,8 +13,9 @@ statement of what is required. Most of it has since been decided (see
   numbered as the supplement cites them.
 - **Gaps and ideas** (§3, §4): problems found in review, and design
   ideas discussed while looking at them. The gaps were decided on
-  2026-11-16; the ideas are not decided as written, though the
-  decisions took up several of them (§4). The fuller
+  2026-11-16, except gap 10 (no ruling) and gap 12 (withdrawn); the
+  ideas are not decided as written, though the decisions took up
+  several of them (§4). The fuller
   drafts of the ideas are in the history of #527's branch,
   `claude/clever-darwin-4b33xi` (commits `b133a2a` through `8d8bce2`).
 
@@ -33,16 +34,26 @@ provenance) and #982 (memory, goals and cognition).
 
 The decisions are inputs to the TRD, not requirements. A requirement
 in the supplement stands as written until the supplement itself is
-edited, and three still disagree with a decision here:
+edited. Review found the places below where the supplement's text
+disagrees with a decision here. The list is what was noticed, not an
+audit, and the TRD should check each decision against the supplement.
 
-- §3.1.3 and §3.3.6 name VRAM, RAM and disk; questions 1 and 6 leave
-  two tiers, a slot and a saved slot file.
-- §3.6.1 lists every open goal; gap 6 shows the highest-priority
-  lines and a count of the rest once the block passes its bound.
-- §3.12's note and idea 2 below still offer a total inbound cap
-  across channels as a candidate; gap 9 keeps caps per channel.
+- §3.1.3 and §3.3.6 (requirements) name VRAM, RAM and disk; questions
+  1 and 6 leave two tiers, a slot and a saved slot file.
+- §3.6.1 (a requirement) lists every open goal; gap 6 shows the
+  highest-priority lines and a count of the rest once the block passes
+  its bound.
+- §3.5.6 (a requirement) says the channel's periphery does not respond
+  while a fork works the channel; gap 5 lets a periphery turn already
+  in flight finish and send.
+- §3.2.4 (a requirement) has a rewrite take effect at the periphery's
+  next compaction boundary; gap 7 applies it there only with a critique
+  verdict that is not bad, and otherwise holds or drops it.
+- §3.12's implementation note (explanatory) and idea 2 below still
+  offer a total inbound cap across channels as a candidate; gap 9 keeps
+  caps per channel.
 
-Two of them reach beyond one item. Identifiers a plugin owns follow
+Two decisions reach beyond one item. Identifiers a plugin owns follow
 `<plugin>:<component>:<uid>`, channel ids included (questions 8 and 10).
 And the kernel supplies seams, not verdicts: where an answer needs a
 policy, a plugin holds it (question 21, gaps 3 and 4).

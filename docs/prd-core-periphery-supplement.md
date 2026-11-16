@@ -1039,7 +1039,7 @@ as of 2026-11-16; the TRD should confirm them against the pinned build.
 - **RAM prompt cache, turned off:** `--cache-ram` (MiB; default 8192;
   0 disables it), with `--cache-idle-slots` saving idle slots into it on
   a new task. The deployment sets `--cache-ram 0`, which also disables
-  `--cache-idle-slots` (A.2).
+  `--cache-idle-slots`.
 - **Slot selection:** by default the server picks a slot by prompt
   similarity (`--slot-prompt-similarity`), which could put a request in
   a slot holding another context. The plugin would name the slot on
