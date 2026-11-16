@@ -1761,6 +1761,9 @@ class MemoryPlugin(CorvidaePlugin):
         self._inflight_tasks: dict[str, tuple[asyncio.Task, str]] = {}
         # Consecutive turn-fork failures per channel, for the backoff (#620).
         self._turn_failures: dict[str, _TurnFailures] = {}
+        # channel -> (watermark, range_end) of the last idle skip: a quiet
+        # channel does not retry an unchanged range every idle period (#342).
+        self._idle_skips: dict[str, tuple[int, int]] = {}
         # Kernel clock and idle tracker; both set in on_start, or both None.
         self._clock: Clock | None = None
         self._idle: IdleTracker | None = None
@@ -2257,6 +2260,13 @@ class MemoryPlugin(CorvidaePlugin):
                 )
                 return
             if max_id <= watermark:
+                return
+            # An unchanged range that already skipped: nothing has happened
+            # since, so this firing neither forks nor warns (#342, option B).
+            # A new message raises max_id and a consolidation raises the
+            # watermark; either drops the entry and the next firing retries.
+            skipped = self._idle_skips.pop(channel_id, None)
+            if skipped == (watermark, max_id):
                 return
             task = self._spawn(self._consolidate_range(channel_id, max_id, "idle"))
             if task is None:
@@ -3091,6 +3101,10 @@ class MemoryPlugin(CorvidaePlugin):
         what was missing (consolidation has no trace id). The watermark is
         untouched; ``trigger`` names what retries (idle, turn, or idle or
         compaction for a turn range skipped with forks off)."""
+        if trigger == "idle":
+            # Nothing has changed for a reason to try again; the next idle
+            # firing sees this and returns without a fork or a warning (#342).
+            self._idle_skips[channel_id] = (watermark, rows[-1][0])
         logger.warning(
             "consolidation skipped for channel %s, messages %d-%d: %s; "
             "the watermark stays at %d and the next %s trigger retries",
