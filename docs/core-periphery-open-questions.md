@@ -657,8 +657,8 @@ K1 and K7 follow A7 and C3.
 **After the TRD merged (2026-11-16).** Three more decisions, taken in
 the live session that merged the draft.
 
-- **D1. The slot manager is deferred.** TRD phases 6 and 7 are not on
-  the path for now: "the current arrangement with llama CPP and its
+- **D1. The slot manager is deferred.** TRD phase 6 is not on the path
+  for now, and phase 7, which needs it, waits with it: "the current arrangement with llama CPP and its
   cache ram setting will handle workloads adequately for now. The main
   piece is having a central dispatcher that can maintain a common
   awareness between different channels."

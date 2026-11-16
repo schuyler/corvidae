@@ -247,7 +247,7 @@ layer beneath every operator entry.
   `channel.runtime_overrides`, then global config. It gains the plugin
   layer between the two, so a plugin can default a dotted tunable for a class of channels. A
   plugin default therefore outranks the global value in `agent.yaml`.
-  For the two defaults set this way (TRD §10.3), the global key does
+  For the defaults set this way (TRD §10.3, §10.5), the global key does
   not reach those channels; a channel's `runtime_overrides` still does.
 
 ### K4. A queue can be held (§3.5.7)
@@ -372,8 +372,8 @@ Task completions and scheduler firings keep the origins they have.
 (`heartbeat.py`, `on_start`). On firing it enqueues one `idle`
 notification on the core's channel, made of:
 
-1. new memories since the last beat, leaving out those the digest has
-   delivered (TRD §10.5);
+1. new memories since the last beat from `core:` channels; the
+   peripherals' come by the digest (TRD §10.5);
 2. goals retired since the last beat;
 3. the idle prompt, from the key `core_periphery.core.idle_prompt`,
    resolved by `resolve_prompt` (`corvidae/prompts.py`).
@@ -737,7 +737,8 @@ Detail of a long fork beyond its report is in the raw log only.
 
 **Deferred (TRD decision D1).** The owner judges llama-server's RAM
 prompt cache adequate for the workload for now, so this section and
-phases 6 and 7 are not on the path. `hold_queue` and `resume_queue`
+phase 6 are not on the path. Phase 7 needs phase 6 and waits with it;
+the owner named only phase 6. `hold_queue` and `resume_queue`
 are not deferred.
 
 Everything in this section waits for #366, except `hold_queue` and
@@ -995,7 +996,7 @@ separately, and both records carry the chain id. The measure is
 co-retrieval: how often both come back in one retrieval. It is logged
 by the funnel and decides nothing yet.
 
-### 10.5 Bounded awareness (§3.1.13, §3.7.4)
+### 10.5 Bounded awareness (§3.1.13, §3.7.4; TRD decisions D2, D3)
 
 The core learns what the peripherals handled themselves through their
 memories, delivered at its tail. Two delays lie between a peripheral
@@ -1005,18 +1006,29 @@ exchange and the core holding it, and each has a bound.
 a per-channel tunable for it, `memory.consolidate_max_age` (seconds;
 unset, the default, turns the trigger off), read with `resolve_tunable`.
 
-- When a message is persisted on a channel that has the tunable set and
-  nothing un-consolidated above its watermark, memory sets a timer with
-  `Clock.call_later` (`corvidae/clock.py`) for that age.
-- When the timer fires, memory consolidates the channel's
-  un-consolidated range up to the newest row, by forking the window as
-  the turn and idle triggers do (`docs/cognition.md`, "Consolidation
-  (write path)"). The token threshold of the turn trigger does not
-  apply to it.
-- Any consolidation that moves the channel's watermark cancels the
-  timer. The next message persisted sets it again.
-- A turn in flight on the channel when the timer fires is not
-  interrupted: the consolidation runs when that turn ends.
+- **The rule.** Whenever a channel with the tunable set has
+  un-consolidated messages and no consolidation running, a timer stands
+  for the time its oldest un-consolidated message was persisted plus
+  the age (`Clock.call_later`, `corvidae/clock.py`). A time already
+  past fires at once.
+- **When it is re-evaluated.** After every message persisted on the
+  channel, after every consolidation of the channel ends, whether it
+  committed, was skipped or failed, and at startup for every channel
+  with the tunable set. A timer is in memory only, so startup is what
+  restores it.
+- **When it fires,** memory consolidates the channel's un-consolidated
+  range up to the newest row, by forking the window as the turn and
+  idle triggers do (`docs/cognition.md`, "Consolidation (write path)").
+  The token threshold of the turn trigger does not apply to it.
+- **A turn in flight** on the channel when it fires is not interrupted:
+  the consolidation runs when that turn ends.
+- **After a failure or a skip** that leaves the watermark where it was,
+  the next attempt is one age later, not at once, and memory's existing
+  warning names the channel and the range.
+- **It forks, so it needs forks on** for the `consolidation` stage, as
+  the turn trigger does (base §3.7 Memory item 1). With them off,
+  `periphery` logs one warning at startup naming both keys, and the
+  bound below does not hold.
 
 `periphery` defaults the tunable for peripheral channels through K3,
 from `core_periphery.periphery.consolidate_max_age` (300). It is unset
@@ -1030,47 +1042,59 @@ reaches that age."
 
 **From memory to the core.** `core` implements `before_agent_turn`
 (`corvidae/hooks.py`) for `core:main:<uid>` and no other channel. That
-hook fires before each model call, tool-result turns included.
+hook fires before each model call, tool-result turns included, except
+the re-run of a turn after an unreachable backend (`corvidae/agent.py`,
+`if not item.retry`).
 
 - `MemoryPlugin.since(after_id: int, limit: int, exclude_prefix: str)
   -> list[dict]` is new: the indexed, unredacted memories with an id
   above `after_id`, oldest first, leaving out those whose channel id
   starts with `exclude_prefix`. `core` passes `core:`, so the core's own
   memories and its forks' are not echoed back. Each dict has what
-  `MemoryPlugin.recent` returns today: `id`, `summary`, `channel_id`,
-  `age_seconds`.
+  `MemoryPlugin.recent` returns today (`id`, `summary`, `channel_id`,
+  `age_seconds`) and one more, `oldest_age_seconds`: the age of the
+  first message of the record's range. `age_seconds` is counted from
+  the last (`memory.py`, `source_timestamp`), and §3.7.4's bound is
+  counted from the oldest.
 - When the call returns any, `core` appends one CONTEXT row at the
   core's tail: one line per memory with its channel id, age and
   summary, framed as data from other channels. It then stores the
   highest id delivered as `digest_memory_id` in `cp_state` (TRD §11).
+  At the strategy's first start the watermark is the highest memory
+  id there is, so history is not replayed into the core.
 - `limit` is `core_periphery.core.digest_max` (20). When more are
   waiting, they come on the following calls, and one warning per
   `anomaly_interval` names the count held back and the key.
-- Each row appended is logged at info with its count and the age of its
-  oldest memory. That age is the measured lag of §3.7.4.
+- Each row appended is logged at info with its count and the largest
+  `oldest_age_seconds` in it. That is the measured lag of §3.7.4.
 - Nothing is enqueued, so no turn starts. A core with no call to make
   is told at its next idle beat (TRD §5.3), whose notification starts a
   turn and so a call.
 
-**The bound.** At each model call on `core:main:<uid>`, the core holds
-every peripheral memory indexed before that call, up to `digest_max`
-per call. A peripheral message is in such a memory no later than
-`consolidate_max_age` after it was persisted, plus the time its
-consolidation waits for a head and runs. Three things stretch it, each
-by a bound of its own:
+**The bound.** At each model call on `core:main:<uid>` that the hook
+precedes, the core holds every peripheral memory indexed before that
+call, less what `digest_max` holds back. By the rule above, a
+consolidation of a peripheral message starts no later than
+`consolidate_max_age` after the message was persisted. These add to
+it, each with a bound of its own:
 
-- a peripheral turn in flight when the timer fires, by that turn;
+- a consolidation of the channel already running at that time, by its
+  duration: the rule is re-evaluated when it ends, and fires at once;
+- a peripheral turn in flight, by that turn;
+- the consolidation's own wait for a head and its run;
+- a consolidation that fails or is skipped, by one more age for each
+  attempt;
 - a blocking fork, during which `core:main:<uid>` makes no call, by
   `fork.blocking_wait` (TRD §7.3). The fork itself reaches the memories
   by retrieval (TRD §7.7);
-- a consolidation that fails, until the next trigger for that channel.
-  Memory's existing warning names the channel and the range.
+- a backlog above `digest_max`, by the calls it takes to drain.
 
 **What the rows cost.** A CONTEXT row is never summarised and leaves
-the window at the core's next compaction (`docs/design.md`), so the
-digest's share of the core's window is bounded by what arrives between
-two compactions. After that the memory is reached by retrieval, like
-any other. Base §3.7 Memory item 1 leaves CONTEXT rows out of the count
+the window when a compaction's cut passes it; a row in the tail a
+compaction retains stays (`docs/design.md`). So a digest row lives
+through at least one compaction boundary and leaves at a later one,
+and the digest's share of the core's window is what arrives over that
+span. After that the memory is reached by retrieval, like any other. Base §3.7 Memory item 1 leaves CONTEXT rows out of the count
 of un-consolidated messages, so a digest row does not by itself start
 a consolidation in the core.
 
@@ -1205,8 +1229,8 @@ order.
 | 3 | K2; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains, the `notify_other_channel` change of TRD §9.3; the age trigger and the digest (TRD §10.5) | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window; a peripheral message that is not escalated is in a CONTEXT row at the core's tail by the core's first call after `consolidate_max_age` and the consolidation's duration, and no core turn was started for it |
 | 4 | K7; tail import; criteria rewrites | #235, phase 3 | a subagent given `tools=["read_file"]` has no other tool in its request; a rewrite is absent from the peripheral's prompt before its next compaction and present after; a frozen channel refuses |
 | 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `hold_queue` and `resume_queue` in `core` (TRD §8.3, on the kernel's stop and resume), the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel; `hold_queue` on the core's own channel returns the refusal text and stores no `cp_stops` row; after `hold_queue` on a fork that shared its parent's lease, the parent's next call is granted |
-| 6 | `slots` on one head: order, paging, stamped saves, shutdown save, the other four tools of TRD §8.3; consolidation's yield | #366, #365, phase 5 | after a page-out and page-in the next call's `cache_n` is within 5% of the prompt length; a file with a changed stamp is deleted with a warning and the call prefills; `pin_context` on a hosted provider returns the no-effect text |
-| 7 | Two models on separate providers, more heads, router mode: not designed | #1009's report, phase 6 | alternating a core and a periphery call loads neither model twice (§3.8.5) |
+| 6 | `slots` on one head: order, paging, stamped saves, shutdown save, the other four tools of TRD §8.3; consolidation's yield | #366, #365, phase 5; deferred (D1) | after a page-out and page-in the next call's `cache_n` is within 5% of the prompt length; a file with a changed stamp is deleted with a warning and the call prefills; `pin_context` on a hosted provider returns the no-effect text |
+| 7 | Two models on separate providers, more heads, router mode: not designed | #1009's report, phase 6; deferred with it | alternating a core and a periphery call loads neither model twice (§3.8.5) |
 | 8 | Trust stamping | #138 | an instruction written after an untrusted escalation carries the untrusted level |
 
 Phases 6 and 7 are deferred (TRD decision D1). Phase 7 is not designed here. Until #1009 reports, all that exists is

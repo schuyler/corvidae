@@ -793,7 +793,7 @@ With the goals plugin loaded:
 3. Critique, consolidation and compaction MUST each run over the window
    of each context item 1 has them run for, independently, as base PRD
    §3.7 and §3.8
-   describe; nothing about them changes. Whatever a context's window
+   describe; nothing about them changes except by item 4. Whatever a context's window
    holds MUST be in scope, including the core's instructions and the
    messages it worded itself.
 
@@ -801,15 +801,18 @@ With the goals plugin loaded:
    own window, the agent forms separate memories of a peripheral exchange and of the
    core's decision about it (open question 14).
 
-4. With the memory plugin loaded, the framework MUST consolidate a
-   channel-bound peripheral's un-consolidated conversation no later
-   than an operator-set age after its oldest un-consolidated message,
-   however little conversation there is and whether or not the channel
-   goes quiet. With §3.1.13, what the core holds at one of its model
-   calls then lags a peripheral by no more than that age and the time
-   the consolidation takes: the core's awareness of the peripherals is
-   eventually consistent, within a bound. The framework MUST log the
-   lag it measures.
+4. With the memory plugin loaded, the framework MUST start
+   consolidating a channel-bound peripheral's un-consolidated
+   conversation no later than an operator-set age after its oldest
+   un-consolidated message, however little conversation there is and
+   whether or not the channel goes quiet; a turn or a consolidation
+   already running on that channel MAY finish first. With §3.1.13,
+   what the core holds at one of its model calls then lags a
+   peripheral by that age, the work that had to finish, the time the
+   consolidation takes, and whatever §3.1.13 held back: the core's
+   awareness of the peripherals is eventually consistent, within a
+   bound the TRD states. The framework MUST log the lag it measures,
+   counted from the oldest message.
 
    *Rationale:* The bound is a time and not an amount of conversation.
    A bound on amount would repeat what escalation already does, since a
