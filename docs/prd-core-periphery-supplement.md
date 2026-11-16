@@ -795,7 +795,8 @@ With the goals plugin loaded:
 3. Critique, consolidation and compaction MUST each run over the window
    of each context item 1 has them run for, independently, as base PRD
    §3.7 and §3.8
-   describe; nothing about them changes except by item 4. Whatever a context's window
+   describe; nothing about them changes except by item 4 and in the profile a
+   stage the operator has not mapped uses (§4; TRD K2). Whatever a context's window
    holds MUST be in scope, including the core's instructions and the
    messages it worded itself.
 
@@ -1011,11 +1012,12 @@ supplement amends them:
   idle, the end of a turn); this adds a fourth for peripheral channels
   and changes none of the three (owner, 2026-11-16, amending the
   decision on open question 16);
-- a background stage the operator has not mapped does its work for a
-  channel that names a profile on that channel's profile. Base §3.6
+- a background chat stage the operator has not mapped does its work
+  for a channel that names a profile on that channel's profile. Base §3.6
   item 5 gives an unmapped stage the default profile for its kind, and
   base §3.8 item 4 gives a stage one profile on every path; under this
-  strategy that is one profile per channel (TRD K2; owner, 2026-11-16).
+  strategy that is one profile per channel (TRD K2; for forks, owner,
+  2026-11-16; the stage's other paths are open, TRD §15.1).
 
 The strategy's scheduling amends none of base §3.13: its pauses are the
 base's stop, and its ordering of active queues is a replacement order

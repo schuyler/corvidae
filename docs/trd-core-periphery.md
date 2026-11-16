@@ -237,8 +237,8 @@ That amends base §3.6 item 5 and §3.8 item 4, and §4 of the supplement
 lists it. Proposed base text for §3.6 item 5, in place of "A stage the
 operator hasn't mapped uses the deployment's default profile for its
 kind": "A stage the operator hasn't mapped uses the deployment's
-default profile for its kind, or, for work on a channel that names a
-profile, that channel's." And for §3.8 item 4, in place of "Each
+default profile for its kind, or, for a chat stage's work on a channel
+that names a profile, that channel's." And for §3.8 item 4, in place of "Each
 background stage has one profile": "Each background stage has one
 profile for a given channel".
 
@@ -1079,8 +1079,8 @@ of a turn after an unreachable backend (`corvidae/agent.py`,
   memories with an id above `after_id`, oldest first, leaving out those
   whose channel id starts with `exclude_prefix`. `core` passes `core:`,
   so the core's own memories and its forks' are not echoed back, and a
-  `limit` of 20, a constant of the plugin: the budget, not this,
-  decides how many go in. Each
+  `limit` of 20, a constant of the plugin; more than that wait for
+  the next call. Each
   dict has what `MemoryPlugin.recent` returns today (`id`, `summary`,
   `channel_id`, `age_seconds`) and one more, `oldest_age_seconds`: the
   age of the first message of the record's range. `age_seconds` is
@@ -1100,13 +1100,16 @@ of a turn after an unreachable backend (`corvidae/agent.py`,
   line's key is its marker, in a form no other id's marker contains, as
   memory's own `memory <id>)` is (`memory.py`).
 - **The watermark.** `digest_memory_id` in `cp_state` (TRD §11) is the
-  id below which every memory was admitted or dropped as a duplicate,
+  highest id up to which every memory was admitted or dropped as a
+  duplicate,
   both of which `admit_detailed` reports. `core` stores it after the
   call returns. An entry the budget left out stops it, so that entry
   and the ones after it are offered again on the next call; those
   already in the window are dropped by their key. A line that alone is
   over the budget is cut to fit, so no memory can hold the watermark
-  for good. The funnel reports an entry admitted even when persisting
+  for good, short of a window cap the operator sets
+  (`funnel.window_budgets.digest`), which holds entries until a
+  compaction makes room. The funnel reports an entry admitted even when persisting
   its row failed (`funnel.py`), so such a row is in the live window and
   lost at a restart. At the strategy's first start the
   watermark is the highest memory id there is, so history is not
@@ -1116,7 +1119,8 @@ of a turn after an unreachable backend (`corvidae/agent.py`,
   `memory` can therefore also arrive once under `digest`.
 - **Logging.** Each admission is logged at info with its count and the
   largest `oldest_age_seconds` in it: the measured lag of §3.7.4. When
-  any are left out, one warning per `anomaly_interval` names the count
+  any are left out, or `since` returned a full page, one warning per
+  `anomaly_interval` names the count
   and the funnel keys that limit the source (`funnel.budgets.digest`,
   `funnel.window_budgets.digest`).
 - **No turn.** Nothing is enqueued. A core with no call to make is told
@@ -1139,7 +1143,8 @@ the message was persisted. These add to that:
 - a blocking fork, during which `core:main:<uid>` makes no call, by
   `fork.blocking_wait` (TRD §7.3). The fork itself reaches the memories
   by retrieval (TRD §7.7);
-- a backlog over the budget, by the calls it takes to drain.
+- a backlog over the budget, by the calls it takes to drain, or over a
+  window cap, until a compaction makes room.
 
 **What the rows cost.** A CONTEXT row is never summarised, and it
 leaves the window when a compaction's cut passes it (`docs/design.md`).
@@ -1227,7 +1232,7 @@ core_periphery:
     force: null                # always | never
     summary_max_chars: 600
     verbatim_max_chars: 500
-    consolidate_max_age: 300   # seconds; the bound of TRD §10.5
+    consolidate_max_age: 300   # seconds; the age of TRD §10.5
     structural:
       attachment: true
       first_sender: true
@@ -1297,7 +1302,9 @@ threat-model entries known now: `escalate` and `instruct` (untrusted
 text reaches the core and comes back out), criteria rewrites on by
 default (TRD §6.5), `work_channel`, the two subcommands, and the digest
 (TRD §10.5): memories made from users' messages reach the core's window
-without the core asking for them.
+without the core asking for them, and a summary that contains another
+memory's marker makes the funnel drop that memory as a duplicate, as
+source `memory` already allows.
 
 ## 14. Requirements to sections
 
@@ -1387,7 +1394,7 @@ means an existing base mechanism meets it and nothing is built.
   should be held for the next is not decided; the measured lag and
   the memories written are the evidence.
 - **The digest's default budget is small.** At `funnel.default_budget`
-  (512 tokens) and memory's entry target (256), about two memories go
+  (512 tokens) and memory's entry target (256), one or two memories go
   in per core call. `funnel.budgets.digest` is unmeasured like the
   other defaults.
 - **D4 beyond forks.** The owner approved the rule for forks; K2 also
