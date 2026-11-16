@@ -283,6 +283,41 @@ async def test_rubric_score_during_catchup_commit_is_keyed_by_upkeep(
     assert loud_unleased_records(caplog) == []
 
 
+async def test_rubric_after_fork_uses_the_per_run_key(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    """After a fork record, the rubric (called in _commit) runs under the run's
+    per-run key, not the channel key the fork re-keyed to (#985): the fork's
+    lease scope restores the outer per-run key on exit. This is the trickiest
+    path the PR touches — outer per-run scope, fork re-keys to the channel,
+    rubric runs back under the per-run key."""
+    caplog.set_level(logging.WARNING)
+    persistence = env.plugin.pm.get_plugin("persistence")
+    ids = await seed_dialog(persistence, env.channel, DIALOG)
+    # The range is in the live window: _live_record takes the fork path
+    # (outcome == "record"), which commits via _commit -> rubric (the fork
+    # record has no importance, so the rubric rates the range).
+    env.channel.conversation = window_of(
+        env.channel.id, ids, contents=[text for _role, text in DIALOG])
+
+    await env.memory._consolidate_range(env.channel.id, ids[-1], "idle")
+    await env.memory.wait_for_background_tasks()
+
+    rows = await usage_rows(env.db)
+    fork_keys = [key for stage, key, mode in rows if stage == "consolidation" and mode == "fork"]
+    rubric_keys = [key for stage, key, mode in rows if stage == "consolidation" and mode == "rubric"]
+    assert len(fork_keys) == 1, (fork_keys, rows)
+    # The fork carries the channel key (re-keyed inside _live_record).
+    assert fork_keys[0] == env.channel.id, fork_keys
+    # The rubric (after the fork) carries the run's per-run key.
+    assert len(rubric_keys) == 1, (rubric_keys, rows)
+    assert _is_consolidation_key(rubric_keys[0]), rubric_keys
+    # The fork and rubric keys differ: the fork is the channel, the rubric is
+    # the per-run key (the fork's lease scope restored the outer key).
+    assert fork_keys[0] != rubric_keys[0], (fork_keys, rubric_keys)
+    assert loud_unleased_records(caplog) == []
+
+
 async def test_consolidation_with_trace_id_uses_it_as_the_key(
     env: Env, caplog: pytest.LogCaptureFixture
 ) -> None:
