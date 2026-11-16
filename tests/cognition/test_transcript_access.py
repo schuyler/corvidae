@@ -7,6 +7,9 @@ them into ``message_fts``, as production does.
 
 import json
 import logging
+import time
+
+import pytest
 
 from corvidae.commands.redact import redact_messages
 from corvidae.tool import declares_untrusted_output
@@ -24,6 +27,24 @@ TS_EARLY = 1699999999.0  # 2023-11-14T22:13:19Z
 TS_LATE = 1700100000.0  # 2023-11-16T02:00:00Z
 
 LOGGER = "corvidae.tools.memory_tools"
+
+
+@pytest.fixture
+def far_east_tz(monkeypatch):
+    """Run the test under UTC+14, so a parser or formatter that used local
+    time instead of UTC would move every boundary by fourteen hours."""
+    monkeypatch.setenv("TZ", "Pacific/Kiritimati")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def _hit(result: str, rid: int) -> str | None:
+    """The hit line for message_log row ``rid``, or None when absent."""
+    return next(
+        (line for line in result.splitlines() if line.startswith(f"{rid}.")), None,
+    )
 
 
 async def _search_tool(memory_tools):
@@ -62,7 +83,7 @@ class TestSearchScope:
         assert "bravo" not in globbed and "alpha" not in globbed, globbed
         await db.close()
 
-    async def test_after_and_before_filter_by_timestamp_naive_is_utc(self):
+    async def test_after_and_before_filter_by_timestamp_naive_is_utc(self, far_east_tz):
         """R1: after/before bound message_log.timestamp; naive values are UTC."""
         _memory, memory_tools, db = await build_tools_env()
         search = await _search_tool(memory_tools)
@@ -118,7 +139,7 @@ class TestSearchScope:
 class TestHitLine:
     """R2: one hit line carries id, channel, UTC timestamp, role, snippet."""
 
-    async def test_hit_line_has_all_five_fields(self):
+    async def test_hit_line_has_all_five_fields(self, far_east_tz):
         """R2: leading id, channel, ISO UTC timestamp, role, **highlighted** match."""
         _memory, memory_tools, db = await build_tools_env()
         search = await _search_tool(memory_tools)
@@ -128,7 +149,8 @@ class TestHitLine:
 
         result = await search("kestrel")
 
-        hit = next(l for l in result.splitlines() if l.startswith(f"{rid}."))
+        hit = _hit(result, rid)
+        assert hit is not None, result
         assert "irc:#b" in hit, hit
         assert "2023-11-14T22:13:20" in hit, hit
         assert "assistant" in hit, hit
@@ -151,7 +173,7 @@ class TestNoAccessStats:
 
         result = await search("pangolin")
 
-        assert str(rid) in result, result
+        assert _hit(result, rid) is not None, result
         async with db.execute(
             "SELECT retrieval_count, last_retrieved_at FROM memory WHERE id = ?",
             (mid,),
@@ -170,12 +192,13 @@ class TestRedaction:
         search = await _search_tool(memory_tools)
         rid = await seed_message_log_row(db, "irc:#a", "user", "password is hunter2")
         # Precondition: findable before redaction.
-        assert str(rid) in await search("hunter2")
+        before = await search("hunter2")
+        assert _hit(before, rid) is not None, before
 
         await redact_messages(db, [rid])
 
         after = await search("hunter2")
-        assert str(rid) not in after and "hunter2" not in after, after
+        assert _hit(after, rid) is None and "hunter2" not in after, after
         replay = await get_tools(memory_tools)["recall_raw"](
             memory_id=None, channel="irc:#a", start_id=rid, end_id=rid,
         )
@@ -338,7 +361,8 @@ class TestRowPattern:
 
         result = await search("axolotls")
 
-        hit = next(l for l in result.splitlines() if l.startswith(f"{rid}."))
+        hit = _hit(result, rid)
+        assert hit is not None, result
         assert "assistant (withheld, not sent)" in hit, hit
         await db.close()
 
@@ -362,9 +386,34 @@ class TestRowPattern:
         with caplog.at_level(logging.WARNING):
             result = await search("marmot")
 
-        assert any(l.startswith(f"{good}.") for l in result.splitlines()), result
-        assert not any(l.startswith(f"{bad}.") for l in result.splitlines()), result
+        assert _hit(result, good) is not None, result
+        assert _hit(result, bad) is None, result
         assert skip_warnings(caplog, bad, "irc:#a"), [
+            r.getMessage() for r in caplog.records
+        ]
+        await db.close()
+
+    async def test_every_known_type_found_unknown_type_skipped(self, caplog):
+        """R8: summary and context rows are searchable like message rows; a
+        row of an unknown type is skipped with the standard warning."""
+        _memory, memory_tools, db = await build_tools_env()
+        search = await _search_tool(memory_tools)
+        # One matching row per non-message known type, plus an unknown type.
+        ids = {}
+        for mtype in ("summary", "context", "bogus"):
+            ids[mtype] = await insert_raw_message(
+                db, "irc:#a", "?",
+                (json.dumps({"role": "system", "content": f"capybara {mtype}"}),),
+                message_type=mtype,
+            )
+
+        with caplog.at_level(logging.WARNING):
+            result = await search("capybara")
+
+        assert _hit(result, ids["summary"]) is not None, result
+        assert _hit(result, ids["context"]) is not None, result
+        assert _hit(result, ids["bogus"]) is None, result
+        assert skip_warnings(caplog, ids["bogus"], "irc:#a"), [
             r.getMessage() for r in caplog.records
         ]
         await db.close()
@@ -388,6 +437,19 @@ class TestOutputAndErrors:
         assert "[truncated — token limit reached]" not in full, full
         assert "[truncated — token limit reached]" in capped, capped
         assert len(capped.splitlines()) < len(full.splitlines()), capped
+        await db.close()
+
+    async def test_at_most_fifty_hits(self):
+        """R9: no more than 50 hits, even when the token cap would fit more."""
+        _memory, memory_tools, db = await build_tools_env()
+        search = await _search_tool(memory_tools)
+        for _ in range(60):
+            await seed_message_log_row(db, "irc:#a", "user", "tapir")
+
+        result = await search("tapir", max_tokens=100000)
+
+        hits = [line for line in result.splitlines() if line.split(".")[0].isdigit()]
+        assert len(hits) == 50, result
         await db.close()
 
     async def test_query_without_word_tokens(self):
@@ -432,6 +494,7 @@ class TestOutputAndErrors:
         assert "OperationalError" in result, result
         assert "retry with a simpler query" in result, result
         assert any(
-            r.levelno == logging.WARNING and r.exc_info for r in caplog.records
+            r.name == LOGGER and r.levelno == logging.WARNING and r.exc_info
+            for r in caplog.records
         ), [r.getMessage() for r in caplog.records]
         await db.close()
