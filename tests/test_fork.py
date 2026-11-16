@@ -60,7 +60,7 @@ def _tool_window() -> ContextWindow:
 def test_fork_prompt_is_prefix_of_main_render(cut, mid_role):
     conv = _tool_window()
     full = conv.build_prompt(frozenset({"zz"}), mid_conversation_system_role=mid_role)
-    prompt = build_fork_prompt(conv, cut, INSTRUCTION, frozenset({"zz"}), mid_role)
+    prompt = build_fork_prompt(conv, INSTRUCTION, frozenset({"zz"}), mid_role)
     assert prompt[:-1] == full[: len(prompt) - 1]
     assert prompt[-1] == {"role": "user", "content": INSTRUCTION}
 
@@ -87,52 +87,14 @@ def _tool_content(prompt: list[dict], call_id: str) -> str:
     return next(m["content"] for m in prompt if m.get("tool_call_id") == call_id)
 
 
-def test_fork_cut_renders_call_pending_at_cut():
-    """A result landing after the reply must not turn the call into 'abandoned' (#185, R1, R2)."""
-    from corvidae.context import TOOL_RESULT_PENDING
-
-    conv = _straddle_window()
-    prompt = build_fork_prompt(conv, 3, INSTRUCTION, frozenset(), "system")
-    assert _tool_content(prompt, "c1") == TOOL_RESULT_PENDING
-    # Equal to what the main turn rendered at reply time.
-    main = conv.build_prompt(frozenset({"c1"}))
-    reply_render = ContextWindow("test:chan")
-    reply_render.system_prompt = "system"
-    reply_render.messages = conv.messages[:3]
-    assert prompt[:-1] == reply_render.build_prompt(frozenset({"c1"}), mid_conversation_system_role="system")
-    assert main  # full render still works
-
-
-def test_fork_cut_leaves_unanswered_call_abandoned():
-    """No result anywhere and not live-pending stays 'abandoned' (R3)."""
-    from corvidae.context import TOOL_RESULT_ABANDONED
-
-    conv = _straddle_window(with_result=False)
-    prompt = build_fork_prompt(conv, 3, INSTRUCTION, frozenset(), "system")
-    assert _tool_content(prompt, "c1") == TOOL_RESULT_ABANDONED
-
-
-def test_fork_cut_after_result_renders_the_result():
-    """A call whose result is before the cut renders that result (R3)."""
-    conv = _straddle_window()
-    prompt = build_fork_prompt(conv, 4, INSTRUCTION, frozenset(), "system")
-    assert _tool_content(prompt, "c1") == "late"
-
-
-def test_fork_without_cut_unchanged_and_pure():
-    """cut=None renders as before and the window is untouched (R3, R4)."""
+def test_fork_prompt_is_prefix_and_pure():
+    """Fork prompt is a prefix of the main render; window is untouched."""
     conv = _straddle_window()
     before = [dict(m) for m in conv.messages]
-    prompt = build_fork_prompt(conv, None, INSTRUCTION, frozenset(), "system")
+    prompt = build_fork_prompt(conv, INSTRUCTION, frozenset(), "system")
     assert prompt[:-1] == conv.build_prompt(frozenset(), mid_conversation_system_role="system")
-    build_fork_prompt(conv, 3, INSTRUCTION, frozenset(), "system")
+    build_fork_prompt(conv, INSTRUCTION, frozenset(), "system")
     assert conv.messages == before
-
-
-@pytest.mark.parametrize("cut", [-1, 10])
-def test_fork_prompt_rejects_out_of_range_cut(cut):
-    with pytest.raises(ValueError):
-        build_fork_prompt(_tool_window(), cut, INSTRUCTION, frozenset(), "system")
 
 
 @pytest.mark.parametrize("cut,back,forward", [
@@ -358,12 +320,12 @@ async def test_fork_request_matches_main_turn(forking_agent):
     client.chat = AsyncMock(side_effect=chat)
     fmt = {"type": "json_schema"}
     result = await plugin.fork(
-        channel, INSTRUCTION, stage="consolidation", cut=2, extra_body={"response_format": fmt}
+        channel, INSTRUCTION, stage="consolidation", extra_body={"response_format": fmt}
     )
 
     messages = client.chat.call_args.args[0]
     full = channel.conversation.build_prompt(frozenset({"zz"}), mid_conversation_system_role="user")
-    assert messages == full[:3] + [{"role": "user", "content": INSTRUCTION}]
+    assert messages == full + [{"role": "user", "content": INSTRUCTION}]
     kwargs = client.chat.call_args.kwargs
     assert kwargs["tools"] == TOOL_SCHEMAS
     # Inference overrides ride along; plugin tunables don't; fork keys win.
@@ -520,8 +482,8 @@ async def test_mapped_stage_fork_goes_to_the_mapped_profile(mapped_agent):
     the main turn's: same messages and tools."""
     plugin, channel, posts, _ = mapped_agent
 
-    await plugin.fork(channel, INSTRUCTION, stage="consolidation", cut=2)
-    await plugin.fork(channel, INSTRUCTION, stage="appraisal", cut=2)
+    await plugin.fork(channel, INSTRUCTION, stage="consolidation")
+    await plugin.fork(channel, INSTRUCTION, stage="appraisal")
 
     mapped, unmapped = posts
     assert mapped["url"] == "http://forks.test/v1/chat/completions"
@@ -531,7 +493,7 @@ async def test_mapped_stage_fork_goes_to_the_mapped_profile(mapped_agent):
     full = channel.conversation.build_prompt(
         frozenset(), mid_conversation_system_role=plugin._mid_conversation_system_role
     )
-    expected = full[:3] + [{"role": "user", "content": INSTRUCTION}]
+    expected = full + [{"role": "user", "content": INSTRUCTION}]
     for post in posts:
         assert post["json"]["messages"] == expected
         assert post["json"]["tools"] == TOOL_SCHEMAS
@@ -594,7 +556,7 @@ async def test_fork_renders_a_snapshot_not_the_live_window(forking_agent):
     channel.pending_tool_call_ids = {"zz"}
     expected = channel.conversation.build_prompt(
         frozenset({"zz"}), mid_conversation_system_role="user"
-    )[:3] + [{"role": "user", "content": INSTRUCTION}]
+    ) + [{"role": "user", "content": INSTRUCTION}]
     snapshot = snapshot_window(channel.conversation, frozenset(channel.pending_tool_call_ids))
     # The live window changes after the snapshot: a compaction replaced it.
     channel.conversation.messages[:] = [
@@ -603,7 +565,7 @@ async def test_fork_renders_a_snapshot_not_the_live_window(forking_agent):
     channel.pending_tool_call_ids = set()
     after = [dict(m) for m in channel.conversation.messages]
 
-    await plugin.fork(channel, INSTRUCTION, stage="consolidation", cut=2, snapshot=snapshot)
+    await plugin.fork(channel, INSTRUCTION, stage="consolidation", snapshot=snapshot)
 
     assert client.chat.call_args.args[0] == expected
     assert channel.conversation.messages == after

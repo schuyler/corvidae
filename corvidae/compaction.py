@@ -451,7 +451,6 @@ class CompactionPlugin(CorvidaePlugin):
         # The same render a fork would send, headed by the system prompt.
         messages = build_fork_prompt(
             conversation,
-            cut,
             self._fork_prompt,
             frozenset(channel.pending_tool_call_ids),
             agent.mid_conversation_system_role,

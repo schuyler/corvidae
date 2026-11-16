@@ -186,48 +186,18 @@ def snapshot_window(conv: ContextWindow, pending_ids: frozenset) -> WindowSnapsh
 
 def build_fork_prompt(
     conv: ContextWindow,
-    cut: int | None,
     instruction: str,
     pending_ids: frozenset,
     mid_role: str,
 ) -> list[dict]:
-    """``build_prompt(window[:cut])`` plus one appended user instruction.
+    """``build_prompt(window)`` plus one appended user instruction.
 
-    Pure: renders a throwaway window holding the first ``cut`` messages, so
-    the channel's window is never touched. ``cut`` None means the whole
-    window. The render is a prefix of the main turn's render only when no
-    tool cycle straddles ``cut`` (see :func:`snap_cut_to_tool_boundary`).
-
-    The pending set is as of the cut: ``pending_ids`` plus the id of every
-    call before ``cut`` whose first result sits at or after it. Those calls
-    were in flight when the reply at the cut was written, so they render as
-    pending, not abandoned, even though the result has since landed (#185).
-
-    Raises:
-        ValueError: if ``cut`` is outside ``0..len(conv.messages)``.
+    Renders the original window object directly — same object, same
+    build_prompt call, same tokens as the main turn. The KV cache serves
+    the prefix; only the instruction is new (#994). A throwaway
+    ContextWindow copy re-renders the tokens, breaking the cache prefix.
     """
-    n = len(conv.messages)
-    if cut is None:
-        cut = n
-    if not 0 <= cut <= n:
-        raise ValueError(f"fork cut {cut} outside 0..{n}")
-
-    # Same system prompt and the same build_prompt arguments as step 7 of
-    # the agent loop; only the message list is truncated.
-    prefix = ContextWindow(conv.channel_id, chars_per_token=conv.chars_per_token)
-    prefix.system_prompt = conv.system_prompt
-    prefix.fence_key = conv.fence_key
-    prefix.messages = conv.messages[:cut]
-    # Calls before the cut whose first result lands at or after it were
-    # pending as of the cut; render them that way, as the main turn did.
-    result_at = _first_result_index(conv.messages)
-    pending_at_cut = {
-        c["id"]
-        for m in prefix.messages
-        for c in well_formed_calls(m)
-        if result_at.get(c["id"], -1) >= cut
-    }
-    prompt = prefix.build_prompt(pending_ids | pending_at_cut, mid_conversation_system_role=mid_role)
+    prompt = conv.build_prompt(pending_ids, mid_conversation_system_role=mid_role)
     prompt.append({"role": "user", "content": instruction})
     return prompt
 
