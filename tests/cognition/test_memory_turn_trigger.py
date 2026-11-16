@@ -314,7 +314,9 @@ async def test_late_message_consolidated_exactly_once(make_env):
     agent.gate.set()
     await env.memory.wait_for_background_tasks()
 
-    # The late message falls in exactly one record's range.
+    # The late message falls in exactly one record's range. (The near-dup
+    # merge can widen the second record's range to overlap the first, so the
+    # assertion is on containment, not on the record's start.)
     rows = await fetch_stamped_memories(env.db)
     containing = [
         r for r in rows
@@ -324,8 +326,8 @@ async def test_late_message_consolidated_exactly_once(make_env):
         f"late message {late_id} in {len(containing)} records: "
         f"{[(r['msg_id_start'], r['msg_id_end']) for r in rows]}"
     )
-    # The watermark moves past the late message.
-    assert await fetch_watermark(env.db, env.channel.id) >= late_id
+    # The watermark moves past the late message (through the filler window).
+    assert await fetch_watermark(env.db, env.channel.id) > late_id
 
 
 @pytest.mark.parametrize("bad", [0, -1, 1.5, "4000", True, None])
