@@ -693,6 +693,227 @@ class TestQueueItemTimingPromptTokens:
 
 
 # ===========================================================================
+# #469: the item's stage run logs its start, paired with the timing line
+# ===========================================================================
+
+
+class TestQueueItemStartLine:
+    async def test_start_and_timing_carry_the_same_trace_id(
+        self, plugin_and_channel, caplog
+    ):
+        """The start record and "queue item timing" share a trace id and a
+        channel, so one item's duration is derivable from the log alone."""
+        plugin, channel, db = plugin_and_channel
+        response = _make_text_response("hi")
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=response)
+        plugin._client = mock_client
+        plugin._mark_started()
+        trace_id = mint_trace_id()
+
+        with caplog.at_level(logging.INFO, logger="corvidae.agent"):
+            await plugin.on_message(
+                channel=channel, sender="user", text="hi", trace_id=trace_id
+            )
+            await drain(plugin, channel)
+
+        starts = [r for r in caplog.records if r.getMessage() == "queue item start"]
+        timings = [r for r in caplog.records if r.getMessage() == "queue item timing"]
+        assert starts, "expected a 'queue item start' log record"
+        assert timings, "expected a 'queue item timing' log record"
+        assert starts[0].trace_id == trace_id
+        assert timings[0].trace_id == trace_id
+        assert starts[0].channel == timings[0].channel == channel.id
+
+
+# ===========================================================================
+# Queue item start/end pairing (#469 review)
+# ===========================================================================
+
+
+class TestQueueItemPairing:
+    """Every "queue item start" is closed, whatever way the item ends."""
+
+    async def test_an_item_with_no_conversation_message_closes_as_no_message(
+        self, plugin_and_channel, caplog,
+    ):
+        """The early return after the start still closes, with its own outcome.
+
+        Only the absorbed-tool-result path opens no stage; everything that
+        starts gets a close, so the outcome field says what happened.
+        """
+        plugin, channel, db = plugin_and_channel
+        trace = mint_trace_id()
+        item = QueueItem(
+            role=QueueItemRole.USER, content="hi", channel=channel, sender="alice",
+            trace_id=trace,
+        )
+
+        # No conversation message: the body returns before the completion
+        # record, which is the gap the review named.
+        plugin._build_conversation_message = lambda _item: None
+
+        with caplog.at_level(logging.INFO):
+            await plugin._process_queue_item_attributed(item, channel, [])
+
+        starts = [r for r in caplog.records if r.getMessage() == "queue item start"]
+        timings = [r for r in caplog.records if r.getMessage() == "queue item timing"]
+        assert len(starts) == len(timings) == 1
+        assert timings[0].outcome == "no_message"
+        assert timings[0].trace_id == starts[0].trace_id == trace
+
+    async def test_a_retried_item_opens_and_closes_a_stage(
+        self, plugin_and_channel, caplog,
+    ):
+        """A retry skips steps 4-6 and still runs the turn, so it needs a pair.
+
+        Round 3's noise fix put the start inside the not-retry branch, so a
+        retried turn logged a close with no start: the issue's own defect on a
+        live path, and nothing tested `item.retry` at all (#469 round 4).
+        """
+        plugin, channel, db = plugin_and_channel
+        trace = mint_trace_id()
+        item = QueueItem(
+            role=QueueItemRole.USER, content="hi", channel=channel, sender="alice",
+            trace_id=trace, retry=True,
+        )
+        from corvidae.agent import _TurnRetry
+
+        # A success cancels the retry's timer, so it needs one that can cancel.
+        plugin._turn_retries[channel.id] = _TurnRetry(
+            item=item, attempt=1, timer=MagicMock()
+        )
+        # Without a client the turn closes as `no_result`, which would leave the
+        # retry happy path untested (#469 round 5).
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
+        plugin._client = mock_client
+
+        with caplog.at_level(logging.INFO):
+            await plugin._process_queue_item_attributed(item, channel, [])
+
+        starts = [r for r in caplog.records if r.getMessage() == "queue item start"]
+        timings = [r for r in caplog.records if r.getMessage() == "queue item timing"]
+        assert len(starts) == len(timings) == 1, (
+            f"a retried item must pair: {[r.getMessage() for r in caplog.records]}"
+        )
+        assert timings[0].trace_id == starts[0].trace_id == trace
+        # The retried turn ran and succeeded: not `no_result`.
+        assert timings[0].outcome == "ok"
+
+    async def test_an_item_that_raises_closes_as_failed(
+        self, plugin_and_channel, caplog,
+    ):
+        """A crash was logged as `outcome: ok`, because "ok" was the default the
+        finally reported and the completion record was the only path that set
+        anything else (#469 review)."""
+        plugin, channel, db = plugin_and_channel
+        item = QueueItem(
+            role=QueueItemRole.USER, content="hi", channel=channel, sender="alice",
+            trace_id=mint_trace_id(),
+        )
+        # Raise after the stage opened, which is the case the outcome covers.
+        plugin._llm_overrides = MagicMock(side_effect=RuntimeError("boom"))
+
+        with caplog.at_level(logging.INFO):
+            with pytest.raises(RuntimeError):
+                await plugin._process_queue_item_attributed(item, channel, [])
+
+        starts = [r for r in caplog.records if r.getMessage() == "queue item start"]
+        timings = [r for r in caplog.records if r.getMessage() == "queue item timing"]
+        assert len(starts) == 1
+        assert len(timings) == 1, "the raising path must still close its start"
+        assert timings[0].outcome == "failed"
+        assert "ok" not in [getattr(r, "outcome", None) for r in timings]
+
+    async def test_a_pending_set_that_shrinks_mid_item_still_pairs(
+        self, plugin_and_channel, caplog,
+    ):
+        """One read of pending_tool_call_ids decides both the start and step 4b.
+
+        Reading it again after two awaits let the two disagree: the set is
+        cleared from another task (ACP's cancel_prompt), so an item chose
+        "buffered" at the top, found nothing pending at 4b, ran a whole turn and
+        logged `outcome: ok` with no start (#469 round 5).
+        """
+        plugin, channel, db = plugin_and_channel
+        plugin._mark_started()
+        channel.pending_tool_call_ids.update({"c1", "c2"})
+        item = QueueItem(
+            role=QueueItemRole.NOTIFICATION, content="result", channel=channel,
+            sender="tool", tool_call_id="c1", trace_id=mint_trace_id(),
+        )
+        # Simulate the other task clearing the set while this item is between
+        # the start decision and step 4b.
+        real_persist = plugin._append_and_persist_message
+
+        async def persist_then_clear(*args, **kwargs):
+            result = await real_persist(*args, **kwargs)
+            channel.pending_tool_call_ids.clear()
+            return result
+
+        plugin._append_and_persist_message = persist_then_clear
+        # A working client is what makes the disagreement visible: the item
+        # then runs a whole turn and reaches the success record, which is not
+        # gated on the start.
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
+        plugin._client = mock_client
+
+        with caplog.at_level(logging.INFO):
+            await plugin._process_queue_item_attributed(item, channel, [])
+
+        names = [r.getMessage() for r in caplog.records]
+        starts = names.count("queue item start")
+        timings = names.count("queue item timing")
+        assert starts == timings, f"unpaired stage: {names}"
+        assert starts == 0, "an absorbed result opens no stage, even after a clear"
+
+    async def test_an_absorbed_tool_result_logs_no_stage(self, plugin_and_channel, caplog):
+        """One INFO line per batched tool result was the noise round 3 named.
+
+        A result absorbed into a pending batch does no work, so it opens no
+        stage: a batch of five calls logged ten INFO lines before this.
+        """
+        plugin, channel, db = plugin_and_channel
+        plugin._mark_started()
+        channel.pending_tool_call_ids.update({"c1", "c2"})
+        item = QueueItem(
+            role=QueueItemRole.NOTIFICATION, content="result", channel=channel,
+            sender="tool", tool_call_id="c1", trace_id=mint_trace_id(),
+        )
+
+        with caplog.at_level(logging.INFO):
+            await plugin._process_queue_item_attributed(item, channel, [])
+
+        names = [r.getMessage() for r in caplog.records]
+        assert "queue item start" not in names, names
+        assert "queue item timing" not in names, names
+
+    async def test_a_completed_item_says_so_on_its_completion_record(
+        self, plugin_and_channel, caplog,
+    ):
+        """`ok` has to appear somewhere, or the field means "not an early
+        return" rather than "succeeded" (#469 review)."""
+        plugin, channel, db = plugin_and_channel
+        response = _make_text_response("hi")
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=response)
+        plugin._client = mock_client
+        plugin._mark_started()
+
+        with caplog.at_level(logging.INFO, logger="corvidae.agent"):
+            await plugin.on_message(
+                channel=channel, sender="user", text="hi", trace_id=mint_trace_id()
+            )
+            await drain(plugin, channel)
+
+        timings = [r for r in caplog.records if r.getMessage() == "queue item timing"]
+        assert timings, "expected a 'queue item timing' record"
+        assert timings[-1].outcome == "ok"
+
+
+# ===========================================================================
 # Default LLM error message: names the failure class and tells the user what
 # to do next. The message must stay calm and must not leak Python type names.
 # ===========================================================================

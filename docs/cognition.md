@@ -316,7 +316,23 @@ that started the run (`"compaction"`, `"idle"` or `"turn"`; `"eval"` from
 attribution snapshot for that call, into `MetricsPlugin`'s emitted tags,
 the `usage_log.trigger` column, and the `memory consolidated` completion
 log line, which carries `memory_ids`, `entries` (their count), `embedded`
-(how many were stored with a vector), the message range and `trigger`.
+(how many were stored with a vector), the message range and `trigger`. A
+`memory consolidation start` record opens the stage once the watermark check
+says there is work, and `memory consolidation timing` closes it in a
+`finally`, carrying the same channel, `trigger`, `range_end` and `trace_id`
+plus `duration_ms`, how many segments were committed (`records`; the
+`memory consolidated` lines carry `entries`, the stored-entry count), and an `outcome`
+(`ok`, `superseded`, `failed` or `cancelled`) — so one start always has exactly one close
+and the duration is the gap between them. The close is gated on the start, not
+on a list of outcomes: a failure in `_wait_for_inflight`, `_ensure_schema` or
+`_get_watermark` happens before the stage opens, so it logs no close, and on
+the compaction trigger `duration_ms` is the work after the in-flight wait, not
+the wait (#469 review). The `memory consolidated` lines between them are per
+stored record, so a multi-segment catch-up logs several, each carrying its
+segment's `range_end` — the end of that segment, which differs from the call's
+on the start and timing records, so `trace_id` is what ties a line to the pair
+(#469 review). A range that is already consolidated logs neither: routine skip,
+no stage.
 `_consolidate_range` also opens a lease scope (#363): its catch-up views
 and every rubric call (after a fork record too) run under
 `upkeep:memory:consolidation`, while the consolidation forks run under

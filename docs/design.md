@@ -2383,6 +2383,26 @@ newest first) are shared by `resolve_conversation` and the catch-up builder.
 `view_call` raises `ForkRefused` on a reply with tool calls (structured or
 written out); transport errors propagate.
 
+**The kernel's stage records (#469).** Every `Agent.fork` call logs
+`stage start` at entry and `stage done` when it returns or raises, each
+carrying `stage`, `channel`, `trace_id`, `seq` (a per-call counter on the
+agent, so a trace that forks several times under one stage — critique's lenses
+do — gives each call its own pair), and — on the done record — `duration_ms`
+and `ok`. They are kernel records, not stage plugin ones, so a stage that
+later refuses (`ForkRefused`) still has a start; the pair is what makes a
+stage's duration derivable from the log without a clock. A stage run
+beside the main turn also has `queue item start` / `queue item timing`, whose
+close carries an `outcome`: `ok` on the step-11 completion record,
+`no_message` or `no_result` on the early returns, and `failed` when the item
+raised — so every start is paired whatever way the item ended, and a crash is
+not logged as a success (#469). Retried items open a stage too: they skip
+steps 4–6 and still run the turn. The one item that logs neither record is a
+tool result absorbed into a pending batch (step 4b), because it does no work
+and every batched result would otherwise cost two INFO lines; the predicate is
+computed before step 4, so the pair still spans the persistence and
+conversation build, and `buffered` is not an outcome any record carries
+(#469 round 4).
+
 **Prefix parity.** `Agent.fork(channel, instruction, *, stage, cut=None,
 extra_body=None, snapshot=None)` renders with exactly what step 7 of the agent loop uses:
 the channel's

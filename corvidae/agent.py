@@ -27,6 +27,7 @@ Logging:
 
 import asyncio
 import dataclasses
+import itertools
 import json
 import os
 import logging
@@ -303,6 +304,11 @@ class Agent(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self._client = None
+        # A per-call discriminator for the stage records (#469 review): a
+        # trace can fork more than once under one stage (a plugin may run one
+        # stage several times per trace), so (trace_id, stage) alone cannot
+        # pair a start with its done.
+        self._fork_seq = itertools.count(1)
         self._tools: dict[str, Callable] = {}
         self._tool_schemas: list[dict] = []
         # The ToolCollectionPlugin and the registry generation the two
@@ -1429,274 +1435,353 @@ class Agent(CorvidaePlugin):
                 return
         _t0 = time.monotonic()
         _phases: dict[str, float] = {}
-
-        # Build the conversation message based on item role
-        msg_result = self._build_conversation_message(item)
-        if msg_result is None:
-            return
-        conversation_message, request_text = msg_result
-
-        # Pick up registry changes (e.g. a reconnected MCP server) before
-        # any conversation is initialised or the turn's tools are read.
-        self._refresh_tools_if_changed()
-
-        _t_conv_init_start = time.monotonic()
-
-        # 1. Lazy-initialize conversation on the channel
-        if channel.conversation is None:
-            conv = ContextWindow(channel.id, chars_per_token=self._chars_per_token)
-            # Identity first, then the channel's register (#316).
-            conv.system_prompt = await self.channel_system_prompt(channel)
-            # The tool set is fixed for the conversation, like the system
-            # prompt it sits beside at the head of the prompt (principle 2).
-            conv.tool_view = self._build_tool_view(channel)
-            conv.fence_key = self._fence_key
-            history = await self.pm.ahook.resolve_conversation(channel=channel)
-            if history:
-                conv.messages = history
-            channel.conversation = conv
-        conv = channel.conversation
-        _phases["conv_init"] = time.monotonic() - _t_conv_init_start
-
-        # 2. Reset turn_counter when this item originates a new trace
-        # (USER items, and notifications whose id was minted at dequeue in
-        # _process_queue_item) — but only when it starts a cycle. An item
-        # arriving while a tool cycle is in flight is charged against that
-        # cycle's budget instead (R4), so a chatty channel can't extend
-        # max_turns. Keying on `originating` rather than USER role lets a
-        # notification-only channel (scheduler reminders, heartbeat) get a
-        # fresh per-exchange budget instead of exhausting it permanently.
-        if not item.retry and item.originating and not channel.pending_tool_call_ids:
-            channel.turn_counter = 0
-
-        # 3. Resolve config and read max_turns_limit
-        resolved = self._registry.resolve_config(channel)
-        max_turns_limit = resolved["max_turns"]
-
-        # Steps 4-6 already ran on the first attempt of a retried turn (its
-        # output is in the window), so a retry goes straight to the LLM call.
-        if not item.retry:
-            # 4 + 4c. Absorbed burst messages first, in arrival order, each
-            # under its own trace (they are USER items, so each one fires
-            # on_message_persisted); then the owner's message.
-            # Persist time covers every row the turn writes, burst included.
-            persist_seconds = 0.0
-            for absorbed_item in absorbed:
-                absorbed_result = self._build_conversation_message(absorbed_item)
-                if absorbed_result is None:
-                    continue
-                persist_seconds += await self._append_and_persist_message(
-                    channel, conv, absorbed_item, *absorbed_result,
-                )
-            persist_seconds += await self._append_and_persist_message(
-                channel, conv, item, conversation_message, request_text,
+        # One INFO line per item that does real work, at the moment the item
+        # starts (#469): "queue item timing" below closes it, and the trace id
+        # pairs the two even when two channels' items interleave. A tool result
+        # absorbed into a pending batch (step 4b) does no work, so it opens no
+        # stage and logs neither record - otherwise every batched result costs
+        # two INFO lines (#469 round 3). The predicate is computed here, before
+        # step 4, so the pair still spans the whole item: the persistence and
+        # conversation build inside that span are part of the stage being timed
+        # (#469 round 4). Retries skip those steps and still open a stage.
+        # Read the pending set once and branch on that value in both places.
+        # Reading it again at step 4b let the two disagree: the set is cleared
+        # from another task (ACP's cancel_prompt, agent.py's own note above), so
+        # an item could open no stage here and then find nothing pending there,
+        # run a whole turn, and log "queue item timing" with outcome ok and no
+        # start (#469 review).
+        _buffered = bool(
+            not item.retry
+            and item.role == QueueItemRole.NOTIFICATION
+            and item.tool_call_id
+            and (channel.pending_tool_call_ids - {item.tool_call_id})
+        )
+        _started = not _buffered
+        if _started:
+            logger.info(
+                "queue item start",
+                extra={
+                    "channel": item.channel.id,
+                    "trace_id": item.trace_id,
+                    "role": item.role.value,
+                },
             )
-            _phases["persist"] = persist_seconds
 
-            # 4b. Batch tool results: if this is a tool-result notification and
-            # there are still pending tool calls, skip the LLM call.
-            # pending_tool_call_ids is unioned across every in-flight dispatch
-            # batch (R3), not scoped to one batch — so the LLM call fires after
-            # the last result of the last outstanding batch, not the current
-            # one. The serial queue ensures results arrive one at a time. User
-            # messages can interleave — they don't clear the pending set, so the
-            # agent remains responsive while tools run.
-            if item.role == QueueItemRole.NOTIFICATION and item.tool_call_id:
-                channel.pending_tool_call_ids.discard(item.tool_call_id)
-                # Same step as the discard: a result is either queued or no
-                # longer pending, never neither (see deliver_tool_error).
-                self._queued_tool_results.discard((channel.id, item.tool_call_id))
-                # The metadata was computed at enqueue; the record is spent.
-                self._dispatched_calls.pop((channel.id, item.tool_call_id), None)
-                if channel.pending_tool_call_ids:
-                    logger.debug(
-                        "tool result buffered, pending: %d",
-                        len(channel.pending_tool_call_ids),
-                        extra={"channel": channel.id, "tool_call_id": item.tool_call_id},
+        # The outcome the finally below reports when the run stops before
+        # the completion record: "failed" unless a path says otherwise, because
+        # the only way to reach the finally with `_closed` false is an early
+        # return (which sets its own outcome) or an exception (#469 review).
+        _outcome = "failed"
+        _closed = False
+        # Bound before the try: the close in the finally reads it, and an early
+        # return (no conversation message) leaves before step 1 assigns it.
+        conv: ContextWindow | None = None
+        try:
+            # Build the conversation message based on item role
+            msg_result = self._build_conversation_message(item)
+            if msg_result is None:
+                _outcome = "no_message"
+                return
+            conversation_message, request_text = msg_result
+
+            # Pick up registry changes (e.g. a reconnected MCP server) before
+            # any conversation is initialised or the turn's tools are read.
+            self._refresh_tools_if_changed()
+
+            _t_conv_init_start = time.monotonic()
+
+            # 1. Lazy-initialize conversation on the channel
+            if channel.conversation is None:
+                conv = ContextWindow(channel.id, chars_per_token=self._chars_per_token)
+                # Identity first, then the channel's register (#316).
+                conv.system_prompt = await self.channel_system_prompt(channel)
+                # The tool set is fixed for the conversation, like the system
+                # prompt it sits beside at the head of the prompt (principle 2).
+                conv.tool_view = self._build_tool_view(channel)
+                conv.fence_key = self._fence_key
+                history = await self.pm.ahook.resolve_conversation(channel=channel)
+                if history:
+                    conv.messages = history
+                channel.conversation = conv
+            conv = channel.conversation
+            _phases["conv_init"] = time.monotonic() - _t_conv_init_start
+
+            # 2. Reset turn_counter when this item originates a new trace
+            # (USER items, and notifications whose id was minted at dequeue in
+            # _process_queue_item) — but only when it starts a cycle. An item
+            # arriving while a tool cycle is in flight is charged against that
+            # cycle's budget instead (R4), so a chatty channel can't extend
+            # max_turns. Keying on `originating` rather than USER role lets a
+            # notification-only channel (scheduler reminders, heartbeat) get a
+            # fresh per-exchange budget instead of exhausting it permanently.
+            if not item.retry and item.originating and not channel.pending_tool_call_ids:
+                channel.turn_counter = 0
+
+            # 3. Resolve config and read max_turns_limit
+            resolved = self._registry.resolve_config(channel)
+            max_turns_limit = resolved["max_turns"]
+
+            # Steps 4-6 already ran on the first attempt of a retried turn (its
+            # output is in the window), so a retry goes straight to the LLM call.
+            if not item.retry:
+                # 4 + 4c. Absorbed burst messages first, in arrival order, each
+                # under its own trace (they are USER items, so each one fires
+                # on_message_persisted); then the owner's message.
+                # Persist time covers every row the turn writes, burst included.
+                persist_seconds = 0.0
+                for absorbed_item in absorbed:
+                    absorbed_result = self._build_conversation_message(absorbed_item)
+                    if absorbed_result is None:
+                        continue
+                    persist_seconds += await self._append_and_persist_message(
+                        channel, conv, absorbed_item, *absorbed_result,
                     )
-                    return
-
-            # 5. Compact if approaching context limit
-            _t_compact_start = time.monotonic()
-            try:
-                await self.pm.ahook.resolve_compaction(
-                    channel=channel, conversation=conv,
-                    max_tokens=resolved["max_context_tokens"],
+                persist_seconds += await self._append_and_persist_message(
+                    channel, conv, item, conversation_message, request_text,
                 )
-            except Exception as exc:
-                self._warn_compaction_failed(channel, exc)
-            _phases["compact"] = time.monotonic() - _t_compact_start
+                _phases["persist"] = persist_seconds
 
-        # 5b. Hard ceiling (#308, PRD §3.3.2): whatever compaction did or
-        # skipped, a window over max_context_tokens loses its oldest rows from
-        # memory (message_log keeps them). Not wrapped: fit_to_budget cannot
-        # raise on any row the window can hold (§3.1.18.1, #392), so a wrapper
-        # here would only hide a defect in that guarantee.
-        # Outside the retry guard: a retried turn (#281) is a main-turn call
-        # too, and tool results may have joined its window since.
-        max_ctx = resolved["max_context_tokens"]
-        dropped, truncated = conv.fit_to_budget(max_ctx)
-        still_over = conv.token_estimate() > max_ctx
-        if dropped or truncated or still_over:
-            self._warn_over_budget(channel, conv, max_ctx, dropped, truncated)
+                # 4b. Batch tool results: if this is a tool-result notification and
+                # there are still pending tool calls, skip the LLM call.
+                # pending_tool_call_ids is unioned across every in-flight dispatch
+                # batch (R3), not scoped to one batch — so the LLM call fires after
+                # the last result of the last outstanding batch, not the current
+                # one. The serial queue ensures results arrive one at a time. User
+                # messages can interleave — they don't clear the pending set, so the
+                # agent remains responsive while tools run.
+                if item.role == QueueItemRole.NOTIFICATION and item.tool_call_id:
+                    channel.pending_tool_call_ids.discard(item.tool_call_id)
+                    # Same step as the discard: a result is either queued or no
+                    # longer pending, never neither (see deliver_tool_error).
+                    self._queued_tool_results.discard((channel.id, item.tool_call_id))
+                    # The metadata was computed at enqueue; the record is spent.
+                    self._dispatched_calls.pop((channel.id, item.tool_call_id), None)
+                    # The same value the start decision used, so a pair can
+                    # never be half-logged: either this item buffered and opened
+                    # no stage, or it opened one and runs to its close (#469
+                    # review).
+                    if _buffered:
+                        logger.debug(
+                            "tool result buffered, pending: %d",
+                            len(channel.pending_tool_call_ids),
+                            extra={"channel": channel.id, "tool_call_id": item.tool_call_id},
+                        )
+                        # No outcome to record: an absorbed item opened no
+                        # stage, so the finally logs nothing for it. Setting
+                        # `_outcome` here was dead (#469 review).
+                        return
 
-        if not item.retry:
-            # 6. Let plugins inject context before the LLM call
-            _t_before_turn_start = time.monotonic()
-            msg_count_before = len(conv.messages)
-            try:
-                await self.pm.ahook.before_agent_turn(
-                    channel=channel, trace_id=item.trace_id, annotations=item.annotations,
+
+                # 5. Compact if approaching context limit
+                _t_compact_start = time.monotonic()
+                try:
+                    await self.pm.ahook.resolve_compaction(
+                        channel=channel, conversation=conv,
+                        max_tokens=resolved["max_context_tokens"],
+                    )
+                except Exception as exc:
+                    self._warn_compaction_failed(channel, exc)
+                _phases["compact"] = time.monotonic() - _t_compact_start
+
+            # 5b. Hard ceiling (#308, PRD §3.3.2): whatever compaction did or
+            # skipped, a window over max_context_tokens loses its oldest rows from
+            # memory (message_log keeps them). Not wrapped: fit_to_budget cannot
+            # raise on any row the window can hold (§3.1.18.1, #392), so a wrapper
+            # here would only hide a defect in that guarantee.
+            # Outside the retry guard: a retried turn (#281) is a main-turn call
+            # too, and tool results may have joined its window since.
+            max_ctx = resolved["max_context_tokens"]
+            dropped, truncated = conv.fit_to_budget(max_ctx)
+            still_over = conv.token_estimate() > max_ctx
+            if dropped or truncated or still_over:
+                self._warn_over_budget(channel, conv, max_ctx, dropped, truncated)
+
+            if not item.retry:
+                # 6. Let plugins inject context before the LLM call
+                _t_before_turn_start = time.monotonic()
+                msg_count_before = len(conv.messages)
+                try:
+                    await self.pm.ahook.before_agent_turn(
+                        channel=channel, trace_id=item.trace_id, annotations=item.annotations,
+                    )
+                except Exception:
+                    logger.warning(
+                        "before_agent_turn hook failed, skipping", exc_info=True
+                    )
+                # Fire persist_message for any messages injected by
+                # before_agent_turn. Messages already carrying a _db_id were
+                # persisted by their producer — firing again would double-store
+                # them.
+                for msg in conv.messages[msg_count_before:]:
+                    if isinstance(msg.get("_db_id"), int):
+                        continue
+                    mt = msg.get("_message_type", MessageType.MESSAGE)
+                    clean = {k: v for k, v in msg.items() if not k.startswith("_")}
+                    try:
+                        results = await self.pm.ahook.persist_message(
+                            channel=channel, message=clean, message_type=mt,
+                        )
+                        rowid = resolve_single_result(results, "persist_message")
+                        if rowid is not None:
+                            msg["_db_id"] = rowid
+                    except Exception:
+                        logger.warning("persist_message hook failed", exc_info=True)
+                _phases["before_turn"] = time.monotonic() - _t_before_turn_start
+
+            # 7. Build prompt and call run_agent_turn (single LLM invocation)
+            _t_llm_start = time.monotonic()
+            messages = conv.build_prompt(
+                frozenset(channel.pending_tool_call_ids),
+                mid_conversation_system_role=self._mid_conversation_system_role,
+            )
+            llm_overrides = self._llm_overrides(channel)
+            if self._request_logprobs:
+                llm_overrides["logprobs"] = True
+
+            result = await self._run_turn(
+                channel, messages, self._tool_view(channel).schemas, llm_overrides or None,
+                item,
+            )
+            if result is None:
+                _outcome = "no_result"
+                return
+
+            # 7b. The persistence-controlling send gate (trap #6). It fires only
+            # when this result's tool calls will NOT dispatch — a text result,
+            # or the max-turns branch — because hiding an assistant message
+            # whose calls dispatch would orphan its tool rows on reload. The
+            # dispatch condition is computed once here and _handle_response
+            # takes the same branch (turn_counter does not move in between).
+            # The gate checks exactly what would be sent: the display text, or
+            # the max-turns fallback on that branch.
+            will_dispatch = bool(result.tool_calls) and channel.turn_counter < max_turns_limit
+            assistant_message = result.message
+            display_text: str | None = None
+            unsent = False
+            if not will_dispatch:
+                if result.tool_calls:
+                    # Max-turns: these calls never dispatch, so a row that kept
+                    # them would dangle on reload. Strip them from the row AND
+                    # the window copy (one dict feeds both), whatever the verdict.
+                    assistant_message = {
+                        k: v for k, v in result.message.items() if k != "tool_calls"
+                    }
+                    if assistant_message.get("content") is None:
+                        assistant_message["content"] = ""
+                display_text = await self._resolve_display_text(
+                    channel, result,
+                    fallback=MAX_TURNS_FALLBACK_MESSAGE if result.tool_calls else None,
                 )
+                if not result.tool_calls and not (display_text or "").strip():
+                    # An empty final is a decline (PRD §3.7 output gate items 5
+                    # and 6): withhold it without consulting the gate.
+                    unsent = True
+                else:
+                    unsent = not await self._gate_send(channel, display_text, "final", item)
+
+            # 8. Append assistant message and fire persistence event, attaching
+            # the resolved rowid to the window copy (same rule as step 4). A
+            # vetoed final persists as UNSENT: in the window, never sent.
+            message_type = MessageType.UNSENT if unsent else MessageType.MESSAGE
+            conv.append(assistant_message, message_type)
+            assistant_in_window = conv.messages[-1]
+            try:
+                results = await self.pm.ahook.persist_message(
+                    channel=channel,
+                    message=assistant_message,
+                    message_type=message_type,
+                )
+                rowid = resolve_single_result(results, "persist_message")
+                if rowid is not None:
+                    assistant_in_window["_db_id"] = rowid
+            except Exception:
+                logger.warning("persist_message hook failed", exc_info=True)
+
+            # 8b. Send an OutboundThinking event if the LLM produced
+            # reasoning_content, unless the thinking gate vetoes it. The marker
+            # waits until after step 9, which works on the assistant message.
+            unsent_markers: list[tuple[str, str]] = []
+            if unsent:
+                unsent_markers.append(("final", display_text or ""))
+            reasoning_text = result.message.get("reasoning_content")
+            # A vetoed final withholds its reasoning with it: the reasoning
+            # often carries the answer, and the final marker already covers
+            # the whole response, so the thinking gate is not consulted.
+            if reasoning_text and not unsent:
+                if await self._gate_send(channel, reasoning_text, "thinking", item):
+                    try:
+                        await self.pm.ahook.send(
+                            channel=channel, event=OutboundThinking(text=reasoning_text)
+                        )
+                    except Exception:
+                        logger.warning("send hook failed for thinking", exc_info=True, extra={"channel": channel.id})
+                else:
+                    unsent_markers.append(("thinking", reasoning_text))
+
+            # 9. Let plugins post-process the in-memory assistant message (e.g., strip reasoning_content)
+            try:
+                await self.pm.ahook.after_persist_assistant(channel=channel, message=assistant_in_window)
             except Exception:
                 logger.warning(
-                    "before_agent_turn hook failed, skipping", exc_info=True
+                    "after_persist_assistant hook failed",
+                    exc_info=True,
+                    extra={"channel": channel.id},
                 )
-            # Fire persist_message for any messages injected by
-            # before_agent_turn. Messages already carrying a _db_id were
-            # persisted by their producer — firing again would double-store
-            # them.
-            for msg in conv.messages[msg_count_before:]:
-                if isinstance(msg.get("_db_id"), int):
-                    continue
-                mt = msg.get("_message_type", MessageType.MESSAGE)
-                clean = {k: v for k, v in msg.items() if not k.startswith("_")}
-                try:
-                    results = await self.pm.ahook.persist_message(
-                        channel=channel, message=clean, message_type=mt,
-                    )
-                    rowid = resolve_single_result(results, "persist_message")
-                    if rowid is not None:
-                        msg["_db_id"] = rowid
-                except Exception:
-                    logger.warning("persist_message hook failed", exc_info=True)
-            _phases["before_turn"] = time.monotonic() - _t_before_turn_start
 
-        # 7. Build prompt and call run_agent_turn (single LLM invocation)
-        _t_llm_start = time.monotonic()
-        messages = conv.build_prompt(
-            frozenset(channel.pending_tool_call_ids),
-            mid_conversation_system_role=self._mid_conversation_system_role,
-        )
-        llm_overrides = self._llm_overrides(channel)
-        if self._request_logprobs:
-            llm_overrides["logprobs"] = True
+            # 9b. Mark each vetoed emission in the window (persisted, so the
+            # marker reloads beside the row it describes).
+            for emission, text in unsent_markers:
+                await self._append_unsent_marker(channel, emission, text)
+            _phases["llm"] = time.monotonic() - _t_llm_start
 
-        result = await self._run_turn(
-            channel, messages, self._tool_view(channel).schemas, llm_overrides or None,
-            item,
-        )
-        if result is None:
-            return
-
-        # 7b. The persistence-controlling send gate (trap #6). It fires only
-        # when this result's tool calls will NOT dispatch — a text result,
-        # or the max-turns branch — because hiding an assistant message
-        # whose calls dispatch would orphan its tool rows on reload. The
-        # dispatch condition is computed once here and _handle_response
-        # takes the same branch (turn_counter does not move in between).
-        # The gate checks exactly what would be sent: the display text, or
-        # the max-turns fallback on that branch.
-        will_dispatch = bool(result.tool_calls) and channel.turn_counter < max_turns_limit
-        assistant_message = result.message
-        display_text: str | None = None
-        unsent = False
-        if not will_dispatch:
-            if result.tool_calls:
-                # Max-turns: these calls never dispatch, so a row that kept
-                # them would dangle on reload. Strip them from the row AND
-                # the window copy (one dict feeds both), whatever the verdict.
-                assistant_message = {
-                    k: v for k, v in result.message.items() if k != "tool_calls"
-                }
-                if assistant_message.get("content") is None:
-                    assistant_message["content"] = ""
-            display_text = await self._resolve_display_text(
-                channel, result,
-                fallback=MAX_TURNS_FALLBACK_MESSAGE if result.tool_calls else None,
-            )
-            if not result.tool_calls and not (display_text or "").strip():
-                # An empty final is a decline (PRD §3.7 output gate items 5
-                # and 6): withhold it without consulting the gate.
-                unsent = True
-            else:
-                unsent = not await self._gate_send(channel, display_text, "final", item)
-
-        # 8. Append assistant message and fire persistence event, attaching
-        # the resolved rowid to the window copy (same rule as step 4). A
-        # vetoed final persists as UNSENT: in the window, never sent.
-        message_type = MessageType.UNSENT if unsent else MessageType.MESSAGE
-        conv.append(assistant_message, message_type)
-        assistant_in_window = conv.messages[-1]
-        try:
-            results = await self.pm.ahook.persist_message(
-                channel=channel,
-                message=assistant_message,
-                message_type=message_type,
-            )
-            rowid = resolve_single_result(results, "persist_message")
-            if rowid is not None:
-                assistant_in_window["_db_id"] = rowid
-        except Exception:
-            logger.warning("persist_message hook failed", exc_info=True)
-
-        # 8b. Send an OutboundThinking event if the LLM produced
-        # reasoning_content, unless the thinking gate vetoes it. The marker
-        # waits until after step 9, which works on the assistant message.
-        unsent_markers: list[tuple[str, str]] = []
-        if unsent:
-            unsent_markers.append(("final", display_text or ""))
-        reasoning_text = result.message.get("reasoning_content")
-        # A vetoed final withholds its reasoning with it: the reasoning
-        # often carries the answer, and the final marker already covers
-        # the whole response, so the thinking gate is not consulted.
-        if reasoning_text and not unsent:
-            if await self._gate_send(channel, reasoning_text, "thinking", item):
-                try:
-                    await self.pm.ahook.send(
-                        channel=channel, event=OutboundThinking(text=reasoning_text)
-                    )
-                except Exception:
-                    logger.warning("send hook failed for thinking", exc_info=True, extra={"channel": channel.id})
-            else:
-                unsent_markers.append(("thinking", reasoning_text))
-
-        # 9. Let plugins post-process the in-memory assistant message (e.g., strip reasoning_content)
-        try:
-            await self.pm.ahook.after_persist_assistant(channel=channel, message=assistant_in_window)
-        except Exception:
-            logger.warning(
-                "after_persist_assistant hook failed",
-                exc_info=True,
-                extra={"channel": channel.id},
+            # 10. Dispatch tool calls or send text response
+            await self._handle_response(
+                result, channel, max_turns_limit, request_text, item,
+                display_text=display_text, unsent=unsent,
             )
 
-        # 9b. Mark each vetoed emission in the window (persisted, so the
-        # marker reloads beside the row it describes).
-        for emission, text in unsent_markers:
-            await self._append_unsent_marker(channel, emission, text)
-        _phases["llm"] = time.monotonic() - _t_llm_start
-
-        # 10. Dispatch tool calls or send text response
-        await self._handle_response(
-            result, channel, max_turns_limit, request_text, item,
-            display_text=display_text, unsent=unsent,
-        )
-
-        # 11. Log phase timing breakdown
-        _total = time.monotonic() - _t0
-        _phases["other"] = max(0, _total - sum(_phases.values()))
-        logger.info(
-            "queue item timing",
-            extra={
-                "channel": item.channel.id,
-                "role": item.role.value,
-                "total_ms": round(_total * 1000),
-                **{f"{k}_ms": round(v * 1000) for k, v in _phases.items()},
-                "prompt_tokens": result.usage.get("prompt_tokens") if result.usage else None,
-                "message_count": len(conv.messages) if conv else 0,
-            },
-        )
+            # 11. Log phase timing breakdown
+            _total = time.monotonic() - _t0
+            _phases["other"] = max(0, _total - sum(_phases.values()))
+            # Set before the log: a raise while building `extra` would otherwise
+            # reach the finally with the flag still false and close a second
+            # time (#469 round 7).
+            _closed = True
+            logger.info(
+                "queue item timing",
+                extra={
+                    "channel": item.channel.id,
+                    "trace_id": item.trace_id,
+                    "role": item.role.value,
+                    "total_ms": round(_total * 1000),
+                    **{f"{k}_ms": round(v * 1000) for k, v in _phases.items()},
+                    "outcome": "ok",
+                    "prompt_tokens": result.usage.get("prompt_tokens") if result.usage else None,
+                    "message_count": len(conv.messages) if conv else 0,
+                },
+            )
+        finally:
+            # Every item that starts closes: an early return (an absorbed
+            # tool result, a turn that produced no result, no conversation
+            # message) or an exception would otherwise leave the start
+            # record unpaired, which is exactly what makes duration
+            # unmeasurable (#469).
+            if _started and not _closed:
+                logger.info(
+                    "queue item timing",
+                    extra={
+                        "channel": item.channel.id,
+                        "trace_id": item.trace_id,
+                        "role": item.role.value,
+                        "total_ms": round((time.monotonic() - _t0) * 1000),
+                        # The same keys the success record carries, so one
+                        # reader handles both shapes (#469 round 7).
+                        **{f"{k}_ms": round(v * 1000) for k, v in _phases.items()},
+                        "outcome": _outcome,
+                        "prompt_tokens": None,
+                        "message_count": len(conv.messages) if conv else 0,
+                    },
+                )
 
     @staticmethod
     def _llm_overrides(channel: Channel) -> dict:
@@ -1869,28 +1954,62 @@ class Agent(CorvidaePlugin):
 
         # The client was bound above, so a plugin stop that clears LLMPlugin's
         # clients during the await can't change the model this stamp names.
+        # Every forked stage passes through here, so this is where each one
+        # gets its start line and duration (#469); the kernel must not name
+        # them (vocabulary rule), so the records say only `stage`. The trace
+        # id is the turn's, taken before the fork's own attribution replaces
+        # the mode, so a stage pairs with the turn that caused it.
+        trace_id = get_attribution().get("trace_id")
+        seq = next(self._fork_seq)
+        # Attribution before the start record: a raise in set_attribution would
+        # otherwise orphan a start with no close (#469 round 4).
         token = set_attribution(channel_id=channel.id, mode="fork")
+        started = time.monotonic()
+        logger.info(
+            "stage start",
+            extra={
+                "channel": channel.id, "stage": stage,
+                "trace_id": trace_id, "seq": seq,
+            },
+        )
+        # ok means the fork produced a result: a refusal is a stage that ran and
+        # cost its time without producing one, so it is not ok either.
+        ok = False
         try:
-            # The channel's own schemas: a fork must share the turn's prefix.
             # A fork extends this channel's prefix, so it takes the channel's
             # key whatever key the caller holds (#363).
             with lease_scope(channel.id):
+                # The channel's own schemas: a fork must share the turn's prefix.
                 response = await client.chat(
                     messages,
                     tools=self._tool_view(channel).schemas or None,
                     extra_body=body,
                 )
+            message = response["choices"][0]["message"]
+            if message.get("tool_calls"):
+                raise ForkRefused(
+                    f"fork on {channel.id} answered with "
+                    f"{len(message['tool_calls'])} tool call(s)"
+                )
+            if looks_like_tool_call(message.get("content") or ""):
+                raise ForkRefused(f"fork on {channel.id} wrote a tool call as text")
+            ok = True
         finally:
             reset_attribution(token)
-
-        message = response["choices"][0]["message"]
-        if message.get("tool_calls"):
-            raise ForkRefused(
-                f"fork on {channel.id} answered with "
-                f"{len(message['tool_calls'])} tool call(s)"
+            # One line per fork, whatever it did: a refusal or a transport
+            # error still took its time and should be measurable.
+            logger.info(
+                "stage done",
+                extra={
+                    "channel": channel.id,
+                    "stage": stage,
+                    "trace_id": trace_id,
+                    "seq": seq,
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                    "ok": ok,
+                },
             )
-        if looks_like_tool_call(message.get("content") or ""):
-            raise ForkRefused(f"fork on {channel.id} wrote a tool call as text")
+
         return ForkResult(
             text=message.get("content") or "",
             message=message,

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
-from corvidae.attribution import get_attribution
+from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel
 from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
@@ -596,6 +596,176 @@ def find_consolidated_record(caplog):
     return matches[0]
 
 
+TRACE_ID = "trace-469-consolidation"
+
+
+class TestConsolidationStageLogLines:
+    """#469: consolidation logs its start, so its duration is derivable.
+
+    "memory consolidation start" opens the stage and "memory consolidation
+    timing" closes it; the channel, trigger, range and trace id pair the two.
+    The "memory consolidated" lines between them are per stored record.
+    """
+
+    async def test_idle_consolidation_logs_its_start(self, caplog):
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            with caplog.at_level(logging.INFO):
+                await drive_idle_consolidation(memory, persistence, channel, db)
+
+            starts = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation start"
+            ]
+            assert len(starts) == 1, (
+                f"expected one start record; got {[r.getMessage() for r in caplog.records]!r}"
+            )
+            start = starts[0]
+            assert start.channel_id == channel.id
+            assert start.trigger == "idle"
+            # The completion the start pairs with carries the same channel and
+            # trigger, which is how a reader measures the stage without a clock.
+            done = find_consolidated_record(caplog)
+            assert done.channel_id == channel.id
+            assert done.trigger == "idle"
+            # And the stage closes: without this the start could be orphaned by
+            # a broken `finally` and the test would still pass (#469 round 4).
+            timings = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation timing"
+            ]
+            assert len(timings) == 1, (
+                f"expected one close; got {[r.getMessage() for r in caplog.records]!r}"
+            )
+            assert timings[0].outcome == "ok"
+        finally:
+            await db.close()
+
+    async def test_compaction_consolidation_start_names_its_trigger(self, caplog):
+        """The start line says which trigger opened the stage, so a compaction
+        consolidation is not mistaken for an idle one in the log."""
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        token = set_attribution(trace_id=TRACE_ID)
+        try:
+            with caplog.at_level(logging.INFO):
+                await drive_compaction_consolidation(memory, persistence, channel)
+            starts = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation start"
+            ]
+            assert starts, "expected a start record for the compaction trigger"
+            assert starts[0].trigger == "compaction"
+            assert starts[0].channel_id == channel.id
+            # The pair is what makes the duration derivable: one timing close,
+            # same channel, trigger and trace (#469 review).
+            timings = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation timing"
+            ]
+            assert len(timings) == 1
+            assert timings[0].channel_id == channel.id
+            assert timings[0].trigger == "compaction"
+            # A real trace, so the pairing assertion compares two values the
+            # test set rather than None to None (#469 round 4).
+            assert starts[0].trace_id == timings[0].trace_id == TRACE_ID
+            assert timings[0].outcome == "ok"
+            assert timings[0].records == 1
+        finally:
+            reset_attribution(token)
+            await db.close()
+
+    async def test_a_failure_before_the_start_logs_no_close(self, caplog):
+        """A raise before the stage opens has nothing to close (#469 review).
+
+        The close used to be gated on a list of excluded outcomes, so an
+        exception from _ensure_schema logged a timing record with no start.
+        """
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            async def boom():
+                raise RuntimeError("schema unavailable")
+
+            memory._ensure_schema = boom
+            with caplog.at_level(logging.INFO):
+                await memory._consolidate_range(channel.id, 999, "turn")
+            names = [r.getMessage() for r in caplog.records]
+            # Fail-soft: the error is logged as a warning and nothing is closed.
+            assert any(n.startswith("consolidation failed for") for n in names), names
+            assert "memory consolidation start" not in names, names
+            assert "memory consolidation timing" not in names, names
+        finally:
+            await db.close()
+
+    async def test_compaction_duration_excludes_the_in_flight_wait(self, caplog):
+        """duration_ms is the work after the wait, not the wait itself.
+
+        The start record is logged after _wait_for_inflight, so a t0 taken
+        before it made the close disagree with the gap between the two records
+        (#469 review).
+        """
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            async def slow_wait(channel_id):
+                await asyncio.sleep(0.5)
+
+            memory._wait_for_inflight = slow_wait
+            with caplog.at_level(logging.INFO):
+                await drive_compaction_consolidation(memory, persistence, channel)
+            timings = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation timing"
+            ]
+            assert len(timings) == 1
+            assert timings[0].duration_ms < 250, (
+                "duration_ms must not include the in-flight wait"
+            )
+        finally:
+            await db.close()
+
+    async def test_a_failed_consolidation_closes_as_failed(self, caplog):
+        """A failure after the start closes the pair with `failed`.
+
+        Only a pre-start failure was covered, which is the case that logs no
+        close at all, so gating the close on `outcome != "failed"` still passed
+        the suite (#469 round 5).
+        """
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            ids = await seed_dialog(persistence, channel, [
+                ("user", "hi"), ("assistant", "hello"),
+            ])
+
+            async def boom(*args, **kwargs):
+                raise RuntimeError("store failed")
+
+            memory._commit = boom
+            with caplog.at_level(logging.INFO):
+                await memory._consolidate_range(channel.id, ids[-1], "idle")
+            timings = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation timing"
+            ]
+            assert len(timings) == 1, [r.getMessage() for r in caplog.records]
+            assert timings[0].outcome == "failed"
+        finally:
+            await db.close()
+
+    async def test_a_skipped_range_logs_no_stage(self, caplog):
+        """A turn trigger re-firing on a consolidated range opens nothing (#469 review)."""
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            await drive_idle_consolidation(memory, persistence, channel, db)
+            caplog.clear()
+            with caplog.at_level(logging.INFO):
+                watermark = await memory._get_watermark(db, channel.id)
+                await memory._consolidate_range(channel.id, watermark, "turn")
+            names = [r.getMessage() for r in caplog.records]
+            assert "memory consolidation start" not in names, names
+            assert "memory consolidation timing" not in names, names
+        finally:
+            await db.close()
+
+
 class TestConsolidationTriggerAttribution:
     """The initiating trigger rides the attribution contextvar in-flight.
 
@@ -961,3 +1131,36 @@ class TestRubricPriorHint:
 
         assert await prior.score([{"role": "user", "content": "x"}], hint=None) == 0.85
         assert len(client.chat_calls) == 1
+
+
+    async def test_a_cancelled_run_closes_as_cancelled(self, caplog):
+        """A stage cancelled mid-flight closes as ``cancelled``, not ``ok``.
+
+        The close is gated on the start, so a cancellation after the start
+        still logs a timing record; reporting ``ok`` there is a lie a reader
+        cannot detect from the record (#469 round 7).
+        """
+        import corvidae_cognition.memory as memmod
+
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            async def cancelled(*args, **kwargs):
+                raise asyncio.CancelledError()
+
+            original = memmod.fetch_range_rows
+            memmod.fetch_range_rows = cancelled
+            try:
+                with caplog.at_level(logging.INFO):
+                    with pytest.raises(asyncio.CancelledError):
+                        await memory._consolidate_range(channel.id, 999, "idle")
+            finally:
+                memmod.fetch_range_rows = original
+
+            closes = [
+                r for r in caplog.records
+                if r.getMessage() == "memory consolidation timing"
+            ]
+            assert len(closes) == 1, [r.getMessage() for r in caplog.records]
+            assert closes[0].outcome == "cancelled", closes[0].outcome
+        finally:
+            await db.close()
