@@ -273,6 +273,60 @@ def test_a4_old_layout_names_key_and_both_destinations():
 
 
 # ---------------------------------------------------------------------------
+# #964: a key that belongs to neither block is a typo, not silence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("section", "expected_path", "accepted_hint"),
+    [
+        (
+            {"providers": {"main": {"base_url": "http://h", "headz": 4}},
+             "profiles": {"main": {"model": "m"}}},
+            "llm.providers.main.headz",
+            "accepted: ",
+        ),
+        (
+            {"providers": {"main": {"base_url": "http://h"}},
+             "profiles": {"main": {"model": "m", "extra_bdy": {"a": 1}}}},
+            "llm.profiles.main.extra_bdy",
+            "accepted: ",
+        ),
+    ],
+)
+def test_a9_unknown_key_names_the_path_and_the_accepted_keys(
+    section, expected_path, accepted_hint
+):
+    """A9: a misspelled provider or profile key fails startup (#964).
+
+    Without this the typo is silent in the worst way: `headz: 4` reads as
+    heads absent, so the operator's capacity declaration disappears, and a
+    misspelled `extra_body` means the request goes out without it.
+    """
+    with pytest.raises(ValueError) as exc:
+        parse_llm_config(section)
+
+    message = str(exc.value)
+    assert expected_path in message
+    assert accepted_hint in message
+
+
+def test_a9_every_unknown_key_is_named_in_one_message():
+    """A9: two typos are both reported, so one round trip fixes both."""
+    section = {
+        "providers": {"main": {"base_url": "http://h", "headz": 4, "bas_url": "x"}},
+        "profiles": {"main": {"model": "m"}},
+    }
+
+    with pytest.raises(ValueError) as exc:
+        parse_llm_config(section)
+
+    message = str(exc.value)
+    assert "llm.providers.main.headz" in message
+    assert "llm.providers.main.bas_url" in message
+
+
+# ---------------------------------------------------------------------------
 # A5: no heads means unbounded, seen through the plugin accessor
 # ---------------------------------------------------------------------------
 
@@ -415,3 +469,26 @@ def test_a7_provider_config_is_empty_before_on_start():
     """A7: before on_start there is no config, so the accessor returns {}."""
     assert LLMPlugin().provider_config("main") == {}
 
+
+
+def test_a_mixed_type_key_is_rejected_without_a_typeerror():
+    """A non-string key must raise ValueError, not crash building the message.
+
+    YAML turns an unquoted ``2:`` into an int, and the unknown-key check sorts
+    the key set to list it. Mixed types make that sort raise TypeError, which
+    escapes the Config error handler at startup and the reload path's
+    ``except ValueError`` — the failure mode #471 already fixed once (#964).
+    """
+    from corvidae.llm_plugin import parse_llm_config
+
+    for config, wanted in (
+        ({"providers": {"main": {"base_url": "http://h", "headz": 4, 2: "y"}}},
+         "llm.providers.main"),
+        ({"profiles": {"main": {"model": "m", 1: "a"}}, "providers": {}},
+         "llm.profiles.main"),
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            parse_llm_config(config)
+        message = str(excinfo.value)
+        assert wanted in message, message
+        assert "must be a string" in message, message
