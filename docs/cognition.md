@@ -1773,7 +1773,9 @@ allow switches, recorded as `outcomes.suppressed = {<emission>: true}` plus
 outage during a burst of notifications from sending one failure message per
 turn; the kernel logs the exception at ERROR, with its traceback, before this
 hook runs, and records `error fallback not sent: vetoed by should_send_response`
-at INFO, so the missing message is traceable to the quiet origin. `user` and
+at INFO. Neither kernel line names the origin, so what ties the missing message
+to it is this row: `outcomes.suppressed = {"error": true}` together with
+`quiet_origin`. `user` and
 `reminder` are never quiet; listing either is ignored with a warning, and a
 value that is not a list of strings fails open with a warning naming the
 channel. The list resolves like any tunable: a channel's `set_settings`

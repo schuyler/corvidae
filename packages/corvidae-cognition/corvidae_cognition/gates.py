@@ -312,8 +312,9 @@ class GatePlugin(CorvidaePlugin):
         a broken gate never silences the agent.
         """
         try:
-            # The quiet veto comes first and needs no vector. Origin is only
-            # resolved for progress/thinking when a quiet set exists.
+            # The quiet veto comes first and needs no vector. With a quiet set
+            # configured, the origin is resolved for progress, thinking and the
+            # error fallback alike.
             quiet = self._quiet_origins(channel)
             surfaced = trace_id is not None and trace_id in self._surfaced
             # The quiet veto covers every emission a quiet turn can make,
