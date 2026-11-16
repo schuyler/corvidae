@@ -592,7 +592,10 @@ async def test_dispatch_result_and_content_lines_name_the_channel(caplog):
     with caplog.at_level(logging.DEBUG, logger="corvidae.tool"):
         await dispatch_tool_call(call, {"my_tool": tool_fn}, channel=_Channel("signal:a"))
 
-    for prefix in ("tool call dispatched", "tool call result", "tool call result content"):
+    for prefix in (
+        "tool call dispatched", "tool call arguments", "tool call result",
+        "tool call result content",
+    ):
         records = _tool_records(caplog, prefix)
         assert records, f"expected a {prefix!r} record"
         assert records[0].channel == "signal:a", f"{prefix} must name the channel"

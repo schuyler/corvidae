@@ -463,10 +463,7 @@ async def dispatch_tool_call(
     )
     logger.debug(
         "tool call arguments",
-        extra={
-            "tool": fn_name,
-            "arguments": _truncate(json.dumps(args)),
-        },
+        extra=_attributed(channel, tool=fn_name, arguments=_truncate(json.dumps(args))),
     )
 
     # Step 3: Check tool exists
