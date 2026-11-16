@@ -791,8 +791,8 @@ Three key formats:
 - `<plugin>:<process tag>:<UID>` for work a plugin owns, such as
   `memory:consolidation:<id>` for catch-up consolidation (#985). The `<UID>`
   is one id per run, so a scheduler can stop or resume one run without the
-  others: use the run's trace id when the work has one (a turn does), and mint
-  one (a uuid) when it doesn't. A subscriber that wants all of a plugin's runs
+  others: use the work's trace id when it has one, and mint one (a uuid)
+  when it doesn't. A subscriber that wants all runs for a given plugin process tag
   — a policy plugin under #366, a metrics query — matches on the stable
   `<plugin>:<process tag>:` prefix; that prefix is part of the contract. The
   `lease.*` events tag `lease_key`, so a per-run key adds one tag value per
