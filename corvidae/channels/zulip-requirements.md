@@ -104,13 +104,17 @@ verified (see the last section).
 
 ## Outbound
 
-26. A reply goes to the topic of the newest allowed message that reached the agent on that channel, held
-    in memory only, whatever started the turn (a message, a reminder, the
-    heartbeat, a cross-channel send); only when none is remembered for the channel
-    (the first turn after a restart, or a channel no allowed message has reached)
-    does it go to `default_topic`. Two allowed senders in different topics of one
-    channel can therefore have an answer land in the other's topic. The empty topic
-    round-trips as the empty topic. A DM goes to its user ids. [#640 D1, PRD 3.2.10]
+26. A reply goes to the topic of the message it answers: the topic is recorded
+    per trace id when an allowed message is taken in, and the turn's final is
+    posted there. So two allowed people writing in different topics of one
+    channel are each answered in their own topic. A send with no trace to answer
+    (a reminder, the heartbeat, a cross-channel send, the first turn after a
+    restart) goes to the topic of the newest allowed message, and only when none
+    is remembered to `default_topic`; the trace map is bounded, so a
+    very-slowly-answered message can lose its preference, never its delivery. A
+    coalesced turn posts one reply, in the topic of the message whose trace it
+    answers. The empty topic round-trips as the empty topic. A DM goes to its
+    user ids. [#640 D1, #643, PRD 3.2.10]
 27. Reasoning and tool status are not displayed. [PRD 3.2.3]
 28. Text is split, never truncated, at the smaller of `message_chunk_size` and the
     server's `max_message_length`, counted in UTF-8 bytes (never fewer than the
@@ -130,12 +134,26 @@ verified (see the last section).
 
 ## Liveness
 
-32. Typing is shown only to allowed senders: sent on the first outstanding message,
-    refreshed every 8 s while a reply is owed, and stopped with an explicit `stop`
-    when a final is sent, when a final is withheld, or when a message the gate never
-    admitted gives its slot back. It is never left on. A failed typing call is a
-    WARNING and never costs the reply. [PRD 3.2.5]
-33. One final releases every outstanding slot (it answers a coalesced burst). On
+32. Typing is shown only to allowed senders: sent on the first outstanding message
+    in a topic, refreshed every 8 s while a reply is owed there, and stopped with an
+    explicit `stop` in that same topic when a final is sent, when a final is
+    withheld, or when a message the gate never admitted gives its slot back. The
+    notice is per (stream, topic), the way Zulip's own is, so two topics owing a
+    reply show two notices and each stop goes where its start did — never to a
+    topic a later message moved the channel to. A refresh whose `start` was in
+    flight when the final's `stop` went out sends a `stop` of its own, so typing
+    cannot reappear after it — but only when nothing is owed in that topic by
+    then: a message arriving in that window is a reply owed, and the loop keeps
+    refreshing instead of exiting (#643). It is never left on. A failed typing call is a
+    WARNING and never costs the reply. [PRD 3.2.5, #643]
+33. One final releases every outstanding slot *on the channel* (it answers a
+    coalesced burst, and a burst may span topics). That release is deliberately
+    wider than the reply's topic: the notice in a topic whose message the same
+    turn absorbed stops even though no reply ever goes there, which is the one
+    place 32's "refreshed while a reply is owed there" and 33 disagree. The
+    alternative - releasing only the answering topic - leaves the absorbed
+    topic's notice refreshing every 8 s for a reply that will never be sent
+    there. On
     the withheld-final path (`on_agent_response`) the ownership check,
     `final_was_unsent` and the release run before the first `await`; a sent final
     releases after it has delivered, as Discord and Signal do, so a message that

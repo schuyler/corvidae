@@ -36,12 +36,18 @@ DIMS = 4  # small for speed; the width is what matters, not the value
 
 EMBED_CONFIG = {
     "llm": {
-        "main": {"base_url": "http://localhost:8080", "model": "chat"},
-        "embedding": {
-            "kind": "embedding",
-            "base_url": "http://localhost:8081",
-            "model": "test-embedder",
-            "dimensions": DIMS,
+        "providers": {
+            "main": {"base_url": "http://localhost:8080"},
+            "embedding": {"base_url": "http://localhost:8081"},
+        },
+        "profiles": {
+            "main": {"model": "chat"},
+            "embedding": {
+                "provider": "embedding",
+                "kind": "embedding",
+                "model": "test-embedder",
+                "dimensions": DIMS,
+            },
         },
     },
     "memory": {

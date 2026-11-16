@@ -30,13 +30,19 @@ DIMS = 32
 
 CONFIG = {
     "llm": {
-        "main": {"base_url": "http://localhost:8080", "model": "chat"},
-        "background": {"base_url": "http://localhost:8080", "model": "bg"},
-        "embedding": {
-            "kind": "embedding",
-            "base_url": "http://localhost:8081",
-            "model": "test-embedder",
-            "dimensions": DIMS,
+        "providers": {
+            "main": {"base_url": "http://localhost:8080"},
+            "embedding": {"base_url": "http://localhost:8081"},
+        },
+        "profiles": {
+            "main": {"model": "chat"},
+            "background": {"model": "bg"},
+            "embedding": {
+                "provider": "embedding",
+                "kind": "embedding",
+                "model": "test-embedder",
+                "dimensions": DIMS,
+            },
         },
     },
 }
@@ -852,3 +858,101 @@ async def test_hook_fires_outside_the_goals_lock(env):
     )
 
     assert (await rows(env, "SELECT status FROM goals WHERE id = ?", (second_id,)))[0][0] == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# #846 gaps 1 and 4: update/retire and add/seed races
+# ---------------------------------------------------------------------------
+
+
+async def _retire_with_update_mid_flight(env, new_text: str) -> tuple[str, str]:
+    """Pause retire_goal inside its record write, run update_goal meanwhile,
+    then release. Returns (update result, retirement record summary)."""
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "work")
+    await env.tools["add_goal"]("old text", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    real_write = env.memory.write_record
+
+    # Hold retire inside the record write so the update lands mid-retire.
+    async def paused_write(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await real_write(*args, **kwargs)
+
+    env.memory.write_record = paused_write
+    retire = asyncio.create_task(env.tools["retire_goal"](gid, "I concluded.", _ctx=ctx))
+    await asyncio.wait_for(entered.wait(), 5)
+    update = asyncio.create_task(env.tools["update_goal"](gid, new_text, _ctx=ctx))
+    # Give update_goal every chance to run (or block on a lock) before release.
+    for _ in range(20):
+        await asyncio.sleep(0)
+    release.set()
+    update_result, _ = await asyncio.gather(update, retire)
+    summary = (await rows(env, "SELECT summary FROM memory"))[0][0]
+    return update_result, summary
+
+
+async def test_g1_update_during_retire_never_quotes_stale_text(env):
+    """AC (retire first): an update racing a retire either gets the 'already
+    retired' error or the record quotes the updated text; never the old text
+    with the update reported as successful."""
+    result, summary = await _retire_with_update_mid_flight(env, "new text")
+    assert "already retired" in result or "new text" in summary, (
+        f"update said {result!r} but the record says {summary!r}"
+    )
+
+
+async def test_g1_update_committed_before_retire_is_quoted(env):
+    """AC (update first): the retirement record quotes the new text."""
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "work")
+    await env.tools["add_goal"]("old text", _ctx=ctx)
+    gid = (await rows(env, "SELECT id FROM goals"))[0][0]
+    assert "updated" in await env.tools["update_goal"](gid, "new text", _ctx=ctx)
+    await env.tools["retire_goal"](gid, "I concluded.", _ctx=ctx)
+    summary = (await rows(env, "SELECT summary FROM memory"))[0][0]
+    assert "new text" in summary and "old text" not in summary
+
+
+async def test_g4_seed_between_add_goal_read_and_write_keeps_positions_distinct(env):
+    """AC: a seed landing between add_goal's position read and its INSERT
+    leaves distinct positions. The seed is injected right before add_goal's
+    INSERT (using the seed CLI's own statement), which is after any separate
+    SELECT MAX and before the write."""
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("existing", _ctx=ctx)
+
+    seed_sql = (
+        "INSERT INTO goals (text, created_at, updated_at, position) "
+        "VALUES (?, ?, ?, COALESCE((SELECT MAX(position) FROM goals), 0) + 1)"
+    )
+    real_execute = env.db.execute
+    fired = []
+
+    # Wrap execute: just before add_goal's INSERT, perform the seed's insert.
+    def racing_execute(sql, *args, **kwargs):
+        if "INSERT INTO goals" in sql and "origin_channel" in sql and not fired:
+            fired.append(True)
+
+            async def seed_then_insert():
+                await real_execute(seed_sql, ("seeded", 1.0, 1.0))
+                return await real_execute(sql, *args, **kwargs)
+
+            return seed_then_insert()
+        return real_execute(sql, *args, **kwargs)
+
+    env.db.execute = racing_execute
+    try:
+        await env.tools["add_goal"]("racer", _ctx=ctx)
+    finally:
+        env.db.execute = real_execute
+    await env.db.commit()
+
+    data = await rows(env, "SELECT text, position FROM goals")
+    assert sorted(t for t, _ in data) == ["existing", "racer", "seeded"]
+    positions = [p for _, p in data]
+    assert len(set(positions)) == len(positions), f"tied positions: {data}"

@@ -91,7 +91,10 @@ def _write_config(tmp_path: Path, daemon_extra: dict) -> Path:
     daemon = {"session_db": str(tmp_path / "sessions.db")}
     daemon.update(daemon_extra)
     config = {
-        "llm": {"main": {"base_url": "http://127.0.0.1:9/v1", "model": "m"}},
+        "llm": {
+            "providers": {"main": {"base_url": "http://127.0.0.1:9/v1"}},
+            "profiles": {"main": {"model": "m"}},
+        },
         "daemon": daemon,
         "agent": {"system_prompt": "test"},
         "plugins": {"disabled": MINIMAL_DISABLED},

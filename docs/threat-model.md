@@ -120,8 +120,8 @@ Assets, roughly in order of how bad it is to lose them:
    (#348). Treat the daemon log as you treat `sessions.db`.
 4. `agent.yaml`: operator intent, hot-reloaded within seconds of a write
    (default poll 2s).
-5. The LLM server, if it is shared with anything else, and each model
-   pool's warm context heads (PRD principle 16): the slot time and the
+5. The LLM server, if it is shared with anything else, and each
+   provider's warm context heads (PRD principle 16): the slot time and the
    warm prefixes the operator's own turns need, and money on a metered
    endpoint, which corvidae doesn't cap.
 
@@ -380,7 +380,7 @@ and per channel (#149). `write_file` writes anywhere
 the daemon user can, creating parent directories, including over
 `agent.yaml`, which `ConfigWatcherPlugin` reloads within two seconds. That
 lets the model clear `immutable_settings` immediately. It can also repoint
-any profile's `base_url`, add an MCP server whose `command` is anything,
+any provider's `base_url`, add an MCP server whose `command` is anything,
 disable plugins, or re-enable globally disabled tools; those keys are not
 hot-reloaded (nothing under `llm:` is), so they wait for the next restart,
 which makes the attack persistent and quiet rather than immediate. A channel's own
@@ -557,12 +557,11 @@ remains a pass-through hook.
 
 **What is fenced and what is not.** Fenced as untrusted outside content: the
 results of `read_file` (spill files read back included), `web_fetch`,
-`web_search` and every MCP tool. A tool declares this for itself
+`web_search`, `shell` and `task_pipeline`, and every MCP tool. A tool declares this for itself
 (`returns_untrusted`, read when the call is dispatched and stored on the
 result), so a result of a tool no plugin declares is unfenced unless it acts on
 another channel. Result rows stored before #557 carry no flag and stay
 unfenced on reload. Unfenced today:
-`shell` and `task_pipeline` output, including a `cat` of a spill file (#580);
 `recall_raw` and `search_memory` replays of earlier content, which can carry
 text that was untrusted when it first arrived; the results inside a
 subagent's own loop, which reach the subagent's model with no frame; and the
@@ -637,7 +636,9 @@ registry, including Signal contacts, and the jobs persist across restarts.
 The file-permission mitigation (keep the file unwritable by the daemon
 user) would disable the CRUD tools, so it is not a viable mitigation for
 the tool path. The real exposure is the same as for any cross-channel
-send tool (finding 15): registry membership is the whole gate. Bounding
+send tool (finding 15): registry membership is the whole gate, and for
+`notify_other_channel` not even that, since it reaches any well-formed
+channel id (#938). Bounding
 the tools (per-channel cap, operator opt-in) is a follow-up.
 
 The RSS reader (packages/rss-reader) polls configured feeds and delivers
@@ -653,6 +654,20 @@ or may not treat it as untrusted. The feed URLs are
 operator-configured in agent.yaml, so the same file-permission
 discipline applies. A body cap and a defusedxml dependency are
 follow-ups.
+
+The goals-notify plugin (packages/goals-notify, #841) sends each goal state
+change to the channel that created the goal, through `notify_other_channel`.
+A retirement carries the model-authored `conclusion`, so text reasoned from
+one channel's conversation (a private DM, or a fetched page that steered the
+turn) reaches the origin channel's window and wakes a turn there, which may
+be a room people the operator never allowed can read. It is the same reach as
+any `notify_other_channel` call (finding 15), made without the model choosing
+to send: the target is fixed by where the goal was created. It bypasses the
+funnel, so the note is not framed or trust-labelled the way PRD §3.5.10
+requires (a variance, #939), and no sensitivity filter (PRD §3.7) applies to
+it. The `hop_count` guard bounds loops. Controls: leave the extra uninstalled
+or list `goals_notify` under `plugins.disabled`; don't create goals from
+channels whose readers shouldn't see their conclusions.
 
 `discord.send_attachment` (issue #521) and `send_signal_attachment` (issue
 #544) are the first tools that send a *file* to a channel the model chooses
@@ -691,8 +706,12 @@ name is generated text, so it also appears in the channel's thread list to
 everyone who can read the channel. Deleting a thread is not offered, so an
 agent that creates them in a loop leaves them; Discord archives them instead.
 
-No tool sends a *message* to the person on another channel yet (the
-cross-channel `notify_other_channel` of #234 queues a turn there instead). PRD §3.5.9 now requires one, with no
+No tool sends a *message* to the person on another channel yet, though three
+already send something: `send_attachment` and `send_signal_attachment` take a
+caption, which is text to a person on a channel the model chose (no cross-channel
+allowlist); `start_thread` posts its opening message, which is text, into a
+thread on another `discord:` channel (never a DM, which it refuses); and
+`notify_other_channel` (#234) queues a turn there instead. PRD §3.5.9 now requires one, with no
 allowlist of target channels: any turn may speak on any channel (#234).
 Finding 15 is its entry. PRD §3.9.7 also lets the agent set recurring
 reminders, which the tree doesn't yet: a recurring reminder set because of
@@ -894,14 +913,19 @@ human removed. What bounds it:
 
 ### 12. A remote model endpoint receives that stage's inputs
 
-Every `llm:` profile is an OpenAI-compatible client, so any profile can point
-at a hosted provider. Doing so sends that profile's requests, conversation
-content included, to the provider. A stage sends to whatever profile
+Every `llm.providers` entry is an OpenAI-compatible endpoint, so any provider
+can be a hosted one. The provider owns the endpoint (`base_url`, `api_key`,
+`heads`); a profile only names which provider it sends to, so repointing a
+provider moves every profile on it. Pointing a profile at a hosted provider
+sends that profile's requests, conversation content included, to the
+provider. A stage sends to whatever profile
 `llm.stages` maps it to, and to its kind's default profile when the map
 doesn't name it (no fallback chains). Main turns go to the default chat
 profile. With no `llm.stages` entries that is two endpoints, the default chat
 profile's and the default embedding profile's; each mapping adds the stage's traffic to the mapped profile's
-endpoint and takes it off the default's. Weigh the endpoint per stage:
+endpoint and takes it off the default's. Two profiles on one provider share its endpoint, so
+mapping a stage to a profile on another provider is what moves its traffic.
+Weigh the endpoint per stage:
 
 | Stage | What it sends |
 |---|---|
@@ -915,12 +939,12 @@ endpoint and takes it off the default's. Weigh the endpoint per stage:
 
 The view is the whole window the agent held: the system prompt (identity and
 register), CONTEXT blocks, tool calls and their results, and earlier
-summaries. A remote profile is a disclosure decision for every stage mapped
+summaries. A remote provider is a disclosure decision for every stage mapped
 to it, and for main turns if it is the default chat profile.
 
 The provider also sees whatever untrusted text those stages carry. Treat a
 remote profile as a disclosure decision per stage, not only a cost one. All
-of `llm:` is read at startup, so a repointed profile or stage takes effect at
+of `llm:` is read at startup, so a repointed provider, profile or stage takes effect at
 the next restart, not when `agent.yaml` is saved.
 
 The key can live in the daemon's environment (`api_key: "${VAR}"`), which
@@ -956,12 +980,18 @@ key points at. The change applies when the key is next resolved: on an
 for the rest. Editing a prompt file does not trigger a reload. `set_settings`
 cannot change these keys: `resolve_prompt` reads static config only. The
 cost is the same as the system-prompt entry: the agent redefines its own
-instructions for that scope. Lock the files read-only to the daemon. There
-is no restart tool in this tree; the agent can restart only by way of
-`shell` or a tool an MCP server provides. Nor is there deferred application:
+instructions for that scope. Lock the files read-only to the daemon. The
+`restart` tool comes from the opt-in restart plugin (`packages/corvidae-restart`,
+the `restart` extra; see [Restart plugin](#restart-plugin)); without it, the
+agent can restart only by way of `shell` or a tool an MCP server provides.
+There is no deferred application either:
 a `reasoning_history` override applies to the whole window from the next
-call. None of these can be unlocked yet (#292). Context leases, latency
-classes and scheduling policy (PRD §3.13) aren't built at all (#296). On a
+call. None of these can be unlocked yet (#292). Context leases are built
+(#364) with the kernel's default order only; latency classes and a
+replaceable scheduling policy (PRD §3.13) aren't (#296). No tool, command or
+setting reaches the lease controls: `stop`, `resume` and `yield_key` are a
+plugin-only API on `LLMPlugin.leases`, and `heads` is operator config like
+the rest of `llm.providers`. On a
 channel that still has `write_file` or `shell`, the agent can already get
 around all of them by rewriting `agent.yaml` or a system-prompt file
 (finding 4), unless the files are read-only to the daemon.
@@ -1032,7 +1062,7 @@ What each kind of unlock costs:
   operator turned it on, it drops the entropy summary from the outcome log,
   which calibration reads. Any other request-body key falls here too, and
   some reach past the channel: a backend's slot or cache controls
-  (llama-server's `id_slot`, `cache_prompt`) can evict another channel's
+  (llama-server's `id_slot`, `cache_prompt`; a pinned `id_slot` also works against the lease scheduler, PRD §3.13) can evict another channel's
   cached prefix, and a forced `response_format` or grammar can stop the
   model emitting tool calls.
 - **Gate tunables and thresholds** (`gate.*`,
@@ -1056,9 +1086,10 @@ What each kind of unlock costs:
   window every turn to stay within budget, down to the newest row alone
   for a budget that small (the log keeps them); the over-budget WARNING is
   the signal. A large `max_turns` lets one injected tool loop run far
-  longer before dispatch is suppressed, holding its lease on one of the
-  pool's heads until another queue reaches its latency bound (PRD
-  §3.13.5), and spending tokens throughout (finding 14).
+  longer before dispatch is suppressed. It keeps its lease on one of the
+  provider's heads while no other queue waits for one, and gives it up at
+  its next call boundary when one does (PRD §3.13.5), and it
+  spends tokens throughout (finding 14).
   `reasoning_history: keep` fills the window with reasoning and brings
   compaction sooner; `drop` (the shipped default) strips the reasoning a
   tool chain in progress relies on, which degrades Qwen-family tool use
@@ -1069,8 +1100,9 @@ What each kind of unlock costs:
   if it is built (PRD §3.5.9), `agent.compaction_*`, the `tools.*` limits).
   Today these are reachable only through a writable `agent.yaml` (finding
   4); an unlock through a tool carries the same costs. A repointed
-  `base_url` on the default chat profile (`llm.main` unless
-  `llm.defaults.chat` names another) sends every conversation, and the API key, to a host
+  `base_url` on the provider the default chat profile uses (`llm.profiles.main` unless
+  `llm.defaults.chat` names another; its provider is `provider:`, else
+  `llm.defaults.provider`, else `main`) sends every conversation, and the API key, to a host
   of the attacker's choosing. `plugins.disabled` switches off the gates
   wholesale at the next restart. A scheduled job's prompt comes back
   framed as the operator's. A setting not named in this ledger falls under
@@ -1090,20 +1122,30 @@ What each kind of unlock costs:
   stage's slot time on every exchange, which starves main turns on a
   single-slot server (PRD principle 3) and spends tokens on every exchange
   on a metered one. Stage output caps still have to fit the context (PRD
-  §3.8.4). A pool's declared heads (PRD §3.13.2) belong to the provider,
+  §3.8.4). Declared heads (PRD §3.13.2) belong to the provider,
   not to a channel, so no override moves them; a self-edit of the config
   that declares them can (the self-edit entry), and declaring more heads
   than the server keeps warm brings the thrashing back.
 - **Scheduling policy** (latency classes, deferring or pausing a channel,
-  the order leases are granted in, PRD §3.13). An injection that tightens
+  stopping and resuming a lease holder, the order leases are granted in,
+  PRD §3.13). An injection that tightens
   its own channel's latency class makes that channel preempt others at
   every call boundary, and each preemption is a context switch someone
   pays prefill for; loosening the operator's channel's class makes the
-  operator wait longer. It can also pause the operator's channel, move its
-  own ahead, or push upkeep back. Every deferral and pause lapses by itself
-  and the operator can resume any channel, and no replacement order delays
-  work past its latency bound (PRD §3.13.7), so the damage is delay and
-  prefill, not a wedged agent.
+  operator wait longer, and removing it leaves the operator's channel
+  with no bound, so a replacement order may delay it indefinitely and
+  nothing reports it overdue (PRD §3.13.5, 7). It can also pause the operator's channel, move its
+  own ahead, stop the holder of a head so its own channel takes it, or
+  push upkeep back. Every deferral and pause lapses by itself
+  and the operator can resume any channel, and no replacement order or
+  deferral delays work past its latency bound (PRD §3.13.7), so the
+  damage from those is delay and prefill, not a wedged agent; a channel
+  with no bound, whether a transport's default or an injection's doing,
+  can be delayed without limit by a replacement order. A stop has
+  no such bound yet (#366): a stopped queue waits until the scheduler
+  plugin or the operator resumes it, so until that is decided a scheduler
+  plugin that stops a queue and never resumes it holds that queue's work
+  for as long as it runs.
 - **Skills.** The skills index sits in the stable prompt region, so a
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan
@@ -1200,12 +1242,12 @@ retry per interval rather than one fork per turn. Idle and compaction are
 not backed off, so the range is still consolidated by them.
 
 Where the tree stands: nothing bounds use over time, and under PRD
-principle 16 nothing in corvidae will for now. It schedules a pool's warm
+principle 16 nothing in corvidae will for now. It schedules a provider's warm
 heads but doesn't cap tokens or spend; rate limits on hosted APIs are a
 future improvement (#296). `usage_log` records every call, and rate limits
 are met only by retrying (PRD §3.6.2). Once built, latency classes (PRD
-§3.13.5) bound how long a flooded channel can hold a head another queue is
-waiting for, at the price of a context switch each time it yields; they
+§3.13.5) bound how long a flooded channel can hold a head a queue with a
+bound is waiting for, at the price of a context switch each time it yields; they
 don't bound its total.
 
 On a metered endpoint, set a spend limit with the provider, and keep
@@ -1263,6 +1305,13 @@ decision (2026-11-01), and these are its costs.
   Signal contact can be messaged on the strength of text fetched in an IRC
   channel. Inbound default-deny bounds who can inject by talking; it does
   not bound what fetched content says.
+  `notify_other_channel` (the cross-channel-send plugin) reaches any
+  well-formed `transport:scope` id, not only channels live in the registry:
+  it resolves the id the way reminders and `corvidae-inotify` do (#938), so
+  a Signal contact or Discord channel nobody has spoken in since the
+  restart is reachable too. An id whose transport no plugin owns still
+  resolves to a bare channel and is reported as queued, though no reply is
+  delivered there.
 - **Notes and reads launder untrusted text.** A note is framed as the
   agent's own, so text injected on IRC that prompts a note reaches the
   operator's Signal window in the agent's voice, and a read pulls one
@@ -1373,8 +1422,9 @@ back is fenced: the header's pointer is kernel text, and the file's contents
 arrive as a `read_file` result under the untrusted-output header and nonce
 fence (#571), though not the notification's own fence, and the header names
 the source recorded when the content was spilled, if the log row survives
-(#576). A `cat` of the file through `shell` arrives unfenced
-(#580). The spill directory is not inside any tool root
+(#576), and a `cat` of the file through `shell` arrives fenced, though
+without the source line, because the stamp needs a whole spill path as its
+argument (#580). The spill directory is not inside any tool root
 (`read_file` has none until #444), so the file is reachable the same way any
 other path is, and the agent can read it whether or not a header pointed at
 it.
@@ -1387,9 +1437,10 @@ case adds the cap times the rate of long tool results. The file is written
 only where the channel (or, in a subagent, its tool set) has a spill reader,
 and read back the same ways as a notification's. The cut line on an
 untrusted result sits in the header, outside the fence. On a trusted result
-it heads the unfenced content, so text in that content (a `shell` command's
-output, say) could imitate it. That is no new reach: such output was
-already unfenced and could imitate any text. In a subagent's loop the cut
+it heads the unfenced content, so text in that content (the output of a tool
+that does not declare itself untrusted, say) could imitate it. That is no new
+reach: such output is unfenced by that tool's own declaration and could
+imitate any text. In a subagent's loop the cut
 line is plain text in the result, with no kernel header at all.
 
 ### Smaller things
@@ -1440,7 +1491,7 @@ line is plain text in the result, with no kernel header at all.
   Zulip channel tells the model it may answer `NO_REPLY` to send nothing (or,
   with `silence.mode` `tool` or `both`, call `end_turn`), and
   a message that says "don't reply to this" may be enough. The worst case is
-  a missed reply. The veto is a containment check, so a reply that merely quotes the token (say, repeating an incoming message that contains `NO_REPLY`) is dropped too: untrusted text can get a reply suppressed without the model choosing silence. A decline is a row in `exchange_log` with
+  a missed reply. The veto is a containment check, so a reply that merely quotes the token (say, repeating an incoming message that contains `NO_REPLY`) is dropped too: untrusted text can get a reply suppressed without the model choosing silence. This is accepted for now, not prevented: the withheld reply is stored `unsent` and recorded as `no_reply`, the cost is one re-prompt, and an exact-match veto would instead leak the token to users whenever the model writes anything beside it. Narrowing the match without that leak is #902. A decline is a row in `exchange_log` with
   `outcomes.silence` (`no_reply` or `empty`) only when `outcome_log` is loaded
   and the turn has a trace id, so look there to find them. With
   `silence.mode: tool` or `both` the agent also has an `end_turn(reason)` tool,
@@ -1628,7 +1679,12 @@ indefinitely, at the operator's expense and against the person on the other end.
 
 `OutboundCapPlugin` counts the messages the gate lets through on a channel
 since the last admitted human message and withholds everything after
-`outbound_cap.max_messages` until a human speaks again.
+`outbound_cap.max_messages` until a human speaks again. Since #821 it also
+enforces an optional sliding window — `outbound_cap.max_messages_per_window`
+in `outbound_cap.window_seconds`, off unless configured — which bounds the
+cases the between-human counter does not: a channel where a human keeps
+talking, or one whose counter keeps being reset. A human message does not
+reset the window.
 
 Mitigations and their limits:
 
@@ -1644,11 +1700,14 @@ Mitigations and their limits:
 - A withheld `final` is still stored as `UNSENT` with a not-sent marker, so the
   agent can see it was held; nothing is silently lost.
 - Every withheld emission is logged, the first in a run at `WARNING` with the
-  channel, emission, trace id and limit key, so an operator can see a cap doing
-  its work rather than guessing at silence.
+  channel, emission, trace id and the limit key that fired, so an operator can
+  see a cap doing its work rather than guessing at silence; a message held while
+  both limits are reached names both, and the window logs one `WARNING` summary
+  when it slides open again.
 
 The agent can raise or clear its own cap through `set_settings`
-(`outbound_cap.max_messages`, `outbound_cap.count_progress`), and an invalid
+(`outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`,
+`outbound_cap.window_seconds`, `outbound_cap.count_progress`), and an invalid
 override fails open, unless the operator lists those keys in
 `agent.immutable_settings`.
 
@@ -1734,6 +1793,59 @@ sender who can steer an exchange can get a false durable "fact" proposed, and
 the filing turn's "only if missing" check is the agent's judgement, not a
 verification. The knowledge base directory must be writable by the daemon,
 which also makes it writable by anything else running as the daemon's user.
+
+### 22. Quiet origins and `speak_up`: a notification source can be muted, and the mute can be lifted from inside the turn (#790)
+
+`gate.send.quiet_origins` lists origins (for example `webhook:github`) whose
+turns send nothing to the human: the decide gate withholds their `final`,
+`progress` and `thinking` emissions whatever their salience. It exists because
+the 2026-11-12 flood (finding 19) was the agent answering CI notifications one
+by one. While `gates` is loaded the agent also has a `speak_up(reason)`
+tool, which lifts the veto for the rest of the calling turn's trace. It is
+offered whatever the list holds, so a hot reload that adds a quiet origin is
+never left without its hatch (#925).
+
+What changes for untrusted text:
+
+- `speak_up` is in the tool list of every turn while `gates` is loaded,
+  whether or not anything is quiet. That includes the turns a quiet source
+  drives, so the quiet payload itself, a webhook body or a PR title, can tell
+  the agent to call it. Called in a turn
+  that isn't quiet, it lifts nothing but still records `outcomes.speak_up`.
+  `tools.disabled: [speak_up]` removes it, leaving a veto with no hatch.
+  The hatch lifts only this veto: the surfaced final still goes through the
+  salience floor (`gate.send.min_salience`), every other `should_send_response`
+  implementation (silence, critique, `outbound_cap`) and the normal not-sent
+  marker. A flood of hatch calls is therefore bounded by `outbound_cap`
+  (finding 19) when that plugin is loaded and configured, not by this plugin. The call is recorded as
+  `outcomes.speak_up` with its reason, so an operator can see which turns
+  surfaced and why.
+- The hatch never sends anything itself. A design that sent directly would
+  have bypassed every gate, `outbound_cap` included.
+- The list is a per-channel runtime tunable like every other gate key
+  (#928), so `set_settings` can change it, and an injected instruction can
+  ask the agent to. A quiet turn's payload can tell the agent to un-quiet its
+  own source on that channel, which brings back the reply-per-notification
+  flood; a message can also quiet a source the operator wants heard. The owner
+  accepted this: the list is a guardrail against floods, not a security
+  boundary. The recommended blocklist in configuration.md lists the key, and
+  `agent.immutable_settings` locks it. A lock blocks new writes, null
+  included, but not an override already set, so a restart clears that (or
+  unlock, clear with `null`, and lock again).
+  Un-quieting is bounded by `outbound_cap` when that plugin is configured.
+- `user` and `reminder` can never be quiet; listing them is ignored with a
+  warning. A list that is not a list of strings fails open (nothing is quiet)
+  with a warning naming the key, the value and the channel, so a typo cannot
+  mute the agent.
+
+Accepted residuals. Progress and thinking sent in the same response as the
+`speak_up` call are gated before the tool runs, so they stay withheld. A
+follow-up turn whose origin differs from the quiet turn (for example a
+`critique` wake) is not quiet. The veto lives in
+`GatePlugin`, so disabling `gates` disables it. The agent can set a
+scheduler job's origin to `heartbeat` (the only other origin the scheduler
+accepts besides `reminder`); if `heartbeat` is quiet, that mutes the job's
+own turns, which fails toward silence rather than toward noise.
 
 ## Privilege separation
 

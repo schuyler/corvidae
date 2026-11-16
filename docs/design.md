@@ -146,7 +146,7 @@ plugins add read-only sections to the console's chat page; see "Web" under Trans
 
 ### Funnel pull path
 
-Some sources cannot give their entries when asked, so they hand the funnel promises instead. An implementation of `on_funnel_ingest` calls `submit(source, future)` and returns; the future resolves to an `Ingest` or to `None`. Implementers submit rather than return because apluggy's `ahook` gathers implementations without `return_exceptions`: one raising implementation would lose every other one's return value. Each channel's `before_agent_turn` runs four steps in order, none of which returns early: expire (only when `funnel.ingest_ttl` is set), sweep finished promises into the channel's next-turn queue, drain the queues through the normal admission path, then collect by calling the hook. Collecting last means a promise submitted in a turn is first swept in the next. A submit for a `(channel, source)` that already has a pending promise cancels that promise, and `on_stop` cancels all of them. Expiry runs only at the channel's next turn, so an idle channel's pending promise runs until then or until shutdown. The contract and its limits are in [cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy). A source that searches per user turn does not implement the hook by hand: `RecallSourceMixin` (`corvidae_cognition/recall.py`) does, adding the user-turn gate, a per-channel cooldown and single search in flight, a timeout and fail-soft logging, so the source supplies `search` and `render` only ([Recall sources](cognition.md#recall-sources-packagescorvidae-cognitioncorvidae_cognitionrecallpy)).
+Some sources cannot give their entries when asked, so they hand the funnel promises instead. An implementation of `on_funnel_ingest` calls `submit(source, future)` and returns; the future resolves to an `Ingest` or to `None`. Implementers submit rather than return because apluggy's `ahook` gathers implementations without `return_exceptions`: one raising implementation would lose every other one's return value. Each channel's `before_agent_turn` runs four steps in order, none of which returns early: expire (only when `funnel.ingest_ttl` is set), sweep finished promises into the channel's next-turn queue, drain the queues through the normal admission path, then collect by calling the hook. Collecting last means a promise submitted in a turn is first swept in the next; a promise that finished after the sweep and is re-submitted in that same collect is carried to the turn's own drain rather than superseded and lost (#726). A submit for a `(channel, source)` that already has a pending promise cancels that promise, and `on_stop` cancels all of them. Expiry runs only at the channel's next turn, so an idle channel's pending promise runs until then or until shutdown. The contract and its limits are in [cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy). A source that searches per user turn does not implement the hook by hand: `RecallSourceMixin` (`corvidae_cognition/recall.py`) does, adding the user-turn gate, a per-channel cooldown and single search in flight, a timeout and fail-soft logging, so the source supplies `search` and `render` only ([Recall sources](cognition.md#recall-sources-packagescorvidae-cognitioncorvidae_cognitionrecallpy)).
 
 ### Funnel `ponder` tool
 
@@ -201,7 +201,7 @@ owner's plugin name after the prefix.
 | `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, Zulip, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines; `MemoryPlugin` runs its turn consolidation trigger from it, awaiting nothing, since the send waits on the hook |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
-| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes any `final` of any origin that contains `NO_REPLY` (a containment check, not an exact match) (cognition extra); a raising implementation fails open (logged, sent); `OutboundCapPlugin` vetoes every emission on a channel once the agent has sent `outbound_cap.max_messages` there since the last admitted human message (`outbound-cap` extra, #791, threat-model finding 19); no kernel implementation, so with none registered everything is sent |
+| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes any `final` of any origin that contains `NO_REPLY` (a containment check, not an exact match) (cognition extra); a raising implementation fails open (logged, sent); `OutboundCapPlugin` vetoes every emission on a channel once the agent has sent `outbound_cap.max_messages` there since the last admitted human message, and likewise once it has sent `outbound_cap.max_messages_per_window` in the last `outbound_cap.window_seconds` — a sliding window a human message does not reset, shipped unset (`outbound-cap` extra, #791, #821, threat-model finding 19); no kernel implementation, so with none registered everything is sent |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
 | `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None). Each message of a coalesced burst fires it under its own trace, in arrival order, before the turn's model call |
@@ -219,7 +219,7 @@ owner's plugin name after the prefix.
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
-| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim, plus the call's start time, total duration across retried attempts, attempts made, and the request's message and tool counts; side effects only (metrics, usage log) |
+| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim, plus the call's start time, total duration across retried attempts, attempts made, the request's message and tool counts, and its lease wait (`lease_wait_ms`, None when unleased); side effects only (metrics, usage log) |
 | `on_metrics` | broadcast | any plugin via `pm.ahook.on_metrics(...)`; built-in emission from `MetricsPlugin.on_llm_response`; never emit from inside an `on_metrics` implementation (recursion) |
 | `on_config_reload` | broadcast | `ConfigWatcherPlugin`, when `agent.yaml`'s mtime changes; per-plugin error isolation |
 
@@ -392,7 +392,7 @@ class LLMClient:
 
 `request_model` returns the `model` a `chat` call with that `extra_body` is
 sent with: the configured model, overridden by the instance `extra_body`
-and then the call's (`llm.<profile>.extra_body.model` can change the model).
+and then the call's (`llm.profiles.<name>.extra_body.model` can change the model).
 `chat` builds its payload's `model` from it. Memory consolidation stamps it
 on the records it writes ([cognition.md](cognition.md#record-stamps)).
 `embed` is deliberately not routed through it: it sends the configured
@@ -427,7 +427,7 @@ shape are not covered.
 
 **Raw reasoning (#355).** llama-server's parsed mode cannot tell a reply
 cut off mid-reasoning from a decline: both arrive with empty `content`. When
-the client has `raw_reasoning` (`llm.<profile>.raw_reasoning`; the operator
+the client has `raw_reasoning` (`llm.profiles.<name>.raw_reasoning`; the operator
 also configures the server to return reasoning inline, e.g. llama.cpp's
 `extra_body.reasoning_format: none`), `chat` splits the reply itself (`split_raw_reasoning`): an optional leading
 `<think>` is dropped, the text up to the first `</think>` becomes
@@ -450,7 +450,7 @@ tail is in neither `content` nor `reasoning_content`, so it reaches no
 transport, no row and no memory; the log is its only copy (PRD §3.3.9,
 §3.10). This runs on every profile's client. `AgentTurnResult.reasoning_reopened`
 carries the flag. `Agent._run_turn` checks it before the cut-off check:
-with `reasoning_reopened: rerun` on the main turn's profile (`llm.main` by
+with `reasoning_reopened: rerun` on the main turn's profile (`llm.profiles.main` by
 default), a final (no tool calls) that
 reopened is popped from the messages and regenerated once, and that result
 is used whatever it holds (a second reopen is already cut); then the
@@ -511,12 +511,12 @@ attempts do not fire `response`. Observer failures are individually
 caught and logged; they never break the call. `llm.py` stays free of
 pluggy imports — `LLMPlugin` injects a `_HookObserver` (defined in
 `llm_plugin.py`) that bridges to the `on_llm_request`/`on_llm_response`
-hooks with the client's profile (a key under `llm:`, such as `main`) and the
+hooks with the client's profile (a key under `llm.profiles`, such as `main`) and the
 current attribution snapshot.
 
 **Attribution.** `attribution.py` holds a single ContextVar dict
-(`stage`, `channel_id`, `trace_id`, `annotations`, `agent_depth`, plus
-stage-specific extras such as `trigger` on consolidation calls). Callers set it at the
+(`stage`, `channel_id`, `trace_id`, `annotations`, `agent_depth`,
+`lease_key`, plus stage-specific extras such as `trigger` on consolidation calls). Callers set it at the
 top of a logical operation and reset in a `finally`: the Agent turn loop
 (`stage="turn"`), CompactionPlugin around its summary call
 (`stage="compaction"`, shadowing the turn), and the subagent work loop
@@ -528,6 +528,82 @@ time and TaskQueue workers are created once at startup, so `Task`
 captures `contextvars.copy_context()` at creation and the worker runs
 `task.work()` inside that context via
 `asyncio.create_task(task.work(), context=task.ctx)`.
+
+`lease_key` names the queue a call belongs to (#363). `lease_scope(key=None)`
+sets it: no key inherits the enclosing one, a key overrides and the parent's
+is restored on exit. Keys are the channel id (turn, forks, appraisal,
+critique, the consolidation fork at compaction, the `fork` tool),
+`subagent:<task_id>`, and `upkeep:<plugin>:<tag>` (catch-up consolidation is
+`upkeep:memory:consolidation`). Five sites open a scope: the channel turn in
+`_process_queue_item`, `Agent.fork`, the subagent `work()`, the `fork` tool's
+`work()` and `MemoryPlugin._consolidate_range`; everything else inherits.
+`LLMClient.chat` with no key runs unleased and logs a WARNING naming the
+stage once per stage per process, then DEBUG; embedding calls need no key
+and never warn. On a provider that declares `heads`, the key is what takes a
+lease (below).
+
+**Leases (#364, #367).** `corvidae/lease.py` holds one `ProviderLeases`
+table per chat-used provider that declares `heads`; `LLMPlugin.on_start`
+builds a `LeaseManager` over them and hands each chat client of that
+provider its table (`LLMClient.leases`). With no such provider there is no
+manager (`LLMPlugin.leases is None`) and no call touches lease code. A
+table holds the leases (key → in-flight call count, grant time, end time of
+its last call, attribution of the last call that entered), the FIFO of
+waiting keys (one entry per key, whose concurrent calls share one future)
+and the stopped keys. `LLMClient.chat` with a table and a `lease_key` sends
+its POST, retries included, inside `leases.call(key, attribution)`:
+
+- a holder that isn't stopped passes straight through while no other key
+  waits (a waiter that is stopped, or already holds here, doesn't count);
+- a key that holds nothing takes a free head at once;
+- otherwise the call joins its key's waiter entry and waits.
+
+Every state change (a call parking or ending, a cancel, stop, resume,
+yield) re-runs one function, `_settle`, which is the default order: a
+stopped holder with no call in flight gives up its head (`lease.yield`
+reason `stop`); an idle holder that called `yield_key` gives it up if
+another key waits (`cooperative`; with no waiter the yield is dropped);
+free heads go to waiters in FIFO order; and while a waiter is left and no
+head is free, the idle holder whose last call ended earliest gives way
+(`contention`); last, a holder's own parked calls are let through on its
+lease once no other key waits. A head is never taken mid-call, and a holder's call that
+arrives while another key waits queues behind it, so a head is held against
+a waiter only until the calls already in flight end. A grant reserves the
+in-flight count of every waiting call of the key at once, so the head can't
+be taken back before they resume; a call cancelled after its grant gives its
+reservation back. `LeaseManager` exposes `snapshot(provider)` (heads,
+holders with age and whether a call is in flight, waiters in order with
+their ages), `stop` / `resume` by (provider, key), `yield_key(key)` (every
+provider where the key holds) and `close()`. Nothing in the kernel calls
+`stop`; it is there for a scheduler plugin (#366). The lease code never calls
+a model and never awaits anything but its own grant.
+
+The no-deadlock argument rests on calls ending. With the default
+`timeout: null` a backend that hangs holds its head for ever, as it stalls
+an unbounded provider today; set the provider's `timeout` where `heads` is
+set.
+
+Shutdown: `LLMPlugin.on_stop` closes the manager before the clients. Each
+lease is released (`lease.release`, value the ms it was held, reason
+`shutdown`), each waiting call fails with `LLM provider <name> is shutting
+down; the call was not sent`, and a call that arrives afterwards fails the
+same way. It then awaits the metric emissions still in flight. Those reach
+`on_metrics` only if its consumers have not stopped first (plugin `on_stop`
+order is not fixed), so the shutdown events are best effort.
+
+Events go through `on_metrics`, scheduled as tasks because the lease code is
+synchronous: `lease.grant` (1.0), `lease.wait_ms` (the wait of a key whose
+calls waited; none for a call that took a free head or passed through),
+`lease.yield` (1.0, `reason` `contention` / `cooperative` / `stop`) and
+`lease.release` (shutdown only). Tags: `provider`, `lease_key`, `stage`,
+`channel`, `trigger` from the attribution of the call the event concerns,
+plus `reason`. A waiter entry shared by a turn and a fork of one channel
+carries its first call's attribution. Each call's own wait is
+`lease_wait_ms` on `on_llm_response` (0.0 when it did not wait, `None` when
+it took no lease, and the time it waited when shutdown failed it before a
+lease), recorded in `usage_log.lease_wait_ms` and as
+`llm.lease_wait_ms`. The observer fires inside the lease, so under
+contention the head is held for the time `on_llm_response` takes.
 
 **Nested agents.** `agent_depth` is the kernel's bound on recursion (#816).
 A main turn runs at depth 0; `next_agent_depth(tools.max_agent_depth)` in
@@ -546,7 +622,7 @@ ten children per level is still many tasks.
 
 **Sinks.** `metrics.py` provides `MetricsPlugin` (translates
 `on_llm_response` into `on_metrics` events: `llm.tokens.*`,
-`llm.latency_ms`, `llm.errors`), `UsageLogPlugin` (one `usage_log` row
+`llm.latency_ms`, `llm.errors`, and `llm.lease_wait_ms` for a call that waited for or took a lease or that shutdown failed, each tagged with the call's `lease_key`, `""` when it had none), `UsageLogPlugin` (one `usage_log` row
 per call), and `MetricsJsonlPlugin` (JSONL event sink, config
 `daemon.metrics_jsonl`). `outcome_log.py` owns the `exchange_log` table:
 one row per exchange, written by `OutcomeLogPlugin`'s hookimpls at
@@ -562,7 +638,7 @@ rows alone: in a self-join on `a.id < b.id`, two calls overlap when
 touch at an endpoint do not). `ended_at` is `started_at + total_ms / 1000`,
 so it comes from the monotonic duration and cannot disagree with
 `total_ms`. `latency_ms` is the final
-attempt only. When calls share a llama-server slot (a pinned `id_slot`, or
+attempt only. When calls share a llama-server slot (an operator-pinned `id_slot`, or
 a single-slot server), a call that arrives while another holds the slot
 waits inside the server, and that wait is part of its `latency_ms`. The
 server's own work is `prompt_ms + predicted_ms`; what remains is, approximately, the wait:
@@ -609,7 +685,9 @@ CREATE TABLE usage_log (
     tool_count INTEGER,         -- tool schemas in the request (embeddings: 0)
     max_context_tokens INTEGER, -- the channel's budget in force when the row is written; NULL with no channel, no registry or an unknown channel
     prompt_ms REAL,             -- llama-server timings.prompt_ms: the final attempt's prefill time; NULL from other providers and on failure
-    predicted_ms REAL           -- llama-server timings.predicted_ms: the final attempt's decode time; NULL likewise
+    predicted_ms REAL,          -- llama-server timings.predicted_ms: the final attempt's decode time; NULL likewise
+    lease_key TEXT,             -- the queue the call belongs to (#363): channel id, 'subagent:<task_id>' or 'upkeep:<plugin>:<tag>'; NULL when unleased and on older rows
+    lease_wait_ms REAL          -- ms the call waited for a lease before it was sent (#364); 0.0 when it did not wait; NULL when it took none (no key, no heads, embedding) and on older rows
 );
 
 CREATE TABLE exchange_log (
@@ -1130,7 +1208,7 @@ that trace.
    backend model it returns a message naming the model; for any non-2xx
    `LLMHTTPError` it names the status, an actionable hint (API key,
    quota, endpoint/model) and a short provider body; for connection and
-   timeout failures it points at `llm.main.base_url`. It defers (`None`)
+   timeout failures it points at `llm.providers.<name>.base_url`. It defers (`None`)
    on every other error, so the generic message still applies.
    **Retry when the backend is unreachable (#281).** When the failure
    satisfies `is_backend_unreachable` (the client has already spent its own
@@ -1451,8 +1529,15 @@ in code:
   (the spill cap); `[metadata: cut to the first N of M characters; the full
   text was not saved]` when the write failed; and `[metadata: cut to the
   first N of M characters]` when the channel has no tool that can read the
-  file. The kernel builds it from the stored fields, so no plugin writes or
-  forges it; the path goes through `clean_value`.
+  file. A channel that gets the pointer also gets `; read it back with
+  read_file length=<P>` (#579), where P is the page `read_file` sizes for
+  that channel's budget (`tools.files.page_chars`, the same helper the tool
+  uses), never above `tools.max_result_chars`: the rest of a spill is read
+  back in pages, and asking for it whole cuts and spills it again. The number
+  is recorded on the row like every other cut field, so a budget change does
+  not rewrite what the model was told. The kernel builds the line from the
+  stored fields, so no plugin writes or forges it; the path goes through
+  `clean_value`.
 - A cross-channel tool result gets `[metadata: result of your own <tool>
   action on <target>; ...]`, in the tool message itself so call and result
   stay adjacent.
@@ -1469,7 +1554,8 @@ in code:
   same cut line as a cut notification. On a fenced result it is the last
   header line, outside the fence; on any other result it is the only header
   line, followed by the content unfenced. Text in an unfenced (trusted)
-  result could imitate that line; shell output is trusted by declaration,
+  result could imitate that line, and only a tool that declares its own output
+  trusted is unfenced — `shell` and `task_pipeline` declare otherwise (#580) —
   so this is accepted (see threat-model.md).
 - Declared annotations follow as `[annotations: k=v, ...]`.
 
@@ -1503,8 +1589,10 @@ reads it and is strict (`is True`, so a truthy non-bool does not count). It
 is per callable and not a plugin class attribute because MCP tools are
 created per server at connect time and no class-level list could name them.
 Declared today: `read_file` (so a spill file read back is fenced, and so is
-any other file), `web_fetch`, `web_search`, and every tool `mcp_client`
-builds. `shell` and `task_pipeline` are not declared (#580).
+any other file), `web_fetch`, `web_search`, `shell` and `task_pipeline` (a
+command's output, or a `cat` of a spill file, is as much outside text as a
+file's contents are), and every tool `mcp_client` builds. A tool nobody
+declares is unfenced.
 
 The declaration is evaluated when the call is dispatched, not when the
 result arrives. `_dispatch_tool_calls` writes `Agent._dispatched_calls`,
@@ -2319,7 +2407,7 @@ the template breaks the prefix and the cache with it. Only where the request
 goes differs: `stage` is a required keyword, and the call goes to
 `LLMPlugin.get_client(stage)`, the client of the profile `llm.stages` maps
 that stage to (else the default chat profile). Its endpoint, model and
-`extra_body` (e.g. `id_slot`) are the stage profile's, not the main turn's.
+`extra_body` are the stage profile's, not the main turn's.
 With no client for the stage, `Agent.fork` raises `ForkUnavailable`.
 `snapshot` (a `WindowSnapshot` from `corvidae.fork.snapshot_window`, #628)
 renders that copy of the window and its pending ids instead of the live
@@ -2542,8 +2630,8 @@ so a background call delays a waiting main turn by its own slot time;
 today only what the operator puts in a stage's profile's `extra_body` (a
 `reasoning_budget_tokens`, a `max_tokens`) bounds a fork's share of that; an
 unmapped fork is bounded by the default chat profile's. #181's target adds the
-rest: exchange-scoped forks scheduled before the slot's next main turn (PRD
-principle 3), and headroom (the window at the compaction threshold plus a
+rest: an exchange-scoped fork runs under its channel's lease and keeps
+that head while no other queue waits for one (PRD principle 3; §3.13.3–5), and headroom (the window at the compaction threshold plus a
 fork's instruction and its profile's caps fits the slot's
 context, so a fork just short of compaction still runs). #182 measures
 how long main turns wait today.
@@ -2628,15 +2716,19 @@ option for lookups that outgrow a full re-scan).
   registered stages (`check_stage_map`), then creates an `LLMClient` for
   each resolved profile and calls `start()` on it. It logs a WARNING for
   each kind that has stages falling back to a default that doesn't exist,
-  then logs where each stage resolves: `llm stages resolved: ...`
+  then logs one INFO line per provider, `llm provider <name>: <base_url>,
+  heads <N|unbounded>, profiles <a, b | (none)>`, with a WARNING
+  (`llm.providers.<name>.heads has no effect`) for a provider that sets
+  `heads` and is used only by embedding profiles, whose calls take no lease.
+  It then logs where each stage resolves: `llm stages resolved: ...`
   (`→(none)` for a stage with no profile).
 - `on_stop` — calls `stop()` on all clients.
 - `on_config_reload` — swaps no client. If the reloaded `llm:` section
   parses to something other than what the daemon started with, it logs one
   summary WARNING (ConfigWatcher's per-key restart-only warnings fire too,
-  since `LLMPlugin` declares no `reloadable_keys`): `llm config changed; LLM profiles, llm.stages and llm.defaults
-  apply on restart`. Everything under `llm:` is restart-only, `llm.main`
-  included. Live reload would need a rollback path, an ordering against the
+  since `LLMPlugin` declares no `reloadable_keys`): `llm config changed; LLM providers, profiles, llm.stages and llm.defaults
+  apply on restart`. Everything under `llm:` is restart-only,
+  `llm.providers.main` included. Live reload would need a rollback path, an ordering against the
   Agent re-borrowing its client, and an encoder re-check for embeddings, and
   nothing asked for it. PRD §3.6.1 says a change to a base profile reaches
   its derived ones on reload too; that gap is #465.
@@ -2648,18 +2740,26 @@ a reload that carries one is refused as a whole (logged at `ERROR`, nothing
 applied). The stage-map check that needs the registered stages runs in
 `on_start` only.
 
-`_create_client` expands `${VAR}` in a profile's `api_key` from the daemon's
+`_create_client` expands `${VAR}` in a provider's `api_key` from the daemon's
 environment (`corvidae/envref.py::expand_env_refs`, shared with MCP
 `headers`). An unset, empty or multi-line variable raises a `ValueError`
-naming `llm.<profile>.api_key` and the variable, never the value; `on_start`
+naming `llm.providers.<name>.api_key` and the variable, never the value; `on_start`
 goes through it. The resolved key lives only on the client, so
 `LLMConfig.profiles` keeps the raw `${VAR}` text. `extends`, `kind` and
 `dimensions` are consumed by `LLMPlugin` and never reach `LLMClient`.
 
 ### Client access
 
-Every key under `llm:` except `defaults` and `stages` is a **profile**,
-built into one client. A plugin that calls a model
+`llm:` has four sections. A **provider** (`llm.providers.<name>`) is one
+endpoint plus its credentials and capacity: `base_url`, `api_key`, `timeout`,
+the retry settings and `heads`. A **profile** (`llm.profiles.<name>`) is what
+to ask a provider for, built into one client: `model`, `kind`, `extra_body`
+and the other request parameters. `parse_llm_config` flattens a profile's
+provider keys (all but `heads`, which is scheduling state, not a client
+setting) and a `provider` name into the resolved profile, so
+`LLMConfig.profiles[...]` and `profile_config` readers see one flat dict;
+`LLMConfig.providers` keeps each provider block as written, `heads` included.
+A plugin that calls a model
 registers each call site as a **stage** through the `register_llm_stages`
 hook (`stages[name] = kind`, kind `"chat"` or `"embedding"`), which
 `LLMPlugin.on_start` broadcasts once. Core registers `compaction` and
@@ -2678,6 +2778,10 @@ no client and memory degrades to keyword search). An unregistered name
 raises `ValueError`, profile names such as `"main"` included.
 `resolve_profile(stage)` returns the profile name and `profile_config(stage)`
 the resolved settings (read-only; `Agent.fork` reads its `extra_body`).
+`resolve_provider(stage)` returns the provider name the stage's profile uses
+(`None` for no profile) and `provider_config(name)` the provider block, `heads`
+included (`{}` for an unknown name or before `on_start`; read-only). `heads`
+sizes the provider's lease table (see Leases above).
 Other plugins retrieve the plugin via `get_dependency(pm, "llm", LLMPlugin)`.
 `MemoryPlugin` reads the embedding stage's encoder identity, `dimensions` and
 prefixes the same way, with `parse_llm_config(config.get("llm"))` in its
@@ -2693,36 +2797,45 @@ included, because the profile's client carries its name.
 
 ```yaml
 llm:
-  main:                       # a profile; kind omitted means chat
-    base_url: "http://host:8080"
-    model: "model-name"
-    api_key: "optional"
-    extra_body: {}
-    max_retries: 3
-    retry_base_delay: 2.0
-    retry_max_delay: 60.0
-    model_not_loaded_wait: 60.0
-    timeout: null             # optional; no timeout if absent
-  forks:
-    extends: main             # deep overlay of main; null deletes an inherited key
-    extra_body:
-      reasoning_budget_tokens: 2048
-  embedding:                  # optional; absent means no embedding client
-    kind: embedding           # required for an embedding profile
-    base_url: "..."
-    model: "..."
-    dimensions: 768           # required
-    # same keys as main
-  defaults:                   # optional: kind -> default profile
-    chat: main                # these two are the fallbacks when omitted
+  providers:
+    main:                     # a provider: one endpoint plus its credentials and capacity
+      base_url: "http://host:8080"
+      api_key: "optional"
+      max_retries: 3
+      retry_base_delay: 2.0
+      retry_max_delay: 60.0
+      model_not_loaded_wait: 60.0
+      timeout: null           # optional; no timeout if absent
+      heads: 2                # optional positive integer; absent means unbounded
+    embedding:
+      base_url: "..."
+  profiles:
+    main:                     # a profile; kind omitted means chat, provider omitted means main
+      model: "model-name"
+      extra_body: {}
+    forks:
+      extends: main           # deep overlay of main; null deletes an inherited key
+      extra_body:
+        reasoning_budget_tokens: 2048
+    embedding:                # optional; absent means no embedding client
+      provider: embedding
+      kind: embedding         # required for an embedding profile
+      model: "..."
+      dimensions: 768         # required
+  defaults:                   # optional
+    chat: main                # kind -> default profile; these two are the fallbacks when omitted
     embedding: embedding
+    provider: main            # the provider a profile with no `provider:` uses; main is the fallback
   stages:                     # optional: stage -> profile
     compaction: forks
     consolidation: forks
 ```
 
-`defaults` and `stages` are reserved names; a profile can't use them. A
-profile block that is `null` is treated as absent.
+Any key directly under `llm:` outside `providers`, `profiles`, `defaults` and
+`stages` fails startup with a message saying where to move it. A provider or
+profile block that is `null` is treated as absent. `extends` applies to
+profiles only. A profile's provider is its `provider:`, else
+`llm.defaults.provider`, else the provider named `main`.
 
 **`kind` and `extends` (`merge_profile`).** `kind` is `chat` or `embedding`.
 An omitted `kind` means `chat`, applied after `extends` is merged, so a child
@@ -2730,16 +2843,16 @@ of an embedding profile stays an embedding profile. `extends: <profile>` lays
 the block over the named profile: mappings merge recursively, lists and
 scalars replace, and a child's `null` deletes the inherited key (unlike
 `runtime.deep_merge`, where `None` is a no-op). Chains resolve root first. A
-resolved profile must have `base_url` and `model` (a partial block that exists
-only to be extended is not supported) and, for an embedding profile,
-`dimensions`.
+resolved profile must have `model` (a partial block that exists only to be
+extended is not supported) and, for an embedding profile, `dimensions`; its
+provider must have a `base_url`.
 
 **Defaults.** `llm.defaults.<kind>` names each kind's default profile. When
 it is absent, chat defaults to `main` and embedding to `embedding`, if those
 exist. Only a default chat profile is required: `defaults.chat: foo` with no
 `main` boots and sends main turns to `foo`. A default, configured or by
 name, that names a profile of another kind is an error, which is how an
-existing `llm.embedding` block without `kind: embedding` fails startup
+`llm.profiles.embedding` block without `kind: embedding` fails startup
 instead of becoming a chat profile and silently dropping memory to keyword
 search.
 
@@ -2748,15 +2861,21 @@ on reload. Each error names the key:
 
 | Case | Error |
 |---|---|
-| unknown base | `llm.<name>.extends names unknown profile '<base>'; defined profiles: ...` |
-| cycle | `llm.<name>.extends forms a cycle: a → b → a; remove one extends` |
-| unknown kind | `llm.<name>.kind must be one of chat, embedding; got '<v>'` |
-| embedding, no dimensions | `llm.<name>.dimensions is required for an embedding profile ...` |
-| missing endpoint | `llm.<name>.base_url is required (after extends)` (also `model`) |
-| not a mapping | `llm.<name> must be a mapping; got <type>` (also `llm.defaults`, `llm.stages`) |
-| bad default | `llm.defaults.<kind> names unknown profile '<p>'`; `... names '<p>', a <k> profile`; `llm.defaults: unknown kind '<k>'` |
-| fallback of the wrong kind | `llm.<fallback> is a <k> profile but is the default <kind> profile by name; add kind: <kind> to it, or set llm.defaults.<kind>` |
-| no chat default | `no default chat profile: define llm.main or set llm.defaults.chat` |
+| old layout | `llm.<key> is not a section; profiles now live under llm.profiles and endpoints (base_url, api_key, timeout, retries, heads) under llm.providers; move llm.<key> there` |
+| key in the wrong block | `llm.providers.<name>.<key> is a profile key, ...` and `llm.profiles.<name>.<key> is a provider key, ...`, each naming the right block |
+| provider without endpoint | `llm.providers.<name>.base_url is required` |
+| bad heads | `llm.providers.<name>.heads must be a positive integer (or absent for unbounded); got <v>` |
+| unknown provider | `llm.profiles.<name>.provider names unknown provider '<p>'; defined providers: ...` (likewise `llm.defaults.provider`) |
+| no provider | `llm.profiles.<name> has no provider; defined providers: ...` and how to set one |
+| unknown base | `llm.profiles.<name>.extends names unknown profile '<base>'; defined profiles: ...` |
+| cycle | `llm.profiles.<name>.extends forms a cycle: a → b → a; remove one extends` |
+| unknown kind | `llm.profiles.<name>.kind must be one of chat, embedding; got '<v>'` |
+| embedding, no dimensions | `llm.profiles.<name>.dimensions is required for an embedding profile ...` |
+| missing model | `llm.profiles.<name>.model is required (after extends)` |
+| not a mapping | `llm.providers.<name>` or `llm.profiles.<name> must be a mapping; got <type>` (also `llm.defaults`, `llm.stages`) |
+| bad default | `llm.defaults.<kind> names unknown profile '<p>'`; `... names '<p>', a <k> profile`; `llm.defaults: unknown kind '<k>'` (`provider` is accepted alongside the kinds) |
+| fallback of the wrong kind | `llm.profiles.<fallback> is a <k> profile but is the default <kind> profile by name; add kind: <kind> to it, or set llm.defaults.<kind>` |
+| no chat default | `no default chat profile: define llm.profiles.main or set llm.defaults.chat` |
 | stage maps to a missing profile | `llm.stages.<stage> names unknown profile '<p>'; defined profiles: ...` |
 | default or stage value not a string | `llm.defaults.<kind> must be a profile name; got [...]; defined profiles: ...` (likewise `llm.stages.<stage>`) |
 | stage maps to the wrong kind (`on_start`) | `llm.stages.<stage> maps a <k> stage to '<p>', a <k2> profile; map it to a <k> profile` |
@@ -3000,7 +3119,7 @@ Declares `depends_on = {"llm", "tools"}`.
 ### LLM configuration
 
 Uses the `LLMClient` for the `subagent` stage from `LLMPlugin`: the profile
-`llm.stages.subagent` names, else the default chat profile (`llm.main` unless
+`llm.stages.subagent` names, else the default chat profile (`llm.profiles.main` unless
 `llm.defaults.chat` says otherwise). The client is retrieved at tool-call
 time, not captured at `on_start`. Runtime overrides don't reach a subagent,
 so the profile's `extra_body` applies as written.
@@ -3476,8 +3595,8 @@ inline handling would deadlock the transport against its own request. The
 single-consumer processor also keeps rapid-succession messages in arrival
 order.
 
-**Identity.** A channel's scope is the sender's ACI — `signal:<aci>` —
-never their phone number. `sourceNumber` is absent whenever a sender has
+**Identity.** A channel created from an inbound message has the sender's ACI
+as its scope — `signal:<aci>` — never their phone number. `sourceNumber` is absent whenever a sender has
 phone-number privacy on, and channel ids are the persistence key for
 `sessions.db`, the jsonl logs, and memory; keying on a field that can
 vanish would fork one sender's history into two.
@@ -3669,12 +3788,25 @@ stop (#390). Since a reply to a coalesced burst already zeroes the count
 (#398), the early clear is total rather than one slot. This is
 [PRD §3.2.10](prd.md): a transport delivers every emission on a channel it
 owns, whatever originated the turn, and liveness and reply bookkeeping
-tolerate a reply that answers no outstanding message. Sending to a channel
-*other than* the turn's own is a separate capability (PRD §3.5.9: operator
-allowlist that starts empty, plus a budget); see the scheduler's "Not in
-phase one: a `send_to_channel` tool" note under
-[SchedulerPlugin](#schedulerplugin) and the deferred entry in
-`docs/threat-model.md`.
+tolerate a reply that answers no outstanding message. Sending to a channel *other than* the turn's own is in the PRD (PRD §3.5.9:
+"Nothing gates which channel a turn may speak on"). No general text
+`send_to_channel` tool exists — the scheduler's "Not in phase one" note under
+[SchedulerPlugin](#schedulerplugin) and `docs/threat-model.md`'s deferred entry
+are about that tool — but `send_signal_attachment` already reaches any known
+`signal:` contact, from a turn begun on any channel: a file, and a caption with
+it, is a way to speak on another channel today. The reach is registry
+membership only, as the threat model says (no cross-channel allowlist). What the
+operator can apply is a per-destination cap on how many messages the agent
+starts *through the send gate*: `outbound_cap` (#791), opt-in and off by
+default. It counts nothing this paragraph describes — `send_signal_attachment`
+and its caption bypass the gate (the cap's own Known gaps says so, naming the
+tool), and so do the reaction tools — so an operator who sets it has bounded
+replies, not outreach. The neighbouring capability that does
+exist is `notify_other_channel`, which leaves another channel's context a
+notification and wakes it (PRD §3.5.10; the cross-channel-send package).
+Neither is an allowlist: there is no cross-channel allowlist in corvidae, by
+PRD decision (the decision table's "No cross-channel allowlist and no memory
+compartments").
 
 **Reaction tools.** `register_tools` also offers `signal_react(emoji)` and
 `signal_unreact(emoji)` under the same `signal:` guard as the attachment tool.
@@ -4008,9 +4140,13 @@ Known limits of the splitter, none of which loses text:
 - A cut can fall inside a ZWJ emoji sequence or between a base character
   and its combining marks, because splitting is by codepoint.
 
-Outbound is text only. `send_thinking` and `send_tool_status` are not
-overridden (the `TransportPlugin` no-ops apply), so reasoning and tool
-traffic never reach Discord.
+Outbound is text and files. The ways out are `send_message`, `send_progress`,
+the `send_attachment` tool (#521, a file plus an optional caption),
+`start_thread` (which starts a thread on a registered channel and may post its first
+message into the new thread, never into the parent), and
+`discord_react` / `discord_unreact` (an emoji on a message). `send_thinking` and
+`send_tool_status` are still not overridden (the `TransportPlugin` no-ops
+apply), so reasoning and tool traffic never reach Discord.
 
 There is no local Discord server, so there is no harness end-to-end test
 for this transport; behavior is pinned by `tests/test_discord_plugin.py`
@@ -4022,10 +4158,18 @@ from the channel id, so no inbound message is needed. The outstanding count
 is guarded at zero in `DiscordPlugin._release_all`, as on Signal,
 with the same early typing release (#101): any final, sent or withheld,
 zeroes the count.
-Sending to a channel other than the turn's own is a separate capability,
-not provided by the transport: PRD §3.5.9 (operator allowlist that starts
-empty, plus a budget); see the scheduler's "Not in phase one: a
-`send_to_channel` tool" note and `docs/threat-model.md`.
+Sending to a channel other than the turn's own has no general text tool: no
+`send_to_channel` exists (the scheduler's "Not in phase one" note and
+`docs/threat-model.md`). Two of this transport's tools do cross channels
+already: `send_attachment`, whose caption is text, and `start_thread` — both
+against any registered `discord:` channel except a DM, which `start_thread`
+refuses. PRD §3.5.9 gates nothing about which
+channel a turn may speak on — there is no cross-channel allowlist. The file,
+caption and reaction tools above bypass the send gate and are not counted at all:
+they are the `outbound_cap` plugin's "sends that bypass the gate" Known gap, not
+something this paragraph's cap reaches. What the operator can apply is a
+per-destination count of the messages the agent starts *through the send gate*,
+shipped as `outbound_cap` (#791).
 
 Out of scope: voice, slash commands, embeds, and inbound reactions (the agent
 can add and remove its own reaction on the triggering message, see
@@ -4041,11 +4185,13 @@ The requirements live in [`corvidae/channels/zulip-requirements.md`](../corvidae
 
 With no `zulip:` block the plugin loads, resolves its registry dependency and does nothing else: no session, no tasks, nothing logged above DEBUG. A malformed block raises in `on_init` naming the field (`zulip.<key>`) and what is accepted. All validation runs before anything is stored, so a failed init leaves the plugin inert and not half-configured.
 
+The trace-to-topic map is keyed `(channel scope, trace id)`, so a send on one stream can never take another stream's topic name for its own (Zulip would create that topic silently). Nothing removes an entry: a finished turn's topic has to survive, because a failed generation's unsent final is followed by the fallback error on the same trace id and then by a retry that keeps it, and both must answer where the message came from (#643). The 512-entry bound evicts the oldest instead, which costs a reply its preferred topic, never a delivery.
+
 **Connection.** `_connection_loop` registers a queue and long-polls it. `/register` is sent with `event_types=["message"]` (edits and deletes are other event types and are never delivered, which is how the append-only log is kept), `apply_markdown=false` (raw Markdown for the model), `client_capabilities={"empty_topic_name": true}` and `fetch_event_types=["realm"]`. The last one matters: `max_message_length`, `max_topic_length` and the empty-topic label are returned only if `realm` is in `fetch_event_types`, which otherwise defaults to `event_types`. The response's `zulip_feature_level` must be at least 248 (Zulip 9.0, the first release with `channel` as a message and typing type), or the loop ends with one ERROR naming the site, the level and the remedy. Every call sorts its outcome into one of five signals: `_Fatal` (401 or a deactivated user or organisation: one ERROR, loop ends, not retried), `_QueueLost` (`BAD_EVENT_QUEUE_ID`: WARNING, re-register at once), `_RateLimited` (429: wait the server's `retry-after`, capped at 60 s), `_Transient` (network error, timeout, 5xx, a reply that is not Zulip's JSON: retry the same queue on the shared ladder, 10 s doubling to 300 s, reset on success) and `_Rejected` (a 4xx the server meant). Events are processed in id order and acknowledged by the next poll's `last_event_id`, after handling. A malformed message event is skipped with a WARNING naming the event and message ids, and does not stop the loop.
 
 **A lost queue is not replayed (#640 D4).** The server drops an idle queue, and a restart starts a new one. Messages sent in the gap are not fetched; the WARNING says so, naming the site and the bot. Catching up (persist the last admitted id per channel, `GET /messages` from it on re-register, deduplicate by id) is a follow-up.
 
-**Identity.** A channel's scope is built from ids only (PRD principle 10): `zulip:<stream_id>`; `zulip:dm:<user_id>` for a 1:1 DM, keyed on the other person; `zulip:dm:<id>,<id>` for a group DM, ids ascending, the bot's own left out. A Zulip *topic* has no stable id (the API pages for register, events, messages, topics and update-message expose none) and users can rename or move topics, so a topic-keyed scope would orphan its history on a rename. It is therefore a label and reply routing, never a key: `channel.name` is `#general > plans` (the empty topic shows as the realm's `realm_empty_topic_display_name`), and the topic of the newest *allowed* message is kept in `_topics[channel.id]`, in memory only. This is the same rule Discord applies to threads, which have their own immutable id; Zulip topics don't. The sender passed to `on_message` is the sender's user id, with the display name in `channel.sender_names`.
+**Identity.** A channel's scope is built from ids only (PRD principle 10): `zulip:<stream_id>`; `zulip:dm:<user_id>` for a 1:1 DM, keyed on the other person; `zulip:dm:<id>,<id>` for a group DM, ids ascending, the bot's own left out. A Zulip *topic* has no stable id (the API pages for register, events, messages, topics and update-message expose none) and users can rename or move topics, so a topic-keyed scope would orphan its history on a rename. It is therefore a label and reply routing, never a key: `channel.name` is `#general > plans` (the empty topic shows as the realm's `realm_empty_topic_display_name`), and reply routing is per turn — `_trace_topics[trace_id]` records the topic an allowed message came in, so its answer goes there even if a message in another topic arrived meanwhile (#643). `_topics[channel.id]` keeps the newest topic as the fallback for a send with no trace to answer. Both maps are in memory only. This is the same rule Discord applies to threads, which have their own immutable id; Zulip topics don't. The sender passed to `on_message` is the sender's user id, with the display name in `channel.sender_names`.
 
 **The empty topic.** From Zulip 10 a channel message may have `""` as its topic. Without the `empty_topic_name` capability the server rewrites it to its display label in events; with it, the transport receives `""`, replies with the same `""`, and shows the label only to the model. The reply therefore lands where the question was asked on every server version.
 
@@ -4055,12 +4201,12 @@ With no `zulip:` block the plugin loads, resolves its registry dependency and do
 
 **Addressing.** A message in a channel or group DM is admitted only when `flags` contains `mentioned` (Zulip sets it for a direct mention and for a mention through a user group the bot belongs to; the group's token is not the bot's own, so it stays in the text); `stream_wildcard_mentioned` and `topic_wildcard_mentioned` do not count, as `@everyone` does not for Discord. A 1:1 DM needs none. `channel.addressed` is set before every `on_message`, `None` for a 1:1 DM. The bot's own mention token (`@**Name**`, `@**Name|id**`, silent `@_**Name**`, or any name with the bot's id) is stripped from the text; other people's mentions stay. The bot's own messages come back through its queue and are dropped by sender id, which is the only thing between the agent and answering itself if its id is ever put on the allowlist with `require_mention: false`.
 
-**Liveness.** Typing only; Zulip bots have no read receipts. The first outstanding message on a channel sends `POST /typing` `op=start` (for a channel, `type=channel` with `stream_id` and `topic`; for a DM, `type=direct` with the user ids) and starts a refresh loop re-sending every 8 s while the count stays positive. Unlike Discord, Zulip has a stop frame, so a final (`send_message`), a withheld final (`on_agent_response` with `final_was_unsent`) or a message the gate never admitted sends `op=stop` once the last slot is released. On the withheld-final path (`on_agent_response`) the ownership check, `final_was_unsent` and the release happen before the first `await`, as for Discord and Signal; a sent final releases after it has delivered, so a message that arrives mid-delivery has its slot released with the rest. A failed typing call is a WARNING, never a lost reply. Only an allowed sender ever takes a slot.
+**Liveness.** Typing only; Zulip bots have no read receipts. A topic's refresh loop sends `POST /typing` `op=start` (for a channel, `type=channel` with `stream_id` and `topic`; for a DM, `type=direct` with the user ids) when a reply is owed there, and re-sends every 8 s while one is; a message that is never admitted shows no notice at all when its veto lands before that loop's first pass. Unlike Discord, Zulip has a stop frame, so a final (`send_message`), a withheld final (`on_agent_response` with `final_was_unsent`) or a message the gate never admitted leaves the loop to send `op=stop` once the last slot is released. One final answers a coalesced burst (#398), so the release is per channel while the refresh loop counts `(channel, topic)`: a topic whose message the same turn absorbed loses its notice when the reply goes out and is not re-started, because that turn will never send a reply there. That is the one place requirement 32 ("refreshed while a reply is owed there") and requirement 33 (one final releases every slot) disagree; 33 wins so that no notice runs forever, and both documents say so. The refresh loop is the only writer of typing state: it re-derives owed-and-showing from the counts after every `await` and sends `start` or `stop` itself, so nothing else posts a notice and no await is a window (#643 rounds 5-6, #888). A start it sends is refreshed on an absolute deadline, so a message arriving while a reply is already owed wakes the loop without postponing the refresh (#888 round 7). On the withheld-final path (`on_agent_response`) the ownership check, `final_was_unsent` and the release happen before the first `await`, as for Discord and Signal; a sent final releases after it has delivered, so a message that arrives mid-delivery has its slot released with the rest. A failed typing call is a WARNING, never a lost reply. Only an allowed sender ever takes a slot.
 
 **Outbound.** `_deliver` defuses mentions, splits with `split_message` at the smaller of `message_chunk_size` and the server's `max_message_length` (bytes, conservatively, since the server counts code points), skips whitespace-only chunks, and posts each in order through a bounded queue (50 chunks): a transient failure leaves it queued with a WARNING and the connection loop flushes it after the next successful poll (PRD §3.2 item 8); past the bound the oldest is dropped and the count logged; a refusal drops the rest of that reply and logs the channel, the topic and the server's own explanation. A 429 on a send waits `retry-after` up to twice. Two properties apply to every send:
 
 - *Mentions are defused.* Zulip has no allowed-mentions switch, so `@` followed by `*` (`@**all**`, `@**Name**`, `@*group*`) gets a zero-width space between them before splitting, and the chunks concatenate to the defused text. Silent mentions (`@_**Name**`) notify no one and pass through.
-- *Replies go to the topic they answer.* The topic of the newest allowed message, else `default_topic`; a DM goes to its user ids.
+- *Replies go to the topic they answer.* The topic recorded for the turn's trace, else the newest allowed message's topic, else `default_topic`; a DM goes to its user ids. Typing is per (stream, topic) and stops where it started.
 
 `send_thinking` and `send_tool_status` are not overridden, so reasoning and tool traffic never reach Zulip.
 
@@ -4225,12 +4371,19 @@ per-panel code:
   answers HEAD) with the route's `name` kwarg dropped, since route names
   are app-wide and two panels could collide.
 
-A plugin registers one panel; a second panel from the same plugin is not
-supported. The app is frozen once running, so a handler can't add routes,
-middlewares or signals through `request.app`.
+A plugin registers one panel; a second one from the same plugin fails startup
+with a `PluginValidationError` naming it, because the sidebar section, the asset
+mount and the route prefix are all keyed by the plugin name. A panel's routes
+must be sub-paths of `/panel/<name>` (#692): a relative path or one with a `..`
+segment would mount where its author did not mean, one under `/static` collides
+with the assets; `/` and an empty path mount at the panel's root and serve,
+which is allowed (owner ruling, 2026-11-14: the PRD's "not with pages of their
+own" describes the console's shape, and a route path cannot enforce it). The app
+is frozen once running, so a handler can't add routes, middlewares or signals
+through `request.app`.
 
-A panel has no page of its own: `GET /panel/<name>/` is a 404, and the
-sidebar carries no navigation. `on_start` renders `index.html` once
+The console offers a panel no page of its own: the sidebar carries no
+navigation, and no link points at `GET /panel/<name>/`. `on_start` renders `index.html` once
 (`_render_index`) and serves it from that string. Two markers are filled,
 panels in name order, `name` and `title` HTML-escaped:
 - `<!--panel-assets-->`, in `<head>` after the `app.js` tag, becomes per
@@ -4440,7 +4593,10 @@ The panel follows the hash. On a `#context_panel/<id>` hash it shows
 (no input control), and opens that channel's window. Any other hash hides
 the view, empties it and stops polling. Reloading on a tab hash reopens the same channel.
 
-The view holds a status line (with "show all" when older rows are cut),
+The view holds a status line (with "show all" when older rows are cut, and a
+`rendered` toggle that fetches `/rendered` — `build_prompt()`'s output for the
+selected window — and swaps the entries for it; polling pauses while it is
+shown, because that body is not append-mostly and has no cursor to tail),
 the entries and the live area. Each entry is a collapsed `<details>` except
 user and assistant rows, which start open. Categories are colored by token,
 light and dark: system prompt and tools, inserted (summaries, context rows,
@@ -4521,6 +4677,43 @@ would read as sender-controlled data — and a cut payload gets its cut line
 there too. The plugin depends on
 `"spill"`. Configuration is in
 [configuration.md](configuration.md#webhook_notify--webhook-deliveries-as-notifications).
+
+### Goals notifications (`goals-notify` package)
+
+`GoalsNotifyPlugin` (#841) implements `on_goals_state_changed`, the hook the
+goals plugin owns ([cognition.md](cognition.md)), and sends each committed
+change to the goal's `origin_channel` with one call to
+`cross_channel_send.notify_other_channel`. The goals plugin fires the hook
+inside the tool call that made the change, so `notify_other_channel` reads the
+changing turn's attribution: the notification carries `source="agent_send
+from <actor>"`, `origin: "agent_send"`, `source_channel`, `source_trace_id`
+and a carried-forward `hop_count`, and the `cross_channel_send.max_hops` guard
+bounds a loop exactly as it bounds any send. An origin that isn't live is
+resolved the way every `notify_other_channel` target is
+(`resolve_persisted_channel`).
+
+The text is `Goal #<id> changed status: <old> → <new>.` for a status change
+and `Goal #<id> retired (was <old>). Conclusion: <conclusion>` for a
+retirement; the goal's own text is not included (`list_goals` has it). Every
+change wakes the origin channel; that turn and the decide gate choose whether
+anything is said to the people there.
+
+Skipped before any send: a goal whose `origin_channel` is `None` (seeded with
+`corvidae goals seed`) and a change whose `actor_channel` is the origin (so a
+goal the heartbeat created and changes stays silent). One channel hears each
+goal. A refusal from `notify_other_channel` (it returns refusals as text: hop
+limit, channel not ready, no source channel) is logged at `WARNING` naming
+the goal and the channel; it never undoes the change. The hook fires after
+the goals lock is released, so two changes to one goal close together can
+arrive out of commit order; each message names `old → new`, and ordering is
+left to the pubsub facility (#937). Delivery bypasses the funnel, a PRD
+§3.5.10 variance recorded in #939.
+
+The plugin declares `depends_on = {"cross_channel_send"}` and
+`optional_depends_on = {"goals"}`: without goals the hookimpl never fires and
+the kernel logs it at `DEBUG`. It has no configuration; install the
+goals-notify extra to load it, and list `goals_notify` under
+`plugins.disabled` to switch it off.
 
 ### GitHub events (`github-webhook` package)
 
@@ -4617,26 +4810,31 @@ daemon:
   session_db: sessions.db
 
 llm:
-  main:
-    base_url: "http://host:8080"
-    model: "model-name"
-    api_key: "optional"
-    extra_body: {}              # optional, passed through to LLM
-    max_retries: 3              # retry attempts on transient errors (default 3)
-    retry_base_delay: 2.0       # base exponential backoff delay in seconds
-    retry_max_delay: 60.0       # maximum retry delay cap in seconds
-    model_not_loaded_wait: 60.0 # seconds to wait out an unloaded router model
-    timeout: null               # HTTP timeout per request; null = no timeout
-  embedding:                    # optional embedding model for memory retrieval
-    kind: embedding             # required; an omitted kind means chat
-    base_url: "..."
-    model: "..."
-    dimensions: 768             # required
-    # same keys as main
-  # forks:                      # any other name is a profile too
-  #   extends: main             # deep overlay; a child's null deletes an inherited key
-  #   extra_body: {reasoning_budget_tokens: 2048}
-  # defaults: {chat: main, embedding: embedding}   # optional; these are the fallbacks
+  providers:
+    main:
+      base_url: "http://host:8080"
+      api_key: "optional"
+      max_retries: 3              # retry attempts on transient errors (default 3)
+      retry_base_delay: 2.0       # base exponential backoff delay in seconds
+      retry_max_delay: 60.0       # maximum retry delay cap in seconds
+      model_not_loaded_wait: 60.0 # seconds to wait out an unloaded router model
+      timeout: null               # HTTP timeout per request; null = no timeout
+      # heads: 2                  # warm context heads; chat calls lease one; absent = unbounded
+    embedding:                    # optional: a separate embedding endpoint
+      base_url: "..."
+  profiles:
+    main:
+      model: "model-name"
+      extra_body: {}              # optional, passed through to LLM
+    embedding:                    # optional embedding model for memory retrieval
+      provider: embedding         # a profile with no provider uses defaults.provider, else main
+      kind: embedding             # required; an omitted kind means chat
+      model: "..."
+      dimensions: 768             # required
+    # forks:                      # any other name is a profile too
+    #   extends: main             # deep overlay; a child's null deletes an inherited key
+    #   extra_body: {reasoning_budget_tokens: 2048}
+  # defaults: {chat: main, embedding: embedding, provider: main}   # optional; these are the fallbacks
   # stages: {compaction: forks}                    # optional: stage -> profile
   # All of llm: is read at startup; a reload that changes it only logs a warning.
 

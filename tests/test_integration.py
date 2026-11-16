@@ -94,10 +94,8 @@ def make_config(*, db_path: str = ":memory:", extra: dict | None = None) -> dict
             "max_context_tokens": 4096,
         },
         "llm": {
-            "main": {
-                "base_url": "http://fake",
-                "model": "test-model",
-            },
+            "providers": {"main": {"base_url": "http://fake"}},
+            "profiles": {"main": {"model": "test-model"}},
         },
         "daemon": {
             "session_db": db_path,

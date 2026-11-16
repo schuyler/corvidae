@@ -460,8 +460,19 @@ class WebPlugin(TransportPlugin):
         # restart pre-flight (which runs on_init, not on_start) catch it.
         panels: list[Panel] = []
         await self.pm.ahook.on_web_console_init(panels=panels)
+        contributed: set[str] = set()
         for panel in panels:
             name = self.pm.get_name(panel.plugin)
+            # One panel per plugin: the sidebar, the asset mount and the route
+            # prefix are all keyed by the plugin name, so a second Panel either
+            # shadows the first or fights it for /panel/<name>/static.
+            if name in contributed:
+                raise pluggy.PluginValidationError(
+                    panel.plugin,
+                    f"web: plugin '{name}' registered more than one panel; "
+                    "append a single Panel and put every route in it",
+                )
+            contributed.add(name)
             for route in panel.routes:
                 if not isinstance(route, web.RouteDef):
                     raise pluggy.PluginValidationError(
@@ -476,6 +487,7 @@ class WebPlugin(TransportPlugin):
                         "for its panel; panels are read-only, so only GET routes "
                         "(aiohttp web.get) are accepted",
                     )
+                self._refuse_unreachable_panel_route(panel.plugin, name, route.path)
             self._panels.append((name, panel))
 
     @hookimpl
@@ -657,6 +669,40 @@ class WebPlugin(TransportPlugin):
         return getattr(persistence, "db", None) if persistence is not None else None
 
     # -- HTTP ---------------------------------------------------------------
+
+    @staticmethod
+    def _refuse_unreachable_panel_route(plugin: object, name: str, path: str) -> None:
+        """Refuse a panel route that could not be the route its author meant.
+
+        Panels are mounted at ``/panel/<name><path>``, beside the asset mount at
+        ``/panel/<name>/static``. aiohttp accepts anything, so a relative path
+        lands outside the prefix, ``/static/...`` is taken by the asset mount,
+        and a ``..`` walks back out of the panel — each a route that silently
+        never runs. A startup error naming the plugin beats a silent
+        non-route (#692).
+
+        ``""`` and ``/`` are deliberately allowed: they mount and serve, so
+        neither is an unreachable route -- ``/`` at ``/panel/<name>/`` and
+        ``""`` at ``/panel/<name>`` (no trailing slash). The
+        PRD's "not with pages of their own" describes the console's shape, and
+        a route path cannot enforce it -- a handler at ``/data`` or a file in
+        the panel's ``static_dir`` can serve a full page just as well (owner
+        ruling, 2026-11-14).
+        """
+        if not path.startswith("/") and path != "":
+            reason = "it does not start with '/', so it mounts outside the panel"
+        elif path == "/static" or path.startswith("/static/"):
+            reason = "that is where the panel's assets are mounted"
+        elif ".." in path.split("/"):
+            reason = "it walks up out of the panel with '..'"
+        else:
+            return
+        raise pluggy.PluginValidationError(
+            plugin,
+            f"web: plugin '{name}' registered panel route {path!r}, which is "
+            f"refused: {reason}. A panel route lives at /panel/{name}<path>, so "
+            f"use a sub-path such as '/data'",
+        )
 
     def _build_app(self) -> web.Application:
         """Routes and middlewares (error guard → Host check → auth → Origin)."""

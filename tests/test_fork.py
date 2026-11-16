@@ -276,7 +276,8 @@ class _EventRecorder:
 
 
 FORK_STAGES = {"compaction": "chat", "consolidation": "chat", "appraisal": "chat"}
-MAIN_PROFILE = {"base_url": "http://main.test/v1", "model": "main-m"}
+MAIN_PROVIDER = {"base_url": "http://main.test/v1"}
+MAIN_PROFILE = {"model": "main-m"}
 
 
 @pytest.fixture
@@ -292,7 +293,10 @@ async def forking_agent(monkeypatch):
     client = MagicMock()
     client.chat = AsyncMock(return_value=_make_text_response("fork says hi"))
     llm, _ = await start_llm_plugin(
-        monkeypatch, {"main": MAIN_PROFILE}, FORK_STAGES, pm=plugin.pm
+        monkeypatch,
+        {"providers": {"main": MAIN_PROVIDER}, "profiles": {"main": MAIN_PROFILE}},
+        FORK_STAGES,
+        pm=plugin.pm,
     )
     llm._clients["main"] = client
     plugin._client = client
@@ -303,14 +307,20 @@ async def forking_agent(monkeypatch):
 
 
 MAPPED_LLM = {
-    "main": MAIN_PROFILE,
-    # max_tokens lives in a base that forks extends: R8 counts inherited keys.
-    "capped": {**MAIN_PROFILE, "extra_body": {"max_tokens": 4096}},
-    "forks": {
-        "extends": "capped",
-        "base_url": "http://forks.test/v1",
-        "model": "forks-m",
-        "extra_body": {"reasoning_budget_tokens": 8192},
+    "providers": {
+        "main": MAIN_PROVIDER,
+        "forks": {"base_url": "http://forks.test/v1"},
+    },
+    "profiles": {
+        "main": MAIN_PROFILE,
+        # max_tokens lives in a base that forks extends: R8 counts inherited keys.
+        "capped": {**MAIN_PROFILE, "extra_body": {"max_tokens": 4096}},
+        "forks": {
+            "extends": "capped",
+            "provider": "forks",
+            "model": "forks-m",
+            "extra_body": {"reasoning_budget_tokens": 8192},
+        },
     },
     "stages": {"consolidation": "forks"},
 }
@@ -444,7 +454,8 @@ async def test_usage_log_mode_column_upgrades_and_records(db):
         await pm.ahook.on_llm_response(profile="main", model="m", request_id=rid, usage={},
                                        latency_ms=1.0, attribution=attribution, error=None,
                                        timings=None, started_at=1000.0, total_ms=1.0,
-                                       attempts=1, message_count=1, tool_count=0)
+                                       attempts=1, message_count=1, tool_count=0,
+                                       lease_wait_ms=None)
     async with db.execute("SELECT request_id, mode FROM usage_log ORDER BY id") as cursor:
         assert await cursor.fetchall() == [("old", None), ("f", "fork"), ("s", "standalone"), ("t", None)]
 

@@ -63,12 +63,18 @@ async def make_full_db(path: str | None = None) -> aiosqlite.Connection:
     pm.register(llm, name="llm")
     config = {
         "llm": {
-            "main": {"base_url": "http://localhost:8080", "model": "chat"},
-            "embedding": {
-                "kind": "embedding",
-                "base_url": "http://localhost:8081",
-                "model": "test-embedder",
-                "dimensions": 32,
+            "providers": {
+                "main": {"base_url": "http://localhost:8080"},
+                "embedding": {"base_url": "http://localhost:8081"},
+            },
+            "profiles": {
+                "main": {"model": "chat"},
+                "embedding": {
+                    "provider": "embedding",
+                    "kind": "embedding",
+                    "model": "test-embedder",
+                    "dimensions": 32,
+                },
             },
         }
     }
@@ -526,12 +532,18 @@ class TestPrePhase1bDb:
         pm.register(llm, name="llm")
         config = {
             "llm": {
-                "main": {"base_url": "http://localhost:8080", "model": "chat"},
-                "embedding": {
-                    "kind": "embedding",
-                    "base_url": "http://localhost:8081",
-                    "model": "test-embedder",
-                    "dimensions": 32,
+                "providers": {
+                    "main": {"base_url": "http://localhost:8080"},
+                    "embedding": {"base_url": "http://localhost:8081"},
+                },
+                "profiles": {
+                    "main": {"model": "chat"},
+                    "embedding": {
+                        "provider": "embedding",
+                        "kind": "embedding",
+                        "model": "test-embedder",
+                        "dimensions": 32,
+                    },
                 },
             }
         }

@@ -164,16 +164,21 @@ async def run_live_evaluation(args) -> None:
 
     config = {
         "llm": {
-            "main": {
-                "base_url": args.base_url, "model": args.model,
-                "api_key": args.api_key,
+            "providers": {
+                "main": {"base_url": args.base_url, "api_key": args.api_key},
+                "embedding": {
+                    "base_url": args.embedding_base_url or args.base_url,
+                    "api_key": args.api_key,
+                },
             },
-            "embedding": {
-                "kind": "embedding",
-                "base_url": args.embedding_base_url or args.base_url,
-                "model": args.embedding_model or args.model,
-                "dimensions": args.embedding_dimensions,
-                "api_key": args.api_key,
+            "profiles": {
+                "main": {"model": args.model},
+                "embedding": {
+                    "provider": "embedding",
+                    "kind": "embedding",
+                    "model": args.embedding_model or args.model,
+                    "dimensions": args.embedding_dimensions,
+                },
             },
         },
         "memory": {},
@@ -672,13 +677,13 @@ def all_degraded_cause(memory) -> str:
         return (
             "the snapshot's embedding_meta records a different encoder or "
             "dimensions than this config, so its vectors are not comparable "
-            "and every query fell back to FTS5; point llm.embedding at the "
+            "and every query fell back to FTS5; point llm.profiles.embedding at the "
             "encoder that built the snapshot, or re-embed a copy of it with "
             "this one, then rerun"
         )
     if getattr(memory, "_embedding_cfg", None) is None:
         return (
-            "the config names no embedding profile (llm.embedding), so no "
+            "the config names no embedding profile (llm.profiles.embedding), so no "
             "record has a stored vector and every query fell back to FTS5; "
             "add the embedding profile the deployment uses (docs/cognition.md) "
             "and rerun"
@@ -692,8 +697,8 @@ def all_degraded_cause(memory) -> str:
     return (
         "the embedding server failed every query (see the 'retrieval "
         "embedding failed; degrading to FTS5' warnings), so the run measured "
-        "keyword search, not vectors; start the server llm.embedding's "
-        "base_url names, check the profile's api_key, and rerun"
+        "keyword search, not vectors; start the server llm.profiles.embedding's "
+        "provider base_url names, check that provider's api_key, and rerun"
     )
 
 
@@ -823,6 +828,10 @@ async def run_snapshot_evaluation(
                 "relevant": query.relevant,
                 "unscorable": unscorable,
                 "degraded": pool.degraded,
+                # Which banding path ran for this query (#931), so a run says
+                # how many queries the relative gate banded on z and how many
+                # it banded on the raw-similarity fallback.
+                "banding_path": pool.banding_path,
                 "negative": negative,
                 "false_admits": probe_false_admits,
                 "recall_at_k": recall,
@@ -858,6 +867,11 @@ async def run_snapshot_evaluation(
         recalls = [r["recall_at_k"] for r in results if r["recall_at_k"] is not None]
         mrrs = [r["mrr"] for r in results if r["mrr"] is not None]
         degraded = sum(1 for r in results if r["degraded"])
+        # The banding paths across the run: the count is the number a fallback
+        # has to be read from, since the gate's own warning is once per process.
+        banding_paths: dict[str, int] = {}
+        for r in results:
+            banding_paths[r["banding_path"]] = banding_paths.get(r["banding_path"], 0) + 1
         # A pool in which nothing was measured but keyword search. The run
         # still writes the file, marked, and then exits non-zero (#662): an
         # FTS-only pool is not a vector measurement, and its 0.6 similarities
@@ -886,6 +900,7 @@ async def run_snapshot_evaluation(
             "scored": len(recalls),
             "degraded": degraded,
             "all_degraded": all_degraded,
+            "banding_paths": banding_paths,
             "mean_recall_at_k": mean(recalls),
             "mean_mrr": mean(mrrs),
             "query_context": memory._query_context,

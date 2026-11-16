@@ -230,8 +230,11 @@ class TestLLMPluginObserverWiring:
     async def test_every_profile_client_gets_an_observer_with_its_profile(self):
         config = {
             "llm": {
-                "main": {"base_url": BASE_URL, "model": "main-model"},
-                "background": {"base_url": BASE_URL, "model": "bg-model"},
+                "providers": {"main": {"base_url": BASE_URL}},
+                "profiles": {
+                    "main": {"model": "main-model"},
+                    "background": {"model": "bg-model"},
+                },
             }
         }
         plugin, recorder = await self._start_plugin(config)
@@ -256,7 +259,10 @@ class TestLLMPluginObserverWiring:
     async def test_hook_receives_attribution_snapshot(self):
         from corvidae.attribution import reset_attribution, set_attribution
 
-        config = {"llm": {"main": {"base_url": BASE_URL, "model": MODEL}}}
+        config = {"llm": {
+            "providers": {"main": {"base_url": BASE_URL}},
+            "profiles": {"main": {"model": MODEL}},
+        }}
         plugin, recorder = await self._start_plugin(config)
         try:
             plugin.get_client().session = _make_mock_session(_make_mock_response())

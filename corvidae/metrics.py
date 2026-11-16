@@ -60,7 +60,9 @@ CREATE TABLE IF NOT EXISTS usage_log (
     tool_count INTEGER,
     max_context_tokens INTEGER,
     prompt_ms REAL,
-    predicted_ms REAL
+    predicted_ms REAL,
+    lease_key TEXT,
+    lease_wait_ms REAL
 )
 """
 # Columns added by #350, as (name, type) for the in-place upgrade sweep.
@@ -101,7 +103,8 @@ class MetricsPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_llm_response(
-        self, profile, model, request_id, usage, latency_ms, attribution, error
+        self, profile, model, request_id, usage, latency_ms, attribution, error,
+        lease_wait_ms,
     ) -> None:
         """Translate one LLM response into token/latency/error metrics."""
         tags = {
@@ -110,6 +113,7 @@ class MetricsPlugin(CorvidaePlugin):
             "stage": attribution.get("stage", ""),
             "channel": attribution.get("channel_id", ""),
             "trigger": attribution.get("trigger", ""),
+            "lease_key": attribution.get("lease_key", ""),
         }
         # Token metrics: emit only the fields the usage dict actually has.
         if usage:
@@ -122,6 +126,9 @@ class MetricsPlugin(CorvidaePlugin):
                     await self._emit(metric, float(usage[key]), tags)
         # Latency is always known — the client measured it.
         await self._emit("llm.latency_ms", float(latency_ms), tags)
+        # The lease wait, for a call that took a lease (#367).
+        if lease_wait_ms is not None:
+            await self._emit("llm.lease_wait_ms", float(lease_wait_ms), tags)
         # Errors are counted as 1.0 events.
         if error is not None:
             await self._emit("llm.errors", 1.0, tags)
@@ -186,6 +193,12 @@ class UsageLogPlugin(CorvidaePlugin):
             # context budget, and the backend's prefill/decode split.
             for column, column_type in USAGE_LOG_TIMING_COLUMNS:
                 await add_column_if_missing(db, "usage_log", column, column_type)
+            # #363: the queue the call leased (or would lease); NULL when
+            # unleased or written before the column existed.
+            await add_column_if_missing(db, "usage_log", "lease_key", "TEXT")
+            # #364: milliseconds the call waited for a lease; NULL when the
+            # call took none (unleased, unbounded provider) or predates it.
+            await add_column_if_missing(db, "usage_log", "lease_wait_ms", "REAL")
             await db.commit()
             self._table_ready = True
         return db
@@ -230,6 +243,7 @@ class UsageLogPlugin(CorvidaePlugin):
     async def on_llm_response(
         self, profile, model, request_id, usage, latency_ms, attribution, error,
         timings, started_at, total_ms, attempts, message_count, tool_count,
+        lease_wait_ms,
     ) -> None:
         """Insert one row for this LLM call. Fail-soft."""
         try:
@@ -250,9 +264,9 @@ class UsageLogPlugin(CorvidaePlugin):
                 "completion_tokens, total_tokens, cached_tokens, cache_n, "
                 "prompt_n, latency_ms, error, started_at, ended_at, total_ms, "
                 "attempts, message_count, tool_count, max_context_tokens, "
-                "prompt_ms, predicted_ms) "
+                "prompt_ms, predicted_ms, lease_key, lease_wait_ms) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     request_id,
@@ -280,6 +294,8 @@ class UsageLogPlugin(CorvidaePlugin):
                     self._max_context_tokens(attribution.get("channel_id")),
                     timings.get("prompt_ms"),
                     timings.get("predicted_ms"),
+                    attribution.get("lease_key"),
+                    lease_wait_ms,
                 ),
             )
             await db.commit()

@@ -11,41 +11,42 @@ import pytest
 
 from corvidae.llm_plugin import parse_llm_config
 
-MAIN = {"base_url": "http://localhost:8080", "model": "m"}
+MAIN = {"model": "m"}
 
 
-def test_non_string_profile_key_names_the_key():
-    """A profile key that is not a string is a config error naming it."""
+def _llm(profiles: dict, **sections: dict) -> dict:
+    """An llm: section with one provider named main, the given profiles, and
+    any defaults / stages."""
+    return {
+        "providers": {"main": {"base_url": "http://localhost:8080"}},
+        "profiles": profiles,
+        **sections,
+    }
+
+
+@pytest.mark.parametrize(
+    ("section", "kwargs"),
+    [
+        ("profiles", {"profiles": {"main": MAIN, 2: MAIN}}),
+        ("defaults", {"profiles": {"main": MAIN}, "defaults": {2: "main"}}),
+        ("stages", {"profiles": {"main": MAIN}, "stages": {2: "main"}}),
+    ],
+)
+def test_a_non_string_key_names_the_key(section, kwargs):
+    """A key that is not a string is a config error naming it (#471).
+
+    All three sections go through the same check, and each message lists the
+    defined names, so `sorted()` over a mixed-type set reached the message:
+    that is how a malformed section became a TypeError instead of a config
+    error. One parametrised test, because the three differ only in section --
+    and `pytest.raises(ValueError)` also fails on the TypeError, which is the
+    property the old type-only duplicates were re-asserting.
+    """
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": MAIN, 2: MAIN})
+        parse_llm_config(_llm(**kwargs))
 
     message = str(exc.value)
-    assert "2" in message
-    assert "string" in message
-
-
-def test_non_string_profile_key_does_not_raise_type_error():
-    """The failure is a ValueError, which the reload path catches."""
-    with pytest.raises(ValueError):
-        parse_llm_config({"main": MAIN, 2: MAIN})
-
-
-def test_non_string_key_under_defaults_names_the_key():
-    """llm.defaults is validated the same way."""
-    with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": MAIN, "defaults": {2: "main"}})
-
-    message = str(exc.value)
-    assert "2" in message
-    assert "string" in message
-
-
-def test_non_string_key_under_stages_names_the_key():
-    """llm.stages is validated the same way."""
-    with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": MAIN, "stages": {2: "main"}})
-
-    message = str(exc.value)
+    assert section in message
     assert "2" in message
     assert "string" in message
 
@@ -60,20 +61,9 @@ def test_unrelated_error_path_does_not_raise_type_error():
     on, never a TypeError.
     """
     with pytest.raises(ValueError) as exc:
-        parse_llm_config({"main": {**MAIN, "extends": "nope"}, 2: MAIN})
+        parse_llm_config(_llm({"main": {**MAIN, "extends": "nope"}, 2: MAIN}))
 
     # Either message is acceptable; both name what the operator must fix.
     message = str(exc.value)
     assert "extends" in message or "must be a string" in message
 
-
-
-def test_non_string_key_reload_is_a_value_error():
-    """The reload path catches ValueError; that is why this class matters.
-
-    ConfigWatcher._reload_config calls parse_llm_config and catches
-    ValueError only, so a TypeError escapes the watcher and is logged as a
-    generic watcher error instead of "reload skipped".
-    """
-    with pytest.raises(ValueError):
-        parse_llm_config({"main": MAIN, 2: MAIN})

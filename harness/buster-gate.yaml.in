@@ -12,13 +12,16 @@
 # cognition set stays off as in the default profile.
 
 llm:
-  main:
-    base_url: http://127.0.0.1:8080/v1
-    # Keep in step with buster.yaml.in.
-    model: qwen3.6:35b
-    extra_body:
-      id_slot: 0
-    timeout: 300
+  providers:
+    main:
+      base_url: http://127.0.0.1:8080/v1
+      timeout: 300
+  profiles:
+    main:
+      # Keep in step with buster.yaml.in.
+      model: qwen3.6:35b
+      extra_body:
+        id_slot: 0
 
 daemon:
   session_db: sessions.db

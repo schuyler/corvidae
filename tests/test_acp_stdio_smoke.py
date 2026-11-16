@@ -110,10 +110,8 @@ def _write_smoke_config(path: Path, *, base_url: str, session_db: Path) -> None:
     """Minimal agent.yaml: mocked LLM, cognition plugins off, local session DB."""
     config = {
         "llm": {
-            "main": {
-                "base_url": base_url,
-                "model": "mock-model",
-            }
+            "providers": {"main": {"base_url": base_url}},
+            "profiles": {"main": {"model": "mock-model"}},
         },
         "daemon": {"session_db": str(session_db)},
         "agent": {

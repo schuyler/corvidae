@@ -131,6 +131,12 @@ def cut_line(plugin, n: int) -> str | None:
     return next((line for line in rendered(plugin, n) if line.startswith("[metadata: cut ")), None)
 
 
+def page(plugin, n: int) -> int | None:
+    """The read_file page the n-th row's cut line suggests (#579), or None."""
+    agent = plugin.pm.get_plugin("agent")
+    return plugin.pm.get_plugin("spill").page_chars_for(agent.items[n].channel)
+
+
 # AC1: one handler per configured endpoint, through the real hook.
 async def test_subscribes_one_handler_per_endpoint(tmp_path):
     plugin, _, subs = await build(tmp_path, {"endpoints": TARGETS})
@@ -164,7 +170,8 @@ async def test_truncation_marker_and_at_cap(tmp_path):
     assert rec.calls[0]["text"] == text[:20]
     [path] = spill_dir(tmp_path).iterdir()
     assert cut_line(plugin, 0) == (
-        f"[metadata: cut to the first 20 of 50 characters; the full text is in {path}]")
+        f"[metadata: cut to the first 20 of 50 characters; the full text is in {path}; "
+        f"read it back with read_file length={page(plugin, 0)}]")
     rec.calls.clear()
     await plugin._deliver(delivery({"k": "x" * 12}))
     assert rec.calls[0]["text"] == '{"k":"' + "x" * 12 + '"}'
@@ -179,7 +186,8 @@ async def test_marker_survives_the_kernel_rendering(tmp_path):
     lines = rendered(plugin, 0)
     assert lines[0] == "[metadata: notification; not from this channel's human]"
     assert lines[1] == (
-        f"[metadata: cut to the first 20 of 50 characters; the full text is in {path}]")
+        f"[metadata: cut to the first 20 of 50 characters; the full text is in {path}; "
+        f"read it back with read_file length={page(plugin, 0)}]")
     assert lines[2] == "[annotations: origin=webhook:github]"
     assert lines[3].startswith("[payload ") and lines[3].endswith(" begins]")
     assert lines[4] == rec.calls[0]["text"] and lines[5].endswith(" ends]")
@@ -191,8 +199,12 @@ async def test_cut_delivery_to_three_channels_writes_one_file(tmp_path):
                                           "endpoints": {"github": ["irc:#a", "irc:#b", "irc:#c"]}})
     await plugin._deliver(delivery({"k": "x" * 42}))
     [path] = spill_dir(tmp_path).iterdir()
-    assert [cut_line(plugin, n) for n in range(3)] == [
-        f"[metadata: cut to the first 20 of 50 characters; the full text is in {path}]"] * 3
+    # One file for the three channels, and every header names it. The wording
+    # of the cut line is the spill plugin's, asserted in tests/test_spill.py and
+    # tests/test_provenance.py; what this test owns is the fan-out.
+    lines = [cut_line(plugin, n) for n in range(3)]
+    assert len(set(lines)) == 1
+    assert str(path) in lines[0]
 
 
 # a sender-chosen delivery id does not shape the spill file's name or directory.

@@ -36,10 +36,8 @@ from llm_response_fixtures import (
 # per the channel-queue design (breaking config change, design review Co3).
 BASE_CONFIG = {
     "llm": {
-        "main": {
-            "base_url": "http://localhost:8080",
-            "model": "test-model",
-        },
+        "providers": {"main": {"base_url": "http://localhost:8080"}},
+        "profiles": {"main": {"model": "test-model"}},
     },
     "daemon": {
         "session_db": ":memory:",
@@ -250,12 +248,7 @@ class TestOnStart:
         pm.register(llm_plugin, name="llm")
 
         # Old flat config — must be rejected with a clear error from LLMPlugin
-        bad_config = {
-            "llm": {
-                "base_url": "http://localhost:8080",
-                "model": "test-model",
-            }
-        }
+        bad_config = {"llm": {"base_url": "http://localhost:8080", "model": "test-model"}}
 
         with pytest.raises((KeyError, ValueError)):
             await llm_plugin.on_start(config=bad_config)
@@ -286,13 +279,13 @@ class TestOnStart:
 
         config_with_bg = {
             "llm": {
-                "main": {
-                    "base_url": "http://localhost:8080",
-                    "model": "main-model",
+                "providers": {
+                    "main": {"base_url": "http://localhost:8080"},
+                    "background": {"base_url": "http://localhost:8081"},
                 },
-                "background": {
-                    "base_url": "http://localhost:8081",
-                    "model": "bg-model",
+                "profiles": {
+                    "main": {"model": "main-model"},
+                    "background": {"provider": "background", "model": "bg-model"},
                 },
             },
             "daemon": {"session_db": ":memory:"},
@@ -467,11 +460,8 @@ class TestOnMessagePersistenceAndLoop:
         extra_body_value = {"id_slot": 1, "cache_prompt": True}
         config = {
             "llm": {
-                "main": {
-                    "base_url": "http://localhost:8080",
-                    "model": "test-model",
-                    "extra_body": extra_body_value,
-                },
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "test-model", "extra_body": extra_body_value}},
             },
         }
 
@@ -511,11 +501,8 @@ class TestOnMessagePersistenceAndLoop:
 
         config = {
             "llm": {
-                "main": {
-                    "base_url": "http://localhost:8080",
-                    "model": "test-model",
-                    # Note: no extra_body key
-                },
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "test-model"}},
             },
         }
 
@@ -555,11 +542,8 @@ class TestOnMessagePersistenceAndLoop:
 
         config = {
             "llm": {
-                "main": {
-                    "base_url": "http://localhost:8080",
-                    "model": "test-model",
-                    "extra_body": None,
-                },
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "test-model", "extra_body": None}},
             },
         }
 
@@ -599,11 +583,8 @@ class TestOnMessagePersistenceAndLoop:
 
         config = {
             "llm": {
-                "main": {
-                    "base_url": "http://localhost:8080",
-                    "model": "test-model",
-                    "extra_body": {},
-                },
+                "providers": {"main": {"base_url": "http://localhost:8080"}},
+                "profiles": {"main": {"model": "test-model", "extra_body": {}}},
             },
         }
 

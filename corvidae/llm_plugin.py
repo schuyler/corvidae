@@ -8,41 +8,51 @@ register_llm_stages (None for main turns).
 
 Config:
     llm:
-      main:           # a profile; the default chat profile unless defaults.chat says otherwise
-        base_url: ...
-        model: ...
-        kind: chat          # optional: chat (default) | embedding
-        extends: other      # optional: deep overlay of another profile
-        api_key: ...        # optional
-        extra_body: ...     # optional
-        max_retries: 3      # optional
-        retry_base_delay: 2.0
-        retry_max_delay: 60.0
-        model_not_loaded_wait: 60.0  # seconds to wait out an unloaded model
-        raw_reasoning: false  # endpoint returns <think>…</think> inline in content
-        reasoning_reopened: truncate  # truncate | rerun: a reply that reopens reasoning after its answer
-        timeout: ...        # optional
-      embedding:      # the /embeddings profile (bootstrap-mapping §4.3)
-        (same keys, plus kind: embedding and required dimensions: int)
+      providers:      # one block per server: capacity and endpoint, declared once
+        main:
+          base_url: ...       # required
+          api_key: ...        # optional
+          timeout: ...        # optional
+          max_retries: 3      # optional
+          retry_base_delay: 2.0
+          retry_max_delay: 60.0
+          model_not_loaded_wait: 60.0  # seconds to wait out an unloaded model
+          heads: 2            # optional positive integer; absent = unbounded
+      profiles:       # what to ask a provider for
+        main:         # the default chat profile unless defaults.chat says otherwise
+          provider: main      # optional: llm.defaults.provider, else the provider named main
+          model: ...
+          kind: chat          # optional: chat (default) | embedding
+          extends: other      # optional: deep overlay of another profile
+          extra_body: ...     # optional
+          raw_reasoning: false  # endpoint returns <think>…</think> inline in content
+          reasoning_reopened: truncate  # truncate | rerun: a reply that reopens reasoning after its answer
+        embedding:    # the /embeddings profile (bootstrap-mapping §4.3)
+          (same keys, plus kind: embedding and required dimensions: int)
       defaults:       # optional: kind -> default profile (chat -> main, embedding -> embedding)
         chat: main
+        provider: main        # optional: the provider a profile without one uses
       stages:         # optional: stage -> profile
         compaction: forks
 
-Every key under llm: except defaults and stages is a profile. A stage
-resolves to the profile llm.stages names for it, else to its kind's default
-profile. Everything under llm: is restart-only; a reload that changes it logs
-a warning and keeps the running clients.
+A stage resolves to the profile llm.stages names for it, else to its kind's
+default profile. Each resolved profile carries its provider's keys (except
+heads) and a ``provider`` name. Anything under llm: other than providers,
+profiles, defaults and stages is the old layout and is refused. Everything
+under llm: is restart-only; a reload that changes it logs a warning and keeps
+the running clients.
 """
 import asyncio
 import copy
 import logging
 import math
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import aiohttp
 
+from corvidae import lease
 from corvidae.attribution import get_attribution
 from corvidae.envref import EnvRefError, expand_env_refs
 from corvidae.hooks import CorvidaePlugin, hookimpl
@@ -53,9 +63,12 @@ logger = logging.getLogger(__name__)
 # Actionable hints for LLM HTTP failures. Unknown statuses still get the code.
 _HTTP_STATUS_HINTS = {
     400: "the request was rejected",
-    401: "the API key was rejected — check llm.main.api_key",
+    401: "the API key was rejected — check llm.providers.<provider>.api_key",
     403: "the API key is not allowed to use this model — check the provider account",
-    404: "the endpoint or model was not found — check llm.main.base_url and llm.main.model",
+    404: (
+        "the endpoint or model was not found — check "
+        "llm.providers.<provider>.base_url and llm.profiles.<profile>.model"
+    ),
     429: "the provider is rate-limiting or the account is out of quota",
 }
 # Provider error bodies are untrusted and can be long; show one short line.
@@ -104,8 +117,8 @@ class _HookObserver:
         )
 
 
-def _model_not_loaded_wait(cfg: dict, profile: str) -> float:
-    """Validate llm.<profile>.model_not_loaded_wait: a finite, non-negative number of seconds."""
+def _model_not_loaded_wait(cfg: dict, provider: str) -> float:
+    """Validate llm.providers.<provider>.model_not_loaded_wait: a finite, non-negative number of seconds."""
     value = cfg.get("model_not_loaded_wait", 60.0)
     # bool is an int subclass; reject it along with None and strings. inf
     # would wait forever and nan would silently disable the wait.
@@ -116,25 +129,25 @@ def _model_not_loaded_wait(cfg: dict, profile: str) -> float:
         or value < 0
     ):
         raise ValueError(
-            f"llm.{profile}.model_not_loaded_wait must be a finite, non-negative number "
+            f"llm.providers.{provider}.model_not_loaded_wait must be a finite, non-negative number "
             f"of seconds, got {value!r}"
         )
     return float(value)
 
 
 def _raw_reasoning(cfg: dict, profile: str) -> bool:
-    """Validate llm.<profile>.raw_reasoning: a boolean, default false."""
+    """Validate llm.profiles.<profile>.raw_reasoning: a boolean, default false."""
     value = cfg.get("raw_reasoning", False)
     # A string such as "false" would otherwise read as true.
     if not isinstance(value, bool):
         raise ValueError(
-            f"llm.{profile}.raw_reasoning must be true or false, got {value!r}"
+            f"llm.profiles.{profile}.raw_reasoning must be true or false, got {value!r}"
         )
     return value
 
 
 def _reasoning_reopened(cfg: dict, profile: str) -> str:
-    """Validate llm.<profile>.reasoning_reopened: "truncate" (default) or "rerun".
+    """Validate llm.profiles.<profile>.reasoning_reopened: "truncate" (default) or "rerun".
 
     An invalid value never fails startup: it is logged and read as truncate.
     """
@@ -142,7 +155,7 @@ def _reasoning_reopened(cfg: dict, profile: str) -> str:
     # Only the two known strings pass; anything else (incl. non-strings) falls back.
     if value not in ("truncate", "rerun") or not isinstance(value, str):
         logger.warning(
-            "llm.%s.reasoning_reopened is %r; accepted values are "
+            "llm.profiles.%s.reasoning_reopened is %r; accepted values are "
             "truncate, rerun; falling back to truncate — fix the value in "
             "agent.yaml and restart",
             profile, value,
@@ -154,8 +167,20 @@ def _reasoning_reopened(cfg: dict, profile: str) -> str:
 #: The kinds a profile may have.
 KINDS: frozenset[str] = frozenset({"chat", "embedding"})
 
-#: Names under llm: that are not profiles.
-RESERVED: frozenset[str] = frozenset({"defaults", "stages"})
+#: Keys that belong on an llm.providers block.
+PROVIDER_KEYS: frozenset[str] = frozenset({
+    "base_url", "api_key", "timeout", "max_retries", "retry_base_delay",
+    "retry_max_delay", "model_not_loaded_wait", "heads",
+})
+
+#: Keys that belong on an llm.profiles block.
+PROFILE_KEYS: frozenset[str] = frozenset({
+    "provider", "model", "kind", "extends", "extra_body", "raw_reasoning",
+    "reasoning_reopened", "dimensions", "document_prefix", "query_prefix",
+})
+
+#: The only keys llm: accepts.
+SECTIONS: frozenset[str] = frozenset({"providers", "profiles", "defaults", "stages"})
 
 #: The profile each kind's default falls back to when llm.defaults omits it.
 FALLBACK_DEFAULTS: dict[str, str] = {"chat": "main", "embedding": "embedding"}
@@ -166,13 +191,16 @@ class LLMConfig:
     """The parsed llm: section.
 
     Attributes:
+        providers: name -> provider block as written (validated).
         profiles: name -> resolved settings: ``extends`` applied and removed,
-            ``kind`` filled in.
+            ``kind`` filled in, the provider's keys (except ``heads``) merged
+            in, and ``provider`` set to the provider's name.
         defaults: kind -> default profile name, configured or fallback; a
             kind with no default is absent.
         stages: stage -> profile name, as configured.
     """
 
+    providers: dict[str, dict]
     profiles: dict[str, dict]
     defaults: dict[str, str]
     stages: dict[str, str]
@@ -210,8 +238,8 @@ def merge_profile(base: dict, child: dict) -> dict:
 def _require_string_key(key: object, path: str, label: str) -> None:
     """Raise unless ``key`` is a string, naming it and the accepted form.
 
-    Keys under the ``llm:`` section are profile names, kind names and stage
-    names, and every one of them reaches an error message built with
+    Keys under the ``llm:`` section are provider names, profile names, kind
+    names and stage names, and every one of them reaches an error message built with
     ``sorted()`` over the key set. YAML turns an unquoted ``2:`` into an int,
     and ``sorted()`` on mixed types raises ``TypeError`` — so the config error
     for some *other* problem would crash while building its own message, and
@@ -253,6 +281,22 @@ def _profile_name(key: str, value: object, profiles: Mapping) -> str:
     return value
 
 
+def _provider_name(key: str, value: object, providers: Mapping) -> str:
+    """The provider name at llm.<key>; anything but a string naming a defined
+    provider is a config error."""
+    defined = ", ".join(sorted(providers)) or "(none)"
+    if not isinstance(value, str):
+        raise ValueError(
+            f"llm.{key} must be a provider name; got {value!r}; "
+            f"defined providers: {defined}"
+        )
+    if value not in providers:
+        raise ValueError(
+            f"llm.{key} names unknown provider {value!r}; defined providers: {defined}"
+        )
+    return value
+
+
 def _resolve_profile(name: str, blocks: dict[str, dict]) -> dict:
     """Profile ``name`` with its ``extends`` chain folded in, root first.
 
@@ -265,13 +309,13 @@ def _resolve_profile(name: str, blocks: dict[str, dict]) -> dict:
         base = blocks[chain[-1]]["extends"]
         if not isinstance(base, str) or base not in blocks:
             raise ValueError(
-                f"llm.{chain[-1]}.extends names unknown profile {base!r}; "
+                f"llm.profiles.{chain[-1]}.extends names unknown profile {base!r}; "
                 f"defined profiles: {', '.join(sorted(blocks))}"
             )
         if base in chain:
             cycle = chain[chain.index(base):] + [base]
             raise ValueError(
-                f"llm.{chain[-1]}.extends forms a cycle: {' → '.join(cycle)}; "
+                f"llm.profiles.{chain[-1]}.extends forms a cycle: {' → '.join(cycle)}; "
                 "remove one extends"
             )
         chain.append(base)
@@ -300,21 +344,108 @@ def parse_llm_config(section: dict | None) -> LLMConfig:
     if not isinstance(section, dict):
         raise ValueError(f"llm must be a mapping; got {type(section).__name__}")
 
-    # Every key except the reserved ones is a profile; a null block is absent.
+    # Names must be strings before any error path sorts them (#471). Section
+    # keys first, so a non-string key gets this message and not the old-layout one.
+    for key in section:
+        _require_string_key(key, "llm", "section name")
+    # Anything outside the four sections is the old layout: say where it goes.
+    for key in section:
+        if key not in SECTIONS:
+            raise ValueError(
+                f"llm.{key} is not a section; profiles now live under "
+                "llm.profiles and endpoints (base_url, api_key, timeout, "
+                "retries, heads) under llm.providers; move "
+                f"llm.{key} there"
+            )
+
+    # Providers: mappings with base_url, a valid heads, and no profile keys.
+    providers: dict[str, dict] = {}
+    for pname, pblock in _section(section, "providers").items():
+        _require_string_key(pname, "llm.providers", "provider name")
+        # A null block is absent, as a null profile is.
+        if pblock is None:
+            continue
+        if not isinstance(pblock, dict):
+            raise ValueError(
+                f"llm.providers.{pname} must be a mapping; got {type(pblock).__name__}"
+            )
+        for key in pblock:
+            _require_string_key(key, f"llm.providers.{pname}", "key")
+        for key in sorted(k for k in pblock if k in PROFILE_KEYS):
+            raise ValueError(
+                f"llm.providers.{pname}.{key} is a profile key, got "
+                f"{pblock[key]!r}; move it to llm.profiles.<name>.{key} "
+                f"(accepted provider keys: {', '.join(sorted(PROVIDER_KEYS))})"
+            )
+        # A key in neither block is a typo, and a typo here loses the
+        # operator's declaration silently: 'headz: 4' reads as unbounded.
+        unknown = sorted(k for k in pblock if k not in PROVIDER_KEYS)
+        if unknown:
+            listed = ", ".join(f"llm.providers.{pname}.{k}" for k in unknown)
+            raise ValueError(
+                f"{listed}: not a provider key; accepted: "
+                f"{', '.join(sorted(PROVIDER_KEYS))}"
+            )
+        if pblock.get("base_url") is None:
+            raise ValueError(
+                f"llm.providers.{pname}.base_url is required; set it to the "
+                "endpoint's URL, e.g. http://localhost:8080/v1"
+            )
+        heads = pblock.get("heads")
+        if heads is not None and (
+            isinstance(heads, bool) or not isinstance(heads, int) or heads < 1
+        ):
+            raise ValueError(
+                f"llm.providers.{pname}.heads must be a positive integer "
+                f"(or absent for unbounded); got {heads!r}"
+            )
+        providers[pname] = pblock
+
+    # Profiles: mappings without provider keys, checked as written, before
+    # extends resolves, so the error names the block that has the key.
     blocks: dict[str, dict] = {}
-    for name, block in section.items():
-        # A key that is not a string is a config error here, at the boundary,
-        # rather than a TypeError later: every error path lists the defined
-        # profiles with sorted(), which raises on mixed-type keys and turns a
-        # malformed section into a crash inside its own message (#471).
-        _require_string_key(name, "llm", "profile name")
-        if name in RESERVED or block is None:
+    for name, block in _section(section, "profiles").items():
+        _require_string_key(name, "llm.profiles", "profile name")
+        if block is None:
             continue
         if not isinstance(block, dict):
-            raise ValueError(f"llm.{name} must be a mapping; got {type(block).__name__}")
+            raise ValueError(
+                f"llm.profiles.{name} must be a mapping; got {type(block).__name__}"
+            )
+        for key in block:
+            _require_string_key(key, f"llm.profiles.{name}", "key")
+        for key in sorted(k for k in block if k in PROVIDER_KEYS):
+            raise ValueError(
+                f"llm.profiles.{name}.{key} is a provider key, got "
+                f"{block[key]!r}; move it to llm.providers.<name>.{key} "
+                f"(accepted profile keys: {', '.join(sorted(PROFILE_KEYS))})"
+            )
+        # Same for a profile: 'extra_bdy' would be dropped without a word.
+        unknown = sorted(k for k in block if k not in PROFILE_KEYS)
+        if unknown:
+            listed = ", ".join(f"llm.profiles.{name}.{k}" for k in unknown)
+            raise ValueError(
+                f"{listed}: not a profile key; accepted: "
+                f"{', '.join(sorted(PROFILE_KEYS))}"
+            )
         blocks[name] = block
 
-    # Resolve each profile and validate the result.
+    # llm.defaults: kinds plus the provider fallback; names checked up front.
+    configured = _section(section, "defaults")
+    # A non-string kind key would reach sorted() in the unknown-kind error.
+    for key in configured:
+        _require_string_key(key, "llm.defaults", "kind")
+    unknown_kinds = set(configured) - KINDS - {"provider"}
+    if unknown_kinds:
+        raise ValueError(
+            f"llm.defaults: unknown kind {sorted(unknown_kinds)[0]!r}; "
+            f"accepted: {', '.join(sorted(KINDS | {'provider'}))}"
+        )
+    defaults_provider = configured.get("provider")
+    if defaults_provider is not None:
+        _provider_name("defaults.provider", defaults_provider, providers)
+
+    # Resolve each profile, validate it, and flatten its provider in.
     profiles: dict[str, dict] = {}
     for name in blocks:
         resolved = _resolve_profile(name, blocks)
@@ -322,29 +453,35 @@ def parse_llm_config(section: dict | None) -> LLMConfig:
         kind = resolved.setdefault("kind", "chat")
         if not isinstance(kind, str) or kind not in KINDS:
             raise ValueError(
-                f"llm.{name}.kind must be one of {', '.join(sorted(KINDS))}; got {kind!r}"
+                f"llm.profiles.{name}.kind must be one of {', '.join(sorted(KINDS))}; got {kind!r}"
             )
-        for key in ("base_url", "model"):
-            if resolved.get(key) is None:
-                raise ValueError(f"llm.{name}.{key} is required (after extends)")
+        if resolved.get("model") is None:
+            raise ValueError(f"llm.profiles.{name}.model is required (after extends)")
         if kind == "embedding" and resolved.get("dimensions") is None:
             raise ValueError(
-                f"llm.{name}.dimensions is required for an embedding profile "
+                f"llm.profiles.{name}.dimensions is required for an embedding profile "
                 "(the model's fixed vector dimension)"
             )
-        profiles[name] = resolved
+        # Provider: explicit, else llm.defaults.provider, else one named main.
+        provider = resolved.get("provider")
+        if provider is not None:
+            _provider_name(f"profiles.{name}.provider", provider, providers)
+        elif defaults_provider is not None:
+            provider = defaults_provider
+        elif "main" in providers:
+            provider = "main"
+        else:
+            raise ValueError(
+                f"llm.profiles.{name} has no provider; defined providers: "
+                f"{', '.join(sorted(providers)) or '(none)'}; set "
+                f"llm.profiles.{name}.provider, set llm.defaults.provider, "
+                "or name a provider main"
+            )
+        # heads is a scheduling key, not a client setting: leave it on the provider.
+        provider_keys = {k: v for k, v in providers[provider].items() if k != "heads"}
+        profiles[name] = {**provider_keys, **resolved, "provider": provider}
 
     # Each kind's default: configured, else the fallback name if it exists.
-    configured = _section(section, "defaults")
-    # A non-string kind key would reach sorted() in the unknown-kind error.
-    for key in configured:
-        _require_string_key(key, "llm.defaults", "kind")
-    unknown_kinds = set(configured) - KINDS
-    if unknown_kinds:
-        raise ValueError(
-            f"llm.defaults: unknown kind {sorted(unknown_kinds)[0]!r}; "
-            f"accepted: {', '.join(sorted(KINDS))}"
-        )
     defaults: dict[str, str] = {}
     for kind in sorted(KINDS):
         if kind in configured:
@@ -359,14 +496,14 @@ def parse_llm_config(section: dict | None) -> LLMConfig:
             name = FALLBACK_DEFAULTS[kind]
             if profiles[name]["kind"] != kind:
                 raise ValueError(
-                    f"llm.{name} is a {profiles[name]['kind']} profile but is the "
+                    f"llm.profiles.{name} is a {profiles[name]['kind']} profile but is the "
                     f"default {kind} profile by name; add kind: {kind} to it, "
                     f"or set llm.defaults.{kind}"
                 )
             defaults[kind] = name
     if "chat" not in defaults:
         raise ValueError(
-            "no default chat profile: define llm.main or set llm.defaults.chat"
+            "no default chat profile: define llm.profiles.main or set llm.defaults.chat"
         )
 
     # The stage map: every entry must name a defined profile.
@@ -376,7 +513,7 @@ def parse_llm_config(section: dict | None) -> LLMConfig:
         # reported, in the startup summary and in check_stage_map's warning.
         _require_string_key(stage, "llm.stages", "stage name")
         _profile_name(f"stages.{stage}", name, profiles)
-    return LLMConfig(profiles=profiles, defaults=defaults, stages=stages)
+    return LLMConfig(providers=providers, profiles=profiles, defaults=defaults, stages=stages)
 
 
 def check_stage_map(config: LLMConfig, stages: Mapping[str, str]) -> None:
@@ -418,6 +555,11 @@ class LLMPlugin(CorvidaePlugin):
         self._config: LLMConfig | None = None
         # stage -> kind; collected from register_llm_stages in on_start
         self._stages: dict[str, str] = {}
+        # The lease manager; None until on_start finds a chat-used provider
+        # that declares heads (#364).
+        self.leases: lease.LeaseManager | None = None
+        # Metric emissions in flight, kept referenced until they finish.
+        self._emitting: set[asyncio.Task] = set()
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -435,6 +577,30 @@ class LLMPlugin(CorvidaePlugin):
             await client.start()
             self._clients[profile] = client
 
+        # Leases: a manager only when a chat-used provider declares heads.
+        self._start_leases()
+
+        # R8: one line per provider; heads on an embedding-only provider is inert.
+        for pname in sorted(self._config.providers):
+            heads = self._config.providers[pname].get("heads")
+            users = sorted(
+                n for n, c in self._config.profiles.items() if c["provider"] == pname
+            )
+            logger.info(
+                "llm provider %s: %s, heads %s, profiles %s",
+                pname, self._config.providers[pname]["base_url"],
+                "unbounded" if heads is None else heads,
+                ", ".join(users) or "(none)",
+            )
+            if heads is not None and users and all(
+                self._config.profiles[n]["kind"] == "embedding" for n in users
+            ):
+                logger.warning(
+                    "llm.providers.%s.heads has no effect: only embedding "
+                    "profiles use it, and embedding calls take no lease",
+                    pname,
+                )
+
         # R5: report each kind that has no default and still has stages
         # that fall back to it.
         for kind in sorted(KINDS - self._config.defaults.keys()):
@@ -445,7 +611,7 @@ class LLMPlugin(CorvidaePlugin):
             if unmapped:
                 logger.warning(
                     "no default %s profile; unmapped stages %s have no client "
-                    "and degrade (set llm.defaults.%s or define llm.%s)",
+                    "and degrade (set llm.defaults.%s or define llm.profiles.%s)",
                     kind, ", ".join(unmapped), kind, FALLBACK_DEFAULTS[kind],
                 )
 
@@ -458,8 +624,61 @@ class LLMPlugin(CorvidaePlugin):
             ),
         )
 
+    def _start_leases(self) -> None:
+        """Build the lease manager, and hand each chat client of a
+        bounded provider its table. Does nothing with no bounded chat provider."""
+        assert self._config is not None
+        heads = {
+            pname: block["heads"]
+            for pname, block in self._config.providers.items()
+            if block.get("heads") is not None
+            and any(
+                cfg["provider"] == pname and cfg["kind"] == "chat"
+                for cfg in self._config.profiles.values()
+            )
+        }
+        if not heads:
+            return
+        # The kernel clock's monotonic time when one is registered.
+        pm = getattr(self, "pm", None)
+        clock = pm.get_plugin("clock") if pm is not None else None
+        manager = lease.LeaseManager(
+            heads,
+            monotonic=clock.monotonic if clock is not None else time.monotonic,
+            emit=self._emit_metric if pm is not None else None,
+        )
+        for profile, cfg in self._config.profiles.items():
+            if cfg["kind"] == "chat" and cfg["provider"] in heads:
+                self._clients[profile].leases = manager.provider(cfg["provider"])
+        self.leases = manager
+
+    def _emit_metric(self, name: str, value: float, tags: dict[str, str]) -> None:
+        """Schedule one lease event on on_metrics (called from sync code)."""
+        task = asyncio.get_running_loop().create_task(
+            self._send_metric(name, value, tags)
+        )
+        self._emitting.add(task)
+        task.add_done_callback(self._emitting.discard)
+
+    async def _send_metric(self, name: str, value: float, tags: dict[str, str]) -> None:
+        """Fire on_metrics, fail-soft: a consumer's failure is logged."""
+        try:
+            await self.pm.ahook.on_metrics(name=name, value=value, tags=tags)
+        except Exception:
+            logger.warning(
+                "on_metrics emission of %s for key %s on provider %s failed",
+                name, tags.get("lease_key"), tags.get("provider"), exc_info=True,
+            )
+
     @hookimpl
     async def on_stop(self) -> None:
+        # Fail waiting calls first so none hangs on a client about to close;
+        # close() is safe to call twice.
+        if self.leases is not None:
+            self.leases.close()
+        # Let the shutdown lease.release events reach on_metrics before stopping.
+        if self._emitting:
+            await asyncio.gather(*self._emitting)
         for client in self._clients.values():
             await client.stop()
 
@@ -472,7 +691,7 @@ class LLMPlugin(CorvidaePlugin):
         """
         if parse_llm_config(config.get("llm")) != self._config:
             logger.warning(
-                "llm config changed; LLM profiles, llm.stages and llm.defaults "
+                "llm config changed; LLM providers, profiles, llm.stages and llm.defaults "
                 "apply on restart"
             )
 
@@ -508,12 +727,12 @@ class LLMPlugin(CorvidaePlugin):
         # Never reached the provider: point at the endpoint configuration.
         if isinstance(error, asyncio.TimeoutError):
             return (
-                "The LLM request timed out. Check llm.main.timeout and the "
+                "The LLM request timed out. Check llm.providers.<provider>.timeout and the "
                 "endpoint's load; the full error is in the log."
             )
         if isinstance(error, aiohttp.ClientConnectionError):
             return (
-                "Could not reach the LLM endpoint — check llm.main.base_url "
+                "Could not reach the LLM endpoint — check llm.providers.<provider>.base_url "
                 "and that the server is running. The full error is in the log."
             )
         return None
@@ -555,6 +774,18 @@ class LLMPlugin(CorvidaePlugin):
         profile = self.resolve_profile(stage)
         return self._config.profiles[profile] if profile is not None else {}
 
+    def resolve_provider(self, stage: str | None = None) -> str | None:
+        """The name of the provider ``stage`` resolves to, or None when it
+        has no profile."""
+        return self.profile_config(stage).get("provider")
+
+    def provider_config(self, name: str) -> dict:
+        """The provider block ``name`` (heads included), or {} when unknown
+        or before on_start. Read-only: the dict is the plugin's own."""
+        if self._config is None:
+            return {}
+        return self._config.providers.get(name, {})
+
     def _create_client(self, cfg: dict, profile: str = "main") -> LLMClient:
         """Construct an LLMClient from config and inject its hook observer.
 
@@ -572,7 +803,7 @@ class LLMPlugin(CorvidaePlugin):
             try:
                 api_key = expand_env_refs(api_key)
             except EnvRefError as exc:
-                where = f"llm.{profile}.api_key"
+                where = f"llm.providers.{cfg.get('provider', profile)}.api_key"
                 if exc.reason == "multiline":
                     raise ValueError(
                         f"{where} references ${{{exc.var}}}, whose value "
@@ -596,7 +827,7 @@ class LLMPlugin(CorvidaePlugin):
             timeout=cfg.get("timeout"),
             document_prefix=cfg.get("document_prefix", ""),
             query_prefix=cfg.get("query_prefix", ""),
-            model_not_loaded_wait=_model_not_loaded_wait(cfg, profile),
+            model_not_loaded_wait=_model_not_loaded_wait(cfg, cfg.get("provider", profile)),
             raw_reasoning=_raw_reasoning(cfg, profile),
             reasoning_reopened=_reasoning_reopened(cfg, profile),
         )

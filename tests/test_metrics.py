@@ -45,6 +45,7 @@ async def _fire_response(pm, *, usage=USAGE, error=None, attribution=ATTRIBUTION
         attempts=1,
         message_count=2,
         tool_count=1,
+        lease_wait_ms=None,
     )
 
 
@@ -77,6 +78,7 @@ class TestMetricsPlugin:
                 "stage": "turn",
                 "channel": "irc:#general",
                 "trigger": "",
+                "lease_key": "",
             }
         assert "llm.errors" not in by_name
 

@@ -14,7 +14,10 @@ import yaml
 
 from corvidae.runtime import Runtime
 
-_LLM = {"main": {"base_url": "http://localhost:8080", "model": "m"}}
+_LLM = {
+    "providers": {"main": {"base_url": "http://localhost:8080"}},
+    "profiles": {"main": {"model": "m"}},
+}
 
 
 def _mock_pm():

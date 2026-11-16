@@ -259,3 +259,123 @@ class TestReviewFixes:
             await plugin.view_image(str(png))
 
         llm_plugin.get_client.assert_called_with("vision")
+
+
+class TestLeaseKey:
+    """#363 AC8: a view_image call inside a channel scope carries that
+    channel's lease key into the call record. The plugin opens no scope of
+    its own; it inherits the calling turn's.
+
+    The kernel boundary keeps corvidae.metrics out of this package's tests,
+    so the test reads the key from the attribution on_llm_response receives,
+    which is the snapshot UsageLogPlugin writes to usage_log.lease_key.
+    """
+
+    @pytest.mark.asyncio
+    async def test_view_image_in_channel_scope_records_channel_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import logging
+
+        import aiohttp
+
+        from corvidae.attribution import lease_scope
+        from corvidae.hooks import create_plugin_manager, hookimpl
+        from corvidae.llm_plugin import LLMPlugin
+
+        # A successful completion response, as the stubbed session returns it.
+        class _Response:
+            status = 200
+            headers: dict = {}
+
+            def raise_for_status(self) -> None:
+                """Always a success."""
+
+            async def json(self) -> dict:
+                """One completion with usage."""
+                return {
+                    "choices": [{"message": {"role": "assistant", "content": "A tiny image."}}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+                }
+
+            async def text(self) -> str:
+                """No body text."""
+                return ""
+
+        # The async context manager session.post() returns.
+        class _Post:
+            async def __aenter__(self) -> _Response:
+                return _Response()
+
+            async def __aexit__(self, *exc: object) -> bool:
+                return False
+
+        # Stands in for aiohttp.ClientSession so no request leaves the test.
+        class _Session:
+            def __init__(self, headers=None, **kw) -> None:
+                self.headers = headers or {}
+
+            def post(self, url, json=None, timeout=None, **kw) -> _Post:
+                """Answer every request."""
+                return _Post()
+
+            async def close(self) -> None:
+                """Nothing to release."""
+
+        # Records the attribution each model call's response hook carries.
+        class _Recorder:
+            def __init__(self) -> None:
+                self.attributions: list[dict] = []
+
+            @hookimpl
+            async def on_llm_response(self, attribution: dict) -> None:
+                """Keep the call-time attribution snapshot."""
+                self.attributions.append(dict(attribution))
+
+        monkeypatch.setattr(aiohttp, "ClientSession", _Session)
+
+        png = tmp_path / "test.png"
+        png.write_bytes(TINY_PNG)
+
+        # The real LLMPlugin and client, with the vision plugin and recorder.
+        pm = create_plugin_manager()
+        vision = VisionPlugin()
+        vision.pm = pm
+        pm.register(vision, name="vision")
+        recorder = _Recorder()
+        pm.register(recorder, name="recorder")
+        llm = LLMPlugin()
+        pm.register(llm, name="llm")
+        config = {"llm": {
+            "providers": {"main": {"base_url": "http://main.test/v1"}},
+            "profiles": {"main": {"model": "main-m"}},
+        }}
+        await llm.on_init(pm, config)
+        await llm.on_start(config)
+        try:
+            records: list[logging.LogRecord] = []
+
+            # Collects corvidae.llm records, to show the unleased check is quiet.
+            class _Collect(logging.Handler):
+                def emit(self, record: logging.LogRecord) -> None:
+                    """Keep every record."""
+                    records.append(record)
+
+            handler = _Collect(level=logging.DEBUG)
+            logging.getLogger("corvidae.llm").addHandler(handler)
+            try:
+                # The scope a turn on this channel would be running in.
+                with lease_scope("irc:#home"):
+                    result = await vision.view_image(str(png))
+            finally:
+                logging.getLogger("corvidae.llm").removeHandler(handler)
+
+            assert "tiny image" in result
+            assert [a.get("lease_key") for a in recorder.attributions] == ["irc:#home"]
+            # Keyed, so the unleased check stayed quiet.
+            assert [
+                r for r in records
+                if r.levelno == logging.WARNING and "lease_scope" in r.getMessage()
+            ] == []
+        finally:
+            await llm.on_stop()

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Callable
 from corvidae.prompts import resolve_prompt
 from corvidae.turn import run_agent_turn
 from corvidae.attribution import (
+    lease_scope,
     agent_depth_refusal,
     next_agent_depth,
     reset_attribution,
@@ -180,7 +181,7 @@ async def _cut_result(
     if isinstance(spill, NotificationSpill):
         cut = await spill.cut(
             content, limit=limit, source="subagent tool result",
-            can_read=spill.can_read(channel, tools),
+            can_read=spill.can_read(channel, tools), channel=channel,
         )
     else:
         # No spill service (a bare loop): the head is kept and the line says it was cut.
@@ -190,7 +191,7 @@ async def _cut_result(
             len(content), limit,
         )
         cut = Cut(shown=limit, total=len(content))
-    words = cut_text(cut.shown, cut.total, cut.path, cut.spilled, cut.failed)
+    words = cut_text(cut.shown, cut.total, cut.path, cut.spilled, cut.failed, cut.page_chars)
     return f"[{words}]\n{content[:limit]}"
 
 
@@ -318,14 +319,17 @@ class SubagentPlugin(CorvidaePlugin):
                 stage="subagent", channel_id=channel.id, agent_depth=depth
             )
             try:
-                result = await run_agent_loop(
-                    client, messages, tools_dict, tool_schemas,
-                    channel=channel,
-                    task_queue=task_queue,
-                    max_turns=self._max_turns,
-                    max_result_chars=max_result_chars,
-                    call_timeouts=call_timeouts,
-                )
+                # A subagent run is its own queue, keyed by its task id; the
+                # id is bound by the time work() runs (#363).
+                with lease_scope(f"subagent:{task.task_id}"):
+                    result = await run_agent_loop(
+                        client, messages, tools_dict, tool_schemas,
+                        channel=channel,
+                        task_queue=task_queue,
+                        max_turns=self._max_turns,
+                        max_result_chars=max_result_chars,
+                        call_timeouts=call_timeouts,
+                    )
             finally:
                 reset_attribution(attribution_token)
             return strip_thinking(result)

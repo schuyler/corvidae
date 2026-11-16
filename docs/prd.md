@@ -26,6 +26,13 @@ this document changes. A plugin that lets untrusted text reach somewhere
 new or a tool do something new records it in the threat model (principle
 9) whether or not this document mentions the plugin.
 
+`docs/prd-core-periphery-supplement.md` is part of this document for
+deployments that run the core/periphery strategy. It is accepted as the
+target, and conformance is checked from acceptance of its technical
+reference document (TRD). It adds principles 17–21 and amends, for those
+deployments, the principles and requirements its §4 lists; its §0 says
+how its requirements read.
+
 ## 1. What it is
 
 Corvidae is a personal agent daemon: one Python asyncio process on one
@@ -101,18 +108,25 @@ one is a bug even if its tests pass.
    Background work runs in the gaps between main turns. Deferral is bounded
    so interactivity can't starve it: an exchange's own background work
    (stage-2 appraisal, critique) forks the exchange's prefix and runs under
-   the same lease before the lease passes on (§3.13.4), so it finishes
-   before the channel's next main turn and its results are in place for
-   the turn that reads them. Other background work (upkeep) waits its turn
-   for a head when every head is leased, and upkeep past its latency bound
+   its channel's lease (§3.13.4), so that lease never orders it behind
+   its own channel's other calls, and where another queue is waiting for the head it takes
+   its turn in FIFO order, so traffic on other channels can't starve it
+   (§3.13.3, 5). A fork has its channel's latency bound, so on a channel
+   the operator leaves without one (§3.13.5) that guarantee does not
+   hold. Background work does not hold back
+   its own channel's next main turn, and its results shape a later turn.
+   What a fork costs on a given backend is measured, not assumed (§3.8.6).
+   Other background work (upkeep) waits its turn for a head when every
+   head is leased, and upkeep past its latency bound
    takes the next free head ahead of work within its bound, so traffic
-   can't starve it (principle 13; §3.13.5). Where the pool has a free head,
+   can't starve it (principle 13; §3.13.5). Where the provider has a free
+   head,
    background work runs beside the main turn rather than yielding to it
    (§3.13.6). A free head is not a free slot: on a server with one slot,
    a background call already decoding delays the main turn whatever the
    lease, so the requirement is to keep background work's share of the
-   pool small (bounded output, §3.8) and out of the way; it is not a
-   guarantee of zero delay. How a pool's
+   provider small (bounded output, §3.8) and out of the way; it is not a
+   guarantee of zero delay. How a provider's
    capacity is shared is §3.13 (principle 16). The inbound gate runs inside
    the transport read path and never calls a model.
 
@@ -199,7 +213,7 @@ one is a bug even if its tests pass.
     attributed by stage, channel, trace, trigger and mode. Eval questions
     are denominated in tokens; this is an eval prerequisite. The same
     record names the profile and model each call was sent with and how
-    much of its prompt came from cache, which is what a pool's warm heads
+    much of its prompt came from cache, which is what a provider's warm heads
     are tuned against (§3.13.10).
 
 12. **How the work is done.** Red/green TDD; every test under a timeout;
@@ -237,7 +251,10 @@ one is a bug even if its tests pass.
     knowledge and the ability to act are the agent's, not the channel's.
     The agent presents the same identity on every channel; what changes
     from one channel to the next is register (§3.3.10), never who it is
-    (§3.3.8). Any turn can speak on any channel a transport owns, leave a
+    (§3.3.8). Under the core/periphery strategy, where contexts run
+    different models, the framework gives every context the one identity
+    and how well the agent presents it is measured (supplement §3.8.2),
+    not required. Any turn can speak on any channel a transport owns, leave a
     note for another channel's context, and read another channel's recent
     conversation (§3.5.9–11), and retrieval spans the whole memory. There
     are no channel walls to configure: the per-channel queue and window
@@ -298,16 +315,20 @@ one is a bug even if its tests pass.
     in `docs/threat-model.md` (principle 9).
 
 16. **Compute is finite, and a context switch is what it costs.** Every
-    model endpoint is a resource pool. A provider keeps a limited number of
+    provider's capacity is finite. A provider keeps a limited number of
     conversation prefixes warm, in its slots and, on llama-server, in host
     RAM (`--cache-ram`), and a call whose prefix isn't warm pays a full
     prefill, the expensive part of any call. When more queues are active
-    than the pool can keep warm, each switch evicts another queue's prefix
+    than the provider can keep warm, each switch evicts another queue's prefix
     and the agent thrashes. Lex runs one slot to get the longest window, a
     deployment choice rather than an architectural one. The operator
-    declares how many warm heads each pool has; work runs under leases on
+    declares how many warm heads each provider has; work runs under leases on
     them, and contexts switch at call boundaries chosen to keep prefixes
-    warm, not call by call (§3.13). Principles 2, 3, 7 and 11 and the fork
+    warm, not call by call (§3.13). The kernel's default order keeps a
+    prefix warm while no other queue wants its head and is only
+    best-effort under contention; choosing switch points that suit a
+    backend's cache is a scheduler plugin's job (§3.13.7). Principles 2,
+    3, 7 and 11 and the fork
     requirements (§3.8) follow from this one: reuse the prefix, keep
     background work out of the main turn's way, let cheap work gate
     expensive work, meter every call.
@@ -441,7 +462,11 @@ one is a bug even if its tests pass.
     announced (`on_message_persisted`) in arrival order. A turn in flight is
     never interrupted. Only consecutive inbound messages coalesce: a tool
     result, a notification or a retry stops the run and keeps its place, and
-    notifications never coalesce. A coalesced burst is one exchange for
+    the channel queue never coalesces notification items. Batching before
+    the queue is allowed: a producer may merge a burst into one notification,
+    and the funnel holds notification payloads outside the queue and admits
+    them per `(channel, origin)` at the turn their one stub triggers (§3.7).
+    A coalesced burst is one exchange for
     `max_turns` (item 3). The last message's trace owns the turn: every
     turn hook, usage row and reply carries it, and the earlier messages'
     traces get admission and persistence only.
@@ -1215,7 +1240,12 @@ deciding only what to newly append and in what order.
    concluded gets silence. A declined turn sends nothing, is withheld as a
    vetoed final is (item 2) so the agent knows it stayed silent, and is
    recorded in the outcome log. In conversational registers it errs toward
-   silence: a missed reply costs the user one re-prompt.
+   silence: a missed reply costs the user one re-prompt. How the agent
+   signals a decline is the plugin's choice (a token in the final text, a
+   tool call, or both). The veto that enforces it acts on the agent's own
+   signal, so it is not a gate in the sense of item 4. A signal followed by
+   text that is sent is not a decline: it is not recorded as one, and what
+   was sent is not withheld.
 6. A final with no text and no tool calls is a decline (item 5): it is
    withheld, never sent. A generation that stopped before its reasoning
    finished is not a decline but a failed generation. The agent rescues
@@ -1383,7 +1413,7 @@ design, not requirement. The requirements are outcomes:
    reconstruction.
 3. Background work doesn't degrade the next main turn: it reuses the
    window rather than rebuilding it, leaves the main window's cached prefix
-   intact, and keeps its share of the pool small (principles 2, 3 and
+   intact, and keeps its share of the provider small (principles 2, 3 and
    16).
 4. Each background stage has one profile, which applies on every path the
    stage takes (fork, view call, windowless, subagent); its reasoning and
@@ -1622,78 +1652,120 @@ design, not requirement. The requirements are outcomes:
    (`self` facts, and the compiled self-model), read as
    coherent drift, thrash, or flattening.
 
-### 3.13 Resource pools and context leases
+### 3.13 Providers and context leases
 
 Principle 16 as outcomes. How a replacement scheduler attaches (hook names
 and semantics) is design. Questions this section leaves open on purpose
 (the latency bound of each class, whether a lease also needs a hard limit
 on turns or time, rate limits on hosted APIs, enforcing parallelism apart
-from warm heads, whether the agent sees its pool's state) are tracked in
+from warm heads, whether the agent sees its provider's state) are tracked in
 #296 and are not requirements until decided there.
 
-1. Every chat profile draws on a pool, one per provider endpoint;
-   profiles on one endpoint share it. A pool is one cost center: usage is
-   accounted to the
-   pool, not per channel or per sender, and its declaration belongs to the
-   provider, so no per-channel override changes it. Embedding calls are
+1. Every chat profile draws on a provider; profiles on one provider
+   share it. A provider is one cost center: usage is accounted to the
+   provider, not per channel or per sender, and its capacity is declared
+   on it, so no per-channel override changes it. Embedding calls are
    metered and attributed (item 10) but take no lease, since they extend
    no conversation prefix.
-2. A pool's capacity is its number of warm context heads: how many
-   conversation prefixes the provider keeps ready to extend without a full
+2. A provider's capacity is its number of warm context heads: how many
+   conversation prefixes it keeps ready to extend without a full
    prefill. On llama-server that is its slots plus the prefixes
    `--cache-ram` holds. The operator declares it; it can't be read from
    the server, because it depends on the cache's size divided by each
-   context's KV size. A pool with no declared heads is unbounded: every
+   context's KV size. A provider with no declared heads is unbounded: every
    queue gets a head at once and the server's own queue orders the calls,
    as without this section. How many calls decode at once is not enforced:
    a server queues calls beyond its own slots.
-3. Work that calls the model runs under a lease on one of its pool's heads.
+3. Work that calls the model runs under a lease on one of its provider's
+   heads.
    A queue (a channel's serial queue, a subagent's run, or a plugin's own
    stream of upkeep such as consolidation) takes a lease when it has work
-   and a head is free, keeps it across calls until the queue drains or
-   yields (item 5), and then releases it, and the next waiting queue's
-   context is prefilled. Holding a lease across calls is what keeps a
-   prefix warm: a channel's tool cycle, its own compaction and the
-   continuations of its exchange run on the head it already has. Leases
+   and a head is free. Under the kernel's default order (item 7) it keeps
+   the lease across calls, idle included, while no other queue waits for
+   a head, and gives it up at its next call boundary when one does
+   (item 5), when it yields of its own accord, or when it is stopped
+   (item 7); the next waiting queue's context is then prefilled. Holding
+   a lease across calls is what keeps a prefix warm: while no other queue
+   waits, a channel's tool cycle, its own compaction, its exchange's forks
+   and its next turn run on the head it already has. Under contention the
+   default order keeps prefixes warm only as far as that rule does; a
+   scheduler plugin that knows its backend's cache can do better
+   (item 7). Leases
    go to waiting queues in FIFO order unless a scheduler plugin replaces
    the order (item 7).
 4. A fork runs under the lease that holds its prefix. Exchange-scoped
    background work (stage-2 appraisal, critique) forks the conversation
    (§3.8), so it runs under the lease of the queue whose head holds that
-   prefix, before the lease is released or passed on. An exchange's own
-   background work therefore finishes before its channel's next main turn
-   and pays no prefill beyond its own tail (principle 3). A fork whose
+   prefix. Under the kernel's default order (item 7) a fork's calls keep
+   that head as any of its queue's calls do: while no other queue waits.
+   A head is never taken mid-call, so a fork already running finishes,
+   and one not yet started when its queue gives up the head waits as the
+   last sentence of this item says. The lease orders
+   other queues behind its holder; it does not hold back the holder's own
+   next main turn. What a fork costs on a given backend is measured
+   (item 10; §3.8.6), not assumed. A fork whose
    prefix no longer holds a head waits for a lease like any queue.
-5. Every queue has a latency bound: how long its waiting work may wait
-   for a head. A channel gets its bound from a latency class, a named
-   bound set in operator config: each transport declares the class its
-   channels default to (someone typing into a web UI expects an immediate
-   reply; someone texting doesn't), and the operator can assign a channel
-   another class. The operator config defines which classes exist and what
-   each one's bound is. Upkeep and agency take the latency bounds §3.1.16
-   gives idle work (principle 13). A lease holder yields at its next call
-   boundary when a waiting queue reaches its latency bound, and the head
-   goes to that queue. A holder may also yield of its own accord at any
-   call boundary (consolidation between chunks, for example).
-6. While a pool has a free head, a queue with work takes it without
+5. A latency bound is how long a queue's waiting work may wait for a
+   head, and a queue may have none. A channel gets its bound from a
+   latency class, a named bound set in operator config: a transport may
+   declare the class its channels default to (someone typing into a web
+   UI expects an immediate reply; someone texting doesn't), and the
+   operator can assign a channel another class or none. The operator
+   config defines which classes exist and what each one's bound is.
+   Upkeep and agency take the latency bounds §3.1.16 gives idle work, on
+   whichever queue they wait, and the heartbeat always has one (§3.7
+   Heartbeat). A plugin whose documented behaviour must hold under
+   traffic gives its work a bound (principle 13). Work with no bound
+   never preempts a holder and is never overdue (past its bound). A
+   lease holder yields at its next call boundary when a waiting queue's
+   work reaches its latency bound, and the head goes to that queue. A holder may also yield of its own accord at any
+   call boundary (consolidation between chunks, for example), and it goes
+   to the end of the line. Under the kernel's default order every call
+   boundary is a yield point: a holder with no call in flight on a
+   provider, whether it is waiting on a tool result, between items or
+   idle, gives up its head there as soon as another queue is waiting for
+   one, and keeps it while none is. When several holders have no call in
+   flight, the one whose last call ended earliest gives way first. While
+   another queue waits, a holder sends no new call on that provider until
+   it holds a head again. A
+   holder that has given up its head queues for one again when it next
+   has a call to send.
+6. While a provider has a free head, a queue with work takes it without
    waiting, background work included: background work runs beside a main
    turn rather than yielding to it. Principle 3's yield applies only when
    every head is leased.
-7. The kernel ships the order above: FIFO plus drain-or-yield. A plugin
-   can replace it (separate high- and low-latency queues, or a lightweight
-   classifier deciding what to swap in) and can defer a queue until a
-   deadline, which pauses that channel while others run. No replacement
+7. The kernel provides the mechanism (leases, stop and resume, and the
+   view of item 8) and ships a default order on it: FIFO grants, keep a
+   head while no other queue waits for one, and give it up at a call
+   boundary to one that does (item 5). Under that order a head is held
+   against a waiting queue only until the calls its holder already has in
+   flight end, and calls end, so it cannot deadlock whatever the queues
+   wait on each other for.
+   A plugin
+   can replace that order (separate high- and low-latency queues, or a
+   lightweight classifier deciding what to swap in), can defer a queue
+   until a deadline, which pauses that channel while others run, and can
+   stop a lease holder and resume it later, which is what sharing a head
+   by time takes. A stopped holder gives up its head on that provider at
+   its next call boundary, never mid-call, keeps any lease it holds on
+   another provider, and its work waits (item 9) until the plugin or the
+   operator resumes it. A stop is not held to the latency bound for now,
+   and whether it lapses by itself is not decided (#366). No replacement
    order or deferral delays work past its latency bound, and every
-   deferral lapses by itself, at its deadline or at the bound. A pause
+   deferral lapses by itself, at its deadline or at the bound. Work with
+   no bound (item 5) is not held to the first of these: a replacement
+   order may delay it indefinitely, and under the default order it takes
+   its FIFO turn behind any work past its bound. A deferral of it still
+   lapses at its deadline. A pause
    never needs a turn to undo it, so the agent cannot pause itself into a
    state no turn can leave, and the operator can resume any channel
    without going through a channel's queue. The kernel's own lease
    decisions never call a model, like the inbound gate (principle 3); a
-   replacement that calls one draws on a pool like any other call.
+   replacement that calls one draws on a provider like any other call.
 8. Policy decides from a view the kernel keeps current without calling a
    model. Per queue: depth, the kinds and ages of waiting items, latency
    class, whether it holds a lease, and how long the channel has been idle
-   (§3.1.16). Per pool: declared heads, which queues hold leases, and the
+   (§3.1.16). Per provider: declared heads, which queues hold leases, and the
    waiting queues with their ages. Reading it is cheap enough to do at
    every call boundary.
 9. Waiting for a lease delays work; it never drops it.
@@ -1705,7 +1777,7 @@ from warm heads, whether the agent sees its pool's state) are tracked in
     (item 11); and, where the
     backend reports it, how many prompt tokens came from cache and how
     many were prefilled (llama-server's `timings.cache_n` and `prompt_n`).
-    These are what a pool's declared heads, the latency bounds and
+    These are what a provider's declared heads, the latency bounds and
     `--cache-ram` are tuned against.
 11. Lease grants, yields, waits and deferrals emit `on_metrics` events
     attributed like the calls they affect (§3.10), so the wait a main turn
@@ -1739,13 +1811,17 @@ record that holds the reasoning.
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
-| Every model endpoint is a resource pool of warm context heads the operator declares; queues lease heads and switch at call boundaries (drain or yield, latency classes); no spend or rate caps for now; single-slot is a deployment choice, not architecture; the lease order is pluggable | principle 16; §3.13; #296; operator, 2026-11-02 |
+| Every provider keeps warm context heads, and the operator declares how many; queues lease heads and switch at call boundaries (drain or yield, latency classes); no spend or rate caps for now; single-slot is a deployment choice, not architecture; the lease order is pluggable (release on drain superseded 2026-11-15, row below) | principle 16; §3.13; #296; operator, 2026-11-02 |
+| Leases are a kernel mechanism (a lease per provider and queue, stop and resume at a call boundary, the policy view) under a replaceable default order: FIFO grants, a holder keeps its head across calls while no other queue waits and gives it up at its next call boundary when one does (sticky until contention). That keeps prefixes warm on a best-effort basis and cannot deadlock, since a head is held against a waiter only until the calls already in flight end; backend-aware optimisation is a scheduler plugin's job. It replaces an earlier default that kept a lease until the queue drained and its exchange's forks had run, which needed the kernel to infer when a queue still had work coming and kept finding ways to hold a head its own work was waiting for. Nothing orders forks ahead of their own channel's next main turn, because what that order would save depends on how a provider manages its cache; a pool is a provider, not a separate concept | principle 3; §3.13.3–5, 7; #364; #362; operator, 2026-11-15 |
+| Core/periphery: one deliberative core context and a peripheral per channel, as a plugin strategy beside the base topology. Whether a fork blocks names only whether its parent's next turn waits for its result; every fork shares its parent's lease, and leases are the scheduler's handle for paging context heads. The strategy's pauses are the base's stop and its ordering a replacement lease order, so it amends nothing in §3.13. Trust passes through the core. Accepted as the target; conformance is checked from TRD acceptance | supplement; #16, #296, #527; operator, 2026-11-07 and 2026-11-15 |
+| A latency bound is optional for any queue: work with none never preempts and is never overdue, and a replacement order may delay it indefinitely. Where a bound matters, the requirement says so (§3.1.16's idle-work bounds, the heartbeat's, and any plugin whose documented behaviour must hold under traffic, principle 13), and on a channel with no class its exchange's forks lose principle 3's starvation guarantee. Supersedes "every queue has a latency bound" | principle 3; §3.13.5, 7; #989; operator, 2026-11-15 |
 | Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
 | Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
 | Hedging vocabulary is persona, not architecture | §3.11.5; diverges from the Persyn spec |
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
 | The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
+| A decline is signalled by a plugin-chosen mechanism (token, tool or both) and enforced by a veto that acts on the agent's signal, not a gate; a signal followed by sent text is not a decline | #791, #795, #797, #799, #806 |
 | Model endpoints may be remote; a profile's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each profile sends | #217 |
 | Critique is gated: stylistic lenses run on salience, the provenance check on every claim about the past, never unconditionally per reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
 | No inline refine step: the sent reply is the candidate, and correction arrives on a later turn | principle 3; §3.7 Critique 4; the Persyn spec's own deferred-deliberation default |
@@ -1760,7 +1836,7 @@ record that holds the reasoning.
 | ACP: client-spawned subprocess, official SDK, v1 only, no auth, swappable tool backend | §3.2 ACP |
 | ACP rejects a concurrent prompt; a failed final delivery still ends the turn | #92 initial values |
 | Metering at `LLMClient`, not the turn loop | principle 11; §3.10 |
-| LLM settings are profiles the client applies, not roles that prescribe a purpose; the operator maps each stage to one profile, used on every path the stage takes, with no separate fork and standalone profiles (the split only let a standalone call render the prompt differently from a fork, and no stage needs that), so a stage's view calls and windowless calls share its forks' pool, and corvidae passes profile parameters through without interpreting them; plugins name no profiles, and an unmapped stage uses its kind's default, with no fallback chains; caps come from the profile on every path; a fork that misses its window's prefix is reported, not prevented | §3.6.1, 5; §3.8.4, 6; #439; operator, 2026-11-03 |
+| LLM settings are profiles the client applies, not roles that prescribe a purpose; the operator maps each stage to one profile, used on every path the stage takes, with no separate fork and standalone profiles (the split only let a standalone call render the prompt differently from a fork, and no stage needs that), so a stage's view calls and windowless calls share its forks' provider, and corvidae passes profile parameters through without interpreting them; plugins name no profiles, and an unmapped stage uses its kind's default, with no fallback chains; caps come from the profile on every path; a fork that misses its window's prefix is reported, not prevented | §3.6.1, 5; §3.8.4, 6; #439; operator, 2026-11-03 |
 | `resolve_compaction` keeps `firstresult`; the first non-None return is how a plugin replaces the compactor | #23 |
 | `transform_system_prompt` is append-only: a transform that modifies the identity+register prefix is rejected with a WARNING listing the hook's implementors (the seed plugin among them; the offending wrapper is not singled out); the untransformed prompt is used. The seed is re-composed from config at each boundary, so there is no accumulation. The hook re-runs at every boundary (conversation start, restart, compaction), not just conversation start | #136; proposed 2026-11-01, implemented 2026-11-04 |
 | Same repository, second distribution for cognition; no compatibility aliases on renamed hooks | principle 1; §1 |
@@ -1791,4 +1867,4 @@ record that holds the reasoning.
 | Identity is agent-wide and heads every prompt written in the agent's voice; channel register is appended after it and never replaces it; the subagent's prompt is persona-neutral (§3.5.7) | operator directive, 2026-11-01; #380; #388 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
-| Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; notifications never coalesce | §3.1.19; #398, #296; owner, 2026-11-03 |
+| Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; the channel queue never coalesces notification items | §3.1.19; #398, #296; owner, 2026-11-03 |

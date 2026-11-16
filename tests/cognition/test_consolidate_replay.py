@@ -395,8 +395,14 @@ def test_replay_client_uses_llm_main_even_when_background_is_configured(tmp_path
     from harness.consolidate_replay import _build_client
 
     config = {"llm": {
-        "main": {"base_url": "http://main.example/v1", "model": "main-model"},
-        "background": {"base_url": "http://bg.example/v1", "model": "bg-model"},
+        "providers": {
+            "main": {"base_url": "http://main.example/v1"},
+            "background": {"base_url": "http://bg.example/v1"},
+        },
+        "profiles": {
+            "main": {"model": "main-model"},
+            "background": {"provider": "background", "model": "bg-model"},
+        },
     }}
 
     client = _build_client(config, tmp_path / "agent.yaml")
@@ -470,10 +476,13 @@ def test_unreachable_server_exits_naming_the_base_url(tmp_path, capsys):
     config = tmp_path / "agent.yaml"
     config.write_text(
         "llm:\n"
-        "  main:\n"
-        "    base_url: http://127.0.0.1:1/v1\n"
-        "    model: nonesuch\n"
-        "    max_retries: 0\n"
+        "  providers:\n"
+        "    main:\n"
+        "      base_url: http://127.0.0.1:1/v1\n"
+        "      max_retries: 0\n"
+        "  profiles:\n"
+        "    main:\n"
+        "      model: nonesuch\n"
     )
 
     rc = main([

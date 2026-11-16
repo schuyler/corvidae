@@ -23,6 +23,7 @@ from corvidae.attribution import get_attribution
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.channels._registers import shipped_register
 from corvidae.channels.split import split_message
+from corvidae.channels.stale import format_stale_prefix
 from corvidae.context import MessageType
 from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress
@@ -187,8 +188,8 @@ _BACKOFF_CAP = 300
 
 def _format_stale_prefix(timestamp_ms: int) -> str:
     """Render an envelope timestamp as a "[sent YYYY-MM-DD HH:MM UTC]" prefix."""
-    dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
-    return f"[sent {dt.strftime('%Y-%m-%d %H:%M')} UTC]\n"
+    # Shared with Zulip's catch-up (#644); the name stays for this module's callers.
+    return format_stale_prefix(timestamp_ms)
 
 
 # Reactions: the trigger map holds this many recent messages, the oldest evicted.

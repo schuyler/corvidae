@@ -15,6 +15,7 @@ provide usage data, the fields are logged as `None`.
 """
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -24,6 +25,7 @@ from typing import Any
 import aiohttp
 
 from corvidae.attribution import get_attribution
+from corvidae.lease import ProviderLeases
 
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 ERROR_BODY_CHARS = 2000
@@ -36,6 +38,10 @@ MODEL_NOT_LOADED_MIN_DELAY = 1.0
 MODEL_NOT_LOADED_MARKER = "model is not loaded"
 
 logger = logging.getLogger(__name__)
+
+# Stages already warned about for an unleased chat call (#363). Module scope is
+# process scope: clients are rebuilt on config reload and must not re-warn.
+_unleased_warned_stages: set[str] = set()
 
 # Text shaped like a chat-template control token (<|endoftext|>, <|im_start|>)
 # or a bare reasoning/tool tag (<think>, <tool_call>, <tool_response> and their
@@ -76,7 +82,7 @@ def split_raw_reasoning(message: dict) -> bool:
     closed it. A server's parsed reasoning cannot tell a cut-off from a
     decline (both arrive as empty content); a missing </think> in the raw
     text can. shortcut: assumes the chat template forces thinking open, so
-    set llm.<profile>.raw_reasoning only on endpoints whose template does;
+    set llm.profiles.<profile>.raw_reasoning only on endpoints whose template does;
     elsewhere every reply without a </think> would read as cut off.
     """
     # Drop an optional opening tag and the whitespace after it.
@@ -248,6 +254,9 @@ class LLMClient:
         self.reasoning_reopened = reasoning_reopened
         self.session: aiohttp.ClientSession | None = None
         self.observer: object | None = None
+        # The lease table of this client's provider, set by LLMPlugin when the
+        # provider declares heads; None leaves every call unleased (#364).
+        self.leases: ProviderLeases | None = None
 
     async def _fire_observer(self, method: str, **kwargs) -> None:
         """Invoke an observer callback, swallowing (but logging) its errors.
@@ -349,6 +358,22 @@ class LLMClient:
         if self.session is None:
             raise RuntimeError("LLMClient.start() must be called before chat()")
 
+        # A chat call with no lease key runs unleased: warn once per stage per
+        # process, then DEBUG. embed() never reaches here, so it never warns.
+        attribution = get_attribution()
+        if not attribution.get("lease_key"):
+            stage = attribution.get("stage") or "(none)"
+            level = logging.DEBUG if stage in _unleased_warned_stages else logging.WARNING
+            _unleased_warned_stages.add(stage)
+            logger.log(
+                level,
+                "chat call for stage %s on channel %s (model %s) has no lease "
+                "key and runs unleased; open corvidae.attribution.lease_scope("
+                "<queue key>) around it (warned once per stage; later calls "
+                "log at DEBUG)",
+                stage, attribution.get("channel_id") or "(none)", self.model,
+            )
+
         logger.debug(
             "chat completion request",
             extra={
@@ -397,11 +422,43 @@ class LLMClient:
             tool_count=len(tools) if tools else 0,
         )
 
-        response, elapsed = await self._post_with_retries(
-            "/chat/completions", payload, request_id, label="chat completion",
-            message_count=len(messages),
-            tool_count=len(tools) if tools else 0,
-        )
+        # On a bounded provider a keyed call is sent only while its key holds
+        # a lease; the wait sits here, so the call's own timings measure the
+        # HTTP work only. None means the call never touched a lease.
+        lease_wait_ms: float | None = None
+        async with contextlib.AsyncExitStack() as leased:
+            lease_key = attribution.get("lease_key")
+            if self.leases is not None and lease_key:
+                waited_from = time.monotonic()
+                try:
+                    wait_s = await leased.enter_async_context(
+                        self.leases.call(lease_key, dict(attribution))
+                    )
+                except Exception as exc:
+                    # Shutdown while waiting: still exactly one response callback.
+                    await self._fire_observer(
+                        "response",
+                        model=sent_model,
+                        request_id=request_id,
+                        usage=None,
+                        latency_ms=0.0,
+                        error=str(exc),
+                        timings=None,
+                        started_at=time.time(),
+                        total_ms=0.0,
+                        attempts=0,
+                        message_count=len(messages),
+                        tool_count=len(tools) if tools else 0,
+                        lease_wait_ms=(time.monotonic() - waited_from) * 1000,
+                    )
+                    raise
+                lease_wait_ms = wait_s * 1000
+            response, elapsed = await self._post_with_retries(
+                "/chat/completions", payload, request_id, label="chat completion",
+                message_count=len(messages),
+                tool_count=len(tools) if tools else 0,
+                lease_wait_ms=lease_wait_ms,
+            )
 
         usage = response.get("usage", {})
         logger.info(
@@ -493,6 +550,7 @@ class LLMClient:
             "/embeddings", payload, request_id, label="embeddings",
             message_count=len(texts),
             tool_count=0,
+            lease_wait_ms=None,
         )
 
         # Unpack one vector per input, honoring the index field when the
@@ -513,7 +571,7 @@ class LLMClient:
 
     async def _post_with_retries(
         self, path: str, payload: dict, request_id: str, label: str,
-        message_count: int, tool_count: int,
+        message_count: int, tool_count: int, lease_wait_ms: float | None,
     ) -> tuple[dict, float]:
         """POST with transient-error retries; shared by chat() and embed().
 
@@ -521,6 +579,9 @@ class LLMClient:
         usage on success, with the error string on terminal failure. The
         callback names ``payload["model"]``, the model actually sent (#297),
         and passes llama-server's ``timings`` (cache hits) through verbatim.
+
+        ``lease_wait_ms`` is the call's wait for a lease (None when unleased),
+        passed through to the response callback.
 
         Returns:
             (parsed JSON response, elapsed seconds of the final attempt).
@@ -643,6 +704,7 @@ class LLMClient:
                 attempts=attempt + not_loaded_attempt + 1,
                 message_count=message_count,
                 tool_count=tool_count,
+                lease_wait_ms=lease_wait_ms,
             )
             raise
 
@@ -664,6 +726,7 @@ class LLMClient:
             attempts=attempt + not_loaded_attempt + 1,
             message_count=message_count,
             tool_count=tool_count,
+            lease_wait_ms=lease_wait_ms,
         )
 
         return response, elapsed

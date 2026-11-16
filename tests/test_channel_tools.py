@@ -398,7 +398,7 @@ class TestSubagentInherits:
         tools_plugin.registry = registry
         pm.register(tools_plugin, name="tools")
         plugin = SubagentPlugin(pm)
-        await plugin.on_start(config={"llm": {"main": {"base_url": "x", "model": "m"}}})
+        await plugin.on_start(config={"llm": {"providers": {"main": {"base_url": "x"}}, "profiles": {"main": {"model": "m"}}}})
 
         channel = Channel("irc", "#lex", config=ChannelConfig(disabled_tools=frozenset({"shell"})))
         task_queue = MagicMock(spec=TaskQueue)
