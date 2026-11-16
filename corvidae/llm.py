@@ -375,7 +375,7 @@ class LLMClient:
         logger.log(
             level,
             "chat call for stage %s on channel %s (model %s) has no lease key; "
-            "it runs unleased under the synthetic key %s. Open "
+            "it runs under the synthetic key %s instead. Open "
             "corvidae.attribution.lease_scope(<queue key>) around it (logged "
             "once per stage at ERROR; later calls log at DEBUG)",
             stage, attribution.get("channel_id") or "(none)", self.model,

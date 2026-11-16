@@ -625,7 +625,7 @@ ten children per level is still many tasks.
 
 **Sinks.** `metrics.py` provides `MetricsPlugin` (translates
 `on_llm_response` into `on_metrics` events: `llm.tokens.*`,
-`llm.latency_ms`, `llm.errors`, and `llm.lease_wait_ms` for a call that waited for or took a lease or that shutdown failed, each tagged with the call's `lease_key`, `unleased:<stage>` for a chat call made with no key and `""` for an embedding call), `UsageLogPlugin` (one `usage_log` row
+`llm.latency_ms`, `llm.errors`, and `llm.lease_wait_ms` for a call that waited for or took a lease or that shutdown failed, each tagged with the call's `lease_key`: `unleased:<stage>` for a chat call made with no key; an embedding call carries the enclosing scope's key, or `""` outside any scope), `UsageLogPlugin` (one `usage_log` row
 per call), and `MetricsJsonlPlugin` (JSONL event sink, config
 `daemon.metrics_jsonl`). `outcome_log.py` owns the `exchange_log` table:
 one row per exchange, written by `OutcomeLogPlugin`'s hookimpls at
@@ -689,7 +689,7 @@ CREATE TABLE usage_log (
     max_context_tokens INTEGER, -- the channel's budget in force when the row is written; NULL with no channel, no registry or an unknown channel
     prompt_ms REAL,             -- llama-server timings.prompt_ms: the final attempt's prefill time; NULL from other providers and on failure
     predicted_ms REAL,          -- llama-server timings.predicted_ms: the final attempt's decode time; NULL likewise
-    lease_key TEXT,             -- the queue the call belongs to (#363): channel id, 'subagent:<task_id>', 'upkeep:<plugin>:<tag>', or 'unleased:<stage>' for a call made with no key (#986); NULL on older rows
+    lease_key TEXT,             -- the queue the call belongs to (#363): channel id, 'subagent:<task_id>', 'upkeep:<plugin>:<tag>', or 'unleased:<stage>' for a chat call made with no key (#986); an embedding call has the enclosing scope's key, NULL outside any scope; NULL on older rows
     lease_wait_ms REAL          -- ms the call waited for a lease before it was sent (#364); 0.0 when it did not wait; NULL when it took none (no heads, embedding) and on older rows
 );
 

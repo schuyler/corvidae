@@ -315,6 +315,9 @@ async def test_unleased_call_logs_error_once_per_stage_then_debug(
     assert len(errors) == 1, [r.getMessage() for r in caplog.records]
     assert re.search(r"\bx\b", errors[0].getMessage())
     assert "unleased:x" in errors[0].getMessage()
+    # Channel and model too: the stack's call has no channel, model main-m.
+    assert "(none)" in errors[0].getMessage()
+    assert "main-m" in errors[0].getMessage()
     assert "lease_scope" in errors[0].getMessage()
     assert len(debugs) == 1
     assert unleased_records(caplog, logging.WARNING) == []

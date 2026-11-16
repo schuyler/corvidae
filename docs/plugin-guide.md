@@ -1950,7 +1950,8 @@ logged with a traceback and never breaks an LLM call.
   `llm.latency_ms` (always), `llm.errors` (value 1.0, on terminal
   failure), and `llm.lease_wait_ms` (only for a call that waited for or took a lease, or that shutdown failed). Tags: `{"profile", "model", "stage", "channel", "lease_key"}` —
   stage, channel and lease key come from the call's attribution snapshot
-  (`unleased:<stage>` for a call made with no key, #986).
+  (`unleased:<stage>` for a chat call made with no key, #986; an embedding
+  call carries the enclosing scope's key, or `""` outside any scope).
 - **`UsageLogPlugin`** (entry point `"usage_log"`, depends on
   `"persistence"`) — consumes `on_llm_response` and writes one row per LLM
   call into the `usage_log` SQLite table (in the persistence plugin's
@@ -1967,8 +1968,8 @@ logged with a traceback and never breaks an LLM call.
   attempt, NULL when the backend reports none). Subtracting those two
   from `latency_ms` approximates the time a call queued in the server.
   `lease_key` names the queue the call ran for (#363), `unleased:<stage>`
-  for a call made with no key (#986); it is NULL for rows written before
-  the column existed.
+  for a chat call made with no key (#986); it is NULL for an embedding call
+  outside any scope and for rows written before the column existed.
   `lease_wait_ms` is how long the call waited for a lease (#364): 0.0 when
   it did not wait, NULL when it took none and on older rows; a call that
   shutdown failed while it waited records the time it waited.

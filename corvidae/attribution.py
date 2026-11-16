@@ -15,7 +15,8 @@ and metadata):
     agent_depth: int — how many background agents deep this operation is
         (absent or 0 for a main turn); see next_agent_depth (#816).
     lease_key: str — the queue this work would lease a head for (#363); see
-        lease_scope. Absent means the call runs unleased.
+        lease_scope. Absent on a chat call, LLMClient.chat runs it under the
+        synthetic key 'unleased:<stage>' (#986); an embedding call needs none.
 
 Propagation rule: contextvars snapshot at ``asyncio.create_task`` time.
 A task created before ``set_attribution`` was called never sees the
