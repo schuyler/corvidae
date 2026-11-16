@@ -380,6 +380,94 @@ async def test_legacy_summary_reply_reads_as_one_entry(env):
     assert json.loads(row["topic_tags"]) == ["wifi", "esp32"]
 
 
+# --- #342: an unchanged idle skip is not retried every idle period ----------
+
+
+@pytest.fixture
+async def env_with_persistence():
+    """The ``env`` fixture plus the persistence plugin, for tests that add a
+    message after the channel has already skipped."""
+    memory, persistence, stub, channel, db = await build_consolidation_env()
+    memory.pm.register(_Registry(channel), name="registry")
+    ids = await seed_dialog(persistence, channel, DIALOG)
+    channel.conversation = window_of(
+        channel.id, ids, contents=[c for _, c in DIALOG]
+    )
+    yield memory, persistence, stub, channel, db, ids
+    await db.close()
+
+
+async def _idle_firing(memory, channel_id):
+    await memory._on_channel_idle(channel_id)
+    await memory.wait_for_background_tasks()
+
+
+def _skip_warnings(caplog):
+    return [
+        r for r in caplog.records
+        if "consolidation skipped for channel" in r.getMessage()
+    ]
+
+
+async def test_an_unchanged_range_skips_once(env_with_persistence, caplog):
+    """#342 option B: the second idle firing on an unchanged channel makes no
+    fork attempt and logs nothing. Delete the early return in
+    ``_on_channel_idle`` and this is the test that fails."""
+    memory, persistence, stub, channel, db, ids = env_with_persistence
+    agent = _use(memory, FakeForkAgent({"consolidation"}, error=RuntimeError("down")))
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await _idle_firing(memory, channel.id)
+        await _idle_firing(memory, channel.id)
+
+    assert len(agent.calls) == 1, agent.calls
+    assert len(_skip_warnings(caplog)) == 1
+    assert await fetch_memories(db) == []
+
+
+async def test_a_new_message_makes_the_next_idle_firing_retry(
+    env_with_persistence, caplog,
+):
+    """Nothing has changed is the condition, and a new message changes it.
+    Compare the watermark alone (drop ``MAX(id)`` from the tuple) and this is
+    the test that fails: the second firing stays silent and never retries."""
+    memory, persistence, stub, channel, db, ids = env_with_persistence
+    agent = _use(memory, FakeForkAgent({"consolidation"}, error=RuntimeError("down")))
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await _idle_firing(memory, channel.id)
+        assert len(agent.calls) == 1
+
+        more = await seed_dialog(persistence, channel, [("user", "any news?")])
+        channel.conversation = window_of(
+            channel.id, ids + more,
+            contents=[c for _, c in DIALOG] + ["any news?"],
+        )
+        await _idle_firing(memory, channel.id)
+
+    assert len(agent.calls) == 2, agent.calls
+    assert len(_skip_warnings(caplog)) == 2
+
+
+async def test_the_suppression_holds_for_every_later_firing(
+    env_with_persistence, caplog,
+):
+    """#342 option B: quiet means quiet, not one firing in two.
+
+    ``pop``ing the record suppresses exactly one firing and then retries, so a
+    quiet channel alternates skip/suppress: half the wasted forks and half the
+    repeated warnings, which is not what the ruling says and not what the title
+    says. Reading it instead holds for every firing until something changes.
+    """
+    memory, persistence, stub, channel, db, ids = env_with_persistence
+    agent = _use(memory, FakeForkAgent({"consolidation"}, error=RuntimeError("down")))
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        for _ in range(4):
+            await _idle_firing(memory, channel.id)
+
+    assert len(agent.calls) == 1, agent.calls
+    assert len(_skip_warnings(caplog)) == 1
 # --- #929: the fork paths must name the range the reply was rated over ------
 
 
