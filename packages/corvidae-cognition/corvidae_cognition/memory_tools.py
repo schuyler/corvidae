@@ -1,7 +1,8 @@
-"""MemoryToolsPlugin — search_memory and recall_raw tools (WP1b.3).
+"""MemoryToolsPlugin — search_memory, search_transcripts and recall_raw tools
+(WP1b.3, #648).
 
 Provides the agent's active memory surface (bootstrap-mapping §3.1 "remember
-harder"). Both tools span the agent's whole memory, every channel's (PRD
+harder"). All three tools span the agent's whole memory, every channel's (PRD
 principle 14, GitHub issue #168); they reach further than passive retrieval in
 *status* (demoted and superseded records are visible).
 
@@ -9,7 +10,11 @@ Tool semantics:
   search_memory  — search by meaning and keywords (cosine scan fused with FTS5,
                    #667), keyword-only when the vector path is down; does NOT
                    update access stats.
-  recall_raw     — verbatim dialog replay; DOES update access stats.
+  search_transcripts — keyword search over every channel's raw message_log
+                   rows, so specifics consolidation dropped stay reachable;
+                   does NOT update access stats.
+  recall_raw     — verbatim dialog replay, by memory record (DOES update access
+                   stats) or by channel and message-id range (does not).
 """
 
 from __future__ import annotations
@@ -51,16 +56,120 @@ def _semantic_unavailable_reason(memory) -> str | None:
     return None
 
 
+def _parse_utc(name: str, value: str | None) -> float | str | None:
+    """Parse an after/before filter to an epoch float (naive means UTC).
+
+    None passes through; an unparseable value returns the error string the
+    tool hands back, naming the argument and the accepted formats.
+    """
+    if value is None:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return (
+            f"Error: invalid '{name}' value '{value}'. "
+            "Use YYYY-MM-DD or ISO-8601 format."
+        )
+    # Naive values are read as UTC, never the host's local time.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _cap_lines(lines: list[str], max_tokens: int) -> str:
+    """Join lines, stopping before the one that would cross ``max_tokens``
+    (approximate) and appending the truncation marker."""
+    max_chars = max_tokens * _CHARS_PER_TOKEN
+    kept: list[str] = []
+    used_chars = 0
+    truncated = False
+    for line in lines:
+        # Stop before the line that would cross the cap.
+        if used_chars + len(line) + 1 > max_chars:
+            truncated = True
+            break
+        kept.append(line)
+        used_chars += len(line) + 1
+    if truncated:
+        kept.append("[truncated — token limit reached]")
+    return "\n".join(kept)
+
+
+def _row_role(
+    row_id: int, msg_json: bytes, message_type: str, channel_id: str,
+    consequence: str,
+) -> tuple[str, dict] | None:
+    """Decode a message_log row to (role label, message), or None to skip it.
+
+    A corrupt blob or unknown type is skipped with the standard warning
+    (``consequence`` says what the caller still returns). An unsent row's
+    role is labelled so it is not read back as dialog that was said.
+    """
+    msg = decode_message_row(row_id, msg_json, channel_id, consequence=consequence)
+    if msg is None:
+        return None
+    if message_type not in {t.value for t in MessageType}:
+        parse_message_type(
+            row_id, message_type, channel_id, consequence=consequence,
+        )
+        return None
+    role = msg.get("role", "?")
+    # A withheld response was never said; label it.
+    if message_type == MessageType.UNSENT.value:
+        role = f"{role} (withheld, not sent)"
+    return role, msg
+
+
+async def _replay(
+    db, channel: str, start: int, end: int, header: str, max_tokens: int,
+) -> tuple[str, int]:
+    """Replay one channel's message_log ids [start, end] as ``role: content``
+    lines under ``header``; returns (text, rows read)."""
+    # message_log uses a global AUTOINCREMENT id shared by all channels;
+    # the numeric range contains interleaved foreign-channel rows. The
+    # channel_id predicate is load-bearing.
+    async with db.execute(
+        "SELECT id, CAST(message AS BLOB), message_type FROM message_log "
+        "WHERE channel_id = ? AND id BETWEEN ? AND ? ORDER BY id",
+        (channel, start, end),
+    ) as cursor:
+        msg_rows = await cursor.fetchall()
+
+    # Build output with token cap (approximate: chars / 4); the header counts.
+    max_chars = max_tokens * _CHARS_PER_TOKEN
+    output_parts = [header]
+    used_chars = len(header)
+    truncated = False
+    for row_id, msg_json, message_type in msg_rows:
+        decoded = _row_role(
+            row_id, msg_json, message_type, channel,
+            consequence="the rest of the range is still returned",
+        )
+        if decoded is None:
+            continue
+        role, msg = decoded
+        content = msg.get("content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        line = f"{role}: {content}"
+        if used_chars + len(line) + 1 > max_chars:
+            truncated = True
+            break
+        output_parts.append(line)
+        used_chars += len(line) + 1
+    if truncated:
+        output_parts.append("[truncated — token limit reached]")
+    return "\n".join(output_parts), len(msg_rows)
+
+
 def _format_results(
     entries: list[tuple[int, str, str, float, int, int | None]], max_tokens: int,
 ) -> str:
     """Render (id, score text, summary, created_at, indexed, superseded_by)
     entries as numbered lines, capped at roughly ``max_tokens``."""
     now = time.time()
-    max_chars = max_tokens * _CHARS_PER_TOKEN
     lines: list[str] = []
-    used_chars = 0
-    truncated = False
     for mid, score_text, summary, created_at, indexed, superseded_by in entries:
         # Status flags: superseded wins over demoted (both are indexed=0).
         flags = []
@@ -70,16 +179,8 @@ def _format_results(
             flags.append("[demoted]")
         flag_str = (" " + " ".join(flags)) if flags else ""
         age_str = _format_age(max(0.0, now - created_at))
-        line = f"{mid}. {score_text} ({age_str}){flag_str} {summary}"
-        # Stop before the line that would cross the cap.
-        if used_chars + len(line) + 1 > max_chars:
-            truncated = True
-            break
-        lines.append(line)
-        used_chars += len(line) + 1
-    if truncated:
-        lines.append("[truncated — token limit reached]")
-    return "\n".join(lines)
+        lines.append(f"{mid}. {score_text} ({age_str}){flag_str} {summary}")
+    return _cap_lines(lines, max_tokens)
 
 
 # A None schema can mean another task is still creating it, so wait briefly
@@ -89,7 +190,7 @@ _SCHEMA_RETRY_DELAY = 0.05
 
 
 class MemoryToolsPlugin(CorvidaePlugin):
-    """Plugin registering search_memory and recall_raw agent tools.
+    """Plugin registering search_memory, search_transcripts and recall_raw tools.
 
     Depends on the memory plugin for DB access.
     """
@@ -255,31 +356,14 @@ class MemoryToolsPlugin(CorvidaePlugin):
             topic_tags. Results are token-capped at max_tokens (approximate)."""
             memory = plugin._memory()
 
-            # Parse date filters (naive values treated as UTC per plan)
-            after_ts: float | None = None
-            before_ts: float | None = None
-            if after is not None:
-                try:
-                    dt = datetime.fromisoformat(after)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    after_ts = dt.timestamp()
-                except ValueError:
-                    return (
-                        f"Error: invalid 'after' value '{after}'. "
-                        "Use YYYY-MM-DD or ISO-8601 format."
-                    )
-            if before is not None:
-                try:
-                    dt = datetime.fromisoformat(before)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    before_ts = dt.timestamp()
-                except ValueError:
-                    return (
-                        f"Error: invalid 'before' value '{before}'. "
-                        "Use YYYY-MM-DD or ISO-8601 format."
-                    )
+            # Parse date filters (naive values treated as UTC); an error
+            # string is returned as-is.
+            after_ts = _parse_utc("after", after)
+            if isinstance(after_ts, str):
+                return after_ts
+            before_ts = _parse_utc("before", before)
+            if isinstance(before_ts, str):
+                return before_ts
 
             db = await plugin._wait_for_schema(memory)
             if db is None:
@@ -372,20 +456,149 @@ class MemoryToolsPlugin(CorvidaePlugin):
             ]
             return f"{KEYWORD_ONLY_NOTE}\n" + _format_results(entries, max_tokens)
 
-        async def recall_raw(
-            memory_id: int,
-            max_tokens: int = 1000,
+        async def search_transcripts(
+            query: str,
+            channel: str | None = None,
+            after: str | None = None,
+            before: str | None = None,
+            max_tokens: int = 2000,
         ) -> str:
-            """Replay the raw dialog messages for a memory record (remember harder); memory ids appear on recalled memory lines as "(age, memory <id>)" and as the leading number in search_memory results.
-            Returns a participants header followed by verbatim role:content lines.
-            Works on demoted, superseded, and tombstoned records. Updates access stats."""
-            memory = plugin._memory()
+            """Search every channel's raw messages by keyword; each hit's leading number is a message_log id, widen it with recall_raw(channel, start_id, end_id); channel is an exact id and after/before are YYYY-MM-DD or ISO-8601 UTC (null for no filter); does not update access stats."""
+            # Parse date filters; an error string is returned as-is.
+            after_ts = _parse_utc("after", after)
+            if isinstance(after_ts, str):
+                return after_ts
+            before_ts = _parse_utc("before", before)
+            if isinstance(before_ts, str):
+                return before_ts
 
+            memory = plugin._memory()
             db = await plugin._wait_for_schema(memory)
             if db is None:
                 return "Error: memory schema not available"
 
-            # Fetch the record (no indexed/redacted filter: "remember harder")
+            match = _fts_match_query(query)
+            if match is None:
+                return "No results: query has no searchable terms."
+
+            # Optional filters, all bound parameters (channel is equality).
+            conditions = ["message_fts MATCH ?"]
+            params: list = [match]
+            if channel is not None:
+                conditions.append("m.channel_id = ?")
+                params.append(channel)
+            if after_ts is not None:
+                conditions.append("m.timestamp >= ?")
+                params.append(after_ts)
+            if before_ts is not None:
+                conditions.append("m.timestamp < ?")
+                params.append(before_ts)
+
+            # One read-only query: bm25 order, a snippet window per hit.
+            try:
+                async with db.execute(
+                    "SELECT m.id, m.channel_id, CAST(m.message AS BLOB), "
+                    "m.message_type, m.timestamp, "
+                    "snippet(message_fts, 0, '**', '**', '…', 16) "
+                    "FROM message_fts JOIN message_log m ON m.id = message_fts.rowid "
+                    f"WHERE {' AND '.join(conditions)} "
+                    f"ORDER BY bm25(message_fts) LIMIT {_SEARCH_LIMIT}",
+                    params,
+                ) as cursor:
+                    rows = await cursor.fetchall()
+            except Exception as exc:
+                logger.warning(
+                    "search_transcripts query failed for %r", query, exc_info=True,
+                )
+                return (
+                    f'Error: search_transcripts failed for "{query}" '
+                    f"({type(exc).__name__}); retry with a simpler query."
+                )
+
+            lines: list[str] = []
+            for row_id, channel_id, msg_json, message_type, ts, snippet in rows:
+                # Corrupt rows and unknown types drop out with a warning.
+                decoded = _row_role(
+                    row_id, msg_json, message_type, channel_id,
+                    consequence="it is left out of the search results",
+                )
+                if decoded is None:
+                    continue
+                role, _msg = decoded
+                # UTC explicitly, never the host's local time.
+                when = datetime.fromtimestamp(ts, timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                lines.append(f"{row_id}. [{when}] {channel_id} {role}: {snippet}")
+
+            if not lines:
+                where = f" in channel {channel}" if channel is not None else ""
+                return f"No transcript messages found matching your query{where}."
+            return _cap_lines(lines, max_tokens)
+
+        # The output is other channels' raw text: fence it (#648).
+        search_transcripts.returns_untrusted = True  # type: ignore[attr-defined]
+
+        async def recall_raw(
+            memory_id: int | None = None,
+            channel: str | None = None,
+            start_id: int | None = None,
+            end_id: int | None = None,
+            max_tokens: int = 1000,
+        ) -> str:
+            """Replay raw dialog messages, either by memory_id (from a memory line's "(age, memory <id>)" or search_memory; updates access stats) or by channel with start_id and end_id (message ids from search_transcripts hits; no stat update); pass null for the arguments of the form you don't use."""
+            forms = (
+                "recall_raw takes either memory_id alone, or channel, "
+                "start_id and end_id together"
+            )
+            record_form = (
+                memory_id is not None
+                and channel is None and start_id is None and end_id is None
+            )
+            range_form = (
+                memory_id is None
+                and channel is not None and start_id is not None
+                and end_id is not None
+            )
+            # Exactly one form per call; name what was passed.
+            if not record_form and not range_form:
+                passed = [
+                    name for name, value in (
+                        ("memory_id", memory_id), ("channel", channel),
+                        ("start_id", start_id), ("end_id", end_id),
+                    ) if value is not None
+                ]
+                got = ", ".join(passed) if passed else "no arguments"
+                return (
+                    f"Error: {forms}; pass null for the arguments you don't "
+                    f"use (got {got})."
+                )
+            if range_form and start_id > end_id:  # type: ignore[operator]
+                return (
+                    f"Error: recall_raw start_id {start_id} is after end_id "
+                    f"{end_id}; pass start_id <= end_id. {forms}."
+                )
+
+            memory = plugin._memory()
+            db = await plugin._wait_for_schema(memory)
+            if db is None:
+                return "Error: memory schema not available"
+
+            if range_form:
+                # Range form: replay only; no stat writes.
+                header = f"[channel {channel}: messages {start_id}–{end_id}]"
+                text, rows_read = await _replay(
+                    db, channel, start_id, end_id, header, max_tokens,  # type: ignore[arg-type]
+                )
+                if rows_read == 0:
+                    text += (
+                        f"\nNo messages in channel {channel} between ids "
+                        f"{start_id} and {end_id}."
+                    )
+                return text
+
+            # Record form: fetch the record (no indexed/redacted filter:
+            # "remember harder").
             async with db.execute(
                 "SELECT id, channel_id, summary, msg_id_start, msg_id_end, participants "
                 "FROM memory WHERE id = ?",
@@ -397,17 +610,6 @@ class MemoryToolsPlugin(CorvidaePlugin):
                 return f"Error: memory {memory_id} not found"
 
             mid, channel_id, _summary, msg_id_start, msg_id_end, participants_json = row
-
-            # Fetch raw messages with channel_id predicate.
-            # message_log uses a global AUTOINCREMENT id shared by all channels;
-            # the numeric range [msg_id_start, msg_id_end] contains interleaved
-            # foreign-channel rows. The channel_id predicate is load-bearing.
-            async with db.execute(
-                "SELECT id, CAST(message AS BLOB), message_type FROM message_log "
-                "WHERE channel_id = ? AND id BETWEEN ? AND ? ORDER BY id",
-                (channel_id, msg_id_start, msg_id_end),
-            ) as cursor:
-                msg_rows = await cursor.fetchall()
 
             # Parse participants for the header
             try:
@@ -423,45 +625,9 @@ class MemoryToolsPlugin(CorvidaePlugin):
                 f"[memory {mid}: messages {msg_id_start}–{msg_id_end}, "
                 f"participants: {participants_display}]"
             )
-
-            # Build output with token cap (approximate: chars / 4)
-            max_chars = max_tokens * _CHARS_PER_TOKEN
-            output_parts = [header]
-            used_chars = len(header)
-            truncated = False
-
-            for row_id, msg_json, message_type in msg_rows:
-                # Skip a corrupt row or unknown type with a warning; the
-                # rest of the range still reads back.
-                msg = decode_message_row(
-                    row_id, msg_json, channel_id,
-                    consequence="the rest of the range is still returned",
-                )
-                if msg is None:
-                    continue
-                if message_type not in {t.value for t in MessageType}:
-                    parse_message_type(
-                        row_id, message_type, channel_id,
-                        consequence="the rest of the range is still returned",
-                    )
-                    continue
-                role = msg.get("role", "?")
-                # A withheld response was never said; label it so the
-                # agent doesn't read it back as part of the dialog.
-                if message_type == MessageType.UNSENT.value:
-                    role = f"{role} (withheld, not sent)"
-                content = msg.get("content", "")
-                if not isinstance(content, str):
-                    content = str(content)
-                line = f"{role}: {content}"
-                if used_chars + len(line) + 1 > max_chars:
-                    truncated = True
-                    break
-                output_parts.append(line)
-                used_chars += len(line) + 1
-
-            if truncated:
-                output_parts.append("[truncated — token limit reached]")
+            text, _rows_read = await _replay(
+                db, channel_id, msg_id_start, msg_id_end, header, max_tokens,
+            )
 
             # Bump access stats (WP1b.1.3: recall_raw bumps, search_memory does not)
             now = time.time()
@@ -474,12 +640,20 @@ class MemoryToolsPlugin(CorvidaePlugin):
             )
             await db.commit()
 
-            return "\n".join(output_parts)
+            return text
+
+        # recall_raw replays raw channel text in both forms: fence it (#648).
+        recall_raw.returns_untrusted = True  # type: ignore[attr-defined]
 
         tool_registry.append(Tool(
             name="search_memory",
             fn=search_memory,
             schema=tool_to_schema(search_memory),
+        ))
+        tool_registry.append(Tool(
+            name="search_transcripts",
+            fn=search_transcripts,
+            schema=tool_to_schema(search_transcripts),
         ))
         tool_registry.append(Tool(
             name="recall_raw",
