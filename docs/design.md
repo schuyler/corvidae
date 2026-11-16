@@ -219,7 +219,7 @@ owner's plugin name after the prefix.
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
-| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim, plus the call's start time, total duration across retried attempts, attempts made, the request's message and tool counts, and its lease wait (`lease_wait_ms`, None when unleased); side effects only (metrics, usage log) |
+| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim, plus the call's start time, total duration across retried attempts, attempts made, the request's message and tool counts, and its lease wait (`lease_wait_ms`, None when it took no lease); side effects only (metrics, usage log) |
 | `on_metrics` | broadcast | any plugin via `pm.ahook.on_metrics(...)`; built-in emission from `MetricsPlugin.on_llm_response`; never emit from inside an `on_metrics` implementation (recursion) |
 | `on_config_reload` | broadcast | `ConfigWatcherPlugin`, when `agent.yaml`'s mtime changes; per-plugin error isolation |
 
@@ -537,9 +537,11 @@ critique, the consolidation fork at compaction, the `fork` tool),
 `upkeep:memory:consolidation`). Five sites open a scope: the channel turn in
 `_process_queue_item`, `Agent.fork`, the subagent `work()`, the `fork` tool's
 `work()` and `MemoryPlugin._consolidate_range`; everything else inherits.
-`LLMClient.chat` with no key runs unleased and logs a WARNING naming the
-stage once per stage per process, then DEBUG; embedding calls need no key
-and never warn. On a provider that declares `heads`, the key is what takes a
+`LLMClient.chat` with no key is a plugin bug, but the call is not refused:
+it runs under the synthetic key `unleased:<stage>`, so on a provider with
+`heads` it still counts against them, and it logs an ERROR naming the stage
+and the synthetic key once per stage per process, then DEBUG (#986);
+embedding calls need no key and never log this. On a provider that declares `heads`, the key is what takes a
 lease (below).
 
 **Leases (#364, #367).** `corvidae/lease.py` holds one `ProviderLeases`
@@ -587,7 +589,8 @@ Shutdown: `LLMPlugin.on_stop` closes the manager before the clients. Each
 lease is released (`lease.release`, value the ms it was held, reason
 `shutdown`), each waiting call fails with `LLM provider <name> is shutting
 down; the call was not sent`, and a call that arrives afterwards fails the
-same way. It then awaits the metric emissions still in flight. Those reach
+same way, as does a call granted a head just before `close()` that had not
+yet resumed (#990). It then awaits the metric emissions still in flight. Those reach
 `on_metrics` only if its consumers have not stopped first (plugin `on_stop`
 order is not fixed), so the shutdown events are best effort.
 
@@ -622,7 +625,7 @@ ten children per level is still many tasks.
 
 **Sinks.** `metrics.py` provides `MetricsPlugin` (translates
 `on_llm_response` into `on_metrics` events: `llm.tokens.*`,
-`llm.latency_ms`, `llm.errors`, and `llm.lease_wait_ms` for a call that waited for or took a lease or that shutdown failed, each tagged with the call's `lease_key`, `""` when it had none), `UsageLogPlugin` (one `usage_log` row
+`llm.latency_ms`, `llm.errors`, and `llm.lease_wait_ms` for a call that waited for or took a lease or that shutdown failed, each tagged with the call's `lease_key`, `unleased:<stage>` for a chat call made with no key and `""` for an embedding call), `UsageLogPlugin` (one `usage_log` row
 per call), and `MetricsJsonlPlugin` (JSONL event sink, config
 `daemon.metrics_jsonl`). `outcome_log.py` owns the `exchange_log` table:
 one row per exchange, written by `OutcomeLogPlugin`'s hookimpls at
@@ -686,8 +689,8 @@ CREATE TABLE usage_log (
     max_context_tokens INTEGER, -- the channel's budget in force when the row is written; NULL with no channel, no registry or an unknown channel
     prompt_ms REAL,             -- llama-server timings.prompt_ms: the final attempt's prefill time; NULL from other providers and on failure
     predicted_ms REAL,          -- llama-server timings.predicted_ms: the final attempt's decode time; NULL likewise
-    lease_key TEXT,             -- the queue the call belongs to (#363): channel id, 'subagent:<task_id>' or 'upkeep:<plugin>:<tag>'; NULL when unleased and on older rows
-    lease_wait_ms REAL          -- ms the call waited for a lease before it was sent (#364); 0.0 when it did not wait; NULL when it took none (no key, no heads, embedding) and on older rows
+    lease_key TEXT,             -- the queue the call belongs to (#363): channel id, 'subagent:<task_id>', 'upkeep:<plugin>:<tag>', or 'unleased:<stage>' for a call made with no key (#986); NULL on older rows
+    lease_wait_ms REAL          -- ms the call waited for a lease before it was sent (#364); 0.0 when it did not wait; NULL when it took none (no heads, embedding) and on older rows
 );
 
 CREATE TABLE exchange_log (

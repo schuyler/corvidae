@@ -24,7 +24,7 @@ from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, CritiquePlugin
 from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT, MemoryPlugin
 from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from helpers import build_plugin_and_channel, window_of
-from test_lease_scopes import ScriptedSession, unleased_records, usage_rows
+from test_lease_scopes import ScriptedSession, loud_unleased_records, usage_rows
 
 from corvidae.channel import Channel
 from corvidae.llm_plugin import LLMPlugin
@@ -181,7 +181,7 @@ async def test_appraisal_stage2_is_keyed_by_channel(env: Env, caplog: pytest.Log
 
     rows = await usage_rows(env.db)
     assert [key for stage, key, _m in rows if stage == "appraisal"] == [env.channel.id]
-    assert unleased_records(caplog, logging.WARNING) == []
+    assert loud_unleased_records(caplog) == []
 
 
 async def test_critique_lens_is_keyed_by_channel(env: Env, caplog: pytest.LogCaptureFixture) -> None:
@@ -198,7 +198,7 @@ async def test_critique_lens_is_keyed_by_channel(env: Env, caplog: pytest.LogCap
 
     rows = await usage_rows(env.db)
     assert [key for stage, key, _m in rows if stage == "critique"] == [env.channel.id]
-    assert unleased_records(caplog, logging.WARNING) == []
+    assert loud_unleased_records(caplog) == []
 
 
 async def test_compaction_consolidation_fork_is_keyed_by_channel(
@@ -218,7 +218,7 @@ async def test_compaction_consolidation_fork_is_keyed_by_channel(
 
     rows = await usage_rows(env.db)
     assert rows == [("consolidation", env.channel.id, "fork")]
-    assert unleased_records(caplog, logging.WARNING) == []
+    assert loud_unleased_records(caplog) == []
 
 
 @pytest.mark.parametrize("via_idle_watch", [False, True])
@@ -242,7 +242,7 @@ async def test_catchup_consolidation_view_is_keyed_by_upkeep(
 
     pairs = await keyed_posts(env)
     assert [key for kind, key in pairs if kind == "view"] == [UPKEEP_KEY]
-    assert unleased_records(caplog, logging.WARNING) == []
+    assert loud_unleased_records(caplog) == []
 
 
 async def test_rubric_score_during_catchup_commit_is_keyed_by_upkeep(
@@ -259,4 +259,4 @@ async def test_rubric_score_during_catchup_commit_is_keyed_by_upkeep(
 
     pairs = await keyed_posts(env)
     assert [key for kind, key in pairs if kind == "rubric"] == [UPKEEP_KEY]
-    assert unleased_records(caplog, logging.WARNING) == []
+    assert loud_unleased_records(caplog) == []

@@ -274,13 +274,17 @@ class TestLLMPluginObserverWiring:
         finally:
             await plugin.on_stop()
 
+        # The call carried no lease key, so it ran under the synthetic
+        # 'unleased:<stage>' key (#986), and both observers see it.
         assert recorder.requests[0]["attribution"] == {
             "stage": "turn",
             "channel_id": "c1",
+            "lease_key": "unleased:turn",
         }
         assert recorder.responses[0]["attribution"] == {
             "stage": "turn",
             "channel_id": "c1",
+            "lease_key": "unleased:turn",
         }
 
 

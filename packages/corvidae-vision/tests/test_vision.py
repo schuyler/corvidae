@@ -375,7 +375,7 @@ class TestLeaseKey:
             # Keyed, so the unleased check stayed quiet.
             assert [
                 r for r in records
-                if r.levelno == logging.WARNING and "lease_scope" in r.getMessage()
+                if r.levelno >= logging.WARNING and "lease_scope" in r.getMessage()
             ] == []
         finally:
             await llm.on_stop()
