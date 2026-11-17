@@ -87,8 +87,12 @@ class TestConfig:
         """`limits: 5` is a startup error naming limits and agent.yaml."""
         with pytest.raises(ValueError) as exc:
             await _init_only(pm, {"limits": 5})
-        assert "limits" in str(exc.value)
-        assert "agent.yaml" in str(exc.value)
+        msg = str(exc.value)
+        assert "limits" in msg and "agent.yaml" in msg
+        # The rejected value and the accepted keys are named too.
+        assert "5" in msg
+        for key in ("inbound_per_channel", "notice_interval", "max_waiting"):
+            assert key in msg
 
     async def test_unknown_key_names_it_and_accepted_keys(self, pm):
         """An unknown key is rejected, naming it and the accepted keys."""
