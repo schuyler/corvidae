@@ -3,11 +3,13 @@
 fit_to_budget is the pure, synchronous over-budget fallback: it drops the
 oldest rows from the in-memory window (snapping tool cycles forward), and
 truncates the newest row in memory only when that row alone exceeds the
-budget. One test per case of the approved design's list (1-7).
+budget. One test per case of the approved design's list (1-7), plus the
+fields other than content that truncation also cuts (#1045).
 """
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -177,3 +179,75 @@ def test_system_prompt_leaving_no_room_keeps_newest_row_unchanged() -> None:
     assert conv.messages is rows
     assert conv.messages == [newest]
     assert conv.messages[0]["content"] == "newest question"
+
+
+def test_newest_row_sized_in_tool_call_arguments_is_truncated() -> None:
+    """#1045: a newest row whose size is in a tool call's arguments (empty
+    content) comes back under budget. The call
+    keeps id, type and name; its arguments become valid JSON naming how much
+    was kept; uncut content keeps its stored None; malformed calls stand as they
+    are; the original row is not mutated."""
+    original_args = json.dumps({"text": words(5000)})
+    big = {"id": "c1", "type": "function",
+           "function": {"name": "write_file", "arguments": original_args}}
+    # Malformed calls: no dict function, and non-string arguments.
+    no_function = {"id": "c2", "type": "function", "function": "not a dict"}
+    dict_args = {"id": "c3", "type": "function",
+                 "function": {"name": "t", "arguments": {"a": 1}}}
+    conv = make_window([
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [big, no_function, dict_args]},
+    ])
+    newest = conv.messages[-1]
+    budget = 300
+    dropped, truncated = conv.fit_to_budget(budget)
+    assert truncated is True
+    assert len(dropped) == 1
+    assert conv.token_estimate() <= budget
+    kept = conv.messages[0]
+    # Content shorter than the cut keeps its stored value (None, not "").
+    assert kept["content"] is None
+    call, second, third = kept["tool_calls"]
+    assert (call["id"], call["type"], call["function"]["name"]) == (
+        "c1", "function", "write_file")
+    # Valid JSON whose one field names K of N and carries the first K chars.
+    stub = json.loads(call["function"]["arguments"])
+    match = re.match(r"first (\d+) of (\d+) characters: ", stub["_truncated"])
+    assert match, stub
+    k, n = int(match.group(1)), int(match.group(2))
+    assert n == len(original_args)
+    assert stub["_truncated"][match.end():] == original_args[:k]
+    assert (second, third) == (no_function, dict_args)
+    # The stored row and its call are untouched.
+    assert newest["tool_calls"][0]["function"]["arguments"] == original_args
+
+
+def test_newest_row_sized_in_reasoning_content_is_truncated() -> None:
+    """#1045: an oversized reasoning_content is cut with the content marker,
+    and content shorter than the cut is left exactly as it was."""
+    conv = make_window([
+        {"role": "assistant", "content": "short answer",
+         "reasoning_content": words(3000)},
+    ])
+    budget = 300
+    _, truncated = conv.fit_to_budget(budget)
+    assert truncated is True
+    assert conv.token_estimate() <= budget
+    kept = conv.messages[0]
+    assert kept["content"] == "short answer"
+    assert re.search(
+        r"\[truncated to fit the context window: showing the first \d+ of "
+        rf"{len(words(3000))} characters\]$",
+        kept["reasoning_content"],
+    ), kept["reasoning_content"][-120:]
+
+
+def test_newest_row_with_nothing_cuttable_stands_as_it_is() -> None:
+    """#1045: a newest row whose size is in no cuttable field (no content key,
+    tool_calls not a list) is left whole with truncated False, not raised on."""
+    conv = make_window([{"role": "assistant", "tool_calls": words(2000)}])
+    newest = conv.messages[-1]
+    dropped, truncated = conv.fit_to_budget(300)
+    assert (dropped, truncated) == ([], False)
+    assert conv.messages == [newest]
