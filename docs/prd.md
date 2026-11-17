@@ -979,10 +979,10 @@ Per transport:
     channel, with its own trace and a stamped link to the exchange that
     sent the note, never an inferred one. It carries the origin of the
     exchange that started the chain (§3.1.4), so the chain's kind
-    (principle 13), critique eligibility (§3.7 Critique 3), budget (§3.1.3)
-    and latency bound (§3.13.5) all follow how the chain started. The target's
-    turn still judges for itself, and may end without sending anything
-    (§3.7, the right to silence).
+    (principle 13), budget (§3.1.3) and latency bound (§3.13.5) all
+    follow how the chain started. The target's turn still judges for
+    itself, and may end without sending anything (§3.7, the right to
+    silence).
 11. Reading another channel: any turn can read another channel's recent
     conversation from the raw log, including what consolidation hasn't
     reached, returned at the tail of the reader's window as framed data.
@@ -1199,18 +1199,29 @@ deciding only what to newly append and in what order.
    are quoted to the critic as data, not instructions.
    The reply is never a record of itself. Generator confidence is
    never evidence.
-3. Eligibility is by propagated origin: `user` and `reminder` exchanges
-   are judged, against the stored originating message, which for a turn
-   a note woke may be on another channel (§3.5.10); `critique`,
-   `heartbeat`, and `task` exchanges are exempt, unbypassable by tool use.
-   Withheld responses stay eligible.
+3. Critique judges every main-loop turn, whatever started it, against
+   the window the agent saw when it wrote the reply and the stored
+   originating message, which for a turn a note woke may be on another
+   channel (§3.5.10). It never judges a stage's fork. A fork's output is
+   a verdict that code consumes, and judging it would be a regress with
+   no last judge; its mistakes surface as wrong or missing objections on
+   main-loop turns. A task's result is judged where it lands, in the
+   launcher's window: critique judges what the launcher says about it.
+   It does not judge the task's own claims, which are records to the
+   critic, or the task's tool actions. Which checks run on a judged turn
+   is each check's own selection (items 1–2). Withheld responses stay
+   eligible.
 4. Empty objections are recorded and wake nothing. Stylistic objections
    re-enter as framed CONTEXT at the channel's next turn and wake nothing,
    so a self-check never sends the user an unsolicited message.
    Provenance objections re-enter at the turn their stub triggers, and the
    agent may end that turn without sending anything. It is told that
    silence is the default, and to reply only when it judges its earlier
-   reply could lead the other party to take an incorrect action.
+   reply could lead the other party to take an incorrect action. A turn
+   whose origin is `critique`, whether a critique finding woke it or a
+   note from such a turn did (§3.5.10), is judged like any other (item
+   3), but its non-empty objections never wake a turn; they re-enter as
+   framed CONTEXT at the channel's next turn.
 5. A critic may run on a different model from the one that wrote the window
    it judges. How it gets that window is design; the requirement is
    §3.8.2's: it judges the window the agent saw when it wrote the reply.
@@ -1813,7 +1824,7 @@ record that holds the reasoning.
 | Emotion classifier replaced by appraisal valence | §3.7 Appraisal; diverges from Persyn §4.9 |
 | Engagement decision inverted: cheap gate first, generate only past threshold | principle 7; §3.7 Appraisal; diverges from the Persyn spec |
 | Two-stage appraisal; stage 1 never calls a model; core mints the exchange key; pull-based compute | §3.7 Appraisal 1–3 |
-| Origin is stamped and propagated, never inferred; critique eligibility by origin | §3.1.4; §3.7 Critique 3 |
+| Origin is stamped and propagated, never inferred. Critique eligibility does not depend on origin: every main-loop turn is judged, and the recursion brake is delivery (objections on a `critique`-origin turn wake nothing) | §3.1.4; §3.7 Critique 3–4; #1031; owner, 2026-11-17 |
 | Two grades on a queue item: kernel-certified `metadata`, never a hook argument, and plugin-owned `annotations`; non-human items (and a person's message whose transport supplies a name or addressing) get a code-built header, and outside payloads a fence derived from the stored row; foreign-origin items are framed, never withheld (no silence default) | §3.1.4; §3.3.11; #555 |
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
