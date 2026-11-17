@@ -47,9 +47,9 @@ the extra, those names match nothing and disable nothing, which is harmless.
 
 ## What the plugins rely on
 
-They are ordinary plugins: they use only the kernel API documented in
-[plugin-guide.md](plugin-guide.md#what-the-kernel-exports-to-plugins), which
-`tests/test_kernel_boundary.py` enforces, and the kernel never imports them.
+They are ordinary plugins: they import the kernel modules mapped in
+[plugin-guide.md](plugin-guide.md#what-the-kernel-exports-to-plugins), and
+the kernel never imports them (`tests/test_kernel_boundary.py`).
 Their loggers keep their `corvidae.*` names (`corvidae.memory`,
 `corvidae.appraisal`, ...), so log configuration and log lines are the same
 as before the split.

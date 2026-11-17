@@ -27,7 +27,7 @@ This document covers the kernel: the `corvidae` package. The cognition
 plugins (memory, funnel, appraisal, critique, outcome log) are a second
 distribution in the same repository, `corvidae-cognition`, installed with
 the `cognition` extra and documented in [cognition.md](cognition.md). The
-kernel never imports them; they use the plugin API listed in
+kernel never imports them; the kernel modules they import are mapped in
 [plugin-guide.md](plugin-guide.md#what-the-kernel-exports-to-plugins).
 
 ```
@@ -2170,8 +2170,9 @@ the survivor itself rather than relying on the watchdog's WARNING, because
 the pre-flight disables kernel logging to keep stderr to its one line.
 
 `Runtime.arm_exit_bound()` exists for that second caller rather than the
-pre-flight importing `corvidae.shutdown`, which would put a kernel-internal
-module in a package's imports and break `tests/test_kernel_boundary.py`.
+pre-flight importing `corvidae.shutdown`, so the restart package reaches the
+watchdog through `Runtime`, which it already uses, rather than through a
+second kernel module.
 Tests never arm the watchdog in-process: an autouse fixture in
 `tests/conftest.py` patches the runtime's reference to a no-op, because the
 acp CLI tests reach the armed path through `run_daemon` and a failed start

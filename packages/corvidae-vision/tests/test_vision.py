@@ -266,9 +266,10 @@ class TestLeaseKey:
     channel's lease key into the call record. The plugin opens no scope of
     its own; it inherits the calling turn's.
 
-    The kernel boundary keeps corvidae.metrics out of this package's tests,
-    so the test reads the key from the attribution on_llm_response receives,
-    which is the snapshot UsageLogPlugin writes to usage_log.lease_key.
+    The test reads the key from the attribution on_llm_response receives,
+    which is the snapshot UsageLogPlugin writes to usage_log.lease_key. It
+    avoids corvidae.metrics because an import allowlist, removed by #1026,
+    once kept that module out of this package's tests.
     """
 
     @pytest.mark.asyncio
