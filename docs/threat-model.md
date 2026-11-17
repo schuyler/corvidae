@@ -1786,7 +1786,9 @@ Mitigations:
   missing, never rewrite.
 - The woken turn is silent by default: its stub ends with `NO_REPLY`, which
   critique's veto on critique-origin finals (and `SilencePlugin`'s, when
-  loaded) withholds, and critique does not critique its own turns.
+  loaded) withholds. Critique judges that turn like any other (#1031), but
+  its findings never wake another turn, so a retention finding on it waits
+  for the next turn instead of starting a second filing turn.
 - The lens is inert unless the operator configures a root: `critique.retention.root`,
   or a markdown_recall block, whose root it then uses. Enabling recall
   therefore enables this route. Selection needs both novelty and commitment density over their thresholds,
@@ -1956,6 +1958,51 @@ not replies, and it lasts only as long as the flood. Raise `max_waiting`
 relative to `inbound_per_channel` × the number of open channels to keep
 headroom. Counting only internal work toward the ceiling would close it and
 is a question for the owner (#1052).
+
+### 25. Critique judges every turn: notification text reaches the critic forks, and a background turn can start a correction (#1031)
+
+Critique used to judge only user and reminder turns. It now judges every
+main-loop turn that has a trace (PRD §3.7 Critique 3): heartbeat turns,
+turns a notification started (`webhook:*`, GitHub events, `rss:*`,
+`restart`, `inotify`, notes from other channels), subagent and fork results
+landing in the launcher's window, and corrections. Two routes are new:
+
+- **Notification text reaches the critics.** On a notification turn the
+  "originating message" the lenses and the proactivity check quote is the
+  notification text, so a webhook payload, a feed item or a GitHub event's
+  strings (finding 20) reach a critic fork's instruction, and stage 2 reads
+  the exchange to list claims for the provenance check. A critic's
+  objections re-enter the window as framed CONTEXT. This is the route a
+  user's own text already takes ("The short version", on the provenance
+  critic), now open to every sender a notification source carries.
+- **A background turn can start a correction.** A provenance or
+  proactivity finding on a heartbeat or notification turn wakes a
+  `critique`-origin turn on that channel, which may send.
+
+Mitigations and their limits:
+
+- Quoted text is data: the originating text and the reply are passed
+  through `quote()` inside the fork instruction, the same framing as on a
+  user turn. That is a soft mitigation, as everywhere a model reads
+  untrusted text.
+- A correction never starts another. Its findings wait for the channel's
+  next turn and wake nothing (PRD §3.7 Critique 4), and a note sent from a
+  correction carries the `critique` origin (#1034), so the turn it wakes on
+  another channel is braked too. One finding costs at most one extra turn.
+- The correction stub defaults to `NO_REPLY`, which critique's veto on
+  critique-origin finals withholds.
+- Per channel, `critique.provenance.enabled`, `critique.proactivity.enabled`,
+  `critique.sample_below_rate` and the lens thresholds turn the checks down
+  or off (they are agent-writable unless listed in
+  `agent.immutable_settings`, finding 23).
+- A decline (an unsent `NO_REPLY` or empty final) is not judged (#420), so a
+  background turn that says nothing costs nothing.
+
+Accepted residual: each judged background turn can cost lens, provenance
+and proactivity forks on the shared backend, and a correction turn. How much
+is unmeasured; a harness probe of whether lens objections help on
+notification turns is a follow-up on #1031. A reminder a correction sets can
+still lead to another correction; that loop predates this change.
 
 ## Privilege separation
 

@@ -799,8 +799,8 @@ class AppraisalPlugin(CorvidaePlugin):
         Fires once per exchange-ending turn, whatever its origin: a correction
         (``critique`` origin) is judged too, and its provenance check needs
         the claims stage 2 lists (#1031). Never for a decline (#420): the
-        agent's choice to stay silent is not a response, so ``get_last_stage2`` keeps the channel's
-        last answered exchange. The task is silent (``deliver=False``): its
+        agent's choice to stay silent is not a response, so
+        ``get_last_stage2`` keeps the channel's last answered exchange. The task is silent (``deliver=False``): its
         empty result triggers no on_notify and therefore no main-model turn
         (trap #10).
         """
