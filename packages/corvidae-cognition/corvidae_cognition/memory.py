@@ -1010,6 +1010,47 @@ def _measured_size(messages: list[dict]) -> int:
     return count_tokens(messages[0]["content"]) + sum(message_tokens(m) for m in messages[1:])
 
 
+def _merge_overlapping_segments(
+    own_ranges: list[tuple[int, int]], after_id: int,
+) -> list[list[int]]:
+    """Merge neighbouring segments (in view order) whose id-ranges overlap, so the
+    resulting groups' id-ranges increase strictly (max_id(group k) <
+    min_id(group k+1)) and tile the range. #947.
+
+    ``own_ranges[i]`` is the (min id, max id) of segment i's own rows. Two
+    passes: the first groups consecutive segments by running max; the second
+    re-merges neighbouring groups whose id-ranges still overlap — a late segment
+    can carry an id below an earlier group's max (a severe clock step-back), and
+    pass 1's running max only looks forward, so a single left-to-right re-merge
+    closes the gap (non-overlap is transitive across view-ordered groups, so one
+    pass suffices). In-order ranges never overlap, so no merge happens and each
+    segment is its own group.
+    """
+    groups: list[list[int]] = []
+    current: list[int] = []
+    group_max = after_id
+    for i, (lo, hi) in enumerate(own_ranges):
+        if lo <= group_max:
+            current.append(i)
+            group_max = max(group_max, hi)
+        else:
+            if current:
+                groups.append(current)
+            current = [i]
+            group_max = hi
+    if current:
+        groups.append(current)
+    merged: list[tuple[list[int], int]] = []  # (indices, g_max)
+    for g in groups:
+        g_min = min(own_ranges[i][0] for i in g)
+        g_max = max(own_ranges[i][1] for i in g)
+        if merged and g_min <= merged[-1][1]:
+            merged[-1] = (merged[-1][0] + g, max(merged[-1][1], g_max))
+        else:
+            merged.append((list(g), g_max))
+    return [idx for idx, _ in merged]
+
+
 async def build_catchup_segments(
     db: aiosqlite.Connection, channel_id: str, after_id: int, through_id: int,
     inputs: ViewInputs, fork_prompt: str,
@@ -1092,23 +1133,10 @@ async def build_catchup_segments(
     for run_view, own, index, fit_sums in plans:
         ids = [run_view[k]["_db_id"] for k in own]
         own_ranges.append((min(ids), max(ids)))
-    groups: list[list[int]] = []  # raw-segment indices, in view order
-    current: list[int] = []
-    group_max = after_id
-    for i, (lo, hi) in enumerate(own_ranges):
-        if lo <= group_max:
-            current.append(i)
-            group_max = max(group_max, hi)
-        else:
-            if current:
-                groups.append(current)
-            current = [i]
-            group_max = hi
-    if current:
-        groups.append(current)
+    groups = _merge_overlapping_segments(own_ranges, after_id)
     # end_id: the last range row before the next group's first own id; the last
     # group's span runs to through_id (covers trailing summary rows). The groups'
-    # min ids increase strictly (the merge), so this never goes below the range.
+    # id-ranges are disjoint (the merge), so each end_id is a contiguous frontier.
     group_min = [min(own_ranges[i][0] for i in g) for g in groups]
     ends = [all_ids[bisect_left(all_ids, m) - 1] for m in group_min[1:]] + [through_id]
 

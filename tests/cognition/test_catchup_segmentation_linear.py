@@ -24,6 +24,7 @@ from corvidae_cognition.memory import (
     _dialog_ids,
     _fork_range_sentence,
     _measured_size,
+    _merge_overlapping_segments,
     build_catchup_segments,
     consolidation_instruction,
     logger,
@@ -329,6 +330,33 @@ async def test_out_of_order_with_summary_boundary_tiles():
     non_summary = sorted(i for i in seen if i != 3)
     assert non_summary == [1, 2, 4, 5, 6], f"non-summary rows do not tile: {non_summary}"
 
+
+
+def test_merge_overlapping_segments_is_transitive():
+    """#947 (review finding): a late raw segment can carry an id below an earlier
+    group's max (a severe clock step-back). Pass 1's running max only looks
+    forward, so the merge must be transitive: the groups' id-ranges increase
+    strictly (max_id(group k) < min_id(group k+1)). This is the case pass 1 alone
+    gets wrong — it emits [0], [1], [2, 3] with group 1's max (4) >= group 2's min
+    (3); the re-merge must fold them so no frontier is crossed."""
+    # own_ranges in view order: group A (ids 1-2, 4), segment i (5-8), segment j
+    # (3-6). Segment j's min (3) is below group A's max (4).
+    own_ranges = [(1, 2), (4, 4), (5, 8), (3, 6)]
+    groups = _merge_overlapping_segments(own_ranges, 0)
+    # Every segment is in exactly one group (no loss, no duplication).
+    flat = [i for g in groups for i in g]
+    assert sorted(flat) == [0, 1, 2, 3], f"segments lost or duplicated: {flat}"
+    # The groups' id-ranges increase strictly: a valid contiguous frontier.
+    for k in range(len(groups) - 1):
+        gk_max = max(own_ranges[i][1] for i in groups[k])
+        gk1_min = min(own_ranges[i][0] for i in groups[k + 1])
+        assert gk_max < gk1_min, (
+            f"group {k} max {gk_max} >= group {k + 1} min {gk1_min}: "
+            f"frontier crossed (groups={groups})"
+        )
+    # In-order ranges never overlap: each segment is its own group.
+    assert _merge_overlapping_segments([(1, 1), (2, 2), (3, 3)], 0) == [[0], [1], [2]]
+
 # ---------------------------------------------------------------------------
 # R1: linear work at 10k rows, counted
 # ---------------------------------------------------------------------------
@@ -541,20 +569,7 @@ async def _oracle_build_catchup_segments(
     for run_view, own, _ in plans:
         ids = [run_view[k]["_db_id"] for k in own]
         own_ranges.append((min(ids), max(ids)))
-    groups: list[list[int]] = []
-    current: list[int] = []
-    group_max = after_id
-    for i, (lo, hi) in enumerate(own_ranges):
-        if lo <= group_max:
-            current.append(i)
-            group_max = max(group_max, hi)
-        else:
-            if current:
-                groups.append(current)
-            current = [i]
-            group_max = hi
-    if current:
-        groups.append(current)
+    groups = _merge_overlapping_segments(own_ranges, after_id)
     group_min = [min(own_ranges[i][0] for i in g) for g in groups]
     ends = [max(i for i in all_ids if i < m) for m in group_min[1:]] + [all_ids[-1]]
 
