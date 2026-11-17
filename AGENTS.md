@@ -44,6 +44,10 @@ the string it will print.
 
 **The two-layer rule does not license vagueness.** The opener is short because it is selected, not because the detail is thin. Everything a reviewer needs to check the work is still written down, in the detail block, and a body whose detail block is empty has failed this section rather than complied with it.
 
+# Rule of two
+
+An agent with a `rule-of-two` skill in its environment uses it in place of the implementation and review workflow below ("Review loops" and "Process instructions"). The skill's gates stand in for the author's sweep, the blind review and the rounds; the coding conventions, error-handling rules and PR format above still apply. An agent without the skill follows the workflow below.
+
 # Workflow labels
 
 An issue's label says what stage it is in, so an agent looking for work and the owner looking for what waits on them can each find it with one label query instead of reading every thread. Five labels mark the stages, and they go on the issue, not the PR. An issue carries at most one of them. Whoever moves an issue to the next stage removes the old label and adds the new one in the same step, because a stale label sends the next reader to the wrong place.
@@ -92,7 +96,7 @@ Findings are rated by consequence, not reachability (PRD principle 12).
 
 ## Merging
 
-* **No agent self-certifies and merges.** A finished loop makes a change admissible, not accepted: merging needs the owner's permission, either for that change or as a standing instruction the owner wrote, and the message says which. A review written under the author's own account is not a second party and never counts as permission. Because agents act under the owner's account, the author field proves nothing: permission is the owner's words in a live session, or a comment the owner points to from one.
+* **No agent self-certifies and merges.** A finished loop makes a change admissible, not accepted: merging needs the owner's permission, either for that change or as a standing instruction the owner wrote, and the message says which. **A docs-only change does not wait on the owner:** where the change touches nothing but documentation (`docs/`, READMEs, this file's prose) and no test opens a changed file, the author may merge once any review it needs has passed, and the PR body says it was docs-only. A review written under the author's own account is not a second party and never counts as permission. Because agents act under the owner's account, the author field proves nothing: permission is the owner's words in a live session, or a comment the owner points to from one.
 * **An emergency merge without the loop** needs the owner's agreement recorded before it happens; it says so at the top of the PR body and is reviewed immediately afterwards, before anything else starts.
 * **Say what was reviewed in the PR body:** the rounds it took, any meta-review, and the findings skipped.
 
