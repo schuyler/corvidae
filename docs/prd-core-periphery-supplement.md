@@ -307,6 +307,24 @@ violates one is a bug even if its tests pass.
     escalation summary (§3.4.3), or compose an instruction with full
     context.
 
+13. With the memory and funnel plugins loaded, the framework MUST give
+    the core the memories that channel-bound peripherals have
+    consolidated since the last it was given: admitted at the tail of
+    its window before a model call it was going to make anyway, through
+    the funnel as any tail context is (base PRD §3.7 Funnel), each
+    labelled with the channel it came from. Doing so MUST NOT start a
+    turn. The framework MUST bound how much one call is given, deliver
+    what is held back on later calls, oldest first, and log a warning
+    when it holds any back.
+
+    *Rationale:* The core is the one context that keeps a common
+    awareness of every channel. Escalation (§3.4) brings it what a
+    peripheral cannot handle. This brings it the rest: what the
+    peripherals handled themselves, late by the age of §3.7.4 and what
+    adds to it.
+    Delivery at the tail costs no turn and leaves the core's cached
+    prefix as it was (base PRD principle 2). Owner, 2026-11-16.
+
 ### 3.2 The peripherals (System One)
 
 1. How much thinking effort a periphery's model spends MUST be operator
@@ -778,13 +796,37 @@ With the goals plugin loaded:
 3. Critique, consolidation and compaction MUST each run over the window
    of each context item 1 has them run for, independently, as base PRD
    §3.7 and §3.8
-   describe; nothing about them changes. Whatever a context's window
+   describe; nothing about them changes except by item 4 and in the profile a
+   stage the operator has not mapped uses (§4; TRD K2). Whatever a context's window
    holds MUST be in scope, including the core's instructions and the
    messages it worded itself.
 
    *Rationale:* Because each context that consolidates does so over its
    own window, the agent forms separate memories of a peripheral exchange and of the
    core's decision about it (open question 14).
+
+4. With the memory plugin loaded and forks enabled for consolidation
+   (base PRD §3.7 Memory item 1), the framework MUST start
+   consolidating a channel-bound peripheral's un-consolidated
+   conversation no later than an operator-set age after its oldest
+   un-consolidated message, however little conversation there is and
+   whether or not the channel goes quiet; a turn or a consolidation
+   already running on that channel MAY finish first, and time the
+   daemon is not running is not counted. With §3.1.13,
+   what the core holds at one of its model calls then lags a
+   peripheral by that age and by what the TRD lists as adding to it,
+   among them work that had to finish, the consolidation's own time,
+   attempts that fail, time the daemon is down, and what §3.1.13 held
+   back: the core's awareness of the peripherals is eventually
+   consistent. The framework MUST log the lag it measures,
+   counted from the oldest message.
+
+   *Rationale:* The bound is a time and not an amount of conversation.
+   A bound on amount would repeat what escalation already does, since a
+   peripheral is told to send complex matters to the core; what is left
+   is routine, and for routine matters the question is how stale the
+   core may be. The consolidations are frequent, so they are meant to
+   be cheap: each one covers little. Owner, 2026-11-16.
 
 ### 3.8 Model requirements
 
@@ -964,7 +1006,19 @@ supplement amends them:
   bounds the chain. Base §3.1.3 and §3.5.10 charge a turn that a note
   wakes to the budget of the chain that woke it and give it that
   chain's origin; they keep doing so for notes, and do not apply to
-  escalations and instructions (gap 1; owner, 2026-11-16).
+  escalations and instructions (gap 1; owner, 2026-11-16);
+- a channel-bound peripheral's conversation is also consolidated when
+  its oldest un-consolidated message reaches an operator-set age
+  (§3.7.4). Base §3.7 Memory item 1 names three triggers (compaction,
+  idle, the end of a turn); this adds a fourth for peripheral channels
+  and changes none of the three (owner, 2026-11-16, amending the
+  decision on open question 16);
+- a background chat stage the operator has not mapped does its work
+  for a channel that names a profile on that channel's profile. Base §3.6
+  item 5 gives an unmapped stage the default profile for its kind, and
+  base §3.8 item 4 gives a stage one profile on every path; under this
+  strategy that is one profile per channel (TRD K2; for forks, owner,
+  2026-11-16; the stage's other paths are open, TRD §15.1).
 
 The strategy's scheduling amends none of base §3.13: its pauses are the
 base's stop, and its ordering of active queues is a replacement order

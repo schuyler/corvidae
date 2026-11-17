@@ -338,6 +338,9 @@ policy, a plugin holds it (question 21, gaps 3 and 4).
     consolidation as upkeep under the lease rules. The dream plugin this
     question mentions has been removed. Recorded on #982.
 
+    *Amended (owner, 2026-11-16):* peripheral channels gain a fourth
+    trigger, the age of the oldest un-consolidated message (§5, D3).
+
 17. **Peripheral state lifecycle.** Channel-bound peripherals have
     persistent conversation history; task-bound peripherals are
     ephemeral (§3.2.9). But what about the peripheral's *plugin state*
@@ -650,3 +653,28 @@ unlisted too and is C6's subject.
 **Kernel contracts.** The owner approved the TRD's kernel changes K2 to
 K6, K8 and K9 in session on 2026-11-16 ("I approve K2–K6, K8 and K9").
 K1 and K7 follow A7 and C3.
+
+**After the TRD merged (2026-11-16).** Four more decisions, taken in
+the live session that merged the draft.
+
+- **D1. The slot manager is deferred.** TRD phase 6 is not on the path
+  for now: "the current arrangement with llama CPP and its
+  cache ram setting will handle workloads adequately for now. The main
+  piece is having a central dispatcher that can maintain a common
+  awareness between different channels." The owner named phase 6;
+  phase 7 needs it and waits with it, which is the agent's inference.
+- **D2. Bounded awareness.** The core learns what peripherals handled
+  themselves through their memories: "Frequent and relatively cheap
+  consolidations on the periphery, so that what the core sees is
+  essentially a bounded eventual consistency." The memories are
+  delivered at the tail of the core's window ("tail delivery of
+  course"), with no turn started. Supplement §3.1.13.
+- **D3. The bound is a time.** "I think a time bound would be more
+  relevant because I think a content bound would be redundant with a
+  peripheral instruction to bump complex topics upstairs." This adds a
+  fourth consolidation trigger for peripheral channels and so amends
+  the decision on question 16, which kept three. Supplement §3.7.4.
+- **D4. K2's rule for forks.** "I approve the K2 extension." For a
+  channel that names a profile, a stage the operator has not mapped
+  forks on that channel's profile, so a peripheral's consolidation and
+  critique run on the model that holds its window. A kernel contract.
