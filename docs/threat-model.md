@@ -1902,8 +1902,8 @@ one channel without limit, each one a turn's worth of compute (see finding 14).
 
 The kernel now offers internal work to plugins before it starts
 (`should_start_work`, PRD §3.1 item 20), and `LimitsPlugin` (`core-periphery`
-extra) answers it. It bounds two things: the sum of waiting work across all
-channels, by refusing new `subagent`, `fork` and `notify_other_channel` work
+extra) answers it. It bounds two things: the internal work waiting across
+all channels, by refusing new `subagent`, `fork` and `notify_other_channel` work
 at `limits.max_waiting`, and the messages one channel may have waiting, by
 rejecting at `should_process_message` at `limits.inbound_per_channel`.
 
