@@ -544,7 +544,7 @@ class TestStage2Listeners:
         finally:
             await _teardown(env)
 
-    async def test_failed_stage2_notifies_no_one(self, tmp_path):
+    async def test_failed_stage2_notifies_once_with_none(self, tmp_path):
         env = await build_env(tmp_path, chat_text="not json at all")
         heard = []
 
@@ -554,7 +554,9 @@ class TestStage2Listeners:
         env.appraisal.add_stage2_listener(listener)
         try:
             await self._run(env, "kb")
-            assert heard == []
+            # A miss notifies exactly once, with stage2=None (#1033 R5).
+            assert len(heard) == 1
+            assert heard[0]["stage2"] is None
         finally:
             await _teardown(env)
 
