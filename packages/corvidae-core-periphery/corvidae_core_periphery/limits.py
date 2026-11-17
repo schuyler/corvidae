@@ -38,6 +38,7 @@ def parse_limits(config: dict) -> dict[str, int] | None:
     if block is None:
         return None
     accepted = ", ".join(DEFAULTS)
+    # `limits: 5` would otherwise silently mean "no limits".
     if not isinstance(block, dict):
         raise ValueError(
             f"Config error: limits is {block!r}; expected a mapping with "
@@ -45,6 +46,7 @@ def parse_limits(config: dict) -> dict[str, int] | None:
         )
     settings = dict(DEFAULTS)
     for key, value in block.items():
+        # A typo (or a key from a later phase) must not be ignored.
         if key not in DEFAULTS:
             raise ValueError(
                 f"Config error: limits.{key} is not a known key; accepted keys "
@@ -95,7 +97,7 @@ class LimitsPlugin(CorvidaePlugin):
         trace_id: str | None,
         annotations: dict,
     ) -> WorkRefusal | None:
-        # No block, no verdicts.
+        # No block, no verdicts; no agent yet means on_start has not run.
         if self._settings is None or self._agent is None:
             return None
         total = sum(self._agent.waiting_work().values())
