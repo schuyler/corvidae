@@ -1220,8 +1220,8 @@ deciding only what to newly append and in what order.
    reply could lead the other party to take an incorrect action. A turn
    whose origin is `critique`, whether a critique finding woke it or a
    note from such a turn did (§3.5.10), is judged like any other (item
-   3), but its objections never wake a turn; they re-enter as framed
-   CONTEXT at the channel's next turn.
+   3), but its non-empty objections never wake a turn; they re-enter as
+   framed CONTEXT at the channel's next turn.
 5. A critic may run on a different model from the one that wrote the window
    it judges. How it gets that window is design; the requirement is
    §3.8.2's: it judges the window the agent saw when it wrote the reply.
