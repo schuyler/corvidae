@@ -1554,11 +1554,9 @@ line is plain text in the result, with no kernel header at all.
   at the cost of the only deletion path while the extra is missing.
 - `exchange_log` copies conversation text into two places: stage-2
   `past_claims` (quoted from the reply) and the objection detail critique
-  records in `outcomes`. `corvidae redact` scrubs the claims and the
-  provenance and stylistic critique detail (#160), but not proactivity
-  detail (#1003) or the detail of lenses other plugins add
-  (`critique.<name>.detail`, finding 23; redaction is on hold, #1005), through the `exchange_log` scrubber the cognition extra registers under
-  `corvidae.redact`. A plugin that keeps its own copy of conversation text
+  records in `outcomes`. Through the `exchange_log` scrubber the cognition
+  extra registers under `corvidae.redact`, `corvidae redact` scrubs the
+  claims and the provenance and stylistic critique detail (#160). A plugin that keeps its own copy of conversation text
   and registers no scrubber is not reached. `retrieval_candidate` (#407)
   copies no text, only memory ids and scores, but a row naming a redacted
   memory still records that it was retrieved, so its scrubber deletes
@@ -1568,8 +1566,10 @@ line is plain text in the result, with no kernel header at all.
   already have admitted its summary into that turn's prompt and bumped its
   access count; the window copy ages out with compaction like any CONTEXT. For
   `exchange_log`, the owning exchange's claims are tombstoned with their
-  counts kept. What `redact` still doesn't reach: exchanges whose
-  `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
+  counts kept. What `redact` still doesn't reach: proactivity's objection
+  detail (#1003) and that of lenses other plugins add
+  (`critique.<name>.detail`, finding 23), both waiting on redaction's
+  hold (#1005); exchanges whose `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
   taken out of `sessions.db` (a calibration export, a backup), and, under
   PRD §3.7 Memory 8, copies on other channels: a read of the redacted
   message, a note or send that restates it, and whatever those channels
