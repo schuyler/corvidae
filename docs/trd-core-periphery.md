@@ -1,12 +1,13 @@
 # Corvidae: technical reference — core/periphery architecture
 
-**Status: draft, not accepted.** `docs/prd-core-periphery-supplement.md`
-("the supplement") says what must be true under the core/periphery
-strategy. This document says how each of those outcomes is met and in
-what order it is built. Conformance to the supplement is checked from the
-owner's acceptance of this document, and merging the draft is not that
-acceptance. Until then the supplement's prerequisites are measured
-against `docs/prd.md` ("base") alone.
+**Status: accepted (owner, 2026-11-17).**
+`docs/prd-core-periphery-supplement.md` ("the supplement") says what
+must be true under the core/periphery strategy. This document says how
+each of those outcomes is met and in what order it is built.
+Conformance to the supplement is checked from this document's
+acceptance. That acceptance does not settle what TRD §15.1 leaves open
+for the owner, nor design what TRD §15.2 leaves out. `docs/prd.md` is
+"base".
 
 Section numbers written "§3.5" are the supplement's; "base §3.5" is the
 base PRD's; "TRD §5" is this document's.
