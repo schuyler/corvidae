@@ -171,6 +171,7 @@ agent:
 # critique:
 #   fork_prompt:
 #     provenance: "..."               # prompts/critique_<lens>_fork.md
+#     # alignment: "..."              # replaces a plugin-added lens's brief (#1033)
 #   retention:                        # #742: defaults to markdown_recall's root
 #     root: values/                   # the knowledge base the lens files into; inert with neither
 #   lens:
@@ -181,8 +182,6 @@ agent:
 #     # alignment:
 #     #   ambiguity: 0.6                # the limit on a declared threshold
 #     #   sample_rate: 0.05             # chance it runs when not selected
-#   # fork_prompt:
-#   #   alignment: "..."              # replaces an added lens's brief
 
 # Engagement and decide gates (optional; cognition extra, see
 # docs/configuration.md "gate.*"). Runtime-tunable per channel via set_settings.

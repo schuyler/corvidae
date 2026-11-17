@@ -1555,8 +1555,9 @@ line is plain text in the result, with no kernel header at all.
 - `exchange_log` copies conversation text into two places: stage-2
   `past_claims` (quoted from the reply) and the objection detail critique
   records in `outcomes`. `corvidae redact` scrubs the claims and the
-  provenance and critique detail (#160), but not proactivity detail
-  (#1003), through the `exchange_log` scrubber the cognition extra registers under
+  provenance and stylistic critique detail (#160), but not proactivity
+  detail (#1003) or the detail of lenses other plugins add
+  (`critique.<name>.detail`, finding 23; redaction is on hold, #1005), through the `exchange_log` scrubber the cognition extra registers under
   `corvidae.redact`. A plugin that keeps its own copy of conversation text
   and registers no scrubber is not reached. `retrieval_candidate` (#407)
   copies no text, only memory ids and scores, but a row naming a redacted

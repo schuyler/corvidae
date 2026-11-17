@@ -1587,8 +1587,10 @@ It also registers the `exchange_log` scrubber (`redact_exchange_log`)
 under the `corvidae.redact` entry-point group. When `corvidae redact`
 tombstones a message, the owning exchange's stage-2 `past_claims` text is
 tombstoned (claim and query counts kept), and so is the provenance and
-critique objection detail in its `outcomes` (see "Operator redaction" in
-[design.md](design.md)).
+stylistic critique objection detail in its `outcomes` (see "Operator redaction" in
+[design.md](design.md)). Proactivity's detail (#1003) and the detail of
+lenses other plugins add (`critique.<name>.detail`) are not reached;
+redaction is on hold (#1005).
 
 The table is created in `on_start` when the DB is already open. At boot it
 usually isn't (persistence starts after outcome_log, since `on_start` is

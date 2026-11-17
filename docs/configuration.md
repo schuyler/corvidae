@@ -281,7 +281,7 @@ Each stage has a fork instruction:
 | `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | Appended to the dropped prefix. |
 | `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | Followed by a size sentence (`memory.entry_target_tokens`) and a sentence naming where the range starts. Restart-only, like the rest of `memory.*`. The output schema is fixed in code: an override must still ask for the reply shape: `entries` (each with a `narrative` and `topic_tags`), `participants` and `importance`. A legacy `summary` reply is still read as one entry. |
 | `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
-| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits. An override must ask for its per-claim verdicts format or every run skips. |
+| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md`; for a lens a plugin adds, the brief it declared | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits. An override must ask for its per-claim verdicts format or every run skips. For an added lens the override replaces the brief only: critique appends the reply format itself. |
 
 These are resolved by `resolve_prompt` (#411): a string is inline text,
 `{"file": path}` or a list of paths reads files relative to the config
@@ -749,7 +749,7 @@ sqlite3 sessions.db \
 uv run corvidae redact --db sessions.db message <id> [<id> ...]
 ```
 
-Pass the ids explicitly rather than using the `range` form: `message_log` ids are global across all channels, so an id range spans whatever other channels were active in the same window. The redaction cascades to intersecting memory records, to both FTS surfaces, and to the text `exchange_log` copies from the conversation (stage-2 `past_claims` and the provenance and critique objection detail in `outcomes`); see "Operator redaction" in [design.md](design.md). The jsonl logs are separate files and are not touched — delete them yourself.
+Pass the ids explicitly rather than using the `range` form: `message_log` ids are global across all channels, so an id range spans whatever other channels were active in the same window. The redaction cascades to intersecting memory records, to both FTS surfaces, and to the text `exchange_log` copies from the conversation (stage-2 `past_claims` and the provenance and stylistic critique objection detail in `outcomes`, but not proactivity's (#1003) or that of lenses other plugins add, while redaction is on hold, #1005); see "Operator redaction" in [design.md](design.md). The jsonl logs are separate files and are not touched — delete them yourself.
 
 ---
 
