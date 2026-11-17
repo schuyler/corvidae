@@ -678,3 +678,8 @@ the live session that merged the draft.
   channel that names a profile, a stage the operator has not mapped
   forks on that channel's profile, so a peripheral's consolidation and
   critique run on the model that holds its window. A kernel contract.
+
+**The TRD is accepted (2026-11-17).** In a live session, after #1021's
+seventh review round: "I approve completing 1021 and accepting the
+TRD". Conformance to the supplement is checked from then. The items in
+TRD §15.1 stay open for the owner.

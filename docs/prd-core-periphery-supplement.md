@@ -1,12 +1,11 @@
 # Corvidae: product requirements supplement — core/periphery architecture
 
-**Status: accepted as the target; conformance is checked from TRD
-acceptance.** This supplement is part of the product requirements for
+**Status: accepted; conformance is checked from the TRD's acceptance
+on 2026-11-17.** This supplement is part of the product requirements for
 deployments that run the core/periphery strategy, and `docs/prd.md` §4
-records the decision. A technical reference document (TRD) will say how
-these outcomes are met and in what order; its draft is
-`docs/trd-core-periphery.md`. No work is measured against
-this supplement until the TRD is accepted. Its prerequisites are measured
+records the decision. The technical reference document (TRD),
+`docs/trd-core-periphery.md`, says how these outcomes are met and in
+what order. Its prerequisites are measured
 against the base PRD alone: the kernel rename (#16), providers and warm
 heads (#362), lease scopes (#363), and the lease mechanism with its
 default order and metrics (#364, #367).
@@ -976,9 +975,8 @@ With the goals plugin loaded:
    builds a backlog; each misses what the other catches. Refusing at
    the start of work, never at the arrival of a result, keeps the
    promise that no work disappears silently. The base PRD has no such
-   seam today; it is stated here, where nothing is measured until the
-   TRD is accepted, and the TRD carries it into the base PRD (open
-   question 21, gap 1).
+   seam today; it is stated here, and the TRD carries it into the base
+   PRD (open question 21, gap 1).
 
 ## 4. What carries over
 
@@ -1234,8 +1232,8 @@ sensitivity plugins, locks under principle 15, the floors of principle
 ---
 
 *This supplement is the accepted target, not a build plan. It specifies
-desired outcomes for the core/periphery architecture. The TRD will specify
-how those outcomes are achieved and in what order, and conformance is
-checked from its acceptance. Appendix A collects the research and design ideas
-that informed the requirements; the TRD may adopt, modify, or discard any
-of them.*
+desired outcomes for the core/periphery architecture. The TRD, accepted
+on 2026-11-17, specifies how those outcomes are achieved and in what
+order, and conformance is checked from its acceptance. Appendix A
+collects the research and design ideas that informed the requirements;
+the TRD may adopt, modify, or discard any of them.*
