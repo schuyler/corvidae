@@ -1960,7 +1960,7 @@ class TestRetentionWakeNeedsARoot:
     """
 
     @staticmethod
-    async def _register(env, *, root, origin=None):
+    async def _register(env, *, root):
         if root is not None:
             env.plugin.config.setdefault("critique", {})["retention"] = {"root": root}
         env.funnel.ingest = Mock()
@@ -1971,7 +1971,7 @@ class TestRetentionWakeNeedsARoot:
         }
         await env.plugin._record_and_register(
             env.channel, "kwr", {"critique": {"lenses": ["retention"], "objections": 1}},
-            [objection], wake=False, origin=origin,
+            [objection], wake=False, origin=None,
         )
 
     async def test_with_a_root_the_finding_wakes_the_channel(self, tmp_path):
