@@ -124,7 +124,7 @@ is written.
 | `periphery` | Supplies peripheral settings and prompt sections, the `escalate` tool, the pre-model checks, prompt revisions. | `core`, `registry` |
 | `forks` | Long-lived forks: fork channels, the fork record, joins, blocking, routing, pass-through. | `core`, `registry` |
 | `slots` | The slot-management plugin: lease order, paging, saved slot files. | `core`, `llm`; #366 |
-| `limits` | Verdicts at the inbound gate and the admission seam (TRD §9). Has its own `limits:` config block, so it runs under either topology. | none |
+| `limits` | Verdicts at the inbound gate and the admission seam (TRD §9). Has its own `limits:` config block, so it runs under either topology. | `agent`, `clock` |
 
 Each is registered in `[project.entry-points.corvidae]` of the
 package's `pyproject.toml`, and CI gains a job as
