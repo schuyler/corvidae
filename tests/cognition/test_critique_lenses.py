@@ -281,7 +281,9 @@ class TestAddLensRejection:
             tmp_path, contributors={"contrib": Contributor(bad, _lens("good", sample_rate=1.0))},
         ) as env:
             assert _warnings(caplog, "contrib", name, *needles), caplog.text
-            await _judged_turn(env, "kr2a", stage2=_stage2())
+            # A full vector, as stage 2 always produces, so a wrongly loaded
+            # thresholded lens fails on the run count, not on a missing key.
+            await _judged_turn(env, "kr2a", stage2=_stage2(**{d: 0.5 for d in DIMENSIONS}))
             _assert_ran(env, good=1, **{name: 0})
 
     async def test_raising_implementer_is_named_and_keeps_its_lenses(
