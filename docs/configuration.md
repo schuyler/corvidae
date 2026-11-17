@@ -657,7 +657,7 @@ A refused subagent, fork or note returns `Not started: limits.max_waiting reache
 Known limits, accepted for phase 1:
 
 - The starting tool's own call is a running Task when it asks, and counts toward `max_waiting`, so for `subagent`, `fork` and `notify_other_channel` the effective ceiling is at most `max_waiting - 1` (the other tool calls of the same response count too).
-- No notice is sent to a rejected sender yet; the rejection is only the WARNING above. A notice needs a transport-declared one-to-one flag (TRD §9.1).
+- No notice is sent to a rejected sender yet; the rejection is only the WARNING above. A notice needs a transport-declared one-to-one flag (TRD §9.1, #1051).
 - Concurrent arrivals on one channel can each pass the inbound check before either is enqueued, so the cap can be overshot by a few (a `shortcut:` in the plugin; a per-channel admission counter is the upgrade).
 - The count misses a result in transit between a task finishing and its notification being enqueued, and a turn retry waiting on a timer, so it can read a little low.
 - Channels that are stopped are not left out of the sum (nothing stops a channel yet).

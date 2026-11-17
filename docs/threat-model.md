@@ -1955,7 +1955,7 @@ waiting. The agent still answers each message, so this denies internal work,
 not replies, and it lasts only as long as the flood. Raise `max_waiting`
 relative to `inbound_per_channel` × the number of open channels to keep
 headroom. Counting only internal work toward the ceiling would close it and
-is a question for the owner on #1050's follow-ups.
+is a question for the owner (#1052).
 
 ## Privilege separation
 

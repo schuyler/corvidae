@@ -893,7 +893,7 @@ Phase 1 defers that notice (owner, 2026-11-17): the kernel has no
 notion of a one-to-one channel, and none of the transports declares one. Phase 1
 rejects at the cap and logs the rejection at warning at most once per
 channel per `limits.notice_interval`. The notice waits on a
-transport-declared one-to-one flag.
+transport-declared one-to-one flag (#1051).
 
 No per-response tool-call cap is built; `max_turns` and
 `tools.max_agent_depth` bound a response today.
