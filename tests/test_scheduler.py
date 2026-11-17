@@ -785,7 +785,7 @@ class TestJobTools:
         e = await Env(memdb, sched_config(max_reminders_per_channel=2)).init()
         lex = e.registry.get_or_create("irc", "#lex")
         assert "set for" in await e.tools["remind_me"]("5m", "x", _ctx=e.ctx(lex))
-        assert "set" in await e.tools["add_job"]("0 9 * * *", "y", _ctx=e.ctx(lex))
+        assert "Job #" in await e.tools["add_job"]("0 9 * * *", "y", _ctx=e.ctx(lex))
         reply = await e.tools["add_job"]("0 10 * * *", "z", _ctx=e.ctx(lex))
         assert "limit 2" in reply and "max_reminders_per_channel" in reply
         assert len(await e.rows()) == 2
@@ -816,6 +816,7 @@ class TestJobTools:
                                           _ctx=e.ctx(lex))
         (updated,) = await e.rows("id = ?", (mine.id,))
         assert updated.text == "mine v2"
+        assert updated.schedule_spec == "cron=0 10 * * *;tz=America/Los_Angeles"
         assert updated.next_fire_at == mine.next_fire_at + 3600
 
         await e.tools["cancel_reminder"](mine.id, _ctx=e.ctx(lex))
@@ -839,6 +840,21 @@ class TestJobTools:
         assert "'0 0 31 2 *'" in await upd(row.id, cron="0 0 31 2 *", _ctx=env.ctx(lex))
         (unchanged,) = await env.rows()
         assert (unchanged.text, unchanged.schedule_spec) == (row.text, row.schedule_spec)
+
+    async def test_job_tool_input_errors(self, env):
+        # The input paths the tools add: no channel, nothing to update, an id
+        # that is not a number; "#N" is accepted as cancel_reminder accepts it.
+        lex = env.registry.get_or_create("irc", "#lex")
+        add, upd = env.tools["add_job"], env.tools["update_job"]
+        assert "no channel" in await add("0 9 * * *", "x", _ctx=env.ctx(None))
+        assert "no channel" in await upd(1, prompt="x", _ctx=env.ctx(None))
+        await add("0 9 * * *", "ok", _ctx=env.ctx(lex))
+        (row,) = await env.rows()
+        assert "at least one" in await upd(row.id, _ctx=env.ctx(lex))
+        assert "'abc'" in await upd("abc", prompt="x", _ctx=env.ctx(lex))
+        assert f"Job #{row.id} updated" in await upd(f"#{row.id}", prompt="v2", _ctx=env.ctx(lex))
+        (after,) = await env.rows()
+        assert after.text == "v2"
 
 
 # ---------------------------------------------------------------------------
