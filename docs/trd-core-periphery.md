@@ -70,6 +70,7 @@ or task's is minted when it starts.
 The supplement names its prerequisites as #16, #362, #363, #364 and
 #367, all closed. The decisions of 2026-11-16 added #814 and #138.
 Reading the tree for this document found five more that no list names.
+The decision of 2026-11-17 on #1031 adds one more.
 
 | Needed | Issue | State | What stands on it |
 |---|---|---|---|
@@ -1321,7 +1322,7 @@ means an existing base mechanism meets it and nothing is built.
 | Principle 20 | TRD §5.3, §10.1 | 2 |
 | Principle 21 | TRD §5.4 | 3 |
 | §3.1.1 | K9, TRD §5.1, §5.2 | 2 |
-| §3.1.2 | TRD §3.3, §5.3; §2 (critique) | 0, 2 |
+| §3.1.2 | TRD §3.3, §5.3; §2 (critique, #1031) | 2 |
 | §3.1.3 | TRD §8.3 | 5, 6 |
 | §3.1.4 | TRD §10.1 | 2 |
 | §3.1.5 | TRD §6.5 | 4 |
