@@ -8,6 +8,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# Skip, rather than fail collection, when the `vision` extra isn't installed.
+# CI's `full` job installs it and proves it imports, so this skip can't hide
+# the tests there (#965).
+pytest.importorskip("corvidae_vision")
+
 from corvidae_vision import (
     DEFAULT_PROMPT,
     IMAGE_EXTENSIONS,

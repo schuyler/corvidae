@@ -92,18 +92,20 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies (all extras)
-        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra github-webhook --extra goals-notify
+        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra github-webhook --extra goals-notify --extra vision
 
       # About 26 test sites skip when sqlite-vec can't load, and the Discord
-      # tests skip without the SDK, as do the Signal tests without `emoji`, which would turn them into silent skips
-      # on a green run. Fail here instead.
-      - name: Check sqlite-vec, discord and emoji load
+      # tests skip without the SDK, as do the Signal tests without `emoji` and
+      # the vision tests without `corvidae_vision` (#965), which would turn them
+      # into silent skips on a green run. Fail here instead.
+      - name: Check sqlite-vec, discord, emoji and corvidae_vision load
         run: |
           uv run --no-sync python - <<'PY'
           import sqlite3
           import sqlite_vec
           import discord
           import emoji
+          import corvidae_vision
 
           conn = sqlite3.connect(":memory:")
           conn.enable_load_extension(True)
@@ -114,7 +116,7 @@ jobs:
           PY
 
       - name: Run tests
-        run: uv run --no-sync pytest -q --ignore=packages/corvidae-vision/tests
+        run: uv run --no-sync pytest -q
 
   # Cognition without its sqlite-vec extra (#130): the FTS5-only degradation
   # path PRD §3.7 (Memory 5) requires. Without this job the vector tests skip
