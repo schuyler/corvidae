@@ -407,6 +407,14 @@ agent:
 #   window_seconds: 3600
 #   count_progress: false   # count "let me look that up" progress lines too
 
+# Limits (#1050; `uv sync --extra core-periphery`): bound inbound floods and
+# waiting work. Absent block = no limits. Every value is a whole number, at
+# least 1; keys left out take the defaults below. Read at startup (no hot reload).
+# limits:
+#   inbound_per_channel: 50   # a channel's next message is rejected at this many waiting
+#   notice_interval: 300      # seconds between rejection warnings per channel
+#   max_waiting: 200          # new subagent/fork/note refused at this much waiting work (counts the starting call and waiting inbound messages)
+
 # ACP stdio transport (optional — does not enable ACP by itself).
 # Start with: uv sync --extra acp --extra cognition && uv run corvidae acp
 # For bb: customAcpAgents → `uv run corvidae acp` (see docs/plugin-guide.md).

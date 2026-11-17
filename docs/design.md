@@ -80,6 +80,7 @@ class AgentSpec:
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, annotations: dict | None) -> None
     async def should_process_message(self, channel: Channel, sender: str, text: str, trace_id: str | None) -> bool | None
     async def should_send_response(self, channel: Channel, text: str, emission: str, trace_id: str | None, annotations: dict) -> bool | None
+    async def should_start_work(self, channel: Channel, kind: str, source_channel: str | None, trace_id: str | None, annotations: dict) -> WorkRefusal | None  # corvidae/admission.py
     async def on_message_admitted(self, channel: Channel, trace_id: str, sender: str, text: str) -> None
     async def on_message_rejected(self, channel: Channel, trace_id: str, sender: str, text: str) -> None
     async def on_message_persisted(self, channel: Channel, trace_id: str, rowid: int | None, text: str, annotations: dict) -> None
@@ -164,6 +165,17 @@ returns `False`; otherwise any `True` returns `True`; otherwise `None`.
 `should_process_message` and `should_send_response` are the hooks resolved
 this way.
 
+`should_start_work` is the one veto that does not return `bool | None`: it
+returns `WorkRefusal(limit, remedy) | None`, so a refusal can name the config
+key reached and what to do next. It is not dispatched through `pm.ahook`
+either. The starting tool calls `corvidae.admission.offer_work(pm, ...)`,
+which calls each implementation by hand, in pluggy's call order (wrappers
+skipped, only the kwargs an impl declares passed), because a gathered call
+raises on the first failure and would lose the other plugins' verdicts. An
+implementation that raises is logged (`logger.exception`, naming the plugin,
+the kind and the channel) and counts as no opinion; the first `WorkRefusal`
+wins and later implementations are not called.
+
 Hooks marked `firstresult=True` in the hookspec (`resolve_llm_error`,
 `resolve_compaction`, `transform_tool_result`, `transform_display_text`,
 `transform_system_prompt`, `resolve_conversation`, `resolve_channel`) use pluggy's own first-non-None-wins dispatch — the
@@ -200,8 +212,9 @@ owner's plugin name after the prefix.
 | `register_llm_stages` | broadcast (sync, imperative) | `LLMPlugin.on_start`, once, before it creates clients: plugins add `stages[name] = kind` (`chat` or `embedding`) for each model-calling stage they own |
 | `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, Zulip, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines; `MemoryPlugin` runs its turn consolidation trigger from it, awaiting nothing, since the send waits on the hook |
 | `on_notify` | broadcast | inject a notification into a channel queue |
-| `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
+| `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no kernel implementation (`LimitsPlugin`, `core-periphery` extra, rejects at `limits.inbound_per_channel`); None from empty broadcast allows all messages |
 | `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes any `final` of any origin that contains `NO_REPLY` (a containment check, not an exact match) (cognition extra); a raising implementation fails open (logged, sent); `OutboundCapPlugin` vetoes every emission on a channel once the agent has sent `outbound_cap.max_messages` there since the last admitted human message, and likewise once it has sent `outbound_cap.max_messages_per_window` in the last `outbound_cap.window_seconds` — a sliding window a human message does not reset, shipped unset (`outbound-cap` extra, #791, #821, threat-model finding 19); no kernel implementation, so with none registered everything is sent |
+| `should_start_work` | veto, called by hand / first `WorkRefusal` wins | the [admission seam](#the-admission-seam-should_start_work) (K1, #1050): `subagent` (kind `task`), `fork` (kind `fork`) and `notify_other_channel` (kind `note`) call `offer_work` before they enqueue anything; `channel` is the queue the work would land on, `source_channel` the channel it comes from; a raising implementation is logged and treated as no opinion; `LimitsPlugin` refuses past `limits.max_waiting` (`core-periphery` extra); no kernel implementation, so with none registered everything starts |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
 | `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None). Each message of a coalesced burst fires it under its own trace, in arrival order, before the turn's model call |
@@ -1103,6 +1116,39 @@ bounded by startup.
 Queues added after startup are visible to other plugins that hold a reference
 to this dict because the reference is live.
 
+**Waiting work (K1, #1050).** Two synchronous reads let a plugin see how much
+accepted work has not finished; both return `dict[str, int]` keyed by channel
+ID with zero entries omitted.
+
+- `Agent.waiting_work()` counts, per channel, the items on its `SerialQueue`
+  (queued, plus the item in flight, plus any item a coalesced turn absorbed
+  that is still unanswered; see `SerialQueue.pending_items`) and the
+  `TaskQueue` tasks, queued or running, whose `Task.channel` is that channel
+  (`TaskQueue.pending_by_channel`). A subagent or fork stays on the TaskQueue
+  until it finishes, so fan-out from one turn is visible even though its
+  result can never be refused. The task that carries the starting tool's own
+  call is running on the TaskQueue when the tool offers its work, so it
+  counts: for `subagent`, `fork` and `notify_other_channel` the effective
+  ceiling of a `max_waiting` check is at most `max_waiting - 1` (the
+  response's other tool calls count too).
+- `Agent.waiting_messages()` counts USER items only (transport messages;
+  notifications and tool results never count, and a turn retry counts once
+  it is re-queued, not while it waits on its timer), from the same
+  `pending_items()`. It exists because only the Agent knows item roles;
+  `LimitsPlugin` uses it for the per-channel inbound cap.
+
+Known undercounts: a result in transit between a task finishing and its
+`on_notify` enqueue is on neither the TaskQueue nor the channel queue, and a
+turn retry waiting on a timer is not an item. Both are brief, and both err
+toward admitting.
+
+`SerialQueue.pending_items()` returns the in-flight items followed by the
+queued ones, read synchronously from `asyncio.Queue._queue` (the same
+CPython-private shortcut as `take_while`). `_run` sets the in-flight list to
+the item it is processing and clears it in a `finally`; `take_while` appends
+each item it takes, so a burst absorbed into one coalesced turn keeps
+counting until that turn ends.
+
 ### Message processing
 
 A transport mints the trace id for each inbound user message
@@ -1380,6 +1426,29 @@ hook is the max-turns `tool_calls` strip. `annotations` is the item's
 annotations dict; origin is not a kernel concept, so a gate that needs it reads
 `annotations["origin"]` (stamped by producers such as the scheduler) the way
 cognition's `GatePlugin` does ([cognition.md](cognition.md#gateplugin)).
+
+### The admission seam (`should_start_work`)
+
+`should_start_work(channel, kind, source_channel, trace_id, annotations)` is
+offered internal work that is about to start, so a plugin can bound fan-out
+(K1, #1050; PRD §3.1 item 20). Callers, each before it builds a `Task` or
+enqueues anything: `subagent` (kind `task`), `fork` (kind `fork`), both with
+the calling channel as `channel` (the result lands there), and
+`notify_other_channel` (kind `note`, `channel` the target, `source_channel`
+the sender). The starting turn's `trace_id` and `annotations` ride along.
+
+**Never offered:** the result of work already started. A task completion
+notification (`TaskPlugin._on_task_complete` through `on_notify`), a deferred
+tool result and the Task that carries an ordinary tool call do not pass
+through the seam and cannot be refused, so a refusal never strands work that
+was already accepted.
+
+A refusal is the starting tool's result, `Not started: <limit> reached —
+<remedy>`, so the model reads it as an ordinary tool result and nothing is
+enqueued. `offer_work` logs one warning,
+`work refused: <kind> on <channel> (from <source>): <limit> reached`, with
+`kind`, `channel`, `source_channel`, `limit` and `trace_id` as `extra`. All
+five hook parameters are required (no defaults; see the arg-binding guard).
 
 ### Tool call dispatch
 
@@ -2690,7 +2759,9 @@ catches exceptions, and delivers the result via `on_notify`.
 `max_workers` (default 1) to run up to that many tasks simultaneously.
 Tracks active tasks and completed results (bounded deque, last 100).
 `is_idle` property returns `True` when the queue has no pending items
-and no tasks are currently executing.
+and no tasks are currently executing. `pending_by_channel()` returns the
+count of queued plus running tasks per `Task.channel.id`, read synchronously
+(it feeds `Agent.waiting_work`).
 
 **TaskPlugin** — hookimpl that owns the TaskQueue. Reads
 `daemon.max_task_workers` from config (default 4) to set concurrency,

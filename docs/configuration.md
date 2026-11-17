@@ -640,6 +640,31 @@ The agent can raise or clear its own cap with `set_settings` unless the keys are
 
 ---
 
+## `limits` — bound inbound floods and waiting work (#1050)
+
+Requires the core-periphery extra (`--extra core-periphery`; `packages/corvidae-core-periphery`, plugin name `limits`). Without it, or without a `limits:` block, nothing is bounded and the plugin gives no verdicts. `LimitsPlugin` bounds two things: how many messages one channel may have waiting (it implements `should_process_message`), and how much accepted work may be waiting across all channels before new internal work is refused (it implements `should_start_work`, [design.md](design.md#the-admission-seam-should_start_work)).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `limits.inbound_per_channel` | integer | `50` | A channel's next message is rejected while this many of its transport messages (USER items) are accepted and not yet answered. Counts per channel only: a coalesced turn counts every message it absorbed until the turn ends, notifications and tool results never count, and a turn retry counts once it is re-queued (it is the same unanswered message), not while it waits on its timer. There is no bypass by sender. |
+| `limits.notice_interval` | integer, seconds | `300` | A rejection is logged at WARNING (`limits: rejected a message from <sender> on <channel>: ...`) at most once per channel per this many seconds, on the kernel clock. |
+| `limits.max_waiting` | integer | `200` | New `subagent`, `fork` and `notify_other_channel` work is refused while the sum of `Agent.waiting_work()` across all channels is at least this. The count is queued and in-flight channel-queue items (waiting transport messages included) plus TaskQueue tasks (queued or running) by the channel that started them, so inbound floods on several channels can reach it (`docs/threat-model.md` finding 24). |
+
+Every present value must be a positive whole number, at least 1; keys left out take their default. A non-mapping block (`limits: 5`), an unknown key, or a bool, float, string, `0` or negative value aborts startup with a `Config error` naming the key and the rejected value with the accepted values, or, for an unknown key, the accepted keys.
+
+A refused subagent, fork or note returns `Not started: limits.max_waiting reached — <N> items of accepted work are waiting; wait for some to finish, or raise limits.max_waiting in agent.yaml` as the tool's result and logs a WARNING naming the kind, both channels and the limit; nothing is enqueued. The result of work already started (a task completion, a deferred tool result) is never refused, so a ceiling never strands accepted work.
+
+Known limits, accepted for phase 1:
+
+- The starting tool's own call is a running Task when it asks, and counts toward `max_waiting`, so for `subagent`, `fork` and `notify_other_channel` the effective ceiling is at most `max_waiting - 1` (the other tool calls of the same response count too).
+- No notice is sent to a rejected sender yet; the rejection is only the WARNING above. A notice needs a transport-declared one-to-one flag (TRD §9.1, #1051).
+- Concurrent arrivals on one channel can each pass the inbound check before either is enqueued, so the cap can be overshot by a few (a `shortcut:` in the plugin; a per-channel admission counter is the upgrade).
+- The count misses a result in transit between a task finishing and its notification being enqueued, and a turn retry waiting on a timer, so it can read a little low.
+- Channels that are stopped are not left out of the sum (nothing stops a channel yet).
+- The block is read at startup. There is no hot reload; restart to change it.
+
+---
+
 ## `funnel` — context-admission funnel
 
 Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.

@@ -156,7 +156,7 @@ at startup; see [Declaring hooks in a plugin](#declaring-hooks-in-a-plugin).
 | Prefix | pluggy spec | Resolution | Core uses result | Implementations |
 |---|---|---|---|---|
 | `on_`, `before_`, `after_` | broadcast | none | no | any number; side effects allowed, including on objects passed in |
-| `should_` | broadcast | `resolve_reject_wins` | yes, `bool` | any number; `False` from any one rejects; `None` abstains |
+| `should_` | broadcast | `resolve_reject_wins` | yes, `bool` | any number; `False` from any one rejects; `None` abstains. `should_start_work` is the one exception: it returns `WorkRefusal \| None` (K1 adds one result type to the veto grammar, so a refusal carries its limit and remedy), is not dispatched through `pm.ahook` but by `corvidae.admission.offer_work`, and the first `WorkRefusal` wins |
 | `resolve_` | `firstresult=True` | first non-`None` | yes | any number; first to answer wins, so order matters and the docstring says who answers |
 | `transform_` | `firstresult=True` wrapper chain with a seed in `_SeedHooksPlugin` | chain | yes | any number, LIFO |
 | bare imperative | broadcast | caller-defined over the result list | sometimes | any number; the docstring states what the caller does with results |
@@ -616,6 +616,7 @@ The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwa
 |------|------|------|
 | `on_message(channel, sender: str, text: str, trace_id: str)` | async broadcast | Inbound message arrives; the transport mints and passes the id (see [Traces](#traces)) |
 | `should_process_message(channel, sender: str, text: str, trace_id: str \| None)` | async broadcast, reject-wins | Gate: decide whether to process a message. Return False to reject, True to accept, None for no opinion. |
+| `should_start_work(channel, kind: str, source_channel: str \| None, trace_id: str \| None, annotations: dict)` | async or sync, called by `offer_work`, first `WorkRefusal` wins | Gate on internal work about to start (`subagent` kind `task`, `fork` kind `fork`, `notify_other_channel` kind `note`). Return a `corvidae.admission.WorkRefusal(limit, remedy)` to refuse, anything else for no opinion. See [Refusing internal work](#refusing-internal-work). |
 | `on_message_admitted(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message admits a USER message |
 | `on_message_rejected(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |
 | `should_send_response(channel, text: str, emission: str, trace_id: str \| None, annotations: dict)` | async broadcast, reject-wins | Outbound gate, before each emission (`final`, `progress`, `thinking`, `error`). Return False to withhold, None for no opinion. See [Output gating](#output-gating). |
@@ -864,6 +865,7 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text, trace_id)` | reject-wins (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `should_send_response(channel, text, emission, trace_id, annotations)` | reject-wins (broadcast) | `bool \| None` | Any `False` withholds the emission; anything else sends it |
+| `should_start_work(channel, kind, source_channel, trace_id, annotations)` | first refusal wins (called by hand) | `WorkRefusal \| None` | The first `WorkRefusal` stops the work and becomes the starting tool's result; anything else is no opinion |
 | `resolve_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and gives its remedy: a timeout or an HTTP error asks the user to try again, while an unreachable backend the daemon has scheduled a retry for says the answer will come when the model server is back. When no retry could be scheduled (no kernel clock registered), the unreachable message falls back to asking the user to try again rather than promising a retry that will not happen. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.providers.<name>.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
 | `resolve_compaction(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `transform_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
@@ -1335,6 +1337,43 @@ class FilterPlugin(CorvidaePlugin):
         return None  # No opinion; other plugins decide
 ```
 
+### Refusing internal work
+
+`should_start_work` is the gate for work the agent starts itself, as
+`should_process_message` is for work a sender starts. `subagent` (kind
+`task`), `fork` (kind `fork`) and `notify_other_channel` (kind `note`) offer
+their work before they enqueue anything; `channel` is the queue it would land
+on and `source_channel` where it comes from. Return a `WorkRefusal` to
+refuse:
+
+```python
+from corvidae.admission import WorkRefusal
+
+class BudgetPlugin(CorvidaePlugin):
+    @hookimpl
+    async def should_start_work(self, channel, kind: str, source_channel: str | None, trace_id: str | None, annotations: dict) -> WorkRefusal | None:
+        if self.spent >= self.budget:
+            return WorkRefusal("budget.max", "wait for running work to finish, or raise budget.max in agent.yaml")
+        return None  # No opinion
+```
+
+`limit` is the config key reached and `remedy` the plain-language next step;
+the starting tool returns `Not started: <limit> reached — <remedy>` as its
+result and the kernel logs one warning naming the kind, both channels and the
+limit. Declare all five parameters without defaults. Never offered, so never
+refusable: the result of work already started (a task completion
+notification, a deferred tool result) and the Task that carries an ordinary
+tool call. `Agent.waiting_work()` and `Agent.waiting_messages()` tell a
+verdict how much accepted work is waiting (see
+[design.md](design.md#agent)).
+
+Unlike `should_process_message`, an implementation that raises does not take
+the call down: `offer_work` calls each implementation itself, logs the
+exception (`should_start_work implementation <plugin> raised ...`) and treats
+it as no opinion, so one broken plugin cannot hide another's refusal. The
+cost is that a broken limiter fails open; log and return `None` yourself if
+you want a different message.
+
 When a message is admitted or rejected, plugins are notified via `on_message_admitted` or `on_message_rejected`. These fire exactly once per message. The `on_message_persisted` hook fires after the trace-originating message (the initial USER message or a standalone notification) has been written to the database, regardless of persistence outcome; it fires once per message in a coalesced burst, in arrival order, though only the last message's trace gets the turn (see Traces) — it receives the database rowid (nullable), the originating text, and the item's annotations dict:
 
 ```python
@@ -1616,6 +1655,8 @@ For `firstresult=True` hooks (`resolve_compaction`, `resolve_conversation`, `res
 - `resolve_llm_error` — wrapped in its own try/except inside `_run_turn`'s error handler; failure is logged at WARNING and the default error message is sent instead.
 
 For `should_process_message` (broadcast, resolved with `resolve_reject_wins`), exceptions propagate to the call site.
+
+For `should_start_work`, `offer_work` catches each implementation's exception, logs it with the plugin name and treats it as no opinion; the other implementations still vote (see [Refusing internal work](#refusing-internal-work)).
 
 For `should_send_response`, the Agent catches any exception, logs it at WARNING and sends the emission anyway (fail open). apluggy gathers a broadcast's implementations concurrently without `return_exceptions`, so one raising implementation discards every sibling's verdict for that emission; once any plugin registers a `wrapper=True` implementation on the hook (as `outbound_cap` does, to count after the combined verdict), apluggy awaits the implementations one after another instead, and a raising one stops the rest from running. Either way a gate that can fail should catch and log its own errors and return None, and a slow gate adds its latency to every emission when the hook is wrapped. The serialisation is an apluggy artefact, not intended behaviour: [#904](https://github.com/schuyler/corvidae/issues/904) carries the fix (gather the non-wrappers once every wrapper is set up, each run to completion, the first exception thrown into the wrappers), and `test_wrapped_should_send_response_gates_run_concurrently` in `tests/test_outbound_cap/` is a strict xfail that fails once the lock picks it up, so this paragraph gets rewritten then.
 

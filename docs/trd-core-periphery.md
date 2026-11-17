@@ -79,7 +79,7 @@ The decision of 2026-11-17 on #1031 adds one more.
 | Reading another channel (base §3.5.11) | #235 | open | tail import (TRD §5.5) |
 | Latency bounds on leases (base §3.13.5) | #365 | open, on hold | the core queue's bound and every "overdue" report (TRD §5.5) |
 | Pluggable lease order (base §3.13.7) | #366 | open | the slot manager's ordering (TRD §8) |
-| Origin never taken from a tool argument | #814 | open | every origin in TRD §5.2 |
+| Origin never taken from a tool argument | #814 | closed (2026-11-17) | every origin in TRD §5.2 |
 | Trust plugin | #138 | open | trust stamping (TRD §9.4) |
 | Critique judges every main-loop turn (base §3.7 Critique 3–4) | #1031 | decided, not built | every "Critiqued: yes" in TRD §5.2 |
 
@@ -124,7 +124,7 @@ is written.
 | `periphery` | Supplies peripheral settings and prompt sections, the `escalate` tool, the pre-model checks, prompt revisions. | `core`, `registry` |
 | `forks` | Long-lived forks: fork channels, the fork record, joins, blocking, routing, pass-through. | `core`, `registry` |
 | `slots` | The slot-management plugin: lease order, paging, saved slot files. | `core`, `llm`; #366 |
-| `limits` | Verdicts at the inbound gate and the admission seam (TRD §9). Has its own `limits:` config block, so it runs under either topology. | none |
+| `limits` | Verdicts at the inbound gate and the admission seam (TRD §9). Has its own `limits:` config block, so it runs under either topology. | `agent`, `clock` |
 
 Each is registered in `[project.entry-points.corvidae]` of the
 package's `pyproject.toml`, and CI gains a job as
@@ -188,10 +188,15 @@ async def should_start_work(
   which cannot carry the limit and remedy §3.12 item 2 requires. This
   adds one result type to the veto grammar.
 - **Depth.** `Agent.waiting_work() -> dict[str, int]` returns the count
-  of accepted items not yet finished, per channel id. It reads the
-  channel queues until #318 lands and the write-ahead log after.
+  of accepted items not yet finished, per channel id: items queued on
+  the channel's queue, the item in flight, and tasks queued or running
+  on the TaskQueue that the channel started (owner, 2026-11-17: a
+  subagent or fork sits on the TaskQueue until it finishes, and its
+  result can never be refused, so a count of channel queues alone never
+  sees fan-out from one turn). It reads the queues until #318 lands and
+  the write-ahead log after.
 
-Proposed base PRD text, for §3.1, to be added when this is built:
+Base PRD text, added as §3.1 item 20 when this was built (#1050):
 
 > Internal work that is about to start (a task, a fork, a note or other
 > item one context puts on another's queue) is offered to plugins for a
@@ -884,6 +889,12 @@ and unfinished messages. Caps are per channel only. There is no bypass
 by sender. A rejected sender on a one-to-one channel is told once per
 `limits.notice_interval` that the channel is full.
 
+Phase 1 defers that notice (owner, 2026-11-17): the kernel has no
+notion of a one-to-one channel, and none of the transports declares one. Phase 1
+rejects at the cap and logs the rejection at warning at most once per
+channel per `limits.notice_interval`. The notice waits on a
+transport-declared one-to-one flag (#1051).
+
 No per-response tool-call cap is built; `max_turns` and
 `tools.max_agent_depth` bound a response today.
 
@@ -895,7 +906,9 @@ the sum of `Agent.waiting_work()` is at `limits.max_waiting` (200).
 The sum leaves out channels that are stopped. Messages held on a
 stopped channel would otherwise fill the ceiling and refuse every
 escalation, which is the lockout gap 9 removed from the inbound caps.
-No decision states this rule; it is the agent's judgment.
+No decision states this rule; it is the agent's judgment. It is built
+in phase 5, with `hold_queue`: until then nothing stops a channel
+(`LeaseManager.stop` has no caller), so phase 1 sums every channel.
 
 ### 9.3 Chains and hops (gap 1; TRD decision C2)
 
@@ -1285,16 +1298,18 @@ order.
 
 | Phase | Builds | Needs | Probe |
 |---|---|---|---|
-| 1 | K1, K3, K4, K5, K6, K8; `limits` | #814 | a task started at `max_waiting` returns the refusal text and a warning is logged; a tool result at the same depth is accepted |
+| 1 | K1; `limits` (TRD §9.1, §9.2) | #814 | a task started at `max_waiting` returns the refusal text and a warning is logged; a tool result at the same depth is accepted |
 | 2 | K9; `core`: channel, uid, `attach_cli`, idle beat, `cp_work`, observables; goal block | #1031, phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
-| 3 | K2; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains, the `notify_other_channel` change of TRD §9.3; the age trigger and the digest (TRD §10.5) | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window; a peripheral message that is not escalated is in a CONTEXT row at the core's tail by the core's first call after `consolidate_max_age` and the consolidation's duration, and no core turn was started for it; with the peripheral on a second profile and the `consolidation` stage unmapped, that consolidation's request goes to the peripheral's profile |
+| 3 | K2, K3; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains, the `notify_other_channel` change of TRD §9.3; the age trigger and the digest (TRD §10.5) | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window; a peripheral message that is not escalated is in a CONTEXT row at the core's tail by the core's first call after `consolidate_max_age` and the consolidation's duration, and no core turn was started for it; with the peripheral on a second profile and the `consolidation` stage unmapped, that consolidation's request goes to the peripheral's profile |
 | 4 | K7; tail import; criteria rewrites | #235, phase 3 | a subagent given `tools=["read_file"]` has no other tool in its request; a rewrite is absent from the peripheral's prompt before its next compaction and present after; a frozen channel refuses |
-| 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `hold_queue` and `resume_queue` in `core` (TRD §8.3, on the kernel's stop and resume), the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel; `hold_queue` on the core's own channel returns the refusal text and stores no `cp_stops` row; after `hold_queue` on a fork that shared its parent's lease, the parent's next call is granted |
+| 5 | K4, K5, K6, K8; `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `hold_queue` and `resume_queue` in `core` (TRD §8.3, on the kernel's stop and resume), the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel; `hold_queue` on the core's own channel returns the refusal text and stores no `cp_stops` row; after `hold_queue` on a fork that shared its parent's lease, the parent's next call is granted |
 | 6 | `slots` on one head: order, paging, stamped saves, shutdown save, the other four tools of TRD §8.3; consolidation's yield | #366, #365, phase 5; deferred (D1) | after a page-out and page-in the next call's `cache_n` is within 5% of the prompt length; a file with a changed stamp is deleted with a warning and the call prefills; `pin_context` on a hosted provider returns the no-effect text |
 | 7 | Two models on separate providers, more heads, router mode: not designed | #1009's report, phase 6; deferred with it | alternating a core and a periphery call loads neither model twice (§3.8.5) |
 | 8 | Trust stamping | #138 | an instruction written after an untrusted escalation carries the untrusted level |
 
-Phases 6 and 7 are deferred (TRD decision D1). Phase 7 is not designed here. Until #1009 reports, all that exists is
+K3, K4, K5, K6 and K8 were in phase 1 until the owner moved each to
+the phase that first uses it (2026-11-17): built earlier, each would
+have shipped with no caller. Phases 6 and 7 are deferred (TRD decision D1). Phase 7 is not designed here. Until #1009 reports, all that exists is
 the README's account of router mode.
 
 Each phase updates `docs/design.md`, `docs/configuration.md`,
@@ -1336,7 +1351,7 @@ means an existing base mechanism meets it and nothing is built.
 | §3.2.1, §3.2.7 | K2, TRD §6.1 | 3, 7 |
 | §3.2.4 | TRD §6.2, §6.5 | 3, 4 |
 | §3.2.5, §3.2.6 | Base; TRD §6.1 | 3 |
-| §3.2.8 | K3, K7, TRD §6.1 | 1, 3, 4 |
+| §3.2.8 | K3, K7, TRD §6.1 | 3, 4 |
 | §3.2.9 | K7, TRD §6.6 | 4 |
 | §3.3.1–3 | TRD §8.2, §8.3 | 6 |
 | §3.3.4, §3.3.5, §3.3.8 | TRD §8.1, §8.3 | 5, 6 |
@@ -1347,12 +1362,12 @@ means an existing base mechanism meets it and nothing is built.
 | §3.4.5 | TRD §6.4 | 3 |
 | §3.4.6 | TRD §6.3; the trust label, TRD §9.4 | 3, 8 |
 | §3.4.7 | TRD §9.4 | 8 |
-| §3.5 preamble | K6, K8, TRD §7.1, §7.2, §7.4 | 1, 5 |
+| §3.5 preamble | K6, K8, TRD §7.1, §7.2, §7.4 | 5 |
 | §3.5.1–3 | TRD §7.1, §7.4 | 5 |
 | §3.5.4 | TRD §7.4, §7.5 | 5 |
 | §3.5.5 | TRD §5.4, §5.6, §7.1 | 3, 5 |
-| §3.5.6 | K5, TRD §7.6 | 1, 5 |
-| §3.5.7 | K4, TRD §7.3 | 1, 5 |
+| §3.5.6 | K5, TRD §7.6 | 5 |
+| §3.5.7 | K4, TRD §7.3 | 5 |
 | §3.6.1–3, §3.6.5 | TRD §10.1 | 2 |
 | §3.7.1–3 | TRD §10.2, §10.3; compaction of a task-bound peripheral is open (TRD §15.1); its critique is settled (#1031) | 3, 5 |
 | §3.7.4 | TRD §10.5 | 3 |
