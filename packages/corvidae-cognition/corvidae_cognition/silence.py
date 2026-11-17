@@ -34,7 +34,7 @@ from corvidae.tool import Tool, ToolContext, tool_to_schema
 
 logger = logging.getLogger("corvidae.silence")
 
-# Same literal as critique.py's NO_REPLY_MARKER; critique is unchanged.
+# Same literal as critique.py's NO_REPLY_MARKER, which critique's own veto keys on.
 NO_REPLY = "NO_REPLY"
 
 

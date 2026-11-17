@@ -30,6 +30,12 @@ DECLINE_MATRIX = [
     pytest.param("NO_REPLY", MessageType.UNSENT, False, id="unsent-no-reply"),
     pytest.param("  NO_REPLY\n", MessageType.UNSENT, False, id="unsent-padded-no-reply"),
     pytest.param("quiet: NO_REPLY", MessageType.UNSENT, False, id="unsent-embedded-no-reply"),
+    # A decline whose text asks permission: the proactivity check would fire
+    # on it if the skip came after that check.
+    pytest.param(
+        "Should I restart it? NO_REPLY", MessageType.UNSENT, False,
+        id="unsent-permission-question-no-reply",
+    ),
     pytest.param("", MessageType.UNSENT, False, id="unsent-empty"),
     pytest.param("  \n", MessageType.UNSENT, False, id="unsent-whitespace"),
     # Another gate withheld a response with content: still judged.
@@ -276,7 +282,10 @@ async def _user_turn(env, reply: str) -> None:
 
 
 class TestDeclineAtAgentLevel:
-    @pytest.mark.parametrize("reply", ["NO_REPLY", ""])
+    # The permission-question decline makes the critique half deterministic:
+    # without the skip it would queue the proactivity check, where the plain
+    # token could only be caught by the critique.sample_below_rate draw.
+    @pytest.mark.parametrize("reply", ["NO_REPLY", "", "Should I restart it? NO_REPLY"])
     async def test_declined_turn_is_neither_appraised_nor_judged(self, turn_env, reply):
         await _user_turn(turn_env, reply)
         # The final went unsent, and nothing was queued to appraise or judge it.
