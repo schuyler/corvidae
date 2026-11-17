@@ -185,7 +185,8 @@ def test_newest_row_sized_in_tool_call_arguments_is_truncated() -> None:
     """#1045: a newest row whose size is in a tool call's arguments (empty
     content) comes back under budget. The call
     keeps id, type and name; its arguments become valid JSON naming how much
-    was kept; uncut content keeps its stored None; malformed calls stand as they
+    was kept; uncut content and a short sibling call keep their stored
+    values; malformed calls stand as they
     are; the original row is not mutated."""
     original_args = json.dumps({"text": words(5000)})
     big = {"id": "c1", "type": "function",
@@ -194,10 +195,13 @@ def test_newest_row_sized_in_tool_call_arguments_is_truncated() -> None:
     no_function = {"id": "c2", "type": "function", "function": "not a dict"}
     dict_args = {"id": "c3", "type": "function",
                  "function": {"name": "t", "arguments": {"a": 1}}}
+    # A well-formed call shorter than the cut keeps its arguments.
+    small = {"id": "c4", "type": "function",
+             "function": {"name": "read_file", "arguments": '{"p": "a.txt"}'}}
     conv = make_window([
         {"role": "user", "content": "old"},
         {"role": "assistant", "content": None,
-         "tool_calls": [big, no_function, dict_args]},
+         "tool_calls": [big, no_function, dict_args, small]},
     ])
     newest = conv.messages[-1]
     budget = 300
@@ -208,7 +212,7 @@ def test_newest_row_sized_in_tool_call_arguments_is_truncated() -> None:
     kept = conv.messages[0]
     # Content shorter than the cut keeps its stored value (None, not "").
     assert kept["content"] is None
-    call, second, third = kept["tool_calls"]
+    call, second, third, fourth = kept["tool_calls"]
     assert (call["id"], call["type"], call["function"]["name"]) == (
         "c1", "function", "write_file")
     # Valid JSON whose one field names K of N and carries the first K chars.
@@ -218,7 +222,7 @@ def test_newest_row_sized_in_tool_call_arguments_is_truncated() -> None:
     k, n = int(match.group(1)), int(match.group(2))
     assert n == len(original_args)
     assert stub["_truncated"][match.end():] == original_args[:k]
-    assert (second, third) == (no_function, dict_args)
+    assert (second, third, fourth) == (no_function, dict_args, small)
     # The stored row and its call are untouched.
     assert newest["tool_calls"][0]["function"]["arguments"] == original_args
 
@@ -251,3 +255,29 @@ def test_newest_row_with_nothing_cuttable_stands_as_it_is() -> None:
     dropped, truncated = conv.fit_to_budget(300)
     assert (dropped, truncated) == ([], False)
     assert conv.messages == [newest]
+
+
+def test_every_field_over_the_cut_is_cut_to_one_k_naming_its_own_length() -> None:
+    """#1045: when content and arguments both exceed the cut, both are cut
+    to the same k, and each marker names that field's own original length.
+    reasoning_content is the longest field, so neither count can pass by
+    being the longest length."""
+    content = words(1500)
+    args = json.dumps({"text": words(2500)})
+    conv = make_window([{"role": "assistant", "content": content,
+                         "reasoning_content": words(4000), "tool_calls": [
+        {"id": "c1", "type": "function",
+         "function": {"name": "t", "arguments": args}}]}])
+    budget = 300
+    _, truncated = conv.fit_to_budget(budget)
+    assert truncated is True
+    assert conv.token_estimate() <= budget
+    kept = conv.messages[0]
+    text_mark = re.search(r"showing the first (\d+) of (\d+) characters\]$",
+                          kept["content"])
+    stub = json.loads(kept["tool_calls"][0]["function"]["arguments"])
+    args_mark = re.match(r"first (\d+) of (\d+) characters: ", stub["_truncated"])
+    assert text_mark and args_mark
+    assert int(text_mark.group(2)) == len(content)
+    assert int(args_mark.group(2)) == len(args)
+    assert text_mark.group(1) == args_mark.group(1)
