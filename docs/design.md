@@ -1869,16 +1869,6 @@ the summary row with `timestamp = boundary - 1e-6`, and commits.
 **Graceful degradation:** without `PersistencePlugin`, `resolve_conversation` returns
 no history and conversation events are not persisted.
 
-## Operator reconsolidation (`corvidae reconsolidate`)
-
-`packages/corvidae-cognition/corvidae_cognition/reconsolidate.py`: an
-operator-only, offline command that re-consolidates a channel's history into
-a marked **copy** of `sessions.db` (never the live file), superseding the
-consolidation records its new ones cover. Never a registered tool; no hook
-calls it. The mechanism, flags, stamp and schema additions are in
-[cognition.md](cognition.md#reconsolidation-corvidae-reconsolidate); its
-threat-model entry is finding 23.
-
 ## Operator redaction (`corvidae redact`)
 
 `corvidae/commands/redact.py` — operator-only CLI for permanent content

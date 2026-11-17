@@ -1421,14 +1421,12 @@ reads from outside (an MCP tool, a folder) records its own entry in
 
 ### Reconsolidation (`corvidae reconsolidate`)
 
-`packages/corvidae-cognition/corvidae_cognition/reconsolidate.py`, registered
-under the `corvidae.commands` entry-point group beside `goals`. An operator-only,
-offline command that re-consolidates a channel's whole `message_log` into a
-**copy** of `sessions.db`, so a prompt or segment-budget variant can be
-measured on real history without touching the live memory (#583, #932). It is
-never a tool, no hook calls it, and it needs no daemon: it builds its model
-clients from `agent.yaml` the way the replay harness does
-(`harness/consolidate_replay.py`).
+`packages/corvidae-cognition/corvidae_cognition/reconsolidate.py`, a
+`corvidae.commands` entry point beside `goals`. An operator-only, offline
+command that re-consolidates a channel's `message_log` into a **copy** of
+`sessions.db`, to measure a prompt or segment-budget variant on real history
+(#583, #932). Never a tool; no hook calls it; it needs no daemon (it builds
+its model clients from `agent.yaml`).
 
 ```
 corvidae reconsolidate --db copy.db --snapshot-from sessions.db \
@@ -1438,80 +1436,54 @@ corvidae reconsolidate --db copy.db --snapshot-from sessions.db \
     [--config agent.yaml] [--dry-run]
 ```
 
-- **A copy, never the live file.** `--snapshot-from` makes `--db` with sqlite's
-  online-backup API (consistent while the daemon writes; it refuses an existing
-  destination) and adds a `reconsolidation_copy` marker table. A `--db` without
-  the marker is refused, and so is the file `daemon.session_db` names, even if
-  marked. One copy per variant: a copy that already holds a run with other
-  settings (segment budget, instruction, system prompt, scope) refuses a
-  resume that differs, naming each setting.
-- **Segments.** For each channel the stretch is re-segmented from id 0 (or from
-  the selected records, below) with `build_catchup_segments`, the builder the
-  daemon's catch-up uses, at `--segment-budget` tokens. The flag replaces
-  `max_context_tokens`; the channel's `reasoning_history` policy is resolved
-  from `agent.yaml` the way the daemon layers it (exact `channels:` entry,
-  then transport-wide entries, then `agent:`). `--system-prompt` is the final
-  identity + register; there is no daemon to run `transform_system_prompt`, and
-  runtime overrides (`set_settings`) are not applied.
-- **Records.** Each segment is one consolidation-stage call. Its reply becomes
-  records stamped `mode = standalone`, `trigger = reconsolidate`, the
-  instruction hash (the text goes to `memory_prompt`), and the new
-  `memory.segment_budget`. The records of one segment share its message range,
-  importance and stamp (PRD Memory 2); there are no per-entry ranges. Importance
-  is the reply's own rating, else the rubric; valence is the mean stage-2
-  appraisal over the range, as `_commit` computes it.
+- **A copy only.** `--snapshot-from` copies the file with sqlite's backup API
+  and adds a `reconsolidation_copy` marker. A `--db` without the marker, or
+  the file `daemon.session_db` names, is refused. One copy per variant.
+- **Segments.** Each channel is re-segmented from id 0 (or from the selected
+  records) with `build_catchup_segments` at `--segment-budget` tokens, which
+  replaces `max_context_tokens`. The channel's `reasoning_history` is resolved
+  from `agent.yaml` as the daemon layers it (exact `channels:` entry,
+  transport-wide entries, `agent:`). `--system-prompt` is the final prompt:
+  no `transform_system_prompt` hooks and no runtime overrides run offline.
+- **Records.** Each segment is one consolidation call; its entries become
+  records stamped `mode = standalone`, `trigger = reconsolidate`, with the
+  instruction hash and `memory.segment_budget`, sharing the segment's range
+  (PRD Memory 2). New records are stored `embedded = 0`, for the daemon's
+  backfill; valence is left NULL.
 - **Supersede, don't delete.** Active `fork` / `standalone` records of the
-  channel whose range meets a segment's get `superseded_by` (the segment's
-  first new record) and `indexed = 0`, and their vector rows are dropped.
-  Their `retrieval_count` is **summed** into each new record, `last_retrieved_at`
-  is the latest, `importance` the larger: the near-dup merge's rules (PRD
-  Memory 3). A record straddling a segment boundary is credited to both
-  segments (it inflates; `retention_score` damps the count with `log1p`).
-  Goal (`direct`) records, `raw` records, redacted records, records already
-  superseded, and records holding another channel's text (`merged_foreign`)
-  are left alone. Nothing references a superseded id by foreign key:
-  `retrieval_candidate.memory_id` is a plain integer, and `recall_raw` reads
-  any status.
-- **The reply is kept.** `memory_reply` holds the model's whole reply per
-  segment (a later `claims` array can be indexed from it without another
-  pass), the instruction and system-prompt hashes (texts in `memory_prompt`,
-  PRD Memory 7), the model and the budget; each new record's `reply_id` points
-  at it. `corvidae redact` tombstones a reply whose segment covers a redacted
-  message (the `memory_reply` scrubber), but a copy is a whole duplicate of
-  `sessions.db`: redacting the live file does not redact its copies.
-- **Scoped runs.** With `--since` / `--until` (ISO-8601 UTC or epoch seconds,
-  on `created_at`, the source conversation's time) and `--min-source-tokens`
-  (dialog tokens in the record's range, measured as the segmenter measures),
-  only the selected active records' ranges are redone, joined when no message
-  of the channel lies between them. A selected range that meets a record
-  reaching past it is widened to cover that record, repeatedly, so superseding
-  never leaves a stretch without an indexed record; `--dry-run` lists these
-  "pulled in" records. Selecting by trigger would miss the oversized records
-  a high `consolidate_after_tokens` caused (compaction and idle wrote them), so
-  the flags are a time window and a size.
+  channel whose range meets a segment get `superseded_by` and `indexed = 0`,
+  and lose their vector rows. `retrieval_count` is summed into the new
+  records, `last_retrieved_at` is the latest, `importance` the larger (the
+  near-dup merge's rules). A record straddling two segments is credited to the
+  first only. Goal (`direct`) records, `raw` records, redacted records and
+  records holding another channel's text are left alone.
+- **The reply is kept.** `memory_reply` holds the whole reply per segment
+  (so a later `claims` array can be indexed without another pass), the model,
+  the budget, and the instruction and system-prompt hashes; their texts are in
+  `memory_prompt` (PRD Memory 7). `corvidae redact` does not reach
+  `memory_reply`; redact a copy's source messages in the copy, or delete it.
+- **Scope.** `--since` / `--until` (ISO-8601 UTC or epoch seconds, on the
+  record's `created_at`) and `--min-source-tokens` (dialog tokens in the
+  record's range) select the active records to redo; overlapping ranges join
+  into stretches. Records the selection did not name but whose range meets a
+  stretch are superseded too, and `--dry-run` lists them first. Selecting by
+  `trigger` would miss oversized records written by compaction or idle while
+  `consolidate_after_tokens` was high, hence the window and the size.
 - **Resumable.** The stretches are fixed at the first start
-  (`reconsolidation_plan`). Each segment commits in one transaction (reply row,
-  records, supersede, vector rows), so a stopped run keeps what finished and a
-  rerun of the same command skips the segments with a `memory_reply` row. An
-  unusable reply is retried once, then the segment is left (its old records stay)
-  and the run exits non-zero listing the range; a transport error stops the run
-  the same way.
+  (`reconsolidation_plan`). Each segment commits in one transaction, so a
+  stopped run keeps what finished, and rerunning the same command skips the
+  segments that have a `memory_reply` row. A reply unusable twice leaves its
+  segment (old records untouched) and the run exits non-zero listing it.
 - **`--dry-run`** writes nothing and calls no model: per channel, the records
-  selected and pulled in, each segment's rows and estimated request tokens.
-- **Vectors.** With a `memory_vec` table, sqlite-vec must load (else the
-  command refuses before writing), and new entries are embedded when an
-  embedding profile is configured and `embedding_meta` matches it; otherwise,
-  or when the embedding call fails or returns the wrong width, entries are
-  stored `embedded = 0` for the daemon's backfill, with a warning.
+  selected and met, and each segment's rows and estimated tokens.
 
-shortcut: no near-duplicate merge against other records, and no halving of an
-embedding batch the server rejects. Upgrade if a measurement needs either.
+shortcut: no valence, no embedding, no near-dup merge, and no widening of a
+scoped stretch over a record that reaches past it. A record whose range runs
+past a stretch is superseded even though part of its range is not redone;
+`--dry-run` shows which. Upgrade if a measurement needs it.
 
-The command adds `memory.segment_budget`, `memory.reply_id` and the tables
-`memory_reply`, `reconsolidation_copy`, `reconsolidation_run` and
-`reconsolidation_plan` to the copy only; the daemon's schema is unchanged and
-ignores them. To adopt a variant, the operator replaces `sessions.db` with the
-copy while the daemon is stopped; that is a manual step, not the command's.
+To adopt a variant the operator replaces `sessions.db` with the copy while the
+daemon is stopped; the command never does.
 
 ### GoalsPlugin (`packages/corvidae-cognition/corvidae_cognition/goals.py`)
 
@@ -1682,9 +1654,7 @@ channels (the engagement gate) keep their `gate: rejected` row, with a null
 `message_rowid`.
 
 It also registers the `exchange_log` scrubber (`redact_exchange_log`)
-under the `corvidae.redact` entry-point group (the memory package adds two
-more: `retrieval_candidate` and `memory_reply`, see
-[Reconsolidation](#reconsolidation-corvidae-reconsolidate)). When `corvidae redact`
+under the `corvidae.redact` entry-point group. When `corvidae redact`
 tombstones a message, the owning exchange's stage-2 `past_claims` text is
 tombstoned (claim and query counts kept), and so is the provenance and
 critique objection detail in its `outcomes` (see "Operator redaction" in

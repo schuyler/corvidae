@@ -1855,34 +1855,25 @@ scheduler job's origin to `heartbeat` (the only other origin the scheduler
 accepts besides `reminder`); if `heartbeat` is quiet, that mutes the job's
 own turns, which fails toward silence rather than toward noise.
 
-### 23. `corvidae reconsolidate` rewrites memory from untrusted history, offline (#932)
+### 23. `corvidae reconsolidate` re-sends history to the model, offline (#932)
 
-`corvidae reconsolidate` is an operator-only command that re-sends a
-channel's recorded history, senders' text included, to the consolidation
-stage's model and writes the reply as memory records in a copy of
-`sessions.db`. It adds no tool and no hook: only an operator at a shell can run
-it, and it never touches the live database (a copy it did not make, and the
-file `daemon.session_db` names, are refused). The exposure of the text itself is
-the daemon's own catch-up call (finding 8: the instruction follows untrusted
-text) and the model-endpoint reach of finding 12, repeated once per segment.
+`corvidae reconsolidate` is an operator-only command that re-sends a channel's
+recorded history, senders' text included, to the consolidation stage's model
+and writes the reply as records in a copy of `sessions.db`. It adds no tool and
+no hook: only an operator at a shell can run it, and a database it did not
+snapshot (or the file `daemon.session_db` names) is refused. The text's
+exposure is the daemon's own catch-up call (finding 8) and the model-endpoint
+reach of finding 12, repeated once per segment.
 
 New surface:
 
-- **A copy is a whole duplicate of `sessions.db`.** Messages, memory and
-  `exchange_log` live on in it after the live file is redacted. `corvidae
-  redact` is pointed at one database; redact a copy too, or delete it.
-- **The model's whole reply is stored** (`memory_reply`), including keys the
-  records do not use. It is derived from conversation text, so the
-  `memory_reply` scrubber tombstones it when `corvidae redact` covers a message
-  in its segment; the new records themselves are
-  reached by redact's range cascade like any consolidation record.
-- **An injected instruction in old history can shape the new records.** The
-  records replace the daemon's in the copy, and become live memory only if the
-  operator swaps the copy in. The operator decides that after reading the
-  records; nothing swaps them automatically.
-
-Accepted residual: the operator's `--system-prompt` file and instruction are
-trusted input, as the daemon's configured prompts are.
+- **A copy is a whole duplicate of `sessions.db`.** Redacting the live file
+  leaves the copy's messages and memory intact; delete the copy or redact it.
+- **`memory_reply` stores the model's whole reply**, derived from conversation
+  text, where `corvidae redact` does not reach. It exists only in copies.
+- **Injected text in old history can shape the new records.** They replace the
+  daemon's only in the copy, and become live memory only if the operator swaps
+  the copy in after reading them.
 
 ## Privilege separation
 

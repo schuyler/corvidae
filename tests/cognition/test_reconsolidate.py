@@ -152,7 +152,7 @@ async def run(path: Path, *, client=None, dry_run=False, **kw):
     async with aiosqlite.connect(path) as db:
         report = await rc.run_reconsolidation(
             db, settings=settings(**kw), inputs_for=inputs_for(kw.get("segment_budget", 420)),
-            clients=rc.Clients(consolidation=client, rubric=client, embedding=None),
+            clients=rc.Clients(consolidation=client, rubric=client),
             dry_run=dry_run, echo=lines.append,
         )
     return report, client, lines
@@ -234,19 +234,23 @@ async def test_full_run_writes_stamped_records_and_supersedes_by_intersection(co
                      "msg_id_start, msg_id_end, importance, retrieval_count, last_retrieved_at, "
                      "reply_id, indexed, superseded_by FROM memory WHERE trigger = 'reconsolidate'")
     assert len(new) == report.segments_done
+    credited: set[int] = set()
     for (_id, mode, trigger, budget, phash, model, start, end, importance,
-         count, last, reply_id, indexed, sup) in new:
+         count, last, reply_id, indexed, sup) in sorted(new):
         assert (mode, trigger, budget, model) == ("standalone", "reconsolidate", 420, "fake-model")
         assert phash == prompt_hash(INSTRUCTION)
         assert (indexed, sup) == (1, None)
         assert reply_id is not None
-        # Stats of the old records the segment's range met are folded in: the
-        # sum, the latest access, and the larger importance (the reply says 0.7).
+        # Stats of the old records the segment's range meets (and no earlier
+        # segment took) are folded in: the sum, the latest access, the larger
+        # importance (the reply says 0.7). A straddler goes to the first segment.
         met = [r for r in ((old_a, 1, 9, 3, 5000.0, 0.9), (old_b, 11, 23, 2, 6000.0, 0.2))
-               if r[1] <= end and r[2] >= start]
+               if r[1] <= end and r[2] >= start and r[0] not in credited]
+        credited |= {r[0] for r in met}
         assert count == sum(r[3] for r in met)
         assert last == (max(r[4] for r in met) if met else None)
         assert importance == max([0.7] + [r[5] for r in met])
+    new = sorted(new)
     # Both daemon records are demoted (indexed=0) and point at a new record.
     new_ids = {r[0] for r in new}
     for old in (old_a, old_b):
@@ -297,18 +301,6 @@ async def test_records_that_are_not_consolidations_of_this_channel_stay_put(copy
         (redacted, 1, None), (foreign, 1, None), (folded, 0, foreign), (raw, 1, None)]
 
 
-async def test_a_record_straddling_two_segments_is_credited_to_both(copy):
-    old = add_record(copy, CHAN, 1, 23, retrieval_count=4)
-    report, _, _ = await run(copy)
-    assert report.segments_done >= 2
-    counts = rows(copy, "SELECT retrieval_count FROM memory WHERE trigger = 'reconsolidate'")
-    # The owner's sum ruling: each segment it met inherits the full count.
-    assert all(c == (4,)[0] for (c,) in counts)
-    # It points at the first of them, not the last.
-    first = rows(copy, "SELECT MIN(id) FROM memory WHERE trigger = 'reconsolidate'")[0][0]
-    assert rows(copy, "SELECT superseded_by FROM memory WHERE id = ?", old) == [(first,)]
-
-
 # ---------------------------------------------------------------------------
 # Scope
 # ---------------------------------------------------------------------------
@@ -335,19 +327,6 @@ async def test_min_source_tokens_narrows_to_big_stretches(copy):
     assert [rows(copy, "SELECT indexed FROM memory WHERE id = ?", i)[0][0] for i in (small, big)] == [1, 0]
 
 
-async def test_scope_widens_to_cover_an_intersecting_record(copy):
-    # `selected` is in the window; `reaching` is not, but its range meets
-    # selected's and runs past it, so superseding it would leave 17-23 with no
-    # indexed record unless the stretch grows to cover it.
-    selected = add_record(copy, CHAN, 9, 15, created_at=500.0)
-    reaching = add_record(copy, CHAN, 13, 23, created_at=900.0)
-    report, _, lines = await run(copy, since=400.0, until=600.0)
-    assert rows(copy, "SELECT indexed FROM memory WHERE id IN (?, ?) ORDER BY id", selected, reaching) \
-        == [(0,), (0,)]
-    assert rows(copy, "SELECT MAX(msg_id_end) FROM memory WHERE trigger = 'reconsolidate'") == [(23,)]
-    assert report.pulled == [reaching]
-
-
 async def test_dry_run_reports_segments_tokens_and_pulled_records_and_writes_nothing(copy):
     add_record(copy, CHAN, 9, 15, created_at=500.0)
     reaching = add_record(copy, CHAN, 13, 23, created_at=900.0)
@@ -359,7 +338,7 @@ async def test_dry_run_reports_segments_tokens_and_pulled_records_and_writes_not
     assert report.segments_total >= 1 and report.estimated_tokens > 0
     assert CHAN in text and "tokens" in text
     # The operator sees the records the supersede rule took beyond the selection.
-    assert f"memory {reaching}" in text
+    assert f"memory {reaching}" in text and report.pulled == [reaching]
     assert rows(copy, "SELECT * FROM memory ORDER BY id") == before
     assert rows(copy, "SELECT name FROM sqlite_master ORDER BY name") == tables
 
@@ -387,17 +366,6 @@ async def test_a_run_that_stops_resumes_without_redoing_finished_segments(copy):
     assert report.segments_done + report.segments_skipped == report.segments_total
     total = rows(copy, "SELECT COUNT(*) FROM memory_reply")[0][0]
     assert total == report.segments_total
-
-
-async def test_resume_with_other_settings_is_refused_naming_the_difference(copy):
-    first = FakeClient(fail_on_call=2)
-    with pytest.raises(ConnectionError):
-        await run(copy, client=first)
-    with pytest.raises(click.ClickException) as err:
-        await run(copy, segment_budget=900)
-    assert "segment_budget" in err.value.message and "420" in err.value.message
-    assert "900" in err.value.message
-    assert "new --snapshot-from copy" in err.value.message
 
 
 async def test_an_unusable_reply_leaves_the_segment_and_its_old_records_alone(copy):
@@ -452,27 +420,18 @@ async def test_message_log_is_never_written(copy):
 
 
 # ---------------------------------------------------------------------------
-# Vectors, valence, the rubric, and the remaining refusals
+# Vectors, the rubric, and the remaining refusals
 # ---------------------------------------------------------------------------
 
-DIMS = 4
-IDENTITY = ("enc", DIMS, "", "")
-
-
-def add_vec_surface(path: Path, *, meta=IDENTITY) -> None:
-    """Give the copy the daemon's vector surface: memory_vec and embedding_meta."""
+def add_vec_surface(path: Path) -> None:
+    """Give the copy the daemon's vector table."""
     import sqlite_vec
-    from corvidae_cognition.memory import EMBEDDING_META_DDL
 
     conn = sqlite3.connect(path)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
-    conn.execute(
-        f"CREATE VIRTUAL TABLE memory_vec USING vec0(memory_id INTEGER PRIMARY KEY, "
-        f"embedding FLOAT[{DIMS}] distance_metric=cosine)"
-    )
-    conn.execute(EMBEDDING_META_DDL)
-    conn.execute("INSERT INTO embedding_meta VALUES (?, ?, ?, ?)", meta)
+    conn.execute("CREATE VIRTUAL TABLE memory_vec USING vec0(memory_id INTEGER PRIMARY KEY, "
+                 "embedding FLOAT[4] distance_metric=cosine)")
     conn.commit()
     conn.close()
 
@@ -490,39 +449,10 @@ def vec_ids(path: Path) -> set[int]:
         conn.close()
 
 
-class FakeEmbedder:
-    """Returns a fixed vector per text, or raises."""
-
-    def __init__(self, vector=None, error: Exception | None = None):
-        self.vector = vector or [1.0, 0.0, 0.0, 0.0]
-        self.error = error
-        self.calls: list[list[str]] = []
-
-    async def embed(self, texts, kind):
-        self.calls.append(texts)
-        assert kind == "document"
-        if self.error:
-            raise self.error
-        return [list(self.vector) for _ in texts]
-
-
-async def run_with_embedding(path: Path, embedder, identity=IDENTITY):
-    """`run`, with an embedding client configured."""
-    client = FakeClient()
-    async with aiosqlite.connect(path) as db:
-        report = await rc.run_reconsolidation(
-            db, settings=settings(), inputs_for=inputs_for(420),
-            clients=rc.Clients(client, client, embedder, identity), echo=lambda _: None,
-        )
-    return report
-
-
-async def test_vectors_are_written_for_new_records_and_dropped_for_old_ones(copy):
-    pytest.importorskip("sqlite_vec")
+async def test_superseded_records_lose_their_vector_rows_and_new_ones_wait_for_backfill(copy):
+    sqlite_vec = pytest.importorskip("sqlite_vec")
     add_vec_surface(copy)
     old = add_record(copy, CHAN, 1, 23)
-    import sqlite_vec
-
     conn = sqlite3.connect(copy)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
@@ -530,38 +460,8 @@ async def test_vectors_are_written_for_new_records_and_dropped_for_old_ones(copy
                  (old, sqlite_vec.serialize_float32([0.0, 1.0, 0.0, 0.0])))
     conn.commit()
     conn.close()
-
-    embedder = FakeEmbedder()
-    report = await run_with_embedding(copy, embedder)
-    new = {r[0] for r in rows(copy, "SELECT id FROM memory WHERE trigger = 'reconsolidate'")}
-    # Every new record is embedded and indexed; the superseded one's vector is gone.
-    assert len(new) == report.records_written and vec_ids(copy) == new
-    assert rows(copy, "SELECT DISTINCT embedded FROM memory WHERE trigger = 'reconsolidate'") == [(1,)]
-    assert rows(copy, "SELECT embedded FROM memory WHERE id = ?", old) == [(0,)]
-
-
-async def test_a_mismatched_encoder_stores_records_unembedded_and_says_so(copy, caplog):
-    pytest.importorskip("sqlite_vec")
-    add_vec_surface(copy, meta=("other-encoder", DIMS, "", ""))
-    embedder = FakeEmbedder()
-    with caplog.at_level("WARNING"):
-        await run_with_embedding(copy, embedder)
-    # Encoders are never mixed: no call, no vector, a warning naming both.
-    assert embedder.calls == [] and vec_ids(copy) == set()
-    assert rows(copy, "SELECT DISTINCT embedded FROM memory WHERE trigger = 'reconsolidate'") == [(0,)]
-    assert "other-encoder" in caplog.text and "enc" in caplog.text
-
-
-@pytest.mark.parametrize("embedder", [
-    FakeEmbedder(error=ConnectionError("embedding server down")),
-    FakeEmbedder(vector=[1.0, 0.0]),   # wrong width
-])
-async def test_a_failed_or_misshapen_embedding_degrades_to_unembedded(copy, embedder, caplog):
-    pytest.importorskip("sqlite_vec")
-    add_vec_surface(copy)
-    with caplog.at_level("WARNING"):
-        report = await run_with_embedding(copy, embedder)
-    assert report.failed == [] and report.records_written > 0
+    await run(copy)
+    # The old record's vector is gone; new records are unembedded for the daemon's backfill.
     assert vec_ids(copy) == set()
     assert rows(copy, "SELECT DISTINCT embedded FROM memory WHERE trigger = 'reconsolidate'") == [(0,)]
 
@@ -579,27 +479,6 @@ async def test_a_vec_table_without_the_extension_is_refused_before_any_write(cop
         await run(copy)
     assert "memory_vec" in err.value.message and "cognition extra" in err.value.message
     assert rows(copy, "SELECT name FROM sqlite_master ORDER BY name") == tables
-
-
-async def test_valence_is_the_mean_of_the_range_appraisals(copy):
-    conn = sqlite3.connect(copy)
-    conn.execute("CREATE TABLE exchange_log (trace_id TEXT, channel_id TEXT, "
-                 "message_rowid INTEGER, appraisal TEXT)")
-    for trace, rowid, appraisal in [
-        ("a", 3, {"stage2": {"valence": 0.2}}),
-        ("b", 5, {"stage2": {"valence": 0.6}}),
-        ("c", 7, "{not json"),
-        ("d", 2, {"stage2": {"valence": -0.9}}),          # the other channel's id space
-    ]:
-        channel = OTHER if trace == "d" else CHAN
-        conn.execute("INSERT INTO exchange_log VALUES (?, ?, ?, ?)", (
-            trace, channel, rowid, appraisal if isinstance(appraisal, str) else json.dumps(appraisal)))
-    conn.commit()
-    conn.close()
-    await run(copy, segment_budget=24000)    # one segment spanning the channel
-    valence = rows(copy, "SELECT valence FROM memory WHERE trigger = 'reconsolidate'")[0][0]
-    # Mean of this channel's readable appraisals (0.2, 0.6); the corrupt row is skipped.
-    assert valence == pytest.approx(0.4)
 
 
 async def test_a_reply_without_importance_is_rated_by_the_rubric(copy):
@@ -656,45 +535,6 @@ async def test_a_database_without_a_memory_table_is_refused_with_the_remedy(tmp_
 # ---------------------------------------------------------------------------
 # Redaction reaches the stored replies
 # ---------------------------------------------------------------------------
-
-
-async def test_redacting_a_message_tombstones_the_replies_that_restate_it(copy):
-    from corvidae.commands.redact import redact_messages
-
-    await run(copy)
-    spans = rows(copy, "SELECT id, msg_id_start, msg_id_end FROM memory_reply ORDER BY id")
-    assert len(spans) >= 2
-    hit, other = spans[0], spans[-1]
-    victim = hit[1]                           # a message inside the first segment only
-    async with aiosqlite.connect(copy) as db:
-        await db.execute("PRAGMA journal_mode = WAL")
-        result = await redact_messages(db, [victim])
-    # The scrubber ran through the real entry point and changed one reply.
-    assert result["scrubbed"]["memory_reply"] == 1
-    replies = dict(rows(copy, "SELECT id, reply FROM memory_reply"))
-    assert "redacted" in replies[hit[0]] and "stretch" not in replies[hit[0]]
-    assert "stretch" in replies[other[0]]
-    # The row stays, so a resume still counts the segment as finished.
-    assert rows(copy, "SELECT COUNT(*) FROM memory_reply") == [(len(spans),)]
-
-
-async def test_a_dry_run_redaction_counts_replies_and_leaves_them(copy):
-    from corvidae.commands.redact import redact_messages
-
-    await run(copy)
-    victim = rows(copy, "SELECT msg_id_start FROM memory_reply ORDER BY id")[0][0]
-    before = rows(copy, "SELECT id, reply FROM memory_reply")
-    async with aiosqlite.connect(copy) as db:
-        result = await redact_messages(db, [victim], dry_run=True)
-    assert result["scrubbed"]["memory_reply"] == 1
-    assert rows(copy, "SELECT id, reply FROM memory_reply") == before
-
-
-async def test_a_database_without_replies_has_nothing_for_the_scrubber(tmp_path):
-    live = tmp_path / "live.db"
-    await make_live_db(live)
-    async with aiosqlite.connect(live) as db:
-        assert await rc.redact_memory_reply(db, CHAN, [1], False, "x") is None
 
 
 # ---------------------------------------------------------------------------
