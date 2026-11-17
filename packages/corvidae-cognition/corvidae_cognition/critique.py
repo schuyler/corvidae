@@ -36,8 +36,10 @@ Two independent paths:
 
 Eligibility is by PROPAGATED origin, never inferred (trap #3): ``user`` and
 ``reminder`` are eligible; ``critique`` is exempt (the recursion brake,
-unbypassable by tool use); ``heartbeat`` and ``task`` are exempt. Withheld
-responses stay eligible — the agent thought it, so critique may still object.
+unbypassable by tool use); ``heartbeat`` and ``task`` are exempt. A response
+another gate withheld stays eligible — the agent thought it, so critique may
+still object. A decline (an unsent ``NO_REPLY`` or empty final,
+``silence.is_decline``) is not a response and is never judged (#420).
 
 Every threshold resolves through ``resolve_tunable`` at decision time
 (operator directive 2): best-guess defaults, runtime-adjustable through both
@@ -62,6 +64,7 @@ from corvidae.task import Task
 from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.probe import ReadOnlyProbe
+from corvidae_cognition.silence import is_decline
 
 # Why a lens skips when forks are off for the stage (shared by both skip texts).
 FORKS_OFF_REASON = (
@@ -807,6 +810,19 @@ class CritiquePlugin(CorvidaePlugin):
         if not self._eligible(trace_id, annotations):
             return  # critique/heartbeat/task/unadmitted exempt — the recursion brake
 
+        # A decline is not a response and is not judged (#420; PRD §3.7
+        # Critique 3). Checked before the first await: it reads the newest
+        # assistant row of the live window. A withheld final with content
+        # stays eligible. Its provenance check needs no gate here: stage 2,
+        # its only trigger, skips a decline too.
+        if self._declined(channel, response_text, trace_id):
+            logger.debug(
+                "critique skipped for %s on %s: the turn was declined",
+                trace_id, channel.id,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
+            return
+
         self._record_reply(channel, trace_id)
 
         # Proactivity check: independent of the stylistic lenses. Runs when
@@ -904,6 +920,23 @@ class CritiquePlugin(CorvidaePlugin):
             return False
         origin = (annotations or {}).get("origin")
         return origin == "reminder" or (origin is None and trace_id in self._admitted)
+
+    @staticmethod
+    def _declined(channel, response_text, trace_id) -> bool:
+        """Whether this final is a decline (#420), failing toward judging.
+
+        A check that raises costs one critique rather than dropping one, and
+        logs a warning so the break is visible.
+        """
+        try:
+            return is_decline(channel, response_text)
+        except Exception:
+            logger.warning(
+                "could not tell whether the final of %s on %s was declined; "
+                "judging it", trace_id, channel.id, exc_info=True,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
+            return False
 
     def _originating_text(self, trace_id, fallback):
         """The exchange's true opening text from AppraisalPlugin's LRU, else
