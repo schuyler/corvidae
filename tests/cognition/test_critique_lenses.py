@@ -930,6 +930,39 @@ class TestSameMachinery:
             await _teardown(env)
 
 
+    async def test_a_malformed_lens_tunable_leaves_provenance_its_turn(
+        self, tmp_path,
+    ):
+        """R8 guard: at stage 2, the provenance check is decided before the
+        added lenses, so a malformed limit on a thresholded lens can't cost
+        provenance its turn."""
+        env = await build_lenses(
+            tmp_path,
+            {"kb": Contributor(_lens(
+                "fragile", thresholds=(_threshold("ambiguity", "min", 0.5),)))},
+            appraisal=FakeAppraisal(stage2=_stage2()),
+        )
+        try:
+            env.channel.runtime_overrides["critique.lens.fragile.ambiguity"] = "high"
+            stage2 = {
+                **{d: 0.5 for d in DIMENSIONS},
+                "past_claims": [{"claim": "we agreed on Friday", "queries": ["Friday"]}],
+            }
+            [listener] = env.appraisal.stage2_listeners
+            # The malformed value may raise out of the listener; provenance
+            # must already be queued by then.
+            try:
+                await listener(
+                    channel=env.channel, trace_id="kprov", response_text="resp",
+                    annotations={"origin": "reminder"}, stage2=stage2)
+            except TypeError:
+                pass
+            queued = [t.description for t in list(env.task.task_queue.queue._queue)]
+            assert "critique:provenance" in queued
+        finally:
+            await _teardown(env)
+
+
 # ---------------------------------------------------------------------------
 # R7 - an added lens only waits
 # ---------------------------------------------------------------------------
