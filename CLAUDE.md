@@ -35,7 +35,8 @@ job. The kernel alone is `--extra dev --extra acp`; CI's `kernel` job runs
 everything outside `tests/cognition/`, `tests/test_cross_channel_send/`,
 `tests/test_webhook_notify/`, `tests/test_github_webhook/`,
 `tests/test_context_panel/`, `tests/test_timepiece/`, `tests/test_inotify/`,
-`tests/test_outbound_cap/`, `tests/test_goals_notify/` and `tests/corvidae_restart/` (which needs the
+`tests/test_outbound_cap/`, `tests/test_goals_notify/`, `packages/rss-reader/tests/`,
+`packages/corvidae-vision/tests/` and `tests/corvidae_restart/` (which needs the
 `restart` extra) that way, so a kernel module must never import `corvidae_cognition`
 (`tests/test_kernel_boundary.py`).
 
