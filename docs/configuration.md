@@ -387,7 +387,7 @@ These are recommendations, not hardcoded blocks: `set_settings` writes are chann
 The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) as of this writing:
 
 - `appraisal.novelty.no_probe_default`, `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`, `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.stage2_prompt`, `appraisal.weights.commitment`, `appraisal.weights.disagreement`, `appraisal.weights.imperative`, `appraisal.weights.novelty`, `appraisal.weights.question`
-- `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.lens.novelty`, `critique.lens.retention`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.sample_below_rate`
+- `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.lens.novelty`, `critique.lens.retention`, `critique.lens.<name>.<dimension>` and `critique.lens.<name>.sample_rate` (for each lens a plugin adds), `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.sample_below_rate`
 - `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.enforce`, `gate.send.min_salience`, `gate.send.quiet_origins`
 - `outbound_cap.count_progress`, `outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`, `outbound_cap.window_seconds`
 
@@ -430,6 +430,18 @@ A knowledge base root turns on a critique lens that asks a different question fr
 The lens flags, it does not file. Each objection carries the `file` it belongs in and the `content` to append, and a retention finding wakes the channel: the critique turn's stub names the root and tells the agent to read the file and append the content as a new section only if it is missing, then reply `NO_REPLY` (withheld, so the turn is silent by default). Stylistic findings from the same run are queued without a wake and admitted on the channel's next turn of any origin, which is usually this filing turn, so the agent sees them where it is told to stay silent rather than on its next reply; findings queued before a provenance wake behave the same way, and changing that is [#889](https://github.com/schuyler/corvidae/issues/889). With the lens on, the provenance check's wake uses the same stub, because one stub governs a channel's pending critique findings whichever wake fires first. The agent files in that turn after reading the file and deciding the fact is really missing — the check is why a lens is the mechanism rather than an automatic write. Updates are additive (a section to append to, never a rewrite), the knowledge base directory must be writable by the daemon, and the lens inherits the `critique` stage's profile and fork settings like the other lenses. Set the two thresholds high enough that an ordinary exchange does not fire it: the lens costs a fork per selection, and its findings cost a turn.
 
 Leave `critique.retention.root` unset to file into recall's root. An explicit value wins; pointing it at a directory recall does not index is legal, and `CritiquePlugin` logs one `WARNING` at startup naming both, because facts filed where recall cannot look are written down and then re-learned. The check runs at `on_init`, so a `set_settings`-style hot change of either key is not covered by it.
+
+### Lenses other plugins add (#1033)
+
+A plugin can contribute critique lenses through `on_critique_init`; see [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init) for the hook and the lens type. Each added lens brings its own keys, named after the lens. Its defaults are whatever the contributing plugin declared:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `critique.lens.<name>.<dimension>` | float | the lens's declared limit | The limit for that lens's threshold on a stage-2 dimension (`valence`, `stakes`, `ambiguity`, `commitment_density`, `novelty`). Whether it is a minimum or a maximum is the lens's declaration. Runtime-tunable per channel. |
+| `critique.lens.<name>.sample_rate` | float | the lens's declared rate | Probability the lens runs on a judged turn its thresholds and patterns don't select. Runtime-tunable per channel. Like `critique.sample_below_rate`, an agent that tunes it to zero stops measuring what selection misses: block it with `immutable_settings` where that matters. |
+| `critique.fork_prompt.<name>` | string | the lens's declared brief | Replaces the brief. Critique still appends the objections reply format. Static config, reloaded on the next fork. |
+
+A malformed lens is rejected at startup with a warning naming the plugin, the lens and the fix, and the other lenses load; nothing a lens declares stops the daemon. A value written through `set_settings` must be a number: a string in one of these keys makes that lens's decision raise for the turn (the built-in checks have already been decided by then).
 
 #### `gate.*` — engagement and decide gates
 

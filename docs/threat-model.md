@@ -1070,7 +1070,8 @@ What each kind of unlock costs:
   model emitting tool calls.
 - **Gate tunables and thresholds** (`gate.*`,
   `critique.provenance.enabled`, `critique.sample_below_rate`, the
-  critique lens thresholds `critique.lens.*`; open by default today).
+  critique lens thresholds `critique.lens.*`, including each added lens's
+  `critique.lens.<name>.*` (finding 23); open by default today).
   Covered in finding 2: an injection can silence the agent on a channel or
   switch off the provenance check. The recommended blocklist in
   [configuration.md](configuration.md) is the lock.
@@ -1852,6 +1853,40 @@ a scheduler job origin `heartbeat` (the only other origin the scheduler
 accepts besides `reminder`; no tool takes an origin, #814); if `heartbeat`
 is quiet, that mutes the job's own turns, which fails toward silence rather
 than toward noise.
+
+### 23. Plugin-added critique lenses: plugin text reaches critic forks, and lens tunables are agent-writable (#1033)
+
+A plugin can add critique lenses through `on_critique_init`
+([cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init)).
+Three things are new.
+
+- **Plugin text reaches critic forks.** A lens's brief is appended as the
+  instruction of a fork of the live window, after whatever untrusted text
+  the window holds (finding 8). It comes from installed plugin code, which
+  the operator chose to load (principle 9), so it is operator-trusted, not
+  untrusted. A lens is still a new way to steer what the agent tells
+  itself: its objections re-enter as framed CONTEXT at the channel's next
+  turn. They wake nothing and send nothing (PRD §3.7 Critique 4), so a
+  lens can't start a turn or reach a channel by itself.
+- **Plugin regexes run on model output.** A lens's reply patterns are
+  searched against the sent reply on the event loop. A pattern with
+  catastrophic backtracking, matched against a long reply, stalls the
+  daemon for every channel while it runs. The patterns come from plugin
+  code, not from traffic, so this is a review item for lens authors (keep
+  patterns linear), not a mechanism.
+- **Each lens adds agent-writable tunables.** `critique.lens.<name>.<dimension>`
+  and `critique.lens.<name>.sample_rate` are runtime-tunable per channel,
+  so finding 2 extends to them: an injection can switch a lens off on a
+  channel (a limit no exchange reaches, rate 0) or make it run on every
+  turn, which spends a fork per turn (finding 14). Block them with
+  `immutable_settings` where that matters. A non-numeric value written
+  through `set_settings` makes that lens's decision raise for the turn;
+  the built-in checks are decided first, so it costs only the added lenses.
+  `critique.fork_prompt.<name>` is static config, like the built-ins'.
+
+Accepted residuals. Redaction doesn't reach an added lens's recorded
+objection text (`outcomes.critique.<name>.detail`) while redaction is on
+hold (#1005); proactivity's detail has the same gap (#1003).
 
 ## Privilege separation
 

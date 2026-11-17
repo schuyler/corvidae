@@ -176,6 +176,13 @@ agent:
 #   lens:
 #     novelty: 0.6                    # both thresholds must be crossed
 #     retention: 0.5
+#     # A lens another plugin adds (#1033) gets its own block, named after
+#     # it; defaults are what the plugin declared:
+#     # alignment:
+#     #   ambiguity: 0.6                # the limit on a declared threshold
+#     #   sample_rate: 0.05             # chance it runs when not selected
+#   # fork_prompt:
+#   #   alignment: "..."              # replaces an added lens's brief
 
 # Engagement and decide gates (optional; cognition extra, see
 # docs/configuration.md "gate.*"). Runtime-tunable per channel via set_settings.

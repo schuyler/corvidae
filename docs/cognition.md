@@ -33,7 +33,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory`, `search_transcripts` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
-| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), and the provenance check |
+| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), the provenance check, and the lenses other plugins contribute through `on_critique_init` |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
@@ -1645,15 +1645,22 @@ warning names the channel and trace. On a miss (forks off, the exchange left the
 the fork failed or its reply was unusable) it is skipped with a warning
 naming the stage, channel, trace and reason: the exchange keeps stage 1 only
 and no standalone call is made. It produces: valence, stakes, ambiguity, commitment density, novelty,
-correction, and `past_claims`. `past_claims` is a list of `{claim,
+correction, and `past_claims`. The five numeric dimensions, by name, are a
+contract other plugins select on: `STAGE2_DIMENSIONS` in `appraisal.py`
+(`valence`, `stakes`, `ambiguity`, `commitment_density`, `novelty`), each a
+float in [0, 1], all five present in every vector stage 2 produces. `past_claims` is a list of `{claim,
 queries}`: each statement in the reply that presents something as
 established before the exchange, with up to 3 short search phrases. A
 missing or malformed field reads as no claims; malformed entries are
 dropped with a warning; it's capped at 5 claims. The vector is merged into
 the `appraisal` envelope's `stage2` key. Then every listener registered with
 `add_stage2_listener` is awaited with `channel, trace_id, response_text,
-annotations, stage2`, outside the appraisal attribution. A failing listener is
-logged and doesn't stop the others; a failed stage 2 notifies no one. It's
+annotations, stage2`, outside the appraisal attribution. Every enqueued stage
+2 notifies each listener exactly once: `stage2` is the vector, or `None`
+when none was produced (a miss above, or an unexpected exception, which is
+logged at warning with the trace). That is how a listener tells "not yet"
+from "never" without a timer. Cancellation (shutdown) notifies no one. A
+failing listener is logged and doesn't stop the others. It's
 a push rather than a wait because a consumer that awaited stage 2 from a
 queued task would hold a TaskQueue worker the stage-2 task may need.
 
@@ -1775,6 +1782,120 @@ probe uses the same helper (`ReadOnlyProbe`).
 `critique.fork_prompt.provenance` override must ask for the verdicts format
 above; one written for an objections list fails parsing, and every run
 skips.
+
+### CritiquePlugin: lenses other plugins add (`on_critique_init`)
+
+A plugin adds a critique lens without editing `critique.py` (#1033). The
+lens is data: critique decides when it runs, runs it through the same fork
+machinery as the stylistic lenses, records it, and queues its objections.
+
+**The hook.** CritiquePlugin owns `on_critique_init(config, add_lens)`
+(declared in its `hookspecs`, so it follows the owner-segment rule in
+[plugin-guide.md](plugin-guide.md#declaring-hooks-in-a-plugin)). Critique
+calls it once, from its own `on_init`, and the lens set is fixed until
+restart. An implementer calls `add_lens(lens)` once per lens:
+
+```python
+from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae_cognition.critique import Lens, Threshold
+
+class AlignmentLenses(CorvidaePlugin):
+    optional_depends_on = frozenset({"critique"})
+
+    @hookimpl
+    async def on_critique_init(self, config, add_lens):
+        add_lens(Lens(
+            name="alignment",
+            fork_prompt="[Self-critique: alignment] Pause the conversation "
+                        "here. ...",
+            thresholds=(Threshold("ambiguity", "min", 0.6),),
+            reply_patterns=(r"(?i)\bI'll\b",),
+            sample_rate=0.05,
+        ))
+```
+
+`config` is passed because critique's `on_init` runs concurrently with the
+implementer's own, so the implementer can't count on having stored config
+yet. A static precondition ("only when a knowledge base root is set") is
+the implementer's to check: it doesn't add the lens. Declare
+`optional_depends_on = frozenset({"critique"})`, so that with critique
+disabled the orphaned hookimpl is reported at debug rather than warning.
+
+Critique calls each implementer separately, with only the arguments its
+hookimpl declares and its own `add_lens`, so every warning can name the
+plugin. An implementer that raises is logged by name with the traceback,
+and the lenses it added before the raise are kept.
+
+**The lens.** Frozen dataclasses, holding no callables:
+
+| Field | Meaning |
+|---|---|
+| `name` | Matches `^[a-z][a-z0-9_]*$`; it names the lens's config keys and its outcome entry |
+| `fork_prompt` | The brief. Critique appends the objections JSON schema, so the reply format is critique's, not the author's. `critique.fork_prompt.<name>` replaces the brief (static config, reloaded like the built-ins' prompts) |
+| `thresholds` | `Threshold(dimension, bound, value)`: `dimension` one of `STAGE2_DIMENSIONS`, `bound` `"min"` (holds at value ≥ limit) or `"max"` (≤), `value` the default limit in [0, 1]. At most one per dimension |
+| `reply_patterns` | Regex source strings searched against the sent reply |
+| `sample_rate` | In [0, 1]; default `0.0` |
+
+**Rejections never stop startup** (PRD principle 5, §3.1.17). A lens that
+fails validation is not loaded and a WARNING names the plugin, the lens,
+the rejected value, what was expected and the remedy; the other lenses
+load. Rejected: anything that isn't a `Lens`; a bad name; an empty or
+non-string prompt; a threshold that isn't a `Threshold`, a bad bound, or a
+value or rate outside [0, 1] (a `bool` isn't a number here); two thresholds
+on one dimension; a pattern that doesn't compile; an unknown dimension (the
+warning lists the accepted ones); and a reserved name. Reserved are the
+built-in lenses (`predictive`, `constrained`, `adversarial`, `retention`,
+`proactivity`, `provenance`), the existing scalar keys
+`critique.lens.{ambiguity,commitment,neg_valence,disagreement,novelty,retention}`
+(a lens named `novelty` would make `critique.lens.novelty` both a number
+and a block), and the stylistic run's outcome keys (`lenses`,
+`objections`, `sampled_below_threshold`, `detail`, which a lens's outcome
+entry would overwrite). A name accepted from more than one plugin loads
+from none of them, with one warning naming each contributor: entry-point
+order isn't deterministic, so "first wins" would load a different lens on
+different starts.
+
+**Selection.** A lens runs when every threshold holds and, if it declares
+patterns, at least one matches the reply. Otherwise it runs with
+probability `sample_rate`. A lens with neither runs at its rate alone, so
+`1.0` means every judged turn. Each limit and the rate are tunable per
+channel: `critique.lens.<name>.<dimension>` and
+`critique.lens.<name>.sample_rate`, through `resolve_tunable`. A declined
+turn logs one debug line with the reason (`critique lens alignment declined
+for trace … on …: ambiguity 0.3 < 0.6; sampled out`, `no pattern matched`).
+
+Thresholds are evaluated on **this** exchange's stage 2, not the previous
+exchange's, so each lens is decided at one of two points:
+
+- A lens with no thresholds is decided at `on_agent_response`, on the reply
+  text, without waiting for appraisal.
+- A lens with thresholds is decided when this trace's stage 2 reaches
+  critique's stage-2 listener. When stage 2 produced no vector
+  (`stage2=None`), or there is no appraisal plugin (then it's decided at
+  `on_agent_response`), it runs at its sample rate only, and a WARNING
+  names the lens, the trace and why there is no stage 2.
+
+Added lenses are decided after the built-in checks at both points, so a
+problem deciding them can't cost the stylistic lenses or the provenance
+check their turn. They run on the turns critique already judges: the same
+eligibility and decline skip as the stylistic lenses.
+
+**Running and delivery.** Each decision point that selects a lens enqueues
+one silent `critique:lenses` task. Each lens is a fork of the live window
+with the containment check, exactly as a stylistic lens: forks off, or the
+exchange gone from the window, skips it with the stylistic lenses' warning
+and records nothing. A lens that ran records, in `exchange_log.outcomes`,
+
+```json
+{"critique": {"<name>": {"objections": 1, "sampled": false, "detail": [...]}}}
+```
+
+(`detail` only when there are objections), merged beside the stylistic
+run's keys. Its objections, tagged `[<name>]`, re-enter through
+`funnel.ingest` as framed CONTEXT at the channel's next turn and wake
+nothing, on every origin (PRD §3.7 Critique 4). Redaction doesn't reach
+`critique.<name>.detail` yet; redaction is on hold (#1005, and #1003 for
+the same gap in proactivity's detail).
 
 ### GatePlugin (`packages/corvidae-cognition/corvidae_cognition/gates.py`)
 
