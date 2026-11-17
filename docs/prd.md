@@ -471,6 +471,14 @@ one is a bug even if its tests pass.
     `max_turns` (item 3). The last message's trace owns the turn: every
     turn hook, usage row and reply carries it, and the earlier messages'
     traces get admission and persistence only.
+20. Internal work that is about to start (a task, a fork, a note or other
+    item one context puts on another's queue) is offered to plugins for a
+    verdict before it is accepted, as inbound messages and outbound
+    emissions are. A refusal returns to whatever tried to start the work
+    as a result naming the limit and the remedy, and is logged at
+    warning. The result of work already started is never offered. The
+    kernel gives no verdict of its own, and lets plugins read how much
+    accepted work is waiting.
 
 ### 3.2 Transports
 

@@ -196,7 +196,7 @@ async def should_start_work(
   sees fan-out from one turn). It reads the queues until #318 lands and
   the write-ahead log after.
 
-Proposed base PRD text, for §3.1, to be added when this is built:
+Base PRD text, added as §3.1 item 20 when this was built (#1050):
 
 > Internal work that is about to start (a task, a fork, a note or other
 > item one context puts on another's queue) is offered to plugins for a
