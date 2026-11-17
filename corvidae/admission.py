@@ -4,7 +4,7 @@ A tool that is about to start work on a queue (a subagent, a fork, a note to
 another channel) offers it here first. Plugins vote through the
 ``should_start_work`` hook; the first ``WorkRefusal`` wins and the tool
 returns its text instead of enqueuing anything. Results of work already
-started are never offered (PRD §3.12 item 2).
+started are never offered (core/periphery supplement §3.12 item 2).
 """
 
 from __future__ import annotations

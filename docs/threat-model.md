@@ -1262,6 +1262,9 @@ since #793: `webhook_notify` caps its own deliveries at
 `max_notifications` per `per_seconds` per endpoint (10 per hour by default),
 so a webhook flood costs at most that many turns per target channel per
 window, drop reports included, rather than one turn per delivery (finding 16).
+`limits.inbound_per_channel` (finding 24) bounds how many messages one
+channel may have waiting, not their rate: each admitted message still costs
+a turn.
 
 ### 15. One identity across channels (by design)
 
@@ -1911,8 +1914,10 @@ What it does not bound:
 - **Hop loops** between channels (notes that provoke notes): phase 3, TRD §9.3.
   A note is counted as waiting work only while it waits.
 - **Inbound across channels.** The cap is per channel; many channels can each
-  hold their share, so the total is bounded only by `max_waiting` for internal
-  work and by the number of channels.
+  hold their share, so the total of waiting messages is bounded only by the
+  number of channels. `max_waiting` does not bound inbound messages: it
+  refuses internal work, and waiting messages count toward it (see the
+  residual below).
 - **Without a block.** With no `limits:` block, or without the extra, the
   plugin gives no verdicts and nothing is bounded; this is opt-in, as for
   `outbound_cap`.
@@ -1932,13 +1937,25 @@ Mitigations and their limits:
 - The seam admits only what the counts see: results in transit between task
   completion and `on_notify`, and a turn retry on a timer, are not counted,
   and concurrent arrivals on one channel can overshoot the inbound cap by a
-  few. The starting tool's own call counts, so the effective ceiling is
+  few. The starting tool's own call counts, and so do the other tool calls
+  of the same response, so the effective ceiling is at most
   `max_waiting - 1`.
 
 Accepted residual: a ceiling is a **self-silencing** route for the agent's own
 fan-out. An injected instruction can fill the ceiling with slow subagents and
 make later legitimate `subagent` calls return the refusal until some finish,
 the same class of harm as the cap in finding 19, not a new capability.
+
+Accepted residual: **outside senders can reach the ceiling.** Waiting
+transport messages are waiting work (TRD K1 counts the channel queues), so
+with the defaults, floods on four channels (4 × 50 = 200) make every
+`subagent`, `fork` and `notify_other_channel` call refuse on every channel
+until the backlog drains; fewer channels suffice while tool tasks are also
+waiting. The agent still answers each message, so this denies internal work,
+not replies, and it lasts only as long as the flood. Raise `max_waiting`
+relative to `inbound_per_channel` × the number of open channels to keep
+headroom. Counting only internal work toward the ceiling would close it and
+is a question for the owner on #1050's follow-ups.
 
 ## Privilege separation
 

@@ -212,7 +212,7 @@ owner's plugin name after the prefix.
 | `register_llm_stages` | broadcast (sync, imperative) | `LLMPlugin.on_start`, once, before it creates clients: plugins add `stages[name] = kind` (`chat` or `embedding`) for each model-calling stage they own |
 | `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, Zulip, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines; `MemoryPlugin` runs its turn consolidation trigger from it, awaiting nothing, since the send waits on the hook |
 | `on_notify` | broadcast | inject a notification into a channel queue |
-| `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
+| `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no kernel implementation (`LimitsPlugin`, `core-periphery` extra, rejects at `limits.inbound_per_channel`); None from empty broadcast allows all messages |
 | `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes any `final` of any origin that contains `NO_REPLY` (a containment check, not an exact match) (cognition extra); a raising implementation fails open (logged, sent); `OutboundCapPlugin` vetoes every emission on a channel once the agent has sent `outbound_cap.max_messages` there since the last admitted human message, and likewise once it has sent `outbound_cap.max_messages_per_window` in the last `outbound_cap.window_seconds` — a sliding window a human message does not reset, shipped unset (`outbound-cap` extra, #791, #821, threat-model finding 19); no kernel implementation, so with none registered everything is sent |
 | `should_start_work` | veto, called by hand / first `WorkRefusal` wins | the [admission seam](#the-admission-seam-should_start_work) (K1, #1050): `subagent` (kind `task`), `fork` (kind `fork`) and `notify_other_channel` (kind `note`) call `offer_work` before they enqueue anything; `channel` is the queue the work would land on, `source_channel` the channel it comes from; a raising implementation is logged and treated as no opinion; `LimitsPlugin` refuses past `limits.max_waiting` (`core-periphery` extra); no kernel implementation, so with none registered everything starts |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
@@ -1129,7 +1129,8 @@ ID with zero entries omitted.
   result can never be refused. The task that carries the starting tool's own
   call is running on the TaskQueue when the tool offers its work, so it
   counts: for `subagent`, `fork` and `notify_other_channel` the effective
-  ceiling of a `max_waiting` check is `max_waiting - 1`.
+  ceiling of a `max_waiting` check is at most `max_waiting - 1` (the
+  response's other tool calls count too).
 - `Agent.waiting_messages()` counts USER items only (transport messages;
   notifications, tool results and retries never count), from the same
   `pending_items()`. It exists because only the Agent knows item roles;

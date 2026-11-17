@@ -616,7 +616,7 @@ The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwa
 |------|------|------|
 | `on_message(channel, sender: str, text: str, trace_id: str)` | async broadcast | Inbound message arrives; the transport mints and passes the id (see [Traces](#traces)) |
 | `should_process_message(channel, sender: str, text: str, trace_id: str \| None)` | async broadcast, reject-wins | Gate: decide whether to process a message. Return False to reject, True to accept, None for no opinion. |
-| `should_start_work(channel, kind: str, source_channel: str \| None, trace_id: str \| None, annotations: dict)` | async, called by `offer_work`, first `WorkRefusal` wins | Gate on internal work about to start (`subagent` kind `task`, `fork` kind `fork`, `notify_other_channel` kind `note`). Return a `corvidae.admission.WorkRefusal(limit, remedy)` to refuse, anything else for no opinion. See [Refusing internal work](#refusing-internal-work). |
+| `should_start_work(channel, kind: str, source_channel: str \| None, trace_id: str \| None, annotations: dict)` | async or sync, called by `offer_work`, first `WorkRefusal` wins | Gate on internal work about to start (`subagent` kind `task`, `fork` kind `fork`, `notify_other_channel` kind `note`). Return a `corvidae.admission.WorkRefusal(limit, remedy)` to refuse, anything else for no opinion. See [Refusing internal work](#refusing-internal-work). |
 | `on_message_admitted(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message admits a USER message |
 | `on_message_rejected(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |
 | `should_send_response(channel, text: str, emission: str, trace_id: str \| None, annotations: dict)` | async broadcast, reject-wins | Outbound gate, before each emission (`final`, `progress`, `thinking`, `error`). Return False to withhold, None for no opinion. See [Output gating](#output-gating). |
@@ -1363,7 +1363,7 @@ result and the kernel logs one warning naming the kind, both channels and the
 limit. Declare all five parameters without defaults. Never offered, so never
 refusable: the result of work already started (a task completion
 notification, a deferred tool result) and the Task that carries an ordinary
-tool call. `Agent.waiting_work()` and `Agent.waiting_messages()` give a
+tool call. `Agent.waiting_work()` and `Agent.waiting_messages()` tell a
 verdict how much accepted work is waiting (see
 [design.md](design.md#agent)).
 
