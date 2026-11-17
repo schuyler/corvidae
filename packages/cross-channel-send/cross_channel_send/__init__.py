@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 
+from corvidae.admission import offer_work
 from corvidae.attribution import get_attribution
 from corvidae.channel import ChannelNotReady, ChannelRegistry, resolve_persisted_channel
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
@@ -188,6 +189,19 @@ class CrossChannelSendPlugin(CorvidaePlugin):
             }
             if "origin" in annotations:
                 note_annotations["origin"] = annotations["origin"]
+
+            # Offer the note to the admission seam; a refusal is the result
+            # and nothing reaches on_notify.
+            refusal = await offer_work(
+                self.pm,
+                channel=target,
+                kind="note",
+                source_channel=source_channel,
+                trace_id=attribution.get("trace_id"),
+                annotations=annotations,
+            )
+            if refusal is not None:
+                return refusal
 
             await self.pm.ahook.on_notify(
                 channel=target,

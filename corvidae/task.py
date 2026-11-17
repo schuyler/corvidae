@@ -141,6 +141,17 @@ class TaskQueue:
         """True when no tasks are queued or actively being processed."""
         return self.queue.qsize() == 0 and not self._active_tasks
 
+    def pending_by_channel(self) -> dict[str, int]:
+        """Count queued and running tasks per ``Task.channel`` id.
+
+        Synchronous. Reads asyncio.Queue._queue (same CPython-private shortcut
+        as SerialQueue.take_while).
+        """
+        counts: dict[str, int] = {}
+        for task in [*self.queue._queue, *self._active_tasks]:
+            counts[task.channel.id] = counts.get(task.channel.id, 0) + 1
+        return counts
+
     async def enqueue(self, task: Task) -> None:
         """Add a task to the queue."""
         logger.info(
