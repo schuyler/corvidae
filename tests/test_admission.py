@@ -7,15 +7,13 @@ import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from corvidae.agent import QueueItem, QueueItemRole
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.queue import SerialQueue
 from corvidae.task import Task, TaskQueue
-from corvidae.tool import Tool, ToolContext, ToolRegistry
+from corvidae.tool import ToolContext, ToolRegistry
 
 from helpers import (
     KERNEL_LLM_STAGES,
@@ -164,8 +162,10 @@ class TestOfferWork:
         """An implementation that raises is logged (ERROR with traceback) and
         a sibling's refusal is still returned."""
         pm = create_plugin_manager()
-        pm.register(_Raiser(), name="raiser")
+        # Pluggy calls the last-registered impl first: the raiser runs
+        # before the gate, so the gate's vote must survive the raise.
         pm.register(_Gate(_refusal()), name="gate")
+        pm.register(_Raiser(), name="raiser")
         with caplog.at_level(logging.WARNING):
             text = await _offer(pm, _channel())
         assert text == "Not started: limits.max_waiting reached — wait"

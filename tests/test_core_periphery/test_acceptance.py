@@ -1,8 +1,14 @@
 """Phase 1 acceptance probe (issue #1050): limits.max_waiting end to end.
 
-Real Agent, TaskPlugin, SubagentPlugin and LimitsPlugin. With waiting work at
-the ceiling, a task start is refused with the tool-result text and a warning,
-while a tool result delivered at the same depth is accepted.
+Real Agent, TaskPlugin, SubagentPlugin and LimitsPlugin. The subagent call
+goes through ``Agent._dispatch_tool_calls``, as a model's tool call does: it
+runs as a carrier Task on the TaskQueue, offers its work at the seam, and its
+result comes back through TaskPlugin and ``on_notify``. With waiting work at
+the ceiling the start is refused with the tool-result text and a warning, and
+that task's completion, a tool result at the same depth, still reaches the
+channel's queue. Only the model turn itself is replaced (a recorder stands in
+for ``_process_queue_item``), because what is under test is admission and
+delivery, not generation.
 """
 
 import asyncio
@@ -12,7 +18,7 @@ from unittest.mock import MagicMock
 
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.task import Task
-from corvidae.tool import ToolRegistry, dispatch_tool_call
+from corvidae.tool import ToolRegistry
 from corvidae.tool_collection import ToolCollectionPlugin
 
 from helpers import KERNEL_LLM_STAGES, build_plugin_and_channel, stub_llm_config
@@ -74,7 +80,8 @@ async def test_task_start_refused_but_tool_result_accepted_at_max_waiting(
     await subagent.on_start(config=CONFIG)
     tool_list: list = []
     subagent.register_tools(tool_registry=tool_list)
-    tool_fns = {t.name: t.fn for t in tool_list}
+    # The Agent dispatches tools from its own table, as after refresh.
+    agent._tools = {t.name: t.fn for t in tool_list}
 
     limits = LimitsPlugin()
     pm.register(limits, name="limits")
@@ -94,7 +101,8 @@ async def test_task_start_refused_but_tool_result_accepted_at_max_waiting(
             )
         await _until(lambda: agent.waiting_work() == {channel.id: 2})
 
-        # The agent's tool path: a subagent start is refused at the ceiling.
+        # The agent's tool path: the model's subagent call runs as a carrier
+        # Task and is refused at the ceiling.
         call = {
             "id": "call-sub",
             "function": {
@@ -103,30 +111,20 @@ async def test_task_start_refused_but_tool_result_accepted_at_max_waiting(
             },
         }
         with caplog.at_level(logging.WARNING):
-            result = await dispatch_tool_call(
-                call, tool_fns, channel=channel, task_queue=task_queue, pm=pm
-            )
-        assert result.content.startswith("Not started: limits.max_waiting reached")
+            await agent._dispatch_tool_calls([call], channel)
+            # The carrier's completion is delivered at the same depth: the
+            # two parked tasks still hold waiting work at max_waiting.
+            await _until(lambda: any(i.tool_call_id == "call-sub" for i in processed))
+        delivered = next(i for i in processed if i.tool_call_id == "call-sub")
+        assert delivered.content.startswith("Not started: limits.max_waiting reached")
         assert any(
-            r.levelno == logging.WARNING and "limits.max_waiting" in r.getMessage()
-            + str(getattr(r, "limit", ""))
+            r.levelno == logging.WARNING
+            and getattr(r, "limit", None) == "limits.max_waiting"
+            and getattr(r, "kind", None) == "task"
             for r in caplog.records
         )
-        # Nothing was enqueued by the refused start: still just the two tasks.
+        # The refused start enqueued nothing: only the two parked tasks wait.
         assert agent.waiting_work() == {channel.id: 2}
-
-        # A tool result at the same depth is never refused: it reaches the queue.
-        channel.pending_tool_call_ids.add("call-pending")
-        await pm.ahook.on_notify(
-            channel=channel,
-            source="task",
-            text="r",
-            tool_call_id="call-pending",
-            annotations=None,
-        )
-        await _until(lambda: any(i.content == "r" for i in processed))
-        delivered = next(i for i in processed if i.content == "r")
-        assert delivered.tool_call_id == "call-pending"
     finally:
         # Release the parked tasks, then stop everything that holds a task.
         release.set()

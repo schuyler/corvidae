@@ -145,6 +145,43 @@ class TestDefaults:
         assert await _process(plugin, ch) is False
 
 
+    async def test_notice_interval_default_is_300(
+        self, pm, kernel_clock, monkeypatch, caplog
+    ):
+        """Absent notice_interval defaults to 300 s: no second warning at
+        299 s, one at 300 s."""
+        clock, _idle = kernel_clock
+        plugin, counts = await _make(
+            pm, monkeypatch, {"limits": {"inbound_per_channel": 1}}
+        )
+        ch = _channel("a")
+        counts.messages = {ch.id: 1}
+
+        def warned():
+            return [
+                r for r in caplog.records
+                if r.levelno == logging.WARNING and ch.id in r.getMessage()
+            ]
+
+        with caplog.at_level(logging.WARNING):
+            assert await _process(plugin, ch) is False
+            await clock.advance(299)
+            assert await _process(plugin, ch) is False
+            assert len(warned()) == 1
+            await clock.advance(1)
+            assert await _process(plugin, ch) is False
+            assert len(warned()) == 2
+
+
+class TestEntryPoint:
+    def test_limits_is_registered_as_a_corvidae_entry_point(self):
+        """Without the entry point the plugin is never loaded, silently."""
+        from importlib.metadata import entry_points
+
+        eps = {ep.name: ep.value for ep in entry_points(group="corvidae")}
+        assert eps.get("limits") == "corvidae_core_periphery.limits:LimitsPlugin"
+
+
 class TestCeiling:
     async def test_refuses_at_max_waiting_across_channels(self, pm, kernel_clock, monkeypatch):
         """The sum over channels at max_waiting yields a WorkRefusal naming
@@ -173,6 +210,25 @@ class TestInbound:
         assert await _process(plugin, ch) is None
         counts.messages = {ch.id: 3}
         assert await _process(plugin, ch) is False
+        # Once one of them finishes the channel admits again.
+        counts.messages = {ch.id: 2}
+        assert await _process(plugin, ch) is None
+
+    async def test_rejection_sends_nothing_to_the_sender(
+        self, pm, kernel_clock, monkeypatch
+    ):
+        """Phase 1 defers the notice: a rejection emits nothing outbound."""
+        from unittest.mock import AsyncMock
+
+        send = AsyncMock()
+        pm.ahook.send = send
+        plugin, counts = await _make(
+            pm, monkeypatch, {"limits": {"inbound_per_channel": 1}}
+        )
+        ch = _channel("a")
+        counts.messages = {ch.id: 1}
+        assert await _process(plugin, ch) is False
+        send.assert_not_awaited()
 
     async def test_warning_once_per_notice_interval(
         self, pm, kernel_clock, monkeypatch, caplog
