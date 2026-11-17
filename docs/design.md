@@ -941,9 +941,16 @@ All operations are synchronous; no database access:
   cut forward past a straddling tool cycle (`snap_cut_forward`) unless that
   would drop the newest row, in which case the orphaned result renders as a
   framed notification. The newest row is always kept; if it alone exceeds
-  the budget its content is truncated in memory only, with a visible
-  marker. A newest row that is not a message object has no content to
-  truncate, so it stands as it is and the caller reports the overage.
+  the budget it is truncated in memory only (#1045): `content` and
+  `reasoning_content` longer than the cut get their first characters and a
+  visible marker, and each tool call's string `function.arguments` longer
+  than the cut is replaced by valid JSON,
+  `{"_truncated": "first K of N characters: <prefix>"}`, keeping the call's
+  `id`, `type` and `name` so result pairing and rendering still work. One
+  cut length applies to all of them, binary-searched to the largest that
+  fits; a field no longer than the cut keeps its stored value. A newest row
+  that is not a message object, or whose size is in no field it can cut,
+  stands as it is and the caller reports the overage.
   Returns `(dropped, truncated)`.
 - The window only grows at the tail (`append`) and truncates at the head
   (`replace_with_summary`, `fit_to_budget`). Nothing is inserted, removed or mutated
