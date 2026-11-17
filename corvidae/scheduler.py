@@ -1301,7 +1301,8 @@ class SchedulerPlugin(CorvidaePlugin):
             try:
                 plugin._cron_next(cron)
             except CronParseError as exc:
-                return f"Error: cron {cron!r} is not usable: {exc}"
+                return (f"Error: cron {cron!r} is not usable: {exc}; give five fields "
+                        f"(minute hour day month weekday) that match a real time")
             return None
 
         def check_prompt(prompt: str) -> str | None:
@@ -1312,9 +1313,9 @@ class SchedulerPlugin(CorvidaePlugin):
                 return f"Error: job prompt is longer than {MAX_REMINDER_TEXT_CHARS} characters"
             return None
 
-        async def add_job(cron: str, prompt: str, _ctx=None) -> str:
+        async def add_job(cron: str, prompt: str, _ctx) -> str:
             """Set a recurring job in this conversation: a 5-field cron expression (minute hour day month weekday, in the configured timezone) and the prompt to act on each time. List jobs with list_reminders and stop one with cancel_reminder."""
-            channel = _ctx.channel if _ctx is not None else None
+            channel = _ctx.channel
             if channel is None:
                 return "Error: no channel context available"
             cron, prompt = (cron or "").strip(), (prompt or "").strip()
@@ -1334,9 +1335,9 @@ class SchedulerPlugin(CorvidaePlugin):
             return (f'Job #{row_id} set: cron "{cron_description(cron)}", '
                     f"next at {format_time(next_fire, plugin._tz)}.")
 
-        async def update_job(id: int, cron: str = "", prompt: str = "", _ctx=None) -> str:  # noqa: A002 - matches cancel_reminder
+        async def update_job(id: int, _ctx, cron: str = "", prompt: str = "") -> str:  # noqa: A002 - matches cancel_reminder
             """Change a recurring job you set in this conversation, by its id (from list_reminders). Only the fields you give change: cron, prompt."""
-            channel = _ctx.channel if _ctx is not None else None
+            channel = _ctx.channel
             if channel is None:
                 return "Error: no channel context available"
             # Tool args are not type-checked; accept "12" and "#12" as well.

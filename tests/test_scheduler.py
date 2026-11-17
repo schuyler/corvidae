@@ -819,6 +819,12 @@ class TestJobTools:
         assert updated.schedule_spec == "cron=0 10 * * *;tz=America/Los_Angeles"
         assert updated.next_fire_at == mine.next_fire_at + 3600
 
+        # A cron-only update keeps the prompt and moves the schedule.
+        assert "updated" in await upd(mine.id, cron="0 11 * * *", _ctx=e.ctx(lex))
+        (moved,) = await e.rows("id = ?", (mine.id,))
+        assert moved.text == "mine v2"
+        assert moved.next_fire_at == mine.next_fire_at + 7200
+
         await e.tools["cancel_reminder"](mine.id, _ctx=e.ctx(lex))
         assert "not pending" in await upd(mine.id, prompt="x", _ctx=e.ctx(lex))
 
