@@ -1070,7 +1070,8 @@ What each kind of unlock costs:
   model emitting tool calls.
 - **Gate tunables and thresholds** (`gate.*`,
   `critique.provenance.enabled`, `critique.sample_below_rate`, the
-  critique lens thresholds `critique.lens.*`; open by default today).
+  critique lens thresholds `critique.lens.*`, including each added lens's
+  `critique.lens.<name>.*` (finding 23); open by default today).
   Covered in finding 2: an injection can silence the agent on a channel or
   switch off the provenance check. The recommended blocklist in
   [configuration.md](configuration.md) is the lock.
@@ -1553,10 +1554,9 @@ line is plain text in the result, with no kernel header at all.
   at the cost of the only deletion path while the extra is missing.
 - `exchange_log` copies conversation text into two places: stage-2
   `past_claims` (quoted from the reply) and the objection detail critique
-  records in `outcomes`. `corvidae redact` scrubs the claims and the
-  provenance and critique detail (#160), but not proactivity detail
-  (#1003), through the `exchange_log` scrubber the cognition extra registers under
-  `corvidae.redact`. A plugin that keeps its own copy of conversation text
+  records in `outcomes`. Through the `exchange_log` scrubber the cognition
+  extra registers under `corvidae.redact`, `corvidae redact` scrubs the
+  claims and the provenance and stylistic critique detail (#160). A plugin that keeps its own copy of conversation text
   and registers no scrubber is not reached. `retrieval_candidate` (#407)
   copies no text, only memory ids and scores, but a row naming a redacted
   memory still records that it was retrieved, so its scrubber deletes
@@ -1566,8 +1566,10 @@ line is plain text in the result, with no kernel header at all.
   already have admitted its summary into that turn's prompt and bumped its
   access count; the window copy ages out with compaction like any CONTEXT. For
   `exchange_log`, the owning exchange's claims are tombstoned with their
-  counts kept. What `redact` still doesn't reach: exchanges whose
-  `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
+  counts kept. What `redact` still doesn't reach: proactivity's objection
+  detail (#1003) and that of lenses other plugins add
+  (`critique.<name>.detail`, finding 23), both waiting on redaction's
+  hold (#1005); exchanges whose `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
   taken out of `sessions.db` (a calibration export, a backup), and, under
   PRD §3.7 Memory 8, copies on other channels: a read of the redacted
   message, a note or send that restates it, and whatever those channels
@@ -1852,6 +1854,40 @@ a scheduler job origin `heartbeat` (the only other origin the scheduler
 accepts besides `reminder`; no tool takes an origin, #814); if `heartbeat`
 is quiet, that mutes the job's own turns, which fails toward silence rather
 than toward noise.
+
+### 23. Plugin-added critique lenses: plugin text reaches critic forks, and lens tunables are agent-writable (#1033)
+
+A plugin can add critique lenses through `on_critique_init`
+([cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init)).
+Three things are new.
+
+- **Plugin text reaches critic forks.** A lens's brief is appended as the
+  instruction of a fork of the live window, after whatever untrusted text
+  the window holds (finding 8). It comes from installed plugin code, which
+  the operator chose to load (principle 9), so it is operator-trusted, not
+  untrusted. A lens is still a new way to steer what the agent tells
+  itself: its objections re-enter as framed CONTEXT at the channel's next
+  turn. They wake nothing and send nothing (PRD §3.7 Critique 4), so a
+  lens can't start a turn or reach a channel by itself.
+- **Plugin regexes run on model output.** A lens's reply patterns are
+  searched against the sent reply on the event loop. A pattern with
+  catastrophic backtracking, matched against a long reply, stalls the
+  daemon for every channel while it runs. The patterns come from plugin
+  code, not from traffic, so this is a review item for lens authors (keep
+  patterns linear), not a mechanism.
+- **Each lens adds agent-writable tunables.** `critique.lens.<name>.<dimension>`
+  and `critique.lens.<name>.sample_rate` are runtime-tunable per channel,
+  so finding 2 extends to them: an injection can switch a lens off on a
+  channel (a limit no exchange reaches, rate 0) or make it run on every
+  turn, which spends a fork per turn (finding 14). Block them with
+  `immutable_settings` where that matters. A non-numeric value written
+  through `set_settings` makes that lens's decision raise for the turn;
+  the built-in checks are decided first, so it costs only the added lenses.
+  `critique.fork_prompt.<name>` is static config, like the built-ins'.
+
+Accepted residuals. Redaction doesn't reach an added lens's recorded
+objection text (`outcomes.critique.<name>.detail`) while redaction is on
+hold (#1005); proactivity's detail has the same gap (#1003).
 
 ## Privilege separation
 

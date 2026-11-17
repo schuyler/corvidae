@@ -53,16 +53,20 @@ import json
 import re
 import logging
 import random
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from inspect import isawaitable
 from pathlib import Path
+from typing import Callable, Literal
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
-from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl, hookspec
 from corvidae.persistence import decode_message_row
 from corvidae.task import Task
 from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
+from corvidae_cognition.appraisal import STAGE2_DIMENSIONS
 from corvidae_cognition.probe import ReadOnlyProbe
 from corvidae_cognition.silence import is_decline
 
@@ -564,10 +568,150 @@ def _recall_roots(config: dict) -> list[str] | None:
     return usable or None
 
 
+# --------------------------------------------------------------------------
+# Plugin-contributed lenses (#1033)
+# --------------------------------------------------------------------------
+
+# Names an added lens may not take: the built-in lenses, the existing
+# critique.lens.* scalar keys (a lens named "novelty" would make
+# critique.lens.novelty both a number and a block), and the stylistic run's
+# outcome keys (a lens named "detail" would overwrite critique.detail in the
+# outcome merge).
+RESERVED_LENS_NAMES: dict[str, frozenset[str]] = {
+    "a built-in lens": frozenset(DEFAULT_FORK_PROMPTS),
+    "an existing critique.lens.* key": frozenset({
+        "ambiguity", "commitment", "neg_valence", "disagreement", "novelty",
+        "retention"}),
+    "a key of the stylistic run's critique outcome": frozenset({
+        "lenses", "objections", "sampled_below_threshold", "detail"}),
+}
+
+# A lens name is a config-key segment.
+LENS_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+@dataclass(frozen=True)
+class Threshold:
+    """One bound on a stage-2 dimension: min holds at value >= limit, max at <=."""
+
+    dimension: str                # one of STAGE2_DIMENSIONS
+    bound: Literal["min", "max"]
+    value: float                  # default limit, in [0, 1]
+
+
+@dataclass(frozen=True)
+class Lens:
+    """A critique lens a plugin contributes: pure data, no callables.
+
+    Selected when every threshold holds and (if patterns are declared) one
+    matches the reply; otherwise at ``sample_rate``. Critique appends the
+    JSON reply schema to ``fork_prompt``.
+    """
+
+    name: str                     # ^[a-z][a-z0-9_]*$ - a config-key segment
+    fork_prompt: str              # the brief
+    thresholds: tuple[Threshold, ...] = ()
+    reply_patterns: tuple[str, ...] = ()   # regex source strings
+    sample_rate: float = 0.0      # in [0, 1]
+
+
+@dataclass(frozen=True)
+class _Added:
+    """An accepted lens with its patterns compiled and its contributor."""
+
+    lens: Lens
+    patterns: tuple[re.Pattern, ...]
+    plugin: str
+
+
+def _is_unit_number(value: object) -> bool:
+    """Whether ``value`` is a real number in [0, 1] (a bool is not one here)."""
+    return (
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        and 0 <= value <= 1
+    )
+
+
+def _lens_problem(lens: object) -> tuple[str | None, tuple[re.Pattern, ...]]:
+    """Why ``lens`` is not acceptable (None when it is) and its compiled patterns.
+
+    Every reason names the rejected value and what was expected, so the
+    warning built from it tells the contributor what to change.
+    """
+    if not isinstance(lens, Lens):
+        return f"expected a Lens, got {type(lens).__name__}", ()
+    if not isinstance(lens.name, str) or not LENS_NAME_PATTERN.match(lens.name):
+        return (
+            f"name {lens.name!r} must match {LENS_NAME_PATTERN.pattern} "
+            "(a config-key segment); rename the lens", ())
+    # A reserved name: say which kind of name it collides with.
+    for kind, names in RESERVED_LENS_NAMES.items():
+        if lens.name in names:
+            return (
+                f"name {lens.name!r} collides with {kind} of that name; "
+                "rename the lens", ())
+    if not isinstance(lens.fork_prompt, str) or not lens.fork_prompt.strip():
+        return f"fork_prompt {lens.fork_prompt!r} must be a non-empty string", ()
+    if not _is_unit_number(lens.sample_rate):
+        return f"sample_rate {lens.sample_rate!r} must be a number in [0, 1]", ()
+    if not isinstance(lens.thresholds, (tuple, list)):
+        return f"thresholds {lens.thresholds!r} must be a tuple of Threshold", ()
+    seen: set[str] = set()
+    for i, t in enumerate(lens.thresholds):
+        if not isinstance(t, Threshold):
+            return (
+                f"thresholds[{i}] is {type(t).__name__}, expected "
+                "Threshold(dimension, bound, value)", ())
+        if t.dimension not in STAGE2_DIMENSIONS:
+            return (
+                f"threshold dimension {t.dimension!r} is not one of "
+                f"{', '.join(STAGE2_DIMENSIONS)}", ())
+        if t.bound not in ("min", "max"):
+            return f"threshold bound {t.bound!r} must be 'min' or 'max'", ()
+        if not _is_unit_number(t.value):
+            return (
+                f"threshold value {t.value!r} on {t.dimension} must be a "
+                "number in [0, 1]", ())
+        if t.dimension in seen:
+            return (
+                f"two thresholds on dimension {t.dimension!r}; declare one "
+                "per dimension (one config key each)", ())
+        seen.add(t.dimension)
+    if not isinstance(lens.reply_patterns, (tuple, list)):
+        return f"reply_patterns {lens.reply_patterns!r} must be a tuple of str", ()
+    compiled: list[re.Pattern] = []
+    for source in lens.reply_patterns:
+        try:
+            compiled.append(re.compile(source))
+        except (re.error, TypeError) as exc:
+            return f"reply pattern {source!r} does not compile ({exc})", ()
+    return None, tuple(compiled)
+
+
+class CritiqueSpec:
+    """Hooks the critique plugin owns."""
+
+    @hookspec
+    async def on_critique_init(
+        self, config: dict, add_lens: Callable[[Lens], None],
+    ) -> None:
+        """Call ``add_lens(Lens(...))`` once per critique lens this plugin contributes.
+
+        Collected once, in critique's ``on_init``; the lens set is fixed until
+        restart. ``config`` is the daemon config (this runs concurrently with
+        the implementer's own ``on_init``, so it may not have stored it yet);
+        a precondition the plugin knows statically is its to check: it just
+        doesn't add the lens. A lens that fails validation is rejected with a
+        warning naming the plugin; the others load.
+        """
+
+
 class CritiquePlugin(CorvidaePlugin):
     """Deferred, salience-gated self-critique plus the provenance check."""
 
     depends_on = frozenset({"task", "llm"})
+    # Owns the on_critique_init hook; its implementers add lenses at startup.
+    hookspecs = CritiqueSpec
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -592,6 +736,10 @@ class CritiquePlugin(CorvidaePlugin):
             collections.OrderedDict())
         # Compactions seen per channel id (before_compaction).
         self._compactions: dict[str, int] = {}
+        # Plugin-contributed lenses by name (fixed after on_init), and whether
+        # handle_stage2 was registered with an appraisal plugin.
+        self._lenses: dict[str, _Added] = {}
+        self._stage2_listening = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -605,8 +753,64 @@ class CritiquePlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         self.config = config
+        await self._collect_lenses(config)
         self._fork_prompts = self._resolve_fork_prompts(config)
         self._warn_if_retention_root_is_not_indexed(config)
+
+    async def _collect_lenses(self, config: dict) -> None:
+        """Ask every on_critique_init implementer for lenses, one at a time.
+
+        Each implementer gets its own ``add_lens`` (so a rejection names the
+        plugin), is called with only the arguments it declares, and runs in
+        its own try: a raise is logged by plugin name and the lenses it
+        already added stay. Nothing here stops startup.
+        """
+        # A pm without a hook namespace (a stub) has no implementers.
+        caller = getattr(getattr(self.pm, "hook", None), "on_critique_init", None)
+        accepted: list[_Added] = []
+        for impl in (caller.get_hookimpls() if caller is not None else []):
+            plugin = impl.plugin_name
+
+            def add_lens(lens: Lens, plugin: str = plugin) -> None:
+                # Validate; a bad lens is rejected loudly, the rest still load.
+                problem, patterns = _lens_problem(lens)
+                if problem is not None:
+                    logger.warning(
+                        "critique lens %s from plugin %s rejected: %s; the lens "
+                        "was not loaded, the others were - correct it and restart",
+                        lens.name if isinstance(lens, Lens) else type(lens).__name__,
+                        plugin, problem,
+                    )
+                    return
+                accepted.append(_Added(lens, patterns, plugin))
+
+            available = {"config": config, "add_lens": add_lens}
+            try:
+                result = impl.function(
+                    **{k: v for k, v in available.items() if k in impl.argnames})
+                if isawaitable(result):
+                    await result
+            except Exception:
+                logger.warning(
+                    "critique: plugin %s raised in on_critique_init; the "
+                    "lenses it added before that are kept - fix the plugin "
+                    "and restart", plugin, exc_info=True,
+                )
+
+        # Duplicates are resolved over accepted lenses only: hookimpl order is
+        # not deterministic, so a name added twice loads from neither.
+        by_name: dict[str, list[_Added]] = {}
+        for added in accepted:
+            by_name.setdefault(added.lens.name, []).append(added)
+        for name, copies in by_name.items():
+            if len(copies) > 1:
+                logger.warning(
+                    "critique lens %r was added by plugins %s; it loads from "
+                    "none of them - rename one of the lenses and restart",
+                    name, ", ".join(dict.fromkeys(c.plugin for c in copies)),
+                )
+                continue
+            self._lenses[name] = copies[0]
 
     @staticmethod
     def _warn_if_retention_root_is_not_indexed(config: dict) -> None:
@@ -649,12 +853,21 @@ class CritiquePlugin(CorvidaePlugin):
 
     def _resolve_fork_prompts(self, config: dict) -> dict[str, str]:
         """Resolve all lens fork prompts at startup/reload."""
-        return {
+        prompts = {
             lens: resolve_prompt(
                 config, f"critique.fork_prompt.{lens}", DEFAULT_FORK_PROMPTS[lens]
             )
             for lens in DEFAULT_FORK_PROMPTS
         }
+        # An added lens: operator override or its own brief, plus critique's
+        # JSON tail (the objection schema is critique's parsing contract).
+        for name, added in self._lenses.items():
+            prompts[name] = (
+                resolve_prompt(
+                    config, f"critique.fork_prompt.{name}", added.lens.fork_prompt)
+                + "\n\n" + _JSON_TAIL
+            )
+        return prompts
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -694,6 +907,7 @@ class CritiquePlugin(CorvidaePlugin):
             )
             return
         add_listener(self.handle_stage2)
+        self._stage2_listening = True
 
     @hookimpl
     async def on_stop(self) -> None:
@@ -877,17 +1091,33 @@ class CritiquePlugin(CorvidaePlugin):
                     lenses = [self._random_lens()]
                     sampled = True
 
-        if not lenses:
-            return
-        text_in = self._originating_text(trace_id, request_text)
+        # The selected stylistic lenses run as one silent task.
+        if lenses:
+            text_in = self._originating_text(trace_id, request_text)
 
-        async def _work() -> str:
-            await self._run_critique(
-                channel, trace_id, text_in, response_text, lenses, sampled
-            )
-            return ""
+            async def _work() -> str:
+                await self._run_critique(
+                    channel, trace_id, text_in, response_text, lenses, sampled
+                )
+                return ""
 
-        await self._enqueue(channel, trace_id, annotations, "critique", _work)
+            await self._enqueue(channel, trace_id, annotations, "critique", _work)
+
+        # Added lenses come after the built-ins, so a problem deciding them
+        # (a malformed tunable) can't cost the built-in checks their turn.
+        # Added lenses without thresholds are decided now, on the reply text;
+        # with no appraisal plugin no stage 2 will come, so the thresholded
+        # ones are decided now too, at their sample rate.
+        if self._stage2_listening:
+            await self._enqueue_added(
+                channel, trace_id, annotations, request_text, response_text,
+                [a for a in self._lenses.values() if not a.lens.thresholds],
+                stage2=None, fallback=None)
+        else:
+            await self._enqueue_added(
+                channel, trace_id, annotations, request_text, response_text,
+                list(self._lenses.values()), stage2=None,
+                fallback="no stage-2 appraisal (appraisal plugin absent)")
 
     def _record_reply(self, channel, trace_id) -> None:
         """Note which window row is the exchange's final reply, for the
@@ -1024,6 +1254,124 @@ class CritiquePlugin(CorvidaePlugin):
             lenses.append("retention")
         return lenses
 
+    # ------------------------------------------------------------------
+    # Plugin-contributed lenses (#1033)
+    # ------------------------------------------------------------------
+
+    def _decide(
+        self, channel, trace_id, added: _Added, stage2: dict | None,
+        reply: str, fallback: str | None,
+    ) -> tuple[bool, bool]:
+        """``(run, sampled)`` for one added lens on one exchange.
+
+        Every threshold must hold on ``stage2`` and, if patterns are declared,
+        one must match ``reply``; then it runs unsampled. Otherwise (or with
+        neither declared) the sample rate decides. ``fallback`` says stage 2
+        is unavailable, so thresholds can't be read: they are skipped and the
+        draw decides. A decline is logged at debug with its reason.
+        """
+        lens = added.lens
+        reason: str | None = None
+        # Neither thresholds nor patterns declared: the rate alone decides.
+        selectors = bool(lens.thresholds or added.patterns)
+        if fallback is not None and lens.thresholds:
+            reason = "no stage 2"
+        elif selectors:
+            # Thresholds first: the first one that fails is the reason.
+            for t in lens.thresholds:
+                limit = resolve_tunable(
+                    channel, self.config,
+                    f"critique.lens.{lens.name}.{t.dimension}", t.value)
+                # Without a fallback the vector is present, and appraisal
+                # fills every dimension (or produces no vector at all).
+                value = stage2[t.dimension]
+                if (value < limit) if t.bound == "min" else (value > limit):
+                    reason = (
+                        f"{t.dimension} {value:g} {'<' if t.bound == 'min' else '>'} "
+                        f"{limit:g}")
+                    break
+            # Then patterns: at least one must match the reply.
+            if reason is None and added.patterns and not any(
+                p.search(reply or "") for p in added.patterns
+            ):
+                reason = "no pattern matched"
+            if reason is None:
+                return True, False
+        # The draw: a sampled run, or a logged decline.
+        rate = resolve_tunable(
+            channel, self.config, f"critique.lens.{lens.name}.sample_rate",
+            lens.sample_rate)
+        if self._rng.random() < rate:
+            return True, True
+        logger.debug(
+            "critique lens %s declined for trace %s on %s: %ssampled out",
+            lens.name, trace_id, channel.id, f"{reason}; " if reason else "",
+            extra={"channel": channel.id, "trace_id": trace_id},
+        )
+        return False, False
+
+    async def _enqueue_added(
+        self, channel, trace_id, annotations, request_text, response_text,
+        lenses: list[_Added], stage2: dict | None, fallback: str | None,
+    ) -> None:
+        """Decide ``lenses`` for this exchange and enqueue one silent task
+        (critique:lenses) running those selected; nothing when none is."""
+        selected: list[tuple[str, bool]] = []
+        for added in lenses:
+            # A thresholded lens decided without stage 2 is a degraded run: say so.
+            if fallback is not None and added.lens.thresholds:
+                logger.warning(
+                    "critique lens %s for trace %s on %s: %s; running at its "
+                    "sample rate", added.lens.name, trace_id, channel.id, fallback,
+                    extra={"channel": channel.id, "trace_id": trace_id},
+                )
+            run, sampled = self._decide(
+                channel, trace_id, added, stage2, response_text, fallback)
+            if run:
+                selected.append((added.lens.name, sampled))
+        if not selected:
+            return
+        text_in = self._originating_text(trace_id, request_text)
+
+        async def _work() -> str:
+            await self._run_added_lenses(
+                channel, trace_id, text_in, response_text, selected)
+            return ""
+
+        await self._enqueue(channel, trace_id, annotations, "critique:lenses", _work)
+
+    async def _run_added_lenses(
+        self, channel, trace_id, originating_text, response_text,
+        selected: list[tuple[str, bool]],
+    ) -> None:
+        """Fork each selected added lens through the built-ins' own path,
+        record ``{"critique": {name: ...}}`` for those that ran and register
+        their objections without waking (an added lens only waits)."""
+        token = set_attribution(
+            stage="critique", channel_id=channel.id, trace_id=trace_id
+        )
+        try:
+            per_lens: dict[str, dict] = {}
+            objections: list[dict] = []
+            for name, sampled in selected:
+                # A miss was already logged by _fork_lens; nothing is recorded.
+                objs = await self._fork_lens(
+                    channel, name, trace_id, originating_text, response_text)
+                if objs is None:
+                    continue
+                entry: dict = {"objections": len(objs), "sampled": sampled}
+                if objs:
+                    entry["detail"] = objs
+                per_lens[name] = entry
+                objections.extend(objs)
+            if not per_lens:
+                return
+            await self._record_and_register(
+                channel, trace_id, {"critique": per_lens}, objections, wake=False,
+            )
+        finally:
+            reset_attribution(token)
+
     def _random_lens(self) -> str:
         return self._rng.choice(list(STYLISTIC_LENSES))
 
@@ -1041,20 +1389,31 @@ class CritiquePlugin(CorvidaePlugin):
         """
         if not self._eligible(trace_id, annotations):
             return
-        if not resolve_tunable(
+        # The provenance check: on when enabled and stage 2 listed claims.
+        claims = (stage2 or {}).get("past_claims") or []
+        if claims and resolve_tunable(
             channel, self.config, "critique.provenance.enabled", PROVENANCE_ENABLED_DEFAULT
         ):
-            return
-        claims = (stage2 or {}).get("past_claims") or []
-        if not claims:
-            return
-        text_in = self._originating_text(trace_id, None)
+            text_in = self._originating_text(trace_id, None)
 
-        async def _work() -> str:
-            await self._run_provenance(channel, trace_id, text_in, response_text, claims)
-            return ""
+            async def _work() -> str:
+                await self._run_provenance(channel, trace_id, text_in, response_text, claims)
+                return ""
 
-        await self._enqueue(channel, trace_id, annotations, "critique:provenance", _work)
+            await self._enqueue(channel, trace_id, annotations, "critique:provenance", _work)
+
+        # Added lenses with thresholds are decided on THIS exchange's stage 2
+        # (None when it produced no vector: they fall back to their rate).
+        # They come after provenance, so a problem deciding them can't cost
+        # the provenance check its turn.
+        await self._enqueue_added(
+            channel, trace_id, annotations, None, response_text,
+            [a for a in self._lenses.values() if a.lens.thresholds],
+            stage2=stage2,
+            fallback=None if stage2 is not None else (
+                "no stage-2 appraisal (stage 2 failed or was skipped; see the "
+                "appraisal warning for this trace)"),
+        )
 
     def _provenance_fork(self, channel, trace_id):
         """``(agent, cut)`` for the provenance fork, or the reason it can't run.

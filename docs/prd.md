@@ -1182,12 +1182,18 @@ deciding only what to newly append and in what order.
 
 **Critique.**
 
-1. After an exchange ends, a silent task selects stylistic lenses from the
-   appraisal vector (ambiguity to predictive, commitments to constrained,
-   negative valence with disagreement to adversarial), samples below
-   threshold at `critique.sample_below_rate` as the false-negative bound,
-   and runs each lens as a schema-constrained judgment of the exchange as
-   the agent saw it (§3.8).
+1. After an exchange ends, critique checks it with lenses, without delaying
+   the reply. Each lens checks for one kind of problem and runs on the
+   exchanges whose appraisal or reply text marks them as likely to have it.
+   An exchange appraised as ambiguous is checked for a misread request
+   (predictive); one dense with commitments, for commitments the agent
+   cannot keep (constrained); one negative in valence with disagreement,
+   for objections the agent dismissed (adversarial). A tunable share of
+   exchanges that select no lens is checked by a random built-in lens,
+   which bounds and measures what selection misses. A lens is added
+   without changing critique; it states which appraisals and reply text
+   select it and how often it runs regardless, and each is tunable per
+   channel. Every lens judges the exchange as the agent saw it (§3.8).
 2. The provenance check runs on any claim about the past, independent of
    the appraisal scores. Stage-2 appraisal (a model) lists the claims. The
    provenance critic (a model) judges whether any record supports each
@@ -1212,9 +1218,10 @@ deciding only what to newly append and in what order.
    is each check's own selection (items 1–2). A response a gate withheld
    is still judged; the agent's choice to stay silent is not a response,
    and is neither judged nor appraised.
-4. Empty objections are recorded and wake nothing. Stylistic objections
-   re-enter as framed CONTEXT at the channel's next turn and wake nothing,
-   so a self-check never sends the user an unsolicited message.
+4. Empty objections are recorded and wake nothing. Stylistic objections,
+   and those of added lenses, re-enter as framed CONTEXT at the channel's
+   next turn and wake nothing, so a self-check never sends the user an
+   unsolicited message.
    Provenance objections re-enter at the turn their stub triggers, and the
    agent may end that turn without sending anything. It is told that
    silence is the default, and to reply only when it judges its earlier

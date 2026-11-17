@@ -28,7 +28,13 @@ import pytest
 from corvidae.attribution import get_attribution
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.context import ContextWindow, MessageType
-from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl, resolve_reject_wins
+from corvidae.hooks import (
+    CorvidaePlugin,
+    create_plugin_manager,
+    hookimpl,
+    install_plugin_hookspecs,
+    resolve_reject_wins,
+)
 from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin, TaskQueue
@@ -124,7 +130,7 @@ async def _seed_fts(path, contents):
 
 async def build_critique(
     tmp_path, appraisal=None, chat_text=OBJECTION_VERDICT, fts_contents=(),
-    with_funnel=False, config=None, fork=True,
+    with_funnel=False, config=None, fork=True, extra_plugins=None,
 ):
     """Wire critique + outcome_log + llm(stub) + task over a file DB.
 
@@ -132,7 +138,9 @@ async def build_critique(
     ``chat_text`` and gives the channel a window holding rowids 1, 2 and 50,
     the rows these tests give their exchanges. The stylistic lenses are forks
     of the window (#320); a miss skips, so without both the lens never runs.
-    Tests that register their own agent pass ``fork=False``.
+    Tests that register their own agent pass ``fork=False``. ``extra_plugins``
+    (name -> plugin) are registered beside critique and their hookspecs
+    installed before critique's ``on_init``, as the daemon does.
     """
     from corvidae_cognition.critique import CritiquePlugin
 
@@ -175,6 +183,11 @@ async def build_critique(
 
     plugin = CritiquePlugin()
     pm.register(plugin, name="critique")
+    for extra_name, extra in (extra_plugins or {}).items():
+        pm.register(extra, name=extra_name)
+    if extra_plugins:
+        # The daemon installs plugin-declared hookspecs before any on_init.
+        install_plugin_hookspecs(pm)
     cfg = config or {}
     cfg.setdefault("daemon", {})["session_db"] = db_path
     await plugin.on_init(pm=pm, config=cfg)

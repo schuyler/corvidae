@@ -142,7 +142,7 @@ plugin.
 The `webhook` plugin owns `on_webhook_subscribe(subscriptions)`, through which
 plugins register handlers for webhook endpoints; see "Webhook ingress" under
 Transports. The `web` plugin owns `on_web_console_init(panels)`, through which
-plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path).
+plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path). The `critique` plugin (cognition extra) owns `on_critique_init(config, add_lens)`, through which plugins add critique lenses; see "CritiquePlugin: lenses other plugins add" in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init).
 
 ### Funnel pull path
 
