@@ -189,7 +189,7 @@ def next_fire(
 
 
 def cron_description(expr: str) -> str:
-    """Human-readable description of a cron expression (for list_jobs)."""
+    """Human-readable description of a cron expression (for list_reminders and job framing)."""
     minutes, hours, doms, months, dows = parse_cron(expr)
 
     def fmt(values: set[int], lo: int, hi: int) -> str:

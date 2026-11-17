@@ -843,7 +843,7 @@ Per transport:
 1. Built-in tools: `shell`, `read_file`, `write_file`, `web_fetch`,
    `web_search`, `task_pipeline`, `task_status`, `set_settings`,
    `subagent`, `fork`, the scheduler's `remind_me`/`list_reminders`/
-   `cancel_reminder`, memory's `search_memory`/`search_transcripts`/`recall_raw`, and the
+   `cancel_reminder`/`add_job`/`update_job`, memory's `search_memory`/`search_transcripts`/`recall_raw`, and the
    send, note and read tools (§3.5.9–11). Schemas
    are generated from type hints and docstrings; `_`-prefixed parameters
    are injected (`ToolContext`: channel, tool-call id, task queue), never
@@ -955,8 +955,7 @@ Per transport:
    any one destination over a period is a restriction the operator can
    apply (principle 15); none applies unless set. It counts every message
    the agent starts, as opposed to the reply a turn owes the channel it
-   runs on, and a reminder firing on a channel other than the one that set
-   it counts as one. It limits flooding a contact, not crossing channels. A
+   runs on. It limits flooding a contact, not crossing channels. A
    message to someone the inbound allowlist doesn't cover, on a one-to-one
    channel, admits that person's replies on that channel: the agent can
    start a conversation, not only send into a void. A message into a group
@@ -1481,20 +1480,21 @@ design, not requirement. The requirements are outcomes:
    frame (§3.3.11): reminder text as data with its quote marks
    neutralized, an operator job as the operator's. A late firing's frame
    says how overdue it was.
-5. Recurrence is a fixed interval with an optional anchor, stepped in
-   local wall-clock time in `scheduler.timezone`, computed from the
+5. Recurrence is a fixed interval with an optional anchor, or a cron
+   expression, stepped in local wall-clock time in `scheduler.timezone`, computed from the
    scheduled time so there is no drift. Startup applies a catch-up policy
    bounded by `catch_up_window`.
 6. Config jobs sync by name on start and reload; a removed name is a
    durable stop; an invalid entry logs and leaves the running job alone.
 7. The agent manages its own reminders, one-shot and recurring: it can
    set, list, change and cancel them. A recurring reminder recurs as
-   item 5 describes. `remind_me` takes an optional target channel and
-   defaults to the calling one; a reminder may target any channel
-   (principle 14), and listing and cancelling cover every channel's
-   reminders. The tools parse `when` themselves, refuse a bare number,
-   cap pending rows per target channel and text length, and refuse to
-   change or cancel config jobs. A floor on how often a reminder the
+   item 5 describes. The tools act on the calling channel only: a
+   reminder fires there, and listing, changing and cancelling cover that
+   channel's reminders. Reaching another channel is §3.5.9's job, not the
+   scheduler's. No tool sets a row's origin; every row a tool creates is
+   a `reminder`. The tools parse `when` themselves, refuse a bare number,
+   cap pending rows per channel and text length, and refuse to change or
+   cancel config jobs. A floor on how often a reminder the
    agent sets may recur is a restriction the operator can apply
    (principle 15).
 8. Retention runs on the kernel clock (§3.1.15, §3.7 Memory 6) and does
@@ -1828,6 +1828,7 @@ record that holds the reasoning.
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
 | The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
+| Reminders and jobs the agent sets act on the calling channel only, with origin `reminder`; cross-channel reach is §3.5.9's alone, so the scheduler is not a second, unaudited path between channels or around the critique of reminders. Supersedes "a reminder may target any channel" | §3.9.7; #814; owner, 2026-11-17 |
 | A decline is signalled by a plugin-chosen mechanism (token, tool or both) and enforced by a veto that acts on the agent's signal, not a gate; a signal followed by sent text is not a decline | #791, #795, #797, #799, #806 |
 | Model endpoints may be remote; a profile's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each profile sends | #217 |
 | Critique is gated: stylistic lenses run on salience, the provenance check on every claim about the past, never unconditionally per reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
