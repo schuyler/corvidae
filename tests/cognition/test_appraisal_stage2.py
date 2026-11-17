@@ -561,6 +561,51 @@ class TestStage2Listeners:
             await _teardown(env)
 
 
+    async def test_unexpected_exception_notifies_once_with_none(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """#1033 R5: a stage 2 that raises is a miss: logged at warning with
+        the trace, and listeners hear stage2=None once."""
+        env = await build_env(tmp_path, chat_text=json.dumps(CLAIMS_STAGE2))
+        heard = []
+
+        async def listener(**kwargs):
+            heard.append(kwargs)
+
+        async def explode(*args, **kwargs):
+            raise RuntimeError("stage 2 exploded")
+
+        env.appraisal.add_stage2_listener(listener)
+        monkeypatch.setattr(env.appraisal, "_run_stage2", explode)
+        try:
+            with caplog.at_level("WARNING", logger="corvidae.appraisal"):
+                await self._run(env, "kx")
+            assert [h["stage2"] for h in heard] == [None]
+            assert "kx" in caplog.text
+        finally:
+            await _teardown(env)
+
+    async def test_cancelled_stage2_notifies_no_one(self, tmp_path, monkeypatch):
+        """#1033: cancellation (shutdown) is not a miss; no listener hears it."""
+        env = await build_env(tmp_path, chat_text=json.dumps(CLAIMS_STAGE2))
+        heard = []
+
+        async def listener(**kwargs):
+            heard.append(kwargs)
+
+        async def cancelled(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        env.appraisal.add_stage2_listener(listener)
+        monkeypatch.setattr(env.appraisal, "_run_stage2", cancelled)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await self._run(env, "kc")
+            assert heard == []
+        finally:
+            await _teardown(env)
+
+
 # ---------------------------------------------------------------------------
 # 3. entropy_summary unit tests
 # ---------------------------------------------------------------------------

@@ -577,10 +577,14 @@ def _recall_roots(config: dict) -> list[str] | None:
 # critique.lens.novelty both a number and a block), and the stylistic run's
 # outcome keys (a lens named "detail" would overwrite critique.detail in the
 # outcome merge).
-RESERVED_LENS_NAMES = frozenset(DEFAULT_FORK_PROMPTS) | frozenset({
-    "ambiguity", "commitment", "neg_valence", "disagreement", "novelty",
-    "retention", "lenses", "objections", "sampled_below_threshold", "detail",
-})
+RESERVED_LENS_NAMES: dict[str, frozenset[str]] = {
+    "a built-in lens": frozenset(DEFAULT_FORK_PROMPTS),
+    "an existing critique.lens.* key": frozenset({
+        "ambiguity", "commitment", "neg_valence", "disagreement", "novelty",
+        "retention"}),
+    "a key of the stylistic run's critique outcome": frozenset({
+        "lenses", "objections", "sampled_below_threshold", "detail"}),
+}
 
 # A lens name is a config-key segment.
 LENS_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -640,11 +644,12 @@ def _lens_problem(lens: object) -> tuple[str | None, tuple[re.Pattern, ...]]:
         return (
             f"name {lens.name!r} must match {LENS_NAME_PATTERN.pattern} "
             "(a config-key segment); rename the lens", ())
-    if lens.name in RESERVED_LENS_NAMES:
-        return (
-            f"name {lens.name!r} collides with a built-in lens, a critique.lens.* "
-            "key or a critique outcome key (reserved: "
-            f"{', '.join(sorted(RESERVED_LENS_NAMES))}); rename the lens", ())
+    # A reserved name: say which kind of name it collides with.
+    for kind, names in RESERVED_LENS_NAMES.items():
+        if lens.name in names:
+            return (
+                f"name {lens.name!r} collides with {kind} of that name; "
+                "rename the lens", ())
     if not isinstance(lens.fork_prompt, str) or not lens.fork_prompt.strip():
         return f"fork_prompt {lens.fork_prompt!r} must be a non-empty string", ()
     if not _is_unit_number(lens.sample_rate):
@@ -1059,20 +1064,6 @@ class CritiquePlugin(CorvidaePlugin):
                 _work_proactivity,
             )
 
-        # Added lenses without thresholds are decided now, on the reply text;
-        # with no appraisal plugin no stage 2 will come, so the thresholded
-        # ones are decided now too, at their sample rate.
-        if self._stage2_listening:
-            await self._enqueue_added(
-                channel, trace_id, annotations, request_text, response_text,
-                [a for a in self._lenses.values() if not a.lens.thresholds],
-                stage2=None, fallback=None)
-        else:
-            await self._enqueue_added(
-                channel, trace_id, annotations, request_text, response_text,
-                list(self._lenses.values()), stage2=None,
-                fallback="no stage-2 appraisal (appraisal plugin absent)")
-
         appraisal = self.pm.get_plugin("appraisal")
         lenses: list[str] = []
         sampled = False
@@ -1100,17 +1091,33 @@ class CritiquePlugin(CorvidaePlugin):
                     lenses = [self._random_lens()]
                     sampled = True
 
-        if not lenses:
-            return
-        text_in = self._originating_text(trace_id, request_text)
+        # The selected stylistic lenses run as one silent task.
+        if lenses:
+            text_in = self._originating_text(trace_id, request_text)
 
-        async def _work() -> str:
-            await self._run_critique(
-                channel, trace_id, text_in, response_text, lenses, sampled
-            )
-            return ""
+            async def _work() -> str:
+                await self._run_critique(
+                    channel, trace_id, text_in, response_text, lenses, sampled
+                )
+                return ""
 
-        await self._enqueue(channel, trace_id, annotations, "critique", _work)
+            await self._enqueue(channel, trace_id, annotations, "critique", _work)
+
+        # Added lenses come after the built-ins, so a problem deciding them
+        # (a malformed tunable) can't cost the built-in checks their turn.
+        # Added lenses without thresholds are decided now, on the reply text;
+        # with no appraisal plugin no stage 2 will come, so the thresholded
+        # ones are decided now too, at their sample rate.
+        if self._stage2_listening:
+            await self._enqueue_added(
+                channel, trace_id, annotations, request_text, response_text,
+                [a for a in self._lenses.values() if not a.lens.thresholds],
+                stage2=None, fallback=None)
+        else:
+            await self._enqueue_added(
+                channel, trace_id, annotations, request_text, response_text,
+                list(self._lenses.values()), stage2=None,
+                fallback="no stage-2 appraisal (appraisal plugin absent)")
 
     def _record_reply(self, channel, trace_id) -> None:
         """Note which window row is the exchange's final reply, for the
@@ -1275,10 +1282,9 @@ class CritiquePlugin(CorvidaePlugin):
                 limit = resolve_tunable(
                     channel, self.config,
                     f"critique.lens.{lens.name}.{t.dimension}", t.value)
-                value = (stage2 or {}).get(t.dimension)
-                if not isinstance(value, (int, float)):
-                    reason = f"{t.dimension} missing from stage 2"
-                    break
+                # Without a fallback the vector is present, and appraisal
+                # fills every dimension (or produces no vector at all).
+                value = stage2[t.dimension]
                 if (value < limit) if t.bound == "min" else (value > limit):
                     reason = (
                         f"{t.dimension} {value:g} {'<' if t.bound == 'min' else '>'} "
@@ -1383,8 +1389,23 @@ class CritiquePlugin(CorvidaePlugin):
         """
         if not self._eligible(trace_id, annotations):
             return
+        # The provenance check: on when enabled and stage 2 listed claims.
+        claims = (stage2 or {}).get("past_claims") or []
+        if claims and resolve_tunable(
+            channel, self.config, "critique.provenance.enabled", PROVENANCE_ENABLED_DEFAULT
+        ):
+            text_in = self._originating_text(trace_id, None)
+
+            async def _work() -> str:
+                await self._run_provenance(channel, trace_id, text_in, response_text, claims)
+                return ""
+
+            await self._enqueue(channel, trace_id, annotations, "critique:provenance", _work)
+
         # Added lenses with thresholds are decided on THIS exchange's stage 2
         # (None when it produced no vector: they fall back to their rate).
+        # They come after provenance, so a problem deciding them can't cost
+        # the provenance check its turn.
         await self._enqueue_added(
             channel, trace_id, annotations, None, response_text,
             [a for a in self._lenses.values() if a.lens.thresholds],
@@ -1393,20 +1414,6 @@ class CritiquePlugin(CorvidaePlugin):
                 "no stage-2 appraisal (stage 2 failed or was skipped; see the "
                 "appraisal warning for this trace)"),
         )
-        if not resolve_tunable(
-            channel, self.config, "critique.provenance.enabled", PROVENANCE_ENABLED_DEFAULT
-        ):
-            return
-        claims = (stage2 or {}).get("past_claims") or []
-        if not claims:
-            return
-        text_in = self._originating_text(trace_id, None)
-
-        async def _work() -> str:
-            await self._run_provenance(channel, trace_id, text_in, response_text, claims)
-            return ""
-
-        await self._enqueue(channel, trace_id, annotations, "critique:provenance", _work)
 
     def _provenance_fork(self, channel, trace_id):
         """``(agent, cut)`` for the provenance fork, or the reason it can't run.

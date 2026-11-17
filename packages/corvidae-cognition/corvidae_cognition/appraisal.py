@@ -161,14 +161,14 @@ DEFAULT_STAGE2_FORK_PROMPT = (
     "}"
 )
 
-# JSON schema constraining the stage-2 call on servers that honour it
-# (llama-server grammar / json_schema via extra_body). Providers that ignore
-# it still return the JSON the prompt asks for; _parse_json_block reads it.
 #: The numeric stage-2 dimensions other plugins may select on (critique
 #: lens thresholds validate against this); the schema below defines them.
 STAGE2_DIMENSIONS: tuple[str, ...] = (
     "valence", "stakes", "ambiguity", "commitment_density", "novelty")
 
+# JSON schema constraining the stage-2 call on servers that honour it
+# (llama-server grammar / json_schema via extra_body). Providers that ignore
+# it still return the JSON the prompt asks for; _parse_json_block reads it.
 STAGE2_SCHEMA = {
     "type": "object",
     "properties": {

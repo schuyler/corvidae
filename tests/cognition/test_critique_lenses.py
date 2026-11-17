@@ -403,6 +403,26 @@ class TestAddLensRejection:
         finally:
             await _teardown(env)
 
+    async def test_implementer_declaring_only_add_lens_is_called(self, tmp_path):
+        """R1/R2 guard: an implementer that declares add_lens and not config
+        is called with what it declares, as pluggy would, and its lens loads."""
+
+        class AddOnly(CorvidaePlugin):
+            depends_on = frozenset()
+
+            @hookimpl
+            async def on_critique_init(self, add_lens):
+                add_lens(_lens("lean", sample_rate=1.0))
+
+        env = await build_lenses(
+            tmp_path, {"lean": AddOnly()}, appraisal=FakeAppraisal(stage2=_stage2()),
+        )
+        try:
+            await _judged_turn(env, "kargs", stage2=_stage2())
+            assert _ran(env, "lean") == 1
+        finally:
+            await _teardown(env)
+
     @pytest.mark.parametrize("reserved", [
         "predictive", "retention",  # a built-in lens
         "novelty", "ambiguity",     # an existing critique.lens.* key
@@ -881,6 +901,31 @@ class TestSameMachinery:
             assert _warnings(caplog, "mine", "kr6d", "not in the window"), caplog.text
             outcomes = await _read_outcomes(env.db, "kr6d") or {}
             assert "mine" not in outcomes.get("critique", {})
+        finally:
+            await _teardown(env)
+
+
+    async def test_a_malformed_lens_tunable_leaves_the_built_ins_their_turn(
+        self, tmp_path,
+    ):
+        """R8 guard: added lenses are decided after the built-in checks, so a
+        malformed per-channel lens tunable can't cost a built-in lens its
+        turn. (What the malformed value itself does is deferred.)"""
+        env = await build_lenses(
+            tmp_path, {"kb": Contributor(_lens("fragile", sample_rate=1.0))},
+            appraisal=FakeAppraisal(stage1={"ambiguity": 0.9}, stage2=_stage2()),
+        )
+        try:
+            env.channel.runtime_overrides["critique.lens.fragile.sample_rate"] = "high"
+            # The malformed value may raise out of the hook; the built-in
+            # decision must already have been made by then.
+            try:
+                await _fire(env, "kmal", origin="user", response_text="resp")
+            except TypeError:
+                pass
+            await _drain(env)
+            assert sum("[Self-critique: predictive]" in c["instruction"]
+                       for c in env.fork_agent.calls) == 1
         finally:
             await _teardown(env)
 
