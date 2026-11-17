@@ -4,7 +4,7 @@
 
 Dependencies are installed by `.claude/hooks/session-start.sh` in Claude Code on
 the web. If an import fails, run
-`uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify` —
+`uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify --extra vision` —
 that installs the `dev` extra (pytest, pytest-asyncio), the `dev` dependency
 group (pytest-timeout), which the pytest config needs, the `acp` and `discord`
 extras, whose transport tests import the SDKs, the `cognition` extra
@@ -25,7 +25,10 @@ and list_channels tools), which `tests/test_cross_channel_send/` imports, and th
 (`packages/rss-reader`: RSS/Atom feed polling), which
 `packages/rss-reader/tests/` imports, and the `goals-notify` extra
 (`packages/goals-notify`: goal state changes to the goal's origin channel),
-which `tests/test_goals_notify/` imports. The
+which `tests/test_goals_notify/` imports, and the `vision` extra
+(`packages/corvidae-vision`: image analysis via the local multimodal LLM), which
+`packages/corvidae-vision/tests/` imports; without it that directory skips, so the
+kernel suite collects it rather than ignoring it, which keeps the skip tested. The
 `cognition` extra includes `sqlite-vec` through the distribution's `vec`
 sub-extra; leave it out to exercise the FTS5-only path (`docs/cognition.md`),
 which is what CI's `cognition-fts` job does. That is CI's `full`
@@ -33,14 +36,14 @@ job. The kernel alone is `--extra dev --extra acp`; CI's `kernel` job runs
 everything outside `tests/cognition/`, `tests/test_cross_channel_send/`,
 `tests/test_webhook_notify/`, `tests/test_github_webhook/`,
 `tests/test_context_panel/`, `tests/test_timepiece/`, `tests/test_inotify/`,
-`tests/test_outbound_cap/`, `tests/test_goals_notify/` and `tests/corvidae_restart/` (which needs the
-`restart` extra) that way, so a kernel module must never import `corvidae_cognition`
+`tests/test_outbound_cap/`, `tests/test_goals_notify/`, `packages/rss-reader/tests/`
+and `tests/corvidae_restart/` (which needs the `restart` extra) that way, so a kernel module must never import `corvidae_cognition`
 (`tests/test_kernel_boundary.py`).
 
 ```sh
-uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify  # everything
+uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify --extra vision  # everything
 uv run pytest                    # full suite
-uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_github_webhook --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/rss-reader/tests --ignore=packages/corvidae-vision/tests --ignore=tests/test_goals_notify  # the kernel suite
+uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_github_webhook --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/rss-reader/tests --ignore=tests/test_goals_notify  # the kernel suite
 uv run pytest tests/test_foo.py  # one file
 uv run pytest --run-eval         # include live-LLM eval tests (deselected by default)
 uv run ruff check .              # lint
@@ -66,8 +69,8 @@ run `uv lock`; CI syncs with `--locked` and fails on a stale lock.
 CI (`.github/workflows/tests.yml`) runs four jobs on every push to `main` and
 every PR: `kernel` (`--extra dev --extra acp`; checks that sqlite-vec, the
 Discord SDK and `corvidae_cognition` are absent, then runs the kernel suite
-above), `full` (every extra; checks sqlite-vec and the Discord
-SDK load, then runs the whole suite), `cognition-fts` (the kernel install plus
+above), `full` (every extra; checks sqlite-vec, the Discord
+SDK, `emoji` and `corvidae_vision` load, then runs the whole suite), `cognition-fts` (the kernel install plus
 `packages/corvidae-cognition` without sqlite-vec; checks it is absent, then runs `tests/cognition/` on the
 FTS5 path), and `web-smoke` (kernel install plus the context panel and a
 pinned Playwright and Chromium; runs `tests/test_web_render_smoke.py` and
