@@ -1291,8 +1291,10 @@ plugin gating eligibility off that origin, never has to infer it from
 stub text. The `'user'|'reminder'|'critique'|'heartbeat'|'task'`
 taxonomy is a convention cognition plugins (AppraisalPlugin,
 CritiquePlugin, OutcomeLogPlugin) share over this key — not a core
-concept. `'user'` is recognized by subscribing to `on_message_admitted`
-rather than by a value in `annotations`; `'task'` is the default OutcomeLogPlugin
+concept. Critique judges every main-loop turn whatever its origin (#1031)
+and reads only `'critique'`, to keep a correction's findings from waking
+another turn. GatePlugin recognizes `'user'` by subscribing to
+`on_message_admitted` rather than by a value in `annotations`; `'task'` is the default OutcomeLogPlugin
 applies when `annotations["origin"]` is absent on a notification-born
 trace. `stub_text=` replaces the default "N pending … item(s)" stub text
 (the provenance check's use). `ingest(channel, source, entries)` is the
@@ -1679,9 +1681,10 @@ model makes both language judgments; the code only fetches evidence:
    call because stage 2 already runs on every answered exchange. A decline
    gets no stage 2, so it gets no provenance check either.
 2. **Evidence.** When stage 2 lands, AppraisalPlugin notifies its listeners.
-   CritiquePlugin registers one in `on_start`. For an eligible exchange
-   (same rule as the stylistic lenses: `user` or `reminder`) with at least
-   one claim, it enqueues a silent task. That task searches `message_fts`
+   CritiquePlugin registers one in `on_start`. For an exchange with at
+   least one claim it enqueues a silent task. Every main-loop turn with a
+   trace is eligible, whatever started it (#1031; the same rule as the
+   stylistic lenses), corrections included, so stage 2 runs on them too. That task searches `message_fts`
    with each claim's phrases (or the claim's own words when it has none):
    every whitespace-separated chunk quoted, then OR-joined. FTS5
    tokenizes the quotes with the index's own tokenizer, so no
@@ -1739,7 +1742,11 @@ retention root (`critique.retention.root`, else markdown_recall's root), retenti
 every critique wake (provenance included) uses one stub that adds how to
 file them: read the named file under the root and append only what is
 missing. The funnel keeps one pending stub per channel and origin, so the
-first wake's text governs everything queued behind it. The plugin's
+first wake's text governs everything queued behind it.
+On a critique-origin turn (a correction, or a turn a note from one woke)
+nothing wakes: its provenance, proactivity and retention findings all wait
+for the channel's next turn, so a correction never starts another (PRD
+§3.7 Critique 4). Retention findings then wait without the filing stub. The plugin's
 `should_send_response` vetoes a `final` on a critique-origin turn whose
 stripped text is `NO_REPLY`; the kernel stores it as `unsent` with the
 not-sent marker. That veto is critique's own and always on with this plugin
@@ -1993,7 +2000,7 @@ runs and the fallback final stays withheld.
 
 What the kernel does with a withheld final is in
 [design.md](design.md#the-output-gate). On the cognition side, critique still
-judges a withheld `user` or `reminder` final, though not a decline (an
+judges a withheld final, whatever its origin, though not a decline (an
 unsent `NO_REPLY` or empty final, #420), its provenance probe doesn't
 count a withheld row as a record of anything said, and `recall_raw` and
 `search_transcripts` label withheld rows `(withheld, not sent)`.
@@ -2096,8 +2103,9 @@ queue first, each not plainly open marked `[in-progress]`, `[blocked]` or
 so the call-to-action is last. `prompts/heartbeat.md` shows a full beat. A failed memory or retired-goals read
 skips the beat, which is retried after one period. The turn then runs the
 ordinary notification pipeline with the agent's normal tools. The `heartbeat`
-origin keeps the existing conventions: critique doesn't review it, the
-decide gate treats it as non-user, and `exchange_log` records it.
+origin follows the general conventions: critique judges it like any other
+turn (#1031), the decide gate treats it as non-user, and `exchange_log`
+records it.
 
 **Its window.** The window grows beat by beat and is bounded by ordinary
 compaction at the channel's budget, `channels.internal:heartbeat.max_context_tokens`

@@ -23,17 +23,16 @@ named by ``source_channel``/``source_trace_id`` and by the kernel's
 ``origin_channel``/``origin_trace`` metadata. How the cognition consumers read
 the woken turn (its trace is minted at dequeue, never admitted), checked
 against their source on 2026-11-17:
-- critique._eligible: eligible iff origin == "reminder", or origin is absent
-  and the trace was admitted. A reminder chain's woken turn is eligible; a
-  user chain's is not. (#1031 decided that every main-loop turn is judged;
-  not built yet.)
+- critique: every main-loop turn with a trace is judged (#1031), so the
+  woken turn is, whatever its origin. A note from a correction carries
+  origin "critique", so the woken turn's findings never wake another turn.
 - funnel: origin keys the deferred-registration queue as (channel.id,
   origin); a woken turn with no origin drains only the next-turn queue.
 - gates: no origin reads as "task", so the decide gate's salience
   withholding applies to a user chain's woken turn; a reminder chain's is
   never withheld; a ``gate.send.quiet_origins`` origin stays quiet on the
   channel it sends to.
-- appraisal: stage 2 runs unless the origin is "critique".
+- appraisal: stage 2 runs on every origin (#1031).
 - outcome_log: the exchange row's origin column records the carried origin,
   or "task" when there is none.
 """

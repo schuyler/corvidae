@@ -10,7 +10,7 @@ Per plans/implementation/phase-2.md WP2.5:
   overwrite (stage1/stage1_out survive);
 - malformed model output is logged and the row keeps stage 1 only; no exception
   escapes;
-- no stage-2 task for origin="critique" exchanges;
+- a stage-2 task for origin="critique" exchanges too (#1031);
 - AppraisalPrior scores a covered msg-id range from stored appraisals and falls
   back to the wrapped prior when uncovered; consolidation writes mean stage-2
   valence into the memory record;
@@ -268,14 +268,15 @@ class TestTrigger:
         assert "appraisal" in task.description
         await _teardown(env)
 
-    async def test_no_task_for_critique_origin(self, tmp_path):
+    async def test_stage2_runs_for_critique_origin(self, tmp_path):
+        """#1031: a correction is judged, so provenance needs its claims."""
         env = await build_env(tmp_path)
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
             trace_id="kc", annotations={"origin": "critique"},
             logprobs=None,
         )
-        assert env.task.task_queue.queue.qsize() == 0
+        assert env.task.task_queue.queue.qsize() == 1
         await _teardown(env)
 
     async def test_silent_task_fires_no_on_notify(self, tmp_path):

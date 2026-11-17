@@ -170,10 +170,7 @@ class TestCritiqueSkipsDeclines:
         env = await _critique_env(tmp_path)
         channel = Channel(transport="test", scope="decline")
         channel.conversation = _window_ending_in(channel, text, final_type)
-        # A user-origin turn: admitted, no origin annotation.
-        await env.critique.on_message_admitted(
-            channel=channel, trace_id="t-decline", sender="user", text="q",
-        )
+        # A user-origin turn: no origin annotation.
 
         await env.critique.on_agent_response(
             channel=channel, request_text="q", response_text=text,
@@ -199,9 +196,6 @@ class TestCritiqueSkipsDeclines:
         monkeypatch.setattr(critique_mod, "is_decline", _boom)
         env = await _critique_env(tmp_path)
         channel = Channel(transport="test", scope="decline")
-        await env.critique.on_message_admitted(
-            channel=channel, trace_id="t-boom", sender="user", text="q",
-        )
 
         with caplog.at_level("WARNING", logger="corvidae.critique"):
             await env.critique.on_agent_response(
@@ -270,8 +264,7 @@ async def _user_turn(env, reply: str) -> None:
     env.plugin._client = client
     env.plugin._mark_started()
     trace_id = mint_trace_id()
-    # The kernel admits a user message before queuing it; critique keys
-    # user origin on that hook.
+    # The kernel admits a user message before queuing it.
     await env.plugin.pm.ahook.on_message_admitted(
         channel=env.channel, trace_id=trace_id, sender="user", text="Should I restart it?",
     )
