@@ -218,17 +218,17 @@ violates one is a bug even if its tests pass.
    heartbeat's role (base PRD §3.7 Heartbeat): the framework MUST NOT
    run a separate heartbeat, and every base PRD requirement on the
    heartbeat applies instead to the core's handling of idle
-   notifications, except its exemption from critique. The framework
-   MUST critique the core's idle-started turns like every other core
-   turn (§3.7).
+   notifications. Like every core turn, the core's idle-started turns
+   are critiqued (§3.7).
 
    *Rationale:* The heartbeat's purpose is that the agent lives between
    messages (base PRD principle 13): when the system is idle, it looks
    at its goals and decides whether to act. The core already holds the
    goals (principle 20), so it takes over that role, and as the
    cognitive center it gets every cognitive function, critique
-   included. Base critique's exemptions for `critique` and `task` turns
-   still apply; they keep critique from judging its own objections.
+   included. Base critique exempts no origin (base §3.7 Critique 3); a
+   turn a critique finding woke is judged, and its findings wake no
+   further turn (base §3.7 Critique 4).
 
 3. The framework MUST let the core direct KV cache allocation through
    tools that control queue multiplexing, and the slot-management plugin
@@ -788,6 +788,9 @@ With the goals plugin loaded:
    consolidation of its result. Nor does it run for a
    long-lived fork, whose work is remembered through the consolidation
    of its join report in its parent's window (§3.5; owner, 2026-11-16).
+   Critique does not run inside a task-bound peripheral; its result is
+   critiqued where it lands, in the launcher's window (base §3.7
+   Critique 3).
 
 2. With the appraisal plugin loaded, appraisal MUST run in the core
    (§3.1.10).
@@ -988,9 +991,7 @@ supplement amends them:
   softened: the framework gives every context the one identity, and
   where contexts run different models, presentation is measured (§3.8.2),
   not required (§3.2.5);
-- the core takes over the heartbeat's role, and its idle-started turns
-  lose the heartbeat's critique exemption, amending base §3.7
-  Heartbeat and §3.7 Critique 3 (§3.1.2);
+- the core takes over the heartbeat's role (§3.1.2);
 - goals sit in a pinned block with tail updates (base §3.7 Goals; §3.6);
 - the core MAY give a task-bound peripheral fewer tools than it holds,
   amending base §3.5.7's full inherited set (§3.2.8);

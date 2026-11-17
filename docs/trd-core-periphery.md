@@ -80,6 +80,7 @@ Reading the tree for this document found five more that no list names.
 | Pluggable lease order (base §3.13.7) | #366 | open | the slot manager's ordering (TRD §8) |
 | Origin never taken from a tool argument | #814 | open | every origin in TRD §5.2 |
 | Trust plugin | #138 | open | trust stamping (TRD §9.4) |
+| Critique judges every main-loop turn (base §3.7 Critique 3–4) | #1031 | decided, not built | every "Critiqued: yes" in TRD §5.2 |
 
 Evidence, each read at `23490ae`:
 
@@ -94,15 +95,8 @@ Evidence, each read at `23490ae`:
 - **Origin is a tool argument today.** #981 records that `add_job` and
   `update_job` pass a model-chosen `origin` into the notification.
 
-One change to a cognition plugin is also a prerequisite, with no issue
-yet. `CritiquePlugin._eligible`
-(`packages/corvidae-cognition/corvidae_cognition/critique.py`) admits
-only origin `reminder`, or no origin on an admitted trace. Every origin
-this strategy adds would be exempt, against gap 1's decision and
-§3.1.2. Critique gains `add_eligible_origin(name: str)`, which a plugin
-calls from `on_start`, and the strategy's plugins register the origins
-of TRD §5.2. An origin nobody registers stays exempt, so the base
-topology and base §3.7 Critique 3 are unchanged.
+Critique judges every main-loop turn whatever its origin (#1031), so
+the origins of TRD §5.2 need no registration.
 
 ## 3. Components
 
@@ -987,7 +981,7 @@ pinning and the byte stability of §3.6.2–3.
 | | core | peripheral | fork | task-bound |
 |---|---|---|---|---|
 | compaction | yes | yes | yes | no; open, TRD §15.1 |
-| critique | yes | yes | yes | no; open, TRD §15.1 |
+| critique | yes | yes | yes | no; its result is critiqued in the launcher's window (#1031) |
 | consolidation | yes | yes | no | no |
 | consolidation at an age (TRD §10.5) | no | yes | no | no |
 | digest of peripheral memories (TRD §10.5) | yes | no | no | no |
@@ -1008,8 +1002,8 @@ pinning and the byte stability of §3.6.2–3.
 - **appraisal**: a per-channel tunable `appraisal.enabled` (default
   true). `periphery` defaults it false for peripheral channels and
   `forks` for `core:fork:*`, both through K3.
-- **critique**: `add_eligible_origin` (TRD §2) and `review_text`
-  (TRD §6.5).
+- **critique**: `review_text` (TRD §6.5). Eligibility needs no switch
+  (#1031).
 
 ### 10.4 Two memories of one exchange (open question 14)
 
@@ -1290,9 +1284,8 @@ order.
 
 | Phase | Builds | Needs | Probe |
 |---|---|---|---|
-| 0 | Critique's `add_eligible_origin` | — | a turn whose origin a plugin registered is critiqued; one nobody registered is not |
 | 1 | K1, K3, K4, K5, K6, K8; `limits` | #814 | a task started at `max_waiting` returns the refusal text and a warning is logged; a tool result at the same depth is accepted |
-| 2 | K9; `core`: channel, uid, `attach_cli`, idle beat, `cp_work`, observables; goal block | phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
+| 2 | K9; `core`: channel, uid, `attach_cli`, idle beat, `cp_work`, observables; goal block | #1031, phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
 | 3 | K2; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains, the `notify_other_channel` change of TRD §9.3; the age trigger and the digest (TRD §10.5) | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window; a peripheral message that is not escalated is in a CONTEXT row at the core's tail by the core's first call after `consolidate_max_age` and the consolidation's duration, and no core turn was started for it; with the peripheral on a second profile and the `consolidation` stage unmapped, that consolidation's request goes to the peripheral's profile |
 | 4 | K7; tail import; criteria rewrites | #235, phase 3 | a subagent given `tools=["read_file"]` has no other tool in its request; a rewrite is absent from the peripheral's prompt before its next compaction and present after; a frozen channel refuses |
 | 5 | `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `hold_queue` and `resume_queue` in `core` (TRD §8.3, on the kernel's stop and resume), the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel; `hold_queue` on the core's own channel returns the refusal text and stores no `cp_stops` row; after `hold_queue` on a fork that shared its parent's lease, the parent's next call is granted |
@@ -1381,14 +1374,14 @@ means an existing base mechanism meets it and nothing is built.
 
 ### 15.1 Open for the owner
 
-- **Compaction and critique of a task-bound peripheral.** §3.7.1 says
-  both run for every context, core and peripheral, and excepts only
-  consolidation. The `subagent` loop has no compaction and is bounded
-  by `subagent.max_turns`, and base critique exempts `task` turns.
-  Either §3.7.1 gains the two exceptions or K7 gains both mechanisms.
-  This document builds neither. It recommends the exceptions: a task
-  that outgrows its window is better split by its launcher, and its
-  result is critiqued in the launcher's window, where it lands.
+- **Compaction of a task-bound peripheral.** §3.7.1 says compaction
+  runs for every context and excepts only consolidation. The
+  `subagent` loop has no compaction and is bounded by
+  `subagent.max_turns`. Either §3.7.1 gains the exception or K7 gains
+  the mechanism. This document builds neither and recommends the
+  exception: a task that outgrows its window is better split by its
+  launcher. Critique is settled (#1031): a task's result is critiqued
+  where it lands, and the loop itself is not.
 - **K8 leaves one edge undesigned.** The owner approved K2 to K6, K8
   and K9 as kernel contracts on 2026-11-16 (TRD §4). The edge: a fork's call already waiting under
   the shared key when that key is stopped waits with it, and the switch
