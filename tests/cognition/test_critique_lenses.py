@@ -275,7 +275,12 @@ class TestContribution:
 # (id, the bad lens, text the warning must name besides plugin and lens name)
 REJECTED = [
     ("bad-name", lambda: _lens("Bad-Name", sample_rate=1.0), "Bad-Name"),
-    ("empty-prompt", lambda: _lens("emptyp", fork_prompt="", sample_rate=1.0), "emptyp"),
+    ("empty-prompt", lambda: _lens("emptyp", fork_prompt="", sample_rate=1.0), "fork_prompt"),
+    ("non-str-prompt", lambda: _lens("intp", fork_prompt=42, sample_rate=1.0), "fork_prompt"),
+    ("threshold-not-a-threshold", lambda: _lens(
+        "dictthresh", sample_rate=1.0,
+        thresholds=({"dimension": "ambiguity", "bound": "min", "value": 0.5},)),
+     "dimension"),
     ("bad-bound", lambda: _lens(
         "badbound", sample_rate=1.0,
         thresholds=(_threshold("ambiguity", "sideways", 0.5),)), "sideways"),
@@ -283,7 +288,7 @@ REJECTED = [
         "bigthresh", sample_rate=1.0,
         thresholds=(_threshold("ambiguity", "min", 1.5),)), "1.5"),
     ("sample-range", lambda: _lens("bigrate", sample_rate=2.0), "2.0"),
-    ("bool-rate", lambda: _lens("boolrate", sample_rate=True), "boolrate"),
+    ("bool-rate", lambda: _lens("boolrate", sample_rate=True), "sample_rate"),
     ("two-thresholds-one-dimension", lambda: _lens(
         "twice", sample_rate=1.0,
         thresholds=(_threshold("ambiguity", "min", 0.2),
@@ -375,6 +380,26 @@ class TestAddLensRejection:
             await _judged_turn(env, "kr2c", stage2=_stage2())
             assert _ran(env, "twin") == 0
             assert _ran(env, "solo") == 1
+        finally:
+            await _teardown(env)
+
+    async def test_a_rejected_copy_does_not_knock_out_a_valid_one(
+        self, tmp_path, caplog,
+    ):
+        """R2a: a lens that fails validation is rejected alone; a valid lens
+        of the same name from another plugin still loads."""
+        with caplog.at_level("WARNING"):
+            env = await build_lenses(
+                tmp_path,
+                {"alpha": Contributor(_lens("twin", sample_rate=1.0)),
+                 "beta": Contributor(_lens("twin", fork_prompt="", sample_rate=1.0))},
+                appraisal=FakeAppraisal(stage2=_stage2()),
+            )
+        try:
+            assert _warnings(caplog, "beta", "twin", "fork_prompt"), caplog.text
+            assert not _warnings(caplog, "twin", "rename"), caplog.text
+            await _judged_turn(env, "kr2d", stage2=_stage2())
+            assert _ran(env, "twin") == 1
         finally:
             await _teardown(env)
 
@@ -651,7 +676,7 @@ class TestSelectionRule:
                 appraisal=FakeAppraisal(stage2=_stage2()),
             )
         try:
-            assert _warnings(caplog, "odd", "sentiment", *DIMENSIONS), caplog.text
+            assert _warnings(caplog, "contrib", "odd", "sentiment", *DIMENSIONS), caplog.text
             await _judged_turn(env, "kr4r", stage2=_stage2())
             assert _ran(env, "odd") == 0
             assert _ran(env, "good") == 1
@@ -683,12 +708,14 @@ class TestStage2Source:
         listener delivers for this trace, not get_last_stage2."""
         env = await build_lenses(
             tmp_path,
-            {"kb": Contributor(_lens(
+            {"kb": Contributor(_ctl(), _lens(
                 "fresh", thresholds=(_threshold("ambiguity", "min", 0.6),)))},
             appraisal=FakeAppraisal(stage2=_stage2(ambiguity=last)),
         )
         try:
             await _judged_turn(env, "kr5a", stage2=_stage2(ambiguity=delivered))
+            # The control proves the hook delivered lenses.
+            assert _ran(env, "ctl") == 1
             assert _ran(env, "fresh") == (1 if runs else 0)
         finally:
             await _teardown(env)
@@ -707,30 +734,38 @@ class TestStage2Source:
             appraisal=FakeAppraisal(stage2=_stage2(ambiguity=0.9)), rng=0.5,
         )
         try:
-            with caplog.at_level("WARNING"):
+            with caplog.at_level("DEBUG"):
                 await _judged_turn(env, "kr5b", stage2=None)
             assert _ran(env, "ctl") == 1
             assert _ran(env, "needy") == (1 if runs else 0)
-            assert _warnings(caplog, "needy", "kr5b", "stage"), caplog.text
+            assert _warnings(caplog, "needy", "kr5b", "stage 2", "failed"), caplog.text
+            if not runs:
+                # The debug decline line names the fallback as its reason.
+                assert [r for r in caplog.records
+                        if "needy" in r.getMessage()
+                        and "no stage 2" in r.getMessage()
+                        and "sampled out" in r.getMessage()], caplog.text
         finally:
             await _teardown(env)
 
+    @pytest.mark.parametrize("rate, runs", [(1.0, True), (0.0, False)])
     async def test_no_appraisal_plugin_falls_back_to_the_rate_with_a_warning(
-        self, tmp_path, caplog,
+        self, tmp_path, caplog, rate, runs,
     ):
         """R5: with no appraisal plugin a thresholded lens is decided at
         on_agent_response by its sample rate, with a warning naming it."""
         env = await build_lenses(
             tmp_path,
-            {"kb": Contributor(_lens(
-                "needy", sample_rate=1.0,
+            {"kb": Contributor(_ctl(), _lens(
+                "needy", sample_rate=rate,
                 thresholds=(_threshold("ambiguity", "min", 0.6),)))},
-            appraisal=None,
+            appraisal=None, rng=0.5,
         )
         try:
             with caplog.at_level("WARNING"):
                 await _judged_turn(env, "kr5c")
-            assert _ran(env, "needy") == 1
+            assert _ran(env, "ctl") == 1
+            assert _ran(env, "needy") == (1 if runs else 0)
             assert _warnings(caplog, "needy", "kr5c", "appraisal"), caplog.text
         finally:
             await _teardown(env)
