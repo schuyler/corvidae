@@ -5,7 +5,7 @@ on 2026-11-17.** This supplement is part of the product requirements for
 deployments that run the core/periphery strategy, and `docs/prd.md` §4
 records the decision. The technical reference document (TRD),
 `docs/trd-core-periphery.md`, says how these outcomes are met and in
-what order. Its prerequisites are measured
+what order. The supplement's prerequisites are measured
 against the base PRD alone: the kernel rename (#16), providers and warm
 heads (#362), lease scopes (#363), and the lease mechanism with its
 default order and metrics (#364, #367).
