@@ -1,8 +1,10 @@
 """Tests for CritiquePlugin (WP2.7; the provenance check redesigned in #155).
 
-- eligibility by PROPAGATED origin (trap #3): user/reminder eligible;
-  critique/heartbeat/task exempt (the recursion brake); a user exchange
-  ending on a tool-result turn is critiqued against the original user text;
+- eligibility (#1031): every main-loop turn with a trace is judged,
+  whatever its origin; findings on a ``critique``-origin turn (a correction)
+  wait for the next turn and never wake one (the recursion brake); a user
+  exchange ending on a tool-result turn is critiqued against the original
+  user text;
 - stylistic lens selection from the appraisal vector
   (predictive/constrained/adversarial) with below-threshold sampling via an
   injectable RNG, marked in the outcome;
@@ -228,12 +230,9 @@ async def _read_outcomes(db, key):
 
 async def _fire(env, trace_id="k", origin="user", response_text="resp",
                 originating_text="orig user text"):
-    """Simulates the propagated-origin mechanics (§1.4/§1.5): "user" makes
-    the trace_id admitted via on_message_admitted (annotations carries no
-    origin string -- eligibility is inferred from admitted-LRU membership);
-    "reminder" stamps annotations["origin"]; "critique"/"heartbeat" stamp their own
-    exempt origin into annotations; "task" is neither admitted nor stamped
-    (background/task-origin default, per §1.4)."""
+    """Simulates the propagated-origin mechanics (§1.4/§1.5): "user" and
+    "task" (a subagent or fork-tool result) carry no origin annotation; any
+    other origin is stamped into annotations["origin"]."""
     await env.outcome.record_exchange(trace_id, env.channel.id, origin=origin)
     if env.appraisal is not None:
         env.appraisal._originating_text[trace_id] = originating_text
@@ -242,13 +241,7 @@ async def _fire(env, trace_id="k", origin="user", response_text="resp",
     if env.fork_agent is not None and trace_id not in env.plugin._originating_rowid:
         await env.plugin.on_message_persisted(
             channel=env.channel, trace_id=trace_id, rowid=1, text=originating_text, annotations={})
-    if origin == "user":
-        await env.plugin.on_message_admitted(
-            channel=env.channel, trace_id=trace_id,
-            sender="user", text=originating_text,
-        )
-        annotations = {}
-    elif origin == "task":
+    if origin in ("user", "task"):
         annotations = {}
     else:
         annotations = {"origin": origin}
@@ -323,12 +316,32 @@ class TestEligibility:
         assert env.task.task_queue.queue.qsize() == 1
         await _teardown(env)
 
-    @pytest.mark.parametrize("origin", ["critique", "heartbeat", "task"])
-    async def test_exempt_origins_produce_no_task(self, tmp_path, origin):
+    @pytest.mark.parametrize("origin", ["critique", "heartbeat", "webhook:github", "task"])
+    async def test_every_origin_is_judged(self, tmp_path, origin):
+        """#1031: no origin is exempt. "task" is a turn with no origin that
+        was never admitted (a subagent or fork-tool result landing)."""
         appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
         env = await build_critique(tmp_path, appraisal=appraisal)
         await _fire(env, "ke", origin=origin)
+        assert env.task.task_queue.queue.qsize() == 1
+        await _teardown(env)
+
+    async def test_a_turn_without_a_trace_is_not_judged(self, tmp_path):
+        appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
+        env = await build_critique(tmp_path, appraisal=appraisal)
+        await env.plugin.on_agent_response(
+            channel=env.channel, request_text="req", response_text="resp",
+            trace_id=None, annotations={}, logprobs=None,
+        )
         assert env.task.task_queue.queue.qsize() == 0
+        await _teardown(env)
+
+    async def test_critique_does_not_infer_user_from_admission(self, tmp_path):
+        """#1031: eligibility no longer depends on admission, so critique
+        keeps no admitted-trace list and does not subscribe to the hook."""
+        env = await build_critique(tmp_path, appraisal=FakeAppraisal())
+        impls = [i.plugin_name for i in env.pm.hook.on_message_admitted.get_hookimpls()]
+        assert "critique" not in impls
         await _teardown(env)
 
     async def test_user_exchange_critiqued_against_originating_text(self, tmp_path):
@@ -687,7 +700,7 @@ class TestRetentionDelivery:
     """#742 via #857: a retention finding reaches the agent with the file and
     the content, and wakes the channel so the fact is filed now."""
 
-    async def _run_retention(self, tmp_path, key):
+    async def _run_retention(self, tmp_path, key, origin="user"):
         appraisal = FakeAppraisal(
             stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
         )
@@ -699,7 +712,7 @@ class TestRetentionDelivery:
         env.pm.ahook.on_notify = AsyncMock()
         env.funnel.ingest = Mock(wraps=env.funnel.ingest)
         env.funnel.ingest_and_wake = AsyncMock()
-        await _fire(env, key, origin="user")
+        await _fire(env, key, origin=origin)
         await _run_next_task(env.task)
         return env
 
@@ -868,12 +881,8 @@ async def _provenance_env(tmp_path, chat_text=OBJECTION_VERDICT, with_funnel=Fal
 
 
 async def _begin_exchange(env, trace_id, origin_rowid, origin="user"):
-    """Admit (for user origin) and persist the exchange's originating row."""
+    """Record the exchange and persist its originating row."""
     await env.outcome.record_exchange(trace_id, env.channel.id, origin=origin)
-    if origin == "user":
-        await env.plugin.on_message_admitted(
-            channel=env.channel, trace_id=trace_id, sender="user", text="when is it due?",
-        )
     await env.plugin.on_message_persisted(
         channel=env.channel, trace_id=trace_id, rowid=origin_rowid,
         text="when is it due?", annotations={},
@@ -923,7 +932,7 @@ def _row(role, content, rowid, **extra):
 
 
 async def _provenance_exchange(env, agent, trace_id="kp", reply_text=CUE_FREE_REPLY,
-                               support=None, persist_reply=True):
+                               support=None, persist_reply=True, annotations=None):
     """A finished exchange in a live window: user message, a tool call and
     its result, then the reply. The rows are in message_log (and the FTS
     index) and in the channel's window; the exchange is begun and
@@ -951,7 +960,7 @@ async def _provenance_exchange(env, agent, trace_id="kp", reply_text=CUE_FREE_RE
     await _begin_exchange(env, trace_id, origin_rowid=origin)
     await env.plugin.on_agent_response(
         channel=env.channel, request_text="when is it due?", response_text=reply_text,
-        trace_id=trace_id, annotations={}, logprobs=None,
+        trace_id=trace_id, annotations=annotations or {}, logprobs=None,
     )
     return SimpleNamespace(origin=origin, tool_row=tool_row, reply_row=reply_row,
                            conv=conv, trace_id=trace_id)
@@ -1029,14 +1038,15 @@ class TestProvenanceTrigger:
         finally:
             await _teardown(env)
 
-    @pytest.mark.parametrize("origin", ["critique", "heartbeat", "task"])
-    async def test_exempt_origins_no_task(self, tmp_path, origin):
+    @pytest.mark.parametrize("origin", ["critique", "heartbeat", "webhook:github", "task"])
+    async def test_every_origin_is_checked(self, tmp_path, origin):
+        """#1031: no origin is exempt from the provenance check."""
         env = await _provenance_env(tmp_path)
         try:
             await _begin_exchange(env, "kx", origin_rowid=50, origin=origin)
             annotations = {} if origin == "task" else {"origin": origin}
             await _stage2(env, "kx", [CLAIM], annotations=annotations)
-            assert env.task.task_queue.queue.qsize() == 0
+            assert env.task.task_queue.queue.qsize() == 1
         finally:
             await _teardown(env)
 
@@ -1176,9 +1186,6 @@ class TestProvenanceEvidence:
         # Without the cutoff the exchange's own rows can't be told apart.
         env = await _provenance_env(tmp_path)
         try:
-            await env.plugin.on_message_admitted(
-                channel=env.channel, trace_id="knr", sender="user", text="q?",
-            )
             with caplog.at_level("WARNING", logger="corvidae.critique"):
                 evidence = await env.plugin._gather_evidence(env.channel, "knr", [CLAIM])
             assert evidence is None
@@ -1895,7 +1902,7 @@ class TestProactivityExecution:
             env.plugin._record_reply(env.channel, "k")
             # _run_proactivity should swallow the exception
             await env.plugin._run_proactivity(
-                env.channel, "k", "question", "Want me to do something?"
+                env.channel, "k", "question", "Want me to do something?", origin=None,
             )
             # No exception propagated — that's the test
             assert len(exploding.calls) == 1
@@ -1926,11 +1933,12 @@ class TestProactivityExecution:
 
         # Run stylistic
         await env.plugin._run_critique(
-            env.channel, "k", "question", "response", ["predictive"], False
+            env.channel, "k", "question", "response", ["predictive"], False,
+            origin=None,
         )
         # Run proactivity (same trace_id)
         await env.plugin._run_proactivity(
-            env.channel, "k", "question", "Want me to do something?"
+            env.channel, "k", "question", "Want me to do something?", origin=None,
         )
 
         # Both outcomes should be present
@@ -1952,7 +1960,7 @@ class TestRetentionWakeNeedsARoot:
     """
 
     @staticmethod
-    async def _register(env, *, root):
+    async def _register(env, *, root, origin=None):
         if root is not None:
             env.plugin.config.setdefault("critique", {})["retention"] = {"root": root}
         env.funnel.ingest = Mock()
@@ -1963,7 +1971,7 @@ class TestRetentionWakeNeedsARoot:
         }
         await env.plugin._record_and_register(
             env.channel, "kwr", {"critique": {"lenses": ["retention"], "objections": 1}},
-            [objection], wake=False,
+            [objection], wake=False, origin=origin,
         )
 
     async def test_with_a_root_the_finding_wakes_the_channel(self, tmp_path):
@@ -1985,5 +1993,67 @@ class TestRetentionWakeNeedsARoot:
             env.funnel.ingest_and_wake.assert_not_awaited()
             [entry] = env.funnel.ingest.call_args.kwargs["entries"]
             assert entry.startswith("[retention]") and "people/yoz.md" in entry, entry
+        finally:
+            await _teardown(env)
+
+
+class TestCorrectionFindingsWait:
+    """#1031 / PRD §3.7 Critique 4: a turn whose origin is ``critique`` (a
+    correction) is judged, but its non-empty findings never wake a turn; they
+    wait as CONTEXT for the channel's next turn. Each path that can wake is
+    driven through the hook that starts it, so the origin has to travel from
+    the turn's annotations to the delivery."""
+
+    async def test_provenance_findings_on_a_correction_wait(self, tmp_path):
+        env = await _provenance_env(tmp_path, with_funnel=True)
+        env.funnel.ingest = Mock(wraps=env.funnel.ingest)
+        env.funnel.ingest_and_wake = AsyncMock()
+        agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
+        correction = {"origin": "critique"}
+        try:
+            await _provenance_exchange(env, agent, trace_id="kc", annotations=correction)
+            await _stage2(env, "kc", [CLAIM], annotations=correction)
+            await _run_next_task(env.task)
+            env.funnel.ingest_and_wake.assert_not_awaited()
+            [call] = env.funnel.ingest.call_args_list
+            assert call.kwargs["entries"][0].startswith("[provenance]"), call
+        finally:
+            await _teardown(env)
+
+    @pytest.mark.parametrize("origin, wakes", [("critique", False), ("heartbeat", True)])
+    async def test_proactivity_findings_wake_unless_on_a_correction(
+        self, tmp_path, origin, wakes,
+    ):
+        verdict = json.dumps({"objections": [
+            {"claim": "restart is yours", "objection": "act, don't ask", "severity": 0.7},
+        ]})
+        # No stage-1/2 vector and no sampling: proactivity is the only check.
+        env = await build_critique(
+            tmp_path, appraisal=FakeAppraisal(), chat_text=verdict, with_funnel=True,
+            config={"critique": {"sample_below_rate": 0.0}},
+        )
+        env.funnel.ingest = Mock(wraps=env.funnel.ingest)
+        env.funnel.ingest_and_wake = AsyncMock()
+        try:
+            await _fire(env, "kpq", origin=origin, response_text="Want me to restart it?")
+            while not env.task.task_queue.queue.empty():
+                await _run_next_task(env.task)
+            if wakes:
+                env.funnel.ingest_and_wake.assert_awaited_once()
+            else:
+                env.funnel.ingest_and_wake.assert_not_awaited()
+                entries = [e for c in env.funnel.ingest.call_args_list
+                           for e in c.kwargs["entries"]]
+                assert any("restart is yours" in e for e in entries), entries
+        finally:
+            await _teardown(env)
+
+    async def test_retention_findings_on_a_correction_wait(self, tmp_path):
+        env = await TestRetentionDelivery._run_retention(
+            TestRetentionDelivery(), tmp_path, "kcr", origin="critique")
+        try:
+            env.funnel.ingest_and_wake.assert_not_awaited()
+            entries = [e for c in env.funnel.ingest.call_args_list for e in c.kwargs["entries"]]
+            assert any(e.startswith("[retention]") for e in entries), entries
         finally:
             await _teardown(env)

@@ -566,17 +566,17 @@ class TestStage2Source:
 
 
 class TestSameMachinery:
-    async def test_ineligible_origin_runs_no_lens(self, tmp_path):
-        """R6: a heartbeat-origin turn is ineligible at either decision point."""
+    async def test_heartbeat_turn_runs_lenses(self, tmp_path):
+        """R6 / #1031: a heartbeat-origin turn is judged at both decision points."""
         late = _lens("late", sample_rate=1.0,
                      thresholds=(_threshold("ambiguity", "min", 0.0),))
         async with lens_env(tmp_path, _lens("early", sample_rate=1.0), late) as env:
             # Control: the same lenses do run on an eligible user turn.
             await _judged_turn(env, "kr6a0", stage2=_stage2(ambiguity=0.9))
             _assert_ran(env, early=1, late=1)
-            # A heartbeat-origin turn adds no run at either decision point.
+            # A heartbeat-origin turn adds a run at each decision point.
             await _judged_turn(env, "kr6a", origin="heartbeat", stage2=_stage2(ambiguity=0.9))
-            _assert_ran(env, early=1, late=1)
+            _assert_ran(env, early=2, late=2)
 
     async def test_declined_turn_runs_no_lens(self, tmp_path, monkeypatch):
         """R6: a declined final (NO_REPLY) is never judged by a lens."""

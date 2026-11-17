@@ -194,7 +194,7 @@ async def test_critique_lens_is_keyed_by_channel(env: Env, caplog: pytest.LogCap
 
     await env.critique._run_critique(
         env.channel, "k", "when is the meeting?", "It was Tuesday, as you said.",
-        ["predictive"], False)
+        ["predictive"], False, origin=None)
 
     rows = await usage_rows(env.db)
     assert [key for stage, key, _m in rows if stage == "critique"] == [env.channel.id]
