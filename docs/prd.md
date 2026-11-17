@@ -979,8 +979,8 @@ Per transport:
     channel, with its own trace and a stamped link to the exchange that
     sent the note, never an inferred one. It carries the origin of the
     exchange that started the chain (§3.1.4), so the chain's kind
-    (principle 13), critique eligibility (§3.7 Critique 3), budget (§3.1.3)
-    and latency bound (§3.13.5) all follow how the chain started. The target's
+    (principle 13), budget (§3.1.3) and latency bound (§3.13.5) all
+    follow how the chain started. The target's
     turn still judges for itself, and may end without sending anything
     (§3.7, the right to silence).
 11. Reading another channel: any turn can read another channel's recent

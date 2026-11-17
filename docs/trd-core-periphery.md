@@ -1353,7 +1353,7 @@ means an existing base mechanism meets it and nothing is built.
 | §3.5.6 | K5, TRD §7.6 | 1, 5 |
 | §3.5.7 | K4, TRD §7.3 | 1, 5 |
 | §3.6.1–3, §3.6.5 | TRD §10.1 | 2 |
-| §3.7.1–3 | TRD §10.2, §10.3; compaction and critique of a task-bound peripheral are open (TRD §15.1) | 3, 5 |
+| §3.7.1–3 | TRD §10.2, §10.3; compaction of a task-bound peripheral is open (TRD §15.1); its critique is settled (#1031) | 3, 5 |
 | §3.7.4 | TRD §10.5 | 3 |
 | §3.8.1 | K2 | 3, 7 |
 | §3.8.4, §3.8.6 | TRD §13 (phases 1–5 run this way) | 2–5 |
