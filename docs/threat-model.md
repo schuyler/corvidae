@@ -598,8 +598,8 @@ string with little memory of who wanted it. What bounds it:
 - **Framing.** The firing text says a reminder "you set" is due and quotes
   the stored text as `Reminder text: «…»`, ending "Decide whether and how
   to act on it." A recurring job the agent set says the same of a "recurring
-  job you set" and quotes `Job prompt: «…»`; only a `scheduler.jobs` entry
-  is framed as the operator's (#814). Any `«` or `»` inside the text is replaced, so it cannot
+  job you set" and quotes `Job prompt: «…»`; only a `scheduler.jobs` or
+  `scheduler.jobs_file` entry is framed as the operator's (#814). Any `«` or `»` inside the text is replaced, so it cannot
   close the quote and continue as framing. Rendering follows
   `agent.mid_conversation_system_role`, so `user` keeps it out of the
   system role as for every other notification. The framing is a soft
@@ -614,8 +614,8 @@ string with little memory of who wanted it. What bounds it:
   jobs and treat another channel's row as not found; `list_reminders` shows
   only the calling channel's rows.
 - **Origin.** No tool takes an origin. Every row a tool creates carries
-  origin `reminder`, so its turns are judged like any reminder's; only a
-  `scheduler.jobs` entry can be `heartbeat` (#814).
+  origin `reminder`, so its turns are judged like any reminder's; only an
+  operator job (`scheduler.jobs` or `scheduler.jobs_file`) can be `heartbeat` (#814).
 - **Volume.** `scheduler.max_reminders_per_channel` (default 50) caps
   pending reminders and agent-set jobs together per channel, and text is
   capped at 2000 characters for both.

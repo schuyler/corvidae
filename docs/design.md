@@ -2961,8 +2961,8 @@ validation fails at startup.
 
 ## SchedulerPlugin
 
-`scheduler.py` — the clock-driven producer: reminders and operator-declared
-periodic jobs (#59; design rationale in
+`scheduler.py` — the clock-driven producer: reminders, the agent's
+recurring jobs and operator-declared periodic jobs (#59; design rationale in
 `plans/scheduler.md`). Entry point name: `"scheduler"`;
 `depends_on = {"registry", "persistence", "clock"}`.
 
@@ -3807,7 +3807,7 @@ stop (#390). Since a reply to a coalesced burst already zeroes the count
 owns, whatever originated the turn, and liveness and reply bookkeeping
 tolerate a reply that answers no outstanding message. Sending to a channel *other than* the turn's own is in the PRD (PRD §3.5.9:
 "Nothing gates which channel a turn may speak on"). No general text
-`send_to_channel` tool exists — the scheduler's "Not in phase one" note under
+`send_to_channel` tool exists — the scheduler's "Not built" note under
 [SchedulerPlugin](#schedulerplugin) and `docs/threat-model.md`'s deferred entry
 are about that tool — but `send_signal_attachment` already reaches any known
 `signal:` contact, from a turn begun on any channel: a file, and a caption with
@@ -4176,7 +4176,7 @@ is guarded at zero in `DiscordPlugin._release_all`, as on Signal,
 with the same early typing release (#101): any final, sent or withheld,
 zeroes the count.
 Sending to a channel other than the turn's own has no general text tool: no
-`send_to_channel` exists (the scheduler's "Not in phase one" note and
+`send_to_channel` exists (the scheduler's "Not built" note and
 `docs/threat-model.md`). Two of this transport's tools do cross channels
 already: `send_attachment`, whose caption is text, and `start_thread` — both
 against any registered `discord:` channel except a DM, which `start_thread`

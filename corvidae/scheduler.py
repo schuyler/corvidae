@@ -1336,7 +1336,7 @@ class SchedulerPlugin(CorvidaePlugin):
                     f"next at {format_time(next_fire, plugin._tz)}.")
 
         async def update_job(id: int, _ctx, cron: str = "", prompt: str = "") -> str:  # noqa: A002 - matches cancel_reminder
-            """Change a recurring job you set in this conversation, by its id (from list_reminders). Only the fields you give change: cron, prompt."""
+            """Change a recurring job you set in this conversation, by its id (from list_reminders). Only the fields you give change: cron, prompt; pass an empty string to leave a field unchanged."""
             channel = _ctx.channel
             if channel is None:
                 return "Error: no channel context available"
