@@ -1,8 +1,10 @@
 """LimitsPlugin: bounds on waiting work and inbound messages (issue #1050).
 
 ``limits.max_waiting`` refuses new internal work (a subagent, a fork, a note
-to another channel) once the accepted, unfinished work across all channels
-reaches the ceiling; results of work already started are never refused.
+to another channel) once the accepted, unfinished internal work across all
+channels reaches the ceiling; messages from users are bounded per channel
+instead and never count toward it (#1052). Results of work already started
+are never refused.
 ``limits.inbound_per_channel`` rejects a channel's next message while that
 many of its USER messages are still accepted and unfinished. With no
 ``limits`` block the plugin gives no verdicts.
@@ -100,13 +102,19 @@ class LimitsPlugin(CorvidaePlugin):
         # No block, no verdicts; no agent yet means on_start has not run.
         if self._settings is None or self._agent is None:
             return None
-        total = sum(self._agent.waiting_work().values())
+        # Internal work only: waiting messages from users are bounded per
+        # channel by inbound_per_channel, and counting them here would let a
+        # flood on a few channels refuse every channel's work (#1052, the
+        # lockout TRD gap 9 removed).
+        total = sum(self._agent.waiting_work().values()) - sum(
+            self._agent.waiting_messages().values()
+        )
         ceiling = self._settings["max_waiting"]
         if total < ceiling:
             return None
         return WorkRefusal(
             "limits.max_waiting",
-            f"{total} items of accepted work are waiting; wait for some to "
+            f"{total} items of internal work are waiting; wait for some to "
             "finish, or raise limits.max_waiting in agent.yaml",
         )
 

@@ -901,14 +901,25 @@ No per-response tool-call cap is built; `max_turns` and
 ### 9.2 Waiting work (§3.12 item 2, open question 21)
 
 `limits` implements `should_start_work` (K1) and refuses new work when
-the sum of `Agent.waiting_work()` is at `limits.max_waiting` (200).
+the sum of `Agent.waiting_work()`, less the messages from users in it
+(`Agent.waiting_messages()`), is at `limits.max_waiting` (200).
 
-The sum leaves out channels that are stopped. Messages held on a
-stopped channel would otherwise fill the ceiling and refuse every
-escalation, which is the lockout gap 9 removed from the inbound caps.
-No decision states this rule; it is the agent's judgment. It is built
-in phase 5, with `hold_queue`: until then nothing stops a channel
-(`LeaseManager.stop` has no caller), so phase 1 sums every channel.
+Messages from users are left out (owner, 2026-11-17, #1052): §9.1
+bounds them per channel, and counted here a flood on a few channels
+would fill the ceiling and refuse every escalation, which is the
+lockout gap 9 removed from the inbound caps. The ceiling bounds what
+the contexts produce for each other; work derived from a message (an
+escalation, a task, a result) still counts.
+
+The sum also leaves out channels that are stopped. With messages from
+users already out, what a stopped channel holds is internal items
+(notifications, tool results, notes and escalations waiting for it),
+and they wait for a resume, not for the system to catch up, so counting
+them would refuse other contexts' work for as long as the channel stays
+stopped. No decision states this rule; it is the agent's judgment. It
+is built in phase 5, with `hold_queue`: until then nothing stops a
+channel (`LeaseManager.stop` has no caller), so phase 1 sums every
+channel.
 
 ### 9.3 Chains and hops (gap 1; TRD decision C2)
 
