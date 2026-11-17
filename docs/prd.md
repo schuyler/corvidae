@@ -1218,9 +1218,10 @@ deciding only what to newly append and in what order.
    agent may end that turn without sending anything. It is told that
    silence is the default, and to reply only when it judges its earlier
    reply could lead the other party to take an incorrect action. A turn
-   a critique finding woke is judged like any other (item 3), but its
-   findings never wake a turn; they re-enter as framed CONTEXT at the
-   channel's next turn.
+   whose origin is `critique`, whether a critique finding woke it or a
+   note from such a turn did (§3.5.10), is judged like any other (item
+   3), but its objections never wake a turn; they re-enter as framed
+   CONTEXT at the channel's next turn.
 5. A critic may run on a different model from the one that wrote the window
    it judges. How it gets that window is design; the requirement is
    §3.8.2's: it judges the window the agent saw when it wrote the reply.
@@ -1823,7 +1824,7 @@ record that holds the reasoning.
 | Emotion classifier replaced by appraisal valence | §3.7 Appraisal; diverges from Persyn §4.9 |
 | Engagement decision inverted: cheap gate first, generate only past threshold | principle 7; §3.7 Appraisal; diverges from the Persyn spec |
 | Two-stage appraisal; stage 1 never calls a model; core mints the exchange key; pull-based compute | §3.7 Appraisal 1–3 |
-| Origin is stamped and propagated, never inferred. Critique eligibility does not depend on origin: every main-loop turn is judged, and the recursion brake is delivery (findings on a correction wake nothing) | §3.1.4; §3.7 Critique 3–4; #1031; owner, 2026-11-17 |
+| Origin is stamped and propagated, never inferred. Critique eligibility does not depend on origin: every main-loop turn is judged, and the recursion brake is delivery (objections on a `critique`-origin turn wake nothing) | §3.1.4; §3.7 Critique 3–4; #1031; owner, 2026-11-17 |
 | Two grades on a queue item: kernel-certified `metadata`, never a hook argument, and plugin-owned `annotations`; non-human items (and a person's message whose transport supplies a name or addressing) get a code-built header, and outside payloads a fence derived from the stored row; foreign-origin items are framed, never withheld (no silence default) | §3.1.4; §3.3.11; #555 |
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |

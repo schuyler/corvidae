@@ -227,8 +227,8 @@ violates one is a bug even if its tests pass.
    goals (principle 20), so it takes over that role, and as the
    cognitive center it gets every cognitive function, critique
    included. Base critique exempts no origin (base §3.7 Critique 3); a
-   turn a critique finding woke is judged, and its findings wake no
-   further turn (base §3.7 Critique 4).
+   turn whose origin is `critique` is judged, and its objections wake
+   no further turn (base §3.7 Critique 4).
 
 3. The framework MUST let the core direct KV cache allocation through
    tools that control queue multiplexing, and the slot-management plugin
