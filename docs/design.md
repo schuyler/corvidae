@@ -1132,7 +1132,8 @@ ID with zero entries omitted.
   ceiling of a `max_waiting` check is at most `max_waiting - 1` (the
   response's other tool calls count too).
 - `Agent.waiting_messages()` counts USER items only (transport messages;
-  notifications, tool results and retries never count), from the same
+  notifications and tool results never count, and a turn retry counts once
+  it is re-queued, not while it waits on its timer), from the same
   `pending_items()`. It exists because only the Agent knows item roles;
   `LimitsPlugin` uses it for the per-channel inbound cap.
 

@@ -646,7 +646,7 @@ Requires the core-periphery extra (`--extra core-periphery`; `packages/corvidae-
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `limits.inbound_per_channel` | integer | `50` | A channel's next message is rejected while this many of its transport messages (USER items) are accepted and not yet answered. Counts per channel only: a coalesced turn counts every message it absorbed until the turn ends, and notifications, tool results and retries never count. There is no bypass by sender. |
+| `limits.inbound_per_channel` | integer | `50` | A channel's next message is rejected while this many of its transport messages (USER items) are accepted and not yet answered. Counts per channel only: a coalesced turn counts every message it absorbed until the turn ends, notifications and tool results never count, and a turn retry counts once it is re-queued (it is the same unanswered message), not while it waits on its timer. There is no bypass by sender. |
 | `limits.notice_interval` | integer, seconds | `300` | A rejection is logged at WARNING (`limits: rejected a message from <sender> on <channel>: ...`) at most once per channel per this many seconds, on the kernel clock. |
 | `limits.max_waiting` | integer | `200` | New `subagent`, `fork` and `notify_other_channel` work is refused while the sum of `Agent.waiting_work()` across all channels is at least this. The count is queued and in-flight channel-queue items (waiting transport messages included) plus TaskQueue tasks (queued or running) by the channel that started them, so inbound floods on several channels can reach it (`docs/threat-model.md` finding 24). |
 
