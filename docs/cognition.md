@@ -1448,8 +1448,7 @@ corvidae reconsolidate --db copy.db --snapshot-from sessions.db \
 - **Records.** Each segment is one consolidation call; its entries become
   records stamped `mode = standalone`, `trigger = reconsolidate`, with the
   instruction hash and `memory.segment_budget`, sharing the segment's range
-  (PRD Memory 2). New records are stored `embedded = 0`, for the daemon's
-  backfill; valence is left NULL.
+  (PRD Memory 2). Valence is left NULL.
 - **Supersede, don't delete.** Active `fork` / `standalone` records of the
   channel whose range meets a segment get `superseded_by` and `indexed = 0`,
   and lose their vector rows. `retrieval_count` is summed into the new
@@ -1457,6 +1456,13 @@ corvidae reconsolidate --db copy.db --snapshot-from sessions.db \
   near-dup merge's rules). A record straddling two segments is credited to the
   first only. Goal (`direct`) records, `raw` records, redacted records and
   records holding another channel's text are left alone.
+- **Vectors.** With a `memory_vec` table, sqlite-vec must load (else the run
+  refuses before writing). If `agent.yaml` has an embedding profile, new
+  entries are embedded and get their vector rows, so retrieval on the copy
+  ranks old and new records alike; `embedding_meta` must match the profile
+  (else the run refuses before writing). A failed or wrong-width embedding
+  leaves those entries `embedded = 0`, with a warning, for the retention
+  job's backfill. Without an embedding profile every new entry is `embedded = 0`.
 - **The reply is kept.** `memory_reply` holds the whole reply per segment
   (so a later `claims` array can be indexed without another pass), the model,
   the budget, and the instruction and system-prompt hashes; their texts are in
@@ -1477,8 +1483,8 @@ corvidae reconsolidate --db copy.db --snapshot-from sessions.db \
 - **`--dry-run`** writes nothing and calls no model: per channel, the records
   selected and met, and each segment's rows and estimated tokens.
 
-shortcut: no valence, no embedding, no near-dup merge, and no widening of a
-scoped stretch over a record that reaches past it. A record whose range runs
+shortcut: no valence, no near-dup merge, no halving of a rejected embedding
+batch, and no widening of a scoped stretch over a record that reaches past it. A record whose range runs
 past a stretch is superseded even though part of its range is not redone;
 `--dry-run` shows which. Upgrade if a measurement needs it.
 

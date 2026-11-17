@@ -22,10 +22,17 @@ instruction and system-prompt hashes; texts go in ``memory_prompt``),
 stretches, fixed at the first start). Each segment commits in one transaction,
 so a rerun skips the segments that have a ``memory_reply`` row.
 
-shortcut: new records are stored ``embedded = 0`` (the daemon's backfill embeds
-them); no valence, no near-dup merge, no widening of a scoped stretch over a
-record that reaches past it, and a record straddling two segments is credited
-to the first only. Upgrade when a measurement needs one.
+New entries are embedded as the daemon embeds them, so retrieval on the copy
+ranks old and new records alike. With a ``memory_vec`` table and an embedding
+profile, ``embedding_meta`` must match the profile (else the run refuses before
+writing); an embedding call that fails or returns the wrong width leaves that
+segment's entries ``embedded = 0``, with a warning, for the retention job's
+backfill.
+
+shortcut: no valence, no near-dup merge, no halving of a rejected embedding
+batch, no widening of a scoped stretch over a record that reaches past it, and
+a record straddling two segments is credited to the first only. Upgrade when a
+measurement needs one.
 """
 
 from __future__ import annotations
@@ -131,6 +138,11 @@ class Clients:
 
     consolidation: object
     rubric: object
+    #: Embeds new entries; None leaves them ``embedded = 0``.
+    embedding: object | None = None
+    #: (encoder, dimensions, document_prefix, query_prefix) the profile embeds
+    #: with, compared with ``embedding_meta`` before any vector is written.
+    embedding_identity: tuple | None = None
 
 
 @dataclass
@@ -352,6 +364,52 @@ async def plan_channel(
 # ---------------------------------------------------------------------------
 
 
+async def _vector_width(db: aiosqlite.Connection, clients: Clients, vec: bool) -> int | None:
+    """The width new vectors are written at, or None when none are.
+
+    Raises:
+        click.ClickException: the copy's ``embedding_meta`` names another
+            encoder than the configured profile (mixing encoders corrupts
+            similarity), before anything is written.
+    """
+    if not vec or clients.embedding is None or clients.embedding_identity is None:
+        return None
+    async with db.execute(
+        "SELECT encoder, dimensions, document_prefix, query_prefix FROM embedding_meta LIMIT 1"
+    ) as cursor:
+        row = await cursor.fetchone()
+    stored = (row[0], row[1], row[2] or "", row[3] or "") if row else None
+    if stored != clients.embedding_identity:
+        raise click.ClickException(
+            f"embedding_meta records {stored} but the embedding profile in agent.yaml is "
+            f"{clients.embedding_identity}; mixing encoders corrupts similarity — point "
+            "--config at the profile that built this database"
+        )
+    return clients.embedding_identity[1]
+
+
+async def _embed(
+    clients: Clients, texts: list[str], where: str, width: int | None
+) -> list[list[float] | None]:
+    """Embed ``texts`` as documents; a failure or wrong width gives None for
+    those entries (stored ``embedded = 0`` for the retention backfill)."""
+    if width is None:
+        return [None] * len(texts)
+    try:
+        vectors = await clients.embedding.embed(texts, kind="document")
+        if len(vectors) != len(texts):
+            raise ValueError(f"{len(vectors)} vectors for {len(texts)} texts")
+    except Exception:
+        logger.warning("reconsolidate: embedding failed for %s (%d entries); storing them "
+                       "embedded=0 for the retention backfill", where, len(texts), exc_info=True)
+        return [None] * len(texts)
+    good = [v if len(v) == width else None for v in vectors]
+    if None in good:
+        logger.warning("reconsolidate: embedding for %s is not %d wide; those entries are "
+                       "stored embedded=0 for the retention backfill", where, width)
+    return good
+
+
 async def _consolidate(client, stamp: RecordStamp, channel_id: str, segment):
     """The segment's reply text and its parse, or None after two unusable
     replies. Transport errors propagate (finished segments are kept)."""
@@ -376,7 +434,7 @@ async def _commit_segment(
     db: aiosqlite.Connection, *, settings: RunSettings, channel_id: str,
     span: tuple[int, int], stamp: RecordStamp, reply: str | None,
     entries: list, participants: list[str], importance: float, created_at: float,
-    vec: bool,
+    vec: bool, vectors: list | None = None,
 ) -> tuple[int, int]:
     """Write one segment in one transaction; returns (records, superseded).
 
@@ -419,17 +477,24 @@ async def _commit_segment(
 
         # The new records, sharing the segment's range (PRD Memory 2).
         new_ids: list[int] = []
-        for entry in entries:
+        for entry, vector in zip(entries, vectors or [None] * len(entries)):
             cursor = await db.execute(
                 "INSERT INTO memory (channel_id, created_at, summary, importance, topic_tags, "
                 "participants, msg_id_start, msg_id_end, retrieval_count, last_retrieved_at, "
                 "embedded, prompt_hash, mode, model, trigger, segment_budget, reply_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (channel_id, created_at, entry.narrative, importance, json.dumps(list(entry.topic_tags)),
-                 json.dumps(participants), start, end, count, last, stamp.hash, stamp.mode,
+                 json.dumps(participants), start, end, count, last, 1 if vector is not None else 0, stamp.hash, stamp.mode,
                  stamp.model, stamp.trigger, settings.segment_budget, reply_id),
             )
             new_ids.append(cursor.lastrowid)
+            if vector is not None:
+                import sqlite_vec
+
+                await db.execute(
+                    "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
+                    (cursor.lastrowid, sqlite_vec.serialize_float32(vector)),
+                )
 
         # Demote the old records and drop their vector rows.
         for old_id, *_rest in old:
@@ -449,7 +514,7 @@ async def _commit_segment(
 
 async def _run_segment(
     db: aiosqlite.Connection, settings: RunSettings, clients: Clients, channel_id: str,
-    segment, vec: bool, report: RunReport,
+    segment, vec: bool, width: int | None, report: RunReport,
 ) -> None:
     """Consolidate one segment and commit it, or record that it was left."""
     span = (segment.rows[0][0], segment.end_id)
@@ -478,8 +543,12 @@ async def _run_segment(
     importance = await RubricPrior(
         lambda: clients.rubric, lambda: settings.rubric_prompt
     ).score(dialog, msg_id_range=span, hint=consolidation.importance)
+    vectors = await _embed(
+        clients, [e.narrative for e in consolidation.entries],
+        f"{channel_id} {span[0]}-{span[1]}", width,
+    )
     written, superseded = await _commit_segment(
-        db, reply=reply, entries=list(consolidation.entries),
+        db, reply=reply, vectors=vectors, entries=list(consolidation.entries),
         participants=list(consolidation.participants), importance=importance,
         created_at=await source_timestamp(db, span[1]), **common,
     )
@@ -511,6 +580,7 @@ async def run_reconsolidation(
     """
     report = RunReport()
     vec = await _prepare(db, dry_run)
+    width = None if dry_run else await _vector_width(db, clients, vec)
 
     # Which channels: the flags, else every channel with history.
     async with db.execute("SELECT DISTINCT channel_id FROM message_log ORDER BY channel_id") as cur:
@@ -574,7 +644,7 @@ async def run_reconsolidation(
                     echo(f"  {channel_id} message ids {span[0]}-{span[1]}: "
                          f"{len(segment.rows)} row(s), ~{size} tokens")
                 else:
-                    await _run_segment(db, settings, clients, channel_id, segment, vec, report)
+                    await _run_segment(db, settings, clients, channel_id, segment, vec, width, report)
 
     echo(
         f"{'would send' if dry_run else 'done'}: {report.segments_total} segment(s), "
@@ -621,16 +691,17 @@ def _configured_live_db(config_path: Path) -> Path | None:
     return config_path.parent / (config.get("daemon") or {}).get("session_db", "sessions.db")
 
 
-def _build_client(llm_config, stage: str) -> LLMClient:
-    """The offline client for ``stage``'s chat profile, as the daemon resolves it."""
-    profile = llm_config.profile_for(stage, "chat")
+def _build_client(llm_config, stage: str, kind: str = "chat") -> tuple[LLMClient, dict]:
+    """The offline client for ``stage``'s profile, as the daemon resolves it,
+    and the profile's settings."""
+    profile = llm_config.profile_for(stage, kind)
     if profile is None:
         raise click.ClickException(
             f"No llm profile serves the {stage!r} stage (llm.stages.{stage} or "
-            "llm.defaults.chat); configure one in agent.yaml"
+            f"llm.defaults.{kind}); configure one in agent.yaml"
         )
     cfg = llm_config.profiles[profile]
-    return LLMClient(**{k: cfg[k] for k in _LLM_CLIENT_KEYS if k in cfg})
+    return LLMClient(**{k: cfg[k] for k in _LLM_CLIENT_KEYS if k in cfg}), cfg
 
 
 def _inputs_resolver(config: dict, system_prompt: str) -> Callable[[str], ViewInputs]:
@@ -717,15 +788,21 @@ def reconsolidate_command(
                 f"Cannot build the run's inputs ({type(exc).__name__}: {exc}) — check "
                 f"--system-prompt, --prompt and {config_path}"
             ) from exc
-        consolidation = _build_client(llm_config, "consolidation")
-        rubric = _build_client(llm_config, "rubric")
+        consolidation, _ = _build_client(llm_config, "consolidation")
+        rubric, _ = _build_client(llm_config, "rubric")
+        # An embedding profile is optional; without one new entries stay unembedded.
+        embedding = identity = None
+        if llm_config.profile_for("embedding", "embedding") is not None:
+            embedding, cfg = _build_client(llm_config, "embedding", "embedding")
+            identity = (cfg.get("model"), cfg.get("dimensions"),
+                        cfg.get("document_prefix", "") or "", cfg.get("query_prefix", "") or "")
         settings = RunSettings(
             segment_budget, instruction, system_prompt, tuple(channels) or None,
             since_ts, until_ts, min_source_tokens, rubric_prompt,
         )
         inputs_for = _inputs_resolver(config, system_prompt)
 
-        clients = [consolidation, rubric]
+        clients = [consolidation, rubric] + ([embedding] if embedding is not None else [])
         for client in clients:
             await client.start()
         try:
@@ -734,7 +811,7 @@ def reconsolidate_command(
                 try:
                     report = await run_reconsolidation(
                         db, settings=settings, inputs_for=inputs_for,
-                        clients=Clients(consolidation, rubric), dry_run=dry_run,
+                        clients=Clients(consolidation, rubric, embedding, identity), dry_run=dry_run,
                     )
                 except click.ClickException:
                     raise

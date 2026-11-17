@@ -423,7 +423,10 @@ async def test_message_log_is_never_written(copy):
 # Vectors, the rubric, and the remaining refusals
 # ---------------------------------------------------------------------------
 
-def add_vec_surface(path: Path) -> None:
+IDENTITY = ("enc", 4, "", "")
+
+
+def add_vec_surface(path: Path, meta=IDENTITY) -> None:
     """Give the copy the daemon's vector table."""
     import sqlite_vec
 
@@ -432,6 +435,10 @@ def add_vec_surface(path: Path) -> None:
     sqlite_vec.load(conn)
     conn.execute("CREATE VIRTUAL TABLE memory_vec USING vec0(memory_id INTEGER PRIMARY KEY, "
                  "embedding FLOAT[4] distance_metric=cosine)")
+    from corvidae_cognition.memory import EMBEDDING_META_DDL
+
+    conn.execute(EMBEDDING_META_DDL)
+    conn.execute("INSERT INTO embedding_meta VALUES (?, ?, ?, ?)", meta)
     conn.commit()
     conn.close()
 
@@ -449,7 +456,33 @@ def vec_ids(path: Path) -> set[int]:
         conn.close()
 
 
-async def test_superseded_records_lose_their_vector_rows_and_new_ones_wait_for_backfill(copy):
+class FakeEmbedder:
+    """Returns a fixed vector per text, or raises."""
+
+    def __init__(self, vector=None, error: Exception | None = None):
+        self.vector = vector or [1.0, 0.0, 0.0, 0.0]
+        self.error = error
+        self.calls: list[list[str]] = []
+
+    async def embed(self, texts, kind):
+        self.calls.append(texts)
+        assert kind == "document"
+        if self.error:
+            raise self.error
+        return [list(self.vector) for _ in texts]
+
+
+async def run_embedding(path: Path, embedder, identity=IDENTITY):
+    """`run`, with an embedding client configured."""
+    client = FakeClient()
+    async with aiosqlite.connect(path) as db:
+        return await rc.run_reconsolidation(
+            db, settings=settings(), inputs_for=inputs_for(420),
+            clients=rc.Clients(client, client, embedder, identity), echo=lambda _: None,
+        )
+
+
+async def test_new_entries_are_embedded_and_superseded_records_lose_their_vectors(copy):
     sqlite_vec = pytest.importorskip("sqlite_vec")
     add_vec_surface(copy)
     old = add_record(copy, CHAN, 1, 23)
@@ -460,8 +493,37 @@ async def test_superseded_records_lose_their_vector_rows_and_new_ones_wait_for_b
                  (old, sqlite_vec.serialize_float32([0.0, 1.0, 0.0, 0.0])))
     conn.commit()
     conn.close()
-    await run(copy)
-    # The old record's vector is gone; new records are unembedded for the daemon's backfill.
+    embedder = FakeEmbedder()
+    report = await run_embedding(copy, embedder)
+    new = {r[0] for r in rows(copy, "SELECT id FROM memory WHERE trigger = 'reconsolidate'")}
+    # Every new record has a vector and says so; the superseded one's is gone.
+    assert len(new) == report.records_written and vec_ids(copy) == new
+    assert rows(copy, "SELECT DISTINCT embedded FROM memory WHERE trigger = 'reconsolidate'") == [(1,)]
+    assert rows(copy, "SELECT embedded FROM memory WHERE id = ?", old) == [(0,)]
+
+
+async def test_a_mismatched_encoder_is_refused_before_anything_is_written(copy):
+    pytest.importorskip("sqlite_vec")
+    add_vec_surface(copy, meta=("other-encoder", 4, "", ""))
+    old = add_record(copy, CHAN, 1, 23)
+    embedder = FakeEmbedder()
+    with pytest.raises(click.ClickException) as err:
+        await run_embedding(copy, embedder)
+    assert "other-encoder" in err.value.message and "enc" in err.value.message
+    assert "--config" in err.value.message
+    assert embedder.calls == [] and rows(copy, "SELECT COUNT(*) FROM memory_reply") == [(0,)]
+    assert rows(copy, "SELECT indexed FROM memory WHERE id = ?", old) == [(1,)]
+
+
+@pytest.mark.parametrize("embedder", [
+    FakeEmbedder(error=ConnectionError("embedding server down")),
+    FakeEmbedder(vector=[1.0, 0.0]),   # wrong width
+])
+async def test_a_failed_or_misshapen_embedding_leaves_entries_for_the_backfill(copy, embedder):
+    pytest.importorskip("sqlite_vec")
+    add_vec_surface(copy)
+    report = await run_embedding(copy, embedder)
+    assert report.failed == [] and report.records_written > 0
     assert vec_ids(copy) == set()
     assert rows(copy, "SELECT DISTINCT embedded FROM memory WHERE trigger = 'reconsolidate'") == [(0,)]
 
