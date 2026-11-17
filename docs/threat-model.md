@@ -1988,7 +1988,11 @@ Mitigations and their limits:
 - A correction never starts another. Its findings wait for the channel's
   next turn and wake nothing (PRD §3.7 Critique 4), and a note sent from a
   correction carries the `critique` origin (#1034), so the turn it wakes on
-  another channel is braked too. One finding costs at most one extra turn.
+  another channel is braked too. No chain forms: a correction's findings,
+  and those of any turn its notes wake, wake nothing. A correction that
+  sends notes still costs one woken turn per note; how many notes one turn
+  may send is bounded only by `limits.max_waiting` when a `limits:` block is
+  configured (finding 24).
 - The correction stub defaults to `NO_REPLY`, which critique's veto on
   critique-origin finals withholds.
 - Per channel, `critique.provenance.enabled`, `critique.proactivity.enabled`,

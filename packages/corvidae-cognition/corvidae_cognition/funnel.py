@@ -310,8 +310,10 @@ class FunnelPlugin(CorvidaePlugin):
         # _stub_pending marks pairs whose wake stub has fired but whose
         # drain has not yet run. Per-ORIGIN keying is the §2.2 correctness
         # point, not an optimization: coalescing a critique verdict into
-        # another origin's stub would make the verdict-responding turn
-        # critique-eligible — the recursion loop reopened one coalesce deep.
+        # another origin's stub would strip the ``critique`` origin from the
+        # verdict-responding turn, and with it the brake that keeps that
+        # turn's own findings from waking another (#1031) — the recursion
+        # loop reopened one coalesce deep.
         self._deferred: dict[tuple[str, str], list[_Payload]] = {}
         self._stub_pending: set[tuple[str, str]] = set()
         # Stub-less payloads (#202), keyed by channel.id alone: admitted at
@@ -381,7 +383,8 @@ class FunnelPlugin(CorvidaePlugin):
         Args:
             channel: The Channel to wake.
             origin: §3.3 origin vocabulary value; stamped into on_notify
-                annotations so the drain (and critique eligibility) never infer it.
+                annotations so the drain (and critique's recursion brake) never
+                infer it.
             source: Frame label at admission ("critique", …).
             entries: Pre-formatted lines to admit on the matching-origin
                 drain.

@@ -2000,7 +2000,7 @@ runs and the fallback final stays withheld.
 
 What the kernel does with a withheld final is in
 [design.md](design.md#the-output-gate). On the cognition side, critique still
-judges a withheld `user` or `reminder` final, though not a decline (an
+judges a withheld final, whatever its origin, though not a decline (an
 unsent `NO_REPLY` or empty final, #420), its provenance probe doesn't
 count a withheld row as a record of anything said, and `recall_raw` and
 `search_transcripts` label withheld rows `(withheld, not sent)`.
@@ -2103,7 +2103,7 @@ queue first, each not plainly open marked `[in-progress]`, `[blocked]` or
 so the call-to-action is last. `prompts/heartbeat.md` shows a full beat. A failed memory or retired-goals read
 skips the beat, which is retried after one period. The turn then runs the
 ordinary notification pipeline with the agent's normal tools. The `heartbeat`
-origin keeps the existing conventions: critique judges it like any other
+origin follows the general conventions: critique judges it like any other
 turn (#1031), the decide gate treats it as non-user, and `exchange_log`
 records it.
 
