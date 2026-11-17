@@ -201,6 +201,21 @@ class TestCeiling:
         assert "limits.max_waiting" in refusal.remedy
 
 
+    async def test_waiting_user_messages_do_not_count(self, pm, kernel_clock, monkeypatch):
+        """Messages from users are bounded per channel, not by the ceiling
+        (#1052): at max_waiting with every item a USER message, work starts;
+        internal items at max_waiting still refuse."""
+        plugin, counts = await _make(pm, monkeypatch, {"limits": {"max_waiting": 5}})
+        # Seven waiting items, five of them messages from users: two internal.
+        counts.work = {"test:a": 4, "test:b": 3}
+        counts.messages = {"test:a": 3, "test:b": 2}
+        assert await _start_work(plugin) is None
+        # Five internal items besides the messages: refused.
+        counts.work = {"test:a": 8, "test:b": 2}
+        refusal = await _start_work(plugin)
+        assert refusal is not None and refusal.limit == "limits.max_waiting"
+
+
 class TestInbound:
     async def test_rejects_at_cap_for_that_channel_only(self, pm, kernel_clock, monkeypatch):
         """The channel's own count at the cap rejects; below it or only other

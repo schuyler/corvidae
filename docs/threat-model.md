@@ -1915,9 +1915,9 @@ What it does not bound:
   A note is counted as waiting work only while it waits.
 - **Inbound across channels.** The cap is per channel; many channels can each
   hold their share, so the total of waiting messages is bounded only by the
-  number of channels. `max_waiting` does not bound inbound messages: it
-  refuses internal work, and waiting messages count toward it (see the
-  residual below).
+  number of channels. `max_waiting` does not bound inbound messages and
+  they do not count toward it (#1052), so a flood cannot refuse internal
+  work on other channels (see the residual below).
 - **Without a block.** With no `limits:` block, or without the extra, the
   plugin gives no verdicts and nothing is bounded; this is opt-in, as for
   `outbound_cap`.
@@ -1946,16 +1946,15 @@ fan-out. An injected instruction can fill the ceiling with slow subagents and
 make later legitimate `subagent` calls return the refusal until some finish,
 the same class of harm as the cap in finding 19, not a new capability.
 
-Accepted residual: **outside senders can reach the ceiling.** Waiting
-transport messages are waiting work (TRD K1 counts the channel queues), so
-with the defaults, floods on four channels (4 × 50 = 200) make every
-`subagent`, `fork` and `notify_other_channel` call refuse on every channel
-until the backlog drains; fewer channels suffice while tool tasks are also
-waiting. The agent still answers each message, so this denies internal work,
-not replies, and it lasts only as long as the flood. Raise `max_waiting`
-relative to `inbound_per_channel` × the number of open channels to keep
-headroom. Counting only internal work toward the ceiling would close it and
-is a question for the owner (#1052).
+Accepted residual: **total waiting messages grow with the channel count.**
+Messages from users are left out of the ceiling (owner, #1052), so floods
+on several channels cannot refuse each other's internal work, but the
+total backlog of waiting messages is bounded only by
+`inbound_per_channel` × the number of channels the allowlists admit. Each
+waiting message is a small queue entry, and allowlists are the main
+control on what reaches the agent (finding 14). Work the agent derives
+from a message (a task, a note, a result) is internal and still counts, so
+a flood that provokes fan-out still meets the ceiling.
 
 ## Privilege separation
 

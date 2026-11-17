@@ -1130,7 +1130,9 @@ ID with zero entries omitted.
   call is running on the TaskQueue when the tool offers its work, so it
   counts: for `subagent`, `fork` and `notify_other_channel` the effective
   ceiling of a `max_waiting` check is at most `max_waiting - 1` (the
-  response's other tool calls count too).
+  response's other tool calls count too). `LimitsPlugin` subtracts
+  `waiting_messages()` before comparing, so messages from users never
+  count toward the ceiling (#1052).
 - `Agent.waiting_messages()` counts USER items only (transport messages;
   notifications and tool results never count, and a turn retry counts once
   it is re-queued, not while it waits on its timer), from the same
