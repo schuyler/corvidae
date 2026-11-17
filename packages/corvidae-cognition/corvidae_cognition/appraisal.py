@@ -38,6 +38,7 @@ from corvidae.task import Task
 from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.probe import ReadOnlyProbe
+from corvidae_cognition.silence import is_decline
 
 # Named explicitly: corvidae/logging.py configures the "corvidae" logger,
 # and __name__ would be corvidae_cognition.appraisal.
@@ -482,6 +483,23 @@ class AppraisalPrior:
         )
 
 
+def _declined(channel, response_text: str, trace_id: str | None) -> bool:
+    """Whether this final is a decline (#420), failing toward appraising.
+
+    A check that raises costs one stage-2 call rather than dropping one, and
+    logs a warning so the break is visible.
+    """
+    try:
+        return is_decline(channel, response_text)
+    except Exception:
+        logger.warning(
+            "could not tell whether the final of %s on %s was declined; "
+            "appraising it", trace_id, channel.id, exc_info=True,
+            extra={"channel": channel.id, "trace_id": trace_id},
+        )
+        return False
+
+
 class AppraisalPlugin(CorvidaePlugin):
     """Stage-1 appraisal: heuristics + FTS5 probe behind a pull API.
 
@@ -772,12 +790,21 @@ class AppraisalPlugin(CorvidaePlugin):
 
         Fires once per exchange-ending turn. Never for ``annotations["origin"] ==
         "critique"`` exchanges — nothing downstream consumes them and it
-        doubles cost. The task is silent (``deliver=False``): its empty
-        result triggers no on_notify and therefore no main-model turn
+        doubles cost. Never for a decline (#420): the agent's choice to stay
+        silent is not a response, so ``get_last_stage2`` keeps the channel's
+        last answered exchange. The task is silent (``deliver=False``): its
+        empty result triggers no on_notify and therefore no main-model turn
         (trap #10).
         """
         origin = (annotations or {}).get("origin")
         if trace_id is None or origin == "critique":
+            return
+        if _declined(channel, response_text, trace_id):
+            logger.debug(
+                "stage-2 appraisal skipped for %s on %s: the turn was declined",
+                trace_id, channel.id,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
             return
         task_plugin = self.pm.get_plugin("task") if hasattr(self, "pm") else None
         queue = getattr(task_plugin, "task_queue", None)

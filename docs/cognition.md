@@ -1633,7 +1633,15 @@ implementation in that broadcast would discard every sibling's verdict.
 `get_appraisal_out(trace_id)` reads the vector back.
 
 **Stage 2** (`on_agent_response`) is a silent fork of the live window over
-the finished exchange. On a miss (forks off, the exchange left the window,
+the finished exchange. A decline gets none (#420; PRD §3.7 Critique 3): when
+the final went unsent and its text carries `NO_REPLY` or is empty, the
+agent stayed silent and there is no response to appraise, so no task is
+enqueued and `get_last_stage2(channel)` keeps the channel's last answered
+exchange for the outbound gate and critique's lens selection. The test is
+`silence.is_decline`, the rule `SilencePlugin` records declines by; it
+doesn't need that plugin loaded. A final another gate withheld has content
+and still gets stage 2. If the test raises, stage 2 runs anyway and a
+warning names the channel and trace. On a miss (forks off, the exchange left the window,
 the fork failed or its reply was unusable) it is skipped with a warning
 naming the stage, channel, trace and reason: the exchange keeps stage 1 only
 and no standalone call is made. It produces: valence, stakes, ambiguity, commitment density, novelty,
@@ -1659,7 +1667,8 @@ model makes both language judgments; the code only fetches evidence:
    in `past_claims`, with a few search phrases for each (see
    [AppraisalPlugin](#appraisalplugin-the-outbound-vector-packagescorvidae-cognitioncorvidae_cognitionappraisalpy)).
    That works in any language and any phrasing, and it costs no extra model
-   call because stage 2 already runs on every exchange.
+   call because stage 2 already runs on every answered exchange. A decline
+   gets no stage 2, so it gets no provenance check either.
 2. **Evidence.** When stage 2 lands, AppraisalPlugin notifies its listeners.
    CritiquePlugin registers one in `on_start`. For an eligible exchange
    (same rule as the stylistic lenses: `user` or `reminder`) with at least
@@ -1861,7 +1870,8 @@ runs and the fallback final stays withheld.
 
 What the kernel does with a withheld final is in
 [design.md](design.md#the-output-gate). On the cognition side, critique still
-judges a withheld `user` or `reminder` final, its provenance probe doesn't
+judges a withheld `user` or `reminder` final, though not a decline (an
+unsent `NO_REPLY` or empty final, #420), its provenance probe doesn't
 count a withheld row as a record of anything said, and `recall_raw` and
 `search_transcripts` label withheld rows `(withheld, not sent)`.
 
@@ -1923,7 +1933,9 @@ A `NO_REPLY` that was actually sent (say another gate's veto raised and the send
 
 **Disabling it.** `plugins.disabled: [silence]` removes the instruction, the veto and the `end_turn` tool; `agent.minimal.yaml.example` does this. A restart rebuilds every conversation's system prompt, so disabling the plugin drops the instruction everywhere at once. The windows still hold earlier `NO_REPLY` rows, though, and with no veto the model may imitate them and send the literal text. If that matters, start those conversations fresh.
 
-**Known gaps.** Appraisal and critique still score a declined turn, so `NO_REPLY` can draw a stylistic objection. The instruction is the same in DMs and group channels; a group-specific variant that names addressing isn't built.
+**Appraisal and critique skip a decline** (#420). The same rule, exported as `is_decline(channel, response_text)` (with `decline_kind(text)` for the shape), gates `AppraisalPlugin`'s stage 2 and `CritiquePlugin`'s stylistic and proactivity checks, so a `NO_REPLY` is never scored or objected to. Both call it before their first await and fail toward running if it raises. A `NO_REPLY` that was sent is a response and is judged.
+
+**Known gaps.** The instruction is the same in DMs and group channels; a group-specific variant that names addressing isn't built.
 
 ### HeartbeatPlugin (`packages/corvidae-cognition/corvidae_cognition/heartbeat.py`)
 

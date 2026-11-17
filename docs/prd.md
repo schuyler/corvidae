@@ -1209,8 +1209,9 @@ deciding only what to newly append and in what order.
    launcher's window: critique judges what the launcher says about it.
    It does not judge the task's own claims, which are records to the
    critic, or the task's tool actions. Which checks run on a judged turn
-   is each check's own selection (items 1–2). Withheld responses stay
-   eligible.
+   is each check's own selection (items 1–2). A response a gate withheld
+   is still judged; the agent's choice to stay silent is not a response,
+   and is neither judged nor appraised.
 4. Empty objections are recorded and wake nothing. Stylistic objections
    re-enter as framed CONTEXT at the channel's next turn and wake nothing,
    so a self-check never sends the user an unsolicited message.
