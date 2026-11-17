@@ -999,12 +999,14 @@ As a last-resort safety net, `execute_tool_call` detects a sync callable registe
 
 ## What the kernel exports to plugins
 
-A plugin outside the `corvidae` package (the `corvidae-cognition` plugins,
-`cross-channel-send`, or your own) should import only these kernel modules.
-This is the API the bundled plugins use, and
-`tests/test_kernel_boundary.py` fails if a bundled plugin imports any other
-kernel module. Changing a signature here is a plugin-API change and needs a
-line in this guide.
+These are the kernel modules and names the bundled plugins (the
+`corvidae-cognition` plugins, `cross-channel-send`, and the rest under
+`packages/`) import. The table is a map, not a contract: before a formal
+release there is no declared plugin API, and anything here may change. A
+plugin may import any kernel module, listed or not; one outside this table
+is more likely to change without a note here, and keeping up with it is the
+plugin owner's job. Nothing checks what a plugin imports, and a bundled
+plugin has no special standing (#1026).
 
 | Module | Names |
 |---|---|
@@ -1020,6 +1022,7 @@ line in this guide.
 | `corvidae.tool` | `Tool`, `ToolContext`, `tool_to_schema` |
 | `corvidae.persistence` | `PersistencePlugin`, `add_column_if_missing`, `view_rows`, `decodable_summaries` |
 | `corvidae.llm_plugin` | `LLMPlugin` |
+| `corvidae.prompts` | `resolve_prompt` |
 | `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |
 | `corvidae.idle` | `IdleTracker`, `IdleWatch` |
 | `corvidae.spill` | `NotificationSpill` (see [Spilling a long notification](#spilling-a-long-notification)) |

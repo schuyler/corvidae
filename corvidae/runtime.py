@@ -494,9 +494,9 @@ class Runtime:
         For a process that has finished its work but whose exit is not
         ``run()``'s to bound: the restart plugin's pre-flight, which loads
         plugins through ``on_init`` and returns (#757). Kept here rather than
-        letting the pre-flight import ``corvidae.shutdown`` so a package
-        still depends only on the documented kernel API
-        (``tests/test_kernel_boundary.py``).
+        letting the pre-flight import ``corvidae.shutdown``, so the restart
+        package reaches the watchdog through ``Runtime``, which it already
+        uses.
         """
         arm_exit_watchdog(self.shutdown_timeouts.exit)
 
