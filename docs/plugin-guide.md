@@ -1743,13 +1743,15 @@ Registered by `RuntimeSettingsPlugin` (entry point name: `runtime_settings`).
 
 ### SchedulerPlugin tools
 
-Registered by `SchedulerPlugin` (entry point name: `scheduler`). All three act on `_ctx.channel` only and take no channel argument, so a speaker on one channel cannot schedule a message to another ([threat-model.md](threat-model.md)).
+Registered by `SchedulerPlugin` (entry point name: `scheduler`). All five act on `_ctx.channel` only and take no channel or origin argument, so a speaker on one channel cannot schedule a message to another, and every row a tool creates carries origin `reminder` ([threat-model.md](threat-model.md), #814).
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
-| `remind_me` | `when: str`, `text: str` | Creates a one-shot reminder on the calling channel. `when` is a relative duration (`20m`, `2h`, `3d`, `1h30m`), an ISO 8601 time (no offset means `scheduler.timezone`), or `HH:MM` for the next occurrence; a bare number is refused as ambiguous. The tool does the date arithmetic and returns the resolved absolute time, e.g. `Reminder #12 set for Fri 2026-10-23 14:22 PDT (in 20m).` Refuses past times, empty text, text over 2000 characters, and more than `scheduler.max_reminders_per_channel` pending reminders. |
+| `remind_me` | `when: str`, `text: str` | Creates a one-shot reminder on the calling channel. `when` is a relative duration (`20m`, `2h`, `3d`, `1h30m`), an ISO 8601 time (no offset means `scheduler.timezone`), or `HH:MM` for the next occurrence; a bare number is refused as ambiguous. The tool does the date arithmetic and returns the resolved absolute time, e.g. `Reminder #12 set for Fri 2026-10-23 14:22 PDT (in 20m).` Refuses past times, empty text, text over 2000 characters, and more than `scheduler.max_reminders_per_channel` pending reminders and jobs on the channel. |
 | `list_reminders` | — | Pending rows on the calling channel, earliest first, with ids and due times. Operator jobs targeting the channel are listed as read-only. |
-| `cancel_reminder` | `id: int` | Cancels a tool-created reminder on the calling channel. Refuses operator jobs; another channel's row reads as not found. |
+| `cancel_reminder` | `id: int` | Cancels a tool-created reminder or recurring job on the calling channel. Refuses operator jobs; another channel's row reads as not found. |
+| `add_job` | `cron: str`, `prompt: str` | Creates a recurring job on the calling channel: a 5-field cron expression in `scheduler.timezone` and the prompt to act on at each firing. Refuses a cron that does not parse or never matches, an empty prompt or one over 2000 characters, and a channel at `scheduler.max_reminders_per_channel` (reminders and jobs count together). Returns the job's id and next fire time. |
+| `update_job` | `id: int`, `cron: str = ""`, `prompt: str = ""` | Changes the cron and/or prompt of a recurring job the agent set on the calling channel. Refuses operator jobs and one-shot reminders; another channel's row reads as not found. |
 
 ## Bundled plugins
 
@@ -2170,11 +2172,11 @@ tools_dict, schemas = tools_plugin.get_tools()
 
 ### SchedulerPlugin (`corvidae/scheduler.py`)
 
-Clock-driven producer of reminders and operator jobs (the heartbeat is cognition's `HeartbeatPlugin` now; see [cognition.md](cognition.md#heartbeatplugin)). Entry point name: `"scheduler"`; `depends_on = {"registry", "persistence", "clock"}`. Owns the `schedule` table in `sessions.db` (created on first use) and one timer task, which sleeps until the earliest due row and is woken early whenever a row changes. A due row fires through `on_notify` with `source` and `annotations["origin"]` set to `reminder`, so persistence, critique eligibility, attribution, and the outbound send work unchanged. Jobs under `scheduler.jobs` sync by name on start and on every reload. Full behaviour: [design.md](design.md#schedulerplugin); keys: [configuration.md](configuration.md#scheduler--reminders-and-periodic-jobs).
+Clock-driven producer of reminders, the agent's recurring jobs and operator jobs (the heartbeat is cognition's `HeartbeatPlugin` now; see [cognition.md](cognition.md#heartbeatplugin)). Entry point name: `"scheduler"`; `depends_on = {"registry", "persistence", "clock"}`. Owns the `schedule` table in `sessions.db` (created on first use) and one timer task, which sleeps until the earliest due row and is woken early whenever a row changes. A due row fires through `on_notify` with `source` and `annotations["origin"]` set to `reminder`, so persistence, critique eligibility, attribution, and the outbound send work unchanged. Jobs under `scheduler.jobs` sync by name on start and on every reload. Full behaviour: [design.md](design.md#schedulerplugin); keys: [configuration.md](configuration.md#scheduler--reminders-and-periodic-jobs).
 
 It follows the two patterns a plugin owning persistent state and a background task needs. Schema creation is lazy on first use (`PersistencePlugin.db` may not be open during its `on_start`, as with `MemoryPlugin`). The timer is an `asyncio.Task` cancelled in `on_stop` (as with `ConfigWatcherPlugin`). It sleeps on the kernel clock, so its tests use a fake clock and never sleep.
 
-**Without this plugin:** no reminders and no scheduled jobs; the three tools are absent.
+**Without this plugin:** no reminders and no scheduled jobs; the five tools are absent.
 
 ### ConfigWatcherPlugin (`corvidae/config_watcher.py`)
 

@@ -2961,8 +2961,8 @@ validation fails at startup.
 
 ## SchedulerPlugin
 
-`scheduler.py` — the clock-driven producer: reminders and operator-declared
-periodic jobs (#59; design rationale in
+`scheduler.py` — the clock-driven producer: reminders, the agent's
+recurring jobs and operator-declared periodic jobs (#59; design rationale in
 `plans/scheduler.md`). Entry point name: `"scheduler"`;
 `depends_on = {"registry", "persistence", "clock"}`.
 
@@ -2971,8 +2971,10 @@ due time, an optional interval, a target channel id, the text, and an
 origin (`reminder`; `heartbeat` is still accepted so old configs load, but
 the heartbeat is now cognition's `HeartbeatPlugin`, started on system idle).
 Reminders come from the `remind_me`
-tool and are pinned to the calling channel. Jobs come from
-`scheduler.jobs` in `agent.yaml` and are synced by `name`.
+tool and the agent's recurring jobs from `add_job`; both are pinned to the
+calling channel and always carry origin `reminder` (#814). Operator jobs
+come from `scheduler.jobs` in `agent.yaml` (or `scheduler.jobs_file`) and
+are synced by `name`.
 
 ```sql
 CREATE TABLE schedule (
@@ -2982,13 +2984,14 @@ CREATE TABLE schedule (
   origin TEXT NOT NULL,        -- 'reminder' ('heartbeat' accepted for old configs)
   text TEXT NOT NULL,          -- the objective, as the agent or operator wrote it
   next_fire_at REAL NOT NULL,  -- unix seconds, UTC
-  interval_seconds REAL,       -- NULL means one-shot
+  interval_seconds REAL,       -- NULL with no cron spec means one-shot
   created_at REAL NOT NULL,
   created_by TEXT NOT NULL,    -- 'config' | 'tool'
   last_fired_at REAL,
   enabled INTEGER NOT NULL DEFAULT 1,
   disabled_reason TEXT,        -- 'fired' | 'cancelled' | 'missed' | 'removed_from_config'
-  schedule_spec TEXT           -- config jobs: canonical every/at/timezone, to detect changes
+  schedule_spec TEXT           -- config jobs: canonical every/at/cron/timezone, to detect changes;
+                               -- agent jobs: cron=<expr>;tz=<name>; NULL for one-shot reminders
 );
 CREATE INDEX schedule_due ON schedule (enabled, next_fire_at);
 ```
@@ -3067,21 +3070,29 @@ was disabled. A name no longer configured is disabled as
 ERROR and its existing row is left alone, so a typo does not stop a
 running job. A reload wakes the timer.
 
-**Tools.** `remind_me(when, text)`, `list_reminders()`, and
-`cancel_reminder(id)` act on `_ctx.channel` only and take no channel
-argument. The tool, not the model, parses `when` against
+**Tools.** `remind_me(when, text)`, `list_reminders()`,
+`cancel_reminder(id)`, `add_job(cron, prompt)` and
+`update_job(id, cron, prompt)` act on `_ctx.channel` only and take no
+channel or origin argument (#814). The tool, not the model, parses `when` against
 `scheduler.timezone`: a relative duration (`20m`, `1h30m`), ISO 8601 with
 or without an offset, or bare `HH:MM` for the next occurrence; a bare
 number is refused as ambiguous. It returns the resolved absolute time.
-`scheduler.max_reminders_per_channel` caps pending tool rows per channel,
-and text is capped at 2000 characters. `cancel_reminder` refuses config
-jobs, and treats another channel's row as not found.
+`add_job` takes a 5-field cron expression, interpreted in
+`scheduler.timezone` at fire time, and refuses one that does not parse or
+never matches; its row recurs like a config cron job and is framed as a
+"recurring job you set". `update_job` changes the cron and/or prompt of
+one of the caller's own recurring jobs. `scheduler.max_reminders_per_channel`
+caps pending tool rows (reminders and jobs together) per channel, and text
+is capped at 2000 characters. `cancel_reminder` and `update_job` refuse
+config jobs and treat another channel's row as not found. No tool writes
+the operator's jobs file.
 
 **Shutdown.** `on_stop` cancels the timer task; firings already enqueued
 drain with the channel queues.
 
-**Not in phase one:** a `send_to_channel` tool, recurring reminders by
-tool, cron syntax, hook-kind jobs (see `plans/scheduler.md`).
+**Not built:** a `send_to_channel` tool (cross-channel reach is PRD
+§3.5.9's), hook-kind jobs (see `plans/scheduler.md`), and a floor on how
+often an agent-set job may recur (PRD §3.9.7).
 
 ## Subagent Tool
 
@@ -3419,14 +3430,16 @@ registers `task_status` as tool closures during `on_start`.
 | `task_status()` | `task.py` | Report task queue status |
 | `task_result(task_id)` | `task.py` | Return a completed task's stored result by id (in-memory deque, then the JSONL file when persistence is enabled) |
 
-`SchedulerPlugin` registers three tools scoped to the calling channel
+`SchedulerPlugin` registers five tools scoped to the calling channel
 (see [SchedulerPlugin](#schedulerplugin)):
 
 | Tool | File | Purpose |
 |------|------|---------|
 | `remind_me(when, text)` | `scheduler.py` | Create a one-shot reminder on this channel; returns the resolved time |
 | `list_reminders()` | `scheduler.py` | Pending rows on this channel, config jobs flagged read-only |
-| `cancel_reminder(id)` | `scheduler.py` | Cancel a tool-created reminder on this channel |
+| `cancel_reminder(id)` | `scheduler.py` | Cancel a tool-created reminder or recurring job on this channel |
+| `add_job(cron, prompt)` | `scheduler.py` | Create a recurring job on this channel, origin `reminder` |
+| `update_job(id, cron, prompt)` | `scheduler.py` | Change one of this channel's recurring jobs the agent set |
 
 ## Transports
 
@@ -3794,7 +3807,7 @@ stop (#390). Since a reply to a coalesced burst already zeroes the count
 owns, whatever originated the turn, and liveness and reply bookkeeping
 tolerate a reply that answers no outstanding message. Sending to a channel *other than* the turn's own is in the PRD (PRD §3.5.9:
 "Nothing gates which channel a turn may speak on"). No general text
-`send_to_channel` tool exists — the scheduler's "Not in phase one" note under
+`send_to_channel` tool exists — the scheduler's "Not built" note under
 [SchedulerPlugin](#schedulerplugin) and `docs/threat-model.md`'s deferred entry
 are about that tool — but `send_signal_attachment` already reaches any known
 `signal:` contact, from a turn begun on any channel: a file, and a caption with
@@ -4163,7 +4176,7 @@ is guarded at zero in `DiscordPlugin._release_all`, as on Signal,
 with the same early typing release (#101): any final, sent or withheld,
 zeroes the count.
 Sending to a channel other than the turn's own has no general text tool: no
-`send_to_channel` exists (the scheduler's "Not in phase one" note and
+`send_to_channel` exists (the scheduler's "Not built" note and
 `docs/threat-model.md`). Two of this transport's tools do cross channels
 already: `send_attachment`, whose caption is text, and `start_thread` — both
 against any registered `discord:` channel except a DM, which `start_thread`
@@ -4880,7 +4893,7 @@ memory:
 scheduler:
   timezone: UTC                 # IANA name; resolves offset-less times (default UTC)
   catch_up_window: 3600         # seconds a missed one-shot may be late and still fire
-  max_reminders_per_channel: 50 # pending tool-created reminders per channel
+  max_reminders_per_channel: 50 # pending tool-created reminders and jobs per channel
   jobs:                         # operator-declared recurring jobs, synced by name
     - name: morning-checkin
       channel: irc:#lex

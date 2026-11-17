@@ -339,13 +339,14 @@ agent:
 #   endpoints:
 #     github: [signal:+15551234567]
 
-# Scheduler: reminders (remind_me tool) and operator jobs (optional;
-# without this block the tools still work, in UTC, with these defaults).
-# A job can target any channel; see docs/threat-model.md finding 7.
+# Scheduler: reminders (remind_me), the agent's recurring jobs (add_job),
+# both on the calling channel only, and operator jobs (optional; without
+# this block the tools still work, in UTC, with these defaults). An operator
+# job can target any channel; see docs/threat-model.md finding 7.
 # scheduler:
 #   timezone: America/Los_Angeles      # resolves offset-less times; default UTC
 #   catch_up_window: 3600              # seconds a reminder missed while down may still fire
-#   max_reminders_per_channel: 50      # pending tool-created reminders per channel
+#   max_reminders_per_channel: 50      # pending tool-created reminders and jobs per channel
 #   jobs:                              # synced by name on start and reload
 #     - name: morning-checkin          # unique; removing it disables the job durably
 #       channel: signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f

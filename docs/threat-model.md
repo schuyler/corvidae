@@ -277,8 +277,9 @@ Four places:
   critique objections) is appended as `role: system` (`funnel.py`).
 - Notifications without a `tool_call_id` are wrapped as `role: system` in
   `Agent._build_conversation_message`. Scheduler firings are among them:
-  a reminder's text is whatever the model wrote into `remind_me`, possibly
-  at an untrusted speaker's request, and it comes back later as a system
+  a reminder's or agent-set job's text is whatever the model wrote into
+  `remind_me`, `add_job` or `update_job`, possibly at an untrusted
+  speaker's request, and it comes back later as a system
   row. See finding 7.
 - The not-sent marker the Agent appends after a `should_send_response`
   veto (#131) is a `role: system` CONTEXT row. It is core-written, not
@@ -596,27 +597,37 @@ string with little memory of who wanted it. What bounds it:
 
 - **Framing.** The firing text says a reminder "you set" is due and quotes
   the stored text as `Reminder text: «…»`, ending "Decide whether and how
-  to act on it." Any `«` or `»` inside the text is replaced, so it cannot
+  to act on it." A recurring job the agent set says the same of a "recurring
+  job you set" and quotes `Job prompt: «…»`; only a `scheduler.jobs` or
+  `scheduler.jobs_file` entry is framed as the operator's (#814). Any `«` or `»` inside the text is replaced, so it cannot
   close the quote and continue as framing. Rendering follows
   `agent.mid_conversation_system_role`, so `user` keeps it out of the
   system role as for every other notification. The framing is a soft
   mitigation in the same sense as the funnel's.
-- **Scoping.** The three tools act on `_ctx.channel` and take no channel
-  argument. A reminder fires on the channel it was set on and nowhere else,
-  so a stranger on IRC cannot use one to make the bot message a Signal
-  contact. PRD §3.9.7 now lets a reminder target any channel, so this
-  scoping is slated to go; finding 15 covers what replaces it.
-  `cancel_reminder` refuses operator jobs and treats another channel's row
-  as not found; `list_reminders` shows only the calling channel's rows. PRD
-  §3.9.7 makes both span every channel.
+- **Scoping.** All five tools (`remind_me`, `list_reminders`,
+  `cancel_reminder`, `add_job`, `update_job`) act on `_ctx.channel` and take
+  no channel argument. A reminder or agent-set job fires on the channel it
+  was set on and nowhere else, so a stranger on IRC cannot use one to make
+  the bot message a Signal contact. PRD §3.9.7 keeps it that way (owner,
+  2026-11-17, #814): reaching another channel goes through §3.5.9 (finding
+  15), not the scheduler. `cancel_reminder` and `update_job` refuse operator
+  jobs and treat another channel's row as not found; `list_reminders` shows
+  only the calling channel's rows.
+- **Origin.** No tool takes an origin. Every row a tool creates carries
+  origin `reminder`, so its turns are judged like any reminder's; only an
+  operator job (`scheduler.jobs` or `scheduler.jobs_file`) can be `heartbeat` (#814).
 - **Volume.** `scheduler.max_reminders_per_channel` (default 50) caps
-  pending reminders per channel, and text is capped at 2000 characters.
+  pending reminders and agent-set jobs together per channel, and text is
+  capped at 2000 characters for both.
   The cap is per channel. Finding 5 used to let a stranger open new IRC PM
   channels at will; with `irc.allow` (#77) only allowlisted senders can,
   so the number of channels, and with it the total, is bounded by who the
   operator allowed. Each firing costs a main-model turn. A reminder fires
   once, so a burst is bounded, but 50 per channel across several allowed
-  senders is still load.
+  senders is still load. An agent-set job recurs until cancelled, and
+  nothing sets a floor on how often: `* * * * *` is a turn a minute on
+  that channel, up to the cap. A floor the operator can apply (PRD §3.9.7)
+  is not built.
 
 `scheduler.jobs` in `agent.yaml` is the operator-only surface. A job can
 target any channel id, including a Signal contact, and recur, and its
@@ -626,21 +637,12 @@ prompt is framed as the operator's. It is hot-reloaded, so it joins the
 just at the next restart. The mitigation is the one finding 4 already
 gives: keep `agent.yaml` unwritable by the daemon user.
 
-The YAML jobs file (scheduler.jobs_file) adds a second operator surface
-for scheduler jobs. The CRUD tools (add_job, update_job, remove_job,
-list_jobs) are registered on every channel and write the file as the
-daemon user. Unlike remind_me (which is scoped to its own channel and
-capped by max_reminders_per_channel), the CRUD tools accept any channel
-id and origin with no per-channel cap. A model on a channel with
-untrusted speakers can therefore schedule messages to any channel in the
-registry, including Signal contacts, and the jobs persist across restarts.
-The file-permission mitigation (keep the file unwritable by the daemon
-user) would disable the CRUD tools, so it is not a viable mitigation for
-the tool path. The real exposure is the same as for any cross-channel
-send tool (finding 15): registry membership is the whole gate, and for
-`notify_other_channel` not even that, since it reaches any well-formed
-channel id (#938). Bounding
-the tools (per-channel cap, operator opt-in) is a follow-up.
+The YAML jobs file (scheduler.jobs_file) is a second operator-only surface
+for scheduler jobs, with the same exposure as `scheduler.jobs`: keep it
+unwritable by the daemon user. No tool writes it. The job tools
+(`add_job`, `update_job`) store the agent's recurring jobs as schedule
+rows bounded like `remind_me` (scoping, origin and volume above), and
+cannot touch the operator's jobs (#814).
 
 The RSS reader (packages/rss-reader) polls configured feeds and delivers
 new items as notifications on the configured targets. The threat is the
@@ -715,11 +717,11 @@ thread on another `discord:` channel (never a DM, which it refuses); and
 `notify_other_channel` (#234) queues a turn there instead. PRD §3.5.9 now requires one, with no
 allowlist of target channels: any turn may speak on any channel (#234).
 Finding 15 is its entry. PRD §3.9.7 also lets the agent set recurring
-reminders, which the tree doesn't yet: a recurring reminder set because of
-injected text fires a main-model turn every interval until someone
-cancels it, which is persistence for that text with no end date. The
-operator can apply a floor on how often an agent-set reminder recurs; with
-none, the bound is the per-target pending cap. Latency classes (PRD
+reminders, which `add_job` does (#814): a recurring job set because of
+injected text fires a main-model turn on its own channel every slot until
+someone cancels it, which is persistence for that text with no end date.
+PRD §3.9.7 lets the operator apply a floor on how often an agent-set
+reminder recurs; none is built, so the bound is the channel's pending cap. Latency classes (PRD
 §3.13.5), once built, keep its firings from holding a head past another
 queue's bound, but nothing bounds their total (finding 14).
 
@@ -1325,11 +1327,6 @@ decision (2026-11-01), and these are its costs.
   loaded, both carry the minimum trust of the source channel's participants
   and low-trust ones are quarantined (PRD §3.5.10–11); without it, they
   arrive unlabelled.
-- **Reminders aimed at other channels.** A reminder may target any channel
-  (PRD §3.9.7), so injected text on one channel can queue firings onto
-  another, up to `scheduler.max_reminders_per_channel` per target, and can
-  fill a target's pending cap so the operator can't set reminders there
-  until the rows fire or are cancelled.
 - **Messaging someone first opens the door to them.** Under PRD §3.5.9 a
   one-to-one message to a contact outside the inbound allowlist admits
   their replies on that channel. Injected text (a fetched page, an MCP
@@ -1344,7 +1341,7 @@ decision (2026-11-01), and these are its costs.
 - **Floods and loops.** No limit applies to messages the agent starts
   unless the operator sets one (PRD §3.5.9), so one exchange can send up to
   its `max_turns` budget's worth of messages to any one contact, and
-  reminder firings aimed at a contact add to that. A note that wakes
+  reminders and jobs set on that contact's own channel add to that. A note that wakes
   another channel starts a turn there, and that turn can wake the first,
   but the whole chain shares the `max_turns` budget of the exchange that
   started it (PRD §3.1.3, §3.5.10), so the ping-pong ends when that
@@ -1850,10 +1847,11 @@ Accepted residuals. Progress and thinking sent in the same response as the
 `speak_up` call are gated before the tool runs, so they stay withheld. A
 follow-up turn whose origin differs from the quiet turn (for example a
 `critique` wake) is not quiet. The veto lives in
-`GatePlugin`, so disabling `gates` disables it. The agent can set a
-scheduler job's origin to `heartbeat` (the only other origin the scheduler
-accepts besides `reminder`); if `heartbeat` is quiet, that mutes the job's
-own turns, which fails toward silence rather than toward noise.
+`GatePlugin`, so disabling `gates` disables it. Only the operator can give
+a scheduler job origin `heartbeat` (the only other origin the scheduler
+accepts besides `reminder`; no tool takes an origin, #814); if `heartbeat`
+is quiet, that mutes the job's own turns, which fails toward silence rather
+than toward noise.
 
 ## Privilege separation
 

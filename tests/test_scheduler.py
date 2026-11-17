@@ -726,12 +726,141 @@ class TestTools:
         env.sched.register_tools(registry)
         params = {t.name: set(t.schema["function"]["parameters"].get("properties", {}))
                   for t in registry}
+        # No tool takes a channel or an origin (#814): every row lands on the
+        # calling channel, and a tool-created job is always a reminder.
         assert params == {"remind_me": {"when", "text"}, "list_reminders": set(),
                           "cancel_reminder": {"id"},
-                          "add_job": {"name", "channel", "cron", "origin", "prompt"},
-                          "update_job": {"name", "channel", "cron", "origin", "prompt"},
-                          "remove_job": {"name"},
-                          "list_jobs": set()}
+                          "add_job": {"cron", "prompt"},
+                          "update_job": {"id", "cron", "prompt"}}
+
+
+class TestJobTools:
+    """add_job / update_job: recurring jobs the agent sets (#814).
+
+    They are schedule rows like reminders: on the calling channel only,
+    origin ``reminder``, under max_reminders_per_channel.
+    """
+
+    async def test_job_fires_on_calling_channel_as_reminder_and_recurs(self, env):
+        # A job lands on the caller's channel, fires there with origin
+        # reminder, stays enabled for its next slot, and cancel_reminder
+        # stops it.
+        lex = env.registry.get_or_create("irc", "#lex")
+        reply = await env.tools["add_job"]("0 9 * * *", "check the feeds", _ctx=env.ctx(lex))
+        (row,) = await env.rows()
+        assert f"Job #{row.id} set" in reply and "Sat 2026-10-24 09:00 PDT" in reply
+        assert (row.channel_id, row.origin, row.created_by, row.name) == (
+            "irc:#lex", "reminder", "tool", None)
+        assert "[your job, cron" in await env.tools["list_reminders"](_ctx=env.ctx(lex))
+
+        env.clock.jump(row.next_fire_at - env.clock.now())
+        await env.sched._tick()
+        (call,) = env.recorder.calls
+        assert call["channel"] is lex
+        assert call["annotations"] == {"origin": "reminder", "schedule_id": row.id}
+        (after,) = await env.rows()
+        assert after.enabled and after.next_fire_at == row.next_fire_at + 86400
+
+        assert "Cancelled" in await env.tools["cancel_reminder"](row.id, _ctx=env.ctx(lex))
+        (cancelled,) = await env.rows()
+        assert not cancelled.enabled
+
+    async def test_job_frame_names_the_agent_and_when(self, memdb):
+        # A tool job's firing says the agent set it, and when; an operator
+        # job's still says the operator set it.
+        e = await Env(memdb, sched_config(jobs=[JOB])).init()
+        lex = e.registry.get_or_create("irc", "#lex")
+        await e.tools["add_job"]("0 9 * * *", "check the feeds", _ctx=e.ctx(lex))
+        rows = {r.created_by: r for r in await e.rows()}
+        tz = ZoneInfo("America/Los_Angeles")
+        text = frame_firing(rows["tool"], tz, None)
+        assert text.startswith(
+            "A recurring job you set on 2026-10-23 14:00 (PDT) for this conversation (cron")
+        assert "Job prompt: «check the feeds»" in text
+        assert "set by the operator" in frame_firing(rows["config"], tz, None)
+
+    async def test_jobs_share_the_reminder_cap(self, memdb):
+        # Jobs and reminders count against one cap per channel, and the
+        # refusal names the key and the limit.
+        e = await Env(memdb, sched_config(max_reminders_per_channel=2)).init()
+        lex = e.registry.get_or_create("irc", "#lex")
+        assert "set for" in await e.tools["remind_me"]("5m", "x", _ctx=e.ctx(lex))
+        assert "Job #" in await e.tools["add_job"]("0 9 * * *", "y", _ctx=e.ctx(lex))
+        reply = await e.tools["add_job"]("0 10 * * *", "z", _ctx=e.ctx(lex))
+        assert "limit 2" in reply and "max_reminders_per_channel" in reply
+        assert len(await e.rows()) == 2
+
+    async def test_update_job_changes_only_the_callers_own_jobs(self, memdb):
+        # update_job edits the caller's job; another channel's row reads as
+        # not found, an operator job and a one-shot reminder are refused,
+        # and a cancelled job is reported as not pending.
+        e = await Env(memdb, sched_config(jobs=[JOB])).init()
+        lex = e.registry.get_or_create("irc", "#lex")
+        other = e.registry.get_or_create("irc", "#other")
+        await e.tools["add_job"]("0 9 * * *", "mine", _ctx=e.ctx(lex))
+        await e.tools["add_job"]("0 9 * * *", "theirs", _ctx=e.ctx(other))
+        await e.tools["remind_me"]("5m", "one-shot", _ctx=e.ctx(lex))
+        rows = {r.text: r for r in await e.rows()}
+
+        upd = e.tools["update_job"]
+        assert await upd(rows["theirs"].id, prompt="hijack", _ctx=e.ctx(lex)) == (
+            f"Error: no job #{rows['theirs'].id} in this conversation.")
+        assert "operator" in await upd(rows["hello"].id, prompt="x", _ctx=e.ctx(lex))
+        assert "one-shot" in await upd(rows["one-shot"].id, prompt="x", _ctx=e.ctx(lex))
+        after = {r.id: r for r in await e.rows()}
+        assert after[rows["theirs"].id].text == "theirs"
+        assert after[rows["hello"].id].text == "hello"
+
+        mine = rows["mine"]
+        assert f"#{mine.id}" in await upd(mine.id, cron="0 10 * * *", prompt="mine v2",
+                                          _ctx=e.ctx(lex))
+        (updated,) = await e.rows("id = ?", (mine.id,))
+        assert updated.text == "mine v2"
+        assert updated.schedule_spec == "cron=0 10 * * *;tz=America/Los_Angeles"
+        assert updated.next_fire_at == mine.next_fire_at + 3600
+
+        # A cron-only update keeps the prompt and moves the schedule.
+        assert "updated" in await upd(mine.id, cron="0 11 * * *", _ctx=e.ctx(lex))
+        (moved,) = await e.rows("id = ?", (mine.id,))
+        assert moved.text == "mine v2"
+        assert moved.next_fire_at == mine.next_fire_at + 7200
+
+        await e.tools["cancel_reminder"](mine.id, _ctx=e.ctx(lex))
+        assert "not pending" in await upd(mine.id, prompt="x", _ctx=e.ctx(lex))
+
+    async def test_job_text_and_cron_are_checked_by_both_tools(self, env):
+        # Both tools refuse an over-long or empty prompt and a cron that
+        # does not parse or never matches, naming the expression.
+        lex = env.registry.get_or_create("irc", "#lex")
+        add, upd = env.tools["add_job"], env.tools["update_job"]
+        long_text = "x" * 2001
+        assert "2000" in await add("0 9 * * *", long_text, _ctx=env.ctx(lex))
+        assert "empty" in await add("0 9 * * *", "  ", _ctx=env.ctx(lex))
+        assert "'nope'" in await add("nope", "x", _ctx=env.ctx(lex))
+        assert "'0 0 31 2 *'" in await add("0 0 31 2 *", "x", _ctx=env.ctx(lex))
+        assert await env.rows() == []
+
+        await add("0 9 * * *", "ok", _ctx=env.ctx(lex))
+        (row,) = await env.rows()
+        assert "2000" in await upd(row.id, prompt=long_text, _ctx=env.ctx(lex))
+        assert "'0 0 31 2 *'" in await upd(row.id, cron="0 0 31 2 *", _ctx=env.ctx(lex))
+        (unchanged,) = await env.rows()
+        assert (unchanged.text, unchanged.schedule_spec) == (row.text, row.schedule_spec)
+
+    async def test_job_tool_input_errors(self, env):
+        # The input paths the tools add: no channel, nothing to update, an id
+        # that is not a number; "#N" is accepted as cancel_reminder accepts it.
+        lex = env.registry.get_or_create("irc", "#lex")
+        add, upd = env.tools["add_job"], env.tools["update_job"]
+        assert "no channel" in await add("0 9 * * *", "x", _ctx=env.ctx(None))
+        assert "no channel" in await upd(1, prompt="x", _ctx=env.ctx(None))
+        await add("0 9 * * *", "ok", _ctx=env.ctx(lex))
+        (row,) = await env.rows()
+        assert "at least one" in await upd(row.id, _ctx=env.ctx(lex))
+        assert "'abc'" in await upd("abc", prompt="x", _ctx=env.ctx(lex))
+        assert f"Job #{row.id} updated" in await upd(f"#{row.id}", prompt="v2", _ctx=env.ctx(lex))
+        (after,) = await env.rows()
+        assert after.text == "v2"
 
 
 # ---------------------------------------------------------------------------

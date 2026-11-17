@@ -507,13 +507,13 @@ The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)
 
 ## `scheduler` — reminders and periodic jobs
 
-`SchedulerPlugin` fires due rows of its `schedule` table into their channels as notifications (see [design.md](design.md#schedulerplugin)). The agent creates one-shot reminders with the `remind_me` tool, always on the channel it is talking on; the operator declares recurring jobs here. The heartbeat is no longer a scheduler job: it is its own plugin, started on system idle (see [`heartbeat`](#heartbeat--a-turn-on-system-idle)). The block is optional: without it the tools still work, in UTC, with the defaults below.
+`SchedulerPlugin` fires due rows of its `schedule` table into their channels as notifications (see [design.md](design.md#schedulerplugin)). The agent creates one-shot reminders with the `remind_me` tool and recurring jobs with `add_job`, always on the channel it is talking on; the operator declares their own jobs here. The heartbeat is no longer a scheduler job: it is its own plugin, started on system idle (see [`heartbeat`](#heartbeat--a-turn-on-system-idle)). The block is optional: without it the tools still work, in UTC, with the defaults below.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `scheduler.timezone` | IANA name | `UTC` | Timezone for `when` values with no offset (ISO without offset, bare `HH:MM`), for `at` anchors, for day-step recurrence (a daily job keeps its wall-clock time across DST), and for times shown to the model. An unknown name logs a warning and uses UTC. |
 | `scheduler.catch_up_window` | float (seconds) | `3600` | On startup, a one-shot reminder that came due while the daemon was down fires once (prefixed `[overdue by …, daemon was down]`) if it is late by less than this; older ones are disabled as `missed`. |
-| `scheduler.max_reminders_per_channel` | integer | `50` | Pending tool-created reminders allowed per channel. `remind_me` refuses beyond it. Bounds what a hostile speaker can park in the table ([threat-model.md](threat-model.md)). |
+| `scheduler.max_reminders_per_channel` | integer | `50` | Pending tool-created reminders and jobs allowed per channel, counted together. `remind_me` and `add_job` refuse beyond it. Bounds what a hostile speaker can park in the table ([threat-model.md](threat-model.md)). |
 | `scheduler.jobs` | list | `[]` | Operator jobs, synced by `name` on startup and on every reload. See below. |
 | `scheduler.jobs_file` | path | — | Path to a YAML file with job definitions (relative to `agent.yaml`). When set and the file exists, jobs are read from the file instead of `scheduler.jobs`. The file is watched for changes (mtime polling, 5 s); edits trigger a re-sync without a restart. Format (YAML):
 ```
@@ -556,7 +556,7 @@ scheduler:
       prompt: "Good morning. Here's what's on today."
 ```
 
-The four CRUD tools (`add_job`, `update_job`, `remove_job`, `list_jobs`) write to the `jobs_file` and trigger a hot reload. They are registered on every channel; see [threat-model.md](threat-model.md) for the exposure.
+No tool writes the `jobs_file` or `scheduler.jobs`: both are the operator's. The agent's own recurring jobs (`add_job`, `update_job`) are schedule rows on the calling channel, origin `reminder`, under `max_reminders_per_channel`; `list_reminders` lists them and `cancel_reminder` stops them (#814). See [threat-model.md](threat-model.md) finding 7.
 
 A job costs a main-model turn per firing on the shared backend; keep intervals in hours. The firing text is framed as data for the model to judge ("Decide whether and how to act on it"), not as an order.
 
