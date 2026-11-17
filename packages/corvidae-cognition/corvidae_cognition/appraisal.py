@@ -796,16 +796,15 @@ class AppraisalPlugin(CorvidaePlugin):
     ) -> None:
         """Enqueue the silent stage-2 appraisal task (never on the response path).
 
-        Fires once per exchange-ending turn. Never for ``annotations["origin"] ==
-        "critique"`` exchanges — nothing downstream consumes them and it
-        doubles cost. Never for a decline (#420): the agent's choice to stay
-        silent is not a response, so ``get_last_stage2`` keeps the channel's
+        Fires once per exchange-ending turn, whatever its origin: a correction
+        (``critique`` origin) is judged too, and its provenance check needs
+        the claims stage 2 lists (#1031). Never for a decline (#420): the
+        agent's choice to stay silent is not a response, so ``get_last_stage2`` keeps the channel's
         last answered exchange. The task is silent (``deliver=False``): its
         empty result triggers no on_notify and therefore no main-model turn
         (trap #10).
         """
-        origin = (annotations or {}).get("origin")
-        if trace_id is None or origin == "critique":
+        if trace_id is None:
             return
         if _declined(channel, response_text, trace_id):
             logger.debug(

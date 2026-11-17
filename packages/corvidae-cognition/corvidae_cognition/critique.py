@@ -34,11 +34,17 @@ Two independent paths:
     judges language on this path. Confident phrasing is never evidence; the
     generator's confidence never substitutes for a record.
 
-Eligibility is by PROPAGATED origin, never inferred (trap #3): ``user`` and
-``reminder`` are eligible; ``critique`` is exempt (the recursion brake,
-unbypassable by tool use); ``heartbeat`` and ``task`` are exempt. A response
-another gate withheld stays eligible — the agent thought it, so critique may
-still object. A decline (an unsent ``NO_REPLY`` or empty final,
+Every main-loop turn that has a trace is judged, whatever started it
+(#1031; PRD §3.7 Critique 3): user, reminder, heartbeat, notification,
+note-woken and subagent-result turns, and corrections (``critique``-origin
+turns, which a provenance or proactivity finding woke). Stage forks never
+reach ``on_agent_response``, so they are never judged. The recursion brake is
+delivery, not eligibility (Critique 4): non-empty findings on a
+``critique``-origin turn never wake a turn; they wait as CONTEXT for the
+channel's next turn, so no chain of corrections forms. The origin propagates
+through tool cycles and onto notes (§3.5.10), so tool use can't bypass it. A
+response another gate withheld stays eligible — the agent thought it, so
+critique may still object. A decline (an unsent ``NO_REPLY`` or empty final,
 ``silence.is_decline``) is not a response and is never judged (#420).
 
 Every threshold resolves through ``resolve_tunable`` at decision time
@@ -147,9 +153,8 @@ PERMISSION_QUESTION_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Bound on the admitted-trace-id LRU (CritiquePlugin._admitted): "user"
-# origin recognition is inferred from on_message_admitted subscription
-# (R1 — origin is a plugin-side convention, not a core field).
+# Bound on the per-trace maps CritiquePlugin keeps (_originating_rowid,
+# _reply): old traces fall off the front.
 ADMITTED_LRU_MAXSIZE = 512
 
 # JSON schema constraining objection output on servers that honour it.
@@ -722,9 +727,6 @@ class CritiquePlugin(CorvidaePlugin):
         # Injectable RNG for the below-threshold sampling draw — tests seed a
         # random.Random; never the module-level random functions (WP2.7 p3).
         self._rng = random.Random()
-        # Bounded set of trace ids admitted via on_message_admitted —
-        # the plugin-side definition of "user" origin (R1).
-        self._admitted: collections.OrderedDict[str, None] = collections.OrderedDict()
         # Bounded map of trace id -> originating row's message_log
         # rowid, fed by on_message_persisted: a lens forks only while that
         # row is still in the window (#51).
@@ -915,22 +917,6 @@ class CritiquePlugin(CorvidaePlugin):
         if self._probe is not None:
             await self._probe.close()
 
-    # ------------------------------------------------------------------
-    # "user" origin recognition (R1 — plugin-side convention)
-    # ------------------------------------------------------------------
-
-    @hookimpl
-    async def on_message_admitted(self, channel, trace_id, sender, text) -> None:
-        """Record the admitted trace id — the definition of "user" origin.
-
-        Subscribing to on_message_admitted IS the plugin-side definition of
-        user origin (R1): the hook fires exactly for admitted USER messages.
-        """
-        self._admitted[trace_id] = None
-        self._admitted.move_to_end(trace_id)
-        while len(self._admitted) > ADMITTED_LRU_MAXSIZE:
-            self._admitted.popitem(last=False)
-
     @hookimpl
     async def on_message_persisted(self, channel, trace_id, rowid, text, annotations) -> None:
         """Record the exchange's originating rowid for the fork containment
@@ -1021,8 +1007,8 @@ class CritiquePlugin(CorvidaePlugin):
         The provenance check doesn't start here: it waits for stage 2's
         past_claims (handle_stage2).
         """
-        if not self._eligible(trace_id, annotations):
-            return  # critique/heartbeat/task/unadmitted exempt — the recursion brake
+        if not self._eligible(trace_id):
+            return
 
         # A decline is not a response and is not judged (#420; PRD §3.7
         # Critique 3). Checked before the first await: it reads the newest
@@ -1044,6 +1030,9 @@ class CritiquePlugin(CorvidaePlugin):
         # determines whether the subject is in the agent's ownership
         # boundary (SOUL.md 'Mine' list) — if so, the question is the
         # failure and the action is the default.
+        # The turn's origin travels with each check to delivery, where a
+        # correction's findings are kept from waking (_record_and_register).
+        origin = (annotations or {}).get("origin")
         if (
             resolve_tunable(
                 channel, self.config, "critique.proactivity.enabled",
@@ -1055,7 +1044,7 @@ class CritiquePlugin(CorvidaePlugin):
 
             async def _work_proactivity() -> str:
                 await self._run_proactivity(
-                    channel, trace_id, text_in_p, response_text
+                    channel, trace_id, text_in_p, response_text, origin=origin,
                 )
                 return ""
 
@@ -1097,7 +1086,8 @@ class CritiquePlugin(CorvidaePlugin):
 
             async def _work() -> str:
                 await self._run_critique(
-                    channel, trace_id, text_in, response_text, lenses, sampled
+                    channel, trace_id, text_in, response_text, lenses, sampled,
+                    origin=origin,
                 )
                 return ""
 
@@ -1137,19 +1127,13 @@ class CritiquePlugin(CorvidaePlugin):
         while len(self._reply) > ADMITTED_LRU_MAXSIZE:
             self._reply.popitem(last=False)
 
-    def _eligible(self, trace_id, annotations) -> bool:
-        """Eligibility by propagated origin (trap #3).
-
-        Eligible iff ``annotations["origin"] == "reminder"``, or origin is absent
-        AND the trace id was admitted via on_message_admitted ("user"
-        recognition, R1). Everything else (critique/heartbeat/task/unknown
-        background) is exempt; the recursion brake holds because
-        critique-origin annotations propagates through tool cycles.
-        """
-        if trace_id is None:
-            return False
-        origin = (annotations or {}).get("origin")
-        return origin == "reminder" or (origin is None and trace_id in self._admitted)
+    @staticmethod
+    def _eligible(trace_id) -> bool:
+        """Whether a turn is judged: every main-loop turn with a trace is
+        (#1031; PRD §3.7 Critique 3), whatever its origin. Every dequeued
+        turn has one, so only a caller outside the agent loop passes None.
+        The recursion brake is in _record_and_register, not here."""
+        return trace_id is not None
 
     @staticmethod
     def _declined(channel, response_text, trace_id) -> bool:
@@ -1332,17 +1316,18 @@ class CritiquePlugin(CorvidaePlugin):
         if not selected:
             return
         text_in = self._originating_text(trace_id, request_text)
+        origin = (annotations or {}).get("origin")
 
         async def _work() -> str:
             await self._run_added_lenses(
-                channel, trace_id, text_in, response_text, selected)
+                channel, trace_id, text_in, response_text, selected, origin=origin)
             return ""
 
         await self._enqueue(channel, trace_id, annotations, "critique:lenses", _work)
 
     async def _run_added_lenses(
         self, channel, trace_id, originating_text, response_text,
-        selected: list[tuple[str, bool]],
+        selected: list[tuple[str, bool]], *, origin: str | None,
     ) -> None:
         """Fork each selected added lens through the built-ins' own path,
         record ``{"critique": {name: ...}}`` for those that ran and register
@@ -1368,6 +1353,7 @@ class CritiquePlugin(CorvidaePlugin):
                 return
             await self._record_and_register(
                 channel, trace_id, {"critique": per_lens}, objections, wake=False,
+                origin=origin,
             )
         finally:
             reset_attribution(token)
@@ -1387,7 +1373,7 @@ class CritiquePlugin(CorvidaePlugin):
         provenance task; the task gathers the evidence and forks the window
         to judge it.
         """
-        if not self._eligible(trace_id, annotations):
+        if not self._eligible(trace_id):
             return
         # The provenance check: on when enabled and stage 2 listed claims.
         claims = (stage2 or {}).get("past_claims") or []
@@ -1395,9 +1381,11 @@ class CritiquePlugin(CorvidaePlugin):
             channel, self.config, "critique.provenance.enabled", PROVENANCE_ENABLED_DEFAULT
         ):
             text_in = self._originating_text(trace_id, None)
+            origin = (annotations or {}).get("origin")
 
             async def _work() -> str:
-                await self._run_provenance(channel, trace_id, text_in, response_text, claims)
+                await self._run_provenance(
+                    channel, trace_id, text_in, response_text, claims, origin=origin)
                 return ""
 
             await self._enqueue(channel, trace_id, annotations, "critique:provenance", _work)
@@ -1447,7 +1435,10 @@ class CritiquePlugin(CorvidaePlugin):
             extra={"channel": channel.id, "trace_id": trace_id}, **kwargs,
         )
 
-    async def _run_provenance(self, channel, trace_id, originating_text, response_text, claims):
+    async def _run_provenance(
+        self, channel, trace_id, originating_text, response_text, claims, *,
+        origin: str | None,
+    ):
         """Gather the evidence for each claim, then fork the window to judge it.
 
         Fork-only: a miss, before or after the evidence is gathered, skips
@@ -1507,7 +1498,8 @@ class CritiquePlugin(CorvidaePlugin):
             if objections:
                 prov["detail"] = objections
             outcome = {"provenance": prov}
-            await self._record_and_register(channel, trace_id, outcome, objections, wake=True)
+            await self._record_and_register(
+                channel, trace_id, outcome, objections, wake=True, origin=origin)
         finally:
             reset_attribution(token)
 
@@ -1516,7 +1508,8 @@ class CritiquePlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     async def _run_proactivity(
-        self, channel, trace_id, originating_text, response_text
+        self, channel, trace_id, originating_text, response_text, *,
+        origin: str | None,
     ) -> None:
         """Fork the window and check whether a permission question in the
         response is about something the agent owns.
@@ -1562,7 +1555,7 @@ class CritiquePlugin(CorvidaePlugin):
                 outcome["proactivity"]["detail"] = objections
             await self._record_and_register(
                 channel, trace_id, outcome, objections,
-                wake=bool(objections),
+                wake=bool(objections), origin=origin,
             )
         except Exception:
             logger.debug(
@@ -1682,6 +1675,7 @@ class CritiquePlugin(CorvidaePlugin):
 
     async def _run_critique(
         self, channel, trace_id, originating_text, response_text, lenses, sampled,
+        *, origin: str | None,
     ) -> None:
         """Run each selected stylistic lens, record the outcome (nothing
         when no lens ran), register
@@ -1729,7 +1723,7 @@ class CritiquePlugin(CorvidaePlugin):
                 crit["detail"] = objections
             outcome = {"critique": crit}
             await self._record_and_register(
-                channel, trace_id, outcome, objections, wake=False,
+                channel, trace_id, outcome, objections, wake=False, origin=origin,
             )
         finally:
             reset_attribution(token)
@@ -1770,6 +1764,7 @@ class CritiquePlugin(CorvidaePlugin):
 
     async def _record_and_register(
         self, channel, trace_id, outcome, objections, *, wake: bool,
+        origin: str | None,
     ) -> None:
         """Record a critique outcome and register non-empty verdicts.
 
@@ -1783,6 +1778,11 @@ class CritiquePlugin(CorvidaePlugin):
         (stylistic) they queue for the channel's next turn and wake nothing
         (#202), except the lenses ``_retention_wake_lenses`` names, whose
         findings wake the channel so the fact is filed now.
+
+        ``origin`` is the judged turn's. On a ``critique``-origin turn (a
+        correction) nothing wakes, whatever ``wake`` or the lens says: every
+        finding waits for the channel's next turn, so a correction can never
+        start another one (the recursion brake, PRD §3.7 Critique 4).
         """
         outcome_log = self.pm.get_plugin("outcome_log")
         if outcome_log is not None:
@@ -1802,7 +1802,9 @@ class CritiquePlugin(CorvidaePlugin):
             logger.debug("critique verdict not delivered: funnel unavailable")
             return
         # Split by delivery: what wakes the channel now, what waits.
-        if wake:
+        if origin == "critique":
+            waking, waiting = [], list(objections)
+        elif wake:
             waking, waiting = list(objections), []
         else:
             wake_lenses = self._retention_wake_lenses()
