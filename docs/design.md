@@ -4703,8 +4703,9 @@ change to the goal's `origin_channel` with one call to
 `cross_channel_send.notify_other_channel`. The goals plugin fires the hook
 inside the tool call that made the change, so `notify_other_channel` reads the
 changing turn's attribution: the notification carries `source="agent_send
-from <actor>"`, `origin: "agent_send"`, `source_channel`, `source_trace_id`
-and a carried-forward `hop_count`, and the `cross_channel_send.max_hops` guard
+from <actor>"`, `source_channel`, `source_trace_id`, the changing turn's own
+`origin` verbatim when it has one (none for a user turn, #1034) and a
+carried-forward `hop_count`, and the `cross_channel_send.max_hops` guard
 bounds a loop exactly as it bounds any send. An origin that isn't live is
 resolved the way every `notify_other_channel` target is
 (`resolve_persisted_channel`).

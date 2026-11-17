@@ -15,22 +15,27 @@ notification's annotations. The receiving context's attribution carries the
 hop_count, so the next send from that context increments it again. When
 hop_count exceeds max_hops (config, default 3), the send is refused.
 
-Cognition consumers see origin "agent_send" in annotations. Verified against the
-cognition source (2026-11-05):
-- critique._eligible: exempt. Eligible iff origin == "reminder", or origin
-  is absent and the trace was admitted (user). "agent_send" matches
-  neither, so a sent instruction never forks a critique.
-- funnel: neutral. Origin keys the deferred-registration queue as
-  (channel.id, origin); "agent_send" is just a new vocabulary value,
-  queued and drained on the next same-origin turn of the channel.
-- gates: the send's final response is a non-user origin, so the decide
-  gate's salience withholding applies to it exactly as to a reminder's
-  reply (engaged inbound messages are unaffected; the engagement gate is
-  inbound-only).
-- appraisal: stage 2 runs (it skips only origin "critique") — one silent
-  appraisal task per sent instruction.
-- outcome_log: the exchange row's origin column records "agent_send"
-  (record_exchange takes annotations["origin"] verbatim, default "task").
+Origin: the note carries the sending turn's ``annotations["origin"]``
+verbatim and never stamps one of its own (PRD §3.5.10, #1034), so a note sent
+from a reminder turn wakes a reminder-origin turn. A user turn has no origin
+("user" is inferred from admission), so its note carries none. The sender is
+named by ``source_channel``/``source_trace_id`` and by the kernel's
+``origin_channel``/``origin_trace`` metadata. How the cognition consumers read
+the woken turn (its trace is minted at dequeue, never admitted), checked
+against their source on 2026-11-17:
+- critique._eligible: eligible iff origin == "reminder", or origin is absent
+  and the trace was admitted. A reminder chain's woken turn is eligible; a
+  user chain's is not. (#1031 decided that every main-loop turn is judged;
+  not built yet.)
+- funnel: origin keys the deferred-registration queue as (channel.id,
+  origin); a woken turn with no origin drains only the next-turn queue.
+- gates: no origin reads as "task", so the decide gate's salience
+  withholding applies to a user chain's woken turn; a reminder chain's is
+  never withheld; a ``gate.send.quiet_origins`` origin stays quiet on the
+  channel it sends to.
+- appraisal: stage 2 runs unless the origin is "critique".
+- outcome_log: the exchange row's origin column records the carried origin,
+  or "task" when there is none.
 """
 
 from __future__ import annotations
@@ -172,17 +177,24 @@ class CrossChannelSendPlugin(CorvidaePlugin):
                     f"{channel_id!r} (hop {hop} > max {self._max_hops})."
                 )
 
+            # The note names its sender and its hop; it carries the sending
+            # turn's origin verbatim and never stamps one of its own, so the
+            # woken turn follows how the chain started (PRD §3.5.10, #1034).
+            # A turn with no origin (a user turn) sends a note with none.
+            note_annotations = {
+                "source_channel": source_channel,
+                "source_trace_id": attribution.get("trace_id"),
+                "hop_count": hop,
+            }
+            if "origin" in annotations:
+                note_annotations["origin"] = annotations["origin"]
+
             await self.pm.ahook.on_notify(
                 channel=target,
                 source=f"agent_send from {source_channel}",
                 text=text,
                 tool_call_id=None,
-                annotations={
-                    "origin": "agent_send",
-                    "source_channel": source_channel,
-                    "source_trace_id": attribution.get("trace_id"),
-                    "hop_count": hop,
-                },
+                annotations=note_annotations,
             )
             return f"Queued on {channel_id}."
         except Exception:
