@@ -144,7 +144,6 @@ class TestDefaults:
         counts.messages = {ch.id: 50}
         assert await _process(plugin, ch) is False
 
-
     async def test_notice_interval_default_is_300(
         self, pm, kernel_clock, monkeypatch, caplog
     ):

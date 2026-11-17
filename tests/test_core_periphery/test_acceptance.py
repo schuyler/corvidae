@@ -116,7 +116,8 @@ async def test_task_start_refused_but_tool_result_accepted_at_max_waiting(
             # two parked tasks still hold waiting work at max_waiting.
             await _until(lambda: any(i.tool_call_id == "call-sub" for i in processed))
         delivered = next(i for i in processed if i.tool_call_id == "call-sub")
-        assert delivered.content.startswith("Not started: limits.max_waiting reached")
+        # TaskPlugin prefixes a completion with "[Task <id>] ".
+        assert "Not started: limits.max_waiting reached —" in delivered.content
         assert any(
             r.levelno == logging.WARNING
             and getattr(r, "limit", None) == "limits.max_waiting"
