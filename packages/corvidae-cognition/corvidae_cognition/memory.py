@@ -1679,6 +1679,8 @@ CREATE TABLE IF NOT EXISTS retrieval_candidate (
     outcome      TEXT NOT NULL,
     source       TEXT,               -- vec | fts | both (#666); NULL on rows from before it
     z            REAL,               -- band_on: relative z-score (#409); NULL when none was computed
+    vec_rank     INTEGER,            -- 1-based rank in the vec list (decayed cosine); NULL when not in the vec list (#1023)
+    fts_rank     INTEGER,            -- 1-based rank in the FTS list (bm25 order); NULL when not in the FTS list (#1023)
     PRIMARY KEY (retrieval_id, memory_id)
 ) WITHOUT ROWID
 """
@@ -3651,20 +3653,23 @@ class MemoryPlugin(CorvidaePlugin):
                             outcome = "dropped_budget"
                     rows.append((retrieval_id, c["id"], c["similarity"],
                                  c["score"], c["band"], i + 1, outcome,
-                                 c["source"], c["z"]))
+                                 c["source"], c["z"],
+                                 c.get("vec_rank"), c.get("fts_rank")))
                 # Excluded in-window records carry their would-be rank.
                 for would_be_rank, c in pool.excluded:
                     rows.append((retrieval_id, c["id"], c["similarity"],
                                  c["score"], c["band"], would_be_rank,
-                                 "excluded_in_window", c["source"], c["z"]))
+                                 "excluded_in_window", c["source"], c["z"],
+                                 c.get("vec_rank"), c.get("fts_rank")))
                 # A memory the redact CLI flagged after it was scored gets no
                 # row (#654): the flag check is part of the insert itself, so
                 # either the flag is visible here or the scrubber, which runs
                 # after the flag commits, deletes the row.
                 await db.executemany(
                     "INSERT INTO retrieval_candidate (retrieval_id, memory_id, "
-                    "similarity, score, band, rank, outcome, source, z) "
-                    "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? "
+                    "similarity, score, band, rank, outcome, source, z, "
+                    "vec_rank, fts_rank) "
+                    "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
                     "WHERE (SELECT redacted FROM memory WHERE id = ?) = 0",
                     [(*row, row[1]) for row in rows],
                 )
@@ -3906,6 +3911,55 @@ class MemoryPlugin(CorvidaePlugin):
         else:
             # Vec-only or degraded: rank by the decayed score, as before #666.
             keys = {c["id"]: (c["score"],) for c in candidates}
+        # Per-list ranks for the candidate log (#1023): computed from the
+        # same filtered lists the fusion consumes, so the logged ranks
+        # exactly replay the fusion. Pool rows get their rank among the
+        # pool; in-window rows get their would-be rank (the rank they would
+        # have had among the pool rows). NULL when the candidate is not in
+        # that list.
+        pool_ids = {c["id"] for c in pool_rows}
+        if fts_order:
+            vec_list = sorted(
+                (i for i in pool_ids if i in vec_keys),
+                key=lambda i: vec_keys[i], reverse=True,
+            )
+            vec_rank_map = {i: n for n, i in enumerate(vec_list, start=1)}
+            fts_list = [i for i in fts_order if i in pool_ids]
+            fts_rank_map = {i: n for n, i in enumerate(fts_list, start=1)}
+            fts_position = {i: n for n, i in enumerate(fts_order)}
+            for c in in_window_rows:
+                if c["id"] in pool_ids:
+                    continue  # defensive: pool rows get their rank below
+                if c["id"] in vec_keys:
+                    c["vec_rank"] = 1 + sum(
+                        1 for i in vec_list if vec_keys[i] >= vec_keys[c["id"]]
+                    )
+                else:
+                    c["vec_rank"] = None
+                if c["id"] in fts_position:
+                    c["fts_rank"] = 1 + sum(
+                        1 for i in fts_list if fts_position[i] < fts_position[c["id"]]
+                    )
+                else:
+                    c["fts_rank"] = None
+        else:
+            # Vec-only or degraded: rank by the decayed score order.
+            sorted_pool = sorted(pool_rows, key=lambda c: c["score"], reverse=True)
+            vec_rank_map = {c["id"]: n for n, c in enumerate(sorted_pool, start=1)}
+            fts_rank_map = {}
+            for c in in_window_rows:
+                if c["id"] in pool_ids:
+                    continue  # defensive: pool rows get their rank below
+                if c["id"] in vec_keys:
+                    c["vec_rank"] = 1 + sum(
+                        1 for p in sorted_pool if p["score"] >= c["score"]
+                    )
+                else:
+                    c["vec_rank"] = None
+                c["fts_rank"] = None
+        for c in pool_rows:
+            c["vec_rank"] = vec_rank_map.get(c["id"])
+            c["fts_rank"] = fts_rank_map.get(c["id"])
         ranked = sorted(pool_rows, key=lambda c: keys[c["id"]], reverse=True)
         # A candidate with no measured similarity cannot be admitted on its
         # own relevance — it bands weak (#409: no keyword-only floor), its
@@ -4532,6 +4586,8 @@ class MemoryPlugin(CorvidaePlugin):
         await add_column_if_missing(db, "retrieval_candidate", "source", "TEXT")
         # #409: the relative gate's z-score; old rows read NULL.
         await add_column_if_missing(db, "retrieval_candidate", "z", "REAL")
+        await add_column_if_missing(db, "retrieval_candidate", "vec_rank", "INTEGER")
+        await add_column_if_missing(db, "retrieval_candidate", "fts_rank", "INTEGER")
         await db.execute(RETRIEVAL_CANDIDATE_INDEX_DDL)
         # Phase 1b: message_fts and retention_meta
         await db.execute(MESSAGE_FTS_DDL)
