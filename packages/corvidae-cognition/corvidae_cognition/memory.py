@@ -15,7 +15,7 @@ This module owns the memory schema:
     transcript after the consolidation replies were unusable, #626) and
     ``model`` (the model the call was sent
     with), plus ``trigger`` (issue #633: ``compaction`` | ``idle`` |
-    ``turn`` | ``eval``, what started the consolidation; NULL for direct
+    ``turn`` | ``eval`` | ``reconsolidate`` (#932), what started the consolidation; NULL for direct
     rows and rows from before the column). All NULL means the row predates stamping
     ("unknown"); ``direct`` rows (goal retirement) were written by no
     consolidation call.
@@ -1452,7 +1452,7 @@ CREATE TABLE IF NOT EXISTS memory (
     prompt_hash TEXT,                   -- sha256 of the instruction text; NULL = unknown/direct
     mode TEXT,                          -- fork | standalone | raw | direct; NULL = unknown (pre-stamp)
     model TEXT,                         -- model the consolidation call was sent with
-    trigger TEXT,                       -- compaction | idle | turn | eval; NULL = direct/pre-#633
+    trigger TEXT,                       -- compaction | idle | turn | eval | reconsolidate; NULL = direct/pre-#633
     merged_foreign INTEGER NOT NULL DEFAULT 0 -- 1 = holds another channel's record via near-dup merge (#627)
 )
 """
@@ -1483,7 +1483,7 @@ class RecordStamp:
     prompt: str | None
     mode: str
     model: str | None
-    # What started the consolidation (compaction | idle | turn | eval); set by
+    # What started the consolidation (compaction | idle | turn | eval | reconsolidate); set by
     # _commit, None for direct records (#633).
     trigger: str | None = None
 

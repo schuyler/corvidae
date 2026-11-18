@@ -2027,6 +2027,27 @@ is unmeasured; a harness probe of whether lens objections help on
 notification turns is a follow-up on #1031. A reminder a correction sets can
 still lead to another correction; that loop predates this change.
 
+### 26. `corvidae reconsolidate` re-sends history to the model, offline (#932)
+
+`corvidae reconsolidate` is an operator-only command that re-sends a channel's
+recorded history, senders' text included, to the consolidation stage's model
+and writes the reply as records in a copy of `sessions.db`. It adds no tool and
+no hook: only an operator at a shell can run it, and a database it did not
+snapshot, the file `daemon.session_db` names, and an adopted copy (one at the
+path it was snapshotted from) are refused. The text's
+exposure is the daemon's own catch-up call (finding 8) and the model-endpoint
+reach of finding 12, repeated once per segment.
+
+New surface:
+
+- **A copy is a whole duplicate of `sessions.db`.** Redacting the live file
+  leaves the copy's messages and memory intact; delete the copy or redact it.
+- **`memory_reply` stores the model's whole reply**, derived from conversation
+  text, where `corvidae redact` does not reach. It exists only in copies.
+- **Injected text in old history can shape the new records.** They replace the
+  daemon's only in the copy, and become live memory only if the operator swaps
+  the copy in after reading them.
+
 ## Privilege separation
 
 There isn't any. Transports, the LLM loop, tool execution, the SQLite

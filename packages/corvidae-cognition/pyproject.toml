@@ -22,6 +22,7 @@ retrieval_candidate = "corvidae_cognition.memory:redact_retrieval_candidates"
 
 [project.entry-points."corvidae.commands"]
 goals = "corvidae_cognition.goals:goals_command"
+reconsolidate = "corvidae_cognition.reconsolidate:reconsolidate_command"
 
 [project.entry-points.corvidae]
 memory = "corvidae_cognition.memory:MemoryPlugin"
