@@ -1121,7 +1121,7 @@ class Agent(CorvidaePlugin):
     def _record_decline(self, channel, item) -> None:
         """Fire-and-forget outcome record for a declined turn (#358).
 
-        An empty final (no text, no tool calls) is withheld without
+        An empty final (no text, no tool calls) is dropped without
         consulting the gate, so the gate's _record never runs. This
         writes the decline record directly so calibration and the
         right-to-silence eval can see declines (PRD §3.7 item 5).
