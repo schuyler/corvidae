@@ -12,6 +12,7 @@ members = [
     "corvidae",
     "corvidae-cognition",
     "corvidae-core-periphery",
+    "corvidae-grice",
     "corvidae-inotify",
     "corvidae-planning",
     "corvidae-restart",
@@ -570,6 +571,9 @@ github-webhook = [
 goals-notify = [
     { name = "goals-notify" },
 ]
+grice = [
+    { name = "corvidae-grice" },
+]
 inotify = [
     { name = "corvidae-inotify" },
 ]
@@ -616,6 +620,7 @@ requires-dist = [
     { name = "context-panel", marker = "extra == 'context-panel'", editable = "packages/context-panel" },
     { name = "corvidae-cognition", extras = ["vec"], marker = "extra == 'cognition'", editable = "packages/corvidae-cognition" },
     { name = "corvidae-core-periphery", marker = "extra == 'core-periphery'", editable = "packages/corvidae-core-periphery" },
+    { name = "corvidae-grice", marker = "extra == 'grice'", editable = "packages/corvidae-grice" },
     { name = "corvidae-inotify", marker = "extra == 'inotify'", editable = "packages/corvidae-inotify" },
     { name = "corvidae-planning", marker = "extra == 'planning'", editable = "packages/corvidae-planning" },
     { name = "corvidae-restart", marker = "extra == 'restart'", editable = "packages/corvidae-restart" },
@@ -639,7 +644,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "webhook-notify", marker = "extra == 'webhook-notify'", editable = "packages/webhook-notify" },
 ]
-provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "context-panel", "webhook-notify", "github-webhook", "goals-notify", "rss", "cognition", "restart", "outbound-cap", "core-periphery", "timepiece", "inotify", "planning"]
+provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "context-panel", "webhook-notify", "github-webhook", "goals-notify", "rss", "cognition", "restart", "outbound-cap", "core-periphery", "timepiece", "inotify", "planning", "grice"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -679,6 +684,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "corvidae", editable = "." }]
+
+[[package]]
+name = "corvidae-grice"
+version = "0.0.1"
+source = { editable = "packages/corvidae-grice" }
+dependencies = [
+    { name = "corvidae" },
+    { name = "corvidae-cognition" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "corvidae", editable = "." },
+    { name = "corvidae-cognition", editable = "packages/corvidae-cognition" },
+]
 
 [[package]]
 name = "corvidae-inotify"
