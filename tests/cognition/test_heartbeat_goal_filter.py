@@ -1,4 +1,4 @@
-"""Tests for the heartbeat_section hook: goals plugin contributes its section."""
+"""Tests for the on_heartbeat_section hook: goals plugin contributes its section."""
 
 import pytest
 from unittest.mock import MagicMock, AsyncMock
@@ -16,7 +16,7 @@ def _retired(id: int, summary: str = "retired summary") -> dict:
 
 
 class TestGoalsHeartbeatSection:
-    """GoalsPlugin.heartbeat_section returns the goals section."""
+    """GoalsPlugin.on_heartbeat_section returns the goals section."""
 
     @pytest.fixture
     def plugin(self) -> GoalsPlugin:
@@ -29,7 +29,7 @@ class TestGoalsHeartbeatSection:
     @pytest.mark.asyncio
     async def test_returns_instruction_and_retired(self, plugin: GoalsPlugin) -> None:
         plugin.retired_goals = AsyncMock(return_value=[_retired(99, "old goal")])
-        text = await plugin.heartbeat_section(prompt="prompt")
+        text = await plugin.on_heartbeat_section(prompt="prompt")
         assert text is not None
         assert "GOALS INSTRUCTION" in text
         assert "old goal" in text
@@ -37,7 +37,7 @@ class TestGoalsHeartbeatSection:
     @pytest.mark.asyncio
     async def test_returns_instruction_only_when_no_retired(self, plugin: GoalsPlugin) -> None:
         plugin.retired_goals = AsyncMock(return_value=[])
-        text = await plugin.heartbeat_section(prompt="prompt")
+        text = await plugin.on_heartbeat_section(prompt="prompt")
         assert text is not None
         assert "GOALS INSTRUCTION" in text
         assert "(none)" in text
@@ -46,33 +46,33 @@ class TestGoalsHeartbeatSection:
     async def test_no_instruction_still_returns_retired(self, plugin: GoalsPlugin) -> None:
         plugin._goals_instruction = ""
         plugin.retired_goals = AsyncMock(return_value=[_retired(99, "old goal")])
-        text = await plugin.heartbeat_section(prompt="prompt")
+        text = await plugin.on_heartbeat_section(prompt="prompt")
         assert text is not None
         assert "old goal" in text
 
     @pytest.mark.asyncio
     async def test_retired_goals_failure_returns_instruction_only(self, plugin: GoalsPlugin) -> None:
         plugin.retired_goals = AsyncMock(side_effect=Exception("db error"))
-        text = await plugin.heartbeat_section(prompt="prompt")
+        text = await plugin.on_heartbeat_section(prompt="prompt")
         assert text is not None
         assert "GOALS INSTRUCTION" in text
         assert "(none)" in text
 
 
 class TestHeartbeatSpec:
-    """HeartbeatSpec.heartbeat_section is a plain async hook (not firstresult)."""
+    """HeartbeatSpec.on_heartbeat_section is a plain async hook (not firstresult)."""
 
     def test_not_firstresult(self) -> None:
-        spec = HeartbeatSpec.heartbeat_section
+        spec = HeartbeatSpec.on_heartbeat_section
         # Plain hookspec: no firstresult attribute
         assert not hasattr(spec, "_hookspec_opts") or "firstresult" not in getattr(spec, "_hookspec_opts", {})
 
 
 class TestHeartbeatPluginNoSeed:
-    """HeartbeatPlugin no longer implements heartbeat_section (no identity seed)."""
+    """HeartbeatPlugin no longer implements on_heartbeat_section (no identity seed)."""
 
-    def test_no_heartbeat_section_impl(self) -> None:
+    def test_no_on_heartbeat_section_impl(self) -> None:
         pm = MagicMock()
         p = HeartbeatPlugin(pm)
-        # The plugin should NOT have a heartbeat_section method
-        assert not hasattr(p, "heartbeat_section")
+        # The plugin should NOT have a on_heartbeat_section method
+        assert not hasattr(p, "on_heartbeat_section")

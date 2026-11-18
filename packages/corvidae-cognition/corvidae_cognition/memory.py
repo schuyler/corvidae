@@ -2069,7 +2069,7 @@ class MemoryPlugin(CorvidaePlugin):
             self._memory_budget_key = "funnel.budgets.memory (unset; the funnel default)"
 
     @hookimpl
-    async def heartbeat_section(
+    async def on_heartbeat_section(
         self,
         prompt: str,
     ) -> str | None:
@@ -2081,7 +2081,7 @@ class MemoryPlugin(CorvidaePlugin):
         try:
             memories = await self.recent(self._memory_limit)
         except Exception:
-            logger.warning("memory: recent() failed for heartbeat_section", exc_info=True)
+            logger.warning("memory: recent() failed for on_heartbeat_section", exc_info=True)
             return None
         # Diff: only what's new since the last beat (#716).
         new_memories = [
