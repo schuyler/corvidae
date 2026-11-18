@@ -154,7 +154,7 @@ class GoalsPlugin(CorvidaePlugin):
             logger.warning("goals schema creation deferred", exc_info=True)
 
     @hookimpl
-    async def on_heartbeat_section(
+    async def heartbeat_section(
         self,
         prompt: str,
     ) -> str | None:

@@ -262,7 +262,7 @@ class HeartbeatSpec:
     """Hook specifications for the heartbeat plugin."""
 
     @hookspec
-    async def on_heartbeat_section(
+    async def heartbeat_section(
         self,
         prompt: str,
     ) -> str | None:
@@ -315,7 +315,7 @@ class HeartbeatPlugin(CorvidaePlugin):
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
         """Read heartbeat.after. Memory is optional: it contributes via
-        the on_heartbeat_section hook under its own config."""
+        the heartbeat_section hook under its own config."""
         await super().on_init(pm, config)
         self._after = parse_after(config)
         if self._after is None:
@@ -364,15 +364,15 @@ class HeartbeatPlugin(CorvidaePlugin):
         which is the retry.
         """
         # The beat is a bare prompt string plus sections contributed by
-        # plugins via the on_heartbeat_section hook. Each contributor keeps
+        # plugins via the heartbeat_section hook. Each contributor keeps
         # its own "only what's new" state (#716).
         try:
-            sections = await self.pm.ahook.on_heartbeat_section(
+            sections = await self.pm.ahook.heartbeat_section(
                 prompt=self._prompt,
             )
         except Exception:
             logger.warning(
-                "heartbeat: on_heartbeat_section hook failed; "
+                "heartbeat: heartbeat_section hook failed; "
                 "sending bare prompt",
                 exc_info=True,
             )
