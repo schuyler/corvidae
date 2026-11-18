@@ -1949,9 +1949,15 @@ no history and conversation events are not persisted.
 
 ## Operator redaction (`corvidae redact`)
 
-`corvidae/commands/redact.py` — operator-only CLI for permanent content
-removal. Never a registered agent tool; never reachable from any hook the
+`corvidae/commands/redact.py` — operator-only CLI that tombstones stored
+content. Never a registered agent tool; never reachable from any hook the
 model can influence.
+
+Redaction is on hold pending a systematic overhaul (#1005): it can't be made
+complete while any later output may restate what the model read, and the
+PRD requires only the tombstone and the command's safety properties. This section describes what the shipped
+command does. [redaction.md](redaction.md) says why it is on hold, lists
+what it does not reach, and says what may change during the hold.
 
 **Forms:**
 
@@ -1973,7 +1979,13 @@ for it instead of crashing.
 `--dry-run` prints affected row counts without writing. Both dry-run and
 real runs count only rows that exist and were actually touched, and the
 `message` and `range` forms print `<found> of <requested>` so a mistyped id
-is visible. A `--db` path that is not an existing file aborts with
+is visible. Every completed run, real or dry, ends with a coverage notice
+(`_COVERAGE_NOTE`): what the command reaches, what it does not (the JSONL
+and daemon logs, backups and exports, copies on other channels, the running
+daemon's context window, restatements in later replies, memories, goals and
+notes), the advice to stop the daemon first (and to rerun if it was
+running), and a link to
+[redaction.md](redaction.md). A run that fails before writing prints none. A `--db` path that is not an existing file aborts with
 `Database not found: <path>` before opening a connection (opening would
 silently create an empty database).
 
@@ -2057,8 +2069,10 @@ creates schema; schema is daemon-owned.
 from the original content (before tombstoning) and runs FTS `MATCH` queries
 against `message_fts` and `memory_fts`. It prints `"verified: 0 hits for
 '<token>' in <tables>"` when clean or `"WARNING: FTS still contains hits for
-'<token>': <table>: <N> hits"` when the cascade left searchable content — every invocation proves its own
-completeness. Skipped when `--dry-run` is in effect or when no suitable
+'<token>': <table>: <N> hits"` when the cascade left searchable content. It
+checks those two indexes for one word and nothing else, so a clean result
+doesn't mean the text is gone: it finds neither copies elsewhere nor a
+paraphrase ([redaction.md](redaction.md)). Skipped when `--dry-run` is in effect or when no suitable
 sample token can be extracted.
 
 The memory cascade above needs the cognition extra's tables. On a kernel-only

@@ -776,7 +776,7 @@ sqlite3 sessions.db \
 uv run corvidae redact --db sessions.db message <id> [<id> ...]
 ```
 
-Pass the ids explicitly rather than using the `range` form: `message_log` ids are global across all channels, so an id range spans whatever other channels were active in the same window. The redaction cascades to intersecting memory records, to both FTS surfaces, and to the text `exchange_log` copies from the conversation (stage-2 `past_claims` and the provenance and stylistic critique objection detail in `outcomes`, but not proactivity's (#1003) or that of lenses other plugins add, while redaction is on hold, #1005); see "Operator redaction" in [design.md](design.md). The jsonl logs are separate files and are not touched — delete them yourself.
+Pass the ids explicitly rather than using the `range` form: `message_log` ids are global across all channels, so an id range spans whatever other channels were active in the same window. The redaction cascades to intersecting memory records, to both FTS surfaces, and to the text `exchange_log` copies from the conversation (stage-2 `past_claims` and the provenance and stylistic critique objection detail in `outcomes`, but not proactivity's (#1003) or that of lenses other plugins add); see "Operator redaction" in [design.md](design.md). The jsonl logs are separate files and are not touched — delete them yourself. Stop the daemon first: its context window still holds the text, and a compaction could write it back. Redaction is not complete even then: copies on other channels and anything the agent later restated in its own words survive it, and redaction is on hold pending an overhaul ([redaction.md](redaction.md) lists what it does not reach).
 
 ---
 

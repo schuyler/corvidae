@@ -290,6 +290,8 @@ def test_cli_memory_form_without_memory_table_fails_cleanly(tmp_path, dry_run):
     assert "memory table not present in this database" in result.output
     # A ClickException is a handled exit, not a crash with a traceback.
     assert isinstance(result.exception, SystemExit), repr(result.exception)
+    # Nothing was redacted, so no coverage notice follows the error (#1005).
+    assert "docs/redaction.md" not in result.output
 
 
 def test_cli_kernel_db_needs_no_sqlite_vec(tmp_path, monkeypatch):
@@ -307,6 +309,51 @@ def test_cli_kernel_db_needs_no_sqlite_vec(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output + repr(result.exception)
     assert "1 of 1 messages" in result.output
+
+
+# ---------------------------------------------------------------------------
+# The coverage notice (#1005): redaction is on hold, so every completed run
+# says what it does not reach
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    "form", [["message", "1"], ["range", "1", "2"], ["memory", "1"]]
+)
+def test_cli_prints_coverage_notice(tmp_path, form, dry_run):
+    """Every form, real or dry run, names what redact does not reach and
+    points to docs/redaction.md, so an operator doesn't take it as complete."""
+    from click.testing import CliRunner
+
+    # A DB with a minimal memory table, so the memory form completes too.
+    async def _build():
+        db, _ids = await _db_with_one_memory_over_two_messages(tmp_path)
+        await db.close()
+
+    asyncio.run(_build())
+    db_path = str(tmp_path / "overlap.db")
+    args = ["--db", db_path] + (["--dry-run"] if dry_run else []) + form
+
+    result = CliRunner().invoke(redact_command, args)
+
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    # Each gap the notice must name, and the pointer to the full account.
+    for phrase in (
+        "docs/redaction.md",
+        "JSONL",
+        "daemon log",
+        "backups",
+        "exports",
+        "other channels",
+        "context window",
+        "restatements",
+        "memories",
+        "goals",
+        "notes",
+        "stop the daemon",
+    ):
+        assert phrase in result.output, (phrase, result.output)
 
 
 # ---------------------------------------------------------------------------

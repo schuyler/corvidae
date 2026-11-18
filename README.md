@@ -325,6 +325,7 @@ For running it:
 
 - [docs/configuration.md](docs/configuration.md) documents every `agent.yaml` key, plus hot reload and containers.
 - [docs/threat-model.md](docs/threat-model.md) covers what untrusted text can reach and what the tools can do. Read it before you add anyone else to an `allow` list.
+- [docs/redaction.md](docs/redaction.md) says what `corvidae redact` does and doesn't remove, and why redaction is on hold.
 - [docs/discord-ops.md](docs/discord-ops.md), [docs/signal-ops.md](docs/signal-ops.md) and [docs/zulip-ops.md](docs/zulip-ops.md) are setup guides for each transport.
 - [docs/discord-remote-api.md](docs/discord-remote-api.md) walks through a Discord bot on a hosted API, including the embedding step.
 - [docs/prompt-guide.md](docs/prompt-guide.md) explains how the prompt gets assembled and how to write a system prompt for it.

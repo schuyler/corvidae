@@ -1569,14 +1569,21 @@ line is plain text in the result, with no kernel header at all.
   already have admitted its summary into that turn's prompt and bumped its
   access count; the window copy ages out with compaction like any CONTEXT. For
   `exchange_log`, the owning exchange's claims are tombstoned with their
-  counts kept. What `redact` still doesn't reach: proactivity's objection
-  detail (#1003) and that of lenses other plugins add
-  (`critique.<name>.detail`, finding 23), both waiting on redaction's
-  hold (#1005); exchanges whose `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
-  taken out of `sessions.db` (a calibration export, a backup), and, under
-  PRD §3.7 Memory 8, copies on other channels: a read of the redacted
-  message, a note or send that restates it, and whatever those channels
-  consolidated from them.
+  counts kept (but not when the message was coalesced into a burst
+  answered by a later message's turn, #423). What `redact` still doesn't
+  reach: proactivity's objection detail in `outcomes` (#1003) and that of
+  lenses other plugins add (`critique.<name>.detail`, finding 23),
+  exchanges whose
+  `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
+  taken out of `sessions.db` (a calibration export, a backup), copies on
+  other channels (a read of the redacted message, a note or send that
+  restates it, and whatever those channels consolidated from them), the
+  running daemon's context window (a compaction can write the text back,
+  so stop the daemon first), and restatements: any later reply, memory,
+  goal or note that paraphrases the message. Redaction can't be made
+  complete for that last reason, and it is on hold pending an overhaul;
+  [redaction.md](redaction.md) keeps the full list and the PRD requires
+  no reach beyond the tombstone (#1005).
 
 ### 17. A markdown folder is a new untrusted-text ingress (#719)
 
