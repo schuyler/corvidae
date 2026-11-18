@@ -304,6 +304,7 @@ class Agent(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self._client = None
+        self._decline_tasks: set = set()
         # A per-call discriminator for the stage records (#469 review): a
         # trace can fork more than once under one stage (a plugin may run one
         # stage several times per trace), so (trace_id, stage) alone cannot
@@ -1117,6 +1118,44 @@ class Agent(CorvidaePlugin):
             return True
         return verdict is not False
 
+    def _record_decline(self, channel, item) -> None:
+        """Fire-and-forget outcome record for a declined turn (#358).
+
+        An empty final (no text, no tool calls) is withheld without
+        consulting the gate, so the gate's _record never runs. This
+        writes the decline record directly so calibration and the
+        right-to-silence eval can see declines (PRD §3.7 item 5).
+        """
+        outcome_log = self.pm.get_plugin("outcome_log")
+        if outcome_log is None:
+            return
+        trace_id = item.trace_id if item is not None else None
+        if trace_id is None:
+            return
+
+        async def _write() -> None:
+            try:
+                await outcome_log.upsert_exchange(
+                    trace_id, channel.id, None,
+                    outcomes={"send": {
+                        "emission": "final",
+                        "origin": "declined",
+                        "vetoed": True,
+                        "reason": "empty_final",
+                    }},
+                )
+            except Exception:
+                logger.warning(
+                    "decline outcome write failed for %s", trace_id,
+                    exc_info=True,
+                    extra={"trace_id": trace_id, "channel": channel.id},
+                )
+
+        task = asyncio.create_task(_write())
+        self._decline_tasks.add(task)
+        task.add_done_callback(self._decline_tasks.discard)
+
+
     async def _append_unsent_marker(
         self, channel: Channel, emission: str, text: str
     ) -> None:
@@ -1701,6 +1740,7 @@ class Agent(CorvidaePlugin):
                     # An empty final is a decline (PRD §3.7 output gate items 5
                     # and 6): withhold it without consulting the gate.
                     unsent = True
+                    self._record_decline(channel, item)
                 else:
                     unsent = not await self._gate_send(channel, display_text, "final", item)
 

@@ -659,6 +659,42 @@ class TestEmptyFinalAndCutOff:
         markers = _markers(channel.conversation.messages)
         assert [unsent_marker_emission(m["content"]) for m in markers] == ["final"]
 
+    async def test_empty_final_writes_decline_outcome(self, env):
+        """A declined turn (empty final) leaves an outcome record in the
+        exchange_log so calibration and the right-to-silence eval can see
+        declines (PRD §3.7 item 5, #358)."""
+        plugin, channel, db = env
+        gate = SpyGate()
+        plugin.pm.register(gate, name="spy_gate")
+
+        # Register a mock outcome_log plugin
+        class _MockOutcomeLog:
+            def __init__(self):
+                self.calls = []
+            async def upsert_exchange(self, trace_id, channel_id, origin, *, outcomes=None):
+                self.calls.append((trace_id, channel_id, origin, outcomes))
+        mock_ol = _MockOutcomeLog()
+        plugin.pm.register(mock_ol, name="outcome_log")
+
+        client = _client(_make_text_response(""))
+        plugin._client = client
+        plugin._mark_started()
+
+        await _say(plugin, channel)
+
+        # The gate was not consulted (empty final bypasses it)
+        assert gate.emissions() == []
+        # The decline outcome was recorded
+        assert len(mock_ol.calls) == 1
+        trace_id, channel_id, origin, outcomes = mock_ol.calls[0]
+        assert trace_id is not None
+        assert channel_id == channel.id
+        send = outcomes["send"]
+        assert send["emission"] == "final"
+        assert send["origin"] == "declined"
+        assert send["vetoed"] is True
+        assert send["reason"] == "empty_final"
+
     async def test_cut_off_reply_is_rerun_once(self, env):
         """An unfinished reply is re-run with identical messages; the second
         reply is sent."""
