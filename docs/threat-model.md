@@ -1989,9 +1989,10 @@ Mitigations and their limits:
   correction carries the `critique` origin (#1034), so the turn it wakes on
   another channel is braked too. No chain forms: a correction's findings,
   and those of any turn its notes wake, wake nothing. A correction that
-  sends notes still costs one woken turn per note; how many notes one turn
-  may send is bounded only by `limits.max_waiting` when a `limits:` block is
-  configured (finding 24).
+  sends notes still costs one woken turn per note. How many notes may wait
+  at once is capped only by `limits.max_waiting`, when a `limits:` block is
+  configured, and a turn a note woke may send notes of its own, up to
+  `cross_channel_send.max_hops` (finding 24).
 - The correction stub defaults to `NO_REPLY`, which critique's veto on
   critique-origin finals withholds.
 - Per channel, `critique.provenance.enabled`, `critique.proactivity.enabled`,
