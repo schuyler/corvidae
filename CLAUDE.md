@@ -4,7 +4,7 @@
 
 Dependencies are installed by `.claude/hooks/session-start.sh` in Claude Code on
 the web. If an import fails, run
-`uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify --extra vision --extra core-periphery --extra planning --extra grice` —
+`uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify --extra vision --extra core-periphery --extra planning --extra alignment` —
 that installs the `dev` extra (pytest, pytest-asyncio), the `dev` dependency
 group (pytest-timeout), which the pytest config needs, the `acp` and `discord`
 extras, whose transport tests import the SDKs, the `cognition` extra
@@ -41,14 +41,14 @@ everything outside `tests/cognition/`, `tests/test_cross_channel_send/`,
 `tests/test_webhook_notify/`, `tests/test_github_webhook/`,
 `tests/test_context_panel/`, `tests/test_timepiece/`, `tests/test_inotify/`,
 `tests/test_outbound_cap/`, `tests/test_goals_notify/`, `tests/test_core_periphery/`,
-`tests/test_planning/`,
+`tests/test_planning/`, `tests/test_alignment/`,
 `packages/rss-reader/tests/` and `tests/corvidae_restart/` (which needs the `restart` extra) that way, so a kernel module must never import `corvidae_cognition`
 (`tests/test_kernel_boundary.py`).
 
 ```sh
-uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify --extra vision --extra core-periphery --extra planning --extra grice  # everything
+uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify --extra vision --extra core-periphery --extra planning --extra alignment  # everything
 uv run pytest                    # full suite
-uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_github_webhook --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/rss-reader/tests --ignore=tests/test_goals_notify --ignore=tests/test_core_periphery --ignore=tests/test_planning  # the kernel suite
+uv run pytest --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_github_webhook --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/rss-reader/tests --ignore=tests/test_goals_notify --ignore=tests/test_core_periphery --ignore=tests/test_planning --ignore=tests/test_alignment  # the kernel suite
 uv run pytest tests/test_foo.py  # one file
 uv run pytest --run-eval         # include live-LLM eval tests (deselected by default)
 uv run ruff check .              # lint

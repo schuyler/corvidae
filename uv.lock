@@ -10,9 +10,9 @@ resolution-markers = [
 members = [
     "context-panel",
     "corvidae",
+    "corvidae-alignment",
     "corvidae-cognition",
     "corvidae-core-periphery",
-    "corvidae-grice",
     "corvidae-inotify",
     "corvidae-planning",
     "corvidae-restart",
@@ -545,6 +545,9 @@ dependencies = [
 acp = [
     { name = "agent-client-protocol" },
 ]
+alignment = [
+    { name = "corvidae-alignment" },
+]
 cognition = [
     { name = "corvidae-cognition", extra = ["vec"] },
 ]
@@ -570,9 +573,6 @@ github-webhook = [
 ]
 goals-notify = [
     { name = "goals-notify" },
-]
-grice = [
-    { name = "corvidae-grice" },
 ]
 inotify = [
     { name = "corvidae-inotify" },
@@ -618,9 +618,9 @@ requires-dist = [
     { name = "apluggy", git = "https://github.com/schuyler/apluggy.git?rev=main" },
     { name = "click", specifier = ">=8.0" },
     { name = "context-panel", marker = "extra == 'context-panel'", editable = "packages/context-panel" },
+    { name = "corvidae-alignment", marker = "extra == 'alignment'", editable = "packages/corvidae-alignment" },
     { name = "corvidae-cognition", extras = ["vec"], marker = "extra == 'cognition'", editable = "packages/corvidae-cognition" },
     { name = "corvidae-core-periphery", marker = "extra == 'core-periphery'", editable = "packages/corvidae-core-periphery" },
-    { name = "corvidae-grice", marker = "extra == 'grice'", editable = "packages/corvidae-grice" },
     { name = "corvidae-inotify", marker = "extra == 'inotify'", editable = "packages/corvidae-inotify" },
     { name = "corvidae-planning", marker = "extra == 'planning'", editable = "packages/corvidae-planning" },
     { name = "corvidae-restart", marker = "extra == 'restart'", editable = "packages/corvidae-restart" },
@@ -644,7 +644,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "webhook-notify", marker = "extra == 'webhook-notify'", editable = "packages/webhook-notify" },
 ]
-provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "context-panel", "webhook-notify", "github-webhook", "goals-notify", "rss", "cognition", "restart", "outbound-cap", "core-periphery", "timepiece", "inotify", "planning", "grice"]
+provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "context-panel", "webhook-notify", "github-webhook", "goals-notify", "rss", "cognition", "restart", "outbound-cap", "core-periphery", "timepiece", "inotify", "planning", "alignment"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -652,6 +652,21 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "ruff", specifier = ">=0.17" },
+]
+
+[[package]]
+name = "corvidae-alignment"
+version = "0.0.1"
+source = { editable = "packages/corvidae-alignment" }
+dependencies = [
+    { name = "corvidae" },
+    { name = "corvidae-cognition" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "corvidae", editable = "." },
+    { name = "corvidae-cognition", editable = "packages/corvidae-cognition" },
 ]
 
 [[package]]
@@ -684,21 +699,6 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "corvidae", editable = "." }]
-
-[[package]]
-name = "corvidae-grice"
-version = "0.0.1"
-source = { editable = "packages/corvidae-grice" }
-dependencies = [
-    { name = "corvidae" },
-    { name = "corvidae-cognition" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "corvidae", editable = "." },
-    { name = "corvidae-cognition", editable = "packages/corvidae-cognition" },
-]
 
 [[package]]
 name = "corvidae-inotify"

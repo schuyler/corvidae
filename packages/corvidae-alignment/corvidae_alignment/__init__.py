@@ -21,11 +21,11 @@ from corvidae_cognition.critique import Lens
 logger = logging.getLogger(__name__)
 
 # The lens's name: it keys the fork prompt override, the tunables and the
-# outcome entry (critique.lens.grice.*).
-LENS_NAME = "grice"
+# outcome entry (critique.lens.alignment.*).
+LENS_NAME = "alignment"
 
 _FORK_PROMPT = """\
-[Self-critique: grice] Review the agent's most recent reply against
+[Self-critique: alignment] Review the agent's most recent reply against
 Grice's four maxims of cooperative communication.
 
 Maxims:
@@ -48,7 +48,7 @@ Rules:
   is a one-sentence rationale."""
 
 
-class GriceLensPlugin(CorvidaePlugin):
+class AlignmentLensPlugin(CorvidaePlugin):
     """Contributes the Grice alignment lens to the critique plugin.
 
     Sample-rate trigger: fires on a fraction of judged turns and lets the
@@ -68,6 +68,6 @@ class GriceLensPlugin(CorvidaePlugin):
             fork_prompt=_FORK_PROMPT,
             thresholds=(),
             reply_patterns=(),
-            # Start at 10%; tunable as critique.lens.grice.sample_rate.
+            # Start at 10%; tunable as critique.lens.alignment.sample_rate.
             sample_rate=0.1,
         ))
