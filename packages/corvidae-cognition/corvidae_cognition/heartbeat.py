@@ -261,24 +261,23 @@ def frame_beat(
 class HeartbeatSpec:
     """Hook specifications for the heartbeat plugin."""
 
-    @hookspec(firstresult=True)
-    async def transform_heartbeat_prompt(
+    @hookspec
+    async def heartbeat_section(
         self,
-        memories: list[dict],
-        retired: list[dict] | None,
-        prompt: str,
-        goals_instruction: str,
         *,
-        diff: bool,
-        open_goals: list[dict] | None,
-    ) -> str:
-        """Transform the heartbeat beat text before delivery.
+        prompt: str,
+    ) -> str | None:
+        """Contribute a section to the heartbeat beat.
 
-        ``firstresult`` over a trylast seed (the seed calls ``frame_beat``
-        with the parameters unchanged). Plugins that implement this hook
-        can reshape the beat: filter goals, drop memories, add context.
-        The goals plugin uses it to show only pursuable goals and skip
-        the memory block.
+        Plain async hook: each implementation returns its section text
+        or ``None``. Implementations run concurrently (``asyncio.gather``)
+        and results keep pluggy's call order, so ``tryfirst``/``trylast``
+        give rough placement. The heartbeat joins the non-``None``
+        sections after the prompt.
+
+        Contributors:
+        - Goals: pick-rule instruction + retired-goal conclusions
+        - Memory: recent memories (optional, under its own config)
         """
 
 
@@ -313,23 +312,6 @@ class HeartbeatPlugin(CorvidaePlugin):
         # already has the old content; re-sending it is the deluge (#716).
         self._last_memory_ids: set[int] = set()
         self._last_goal_ids: set[int] = set()
-
-    @hookimpl(trylast=True)
-    async def transform_heartbeat_prompt(
-        self,
-        memories: list[dict],
-        retired: list[dict] | None,
-        prompt: str,
-        goals_instruction: str,
-        *,
-        diff: bool,
-        open_goals: list[dict] | None,
-    ) -> str:
-        """Identity seed: assemble the beat text via frame_beat."""
-        return frame_beat(
-            memories, retired, prompt, goals_instruction,
-            diff=diff, open_goals=open_goals,
-        )
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -386,95 +368,43 @@ class HeartbeatPlugin(CorvidaePlugin):
 
 
     async def _beat(self) -> None:
-        """The system watch callback: read memory (and retired goals), re-check
+        """The system watch callback: collect sections from plugins, re-check
         quiet, notify.
 
-        Never raises for a failed read: an exception escaping the
-        callback would stop the tracker re-arming the watch. Returning
-        without a beat leaves the activity epoch unchanged, so the tracker
-        re-arms after one period, which is the retry.
+        Never raises: an exception escaping the callback would stop the
+        tracker re-arming the watch. Returning without a beat leaves the
+        activity epoch unchanged, so the tracker re-arms after one period,
+        which is the retry.
         """
-        # Review input: the newest memories of the whole memory (the beat's
-        # own included), and the retired goals' conclusions when the goals
-        # plugin is loaded.
-        goals = self.pm.get_plugin("goals")
-        retired = None
-        open_goals_list = None
+        # The beat is a bare prompt string plus sections contributed by
+        # plugins via the heartbeat_section hook. Each contributor keeps
+        # its own "only what's new" state (#716).
         try:
-            memories = await self._memory.recent(self._memory_limit)
-            if goals is not None:
-                retired = await goals.retired_goals(self._retired_goal_limit)
-                open_goals_list = await goals.open_goals()
-        except Exception as exc:
-            logger.warning(
-                "heartbeat: memory or retired-goals read failed on %s (%s); "
-                "beat skipped, retrying in %gs",
-                HEARTBEAT_CHANNEL, type(exc).__name__, self._after,
-                exc_info=True, extra={"channel": HEARTBEAT_CHANNEL},
+            sections = await self.pm.ahook.heartbeat_section(
+                prompt=self._prompt,
             )
-            return
-        # The read awaited; a message may have arrived. Never beat while busy.
+        except Exception:
+            logger.warning(
+                "heartbeat: heartbeat_section hook failed; "
+                "sending bare prompt",
+                exc_info=True,
+            )
+            sections = []
+
+        # The hook awaited; a message may have arrived. Never beat while busy.
         if not self._idle.system_quiet():
             return
         transport, _, scope = HEARTBEAT_CHANNEL.partition(":")
         channel = self._registry.get_or_create(transport, scope)
+        n_sections = sum(1 for s in sections if s is not None)
         logger.info(
-            "heartbeat: beat", extra={"channel": channel.id, "memories": len(memories)}
+            "heartbeat: beat", extra={"channel": channel.id, "sections": n_sections}
         )
-        # Diff mode: only send what's new since the last beat (#716).
-        # The persistent channel already has the old content.
-        #
-        # Memories: always diff (the compaction summary carries the old
-        # narrative; re-sending all memories is redundant).
-        # Goals: diff normally, full after compaction (structured data the
-        # summary may not preserve well).
-        new_memories = [
-            m for m in memories
-            if m.get("id") not in self._last_memory_ids
-        ]
-        new_retired = None
-        if retired is not None:
-            new_retired = [
-                g for g in retired
-                if g.get("id") not in self._last_goal_ids
-            ]
 
-        # First beat: no prior state at all → full mode for both.
-        is_first = not self._last_memory_ids and not self._last_goal_ids
-        if is_first:
-            beat_memories, beat_retired, beat_diff = memories, retired, False
-        else:
-            # Subsequent beats: diff for memories, diff-or-full for goals.
-            # Goals are full when _last_goal_ids was just reset (compaction).
-            goals_full = retired is not None and not self._last_goal_ids
-            beat_memories = new_memories
-            beat_retired = retired if goals_full else new_retired
-            beat_diff = True
-
-        try:
-            text = await self.pm.ahook.transform_heartbeat_prompt(
-                beat_memories, beat_retired,
-                self._prompt, self._goals_instruction,
-                diff=beat_diff,
-                open_goals=open_goals_list,
-            )
-        except Exception:
-            logger.warning(
-                "heartbeat: transform_heartbeat_prompt failed; "
-                "falling back to frame_beat",
-                exc_info=True,
-            )
-            text = frame_beat(
-                beat_memories, beat_retired,
-                self._prompt, self._goals_instruction,
-                diff=beat_diff,
-                open_goals=open_goals_list,
-            )
-
-        # Update the diff state for the next beat.
-        self._last_memory_ids = {m.get("id") for m in memories if m.get("id") is not None}
-        if retired is not None:
-            self._last_goal_ids = {g.get("id") for g in retired if g.get("id") is not None}
+        # Join non-None sections after the prompt.
+        parts = [self._prompt]
+        parts.extend(s for s in sections if s is not None)
+        text = "\n\n".join(parts)
 
         await self.pm.ahook.on_notify(
             channel=channel,

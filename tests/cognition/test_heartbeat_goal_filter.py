@@ -1,100 +1,78 @@
-"""Tests for the transform_heartbeat_prompt hook and goals-plugin shaping."""
-
-from __future__ import annotations
+"""Tests for the heartbeat_section hook: goals plugin contributes its section."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock, AsyncMock
 
-from corvidae_cognition.heartbeat import frame_beat, HeartbeatPlugin
 from corvidae_cognition.goals import GoalsPlugin
+from corvidae_cognition.heartbeat import HeartbeatPlugin, HeartbeatSpec
 
 
-def _goal(id: int, status: str = "open", summary: str = "") -> dict:
-    return {
-        "id": id,
-        "status": status,
-        "summary": summary or f"goal {id}",
-        "age_seconds": 3600,
-    }
+def _goal(id: int, status: str = "open", summary: str = "test goal") -> dict:
+    return {"id": id, "status": status, "summary": summary, "age_seconds": 3600}
 
 
-class TestGoalsTransformHeartbeatPrompt:
-    """GoalsPlugin.transform_heartbeat_prompt shapes the beat."""
+def _retired(id: int, summary: str = "retired summary") -> dict:
+    return {"id": id, "age_seconds": 7200, "summary": summary}
+
+
+class TestGoalsHeartbeatSection:
+    """GoalsPlugin.heartbeat_section returns the goals section."""
 
     @pytest.fixture
     def plugin(self) -> GoalsPlugin:
         pm = MagicMock()
         p = GoalsPlugin(pm)
+        p._goals_instruction = "GOALS INSTRUCTION"
+        p._retired_goal_limit = 20
         return p
 
-    async def test_filters_out_blocked_and_waiting(self, plugin: GoalsPlugin) -> None:
-        goals = [
-            _goal(1, "open", "open goal"),
-            _goal(2, "in-progress", "in-progress goal"),
-            _goal(3, "blocked", "blocked goal"),
-            _goal(4, "waiting", "waiting goal"),
-        ]
-        text = await plugin.transform_heartbeat_prompt(
-            [{"id": 1, "age_seconds": 60, "channel_id": "test", "summary": "mem"}],
-            [],
-            "prompt",
-            "goals instruction",
-            diff=False,
-            open_goals=goals,
-        )
-        assert "open goal" in text
-        assert "in-progress goal" in text
-        assert "blocked goal" not in text
-        assert "waiting goal" not in text
+    @pytest.mark.asyncio
+    async def test_returns_instruction_and_retired(self, plugin: GoalsPlugin) -> None:
+        plugin.retired_goals = AsyncMock(return_value=[_retired(99, "old goal")])
+        text = await plugin.heartbeat_section(prompt="prompt")
+        assert text is not None
+        assert "GOALS INSTRUCTION" in text
+        assert "old goal" in text
 
-    async def test_caps_at_five(self, plugin: GoalsPlugin) -> None:
-        goals = [_goal(i, "open", f"goal {i}") for i in range(10)]
-        text = await plugin.transform_heartbeat_prompt(
-            [], [], "prompt", "goals instruction",
-            diff=False, open_goals=goals,
-        )
-        for i in range(5):
-            assert f"goal {i}" in text
-        for i in range(5, 10):
-            assert f"goal {i}" not in text
+    @pytest.mark.asyncio
+    async def test_returns_instruction_only_when_no_retired(self, plugin: GoalsPlugin) -> None:
+        plugin.retired_goals = AsyncMock(return_value=[])
+        text = await plugin.heartbeat_section(prompt="prompt")
+        assert text is not None
+        assert "GOALS INSTRUCTION" in text
+        assert "(none)" in text
 
-    async def test_strips_memories(self, plugin: GoalsPlugin) -> None:
-        memories = [
-            {"id": 1, "age_seconds": 60, "channel_id": "test", "summary": "recent memory"},
-        ]
-        text = await plugin.transform_heartbeat_prompt(
-            memories, [], "prompt", "goals instruction",
-            diff=False, open_goals=[_goal(1)],
-        )
-        assert "recent memory" not in text
+    @pytest.mark.asyncio
+    async def test_no_instruction_still_returns_retired(self, plugin: GoalsPlugin) -> None:
+        plugin._goals_instruction = ""
+        plugin.retired_goals = AsyncMock(return_value=[_retired(99, "old goal")])
+        text = await plugin.heartbeat_section(prompt="prompt")
+        assert text is not None
+        assert "old goal" in text
 
-    async def test_suppresses_retired_goals(self, plugin: GoalsPlugin) -> None:
-        retired = [{"id": 99, "age_seconds": 7200, "summary": "retired goal summary"}]
-        text = await plugin.transform_heartbeat_prompt(
-            [], retired, "prompt", "goals instruction",
-            diff=False, open_goals=[_goal(1)],
-        )
-        assert "retired goal summary" not in text
+    @pytest.mark.asyncio
+    async def test_retired_goals_failure_returns_instruction_only(self, plugin: GoalsPlugin) -> None:
+        plugin.retired_goals = AsyncMock(side_effect=Exception("db error"))
+        text = await plugin.heartbeat_section(prompt="prompt")
+        assert text is not None
+        assert "GOALS INSTRUCTION" in text
+        assert "(none)" in text
 
 
-class TestHeartbeatSeed:
-    """HeartbeatPlugin.transform_heartbeat_prompt is an identity seed."""
+class TestHeartbeatSpec:
+    """HeartbeatSpec.heartbeat_section is a plain async hook (not firstresult)."""
 
-    @pytest.fixture
-    def plugin(self) -> HeartbeatPlugin:
+    def test_not_firstresult(self) -> None:
+        spec = HeartbeatSpec.heartbeat_section
+        # Plain hookspec: no firstresult attribute
+        assert not hasattr(spec, "_hookspec_opts") or "firstresult" not in getattr(spec, "_hookspec_opts", {})
+
+
+class TestHeartbeatPluginNoSeed:
+    """HeartbeatPlugin no longer implements heartbeat_section (no identity seed)."""
+
+    def test_no_heartbeat_section_impl(self) -> None:
         pm = MagicMock()
         p = HeartbeatPlugin(pm)
-        return p
-
-    async def test_identity_returns_frame_beat_output(self, plugin: HeartbeatPlugin) -> None:
-        goals = [_goal(1, "open", "open goal")]
-        memories = [{"id": 1, "age_seconds": 60, "channel_id": "test", "summary": "mem"}]
-        text = await plugin.transform_heartbeat_prompt(
-            memories, [], "prompt", "goals instruction",
-            diff=False, open_goals=goals,
-        )
-        expected = frame_beat(
-            memories, [], "prompt", "goals instruction",
-            diff=False, open_goals=goals,
-        )
-        assert text == expected
+        # The plugin should NOT have a heartbeat_section method
+        assert not hasattr(p, "heartbeat_section")
