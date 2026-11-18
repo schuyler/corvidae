@@ -28,6 +28,8 @@ again:
 - A message coalesced into a burst leaves its `past_claims` on the turn that
   answered it, which the scrubber doesn't find (#423).
 - Proactivity objection text in `exchange_log.outcomes` isn't scrubbed (#1003).
+- Objection detail from critique lenses other plugins add
+  (`critique.<name>.detail`) isn't scrubbed either (threat model, finding 23).
 - Goal text has no scrubber (threat model, finding 10).
 
 **The model restates what it reads.** Once a message has been in the
@@ -75,6 +77,8 @@ does not reach and pointing here.
   goals, notes and critique objections that paraphrase the message.
 - `exchange_log` rows whose `message_rowid` is NULL.
 - Proactivity objection detail in `exchange_log.outcomes` (#1003).
+- Objection detail of lenses other plugins add (`critique.<name>.detail`,
+  threat model finding 23).
 - The `past_claims` of the turn that answered a coalesced burst, when an
   earlier message in the burst is redacted (#423).
 - Goal text (`goals` table).
