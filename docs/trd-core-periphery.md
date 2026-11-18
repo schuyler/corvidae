@@ -148,7 +148,9 @@ instructions"). K1 was agreed in session on 2026-11-16, with a refusal
 that carries its reason (TRD decision A7). K7 follows TRD decision
 C3. K2 to K6, K8 and K9 are new in this document, and the owner
 approved them on 2026-11-16 ("I approve K2–K6, K8 and K9"), and K2's
-rule for forks later the same day (TRD decision D4).
+rule for forks later the same day (TRD decision D4). K10 was added
+while splitting phase 2, and the owner approved it on 2026-11-18
+(#1058, ruling 4).
 
 ### K1. Admission seam for internal work (§3.12 item 2)
 
@@ -347,6 +349,21 @@ CLI neither reads for a `core:*` channel nor writes to one.
 place of `cli:local`, and the CLI also delivers that channel's outbound
 events. The channel keeps its id, so its history stays the core's.
 
+### K10. A failed turn is a metric (§3.1.11)
+
+When `run_agent_turn` raises, `Agent` (`corvidae/agent.py`) logs and
+calls `resolve_llm_error`, a firstresult hook that picks the error text
+and stops at the first answer, so no plugin can count failed turns.
+Observables' errors in the last hour (TRD §5.5) needs that count.
+
+`Agent` emits one `on_metrics` event, `agent.turn.failed`, tagged with
+the channel id and the exception type, on every failed turn, a failed
+retry included. It emits before `resolve_llm_error` is called, so a
+failure in the error path cannot suppress it, and a consumer that
+raises is logged at warning without stopping the user's error message.
+The exact tag keys are fixed by #1060 and documented in
+`docs/design.md`.
+
 ### Changes other issues already carry
 
 #318, #234, #235, #365, #366 and #814 have their own issues (TRD §2);
@@ -449,6 +466,16 @@ logs them at info (§3.10.5). It logs a warning and enqueues an
 
 One notice per kind and channel per `anomaly_interval` (900 s).
 
+Phase 2 builds the tool, the sampler, the pacing, and the fields and
+anomaly it can compute: queue depth, messages and errors in the last
+hour (errors counted from K10), residency reported as not managed, and
+the queue-growth anomaly. The rest arrives with the feature it watches
+(owner, 2026-11-18; #1058, ruling 3): the `error_threshold` anomaly
+with peripherals in phase 3; the stopped and pass-through fields, the
+fork fields and the fork-idle anomaly with forks in phase 5; residency
+other than not managed with slots in phase 6; the latency-bound anomaly
+with #365.
+
 `import_tail(channel_id, n)` is base §3.5.11's read (#235) aimed at a
 peripheral: the last `n` rows of its window, appended at the core's tail
 framed as data from that channel. It writes nothing to the peripheral.
@@ -464,6 +491,9 @@ reads it.
 The core declines an escalation with `decline_escalation(row_id,
 reason)`, which sets the row's outcome to `declined` and logs one info
 line naming the channel and the reason (§3.5.5).
+
+`cp_work`, `work_status` and `decline_escalation` are built in phase 3,
+with escalation, the first kind they record (TRD §13).
 
 ## 6. Peripherals
 
@@ -1310,8 +1340,8 @@ order.
 | Phase | Builds | Needs | Probe |
 |---|---|---|---|
 | 1 | K1; `limits` (TRD §9.1, §9.2) | #814 | a task started at `max_waiting` returns the refusal text and a warning is logged; a tool result at the same depth is accepted |
-| 2 | K9; `core`: channel, uid, `attach_cli`, idle beat, `cp_work`, observables; goal block | #1031, phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
-| 3 | K2, K3; the `appraisal.enabled` switch; `instruct` on the core; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains, the `notify_other_channel` change of TRD §9.3; the age trigger and the digest (TRD §10.5) | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window; a peripheral message that is not escalated is in a CONTEXT row at the core's tail by the core's first call after `consolidate_max_age` and the consolidation's duration, and no core turn was started for it; with the peripheral on a second profile and the `consolidation` stage unmapped, that consolidation's request goes to the peripheral's profile |
+| 2 | K9, K10; `core`: channel, uid, `attach_cli`, idle beat, observables (TRD §5.5, the phase-2 part); goal block | #1031, phase 1 | the core's channel id is the same across a restart; an idle period produces one `idle` row on it; the system prompt's hash is equal on every call between two compactions while a goal changes |
+| 3 | K2, K3; the `appraisal.enabled` switch; `instruct` on the core; `cp_work`, `work_status` and `decline_escalation` (TRD §5.6); the `error_threshold` anomaly; `periphery`: settings, sections, `escalate`, structural rules, `force`, exact wording, labels, chains, the `notify_other_channel` change of TRD §9.3; the age trigger and the digest (TRD §10.5) | #234, phase 2 | with `force: always`, a message produces an `escalation` row on the core and a reply on the channel; with `never`, none; a forced loop stops at `max_hops` with the user told; the core's exact text is byte-equal in the peripheral's window; a peripheral message that is not escalated is in a CONTEXT row at the core's tail by the core's first call after `consolidate_max_age` and the consolidation's duration, and no core turn was started for it; with the peripheral on a second profile and the `consolidation` stage unmapped, that consolidation's request goes to the peripheral's profile |
 | 4 | K7; tail import; criteria rewrites | #235, phase 3 | a subagent given `tools=["read_file"]` has no other tool in its request; a rewrite is absent from the peripheral's prompt before its next compaction and present after; a frozen channel refuses |
 | 5 | K4, K5, K6, K8; `forks`: long-lived forks, blocking, routing, bound, join, abandon, refork, pass-through, restart, `hold_queue` and `resume_queue` in `core` (TRD §8.3, on the kernel's stop and resume), the `memory.consolidate` switch, `cp_requests` with `corvidae resume` and `corvidae fork end`, `<stage>.fork_blocking` | #318, phase 3 | a blocking routed fork that never joins: after `blocking_wait` an escalation is handled by the main context; a join appends one row to the parent whose effects list names the message the fork sent; a restart mid-fork leaves the fork running and the wait still bounded; under pass-through an inbound message is in the peripheral's window with no model call on that channel; `hold_queue` on the core's own channel returns the refusal text and stores no `cp_stops` row; after `hold_queue` on a fork that shared its parent's lease, the parent's next call is granted |
 | 6 | `slots` on one head: order, paging, stamped saves, shutdown save, the other four tools of TRD §8.3; consolidation's yield | #366, #365, phase 5; deferred (D1) | after a page-out and page-in the next call's `cache_n` is within 5% of the prompt length; a file with a changed stamp is deleted with a warning and the call prefills; `pin_context` on a hosted provider returns the no-effect text |
@@ -1320,7 +1350,10 @@ order.
 
 K3, K4, K5, K6 and K8 were in phase 1 until the owner moved each to
 the phase that first uses it (2026-11-17): built earlier, each would
-have shipped with no caller. Phases 6 and 7 are deferred (TRD decision D1). Phase 7 is not designed here. Until #1009 reports, all that exists is
+have shipped with no caller. `cp_work`, `work_status` and
+`decline_escalation` moved from phase 2 to phase 3 for the same reason
+(owner, 2026-11-18; #1058, ruling 2): every kind `cp_work` records is
+first built in phase 3 or later. Phases 6 and 7 are deferred (TRD decision D1). Phase 7 is not designed here. Until #1009 reports, all that exists is
 the README's account of router mode.
 
 Each phase updates `docs/design.md`, `docs/configuration.md`,
@@ -1356,7 +1389,7 @@ means an existing base mechanism meets it and nothing is built.
 | §3.1.7 | TRD §7.1, §7.3 | 5 |
 | §3.1.8, §3.1.9 | TRD §5.4 | 3 |
 | §3.1.10 | TRD §10.2, §10.3 | 3 |
-| §3.1.11 | TRD §5.5 | 2 |
+| §3.1.11 | K10, TRD §5.5 | 2, 3, 5, 6 |
 | §3.1.12 | TRD §5.5 | 4 |
 | §3.1.13 | TRD §10.5 | 3 |
 | §3.2.1, §3.2.7 | K2, TRD §6.1 | 3, 7 |
@@ -1388,7 +1421,7 @@ means an existing base mechanism meets it and nothing is built.
 | §3.9.1 | TRD §5.4 | 3 |
 | §3.9.3 | Base (`on_notify`) | — |
 | §3.9.4 | Base §3.5.9 through #234 | 3 |
-| §3.10.1 | TRD §5.6 | 2 |
+| §3.10.1 | TRD §5.6 | 3 |
 | §3.10.2 | TRD §6.4 | 3 |
 | §3.10.3 | TRD §8.5 | 6 |
 | §3.10.4 | TRD §7.4 (the `cp_forks` state changes are logged; an abandonment at warning with its reason) | 5 |
