@@ -266,6 +266,82 @@ async def test_turn_range_end_is_read_in_the_hook(make_env):
     assert await fetch_watermark(env.db, env.channel.id) == env.ids[-1]
 
 
+async def test_late_message_consolidated_exactly_once(make_env):
+    """A message persisted during a turn-trigger fork is consolidated exactly
+    once, by the next consolidation (the #664 outcome that was never tested)."""
+    agent = GatedForkAgent({"consolidation"}, text=REPLY)
+    env = await make_env(tokens_of(DIALOG), agent=agent)
+    # Disable the near-dup merge: the embed stub returns a fixed vector, so
+    # every record is a near-duplicate of the first, and the merge would widen
+    # the second record's range to overlap the first — hiding the mutation the
+    # ticket names (the late id skipped, the fillers consolidated). With the
+    # merge off, the second record's range is exactly (watermark, range_end].
+    env.memory._dup_threshold = 2.0
+
+    # First turn: the hook fixes the range at the hook-time window end.
+    await env.memory.on_agent_response(channel=env.channel)
+
+    # A late message enters the window and is persisted after the hook; it is
+    # not in the first record's range.
+    late_id = env.ids[-1] + 1
+    env.channel.conversation.messages.append({
+        "role": "user", "content": "one more thing", "_db_id": late_id,
+        "_message_type": MessageType.MESSAGE,
+    })
+    persisted = await env.persistence.persist_message(
+        channel=env.channel, message={"role": "user", "content": "one more thing"},
+        message_type=MessageType.MESSAGE,
+    )
+    assert persisted == late_id
+
+    # Open the gate: the first record covers only what the hook saw.
+    agent.gate.set()
+    await env.memory.wait_for_background_tasks()
+    rows = await fetch_stamped_memories(env.db)
+    assert {r["msg_id_end"] for r in rows} == {env.ids[-1]}
+    assert await fetch_watermark(env.db, env.channel.id) == env.ids[-1]
+
+    # Push the window past the threshold again and fire the turn hook: the
+    # second consolidation must pick up the late message, exactly once. The
+    # watermark is at env.ids[-1], so enough new rows (past it) are needed for
+    # their token sum to reach the threshold.
+    for i in range(4):
+        rowid = await env.persistence.persist_message(
+            channel=env.channel,
+            message={"role": "user", "content": f"filler {i} to push past the threshold"},
+            message_type=MessageType.MESSAGE,
+        )
+        env.channel.conversation.messages.append({
+            "role": "user", "content": f"filler {i} to push past the threshold",
+            "_db_id": rowid, "_message_type": MessageType.MESSAGE,
+        })
+    agent.gate.clear()  # close the gate for the second fork
+    await env.memory.on_agent_response(channel=env.channel)
+    agent.gate.set()
+    await env.memory.wait_for_background_tasks()
+
+    # The late message falls in exactly one record's range, and that record
+    # starts at the late message (past the first record's end) — not
+    # overlapping the first record, which is the mutation the ticket names.
+    # (The near-dup merge is disabled above, so the second record's range is
+    # exactly (watermark, range_end].)
+    rows = await fetch_stamped_memories(env.db)
+    containing = [
+        r for r in rows
+        if r["msg_id_start"] <= late_id <= r["msg_id_end"]
+    ]
+    assert len(containing) == 1, (
+        f"late message {late_id} in {len(containing)} records: "
+        f"{[(r['msg_id_start'], r['msg_id_end']) for r in rows]}"
+    )
+    assert containing[0]["msg_id_start"] == late_id, (
+        f"containing record starts at {containing[0]['msg_id_start']}, "
+        f"expected {late_id} (past the first record's end {env.ids[-1]})"
+    )
+    # The watermark moves past the late message (through the filler window).
+    assert await fetch_watermark(env.db, env.channel.id) > late_id
+
+
 @pytest.mark.parametrize("bad", [0, -1, 1.5, "4000", True, None])
 async def test_consolidate_after_tokens_must_be_a_positive_int(bad):
     """D7: anything but a positive integer fails at startup, naming the key,
