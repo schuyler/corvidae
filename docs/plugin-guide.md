@@ -22,32 +22,6 @@ class GreetPlugin(CorvidaePlugin):
 
 A plugin subclasses `CorvidaePlugin` from `corvidae.hooks`. It only needs to implement the hooks it cares about — all hooks are optional. The `@hookimpl` decorator marks each implementation. Plugins use no-argument constructors; `pm` and `config` are received via the `on_init` hook.
 
-#### Pre-flight checks: deliberate deviation vs. accidental mess
-
-`on_init` runs in the restart pre-flight (a second process alongside the
-live daemon), so it is the right place for validation that must pass
-before a restart is allowed. When a pre-flight check compares current
-state to an expected state, it should distinguish **deliberate
-deviation** from **accidental mess**:
-
-| Condition | Action |
-|-----------|--------|
-| Dirty tree (uncommitted changes) | **Refuse** — genuine risk of lost work |
-| Clean tree, expected state | **Pass** |
-| Clean tree, unexpected state (e.g., non-main branch) | **Warn** (stderr), pass — deliberate and reproducible |
-| Missing resource / not a repo | **Refuse** — genuine problem |
-
-A clean, reproducible state on a different branch is deliberate: the
-agent or operator chose to run this code. A dirty tree is not: a
-restart could lose work. The pattern generalizes beyond git branches:
-any pre-flight validation that compares current state to an expected
-state should ask "is this deviation deliberate and safe?" before
-refusing.
-
-Precedent: `lex_restart`'s corvidae checkout check (commit b0dfd44)
-moves the branch check from the problems list (refusal) to a stderr
-warning; the dirty check remains a hard refusal.
-
 ```python
 from corvidae.hooks import CorvidaePlugin, hookimpl
 
@@ -618,32 +592,6 @@ Declare `optional_depends_on = frozenset({"web"})` so the impl is not reported a
 
 Implement `on_config_reload` to re-read configuration values when `agent.yaml` changes at runtime. The hook fires on the event loop thread; implementations must not block.
 
-#### Pre-flight checks: deliberate deviation vs. accidental mess
-
-`on_init` runs in the restart pre-flight (a second process alongside the
-live daemon), so it is the right place for validation that must pass
-before a restart is allowed. When a pre-flight check compares current
-state to an expected state, it should distinguish **deliberate
-deviation** from **accidental mess**:
-
-| Condition | Action |
-|-----------|--------|
-| Dirty tree (uncommitted changes) | **Refuse** — genuine risk of lost work |
-| Clean tree, expected state | **Pass** |
-| Clean tree, unexpected state (e.g., non-main branch) | **Warn** (stderr), pass — deliberate and reproducible |
-| Missing resource / not a repo | **Refuse** — genuine problem |
-
-A clean, reproducible state on a different branch is deliberate: the
-agent or operator chose to run this code. A dirty tree is not: a
-restart could lose work. The pattern generalizes beyond git branches:
-any pre-flight validation that compares current state to an expected
-state should ask "is this deviation deliberate and safe?" before
-refusing.
-
-Precedent: `lex_restart`'s corvidae checkout check (commit b0dfd44)
-moves the branch check from the problems list (refusal) to a stderr
-warning; the dirty check remains a hard refusal.
-
 ```python
 from corvidae.hooks import CorvidaePlugin, hookimpl
 
@@ -661,6 +609,33 @@ class MyPlugin(CorvidaePlugin):
 `on_config_reload` receives the full re-parsed config dict, already merged with CLI overrides. Per-plugin errors are caught and logged by `ConfigWatcherPlugin`; a failing `on_config_reload` in one plugin does not prevent other plugins from receiving the reload.
 
 The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwards only the arguments declared in the hookimpl signature, so a hookimpl that omits `config` is called with no arguments.
+
+#### Pre-flight checks: deliberate deviation vs. accidental mess
+
+`on_init` runs in the restart pre-flight (a second process alongside the
+live daemon), so it is the right place for validation that must pass
+before a restart is allowed. When a pre-flight check compares current
+state to an expected state, it should distinguish **deliberate
+deviation** from **accidental mess**:
+
+| Condition | Action |
+|-----------|--------|
+| Dirty tree (uncommitted changes) | **Refuse** — genuine risk of lost work |
+| Clean tree, expected state | **Pass** |
+| Clean tree, unexpected state (e.g., non-main branch) | **Pass** with a WARNING log line — deliberate and reproducible |
+| Missing resource / not a repo | **Refuse** — genuine problem |
+
+A clean, reproducible state on a different branch is deliberate: the
+agent or operator chose to run this code. A dirty tree is not: a
+restart could lose work. The pattern generalizes beyond git branches:
+any pre-flight validation that compares current state to an expected
+state should ask "is this deviation deliberate and safe?" before
+refusing.
+
+Precedent: `lex_restart` (an external plugin, not in this repo)'s
+corvidae checkout check moves the branch check from the problems list
+(refusal) to a WARNING log line; the dirty check remains a hard refusal.
+
 
 ### Messaging
 
