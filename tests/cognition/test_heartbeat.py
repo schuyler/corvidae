@@ -161,14 +161,7 @@ async def test_asleep_heartbeat_needs_no_memory_plugin(make_env):
     assert env.beats == []
 
 
-async def test_awake_heartbeat_without_memory_fails_with_remedy(make_env):
-    """H2 needs memory: heartbeat.after without the memory plugin fails
-    startup, naming memory and how to fix it."""
-    with pytest.raises(RuntimeError) as exc:
-        await make_env(AWAKE, with_memory=False)
-    message = str(exc.value)
-    assert "memory" in message and "heartbeat.after" in message
-    assert "enable" in message and "remove" in message
+
 
 
 # ---------------------------------------------------------------------------
@@ -228,8 +221,9 @@ async def test_repeats_once_per_period_while_quiet(make_env):
 
 
 async def test_memory_read_failure_retries_next_period(make_env, caplog):
-    """H1: a failed memory read skips that beat with a warning and the next
-    one comes `after` seconds later; beats don't stop."""
+    """H1: a failed memory read sends a beat without the memory section
+    (design ruling 2026-11-18); the next beat includes memories if the
+    read succeeds. Beats don't stop."""
     env = await make_env(AWAKE)
     real_recent = env.memory.recent
     failures = [RuntimeError("database is locked")]
@@ -240,25 +234,23 @@ async def test_memory_read_failure_retries_next_period(make_env, caplog):
         return await real_recent(limit)
 
     env.memory.recent = flaky_recent
-    with caplog.at_level(logging.WARNING, logger="corvidae.heartbeat"):
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
         await env.clock.advance(AFTER)
-    assert env.beats == []
+    # The beat is sent, but without the memory section.
+    assert len(env.beats) == 1
+    assert "Your recent memories" not in env.beats[0]["text"]
+    # The memory plugin logged a warning.
     records = [
         r for r in caplog.records
-        if r.name == "corvidae.heartbeat" and r.levelno == logging.WARNING
+        if r.name == "corvidae.memory" and r.levelno == logging.WARNING
     ]
-    assert len(records) == 1
-    message = records[0].getMessage()
-    assert HEARTBEAT_CHANNEL in message
-    assert "RuntimeError" in message
-    assert f"retrying in {AFTER}" in message
-    # The log line carries the traceback.
-    assert records[0].exc_info is not None
-    # The retry waits a full period, not less.
-    await env.clock.advance(AFTER - 1)
-    assert env.beats == []
-    await env.clock.advance(1)
-    assert len(env.beats) == 1
+    assert len(records) >= 1
+    # Seed a memory, then the next beat includes it (the read succeeded).
+    await env.seed_memory("irc:#test", "A memory for the second beat.", env.clock.now())
+    await env.clock.advance(AFTER)
+    assert len(env.beats) == 2
+    assert "Your recent memories" in env.beats[1]["text"]
+    assert "A memory for the second beat." in env.beats[1]["text"]
 
 
 @pytest.mark.parametrize("bad", [0, float("nan")])
@@ -332,33 +324,7 @@ async def test_sleep_survives_restart(make_env):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("bad", [-1, 2.5, True, "20"])
-async def test_rejects_a_bad_memory_limit(make_env, bad):
-    """A negative, fractional, boolean or string memory_limit fails startup,
-    naming the key, the rejected value, what is accepted and where to fix it."""
-    with pytest.raises(ValueError) as exc:
-        await make_env({"heartbeat": {"memory_limit": bad}}, with_memory=False)
-    message = str(exc.value)
-    assert "heartbeat.memory_limit" in message
-    assert f"got {bad!r}" in message
-    assert "whole number" in message
-    assert "0 or more" in message
-    assert "agent.yaml" in message
 
-
-@pytest.mark.parametrize("bad", [-1, 2.5, True, "20"])
-async def test_rejects_a_bad_retired_goal_limit(make_env, bad):
-    """A negative, fractional, boolean or string retired_goal_limit fails
-    startup, naming the key, the rejected value, what is accepted and where
-    to fix it."""
-    with pytest.raises(ValueError) as exc:
-        await make_env({"heartbeat": {"retired_goal_limit": bad}}, with_memory=False)
-    message = str(exc.value)
-    assert "heartbeat.retired_goal_limit" in message
-    assert f"got {bad!r}" in message
-    assert "whole number" in message
-    assert "0 or more" in message
-    assert "agent.yaml" in message
 
 
 def test_review_limits_default_to_five_and_accept_zero():

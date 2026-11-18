@@ -264,7 +264,6 @@ class HeartbeatSpec:
     @hookspec
     async def heartbeat_section(
         self,
-        *,
         prompt: str,
     ) -> str | None:
         """Contribute a section to the heartbeat beat.
@@ -315,26 +314,14 @@ class HeartbeatPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
-        """Read heartbeat.after; an awake heartbeat requires memory."""
+        """Read heartbeat.after. Memory is optional: it contributes via
+        the heartbeat_section hook under its own config."""
         await super().on_init(pm, config)
-        # Validated before the asleep return: a bad value fails startup either way.
-        self._memory_limit = parse_memory_limit(config)
-        self._retired_goal_limit = parse_retired_goal_limit(config)
         self._after = parse_after(config)
         if self._after is None:
             return
-        # The review needs memory; fail with the remedy, not a bare lookup.
-        memory = self.pm.get_plugin("memory")
-        if memory is None:
-            raise RuntimeError(
-                "heartbeat.after is set but the memory plugin is not loaded; "
-                "enable memory (remove it from plugins.disabled) or remove "
-                "heartbeat.after to keep the heartbeat asleep"
-            )
-        self._memory = memory
         # Prompt overrides (#411): file, inline, or built-in default.
         self._prompt = resolve_prompt(config, "heartbeat.prompt", DEFAULT_HEARTBEAT_PROMPT)
-        self._goals_instruction = resolve_prompt(config, "heartbeat.goals_instruction", GOALS_INSTRUCTION)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:

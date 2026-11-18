@@ -236,12 +236,15 @@ async def test_beat_obeys_retired_goal_limit(make_env, monkeypatch):
     # assert on that section only. With the new order (retired goals first),
     # the memory section follows the retired-goals section, so extract only
     # up to the next section marker.
-    retired_start = text.index(heartbeat.RETIRED_GOALS_HEADER)
+    # The goals section uses a new header format (design ruling 2026-11-18).
+    retired_header = "Goals you retired, newest first"
+    retired_start = text.index(retired_header)
     retired_end = len(text)
-    for marker in ("Open goals", heartbeat.MEMORY_HEADER):
-        idx = text.find(marker, retired_start)
-        if idx != -1:
-            retired_end = min(retired_end, idx)
+    # The memory section follows; extract only the goals section.
+    memory_header = "Your recent memories"
+    idx = text.find(memory_header, retired_start)
+    if idx != -1:
+        retired_end = idx
     retired_section = text[retired_start:retired_end]
     assert "New conclusion: the schedule holds." in retired_section
     assert "Old conclusion: it ran every night." not in retired_section

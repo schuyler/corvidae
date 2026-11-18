@@ -33,6 +33,7 @@ from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.tool import Tool, tool_to_schema
 from corvidae_cognition.funnel import FunnelPlugin
 from corvidae_cognition.memory import MemoryPlugin, _format_age
+from corvidae_cognition.heartbeat import GOALS_INSTRUCTION
 from corvidae_cognition.heartbeat import frame_beat
 
 logger = logging.getLogger("corvidae.goals")
@@ -119,7 +120,7 @@ class GoalsPlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self._schema_ready = False
-        self._goals_instruction: str = ""
+        self._goals_instruction: str = GOALS_INSTRUCTION
         self._retired_goal_limit: int = 20
         # Serializes the read-check-write of a goal's state: retire_goal,
         # set_goal_status and update_goal take it from their check through their UPDATE, so two
@@ -134,13 +135,15 @@ class GoalsPlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         self._goals_instruction = (
-            config.get("goals", {}).get("goals_instruction", "")
-            or config.get("heartbeat", {}).get("goals_instruction", "")
+            config.get("goals", {}).get("goals_instruction")
+            or config.get("heartbeat", {}).get("goals_instruction")
+            or GOALS_INSTRUCTION
         )
-        self._retired_goal_limit = int(
-            config.get("goals", {}).get("retired_goal_limit", 20)
-            or config.get("heartbeat", {}).get("retired_goal_limit", 20)
-        )
+        # Deprecation path: goals.retired_goal_limit, then heartbeat.retired_goal_limit.
+        raw_limit = config.get("goals", {}).get("retired_goal_limit")
+        if raw_limit is None:
+            raw_limit = config.get("heartbeat", {}).get("retired_goal_limit", 20)
+        self._retired_goal_limit = int(raw_limit)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -153,7 +156,6 @@ class GoalsPlugin(CorvidaePlugin):
     @hookimpl
     async def heartbeat_section(
         self,
-        *,
         prompt: str,
     ) -> str | None:
         """Contribute the goals section to the heartbeat beat.

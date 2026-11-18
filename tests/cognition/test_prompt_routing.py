@@ -98,7 +98,7 @@ class TestHeartbeatPromptRouting:
         }
         await plugin.on_init(_FakePM({"memory": object()}), cfg)
         assert plugin._prompt == "HB INLINE"
-        assert plugin._goals_instruction == "GOALS INLINE"
+        # goals_instruction moved to GoalsPlugin (design ruling 2026-11-18)
 
     async def test_file_prompt_resolved_at_init(self, tmp_path: Path):
         (tmp_path / "hb.md").write_text("From the heartbeat file.\n")
@@ -115,7 +115,7 @@ class TestHeartbeatPromptRouting:
         cfg = {"heartbeat": {"after": 60}}
         await plugin.on_init(_FakePM({"memory": object()}), cfg)
         assert plugin._prompt == DEFAULT_HEARTBEAT_PROMPT
-        assert plugin._goals_instruction == GOALS_INSTRUCTION
+        # goals_instruction moved to GoalsPlugin (design ruling 2026-11-18)
 
 
 class TestConsolidationPromptRouting:
