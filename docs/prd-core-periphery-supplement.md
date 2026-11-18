@@ -1,11 +1,11 @@
 # Corvidae: product requirements supplement — core/periphery architecture
 
-**Status: accepted as the target; conformance is checked from TRD
-acceptance.** This supplement is part of the product requirements for
+**Status: accepted; conformance is checked from the TRD's acceptance
+on 2026-11-17.** This supplement is part of the product requirements for
 deployments that run the core/periphery strategy, and `docs/prd.md` §4
-records the decision. A technical reference document (TRD) will say how
-these outcomes are met and in what order. No work is measured against
-this supplement until the TRD is accepted. Its prerequisites are measured
+records the decision. The technical reference document (TRD),
+`docs/trd-core-periphery.md`, says how these outcomes are met and in
+what order. The supplement's prerequisites are measured
 against the base PRD alone: the kernel rename (#16), providers and warm
 heads (#362), lease scopes (#363), and the lease mechanism with its
 default order and metrics (#364, #367).
@@ -174,9 +174,10 @@ violates one is a bug even if its tests pass.
     be delivered to that same context.
 
     *Rationale:* When the core receives an idle notification, it reads
-    its goals and decides what needs attention. There is no separate
-    purpose-generating mechanism; the goals *are* the purpose, and they
-    are already in the window. This is base PRD principle 13 (the agent
+    its goals and decides what needs attention. The notification carries
+    an idle prompt, which the operator can change (open question 20),
+    but no separate context generates purpose: the goals the prompt
+    points at are already in the window. This is base PRD principle 13 (the agent
     lives between messages) realized directly: the context that
     receives the idle event is the same context that holds the goals.
 
@@ -203,8 +204,10 @@ violates one is a bug even if its tests pass.
 1. The framework MUST run the core as a channel with an input queue.
    Its transports MUST include the internal notification bus, which
    MUST deliver escalations from peripherals, idle events, task
-   completions, and scheduler firings (open question 8 asks whether it
-   also gets a user-facing one).
+   completions, and scheduler firings. The operator MAY also attach the
+   CLI to the core's channel; the framework MUST default to leaving it
+   unattached, and MUST NOT attach any other user-facing transport to
+   the core's channel (open question 8).
 
    *Rationale:* The core runs a single context that favours depth over
    latency. It performs deliberative reasoning, multi-step tasks, goal
@@ -215,23 +218,23 @@ violates one is a bug even if its tests pass.
    heartbeat's role (base PRD §3.7 Heartbeat): the framework MUST NOT
    run a separate heartbeat, and every base PRD requirement on the
    heartbeat applies instead to the core's handling of idle
-   notifications, except its exemption from critique. The framework
-   MUST critique the core's idle-started turns like every other core
-   turn (§3.7).
+   notifications. Like every core turn, the core's idle-started turns
+   are critiqued (§3.7).
 
    *Rationale:* The heartbeat's purpose is that the agent lives between
    messages (base PRD principle 13): when the system is idle, it looks
    at its goals and decides whether to act. The core already holds the
    goals (principle 20), so it takes over that role, and as the
    cognitive center it gets every cognitive function, critique
-   included. Base critique's exemptions for `critique` and `task` turns
-   still apply; they keep critique from judging its own objections.
+   included. Base critique exempts no origin (base §3.7 Critique 3); a
+   turn whose origin is `critique` is judged, and its objections wake
+   no further turn (base §3.7 Critique 4).
 
 3. The framework MUST let the core direct KV cache allocation through
    tools that control queue multiplexing, and the slot-management plugin
-   MUST decide from that direction which contexts are resident in VRAM,
-   RAM, or disk, and when they are paged in, paged out, or checkpointed
-   (§3.3.6).
+   MUST decide from that direction which contexts are resident in fast
+   memory and which are paged out to saved state, and when they are
+   paged in, paged out, or checkpointed (§3.3.6).
 
 4. The goal block MUST be part of the core's context (§3.6).
 
@@ -274,7 +277,7 @@ violates one is a bug even if its tests pass.
 10. With the appraisal plugin loaded, appraisal (base PRD §3.7 Appraisal)
     MUST run in the core, over patterns across channels and over time,
     in addition to the consolidation, compaction, and critique that run
-    for every context (§3.7).
+    under §3.7.
 
 11. The framework MUST let the core read the system's **channel
     observables** whenever it asks, without waking it to show them. The
@@ -302,6 +305,24 @@ violates one is a bug even if its tests pass.
     understand the conversation's register, verify a peripheral's
     escalation summary (§3.4.3), or compose an instruction with full
     context.
+
+13. With the memory and funnel plugins loaded, the framework MUST give
+    the core the memories that channel-bound peripherals have
+    consolidated since the last it was given: admitted at the tail of
+    its window before a model call it was going to make anyway, through
+    the funnel as any tail context is (base PRD §3.7 Funnel), each
+    labelled with the channel it came from. Doing so MUST NOT start a
+    turn. The framework MUST bound how much one call is given, deliver
+    what is held back on later calls, oldest first, and log a warning
+    when it holds any back.
+
+    *Rationale:* The core is the one context that keeps a common
+    awareness of every channel. Escalation (§3.4) brings it what a
+    peripheral cannot handle. This brings it the rest: what the
+    peripherals handled themselves, late by the age of §3.7.4 and what
+    adds to it.
+    Delivery at the tail costs no turn and leaves the core's cached
+    prefix as it was (base PRD principle 2). Owner, 2026-11-16.
 
 ### 3.2 The peripherals (System One)
 
@@ -334,8 +355,14 @@ violates one is a bug even if its tests pass.
    edits are self-modification (base PRD principle 15): the framework
    MUST let the operator freeze the periphery prompts or bound what the
    core may change, and operator config MUST be able to lift any such
-   lock. A rewrite MUST take effect at the periphery's next compaction
-   boundary or conversation start, not mid-window (base PRD §3.3.8).
+   lock. Where the framework lets the core edit the prompt, it MUST
+   default to allowing the edits; the operator MAY lock them. A
+   rewrite MUST NOT take effect mid-window: it is applied at a
+   compaction boundary or conversation start of the periphery (base
+   PRD §3.3.8). With the critique plugin loaded, a rewrite MUST stay
+   pending until critique has returned a verdict on it, and MUST NOT
+   be applied on a bad verdict; a rewrite still pending at a boundary
+   waits for a later one.
 
    *Rationale:* The periphery's prompt is a living artifact. The core
    observes a mis-escalation, diagnoses which part of the judgment
@@ -345,9 +372,10 @@ violates one is a bug even if its tests pass.
    as the core. Task-bound peripherals are the exception (§3.2.9).
 
    *Intent (measured):* a channel-bound peripheral presents as the same
-   agent as the core. How the identity is rendered for a peripheral, in
-   full or compressed, is open question 9, and how well it works is
-   measured by tone continuity (§3.8.2).
+   agent as the core. A channel-bound peripheral gets the identity in
+   full (open
+   question 9, decided), and how well it works is measured by tone
+   continuity (§3.8.2).
 
    *Note:* §4 softens base principle 14 for this strategy: the
    framework gives every context the one identity, and where contexts
@@ -402,7 +430,7 @@ violates one is a bug even if its tests pass.
 10. *(Explanatory.)* The periphery is meant to communicate with the core
     concisely: an escalation carries what the core needs and nothing
     more, as the core's instructions to the periphery do (§3.1.8). Its
-    format is open question 19.
+    format was settled under open question 19.
 
 ### 3.3 KV cache allocation
 
@@ -444,8 +472,9 @@ violates one is a bug even if its tests pass.
    applies to a context the core pinned or brought forward; a held queue
    is stopped (§3.3.7), and a stop is not subject to it. The
    slot-management plugin MUST turn the core's
-   direction into memory placement: which contexts stay in VRAM, which
-   move to RAM or disk, and when to restore one ahead of need. The
+   direction into memory placement: which contexts stay resident, which
+   are paged out to saved state, and when to restore one ahead of need.
+   The
    plugin's decisions MUST be cheap enough to make at every call
    boundary (base PRD §3.13.8), and backend-specific operations MUST
    live in it (Appendix A.4). The framework MUST keep a held queue
@@ -495,7 +524,9 @@ violates one is a bug even if its tests pass.
    *Note (explanatory):* base PRD §3.13.7 leaves a stop unbounded for
    now and leaves open whether it lapses by itself (#366). This item
    relies on a stop that does not lapse; if #366 decides otherwise, this
-   item goes back to the owner.
+   item goes back to the owner. The owner ruled on 2026-11-16 that a
+   stop does not lapse and that a deferral is the pause that does; base
+   §3.13.7 reads as undecided until #366 edits it.
 
    *Rationale:* The slot-management plugin orders active queues because
    it alone knows the cache resources and the cost of swapping them. It
@@ -570,8 +601,9 @@ violates one is a bug even if its tests pass.
    stamp that level itself, never from anything the model wrote. Where
    the framework cannot tell which content an instruction was written
    from, it MUST use the lowest trust in the core's window since its
-   last compaction. How the framework learns what an instruction answers
-   is a design decision (`docs/core-periphery-open-questions.md`, gap 2).
+   last compaction. The framework takes nothing the model cites as
+   telling it, so in practice that fallback is the rule
+   (`docs/core-periphery-open-questions.md`, gap 2).
 
    *Rationale:* Item 6 frames an escalation as data, but an attacker
    who waits one turn would otherwise reach a periphery through an
@@ -593,7 +625,8 @@ The fork's rows MUST stay in the log (base PRD principle 4) and MUST NOT
 enter the parent's window.
 
 Whatever its kind, every fork is either **blocking** or **non-blocking**,
-and the choice is made when the fork is taken (item 7). Blocking names
+and the choice is made when the fork is taken (item 7, which also
+bounds a blocking wait on a long-lived fork). Blocking names
 only the join dependency: the parent's next turn waits for a blocking
 fork's result, and does not wait for a non-blocking fork's, whose result
 re-enters the parent, if it re-enters at all, only by tail-append on a
@@ -654,8 +687,14 @@ respond to an escalation.
 
 6. The framework MUST let the core work a channel directly in a fork,
    with the peripheral's context brought in (§3.3.6), and join the
-   results back. While that fork is active, the channel's periphery
-   MUST NOT respond on it.
+   results back. While that fork is active the channel is
+   **pass-through**: the framework MUST keep recording what arrives on
+   it in the channel's peripheral context, MUST deliver a copy to the
+   fork framed as data from that channel (§3.1.12), and MUST NOT start
+   a periphery response on it. A periphery turn already
+   in flight when the fork takes the channel finishes and sends. What
+   the fork says on the channel MUST go out as exact wording (§3.1.9),
+   so it appears in the peripheral's context (principle 21).
 
    *Rationale:* Some exchanges (a complex multi-turn conversation the
    periphery can't handle) need the core itself.
@@ -669,8 +708,8 @@ respond to an escalation.
    either way for a long-lived fork:
    - **Blocking.** The core's next turn waits for the join. The
      framework MUST also let the core route its notifications to a
-     blocking fork until the join, so the main context takes none until
-     then; routing implies blocking, but blocking does not imply
+     blocking fork until the join or the bound below, so the main
+     context takes none until then; routing implies blocking, but blocking does not imply
      routing. Routing does not stop the lease the fork shares with its
      parent (§3.3.7). Where the
      core routes them, the join's report MUST cover the notifications
@@ -678,7 +717,11 @@ respond to an escalation.
      that the agent's own actions cannot leave the core unable to
      receive work holds through a blocking fork, so a blocking fork that
      neither joins nor is abandoned is the case that guarantee is tested
-     on.
+     on. The strategy MUST bound the core's blocking wait on a
+     long-lived fork, with a default the operator MAY change. Past the
+     bound the fork becomes non-blocking: any routing ends, so the
+     core's notifications return to its main context, the fork keeps
+     running, and the framework MUST log a warning.
    - **Non-blocking.** The core keeps working and receiving its
      notifications, and the framework MUST NOT make the parent's next
      turn wait for a non-blocking fork's result.
@@ -701,8 +744,11 @@ respond to an escalation.
 
 With the goals plugin loaded:
 
-1. The goal block MUST list every open commitment, compactly enough to
-   stay within the bound of item 5.
+1. The goal block MUST list the open goals, one line each, with each
+   goal's state and how long it has been in that state. When listing
+   every open goal would exceed the bound of item 5, the block MUST
+   list the highest-priority goals that fit and say how many it left
+   out.
 
 2. The goal block MUST be **pinned**: compaction MUST NOT touch it.
 
@@ -710,18 +756,20 @@ With the goals plugin loaded:
    (compaction point) and MUST be **byte-stable between boundaries**. A
    goal created, changed or retired between boundaries MUST be appended
    at the tail as a CONTEXT entry that supersedes that goal's line in
-   the block (base PRD §3.7 Goals), and the next rebuild MUST fold those
+   the block, where the block shows one (base PRD §3.7 Goals), and the next rebuild MUST fold those
    entries into the block.
 
    *Rationale:* The tail entries mean the core never acts on a stale
    goal list without breaking the cached prefix.
 
 4. *(Explanatory.)* The goal block is the core's answer to "what should
-   I be doing?" during idle. It is the real thing, not a proxy.
+   I be doing?" during idle. It is the real thing, not a proxy. What the
+   core is asked to do with it is the idle prompt's business (§3.1.2,
+   open question 20).
 
 5. The goal block MUST stay within a bounded share of the core's window,
    set in operator config with a default. The framework MUST log a
-   warning when a rebuild exceeds it.
+   warning when a rebuild leaves goals out to stay within it.
 
    *Rationale:* The bound is meant to leave wide margin; Appendix A.5
    gives a reference measurement.
@@ -734,20 +782,53 @@ With the goals plugin loaded:
    loaded, consolidation (converting raw conversation logs into
    narrative memory, base PRD §3.7 Memory) and critique (evaluating the
    quality of responses and decisions, base PRD §3.7 Critique) MUST run
-   for every context too.
+   for every context too, except that consolidation does not run for a
+   task-bound peripheral: it writes no memory of its own (§3.2.9, open
+   question 17), and its work is remembered through the core's
+   consolidation of its result. Nor does it run for a
+   long-lived fork, whose work is remembered through the consolidation
+   of its join report in its parent's window (§3.5; owner, 2026-11-16).
+   Critique does not run inside a task-bound peripheral; its result is
+   critiqued where it lands, in the launcher's window (base §3.7
+   Critique 3).
 
 2. With the appraisal plugin loaded, appraisal MUST run in the core
    (§3.1.10).
 
-3. Critique, consolidation and compaction MUST each run over each
-   context's own window independently, as base PRD §3.7 and §3.8
-   describe; nothing about them changes. Whatever a context's window
+3. Critique, consolidation and compaction MUST each run over the window
+   of each context item 1 has them run for, independently, as base PRD
+   §3.7 and §3.8
+   describe; nothing about them changes except by item 4 and in the profile a
+   stage the operator has not mapped uses (§4; TRD K2). Whatever a context's window
    holds MUST be in scope, including the core's instructions and the
    messages it worded itself.
 
-   *Rationale:* Because each context consolidates its own window, the
-   agent forms separate memories of a peripheral exchange and of the
+   *Rationale:* Because each context that consolidates does so over its
+   own window, the agent forms separate memories of a peripheral exchange and of the
    core's decision about it (open question 14).
+
+4. With the memory plugin loaded and forks enabled for consolidation
+   (base PRD §3.7 Memory item 1), the framework MUST start
+   consolidating a channel-bound peripheral's un-consolidated
+   conversation no later than an operator-set age after its oldest
+   un-consolidated message, however little conversation there is and
+   whether or not the channel goes quiet; a turn or a consolidation
+   already running on that channel MAY finish first, and time the
+   daemon is not running is not counted. With §3.1.13,
+   what the core holds at one of its model calls then lags a
+   peripheral by that age and by what the TRD lists as adding to it,
+   among them work that had to finish, the consolidation's own time,
+   attempts that fail, time the daemon is down, and what §3.1.13 held
+   back: the core's awareness of the peripherals is eventually
+   consistent. The framework MUST log the lag it measures,
+   counted from the oldest message.
+
+   *Rationale:* The bound is a time and not an amount of conversation.
+   A bound on amount would repeat what escalation already does, since a
+   peripheral is told to send complex matters to the core; what is left
+   is routine, and for routine matters the question is how stale the
+   core may be. The consolidations are frequent, so they are meant to
+   be cheap: each one covers little. Owner, 2026-11-16.
 
 ### 3.8 Model requirements
 
@@ -868,14 +949,37 @@ With the goals plugin loaded:
    operator config, with a message that would exceed it rejected at the
    inbound gate before it is accepted, so the write-ahead log of
    accepted work (base PRD §3.4.8) keeps its promise that nothing
-   accepted is lost. Other candidates (a total cap across channels, a
-   bound on loops between the core and peripherals, a per-response
-   tool-call cap) are in `docs/core-periphery-open-questions.md`.
+   accepted is lost. Inbound caps are per channel only: a total across
+   channels could fill with held messages and lock every sender out
+   (gap 9). Loops between contexts are bounded by item 2. A
+   per-response tool-call cap remains a candidate, in
+   `docs/core-periphery-open-questions.md`.
 
    *Rationale:* Resource exhaustion doesn't depend on topology, so this
    holds under every strategy. Stating the outcome rather than a set of
    caps leaves the TRD to choose limits that fit together, instead of
    accumulating mechanisms one finding at a time.
+
+2. **(All strategies.)** The kernel MUST give plugins a seam at which
+   internal work that is about to start (a task, a fork, an
+   instruction, an escalation) is offered for a verdict, as the
+   inbound gate and the output gate already offer messages, and MUST
+   let plugins read how much accepted work is waiting. The kernel
+   supplies the seam; a plugin gives the verdict. Work refused there
+   MUST come back to whatever tried to start it as a result naming the
+   limit and the remedy, and the refusal MUST be logged at warning. The
+   result of work already started MUST NOT be refused there (§3.10.1).
+   Under the core/periphery strategy, each item that crosses between
+   contexts MUST carry a hop count stored with the item, and the
+   framework MUST suppress a crossing at zero and tell the user so.
+
+   *Rationale:* A ceiling on waiting work catches producers that
+   outrun consumers, and a hop count catches a steady loop that never
+   builds a backlog; each misses what the other catches. Refusing at
+   the start of work, never at the arrival of a result, keeps the
+   promise that no work disappears silently. The base PRD has no such
+   seam today; it is stated here, and the TRD carries it into the base
+   PRD (open question 21, gap 1).
 
 ## 4. What carries over
 
@@ -887,19 +991,33 @@ supplement amends them:
   softened: the framework gives every context the one identity, and
   where contexts run different models, presentation is measured (§3.8.2),
   not required (§3.2.5);
-- the core takes over the heartbeat's role, and its idle-started turns
-  lose the heartbeat's critique exemption, amending base §3.7
-  Heartbeat and §3.7 Critique 3 (§3.1.2);
+- the core takes over the heartbeat's role (§3.1.2);
 - goals sit in a pinned block with tail updates (base §3.7 Goals; §3.6);
-- if open question 9 settles on a compressed identity for peripheries,
-  that amends base §3.3.8's identity heading every prompt (§3.2.5);
 - the core MAY give a task-bound peripheral fewer tools than it holds,
   amending base §3.5.7's full inherited set (§3.2.8);
 - base §3.8 governs one-shot forks; long-lived forks follow §3.5;
 - base principle 3's "background work does not hold back its own
   channel's next main turn" is a default: the operator MAY set a
   background stage's forks to block, and then the channel's next turn
-  waits for that stage's result (§3.5.7).
+  waits for that stage's result (§3.5.7);
+- an escalation or an instruction starts an exchange of its own, with
+  its own turn budget and its own origin, and the hop count of §3.12.2
+  bounds the chain. Base §3.1.3 and §3.5.10 charge a turn that a note
+  wakes to the budget of the chain that woke it and give it that
+  chain's origin; they keep doing so for notes, and do not apply to
+  escalations and instructions (gap 1; owner, 2026-11-16);
+- a channel-bound peripheral's conversation is also consolidated when
+  its oldest un-consolidated message reaches an operator-set age
+  (§3.7.4). Base §3.7 Memory item 1 names three triggers (compaction,
+  idle, the end of a turn); this adds a fourth for peripheral channels
+  and changes none of the three (owner, 2026-11-16, amending the
+  decision on open question 16);
+- a background chat stage the operator has not mapped does its work
+  for a channel that names a profile on that channel's profile. Base §3.6
+  item 5 gives an unmapped stage the default profile for its kind, and
+  base §3.8 item 4 gives a stage one profile on every path; under this
+  strategy that is one profile per channel (TRD K2; for forks, owner,
+  2026-11-16; the stage's other paths are open, TRD §15.1).
 
 The strategy's scheduling amends none of base §3.13: its pauses are the
 base's stop, and its ordering of active queues is a replacement order
@@ -985,23 +1103,33 @@ models; that hazard is accepted until it shows up as a problem.
 
 ### A.2 KV cache tier design
 
-When context memory can be managed (local LLM deployments), a
-three-tier hierarchy is the working model:
-- **VRAM (hot):** Active contexts. Fast access, limited capacity.
-- **RAM (warm):** Recently active contexts. Slower access, larger
+When context memory can be managed (local LLM deployments), the working
+model is two tiers, both under the slot-management plugin's control
+(open question 6, decided):
+- **Slot (hot):** a context resident in VRAM. Fast access, limited
   capacity.
-- **Disk (cold):** Inactive contexts. Slowest access, largest capacity.
+- **Saved slot file (cold):** a context paged out to a file the plugin
+  wrote. Slower access, largest capacity.
 
-The slot-management plugin carries out four operations: page-in (RAM/disk →
-VRAM), page-out (VRAM → RAM/disk), checkpoint (core context → RAM/disk for
-rollback/resumption), and reheat (disk → VRAM on new notification).
+The model server's own RAM prompt cache is turned off (A.4): the plugin
+cannot see what it holds, so it could not tell whether a paged-out
+context would return from RAM or need a restore. An earlier draft of
+this appendix had it as a middle tier.
+
+The slot-management plugin carries out three operations: page-in (file →
+slot, when work arrives for a context or the core directs attention to
+it), page-out (slot → file), and checkpoint (a save that keeps its slot,
+for rollback or resumption).
 
 A tail-invalidation benchmark showed that any in-place mutation triggers
 full re-prefill at ~26x cost, which constrains the swap policy.
 
 ### A.3 Escalation detection
 
-The initial design combines two signals:
+Open question 2 settled on the periphery model's own judgment, expressed
+as an `escalate` tool call, with structural rules checked before the
+model runs and a confidence signal waiting for labels to calibrate
+against. The earlier sketch, kept for reference, combined two signals:
 - **Message-type rules** for obvious cases: questions about goals,
   requests for decisions, multi-step tasks → always escalate.
 - **Confidence signal** for the rest: the periphery's implicit
@@ -1019,14 +1147,22 @@ providers are supported through the base PRD's provider-neutral profiles
 and providers (§3.6, §3.13) and get the degenerate case of §3.3.4 when they
 lack these levers. Flags and endpoints below are from the llama-server
 README (`tools/server/README.md` in ggml-org/llama.cpp) as of
-2026-11-05; the TRD should confirm them against the pinned build.
+2026-11-05, and the `--cache-ram 0`, slot selection and `id_slot` entries
+as of 2026-11-16; the TRD should confirm them against the pinned build.
 
-- **VRAM tier:** server slots (`-np, --parallel`), each holding one
+- **Slots (resident):** server slots (`-np, --parallel`), each holding one
   resident context. Prefix reuse within a slot is `--cache-prompt` (on by
   default) and `--cache-reuse` (KV shifting).
-- **RAM tier:** the prompt cache, `--cache-ram` (MiB; default 8192), with
-  `--cache-idle-slots` saving idle slots into it on a new task.
-- **Disk tier and checkpoints:** `POST /slots/{id}?action=save` and
+- **RAM prompt cache, turned off:** `--cache-ram` (MiB; default 8192;
+  0 disables it), with `--cache-idle-slots` saving idle slots into it on
+  a new task. The deployment sets `--cache-ram 0`, which also disables
+  `--cache-idle-slots`.
+- **Slot selection:** by default the server picks a slot by prompt
+  similarity (`--slot-prompt-similarity`), which could put a request in
+  a slot holding another context. The plugin would name the slot on
+  each call (`id_slot`); whether the chat completions endpoint honours
+  it is check 4 on #1009, and nothing is decided until then.
+- **Saved slot files and checkpoints:** `POST /slots/{id}?action=save` and
   `?action=restore` write and read a slot's prompt cache under
   `--slot-save-path`.
 - **Multiple models:** router mode (`--models-dir` or `--models-preset`),
@@ -1039,12 +1175,20 @@ README (`tools/server/README.md` in ggml-org/llama.cpp) as of
 - **Suspend and resume.** Because slots can be saved to disk, an agent
   can be suspended, or suspend itself and exit, and later be restored
   with its contexts warm instead of re-prefilled. This should be the
-  default, except when the agent starts in safe mode, which rebuilds
-  every context from the log and prefills it fresh. The log stays the
-  source of truth either way (base PRD §3.4.8); a restored cache only
-  saves the prefill. A saved cache is valid only for the model, build
-  and prompt it was saved with; the TRD should confirm whether
-  llama-server refuses a mismatched restore.
+  default: on a graceful shutdown the plugin saves every resident
+  context, and restores each when it is next granted a slot. The log
+  stays the source of truth either way (base PRD §3.4.8); a restored
+  cache only saves the prefill. A saved cache is valid only for the
+  model, build and prompt it was saved with, so the plugin stamps each
+  file and restores only on a match; a file that does not match is
+  discarded with a warning and its context prefilled from the log.
+  There is no separate safe mode (open question 15, decided). What
+  llama-server itself does with a mismatched restore is one of the
+  checks on #1009.
+
+None of these levers has been exercised on the pinned build. #1009 lists
+the checks, the router-mode ones in particular, and blocks neither the
+TRD nor the implementation.
 
 ### A.5 Goal block size
 
@@ -1089,8 +1233,8 @@ sensitivity plugins, locks under principle 15, the floors of principle
 ---
 
 *This supplement is the accepted target, not a build plan. It specifies
-desired outcomes for the core/periphery architecture. The TRD will specify
-how those outcomes are achieved and in what order, and conformance is
-checked from its acceptance. Appendix A collects the research and design ideas
-that informed the requirements; the TRD may adopt, modify, or discard any
-of them.*
+desired outcomes for the core/periphery architecture. The TRD, accepted
+on 2026-11-17, specifies how those outcomes are achieved and in what
+order, and conformance is checked from its acceptance. Appendix A
+collects the research and design ideas that informed the requirements;
+the TRD may adopt, modify, or discard any of them.*

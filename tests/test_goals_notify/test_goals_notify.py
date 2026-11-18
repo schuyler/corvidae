@@ -84,8 +84,8 @@ async def test_status_change_notifies_origin_with_the_send_fields():
     kwargs = on_notify.call_args.kwargs
     assert kwargs["channel"] is registry.get(ORIGIN)
     assert kwargs["source"] == f"agent_send from {ACTOR}"
+    # The changing turn carries no origin, so neither does the note (#1034).
     assert kwargs["annotations"] == {
-        "origin": "agent_send",
         "source_channel": ACTOR,
         "source_trace_id": "trace-841",
         "hop_count": 2,

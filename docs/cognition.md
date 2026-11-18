@@ -30,10 +30,10 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | Plugin | Entry point | What it does |
 |---|---|---|
 | `MemoryPlugin` | `memory` | Consolidates conversation (at turn ends, on idle, and at compaction) into durable memories and retrieves them into context; owns `sqlite-vec` |
-| `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
+| `MemoryToolsPlugin` | `memory_tools` | `search_memory`, `search_transcripts` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
-| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), and the provenance check |
+| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), the provenance check, and the lenses other plugins contribute through `on_critique_init` |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
@@ -47,9 +47,9 @@ the extra, those names match nothing and disable nothing, which is harmless.
 
 ## What the plugins rely on
 
-They are ordinary plugins: they use only the kernel API documented in
-[plugin-guide.md](plugin-guide.md#what-the-kernel-exports-to-plugins), which
-`tests/test_kernel_boundary.py` enforces, and the kernel never imports them.
+They are ordinary plugins: they import the kernel modules mapped in
+[plugin-guide.md](plugin-guide.md#what-the-kernel-exports-to-plugins), and
+the kernel never imports them (`tests/test_kernel_boundary.py`).
 Their loggers keep their `corvidae.*` names (`corvidae.memory`,
 `corvidae.appraisal`, ...), so log configuration and log lines are the same
 as before the split.
@@ -230,7 +230,7 @@ the row):
   row included. A range whose only rows are corrupt advances the watermark
   with no record and no LLM call.
 - **`recall_raw`** returns the valid rows of the range in order and omits the
-  corrupt one.
+  corrupt one; **`search_transcripts`** drops it from its hits the same way.
 - **The `message_fts` backfill** indexes every valid row and indexes a corrupt
   row as empty text, so it is not retried on every start.
 
@@ -1155,19 +1155,19 @@ whole memory budget for a turn.
 
 ### MemoryToolsPlugin (`packages/corvidae-cognition/corvidae_cognition/memory_tools.py`)
 
-Registers the `search_memory` and `recall_raw` agent tools — the active
-memory surface ("remember harder"). Entry point
+Registers the `search_memory`, `search_transcripts` and `recall_raw` agent
+tools — the active memory surface ("remember harder"). Entry point
 name: `"memory_tools"`; `depends_on = frozenset({"memory"})`. Reaches the
 DB through `get_dependency(pm, "memory", MemoryPlugin)`.
 
 Implements one hook:
 
-- `register_tools` — appends `search_memory` and `recall_raw` to
-  `tool_registry`.
+- `register_tools` — appends `search_memory`, `search_transcripts` and
+  `recall_raw` to `tool_registry`.
 
-**Whole memory:** both tools span every channel's records, as passive
-retrieval does (PRD principle 14, #168); neither takes the calling channel
-into account, so neither declares `_ctx`. They reach further than passive
+**Whole memory:** all three tools span every channel, as passive
+retrieval does (PRD principle 14, #168); none takes the calling channel
+into account, so none declares `_ctx`. They reach further than passive
 retrieval in *status* (demoted, superseded, and redacted-tombstone records),
 and they don't apply passive retrieval's window exclusion (#634).
 `search_memory`'s optional `channel=` argument narrows to one channel's
@@ -1176,6 +1176,29 @@ written on simply matches nothing. `recall_raw` replays a record's raw range
 from the record's own channel: `message_log` ids are global, so the range
 holds other channels' interleaved rows and the `channel_id` predicate keeps
 them out.
+
+**Raw transcripts without a record (#648).** Consolidation is lossy, so the
+agent can also reach `message_log` directly. `search_transcripts` is a
+keyword search over `message_fts` (FTS5 over each row's `$.content`,
+trigger-synced) across every channel, in bm25 order; each hit names its
+`message_log` id, channel, UTC timestamp and role, with a snippet around the
+match. A hit is widened with `recall_raw`'s range form, `channel` +
+`start_id` + `end_id`, which replays that channel's rows in the inclusive
+id range exactly as the record form does. It covers the rows `recall_raw`
+replays: dialogue, compaction summaries, CONTEXT rows (so a hit can be an
+injected memory or note line rather than something said) and withheld rows,
+labelled. Corrupt rows and unknown types are skipped with the standard
+warning. Neither touches access statistics. Redaction needs nothing of its
+own: `corvidae redact` rewrites the row, and the `message_log_au` trigger
+re-indexes the tombstone, so the original text is neither found nor
+replayed. The index holds only `content`, so tool-call arguments are not
+searchable, and the `unicode61` tokenizer limits (#158) apply.
+
+**Fencing.** `search_transcripts` and `recall_raw` declare
+`returns_untrusted`: their output reaches the model fenced as untrusted
+outside content, because replayed rows carry whatever the original senders
+wrote. Both `recall_raw` forms are fenced. `search_memory` is not: it
+returns the agent's own record summaries.
 
 **Search by meaning (#667).** With the vector path up, `search_memory`
 embeds the query (`kind="query"`) and ranks two lists over the same filters
@@ -1208,7 +1231,7 @@ paraphrase may have been missed. If that FTS5 query fails as well, it falls
 back to a `LIKE` scan over record summaries instead of returning an internal
 error. Tool searches write no `retrieval_log` rows.
 
-Both tools retry briefly when the memory schema is still being created by
+All three tools retry briefly when the memory schema is still being created by
 another task.
 
 **Tools:**
@@ -1216,17 +1239,20 @@ another task.
 | Tool | Parameters | What it does |
 |------|------------|--------------|
 | `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | Search by meaning and keywords (above). Returns a list `id. score (age)[flags] summary`, led by each memory id (for `recall_raw`), best match first, capped at approximately `max_tokens`. The score is the cosine similarity to the query (two decimals), or `kw` for a keyword hit with no vector. In keyword-only fallback the first line says so, results are in FTS order, and the score is the negated bm25 rank. `channel` narrows to one channel's records by exact id; a channel with no records matches nothing. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
-| `recall_raw` | `memory_id: int`, `max_tokens: int` (default `1000`) | Replays the raw `message_log` dialog for the record's `[msg_id_start, msg_id_end]` range using `WHERE channel_id = record.channel_id AND id BETWEEN ...` — the channel predicate is load-bearing because the `message_log` id sequence is global across all channels. Returns a participants header (`[memory N: messages S–E, participants: {...}]`) followed by verbatim `role: content` lines, truncated at `max_tokens` with an explicit marker. Works on demoted, superseded, and tombstoned records. Reaches any channel's record. **Bumps `retrieval_count` and `last_retrieved_at`** on the record — the bump is what makes the record eligible for re-promotion by the next retention job run. |
+| `search_transcripts` | `query: str`, `channel: str\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `max_tokens: int` (default `2000`) | Keyword search over every channel's `message_log` content (above). Returns up to 50 lines `id. [timestamp] channel role: snippet`, best bm25 match first, the match wrapped in `**`, capped at approximately `max_tokens`. `channel` narrows by exact id; `after`/`before` parse as for `search_memory` and compare against the row's `timestamp`. A query with no word tokens, no hits (naming the channel filter when set) and a failing FTS query (logged at WARNING; retry with a simpler query) each return a plain message. **Does not update access stats.** Fenced. |
+| `recall_raw` | `memory_id: int\|None`, `channel: str\|None`, `start_id: int\|None`, `end_id: int\|None` (all default `None`), `max_tokens: int` (default `1000`) | Two forms; exactly one per call, or an error naming both forms and what was passed. **By range** (`channel`, `start_id`, `end_id`): replays that channel's rows with `start_id ≤ id ≤ end_id` under a `[channel C: messages S–E]` header; says so when the range holds none; bumps nothing. **By record** (`memory_id`): replays the raw `message_log` dialog for the record's `[msg_id_start, msg_id_end]` range using `WHERE channel_id = record.channel_id AND id BETWEEN ...` — the channel predicate is load-bearing because the `message_log` id sequence is global across all channels. Returns a participants header (`[memory N: messages S–E, participants: {...}]`) followed by verbatim `role: content` lines, truncated at `max_tokens` with an explicit marker. Works on demoted, superseded, and tombstoned records. Reaches any channel's record. **Bumps `retrieval_count` and `last_retrieved_at`** on the record — the bump is what makes the record eligible for re-promotion by the next retention job run. |
 
-**Recall-stat semantics:** `recall_raw` bumps the record's access stats;
-`search_memory` does not. `search_memory` is a catalog for choosing what
+**Recall-stat semantics:** `recall_raw` by record bumps the record's access
+stats; `search_memory`, `search_transcripts` and `recall_raw` by range do
+not (no record is involved in the last two). `search_memory` is a catalog for choosing what
 to recall; bumping every listed record would inflate scores for marginal
 matches and distort retention scoring. The re-promotion path is:
 `search_memory` surfaces a demoted record (flagged `[demoted]`) → agent
 calls `recall_raw` → next retention job run finds the score above the
 demotion threshold and re-promotes.
 
-**Without this plugin:** the `search_memory` and `recall_raw` tools are
+**Without this plugin:** the `search_memory`, `search_transcripts` and
+`recall_raw` tools are
 not available. Memory records are still formed and passively retrieved
 by `MemoryPlugin`; only the agent's active access surface is absent.
 
@@ -1265,8 +1291,10 @@ plugin gating eligibility off that origin, never has to infer it from
 stub text. The `'user'|'reminder'|'critique'|'heartbeat'|'task'`
 taxonomy is a convention cognition plugins (AppraisalPlugin,
 CritiquePlugin, OutcomeLogPlugin) share over this key — not a core
-concept. `'user'` is recognized by subscribing to `on_message_admitted`
-rather than by a value in `annotations`; `'task'` is the default OutcomeLogPlugin
+concept. Critique judges every main-loop turn whatever its origin (#1031)
+and reads only `'critique'`, to keep a correction's findings from waking
+another turn. GatePlugin recognizes `'user'` by subscribing to
+`on_message_admitted` rather than by a value in `annotations`; `'task'` is the default OutcomeLogPlugin
 applies when `annotations["origin"]` is absent on a notification-born
 trace. `stub_text=` replaces the default "N pending … item(s)" stub text
 (the provenance check's use). `ingest(channel, source, entries)` is the
@@ -1561,8 +1589,10 @@ It also registers the `exchange_log` scrubber (`redact_exchange_log`)
 under the `corvidae.redact` entry-point group. When `corvidae redact`
 tombstones a message, the owning exchange's stage-2 `past_claims` text is
 tombstoned (claim and query counts kept), and so is the provenance and
-critique objection detail in its `outcomes` (see "Operator redaction" in
-[design.md](design.md)).
+stylistic critique objection detail in its `outcomes` (see "Operator redaction" in
+[design.md](design.md)). Proactivity's detail (#1003) and the detail of
+lenses other plugins add (`critique.<name>.detail`) are not reached;
+redaction is on hold (#1005).
 
 The table is created in `on_start` when the DB is already open. At boot it
 usually isn't (persistence starts after outcome_log, since `on_start` is
@@ -1607,19 +1637,34 @@ implementation in that broadcast would discard every sibling's verdict.
 `get_appraisal_out(trace_id)` reads the vector back.
 
 **Stage 2** (`on_agent_response`) is a silent fork of the live window over
-the finished exchange. On a miss (forks off, the exchange left the window,
+the finished exchange. A decline gets none (#420; PRD §3.7 Critique 3): when
+the final went unsent and its text carries `NO_REPLY` or is empty, the
+agent stayed silent and there is no response to appraise, so no task is
+enqueued and `get_last_stage2(channel)` keeps the channel's last answered
+exchange for the outbound gate and critique's lens selection. The test is
+`silence.is_decline`, the rule `SilencePlugin` records declines by; it
+doesn't need that plugin loaded. A final another gate withheld has content
+and still gets stage 2. If the test raises, stage 2 runs anyway and a
+warning names the channel and trace. On a miss (forks off, the exchange left the window,
 the fork failed or its reply was unusable) it is skipped with a warning
 naming the stage, channel, trace and reason: the exchange keeps stage 1 only
 and no standalone call is made. It produces: valence, stakes, ambiguity, commitment density, novelty,
-correction, and `past_claims`. `past_claims` is a list of `{claim,
+correction, and `past_claims`. The five numeric dimensions, by name, are a
+contract other plugins select on: `STAGE2_DIMENSIONS` in `appraisal.py`
+(`valence`, `stakes`, `ambiguity`, `commitment_density`, `novelty`), each a
+float in [0, 1], all five present in every vector stage 2 produces. `past_claims` is a list of `{claim,
 queries}`: each statement in the reply that presents something as
 established before the exchange, with up to 3 short search phrases. A
 missing or malformed field reads as no claims; malformed entries are
 dropped with a warning; it's capped at 5 claims. The vector is merged into
 the `appraisal` envelope's `stage2` key. Then every listener registered with
 `add_stage2_listener` is awaited with `channel, trace_id, response_text,
-annotations, stage2`, outside the appraisal attribution. A failing listener is
-logged and doesn't stop the others; a failed stage 2 notifies no one. It's
+annotations, stage2`, outside the appraisal attribution. Every enqueued stage
+2 notifies each listener exactly once: `stage2` is the vector, or `None`
+when none was produced (a miss above, or an unexpected exception, which is
+logged at warning with the trace). That is how a listener tells "not yet"
+from "never" without a timer. Cancellation (shutdown) notifies no one. A
+failing listener is logged and doesn't stop the others. It's
 a push rather than a wait because a consumer that awaited stage 2 from a
 queued task would hold a TaskQueue worker the stage-2 task may need.
 
@@ -1633,11 +1678,13 @@ model makes both language judgments; the code only fetches evidence:
    in `past_claims`, with a few search phrases for each (see
    [AppraisalPlugin](#appraisalplugin-the-outbound-vector-packagescorvidae-cognitioncorvidae_cognitionappraisalpy)).
    That works in any language and any phrasing, and it costs no extra model
-   call because stage 2 already runs on every exchange.
+   call because stage 2 already runs on every answered exchange. A decline
+   gets no stage 2, so it gets no provenance check either.
 2. **Evidence.** When stage 2 lands, AppraisalPlugin notifies its listeners.
-   CritiquePlugin registers one in `on_start`. For an eligible exchange
-   (same rule as the stylistic lenses: `user` or `reminder`) with at least
-   one claim, it enqueues a silent task. That task searches `message_fts`
+   CritiquePlugin registers one in `on_start`. For an exchange with at
+   least one claim it enqueues a silent task. Every main-loop turn with a
+   trace is eligible, whatever started it (#1031; the same rule as the
+   stylistic lenses), corrections included, so stage 2 runs on them too. That task searches `message_fts`
    with each claim's phrases (or the claim's own words when it has none):
    every whitespace-separated chunk quoted, then OR-joined. FTS5
    tokenizes the quotes with the index's own tokenizer, so no
@@ -1695,7 +1742,11 @@ retention root (`critique.retention.root`, else markdown_recall's root), retenti
 every critique wake (provenance included) uses one stub that adds how to
 file them: read the named file under the root and append only what is
 missing. The funnel keeps one pending stub per channel and origin, so the
-first wake's text governs everything queued behind it. The plugin's
+first wake's text governs everything queued behind it.
+On a critique-origin turn (a correction, or a turn a note from one woke)
+nothing wakes: its provenance, proactivity and retention findings all wait
+for the channel's next turn, so a correction never starts another (PRD
+§3.7 Critique 4). Retention findings then wait without the filing stub. The plugin's
 `should_send_response` vetoes a `final` on a critique-origin turn whose
 stripped text is `NO_REPLY`; the kernel stores it as `unsent` with the
 not-sent marker. That veto is critique's own and always on with this plugin
@@ -1740,6 +1791,120 @@ probe uses the same helper (`ReadOnlyProbe`).
 `critique.fork_prompt.provenance` override must ask for the verdicts format
 above; one written for an objections list fails parsing, and every run
 skips.
+
+### CritiquePlugin: lenses other plugins add (`on_critique_init`)
+
+A plugin adds a critique lens without editing `critique.py` (#1033). The
+lens is data: critique decides when it runs, runs it through the same fork
+machinery as the stylistic lenses, records it, and queues its objections.
+
+**The hook.** CritiquePlugin owns `on_critique_init(config, add_lens)`
+(declared in its `hookspecs`, so it follows the owner-segment rule in
+[plugin-guide.md](plugin-guide.md#declaring-hooks-in-a-plugin)). Critique
+calls it once, from its own `on_init`, and the lens set is fixed until
+restart. An implementer calls `add_lens(lens)` once per lens:
+
+```python
+from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae_cognition.critique import Lens, Threshold
+
+class AlignmentLenses(CorvidaePlugin):
+    optional_depends_on = frozenset({"critique"})
+
+    @hookimpl
+    async def on_critique_init(self, config, add_lens):
+        add_lens(Lens(
+            name="alignment",
+            fork_prompt="[Self-critique: alignment] Pause the conversation "
+                        "here. ...",
+            thresholds=(Threshold("ambiguity", "min", 0.6),),
+            reply_patterns=(r"(?i)\bI'll\b",),
+            sample_rate=0.05,
+        ))
+```
+
+`config` is passed because critique's `on_init` runs concurrently with the
+implementer's own, so the implementer can't count on having stored config
+yet. A static precondition ("only when a knowledge base root is set") is
+the implementer's to check: it doesn't add the lens. Declare
+`optional_depends_on = frozenset({"critique"})`, so that with critique
+disabled the orphaned hookimpl is reported at debug rather than warning.
+
+Critique calls each implementer separately, with only the arguments its
+hookimpl declares and its own `add_lens`, so every warning can name the
+plugin. An implementer that raises is logged by name with the traceback,
+and the lenses it added before the raise are kept.
+
+**The lens.** Frozen dataclasses, holding no callables:
+
+| Field | Meaning |
+|---|---|
+| `name` | Matches `^[a-z][a-z0-9_]*$`; it names the lens's config keys and its outcome entry |
+| `fork_prompt` | The brief. Critique appends the objections JSON schema, so the reply format is critique's, not the author's. `critique.fork_prompt.<name>` replaces the brief (static config, reloaded like the built-ins' prompts) |
+| `thresholds` | `Threshold(dimension, bound, value)`: `dimension` one of `STAGE2_DIMENSIONS`, `bound` `"min"` (holds at value ≥ limit) or `"max"` (≤), `value` the default limit in [0, 1]. At most one per dimension |
+| `reply_patterns` | Regex source strings searched against the sent reply |
+| `sample_rate` | In [0, 1]; default `0.0` |
+
+**Rejections never stop startup** (PRD principle 5, §3.1.17). A lens that
+fails validation is not loaded and a WARNING names the plugin, the lens,
+the rejected value, what was expected and the remedy; the other lenses
+load. Rejected: anything that isn't a `Lens`; a bad name; an empty or
+non-string prompt; a threshold that isn't a `Threshold`, a bad bound, or a
+value or rate outside [0, 1] (a `bool` isn't a number here); two thresholds
+on one dimension; a pattern that doesn't compile; an unknown dimension (the
+warning lists the accepted ones); and a reserved name. Reserved are the
+built-in lenses (`predictive`, `constrained`, `adversarial`, `retention`,
+`proactivity`, `provenance`), the existing scalar keys
+`critique.lens.{ambiguity,commitment,neg_valence,disagreement,novelty,retention}`
+(a lens named `novelty` would make `critique.lens.novelty` both a number
+and a block), and the stylistic run's outcome keys (`lenses`,
+`objections`, `sampled_below_threshold`, `detail`, which a lens's outcome
+entry would overwrite). A name accepted from more than one plugin loads
+from none of them, with one warning naming each contributor: entry-point
+order isn't deterministic, so "first wins" would load a different lens on
+different starts.
+
+**Selection.** A lens runs when every threshold holds and, if it declares
+patterns, at least one matches the reply. Otherwise it runs with
+probability `sample_rate`. A lens with neither runs at its rate alone, so
+`1.0` means every judged turn. Each limit and the rate are tunable per
+channel: `critique.lens.<name>.<dimension>` and
+`critique.lens.<name>.sample_rate`, through `resolve_tunable`. A declined
+turn logs one debug line with the reason (`critique lens alignment declined
+for trace … on …: ambiguity 0.3 < 0.6; sampled out`, `no pattern matched`).
+
+Thresholds are evaluated on **this** exchange's stage 2, not the previous
+exchange's, so each lens is decided at one of two points:
+
+- A lens with no thresholds is decided at `on_agent_response`, on the reply
+  text, without waiting for appraisal.
+- A lens with thresholds is decided when this trace's stage 2 reaches
+  critique's stage-2 listener. When stage 2 produced no vector
+  (`stage2=None`), or there is no appraisal plugin (then it's decided at
+  `on_agent_response`), it runs at its sample rate only, and a WARNING
+  names the lens, the trace and why there is no stage 2.
+
+Added lenses are decided after the built-in checks at both points, so a
+problem deciding them can't cost the stylistic lenses or the provenance
+check their turn. They run on the turns critique already judges: the same
+eligibility and decline skip as the stylistic lenses.
+
+**Running and delivery.** Each decision point that selects a lens enqueues
+one silent `critique:lenses` task. Each lens is a fork of the live window
+with the containment check, exactly as a stylistic lens: forks off, or the
+exchange gone from the window, skips it with the stylistic lenses' warning
+and records nothing. A lens that ran records, in `exchange_log.outcomes`,
+
+```json
+{"critique": {"<name>": {"objections": 1, "sampled": false, "detail": [...]}}}
+```
+
+(`detail` only when there are objections), merged beside the stylistic
+run's keys. Its objections, tagged `[<name>]`, re-enter through
+`funnel.ingest` as framed CONTEXT at the channel's next turn and wake
+nothing, on every origin (PRD §3.7 Critique 4). Redaction doesn't reach
+`critique.<name>.detail` yet; redaction is on hold (#1005, and #1003 for
+the same gap in proactivity's detail).
 
 ### GatePlugin (`packages/corvidae-cognition/corvidae_cognition/gates.py`)
 
@@ -1835,9 +2000,10 @@ runs and the fallback final stays withheld.
 
 What the kernel does with a withheld final is in
 [design.md](design.md#the-output-gate). On the cognition side, critique still
-judges a withheld `user` or `reminder` final, its provenance probe doesn't
-count a withheld row as a record of anything said, and `recall_raw` labels
-withheld rows `(withheld, not sent)`.
+judges a withheld final, whatever its origin, though not a decline (an
+unsent `NO_REPLY` or empty final, #420), its provenance probe doesn't
+count a withheld row as a record of anything said, and `recall_raw` and
+`search_transcripts` label withheld rows `(withheld, not sent)`.
 
 Every tunable resolves through `resolve_tunable` at decision time, so a
 `set_settings` override or a hot config reload applies on the next
@@ -1897,7 +2063,9 @@ A `NO_REPLY` that was actually sent (say another gate's veto raised and the send
 
 **Disabling it.** `plugins.disabled: [silence]` removes the instruction, the veto and the `end_turn` tool; `agent.minimal.yaml.example` does this. A restart rebuilds every conversation's system prompt, so disabling the plugin drops the instruction everywhere at once. The windows still hold earlier `NO_REPLY` rows, though, and with no veto the model may imitate them and send the literal text. If that matters, start those conversations fresh.
 
-**Known gaps.** Appraisal and critique still score a declined turn, so `NO_REPLY` can draw a stylistic objection. The instruction is the same in DMs and group channels; a group-specific variant that names addressing isn't built.
+**Appraisal and critique skip a decline** (#420). The same rule, exported as `is_decline(channel, response_text)` (with `decline_kind(text)` for the shape), gates `AppraisalPlugin`'s stage 2 and `CritiquePlugin`'s stylistic and proactivity checks, so a `NO_REPLY` is never scored or objected to. Both call it before their first await and fail toward running if it raises. A `NO_REPLY` that was sent is a response and is judged.
+
+**Known gaps.** The instruction is the same in DMs and group channels; a group-specific variant that names addressing isn't built.
 
 ### HeartbeatPlugin (`packages/corvidae-cognition/corvidae_cognition/heartbeat.py`)
 
@@ -1935,8 +2103,9 @@ queue first, each not plainly open marked `[in-progress]`, `[blocked]` or
 so the call-to-action is last. `prompts/heartbeat.md` shows a full beat. A failed memory or retired-goals read
 skips the beat, which is retried after one period. The turn then runs the
 ordinary notification pipeline with the agent's normal tools. The `heartbeat`
-origin keeps the existing conventions: critique doesn't review it, the
-decide gate treats it as non-user, and `exchange_log` records it.
+origin follows the general conventions: critique judges it like any other
+turn (#1031), the decide gate treats it as non-user, and `exchange_log`
+records it.
 
 **Its window.** The window grows beat by beat and is bounded by ordinary
 compaction at the channel's budget, `channels.internal:heartbeat.max_context_tokens`

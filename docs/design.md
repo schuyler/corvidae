@@ -27,7 +27,7 @@ This document covers the kernel: the `corvidae` package. The cognition
 plugins (memory, funnel, appraisal, critique, outcome log) are a second
 distribution in the same repository, `corvidae-cognition`, installed with
 the `cognition` extra and documented in [cognition.md](cognition.md). The
-kernel never imports them; they use the plugin API listed in
+kernel never imports them; the kernel modules they import are mapped in
 [plugin-guide.md](plugin-guide.md#what-the-kernel-exports-to-plugins).
 
 ```
@@ -80,6 +80,7 @@ class AgentSpec:
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, annotations: dict | None) -> None
     async def should_process_message(self, channel: Channel, sender: str, text: str, trace_id: str | None) -> bool | None
     async def should_send_response(self, channel: Channel, text: str, emission: str, trace_id: str | None, annotations: dict) -> bool | None
+    async def should_start_work(self, channel: Channel, kind: str, source_channel: str | None, trace_id: str | None, annotations: dict) -> WorkRefusal | None  # corvidae/admission.py
     async def on_message_admitted(self, channel: Channel, trace_id: str, sender: str, text: str) -> None
     async def on_message_rejected(self, channel: Channel, trace_id: str, sender: str, text: str) -> None
     async def on_message_persisted(self, channel: Channel, trace_id: str, rowid: int | None, text: str, annotations: dict) -> None
@@ -142,7 +143,7 @@ plugin.
 The `webhook` plugin owns `on_webhook_subscribe(subscriptions)`, through which
 plugins register handlers for webhook endpoints; see "Webhook ingress" under
 Transports. The `web` plugin owns `on_web_console_init(panels)`, through which
-plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path).
+plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path). The `critique` plugin (cognition extra) owns `on_critique_init(config, add_lens)`, through which plugins add critique lenses; see "CritiquePlugin: lenses other plugins add" in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init).
 
 ### Funnel pull path
 
@@ -163,6 +164,17 @@ that need a single resolved value pass the result list to
 returns `False`; otherwise any `True` returns `True`; otherwise `None`.
 `should_process_message` and `should_send_response` are the hooks resolved
 this way.
+
+`should_start_work` is the one veto that does not return `bool | None`: it
+returns `WorkRefusal(limit, remedy) | None`, so a refusal can name the config
+key reached and what to do next. It is not dispatched through `pm.ahook`
+either. The starting tool calls `corvidae.admission.offer_work(pm, ...)`,
+which calls each implementation by hand, in pluggy's call order (wrappers
+skipped, only the kwargs an impl declares passed), because a gathered call
+raises on the first failure and would lose the other plugins' verdicts. An
+implementation that raises is logged (`logger.exception`, naming the plugin,
+the kind and the channel) and counts as no opinion; the first `WorkRefusal`
+wins and later implementations are not called.
 
 Hooks marked `firstresult=True` in the hookspec (`resolve_llm_error`,
 `resolve_compaction`, `transform_tool_result`, `transform_display_text`,
@@ -200,8 +212,9 @@ owner's plugin name after the prefix.
 | `register_llm_stages` | broadcast (sync, imperative) | `LLMPlugin.on_start`, once, before it creates clients: plugins add `stages[name] = kind` (`chat` or `embedding`) for each model-calling stage they own |
 | `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, Zulip, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines; `MemoryPlugin` runs its turn consolidation trigger from it, awaiting nothing, since the send waits on the hook |
 | `on_notify` | broadcast | inject a notification into a channel queue |
-| `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
+| `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no kernel implementation (`LimitsPlugin`, `core-periphery` extra, rejects at `limits.inbound_per_channel`); None from empty broadcast allows all messages |
 | `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes any `final` of any origin that contains `NO_REPLY` (a containment check, not an exact match) (cognition extra); a raising implementation fails open (logged, sent); `OutboundCapPlugin` vetoes every emission on a channel once the agent has sent `outbound_cap.max_messages` there since the last admitted human message, and likewise once it has sent `outbound_cap.max_messages_per_window` in the last `outbound_cap.window_seconds` — a sliding window a human message does not reset, shipped unset (`outbound-cap` extra, #791, #821, threat-model finding 19); no kernel implementation, so with none registered everything is sent |
+| `should_start_work` | veto, called by hand / first `WorkRefusal` wins | the [admission seam](#the-admission-seam-should_start_work) (K1, #1050): `subagent` (kind `task`), `fork` (kind `fork`) and `notify_other_channel` (kind `note`) call `offer_work` before they enqueue anything; `channel` is the queue the work would land on, `source_channel` the channel it comes from; a raising implementation is logged and treated as no opinion; `LimitsPlugin` refuses past `limits.max_waiting` (`core-periphery` extra); no kernel implementation, so with none registered everything starts |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
 | `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None). Each message of a coalesced burst fires it under its own trace, in arrival order, before the turn's model call |
@@ -941,9 +954,16 @@ All operations are synchronous; no database access:
   cut forward past a straddling tool cycle (`snap_cut_forward`) unless that
   would drop the newest row, in which case the orphaned result renders as a
   framed notification. The newest row is always kept; if it alone exceeds
-  the budget its content is truncated in memory only, with a visible
-  marker. A newest row that is not a message object has no content to
-  truncate, so it stands as it is and the caller reports the overage.
+  the budget it is truncated in memory only (#1045): `content` and
+  `reasoning_content` longer than the cut get their first characters and a
+  visible marker, and each tool call's string `function.arguments` longer
+  than the cut is replaced by valid JSON,
+  `{"_truncated": "first K of N characters: <prefix>"}`, keeping the call's
+  `id`, `type` and `name` so result pairing and rendering still work. One
+  cut length applies to all of them, binary-searched to the largest that
+  fits; a field no longer than the cut keeps its stored value. A newest row
+  that is not a message object, or whose size is in no field it can cut,
+  stands as it is and the caller reports the overage.
   Returns `(dropped, truncated)`.
 - The window only grows at the tail (`append`) and truncates at the head
   (`replace_with_summary`, `fit_to_budget`). Nothing is inserted, removed or mutated
@@ -1095,6 +1115,41 @@ bounded by startup.
 `Agent.queues` is a public `dict[str, SerialQueue]` (keyed by channel ID).
 Queues added after startup are visible to other plugins that hold a reference
 to this dict because the reference is live.
+
+**Waiting work (K1, #1050).** Two synchronous reads let a plugin see how much
+accepted work has not finished; both return `dict[str, int]` keyed by channel
+ID with zero entries omitted.
+
+- `Agent.waiting_work()` counts, per channel, the items on its `SerialQueue`
+  (queued, plus the item in flight, plus any item a coalesced turn absorbed
+  that is still unanswered; see `SerialQueue.pending_items`) and the
+  `TaskQueue` tasks, queued or running, whose `Task.channel` is that channel
+  (`TaskQueue.pending_by_channel`). A subagent or fork stays on the TaskQueue
+  until it finishes, so fan-out from one turn is visible even though its
+  result can never be refused. The task that carries the starting tool's own
+  call is running on the TaskQueue when the tool offers its work, so it
+  counts: for `subagent`, `fork` and `notify_other_channel` the effective
+  ceiling of a `max_waiting` check is at most `max_waiting - 1` (the
+  response's other tool calls count too). `LimitsPlugin` subtracts
+  `waiting_messages()` before comparing, so messages from users never
+  count toward the ceiling (#1052).
+- `Agent.waiting_messages()` counts USER items only (transport messages;
+  notifications and tool results never count, and a turn retry counts once
+  it is re-queued, not while it waits on its timer), from the same
+  `pending_items()`. It exists because only the Agent knows item roles;
+  `LimitsPlugin` uses it for the per-channel inbound cap.
+
+Known undercounts: a result in transit between a task finishing and its
+`on_notify` enqueue is on neither the TaskQueue nor the channel queue, and a
+turn retry waiting on a timer is not an item. Both are brief, and both err
+toward admitting.
+
+`SerialQueue.pending_items()` returns the in-flight items followed by the
+queued ones, read synchronously from `asyncio.Queue._queue` (the same
+CPython-private shortcut as `take_while`). `_run` sets the in-flight list to
+the item it is processing and clears it in a `finally`; `take_while` appends
+each item it takes, so a burst absorbed into one coalesced turn keeps
+counting until that turn ends.
 
 ### Message processing
 
@@ -1374,6 +1429,29 @@ annotations dict; origin is not a kernel concept, so a gate that needs it reads
 `annotations["origin"]` (stamped by producers such as the scheduler) the way
 cognition's `GatePlugin` does ([cognition.md](cognition.md#gateplugin)).
 
+### The admission seam (`should_start_work`)
+
+`should_start_work(channel, kind, source_channel, trace_id, annotations)` is
+offered internal work that is about to start, so a plugin can bound fan-out
+(K1, #1050; PRD §3.1 item 20). Callers, each before it builds a `Task` or
+enqueues anything: `subagent` (kind `task`), `fork` (kind `fork`), both with
+the calling channel as `channel` (the result lands there), and
+`notify_other_channel` (kind `note`, `channel` the target, `source_channel`
+the sender). The starting turn's `trace_id` and `annotations` ride along.
+
+**Never offered:** the result of work already started. A task completion
+notification (`TaskPlugin._on_task_complete` through `on_notify`), a deferred
+tool result and the Task that carries an ordinary tool call do not pass
+through the seam and cannot be refused, so a refusal never strands work that
+was already accepted.
+
+A refusal is the starting tool's result, `Not started: <limit> reached —
+<remedy>`, so the model reads it as an ordinary tool result and nothing is
+enqueued. `offer_work` logs one warning,
+`work refused: <kind> on <channel> (from <source>): <limit> reached`, with
+`kind`, `channel`, `source_channel`, `limit` and `trace_id` as `extra`. All
+five hook parameters are required (no defaults; see the arg-binding guard).
+
 ### Tool call dispatch
 
 `_dispatch_tool_calls` records all tool call IDs in
@@ -1596,8 +1674,9 @@ created per server at connect time and no class-level list could name them.
 Declared today: `read_file` (so a spill file read back is fenced, and so is
 any other file), `web_fetch`, `web_search`, `shell` and `task_pipeline` (a
 command's output, or a `cat` of a spill file, is as much outside text as a
-file's contents are), and every tool `mcp_client` builds. A tool nobody
-declares is unfenced.
+file's contents are), every tool `mcp_client` builds, and the memory tools
+`search_transcripts` and `recall_raw` (replayed `message_log` rows carry
+whatever their senders wrote; #648). A tool nobody declares is unfenced.
 
 The declaration is evaluated when the call is dispatched, not when the
 result arrives. `_dispatch_tool_calls` writes `Agent._dispatched_calls`,
@@ -1849,7 +1928,8 @@ or redact the row (#232):
 - **Web history replay** (`_fetch_history_rows` / `_rows_to_frames`): a corrupt
   row, or one with an unknown `message_type`, among the newest rows is skipped
   and the other rows still replay; it no longer blanks the channel's history.
-- **Memory** (consolidation, `recall_raw`, the `message_fts` backfill): see
+- **Memory** (consolidation, `recall_raw`, `search_transcripts`, the
+  `message_fts` backfill): see
   [cognition.md](cognition.md#corrupt-message_log-rows).
 - **Redact** (below): the tool that fixes a corrupt row works on it.
 
@@ -2182,8 +2262,9 @@ the survivor itself rather than relying on the watchdog's WARNING, because
 the pre-flight disables kernel logging to keep stderr to its one line.
 
 `Runtime.arm_exit_bound()` exists for that second caller rather than the
-pre-flight importing `corvidae.shutdown`, which would put a kernel-internal
-module in a package's imports and break `tests/test_kernel_boundary.py`.
+pre-flight importing `corvidae.shutdown`, so the restart package reaches the
+watchdog through `Runtime`, which it already uses, rather than through a
+second kernel module.
 Tests never arm the watchdog in-process: an autouse fixture in
 `tests/conftest.py` patches the runtime's reference to a no-op, because the
 acp CLI tests reach the armed path through `run_daemon` and a failed start
@@ -2694,7 +2775,9 @@ catches exceptions, and delivers the result via `on_notify`.
 `max_workers` (default 1) to run up to that many tasks simultaneously.
 Tracks active tasks and completed results (bounded deque, last 100).
 `is_idle` property returns `True` when the queue has no pending items
-and no tasks are currently executing.
+and no tasks are currently executing. `pending_by_channel()` returns the
+count of queued plus running tasks per `Task.channel.id`, read synchronously
+(it feeds `Agent.waiting_work`).
 
 **TaskPlugin** — hookimpl that owns the TaskQueue. Reads
 `daemon.max_task_workers` from config (default 4) to set concurrency,
@@ -2972,8 +3055,8 @@ validation fails at startup.
 
 ## SchedulerPlugin
 
-`scheduler.py` — the clock-driven producer: reminders and operator-declared
-periodic jobs (#59; design rationale in
+`scheduler.py` — the clock-driven producer: reminders, the agent's
+recurring jobs and operator-declared periodic jobs (#59; design rationale in
 `plans/scheduler.md`). Entry point name: `"scheduler"`;
 `depends_on = {"registry", "persistence", "clock"}`.
 
@@ -2982,8 +3065,10 @@ due time, an optional interval, a target channel id, the text, and an
 origin (`reminder`; `heartbeat` is still accepted so old configs load, but
 the heartbeat is now cognition's `HeartbeatPlugin`, started on system idle).
 Reminders come from the `remind_me`
-tool and are pinned to the calling channel. Jobs come from
-`scheduler.jobs` in `agent.yaml` and are synced by `name`.
+tool and the agent's recurring jobs from `add_job`; both are pinned to the
+calling channel and always carry origin `reminder` (#814). Operator jobs
+come from `scheduler.jobs` in `agent.yaml` (or `scheduler.jobs_file`) and
+are synced by `name`.
 
 ```sql
 CREATE TABLE schedule (
@@ -2993,13 +3078,14 @@ CREATE TABLE schedule (
   origin TEXT NOT NULL,        -- 'reminder' ('heartbeat' accepted for old configs)
   text TEXT NOT NULL,          -- the objective, as the agent or operator wrote it
   next_fire_at REAL NOT NULL,  -- unix seconds, UTC
-  interval_seconds REAL,       -- NULL means one-shot
+  interval_seconds REAL,       -- NULL with no cron spec means one-shot
   created_at REAL NOT NULL,
   created_by TEXT NOT NULL,    -- 'config' | 'tool'
   last_fired_at REAL,
   enabled INTEGER NOT NULL DEFAULT 1,
   disabled_reason TEXT,        -- 'fired' | 'cancelled' | 'missed' | 'removed_from_config'
-  schedule_spec TEXT           -- config jobs: canonical every/at/timezone, to detect changes
+  schedule_spec TEXT           -- config jobs: canonical every/at/cron/timezone, to detect changes;
+                               -- agent jobs: cron=<expr>;tz=<name>; NULL for one-shot reminders
 );
 CREATE INDEX schedule_due ON schedule (enabled, next_fire_at);
 ```
@@ -3078,21 +3164,29 @@ was disabled. A name no longer configured is disabled as
 ERROR and its existing row is left alone, so a typo does not stop a
 running job. A reload wakes the timer.
 
-**Tools.** `remind_me(when, text)`, `list_reminders()`, and
-`cancel_reminder(id)` act on `_ctx.channel` only and take no channel
-argument. The tool, not the model, parses `when` against
+**Tools.** `remind_me(when, text)`, `list_reminders()`,
+`cancel_reminder(id)`, `add_job(cron, prompt)` and
+`update_job(id, cron, prompt)` act on `_ctx.channel` only and take no
+channel or origin argument (#814). The tool, not the model, parses `when` against
 `scheduler.timezone`: a relative duration (`20m`, `1h30m`), ISO 8601 with
 or without an offset, or bare `HH:MM` for the next occurrence; a bare
 number is refused as ambiguous. It returns the resolved absolute time.
-`scheduler.max_reminders_per_channel` caps pending tool rows per channel,
-and text is capped at 2000 characters. `cancel_reminder` refuses config
-jobs, and treats another channel's row as not found.
+`add_job` takes a 5-field cron expression, interpreted in
+`scheduler.timezone` at fire time, and refuses one that does not parse or
+never matches; its row recurs like a config cron job and is framed as a
+"recurring job you set". `update_job` changes the cron and/or prompt of
+one of the caller's own recurring jobs. `scheduler.max_reminders_per_channel`
+caps pending tool rows (reminders and jobs together) per channel, and text
+is capped at 2000 characters. `cancel_reminder` and `update_job` refuse
+config jobs and treat another channel's row as not found. No tool writes
+the operator's jobs file.
 
 **Shutdown.** `on_stop` cancels the timer task; firings already enqueued
 drain with the channel queues.
 
-**Not in phase one:** a `send_to_channel` tool, recurring reminders by
-tool, cron syntax, hook-kind jobs (see `plans/scheduler.md`).
+**Not built:** a `send_to_channel` tool (cross-channel reach is PRD
+§3.5.9's), hook-kind jobs (see `plans/scheduler.md`), and a floor on how
+often an agent-set job may recur (PRD §3.9.7).
 
 ## Subagent Tool
 
@@ -3430,14 +3524,16 @@ registers `task_status` as tool closures during `on_start`.
 | `task_status()` | `task.py` | Report task queue status |
 | `task_result(task_id)` | `task.py` | Return a completed task's stored result by id (in-memory deque, then the JSONL file when persistence is enabled) |
 
-`SchedulerPlugin` registers three tools scoped to the calling channel
+`SchedulerPlugin` registers five tools scoped to the calling channel
 (see [SchedulerPlugin](#schedulerplugin)):
 
 | Tool | File | Purpose |
 |------|------|---------|
 | `remind_me(when, text)` | `scheduler.py` | Create a one-shot reminder on this channel; returns the resolved time |
 | `list_reminders()` | `scheduler.py` | Pending rows on this channel, config jobs flagged read-only |
-| `cancel_reminder(id)` | `scheduler.py` | Cancel a tool-created reminder on this channel |
+| `cancel_reminder(id)` | `scheduler.py` | Cancel a tool-created reminder or recurring job on this channel |
+| `add_job(cron, prompt)` | `scheduler.py` | Create a recurring job on this channel, origin `reminder` |
+| `update_job(id, cron, prompt)` | `scheduler.py` | Change one of this channel's recurring jobs the agent set |
 
 ## Transports
 
@@ -3805,7 +3901,7 @@ stop (#390). Since a reply to a coalesced burst already zeroes the count
 owns, whatever originated the turn, and liveness and reply bookkeeping
 tolerate a reply that answers no outstanding message. Sending to a channel *other than* the turn's own is in the PRD (PRD §3.5.9:
 "Nothing gates which channel a turn may speak on"). No general text
-`send_to_channel` tool exists — the scheduler's "Not in phase one" note under
+`send_to_channel` tool exists — the scheduler's "Not built" note under
 [SchedulerPlugin](#schedulerplugin) and `docs/threat-model.md`'s deferred entry
 are about that tool — but `send_signal_attachment` already reaches any known
 `signal:` contact, from a turn begun on any channel: a file, and a caption with
@@ -4174,7 +4270,7 @@ is guarded at zero in `DiscordPlugin._release_all`, as on Signal,
 with the same early typing release (#101): any final, sent or withheld,
 zeroes the count.
 Sending to a channel other than the turn's own has no general text tool: no
-`send_to_channel` exists (the scheduler's "Not in phase one" note and
+`send_to_channel` exists (the scheduler's "Not built" note and
 `docs/threat-model.md`). Two of this transport's tools do cross channels
 already: `send_attachment`, whose caption is text, and `start_thread` — both
 against any registered `discord:` channel except a DM, which `start_thread`
@@ -4701,8 +4797,9 @@ change to the goal's `origin_channel` with one call to
 `cross_channel_send.notify_other_channel`. The goals plugin fires the hook
 inside the tool call that made the change, so `notify_other_channel` reads the
 changing turn's attribution: the notification carries `source="agent_send
-from <actor>"`, `origin: "agent_send"`, `source_channel`, `source_trace_id`
-and a carried-forward `hop_count`, and the `cross_channel_send.max_hops` guard
+from <actor>"`, `source_channel`, `source_trace_id`, the changing turn's own
+`origin` verbatim when it has one (none for a user turn, #1034) and a
+carried-forward `hop_count`, and the `cross_channel_send.max_hops` guard
 bounds a loop exactly as it bounds any send. An origin that isn't live is
 resolved the way every `notify_other_channel` target is
 (`resolve_persisted_channel`).
@@ -4891,7 +4988,7 @@ memory:
 scheduler:
   timezone: UTC                 # IANA name; resolves offset-less times (default UTC)
   catch_up_window: 3600         # seconds a missed one-shot may be late and still fire
-  max_reminders_per_channel: 50 # pending tool-created reminders per channel
+  max_reminders_per_channel: 50 # pending tool-created reminders and jobs per channel
   jobs:                         # operator-declared recurring jobs, synced by name
     - name: morning-checkin
       channel: irc:#lex
@@ -5125,7 +5222,7 @@ packages/corvidae-cognition/   # the cognition extra (docs/cognition.md)
 └── corvidae_cognition/
     ├── memory.py         # MemoryPlugin (consolidation + retrieval + message_fts schema)
     ├── retention.py      # run_retention_job(), retention_score()
-    ├── memory_tools.py   # MemoryToolsPlugin, search_memory, recall_raw
+    ├── memory_tools.py   # MemoryToolsPlugin, search_memory, search_transcripts, recall_raw
     ├── funnel.py         # FunnelPlugin (context-admission funnel)
     ├── appraisal.py      # AppraisalPlugin
     ├── critique.py       # CritiquePlugin

@@ -44,6 +44,10 @@ class SerialQueue:
     def __init__(self) -> None:
         self._queue: asyncio.Queue = asyncio.Queue()
         self._consumer_task: asyncio.Task | None = None
+        # Items accepted but unanswered that have left the queue: the item the
+        # consumer is processing plus any a coalesced turn absorbed through
+        # take_while. Cleared when the owning turn ends.
+        self._in_flight: list[QueueItem] = []
 
     @property
     def is_empty(self) -> bool:
@@ -54,6 +58,13 @@ class SerialQueue:
         processing the last dequeued item.
         """
         return self._queue.empty()
+
+    def pending_items(self) -> list[QueueItem]:
+        """Items accepted and not yet finished: in flight, then queued.
+
+        Synchronous. Reads asyncio.Queue._queue (see take_while's shortcut).
+        """
+        return [*self._in_flight, *self._queue._queue]
 
     async def enqueue(self, item) -> None:
         """Add an item to the queue.
@@ -87,6 +98,8 @@ class SerialQueue:
             # get_nowait keeps asyncio's own bookkeeping consistent.
             taken.append(self._queue.get_nowait())
             self._queue.task_done()
+        # A taken item stays pending until the owning turn ends.
+        self._in_flight.extend(taken)
         return taken
 
     def start(self, process_fn: Callable) -> None:
@@ -110,6 +123,8 @@ class SerialQueue:
         """
         while True:
             item = await self._queue.get()
+            # Record the item as pending work for the depth reads.
+            self._in_flight = [item]
             try:
                 await process_fn(item)
             except Exception:
@@ -118,6 +133,8 @@ class SerialQueue:
                     item.channel.id,
                 )
             finally:
+                # The turn is over: it and anything it absorbed are finished.
+                self._in_flight = []
                 self._queue.task_done()
 
     async def drain(self) -> None:

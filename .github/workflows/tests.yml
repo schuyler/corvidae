@@ -52,8 +52,8 @@ jobs:
           present = [m for m in ("sqlite_vec", "discord", "corvidae_cognition",
                                  "cross_channel_send", "corvidae_restart",
                                  "webhook_notify", "context_panel", "corvidae_timepiece",
-                                 "corvidae_inotify", "emoji", "outbound_cap",
-                                 "github_webhook", "goals_notify")
+                                 "corvidae_inotify", "emoji", "outbound_cap", "corvidae_core_periphery",
+                                 "github_webhook", "goals_notify", "corvidae_vision")
                      if importlib.util.find_spec(m) is not None]
           assert not present, f"kernel install has optional packages: {present}"
           import corvidae.channels.discord  # must import without its SDK
@@ -61,8 +61,11 @@ jobs:
           print("kernel install: no optional packages")
           PY
 
+      # packages/corvidae-vision/tests is collected, not ignored: test_vision.py
+      # skips itself without the extra, and running it here is what proves the
+      # skip still works (#965).
       - name: Run kernel tests
-        run: uv run --no-sync pytest -q --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/corvidae-vision/tests --ignore=packages/rss-reader/tests --ignore=tests/test_github_webhook --ignore=tests/test_goals_notify
+        run: uv run --no-sync pytest -q --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/rss-reader/tests --ignore=tests/test_github_webhook --ignore=tests/test_goals_notify --ignore=tests/test_core_periphery
 
       # Advisory until the tree is clean (#111, #455): the output is in the
       # log, but a finding does not fail the run. Drop continue-on-error in
@@ -92,18 +95,20 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies (all extras)
-        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra github-webhook --extra goals-notify
+        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra github-webhook --extra goals-notify --extra vision --extra core-periphery
 
       # About 26 test sites skip when sqlite-vec can't load, and the Discord
-      # tests skip without the SDK, as do the Signal tests without `emoji`, which would turn them into silent skips
-      # on a green run. Fail here instead.
-      - name: Check sqlite-vec, discord and emoji load
+      # tests skip without the SDK, as do the Signal tests without `emoji` and
+      # the vision tests without `corvidae_vision` (#965), which would turn them
+      # into silent skips on a green run. Fail here instead.
+      - name: Check sqlite-vec, discord, emoji and corvidae_vision load
         run: |
           uv run --no-sync python - <<'PY'
           import sqlite3
           import sqlite_vec
           import discord
           import emoji
+          import corvidae_vision
 
           conn = sqlite3.connect(":memory:")
           conn.enable_load_extension(True)
@@ -114,7 +119,7 @@ jobs:
           PY
 
       - name: Run tests
-        run: uv run --no-sync pytest -q --ignore=packages/corvidae-vision/tests
+        run: uv run --no-sync pytest -q
 
   # Cognition without its sqlite-vec extra (#130): the FTS5-only degradation
   # path PRD §3.7 (Memory 5) requires. Without this job the vector tests skip

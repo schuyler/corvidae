@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "corvidae-core-periphery"
+version = "0.0.1"
+description = "Core/periphery plugins for corvidae: admission limits on waiting work and inbound messages"
+requires-python = ">=3.13"
+dependencies = ["corvidae"]
+
+[project.entry-points.corvidae]
+limits = "corvidae_core_periphery.limits:LimitsPlugin"
+
+[tool.uv.sources]
+corvidae = { workspace = true }
+
+# Explicit, so a later docs/ directory here can't break the build.
+[tool.setuptools.packages.find]
+include = ["corvidae_core_periphery*"]
