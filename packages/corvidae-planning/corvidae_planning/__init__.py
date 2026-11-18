@@ -19,41 +19,54 @@ from corvidae_cognition.critique import Lens
 # All patterns are case-insensitive (?i).
 _GOAL_SIGNALS = (
     # Commitment: "I'll do X", "next step: Y", "TODO: Z"
-    r"(?i)\bI(?:'ll| will)\b",
-    r"(?i)\bnext step\b",
+    r"(?i)\bI(?:['\u2019]ll|\s+will)\b",
+    r"(?i)\bwe(?:['\u2019]ll|\s+will)\b",
+    r"(?i)\bI(?:['\u2019]m|\s+am)\s+going\s+to\b",
+    r"(?i)\bnext\s+step\b",
     r"(?i)\bTODO\b",
-    r"(?i)\bI(?:'ll| will) (?:pick up|start|work on|build|write|set up|create|add|file|open)\b",
     # Completion: "done", "retired", "merged", "shipped"
-    r"(?i)\b(?:is|are|was|were|got) (?:done|complete|finished)\b",
+    r"(?i)\b(?:is|are|was|were|has|have|had|got)\s+(?:been\s+)?(?:done|complete|completed|finished|closed|resolved)\b",
     r"(?i)\bretired\b",
     r"(?i)\bmerged\b",
     r"(?i)\bshipped\b",
     # State-change: blocker clearing, scope shift
     r"(?i)\bunblocked\b",
-    r"(?i)\bblocked on\b",
-    r"(?i)\bno longer (?:blocked|pending|waiting)\b",
-    r"(?i)\b(?:scope|priority) (?:shift|change|changed)\b",
+    r"(?i)\bblocked\s+on\b",
+    r"(?i)\bno\s+longer\s+(?:blocked|pending|waiting)\b",
+    r"(?i)\b(?:scope|priority)\s+(?:has\s+)?(?:shift|shifted|change|changed)\b",
 )
 
 # The fork prompt: asks the model to evaluate whether the turn warrants
 # a goal action. High-precision threshold (>=80% confidence).
+# The fork does NOT have access to the goal list — it produces a goal
+# description, and the agent resolves it to a goal id.
 _FORK_PROMPT = """\
-[Self-critique: planning] Review the most recent exchange. Does it warrant a goal action?
+[Self-critique: planning] Review the most recent agent reply. Does it warrant a goal action?
 
-- CREATE: the agent committed to a multi-step task ("I'll do X", "next step: Y") that is not already a goal.
-- UPDATE: an existing goal's state changed (a blocker cleared, a new finding landed, the scope shifted) and the goal text is now stale.
-- RETIRE: an existing goal is done (the work is complete) but not yet retired.
+You do not have access to the current goal list. You are evaluating the reply text only.
 
-Fire ONLY if you are confident (>=80%) that a goal action is warranted. If the turn is ambiguous, or the goal action is trivial (a single-beat task that doesn't need tracking), don't fire.
+Actions:
+- create: the agent committed to a multi-step task that is not already a goal. "goal" should be a short new goal title.
+- update: an existing goal's state changed (a blocker cleared, a new finding landed, the scope shifted) and the goal text is now stale. "goal" should be a short description of which goal (the agent will resolve it to an id).
+- retire: an existing goal is done (the work is complete) but not yet retired. "goal" should be a short description of which goal (the agent will resolve it to an id).
 
-Output JSON: {"action": "create"|"update"|"retire", "goal": "<description or goal id>", "rationale": "<one sentence>"} or null if no goal action is warranted."""
+If you would assign less than 80% probability that a goal action is needed, return null. If the goal action is trivial (a single-beat task that doesn't need tracking), return null.
+
+Return exactly one JSON value. No markdown.
+If no action is warranted, return null.
+Otherwise return an object with fields:
+- action: one of "create", "update", "retire"
+- goal: string (a title for create, a description for update/retire)
+- rationale: string (one sentence)"""
 
 
 class PlanningLensPlugin(CorvidaePlugin):
     """Contributes the planning lens to the critique plugin.
 
-    The lens has no thresholds (it doesn't use the appraisal vector) and
-    a sample_rate of 0.0 (it fires only when a reply pattern matches).
+    The lens has no thresholds (it doesn't use the appraisal vector).
+    ``sample_rate=0.0`` is the pattern-only sentinel: when a reply pattern
+    matches, the lens runs immediately (no sampling); when no pattern
+    matches, the sampling draw at 0.0 means it never runs.
     """
 
     depends_on = frozenset({"critique"})
@@ -65,5 +78,6 @@ class PlanningLensPlugin(CorvidaePlugin):
             fork_prompt=_FORK_PROMPT,
             thresholds=(),
             reply_patterns=_GOAL_SIGNALS,
+            # Pattern-only: runs when a reply pattern matches, never otherwise.
             sample_rate=0.0,
         ))
