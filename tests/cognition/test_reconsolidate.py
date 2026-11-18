@@ -231,6 +231,24 @@ async def test_an_adopted_copy_is_refused_whatever_the_config_says(tmp_path):
     assert "--snapshot-from" in err.value.message
 
 
+async def test_a_copy_adopted_over_a_symlinked_sessions_db_is_refused(tmp_path):
+    # sessions.db is a symlink into a data directory. Adopting with
+    # `mv variant sessions.db` replaces the link itself, so the guard must
+    # remember the path the operator named, not the link's target.
+    data = tmp_path / "data"
+    data.mkdir()
+    target = data / "sessions.db"
+    await make_live_db(target)
+    live = tmp_path / "sessions.db"
+    live.symlink_to(target)
+    variant = tmp_path / "variant-a.db"
+    await rc.snapshot_database(live, variant)
+    variant.replace(live)
+    with pytest.raises(click.ClickException) as err:
+        rc.check_is_copy(live, live_path=None)
+    assert str(live) in err.value.message and "adopted" in err.value.message
+
+
 # ---------------------------------------------------------------------------
 # A full run
 # ---------------------------------------------------------------------------
@@ -337,11 +355,13 @@ async def test_since_until_select_by_created_at_and_leave_the_rest(copy):
     assert report.records_superseded == 1
 
 
-async def test_overlapping_selected_records_are_redone_once(copy):
-    # Near-dup merges leave active records whose ranges overlap. Their union
-    # is one stretch, so no message is consolidated twice.
+@pytest.mark.parametrize("second_start", [7, 13], ids=["many-shared", "one-shared"])
+async def test_overlapping_selected_records_are_redone_once(copy, second_start):
+    # Near-dup merges leave active records whose ranges overlap, by many
+    # messages or by just one. Their union is one stretch, so no message is
+    # consolidated twice.
     first = add_record(copy, CHAN, 1, 13, created_at=500.0)
-    second = add_record(copy, CHAN, 7, 23, created_at=500.0)
+    second = add_record(copy, CHAN, second_start, 23, created_at=500.0)
     report, _, _ = await run(copy, since=0.0)
     assert report.failed == []
     spans = sorted(rows(copy, "SELECT msg_id_start, msg_id_end FROM memory_reply"))

@@ -177,8 +177,11 @@ def _backup(source: Path, dest: Path) -> None:
             dst.execute(COPY_MARKER_DDL)
             dst.execute(
                 "INSERT INTO reconsolidation_copy (source, created_at) VALUES (?, ?)",
-                # Resolved, so check_is_copy can compare it from any directory.
-                (str(source.resolve()), time.time()),
+                # Absolute, so check_is_copy can compare it from any directory;
+                # not resolved, so a symlinked sessions.db is remembered as the
+                # path the operator named, which is where an adopted copy lands
+                # (samefile follows any link when the check runs).
+                (str(source.absolute()), time.time()),
             )
             dst.commit()
         finally:
