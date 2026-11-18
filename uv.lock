@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -13,6 +13,7 @@ members = [
     "corvidae-cognition",
     "corvidae-core-periphery",
     "corvidae-inotify",
+    "corvidae-planning",
     "corvidae-restart",
     "corvidae-timepiece",
     "corvidae-vision",
@@ -685,6 +686,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "corvidae", editable = "." }]
+
+[[package]]
+name = "corvidae-planning"
+version = "0.0.1"
+source = { editable = "packages/corvidae-planning" }
+dependencies = [
+    { name = "corvidae" },
+    { name = "corvidae-cognition" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "corvidae", editable = "." },
+    { name = "corvidae-cognition", editable = "packages/corvidae-cognition" },
+]
 
 [[package]]
 name = "corvidae-restart"
