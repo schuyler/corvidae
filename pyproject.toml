@@ -201,3 +201,4 @@ outbound-cap = { workspace = true }
 corvidae-core-periphery = { workspace = true }
     corvidae-vision = { workspace = true }
     rss-reader = { workspace = true }
+    corvidae-planning = { workspace = true }
