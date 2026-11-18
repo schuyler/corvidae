@@ -16,6 +16,3 @@ corvidae = { workspace = true }
 
 [project.entry-points.corvidae]
 vision = "corvidae_vision:VisionPlugin"
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"

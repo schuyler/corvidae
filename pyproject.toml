@@ -77,6 +77,10 @@ restart = [
 outbound-cap = [
     "outbound-cap",
 ]
+# Admission limits on waiting work and inbound messages (#1050).
+core-periphery = [
+    "corvidae-core-periphery",
+]
 timepiece = [
     "corvidae-timepiece",
 ]
@@ -194,5 +198,6 @@ corvidae-restart = { workspace = true }
 corvidae-timepiece = { workspace = true }
 corvidae-inotify = { workspace = true }
 outbound-cap = { workspace = true }
+corvidae-core-periphery = { workspace = true }
     corvidae-vision = { workspace = true }
     rss-reader = { workspace = true }

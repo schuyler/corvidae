@@ -35,6 +35,7 @@ from corvidae.outbound import (
 )
 
 if TYPE_CHECKING:
+    from corvidae.admission import WorkRefusal
     from corvidae.channel import Channel
     from corvidae.context import ContextWindow, MessageType
 
@@ -854,6 +855,46 @@ class AgentSpec:
             channel muting). No built-in plugin implements this hook. Return
             False to reject, True to force-accept, None for no opinion.
             Resolved with resolve_reject_wins.
+        """
+
+    @hookspec
+    async def should_start_work(
+        self,
+        channel: Channel,
+        kind: str,
+        source_channel: str | None,
+        trace_id: str | None,
+        annotations: dict,
+    ) -> WorkRefusal | None:
+        """Gate hook: decide whether internal work may start (K1, #1050).
+
+        Grammar class: veto (broadcast; the first WorkRefusal wins).
+
+        Called by the tool that starts work, before it enqueues anything:
+        ``subagent`` (kind "task"), ``fork`` (kind "fork") and
+        ``notify_other_channel`` (kind "note"), through
+        ``corvidae.admission.offer_work``, which calls each implementation
+        itself so one failure cannot discard its siblings' verdicts. Return a
+        ``WorkRefusal`` to refuse; anything else is no opinion. An
+        implementation that raises is logged and treated as no opinion.
+
+        Never offered: the result of work already started (a task completion
+        notification, a deferred tool result) and the Task that carries an
+        ordinary tool call. Those are never refused.
+
+        A refusal becomes the starting tool's result,
+        ``Not started: <limit> reached -- <remedy>``, and is logged at
+        warning with the kind, both channels and the limit.
+
+        All parameters are required (no defaults), so the arg-binding guard
+        catches an impl that re-declares one with a default.
+
+        Args:
+            channel: The channel whose queue the work would land on.
+            kind: "task", "fork" or "note".
+            source_channel: Id of the channel the work comes from, if any.
+            trace_id: The starting turn's trace id, if any.
+            annotations: The starting turn's annotations.
         """
 
     @hookspec

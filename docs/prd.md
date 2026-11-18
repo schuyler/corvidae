@@ -28,8 +28,9 @@ new or a tool do something new records it in the threat model (principle
 
 `docs/prd-core-periphery-supplement.md` is part of this document for
 deployments that run the core/periphery strategy. It is accepted as the
-target, and conformance is checked from acceptance of its technical
-reference document (TRD). It adds principles 17–21 and amends, for those
+target, and conformance is checked from the owner's acceptance of its
+technical reference document (TRD), `docs/trd-core-periphery.md`, on
+2026-11-17. It adds principles 17–21 and amends, for those
 deployments, the principles and requirements its §4 lists; its §0 says
 how its requirements read.
 
@@ -470,6 +471,14 @@ one is a bug even if its tests pass.
     `max_turns` (item 3). The last message's trace owns the turn: every
     turn hook, usage row and reply carries it, and the earlier messages'
     traces get admission and persistence only.
+20. Internal work that is about to start (a task, a fork, a note or other
+    item one context puts on another's queue) is offered to plugins for a
+    verdict before it is accepted, as inbound messages and outbound
+    emissions are. A refusal returns to whatever tried to start the work
+    as a result naming the limit and the remedy, and is logged at
+    warning. The result of work already started is never offered. The
+    kernel gives no verdict of its own, and lets plugins read how much
+    accepted work is waiting.
 
 ### 3.2 Transports
 
@@ -842,7 +851,7 @@ Per transport:
 1. Built-in tools: `shell`, `read_file`, `write_file`, `web_fetch`,
    `web_search`, `task_pipeline`, `task_status`, `set_settings`,
    `subagent`, `fork`, the scheduler's `remind_me`/`list_reminders`/
-   `cancel_reminder`, memory's `search_memory`/`search_transcripts`/`recall_raw`, and the
+   `cancel_reminder`/`add_job`/`update_job`, memory's `search_memory`/`search_transcripts`/`recall_raw`, and the
    send, note and read tools (§3.5.9–11). Schemas
    are generated from type hints and docstrings; `_`-prefixed parameters
    are injected (`ToolContext`: channel, tool-call id, task queue), never
@@ -954,8 +963,7 @@ Per transport:
    any one destination over a period is a restriction the operator can
    apply (principle 15); none applies unless set. It counts every message
    the agent starts, as opposed to the reply a turn owes the channel it
-   runs on, and a reminder firing on a channel other than the one that set
-   it counts as one. It limits flooding a contact, not crossing channels. A
+   runs on. It limits flooding a contact, not crossing channels. A
    message to someone the inbound allowlist doesn't cover, on a one-to-one
    channel, admits that person's replies on that channel: the agent can
    start a conversation, not only send into a void. A message into a group
@@ -979,10 +987,10 @@ Per transport:
     channel, with its own trace and a stamped link to the exchange that
     sent the note, never an inferred one. It carries the origin of the
     exchange that started the chain (§3.1.4), so the chain's kind
-    (principle 13), critique eligibility (§3.7 Critique 3), budget (§3.1.3)
-    and latency bound (§3.13.5) all follow how the chain started. The target's
-    turn still judges for itself, and may end without sending anything
-    (§3.7, the right to silence).
+    (principle 13), budget (§3.1.3) and latency bound (§3.13.5) all
+    follow how the chain started. The target's turn still judges for
+    itself, and may end without sending anything (§3.7, the right to
+    silence).
 11. Reading another channel: any turn can read another channel's recent
     conversation from the raw log, including what consolidation hasn't
     reached, returned at the tail of the reader's window as framed data.
@@ -1182,12 +1190,18 @@ deciding only what to newly append and in what order.
 
 **Critique.**
 
-1. After an exchange ends, a silent task selects stylistic lenses from the
-   appraisal vector (ambiguity to predictive, commitments to constrained,
-   negative valence with disagreement to adversarial), samples below
-   threshold at `critique.sample_below_rate` as the false-negative bound,
-   and runs each lens as a schema-constrained judgment of the exchange as
-   the agent saw it (§3.8).
+1. After an exchange ends, critique checks it with lenses, without delaying
+   the reply. Each lens checks for one kind of problem and runs on the
+   exchanges whose appraisal or reply text marks them as likely to have it.
+   An exchange appraised as ambiguous is checked for a misread request
+   (predictive); one dense with commitments, for commitments the agent
+   cannot keep (constrained); one negative in valence with disagreement,
+   for objections the agent dismissed (adversarial). A tunable share of
+   exchanges that select no lens is checked by a random built-in lens,
+   which bounds and measures what selection misses. A lens is added
+   without changing critique; it states which appraisals and reply text
+   select it and how often it runs regardless, and each is tunable per
+   channel. Every lens judges the exchange as the agent saw it (§3.8).
 2. The provenance check runs on any claim about the past, independent of
    the appraisal scores. Stage-2 appraisal (a model) lists the claims. The
    provenance critic (a model) judges whether any record supports each
@@ -1199,18 +1213,31 @@ deciding only what to newly append and in what order.
    are quoted to the critic as data, not instructions.
    The reply is never a record of itself. Generator confidence is
    never evidence.
-3. Eligibility is by propagated origin: `user` and `reminder` exchanges
-   are judged, against the stored originating message, which for a turn
-   a note woke may be on another channel (§3.5.10); `critique`,
-   `heartbeat`, and `task` exchanges are exempt, unbypassable by tool use.
-   Withheld responses stay eligible.
-4. Empty objections are recorded and wake nothing. Stylistic objections
-   re-enter as framed CONTEXT at the channel's next turn and wake nothing,
-   so a self-check never sends the user an unsolicited message.
+3. Critique judges every main-loop turn, whatever started it, against
+   the window the agent saw when it wrote the reply and the stored
+   originating message, which for a turn a note woke may be on another
+   channel (§3.5.10). It never judges a stage's fork. A fork's output is
+   a verdict that code consumes, and judging it would be a regress with
+   no last judge; its mistakes surface as wrong or missing objections on
+   main-loop turns. A task's result is judged where it lands, in the
+   launcher's window: critique judges what the launcher says about it.
+   It does not judge the task's own claims, which are records to the
+   critic, or the task's tool actions. Which checks run on a judged turn
+   is each check's own selection (items 1–2). A response a gate withheld
+   is still judged; the agent's choice to stay silent is not a response,
+   and is neither judged nor appraised.
+4. Empty objections are recorded and wake nothing. Stylistic objections,
+   and those of added lenses, re-enter as framed CONTEXT at the channel's
+   next turn and wake nothing, so a self-check never sends the user an
+   unsolicited message.
    Provenance objections re-enter at the turn their stub triggers, and the
    agent may end that turn without sending anything. It is told that
    silence is the default, and to reply only when it judges its earlier
-   reply could lead the other party to take an incorrect action.
+   reply could lead the other party to take an incorrect action. A turn
+   whose origin is `critique`, whether a critique finding woke it or a
+   note from such a turn did (§3.5.10), is judged like any other (item
+   3), but its non-empty objections never wake a turn; they re-enter as
+   framed CONTEXT at the channel's next turn.
 5. A critic may run on a different model from the one that wrote the window
    it judges. How it gets that window is design; the requirement is
    §3.8.2's: it judges the window the agent saw when it wrote the reply.
@@ -1480,20 +1507,21 @@ design, not requirement. The requirements are outcomes:
    frame (§3.3.11): reminder text as data with its quote marks
    neutralized, an operator job as the operator's. A late firing's frame
    says how overdue it was.
-5. Recurrence is a fixed interval with an optional anchor, stepped in
-   local wall-clock time in `scheduler.timezone`, computed from the
+5. Recurrence is a fixed interval with an optional anchor, or a cron
+   expression, stepped in local wall-clock time in `scheduler.timezone`, computed from the
    scheduled time so there is no drift. Startup applies a catch-up policy
    bounded by `catch_up_window`.
 6. Config jobs sync by name on start and reload; a removed name is a
    durable stop; an invalid entry logs and leaves the running job alone.
 7. The agent manages its own reminders, one-shot and recurring: it can
    set, list, change and cancel them. A recurring reminder recurs as
-   item 5 describes. `remind_me` takes an optional target channel and
-   defaults to the calling one; a reminder may target any channel
-   (principle 14), and listing and cancelling cover every channel's
-   reminders. The tools parse `when` themselves, refuse a bare number,
-   cap pending rows per target channel and text length, and refuse to
-   change or cancel config jobs. A floor on how often a reminder the
+   item 5 describes. The tools act on the calling channel only: a
+   reminder fires there, and listing, changing and cancelling cover that
+   channel's reminders. Reaching another channel is §3.5.9's job, not the
+   scheduler's. No tool sets a row's origin; every row a tool creates is
+   a `reminder`. The tools parse `when` themselves, refuse a bare number,
+   cap pending rows per channel and text length, and refuse to change or
+   cancel config jobs. A floor on how often a reminder the
    agent sets may recur is a restriction the operator can apply
    (principle 15).
 8. Retention runs on the kernel clock (§3.1.15, §3.7 Memory 6) and does
@@ -1812,14 +1840,14 @@ record that holds the reasoning.
 | Emotion classifier replaced by appraisal valence | §3.7 Appraisal; diverges from Persyn §4.9 |
 | Engagement decision inverted: cheap gate first, generate only past threshold | principle 7; §3.7 Appraisal; diverges from the Persyn spec |
 | Two-stage appraisal; stage 1 never calls a model; core mints the exchange key; pull-based compute | §3.7 Appraisal 1–3 |
-| Origin is stamped and propagated, never inferred; critique eligibility by origin | §3.1.4; §3.7 Critique 3 |
+| Origin is stamped and propagated, never inferred. Critique eligibility does not depend on origin: every main-loop turn is judged, and the recursion brake is delivery (objections on a `critique`-origin turn wake nothing) | §3.1.4; §3.7 Critique 3–4; #1031; owner, 2026-11-17 |
 | Two grades on a queue item: kernel-certified `metadata`, never a hook argument, and plugin-owned `annotations`; non-human items (and a person's message whose transport supplies a name or addressing) get a code-built header, and outside payloads a fence derived from the stored row; foreign-origin items are framed, never withheld (no silence default) | §3.1.4; §3.3.11; #555 |
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
 | Every provider keeps warm context heads, and the operator declares how many; queues lease heads and switch at call boundaries (drain or yield, latency classes); no spend or rate caps for now; single-slot is a deployment choice, not architecture; the lease order is pluggable (release on drain superseded 2026-11-15, row below) | principle 16; §3.13; #296; operator, 2026-11-02 |
 | Leases are a kernel mechanism (a lease per provider and queue, stop and resume at a call boundary, the policy view) under a replaceable default order: FIFO grants, a holder keeps its head across calls while no other queue waits and gives it up at its next call boundary when one does (sticky until contention). That keeps prefixes warm on a best-effort basis and cannot deadlock, since a head is held against a waiter only until the calls already in flight end; backend-aware optimisation is a scheduler plugin's job. It replaces an earlier default that kept a lease until the queue drained and its exchange's forks had run, which needed the kernel to infer when a queue still had work coming and kept finding ways to hold a head its own work was waiting for. Nothing orders forks ahead of their own channel's next main turn, because what that order would save depends on how a provider manages its cache; a pool is a provider, not a separate concept | principle 3; §3.13.3–5, 7; #364; #362; operator, 2026-11-15 |
-| Core/periphery: one deliberative core context and a peripheral per channel, as a plugin strategy beside the base topology. Whether a fork blocks names only whether its parent's next turn waits for its result; every fork shares its parent's lease, and leases are the scheduler's handle for paging context heads. The strategy's pauses are the base's stop and its ordering a replacement lease order, so it amends nothing in §3.13. Trust passes through the core. Accepted as the target; conformance is checked from TRD acceptance | supplement; #16, #296, #527; operator, 2026-11-07 and 2026-11-15 |
+| Core/periphery: one deliberative core context and a peripheral per channel, as a plugin strategy beside the base topology. Whether a fork blocks names only whether its parent's next turn waits for its result; every fork shares its parent's lease, and leases are the scheduler's handle for paging context heads. The strategy's pauses are the base's stop and its ordering a replacement lease order, so it amends nothing in §3.13. Trust passes through the core. Accepted as the target; its TRD was accepted on 2026-11-17, and conformance is checked from then | supplement; TRD; #16, #296, #527; operator, 2026-11-07, 2026-11-15 and 2026-11-17 |
 | A latency bound is optional for any queue: work with none never preempts and is never overdue, and a replacement order may delay it indefinitely. Where a bound matters, the requirement says so (§3.1.16's idle-work bounds, the heartbeat's, and any plugin whose documented behaviour must hold under traffic, principle 13), and on a channel with no class its exchange's forks lose principle 3's starvation guarantee. Supersedes "every queue has a latency bound" | principle 3; §3.13.5, 7; #989; operator, 2026-11-15 |
 | Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
 | Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
@@ -1827,6 +1855,7 @@ record that holds the reasoning.
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
 | The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
+| Reminders and jobs the agent sets act on the calling channel only, with origin `reminder`; cross-channel reach is §3.5.9's alone, so the scheduler is not a second, unaudited path between channels or around the critique of reminders. Supersedes "a reminder may target any channel" | §3.9.7; #814; owner, 2026-11-17 |
 | A decline is signalled by a plugin-chosen mechanism (token, tool or both) and enforced by a veto that acts on the agent's signal, not a gate; a signal followed by sent text is not a decline | #791, #795, #797, #799, #806 |
 | Model endpoints may be remote; a profile's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each profile sends | #217 |
 | Critique is gated: stylistic lenses run on salience, the provenance check on every claim about the past, never unconditionally per reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |

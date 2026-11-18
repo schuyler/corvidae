@@ -277,8 +277,9 @@ Four places:
   critique objections) is appended as `role: system` (`funnel.py`).
 - Notifications without a `tool_call_id` are wrapped as `role: system` in
   `Agent._build_conversation_message`. Scheduler firings are among them:
-  a reminder's text is whatever the model wrote into `remind_me`, possibly
-  at an untrusted speaker's request, and it comes back later as a system
+  a reminder's or agent-set job's text is whatever the model wrote into
+  `remind_me`, `add_job` or `update_job`, possibly at an untrusted
+  speaker's request, and it comes back later as a system
   row. See finding 7.
 - The not-sent marker the Agent appends after a `should_send_response`
   veto (#131) is a `role: system` CONTEXT row. It is core-written, not
@@ -596,27 +597,37 @@ string with little memory of who wanted it. What bounds it:
 
 - **Framing.** The firing text says a reminder "you set" is due and quotes
   the stored text as `Reminder text: «…»`, ending "Decide whether and how
-  to act on it." Any `«` or `»` inside the text is replaced, so it cannot
+  to act on it." A recurring job the agent set says the same of a "recurring
+  job you set" and quotes `Job prompt: «…»`; only a `scheduler.jobs` or
+  `scheduler.jobs_file` entry is framed as the operator's (#814). Any `«` or `»` inside the text is replaced, so it cannot
   close the quote and continue as framing. Rendering follows
   `agent.mid_conversation_system_role`, so `user` keeps it out of the
   system role as for every other notification. The framing is a soft
   mitigation in the same sense as the funnel's.
-- **Scoping.** The three tools act on `_ctx.channel` and take no channel
-  argument. A reminder fires on the channel it was set on and nowhere else,
-  so a stranger on IRC cannot use one to make the bot message a Signal
-  contact. PRD §3.9.7 now lets a reminder target any channel, so this
-  scoping is slated to go; finding 15 covers what replaces it.
-  `cancel_reminder` refuses operator jobs and treats another channel's row
-  as not found; `list_reminders` shows only the calling channel's rows. PRD
-  §3.9.7 makes both span every channel.
+- **Scoping.** All five tools (`remind_me`, `list_reminders`,
+  `cancel_reminder`, `add_job`, `update_job`) act on `_ctx.channel` and take
+  no channel argument. A reminder or agent-set job fires on the channel it
+  was set on and nowhere else, so a stranger on IRC cannot use one to make
+  the bot message a Signal contact. PRD §3.9.7 keeps it that way (owner,
+  2026-11-17, #814): reaching another channel goes through §3.5.9 (finding
+  15), not the scheduler. `cancel_reminder` and `update_job` refuse operator
+  jobs and treat another channel's row as not found; `list_reminders` shows
+  only the calling channel's rows.
+- **Origin.** No tool takes an origin. Every row a tool creates carries
+  origin `reminder`, so its turns are judged like any reminder's; only an
+  operator job (`scheduler.jobs` or `scheduler.jobs_file`) can be `heartbeat` (#814).
 - **Volume.** `scheduler.max_reminders_per_channel` (default 50) caps
-  pending reminders per channel, and text is capped at 2000 characters.
+  pending reminders and agent-set jobs together per channel, and text is
+  capped at 2000 characters for both.
   The cap is per channel. Finding 5 used to let a stranger open new IRC PM
   channels at will; with `irc.allow` (#77) only allowlisted senders can,
   so the number of channels, and with it the total, is bounded by who the
   operator allowed. Each firing costs a main-model turn. A reminder fires
   once, so a burst is bounded, but 50 per channel across several allowed
-  senders is still load.
+  senders is still load. An agent-set job recurs until cancelled, and
+  nothing sets a floor on how often: `* * * * *` is a turn a minute on
+  that channel, up to the cap. A floor the operator can apply (PRD §3.9.7)
+  is not built.
 
 `scheduler.jobs` in `agent.yaml` is the operator-only surface. A job can
 target any channel id, including a Signal contact, and recur, and its
@@ -626,21 +637,12 @@ prompt is framed as the operator's. It is hot-reloaded, so it joins the
 just at the next restart. The mitigation is the one finding 4 already
 gives: keep `agent.yaml` unwritable by the daemon user.
 
-The YAML jobs file (scheduler.jobs_file) adds a second operator surface
-for scheduler jobs. The CRUD tools (add_job, update_job, remove_job,
-list_jobs) are registered on every channel and write the file as the
-daemon user. Unlike remind_me (which is scoped to its own channel and
-capped by max_reminders_per_channel), the CRUD tools accept any channel
-id and origin with no per-channel cap. A model on a channel with
-untrusted speakers can therefore schedule messages to any channel in the
-registry, including Signal contacts, and the jobs persist across restarts.
-The file-permission mitigation (keep the file unwritable by the daemon
-user) would disable the CRUD tools, so it is not a viable mitigation for
-the tool path. The real exposure is the same as for any cross-channel
-send tool (finding 15): registry membership is the whole gate, and for
-`notify_other_channel` not even that, since it reaches any well-formed
-channel id (#938). Bounding
-the tools (per-channel cap, operator opt-in) is a follow-up.
+The YAML jobs file (scheduler.jobs_file) is a second operator-only surface
+for scheduler jobs, with the same exposure as `scheduler.jobs`: keep it
+unwritable by the daemon user. No tool writes it. The job tools
+(`add_job`, `update_job`) store the agent's recurring jobs as schedule
+rows bounded like `remind_me` (scoping, origin and volume above), and
+cannot touch the operator's jobs (#814).
 
 The RSS reader (packages/rss-reader) polls configured feeds and delivers
 new items as notifications on the configured targets. The threat is the
@@ -715,11 +717,11 @@ thread on another `discord:` channel (never a DM, which it refuses); and
 `notify_other_channel` (#234) queues a turn there instead. PRD §3.5.9 now requires one, with no
 allowlist of target channels: any turn may speak on any channel (#234).
 Finding 15 is its entry. PRD §3.9.7 also lets the agent set recurring
-reminders, which the tree doesn't yet: a recurring reminder set because of
-injected text fires a main-model turn every interval until someone
-cancels it, which is persistence for that text with no end date. The
-operator can apply a floor on how often an agent-set reminder recurs; with
-none, the bound is the per-target pending cap. Latency classes (PRD
+reminders, which `add_job` does (#814): a recurring job set because of
+injected text fires a main-model turn on its own channel every slot until
+someone cancels it, which is persistence for that text with no end date.
+PRD §3.9.7 lets the operator apply a floor on how often an agent-set
+reminder recurs; none is built, so the bound is the channel's pending cap. Latency classes (PRD
 §3.13.5), once built, keep its firings from holding a head past another
 queue's bound, but nothing bounds their total (finding 14).
 
@@ -1068,7 +1070,8 @@ What each kind of unlock costs:
   model emitting tool calls.
 - **Gate tunables and thresholds** (`gate.*`,
   `critique.provenance.enabled`, `critique.sample_below_rate`, the
-  critique lens thresholds `critique.lens.*`; open by default today).
+  critique lens thresholds `critique.lens.*`, including each added lens's
+  `critique.lens.<name>.*` (finding 23); open by default today).
   Covered in finding 2: an injection can silence the agent on a channel or
   switch off the provenance check. The recommended blocklist in
   [configuration.md](configuration.md) is the lock.
@@ -1259,6 +1262,9 @@ since #793: `webhook_notify` caps its own deliveries at
 `max_notifications` per `per_seconds` per endpoint (10 per hour by default),
 so a webhook flood costs at most that many turns per target channel per
 window, drop reports included, rather than one turn per delivery (finding 16).
+`limits.inbound_per_channel` (finding 24) bounds how many messages one
+channel may have waiting, not their rate: each admitted message still costs
+a turn.
 
 ### 15. One identity across channels (by design)
 
@@ -1325,11 +1331,6 @@ decision (2026-11-01), and these are its costs.
   loaded, both carry the minimum trust of the source channel's participants
   and low-trust ones are quarantined (PRD §3.5.10–11); without it, they
   arrive unlabelled.
-- **Reminders aimed at other channels.** A reminder may target any channel
-  (PRD §3.9.7), so injected text on one channel can queue firings onto
-  another, up to `scheduler.max_reminders_per_channel` per target, and can
-  fill a target's pending cap so the operator can't set reminders there
-  until the rows fire or are cancelled.
 - **Messaging someone first opens the door to them.** Under PRD §3.5.9 a
   one-to-one message to a contact outside the inbound allowlist admits
   their replies on that channel. Injected text (a fetched page, an MCP
@@ -1344,7 +1345,7 @@ decision (2026-11-01), and these are its costs.
 - **Floods and loops.** No limit applies to messages the agent starts
   unless the operator sets one (PRD §3.5.9), so one exchange can send up to
   its `max_turns` budget's worth of messages to any one contact, and
-  reminder firings aimed at a contact add to that. A note that wakes
+  reminders and jobs set on that contact's own channel add to that. A note that wakes
   another channel starts a turn there, and that turn can wake the first,
   but the whole chain shares the `max_turns` budget of the exchange that
   started it (PRD §3.1.3, §3.5.10), so the ping-pong ends when that
@@ -1556,10 +1557,9 @@ line is plain text in the result, with no kernel header at all.
   at the cost of the only deletion path while the extra is missing.
 - `exchange_log` copies conversation text into two places: stage-2
   `past_claims` (quoted from the reply) and the objection detail critique
-  records in `outcomes`. `corvidae redact` scrubs the claims and the
-  provenance and critique detail (#160), but not proactivity detail
-  (#1003), through the `exchange_log` scrubber the cognition extra registers under
-  `corvidae.redact`. A plugin that keeps its own copy of conversation text
+  records in `outcomes`. Through the `exchange_log` scrubber the cognition
+  extra registers under `corvidae.redact`, `corvidae redact` scrubs the
+  claims and the provenance and stylistic critique detail (#160). A plugin that keeps its own copy of conversation text
   and registers no scrubber is not reached. `retrieval_candidate` (#407)
   copies no text, only memory ids and scores, but a row naming a redacted
   memory still records that it was retrieved, so its scrubber deletes
@@ -1569,8 +1569,10 @@ line is plain text in the result, with no kernel header at all.
   already have admitted its summary into that turn's prompt and bumped its
   access count; the window copy ages out with compaction like any CONTEXT. For
   `exchange_log`, the owning exchange's claims are tombstoned with their
-  counts kept. What `redact` still doesn't reach: exchanges whose
-  `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
+  counts kept. What `redact` still doesn't reach: proactivity's objection
+  detail (#1003) and that of lenses other plugins add
+  (`critique.<name>.detail`, finding 23), both waiting on redaction's
+  hold (#1005); exchanges whose `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
   taken out of `sessions.db` (a calibration export, a backup), and, under
   PRD §3.7 Memory 8, copies on other channels: a read of the redacted
   message, a note or send that restates it, and whatever those channels
@@ -1784,7 +1786,9 @@ Mitigations:
   missing, never rewrite.
 - The woken turn is silent by default: its stub ends with `NO_REPLY`, which
   critique's veto on critique-origin finals (and `SilencePlugin`'s, when
-  loaded) withholds, and critique does not critique its own turns.
+  loaded) withholds. Critique judges that turn like any other (#1031), but
+  its findings never wake another turn, so a retention finding on it waits
+  for the next turn instead of starting a second filing turn.
 - The lens is inert unless the operator configures a root: `critique.retention.root`,
   or a markdown_recall block, whose root it then uses. Enabling recall
   therefore enables this route. Selection needs both novelty and commitment density over their thresholds,
@@ -1850,10 +1854,159 @@ Accepted residuals. Progress and thinking sent in the same response as the
 `speak_up` call are gated before the tool runs, so they stay withheld. A
 follow-up turn whose origin differs from the quiet turn (for example a
 `critique` wake) is not quiet. The veto lives in
-`GatePlugin`, so disabling `gates` disables it. The agent can set a
-scheduler job's origin to `heartbeat` (the only other origin the scheduler
-accepts besides `reminder`); if `heartbeat` is quiet, that mutes the job's
-own turns, which fails toward silence rather than toward noise.
+`GatePlugin`, so disabling `gates` disables it. Only the operator can give
+a scheduler job origin `heartbeat` (the only other origin the scheduler
+accepts besides `reminder`; no tool takes an origin, #814); if `heartbeat`
+is quiet, that mutes the job's own turns, which fails toward silence rather
+than toward noise.
+
+### 23. Plugin-added critique lenses: plugin text reaches critic forks, and lens tunables are agent-writable (#1033)
+
+A plugin can add critique lenses through `on_critique_init`
+([cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init)).
+Three things are new.
+
+- **Plugin text reaches critic forks.** A lens's brief is appended as the
+  instruction of a fork of the live window, after whatever untrusted text
+  the window holds (finding 8). It comes from installed plugin code, which
+  the operator chose to load (principle 9), so it is operator-trusted, not
+  untrusted. A lens is still a new way to steer what the agent tells
+  itself: its objections re-enter as framed CONTEXT at the channel's next
+  turn. They wake nothing and send nothing (PRD §3.7 Critique 4), so a
+  lens can't start a turn or reach a channel by itself.
+- **Plugin regexes run on model output.** A lens's reply patterns are
+  searched against the sent reply on the event loop. A pattern with
+  catastrophic backtracking, matched against a long reply, stalls the
+  daemon for every channel while it runs. The patterns come from plugin
+  code, not from traffic, so this is a review item for lens authors (keep
+  patterns linear), not a mechanism.
+- **Each lens adds agent-writable tunables.** `critique.lens.<name>.<dimension>`
+  and `critique.lens.<name>.sample_rate` are runtime-tunable per channel,
+  so finding 2 extends to them: an injection can switch a lens off on a
+  channel (a limit no exchange reaches, rate 0) or make it run on every
+  turn, which spends a fork per turn (finding 14). Block them with
+  `immutable_settings` where that matters. A non-numeric value written
+  through `set_settings` makes that lens's decision raise for the turn;
+  the built-in checks are decided first, so it costs only the added lenses.
+  `critique.fork_prompt.<name>` is static config, like the built-ins'.
+
+Accepted residuals. Redaction doesn't reach an added lens's recorded
+objection text (`outcomes.critique.<name>.detail`) while redaction is on
+hold (#1005); proactivity's detail has the same gap (#1003).
+
+### 24. Internal work fans out without bound, and an inbound flood fills a channel (#1050)
+
+Nothing bounded how much work one turn could start or how many messages a
+channel could hold. A looping turn, or an injected instruction, could call
+`subagent`, `fork` or `notify_other_channel` repeatedly and fill the
+TaskQueue and other channels' queues, and a sender could pile messages onto
+one channel without limit, each one a turn's worth of compute (see finding 14).
+
+The kernel now offers internal work to plugins before it starts
+(`should_start_work`, PRD §3.1 item 20), and `LimitsPlugin` (`core-periphery`
+extra) answers it. It bounds two things: the internal work waiting across
+all channels, by refusing new `subagent`, `fork` and `notify_other_channel` work
+at `limits.max_waiting`, and the messages one channel may have waiting, by
+rejecting at `should_process_message` at `limits.inbound_per_channel`.
+
+What it does not bound:
+
+- **Tool calls in one response.** `max_turns` and `tools.max_agent_depth`
+  bound a response today; a per-response cap is not built.
+- **Hop loops** between channels (notes that provoke notes): phase 3, TRD §9.3.
+  A note is counted as waiting work only while it waits.
+- **Inbound across channels.** The cap is per channel; many channels can each
+  hold their share, so the total of waiting messages is bounded only by the
+  number of channels. `max_waiting` does not bound inbound messages and
+  they do not count toward it (#1052), so a flood cannot refuse internal
+  work on other channels (see the residual below).
+- **Without a block.** With no `limits:` block, or without the extra, the
+  plugin gives no verdicts and nothing is bounded; this is opt-in, as for
+  `outbound_cap`.
+
+Mitigations and their limits:
+
+- A refusal is returned to the model as the starting tool's result,
+  `Not started: <limit> reached — <remedy>`. The text is built from the
+  config key and a fixed remedy plus a count, so no sender-controlled text is
+  added to the window.
+- The result of work already started is never offered, so a refusal cannot
+  strand accepted work or drop a result.
+- A rejected sender is not told (a notice waits on a one-to-one flag); the
+  operator sees one WARNING per channel per `limits.notice_interval`.
+- An implementation that raises is logged and counts as no opinion, so a
+  broken limiter fails open rather than blocking all work.
+- The seam admits only what the counts see: results in transit between task
+  completion and `on_notify`, and a turn retry on a timer, are not counted,
+  and concurrent arrivals on one channel can overshoot the inbound cap by a
+  few. The starting tool's own call counts, and so do the other tool calls
+  of the same response, so the effective ceiling is at most
+  `max_waiting - 1`.
+
+Accepted residual: a ceiling is a **self-silencing** route for the agent's own
+fan-out. An injected instruction can fill the ceiling with slow subagents and
+make later legitimate `subagent` calls return the refusal until some finish,
+the same class of harm as the cap in finding 19, not a new capability.
+
+Accepted residual: **total waiting messages grow with the channel count.**
+Messages from users are left out of the ceiling (owner, #1052), so floods
+on several channels cannot refuse each other's internal work, but the
+total backlog of waiting messages is bounded only by
+`inbound_per_channel` × the number of channels the allowlists admit. Each
+waiting message is a small queue entry, and allowlists are the main
+control on what reaches the agent (finding 14). Work the agent derives
+from a message (a task, a note, a result) is internal and still counts, so
+a flood that provokes fan-out still meets the ceiling.
+
+### 25. Critique judges every turn: notification text reaches the critic forks, and a background turn can start a correction (#1031)
+
+Critique used to judge only user and reminder turns. It now judges every
+main-loop turn that has a trace (PRD §3.7 Critique 3): heartbeat turns,
+turns a notification started (`webhook:*`, GitHub events, `rss:*`,
+`restart`, `inotify`, notes from other channels), subagent and fork results
+landing in the launcher's window, and corrections. Two routes are new:
+
+- **Notification text reaches the critics.** On a notification turn the
+  "originating message" the lenses and the proactivity check quote is the
+  notification text, so a webhook payload, a feed item or a GitHub event's
+  strings (finding 20) reach a critic fork's instruction, and stage 2 reads
+  the exchange to list claims for the provenance check. A critic's
+  objections re-enter the window as framed CONTEXT. This is the route a
+  user's own text already takes ("The short version", on the provenance
+  critic), now open to every sender a notification source carries.
+- **A background turn can start a correction.** A provenance or
+  proactivity finding on a heartbeat or notification turn wakes a
+  `critique`-origin turn on that channel, which may send.
+
+Mitigations and their limits:
+
+- Quoted text is data: the originating text and the reply are passed
+  through `quote()` inside the fork instruction, the same framing as on a
+  user turn. That is a soft mitigation, as everywhere a model reads
+  untrusted text.
+- A correction never starts another. Its findings wait for the channel's
+  next turn and wake nothing (PRD §3.7 Critique 4), and a note sent from a
+  correction carries the `critique` origin (#1034), so the turn it wakes on
+  another channel is braked too. No chain forms: a correction's findings,
+  and those of any turn its notes wake, wake nothing. A correction that
+  sends notes still costs one woken turn per note. How many notes may wait
+  at once is capped only by `limits.max_waiting`, when a `limits:` block is
+  configured, and a turn a note woke may send notes of its own, up to
+  `cross_channel_send.max_hops` (finding 24).
+- The correction stub defaults to `NO_REPLY`, which critique's veto on
+  critique-origin finals withholds.
+- Per channel, `critique.provenance.enabled`, `critique.proactivity.enabled`,
+  `critique.sample_below_rate` and the lens thresholds turn the checks down
+  or off (they are agent-writable unless listed in
+  `agent.immutable_settings`, finding 23).
+- A decline (an unsent `NO_REPLY` or empty final) is not judged (#420), so a
+  background turn that says nothing costs nothing.
+
+Accepted residual: each judged background turn can cost lens, provenance
+and proactivity forks on the shared backend, and a correction turn. How much
+is unmeasured; a harness probe of whether lens objections help on
+notification turns is a follow-up on #1031. A reminder a correction sets can
+still lead to another correction; that loop predates this change.
 
 ## Privilege separation
 
