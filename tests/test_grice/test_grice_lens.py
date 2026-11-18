@@ -65,3 +65,22 @@ class TestGriceLens:
     async def test_brief_caps_at_four_objections(self):
         [lens] = await _contributed(GriceLensPlugin())
         assert "max 4" in lens.fork_prompt
+
+    async def test_brief_one_objection_per_maxim(self):
+        """The prompt caps at one objection per violated maxim."""
+        [lens] = await _contributed(GriceLensPlugin())
+        assert "One objection per violated maxim" in lens.fork_prompt
+
+
+class TestEntryPoint:
+    """The entry point is registered correctly for plugin discovery."""
+
+    def test_entry_point_exists(self):
+        from importlib.metadata import entry_points
+        eps = entry_points(group="corvidae")
+        names = [ep.name for ep in eps]
+        assert "corvidae_grice" in names, (
+            f"corvidae_grice entry point missing; found: {names}"
+        )
+        ep = next(ep for ep in eps if ep.name == "corvidae_grice")
+        assert ep.value == "corvidae_grice:GriceLensPlugin"
