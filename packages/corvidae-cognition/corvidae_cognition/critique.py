@@ -714,18 +714,26 @@ class CritiqueSpec:
     async def transform_critique_prompt(
         self, channel, trace_id: str, lens_name: str, instruction: str,
     ) -> str:
-        """Transform the fork instruction before the critique fork runs.
+        """Transform a lens's fork instruction before its fork runs.
 
-        Fires in _fork_lens after the base instruction is assembled
-        (fork prompt + exchange quote) and before agent.fork is called.
-        Implementers receive the instruction and return the (possibly
-        modified) instruction. The first non-None return wins (same
-        resolution as transform_system_prompt); None passes the
-        instruction through unchanged.
+        Fires once per lens fork in ``_fork_lens``, after the instruction is
+        assembled (the brief, the exchange quote and any built-in extra
+        text) and before the containment check and ``agent.fork``.
+        ``lens_name`` names the lens being forked.
 
-        Use this to inject lens-specific context into the fork prompt —
-        e.g. the planning lens appends the current goal list so the fork
-        can reference specific goal ids.
+        Resolution: ``firstresult`` over a trylast seed (CritiquePlugin's
+        own implementation) that returns ``instruction`` unchanged. A plain
+        hookimpl that returns a string ends the chain, so a plain
+        implementer answers only for its own lens and returns None for the
+        rest, as ``resolve_channel`` implementers answer only for their own
+        prefix; then pluggy's call order cannot change the result. A plain
+        implementer may await (the planning lens reads the goal list).
+        ``@hookimpl(wrapper=True)`` implementers compose around the result,
+        LIFO, but apluggy wrappers are sync generators and cannot await.
+
+        A raising implementer is logged at WARNING naming the lens, the
+        channel and the trace, and the fork runs with the untransformed
+        instruction.
         """
 
 
@@ -1919,24 +1927,22 @@ class CritiquePlugin(CorvidaePlugin):
                 f"\n\nThe knowledge base root is «{quote(str(root))}»: every "
                 "file you name is a path under it."
             )
-        # Plugins may transform the instruction (e.g. append the goal list).
-        # A failing transform must not cost the lens its fork.
+        # Plugins may transform the instruction (e.g. append the goal list);
+        # firstresult over the seed, so the result is one string. A failing
+        # transform must not cost the lens its fork.
         if self.pm is not None:
             try:
                 transformed = await self.pm.ahook.transform_critique_prompt(
                     channel=channel, trace_id=trace_id,
                     lens_name=lens, instruction=instruction,
                 )
-                if isinstance(transformed, list):
-                    transformed = next(
-                        (t for t in transformed if t is not None), None)
                 if transformed is not None:
                     instruction = transformed
             except Exception:
                 logger.warning(
-                    'transform_critique_prompt hook failed for lens %s; '
-                    'using the untransformed instruction',
-                    lens, exc_info=True,
+                    'transform_critique_prompt failed for lens %s on trace %s '
+                    'on channel %s; the fork uses the untransformed instruction',
+                    lens, trace_id, channel.id, exc_info=True,
                     extra={'channel': channel.id, 'trace_id': trace_id},
                 )
         # Containment check; a string is the reason the lens must skip.

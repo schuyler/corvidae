@@ -143,7 +143,7 @@ plugin.
 The `webhook` plugin owns `on_webhook_subscribe(subscriptions)`, through which
 plugins register handlers for webhook endpoints; see "Webhook ingress" under
 Transports. The `web` plugin owns `on_web_console_init(panels)`, through which
-plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path). The `critique` plugin (cognition extra) owns `on_critique_init(config, add_lens)`, through which plugins add critique lenses; see "CritiquePlugin: lenses other plugins add" in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init).
+plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path). The `critique` plugin (cognition extra) owns `on_critique_init(config, add_lens)`, through which plugins add critique lenses; see "CritiquePlugin: lenses other plugins add" in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init). It also owns `transform_critique_prompt(channel, trace_id, lens_name, instruction)`, through which a plugin adds live context to a lens's fork instruction; see [cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt).
 
 ### Funnel pull path
 
@@ -4828,6 +4828,37 @@ The plugin declares `depends_on = {"cross_channel_send"}` and
 the kernel logs it at `DEBUG`. It has no configuration; install the
 goals-notify extra to load it, and list `goals_notify` under
 `plugins.disabled` to switch it off.
+
+### Planning lens (`corvidae-planning` package)
+
+`PlanningLensPlugin` (#1067) adds one critique lens, `planning`, through
+`on_critique_init`. It has no thresholds and no reply patterns, so it runs
+at its sample rate (default 0.1, `critique.lens.planning.sample_rate`) on
+the turns critique judges. Its brief asks the fork whether the exchange
+warrants a goal action: `create` (an untracked multi-step commitment),
+`update` (an open goal's text has gone stale) or `retire` (an open goal is
+done), at 80% confidence or better, and nothing on trivial or casual turns
+or for goals already listed. Each action is one objection in critique's
+format: the claim is `create: <title>`, `update: #<id>` or `retire: #<id>`,
+and the objection is the rationale. Findings are recorded under
+`outcomes.critique.planning` and reach the channel's next turn through the
+funnel like any added lens's. The agent decides whether to act; the lens
+changes no goal.
+
+Its `transform_critique_prompt` implementation appends the open goal list
+(`GoalsPlugin.open_goals()`) to the planning fork's instruction, one
+`#<id>: «<text>»` line per goal, with each text flattened to one line and
+capped by `corvidae.fork.quote`, or a line saying the list is empty. It
+answers only for `planning`. If the list can't be read, it logs a WARNING
+naming the trace and the channel and the fork runs without it.
+
+The plugin declares `optional_depends_on = {"critique", "goals"}`, so a
+config that disables either still starts: without critique its hookimpls
+are reported at `DEBUG` and nothing runs; without goals the fork runs
+without the list and each planning fork logs a WARNING saying so. Install the
+planning extra to load it, list `corvidae_planning` under
+`plugins.disabled` to switch it off, and override the brief with
+`critique.fork_prompt.planning`.
 
 ### GitHub events (`github-webhook` package)
 

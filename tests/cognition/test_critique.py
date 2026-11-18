@@ -1449,8 +1449,12 @@ async def _real_path_env(tmp_path, replies, past_claims):
     for name, cls in (("appraisal", AppraisalPlugin), ("critique", CritiquePlugin)):
         p = cls()
         pm.register(p, name=name)
-        await p.on_init(pm=pm, config=cfg)
         plugins.append(p)
+    # The daemon installs plugin-declared hookspecs (critique's among them)
+    # after registering and before any on_init.
+    install_plugin_hookspecs(pm)
+    for p in plugins:
+        await p.on_init(pm=pm, config=cfg)
     for p in plugins:
         await p.on_start(config=cfg)
     critique = plugins[1]
