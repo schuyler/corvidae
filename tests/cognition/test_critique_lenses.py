@@ -372,6 +372,58 @@ class TestAddLensRejection:
 # ---------------------------------------------------------------------------
 
 
+class Transformer(CorvidaePlugin):
+    """A test plugin implementing ``transform_critique_prompt`` for lens
+    ``mine`` only; ``raises`` makes it blow up instead (#1067)."""
+
+    depends_on = frozenset()
+
+    def __init__(self, raises=False):
+        self.raises = raises
+        self.seen = []
+
+    @hookimpl
+    async def transform_critique_prompt(self, channel, trace_id, lens_name, instruction):
+        # Record every call, then answer only for our own lens.
+        self.seen.append(lens_name)
+        if lens_name != "mine":
+            return None
+        if self.raises:
+            raise RuntimeError("transform blew up")
+        return instruction + "\nXFORM-MARK"
+
+
+class TestTransformCritiquePrompt:
+    """The critique-owned transform_critique_prompt hook (#1067 req 5, 6)."""
+
+    async def test_transform_replaces_its_lens_instruction_only(self, tmp_path):
+        xform = Transformer()
+        contributors = {"kb": Contributor(_lens("mine", sample_rate=1.0), _ctl()),
+                        "xform": xform}
+        async with lens_env(tmp_path, contributors=contributors) as env:
+            await _judged_turn(env, "kt1", stage2=_stage2())
+            _assert_ran(env, mine=1, ctl=1)
+            by_lens = {n: next(c["instruction"] for c in env.fork_agent.calls
+                               if f"LENSBRIEF-{n}:" in c["instruction"])
+                       for n in ("mine", "ctl")}
+            # Its own lens's fork got the transformed text; None passed ctl's through.
+            assert by_lens["mine"].endswith("XFORM-MARK")
+            assert "XFORM-MARK" not in by_lens["ctl"]
+            assert xform.seen.count("mine") == 1
+
+    async def test_raising_transform_is_logged_and_the_lens_still_forks(
+        self, tmp_path, caplog,
+    ):
+        contributors = {"kb": Contributor(_lens("mine", sample_rate=1.0)),
+                        "xform": Transformer(raises=True)}
+        async with lens_env(tmp_path, contributors=contributors) as env:
+            await _judged_turn(env, "kt2", stage2=_stage2())
+            _assert_ran(env, mine=1)
+            assert not any("XFORM-MARK" in c["instruction"] for c in env.fork_agent.calls)
+            assert _warnings(caplog, "transform_critique_prompt", "mine", "kt2",
+                             env.channel.id, "untransformed")
+
+
 class TestLensIsData:
     def test_lens_and_threshold_hold_no_callables(self):
         """R3: neither type declares a callable field nor holds a callable."""

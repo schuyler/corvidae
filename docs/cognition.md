@@ -1990,6 +1990,35 @@ nothing, on every origin (PRD §3.7 Critique 4). Redaction doesn't reach
 `critique.<name>.detail` yet; redaction is on hold (#1005, and #1003 for
 the same gap in proactivity's detail).
 
+### CritiquePlugin: lens context from other plugins (`transform_critique_prompt`)
+
+A lens's brief is static, so a lens that needs live context (the planning
+lens needs the open goal list) adds it per fork through
+`transform_critique_prompt(channel, trace_id, lens_name, instruction) -> str`,
+which CritiquePlugin owns and declares in its `hookspecs` (#1067).
+
+It fires once per lens fork in `_fork_lens`: for the stylistic lenses,
+retention and every added lens, but not provenance or proactivity, which
+build their own forks. It runs after the instruction is assembled (the
+brief with critique's JSON tail, the exchange quote, and retention's
+knowledge base root) and before the containment check, so a slow
+implementer can't let the exchange leave the window unnoticed.
+
+Resolution is `firstresult` over a trylast seed, CritiquePlugin's own
+implementation, which returns the instruction unchanged. A plain hookimpl
+that returns a string ends the chain, so an implementer answers only for
+its own lens and returns `None` for every other, the way `resolve_channel`
+implementers answer only for their own prefix; the order pluggy calls them
+in then can't change the result. A plain implementer may await.
+`@hookimpl(wrapper=True)` implementers compose around the result, LIFO, but
+apluggy wrappers are sync generators and can't await. Return the
+instruction with your text appended rather than rewritten: the brief's
+reply format is critique's parsing contract.
+
+An implementer that raises is logged at WARNING naming the lens, the trace
+and the channel, with the traceback, and the lens forks with the
+untransformed instruction.
+
 ### GatePlugin (`packages/corvidae-cognition/corvidae_cognition/gates.py`)
 
 The agent's right to silence (PRD §3.7). Entry point name: `"gates"`;

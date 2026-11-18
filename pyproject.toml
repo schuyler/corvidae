@@ -87,6 +87,10 @@ timepiece = [
 inotify = [
     "corvidae-inotify",
 ]
+# The planning critique lens: flags turns that warrant a goal action (#1067).
+planning = [
+    "corvidae-planning",
+]
 
 [project.scripts]
 corvidae = "corvidae.main:corvidae"
@@ -201,3 +205,4 @@ outbound-cap = { workspace = true }
 corvidae-core-periphery = { workspace = true }
     corvidae-vision = { workspace = true }
     rss-reader = { workspace = true }
+corvidae-planning = { workspace = true }

@@ -22,11 +22,11 @@ cd "${CLAUDE_PROJECT_DIR:-$(pwd)}"
 # plus one extra per test directory that imports a workspace package or an SDK
 # -- acp, discord, signal (their transport tests import the SDKs), cognition,
 # cross-channel-send, webhook-notify, context-panel, restart, timepiece,
-# inotify, outbound-cap, goals-notify, vision and core-periphery. Naming a subset leaves those directories failing to
+# inotify, outbound-cap, goals-notify, vision, core-periphery and planning. Naming a subset leaves those directories failing to
 # import, which reads as a broken tree rather than a missing extra (#699).
 # Keep this line identical to CLAUDE.md's; uv sync is idempotent and reuses its
 # cache, so the extra extras cost a resolution, not a download.
 echo "session-start: installing dependencies with uv"
-uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify --extra vision --extra core-periphery
+uv sync --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra github-webhook --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra goals-notify --extra vision --extra core-periphery --extra planning
 
 echo "session-start: dependencies ready"

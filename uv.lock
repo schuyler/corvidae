@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -13,6 +13,7 @@ members = [
     "corvidae-cognition",
     "corvidae-core-periphery",
     "corvidae-inotify",
+    "corvidae-planning",
     "corvidae-restart",
     "corvidae-timepiece",
     "corvidae-vision",
@@ -575,6 +576,9 @@ inotify = [
 outbound-cap = [
     { name = "outbound-cap" },
 ]
+planning = [
+    { name = "corvidae-planning" },
+]
 restart = [
     { name = "corvidae-restart" },
 ]
@@ -613,6 +617,7 @@ requires-dist = [
     { name = "corvidae-cognition", extras = ["vec"], marker = "extra == 'cognition'", editable = "packages/corvidae-cognition" },
     { name = "corvidae-core-periphery", marker = "extra == 'core-periphery'", editable = "packages/corvidae-core-periphery" },
     { name = "corvidae-inotify", marker = "extra == 'inotify'", editable = "packages/corvidae-inotify" },
+    { name = "corvidae-planning", marker = "extra == 'planning'", editable = "packages/corvidae-planning" },
     { name = "corvidae-restart", marker = "extra == 'restart'", editable = "packages/corvidae-restart" },
     { name = "corvidae-timepiece", marker = "extra == 'timepiece'", editable = "packages/corvidae-timepiece" },
     { name = "corvidae-vision", marker = "extra == 'vision'", editable = "packages/corvidae-vision" },
@@ -634,7 +639,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "webhook-notify", marker = "extra == 'webhook-notify'", editable = "packages/webhook-notify" },
 ]
-provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "context-panel", "webhook-notify", "github-webhook", "goals-notify", "rss", "cognition", "restart", "outbound-cap", "core-periphery", "timepiece", "inotify"]
+provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "context-panel", "webhook-notify", "github-webhook", "goals-notify", "rss", "cognition", "restart", "outbound-cap", "core-periphery", "timepiece", "inotify", "planning"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -685,6 +690,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "corvidae", editable = "." }]
+
+[[package]]
+name = "corvidae-planning"
+version = "0.0.1"
+source = { editable = "packages/corvidae-planning" }
+dependencies = [
+    { name = "corvidae" },
+    { name = "corvidae-cognition" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "corvidae", editable = "." },
+    { name = "corvidae-cognition", editable = "packages/corvidae-cognition" },
+]
 
 [[package]]
 name = "corvidae-restart"

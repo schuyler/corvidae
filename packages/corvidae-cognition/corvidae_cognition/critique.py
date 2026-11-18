@@ -710,6 +710,32 @@ class CritiqueSpec:
         warning naming the plugin; the others load.
         """
 
+    @hookspec(firstresult=True)
+    async def transform_critique_prompt(
+        self, channel, trace_id: str, lens_name: str, instruction: str,
+    ) -> str:
+        """Transform a lens's fork instruction before its fork runs.
+
+        Fires once per lens fork in ``_fork_lens``, after the instruction is
+        assembled (the brief, the exchange quote and any built-in extra
+        text) and before the containment check and ``agent.fork``.
+        ``lens_name`` names the lens being forked.
+
+        Resolution: ``firstresult`` over a trylast seed (CritiquePlugin's
+        own implementation) that returns ``instruction`` unchanged. A plain
+        hookimpl that returns a string ends the chain, so a plain
+        implementer answers only for its own lens and returns None for the
+        rest, as ``resolve_channel`` implementers answer only for their own
+        prefix; then pluggy's call order cannot change the result. A plain
+        implementer may await (the planning lens reads the goal list).
+        ``@hookimpl(wrapper=True)`` implementers compose around the result,
+        LIFO, but apluggy wrappers are sync generators and cannot await.
+
+        A raising implementer is logged at WARNING naming the lens, the
+        channel and the trace, and the fork runs with the untransformed
+        instruction.
+        """
+
 
 class CritiquePlugin(CorvidaePlugin):
     """Deferred, salience-gated self-critique plus the provenance check."""
@@ -717,6 +743,13 @@ class CritiquePlugin(CorvidaePlugin):
     depends_on = frozenset({"task", "llm"})
     # Owns the on_critique_init hook; its implementers add lenses at startup.
     hookspecs = CritiqueSpec
+
+    @hookimpl(trylast=True)
+    async def transform_critique_prompt(
+        self, channel, trace_id: str, lens_name: str, instruction: str,
+    ) -> str:
+        """Seed: pass the instruction through unchanged."""
+        return instruction
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -1894,6 +1927,24 @@ class CritiquePlugin(CorvidaePlugin):
                 f"\n\nThe knowledge base root is «{quote(str(root))}»: every "
                 "file you name is a path under it."
             )
+        # Plugins may transform the instruction (e.g. append the goal list);
+        # firstresult over the seed, so the result is one string. A failing
+        # transform must not cost the lens its fork.
+        if self.pm is not None:
+            try:
+                transformed = await self.pm.ahook.transform_critique_prompt(
+                    channel=channel, trace_id=trace_id,
+                    lens_name=lens, instruction=instruction,
+                )
+                if transformed is not None:
+                    instruction = transformed
+            except Exception:
+                logger.warning(
+                    'transform_critique_prompt failed for lens %s on trace %s '
+                    'on channel %s; the fork uses the untransformed instruction',
+                    lens, trace_id, channel.id, exc_info=True,
+                    extra={'channel': channel.id, 'trace_id': trace_id},
+                )
         # Containment check; a string is the reason the lens must skip.
         agent = self._fork_target(channel, trace_id)
         if isinstance(agent, str):

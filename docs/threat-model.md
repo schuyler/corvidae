@@ -2048,6 +2048,32 @@ New surface:
   daemon's only in the copy, and become live memory only if the operator swaps
   the copy in after reading them.
 
+### 27. The planning lens puts goal text into a critic fork, and plugins can rewrite lens instructions (#1067)
+
+Two things are new.
+
+- **Goal text reaches the planning fork.** The planning lens
+  ([design.md](design.md#planning-lens-corvidae-planning-package)) appends
+  every open goal's text to its fork instruction. Goal text can come from
+  injected text on any channel (finding 10), so injected text written into
+  a goal now also reaches a critic fork, as the instruction's user turn
+  rather than as a framed CONTEXT entry. Each goal is flattened to one line
+  and capped at 120 characters (`corvidae.fork.quote`) inside `«»`, which
+  stops a goal from breaking the list's layout but not from carrying an
+  instruction. What the fork can do with it is bounded the way any lens is
+  (finding 23): its objections re-enter as framed CONTEXT at the next turn
+  and wake nothing, and the lens changes no goal. An injected goal can at
+  most steer the planning lens's suggestions, which the agent then judges.
+  To switch it off, list `corvidae_planning` under `plugins.disabled`.
+- **Plugins can rewrite lens instructions.** `transform_critique_prompt`
+  ([cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt))
+  hands every implementer the instruction for each stylistic, retention and
+  added lens fork, and the returned string replaces it. A plugin could
+  soften the built-in critics this way. The text comes from installed
+  plugin code, which the operator chose to load (principle 9), so this is a
+  review item for plugin authors, not a mechanism. Provenance and
+  proactivity don't go through the hook.
+
 ## Privilege separation
 
 There isn't any. Transports, the LLM loop, tool execution, the SQLite
