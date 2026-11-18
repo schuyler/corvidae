@@ -1,11 +1,11 @@
 # Corvidae: product requirements supplement — core/periphery architecture
 
-**Status: accepted as the target; conformance is checked from TRD
-acceptance.** This supplement is part of the product requirements for
+**Status: accepted; conformance is checked from the TRD's acceptance
+on 2026-11-17.** This supplement is part of the product requirements for
 deployments that run the core/periphery strategy, and `docs/prd.md` §4
-records the decision. A technical reference document (TRD) will say how
-these outcomes are met and in what order. No work is measured against
-this supplement until the TRD is accepted. Its prerequisites are measured
+records the decision. The technical reference document (TRD),
+`docs/trd-core-periphery.md`, says how these outcomes are met and in
+what order. The supplement's prerequisites are measured
 against the base PRD alone: the kernel rename (#16), providers and warm
 heads (#362), lease scopes (#363), and the lease mechanism with its
 default order and metrics (#364, #367).
@@ -218,17 +218,17 @@ violates one is a bug even if its tests pass.
    heartbeat's role (base PRD §3.7 Heartbeat): the framework MUST NOT
    run a separate heartbeat, and every base PRD requirement on the
    heartbeat applies instead to the core's handling of idle
-   notifications, except its exemption from critique. The framework
-   MUST critique the core's idle-started turns like every other core
-   turn (§3.7).
+   notifications. Like every core turn, the core's idle-started turns
+   are critiqued (§3.7).
 
    *Rationale:* The heartbeat's purpose is that the agent lives between
    messages (base PRD principle 13): when the system is idle, it looks
    at its goals and decides whether to act. The core already holds the
    goals (principle 20), so it takes over that role, and as the
    cognitive center it gets every cognitive function, critique
-   included. Base critique's exemptions for `critique` and `task` turns
-   still apply; they keep critique from judging its own objections.
+   included. Base critique exempts no origin (base §3.7 Critique 3); a
+   turn whose origin is `critique` is judged, and its objections wake
+   no further turn (base §3.7 Critique 4).
 
 3. The framework MUST let the core direct KV cache allocation through
    tools that control queue multiplexing, and the slot-management plugin
@@ -305,6 +305,24 @@ violates one is a bug even if its tests pass.
     understand the conversation's register, verify a peripheral's
     escalation summary (§3.4.3), or compose an instruction with full
     context.
+
+13. With the memory and funnel plugins loaded, the framework MUST give
+    the core the memories that channel-bound peripherals have
+    consolidated since the last it was given: admitted at the tail of
+    its window before a model call it was going to make anyway, through
+    the funnel as any tail context is (base PRD §3.7 Funnel), each
+    labelled with the channel it came from. Doing so MUST NOT start a
+    turn. The framework MUST bound how much one call is given, deliver
+    what is held back on later calls, oldest first, and log a warning
+    when it holds any back.
+
+    *Rationale:* The core is the one context that keeps a common
+    awareness of every channel. Escalation (§3.4) brings it what a
+    peripheral cannot handle. This brings it the rest: what the
+    peripherals handled themselves, late by the age of §3.7.4 and what
+    adds to it.
+    Delivery at the tail costs no turn and leaves the core's cached
+    prefix as it was (base PRD principle 2). Owner, 2026-11-16.
 
 ### 3.2 The peripherals (System One)
 
@@ -506,7 +524,9 @@ violates one is a bug even if its tests pass.
    *Note (explanatory):* base PRD §3.13.7 leaves a stop unbounded for
    now and leaves open whether it lapses by itself (#366). This item
    relies on a stop that does not lapse; if #366 decides otherwise, this
-   item goes back to the owner.
+   item goes back to the owner. The owner ruled on 2026-11-16 that a
+   stop does not lapse and that a deferral is the pause that does; base
+   §3.13.7 reads as undecided until #366 edits it.
 
    *Rationale:* The slot-management plugin orders active queues because
    it alone knows the cache resources and the cost of swapping them. It
@@ -765,7 +785,12 @@ With the goals plugin loaded:
    for every context too, except that consolidation does not run for a
    task-bound peripheral: it writes no memory of its own (§3.2.9, open
    question 17), and its work is remembered through the core's
-   consolidation of its result.
+   consolidation of its result. Nor does it run for a
+   long-lived fork, whose work is remembered through the consolidation
+   of its join report in its parent's window (§3.5; owner, 2026-11-16).
+   Critique does not run inside a task-bound peripheral; its result is
+   critiqued where it lands, in the launcher's window (base §3.7
+   Critique 3).
 
 2. With the appraisal plugin loaded, appraisal MUST run in the core
    (§3.1.10).
@@ -773,13 +798,37 @@ With the goals plugin loaded:
 3. Critique, consolidation and compaction MUST each run over the window
    of each context item 1 has them run for, independently, as base PRD
    §3.7 and §3.8
-   describe; nothing about them changes. Whatever a context's window
+   describe; nothing about them changes except by item 4 and in the profile a
+   stage the operator has not mapped uses (§4; TRD K2). Whatever a context's window
    holds MUST be in scope, including the core's instructions and the
    messages it worded itself.
 
    *Rationale:* Because each context that consolidates does so over its
    own window, the agent forms separate memories of a peripheral exchange and of the
    core's decision about it (open question 14).
+
+4. With the memory plugin loaded and forks enabled for consolidation
+   (base PRD §3.7 Memory item 1), the framework MUST start
+   consolidating a channel-bound peripheral's un-consolidated
+   conversation no later than an operator-set age after its oldest
+   un-consolidated message, however little conversation there is and
+   whether or not the channel goes quiet; a turn or a consolidation
+   already running on that channel MAY finish first, and time the
+   daemon is not running is not counted. With §3.1.13,
+   what the core holds at one of its model calls then lags a
+   peripheral by that age and by what the TRD lists as adding to it,
+   among them work that had to finish, the consolidation's own time,
+   attempts that fail, time the daemon is down, and what §3.1.13 held
+   back: the core's awareness of the peripherals is eventually
+   consistent. The framework MUST log the lag it measures,
+   counted from the oldest message.
+
+   *Rationale:* The bound is a time and not an amount of conversation.
+   A bound on amount would repeat what escalation already does, since a
+   peripheral is told to send complex matters to the core; what is left
+   is routine, and for routine matters the question is how stale the
+   core may be. The consolidations are frequent, so they are meant to
+   be cheap: each one covers little. Owner, 2026-11-16.
 
 ### 3.8 Model requirements
 
@@ -929,9 +978,8 @@ With the goals plugin loaded:
    builds a backlog; each misses what the other catches. Refusing at
    the start of work, never at the arrival of a result, keeps the
    promise that no work disappears silently. The base PRD has no such
-   seam today; it is stated here, where nothing is measured until the
-   TRD is accepted, and the TRD carries it into the base PRD (open
-   question 21, gap 1).
+   seam today; it is stated here, and the TRD carries it into the base
+   PRD (open question 21, gap 1).
 
 ## 4. What carries over
 
@@ -943,9 +991,7 @@ supplement amends them:
   softened: the framework gives every context the one identity, and
   where contexts run different models, presentation is measured (§3.8.2),
   not required (§3.2.5);
-- the core takes over the heartbeat's role, and its idle-started turns
-  lose the heartbeat's critique exemption, amending base §3.7
-  Heartbeat and §3.7 Critique 3 (§3.1.2);
+- the core takes over the heartbeat's role (§3.1.2);
 - goals sit in a pinned block with tail updates (base §3.7 Goals; §3.6);
 - the core MAY give a task-bound peripheral fewer tools than it holds,
   amending base §3.5.7's full inherited set (§3.2.8);
@@ -953,7 +999,25 @@ supplement amends them:
 - base principle 3's "background work does not hold back its own
   channel's next main turn" is a default: the operator MAY set a
   background stage's forks to block, and then the channel's next turn
-  waits for that stage's result (§3.5.7).
+  waits for that stage's result (§3.5.7);
+- an escalation or an instruction starts an exchange of its own, with
+  its own turn budget and its own origin, and the hop count of §3.12.2
+  bounds the chain. Base §3.1.3 and §3.5.10 charge a turn that a note
+  wakes to the budget of the chain that woke it and give it that
+  chain's origin; they keep doing so for notes, and do not apply to
+  escalations and instructions (gap 1; owner, 2026-11-16);
+- a channel-bound peripheral's conversation is also consolidated when
+  its oldest un-consolidated message reaches an operator-set age
+  (§3.7.4). Base §3.7 Memory item 1 names three triggers (compaction,
+  idle, the end of a turn); this adds a fourth for peripheral channels
+  and changes none of the three (owner, 2026-11-16, amending the
+  decision on open question 16);
+- a background chat stage the operator has not mapped does its work
+  for a channel that names a profile on that channel's profile. Base §3.6
+  item 5 gives an unmapped stage the default profile for its kind, and
+  base §3.8 item 4 gives a stage one profile on every path; under this
+  strategy that is one profile per channel (TRD K2; for forks, owner,
+  2026-11-16; the stage's other paths are open, TRD §15.1).
 
 The strategy's scheduling amends none of base §3.13: its pauses are the
 base's stop, and its ordering of active queues is a replacement order
@@ -1169,8 +1233,8 @@ sensitivity plugins, locks under principle 15, the floors of principle
 ---
 
 *This supplement is the accepted target, not a build plan. It specifies
-desired outcomes for the core/periphery architecture. The TRD will specify
-how those outcomes are achieved and in what order, and conformance is
-checked from its acceptance. Appendix A collects the research and design ideas
-that informed the requirements; the TRD may adopt, modify, or discard any
-of them.*
+desired outcomes for the core/periphery architecture. The TRD, accepted
+on 2026-11-17, specifies how those outcomes are achieved and in what
+order, and conformance is checked from its acceptance. Appendix A
+collects the research and design ideas that informed the requirements;
+the TRD may adopt, modify, or discard any of them.*

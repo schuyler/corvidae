@@ -119,12 +119,50 @@ class TestNotifyDelivery:
         assert kwargs["source"] == f"agent_send from {ch_a.id}"
         assert kwargs["text"] == "hello bob"
         assert kwargs["tool_call_id"] is None
-        assert kwargs["annotations"]["origin"] == "agent_send"
+        # A user turn carries no origin, so neither does its note (#1034):
+        # the note never synthesizes one of its own.
+        assert "origin" not in kwargs["annotations"]
         assert kwargs["annotations"]["source_channel"] == ch_a.id
         assert kwargs["annotations"]["source_trace_id"] == "trace-123"
         assert kwargs["annotations"]["hop_count"] == 1
         # trace_id must NOT be in annotations (target mints its own trace)
         assert "trace_id" not in kwargs["annotations"]
+
+        await db.close()
+
+    async def test_note_carries_the_sending_turns_origin(self):
+        """A note sent from a turn with an origin carries that origin
+        verbatim, so the woken turn follows how the chain started (#1034,
+        PRD §3.5.10)."""
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+
+        # The sending turn is a reminder firing on channel a.
+        _attribution.set(
+            {
+                "channel_id": ch_a.id,
+                "trace_id": "trace-456",
+                "annotations": {"origin": "reminder", "schedule_id": 9},
+            }
+        )
+
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+
+        await plugin.notify_other_channel(ch_b.id, "hello bob")
+        # Only the origin crosses over; the sender's other keys stay behind.
+        assert notify.call_args.kwargs["annotations"] == {
+            "origin": "reminder",
+            "source_channel": ch_a.id,
+            "source_trace_id": "trace-456",
+            "hop_count": 1,
+        }
 
         await db.close()
 

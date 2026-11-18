@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -11,6 +11,7 @@ members = [
     "context-panel",
     "corvidae",
     "corvidae-cognition",
+    "corvidae-core-periphery",
     "corvidae-inotify",
     "corvidae-restart",
     "corvidae-timepiece",
@@ -548,6 +549,9 @@ cognition = [
 context-panel = [
     { name = "context-panel" },
 ]
+core-periphery = [
+    { name = "corvidae-core-periphery" },
+]
 cross-channel-send = [
     { name = "cross-channel-send" },
 ]
@@ -607,6 +611,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "context-panel", marker = "extra == 'context-panel'", editable = "packages/context-panel" },
     { name = "corvidae-cognition", extras = ["vec"], marker = "extra == 'cognition'", editable = "packages/corvidae-cognition" },
+    { name = "corvidae-core-periphery", marker = "extra == 'core-periphery'", editable = "packages/corvidae-core-periphery" },
     { name = "corvidae-inotify", marker = "extra == 'inotify'", editable = "packages/corvidae-inotify" },
     { name = "corvidae-restart", marker = "extra == 'restart'", editable = "packages/corvidae-restart" },
     { name = "corvidae-timepiece", marker = "extra == 'timepiece'", editable = "packages/corvidae-timepiece" },
@@ -629,7 +634,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "webhook-notify", marker = "extra == 'webhook-notify'", editable = "packages/webhook-notify" },
 ]
-provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "context-panel", "webhook-notify", "github-webhook", "goals-notify", "rss", "cognition", "restart", "outbound-cap", "timepiece", "inotify"]
+provides-extras = ["dev", "acp", "discord", "signal", "cross-channel-send", "vision", "context-panel", "webhook-notify", "github-webhook", "goals-notify", "rss", "cognition", "restart", "outbound-cap", "core-periphery", "timepiece", "inotify"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -658,6 +663,17 @@ requires-dist = [
     { name = "sqlite-vec", marker = "extra == 'vec'", specifier = ">=0.1.9" },
 ]
 provides-extras = ["vec"]
+
+[[package]]
+name = "corvidae-core-periphery"
+version = "0.0.1"
+source = { editable = "packages/corvidae-core-periphery" }
+dependencies = [
+    { name = "corvidae" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "corvidae", editable = "." }]
 
 [[package]]
 name = "corvidae-inotify"

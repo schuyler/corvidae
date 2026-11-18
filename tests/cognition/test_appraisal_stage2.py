@@ -10,7 +10,7 @@ Per plans/implementation/phase-2.md WP2.5:
   overwrite (stage1/stage1_out survive);
 - malformed model output is logged and the row keeps stage 1 only; no exception
   escapes;
-- no stage-2 task for origin="critique" exchanges;
+- a stage-2 task for origin="critique" exchanges too (#1031);
 - AppraisalPrior scores a covered msg-id range from stored appraisals and falls
   back to the wrapped prior when uncovered; consolidation writes mean stage-2
   valence into the memory record;
@@ -268,14 +268,15 @@ class TestTrigger:
         assert "appraisal" in task.description
         await _teardown(env)
 
-    async def test_no_task_for_critique_origin(self, tmp_path):
+    async def test_stage2_runs_for_critique_origin(self, tmp_path):
+        """#1031: a correction is judged, so provenance needs its claims."""
         env = await build_env(tmp_path)
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
             trace_id="kc", annotations={"origin": "critique"},
             logprobs=None,
         )
-        assert env.task.task_queue.queue.qsize() == 0
+        assert env.task.task_queue.queue.qsize() == 1
         await _teardown(env)
 
     async def test_silent_task_fires_no_on_notify(self, tmp_path):
@@ -544,7 +545,7 @@ class TestStage2Listeners:
         finally:
             await _teardown(env)
 
-    async def test_failed_stage2_notifies_no_one(self, tmp_path):
+    async def test_failed_stage2_notifies_once_with_none(self, tmp_path):
         env = await build_env(tmp_path, chat_text="not json at all")
         heard = []
 
@@ -554,6 +555,53 @@ class TestStage2Listeners:
         env.appraisal.add_stage2_listener(listener)
         try:
             await self._run(env, "kb")
+            # A miss notifies exactly once, with stage2=None (#1033 R5).
+            assert len(heard) == 1
+            assert heard[0]["stage2"] is None
+        finally:
+            await _teardown(env)
+
+
+    async def test_unexpected_exception_notifies_once_with_none(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """#1033 R5: a stage 2 that raises is a miss: logged at warning with
+        the trace, and listeners hear stage2=None once."""
+        env = await build_env(tmp_path, chat_text=json.dumps(CLAIMS_STAGE2))
+        heard = []
+
+        async def listener(**kwargs):
+            heard.append(kwargs)
+
+        async def explode(*args, **kwargs):
+            raise RuntimeError("stage 2 exploded")
+
+        env.appraisal.add_stage2_listener(listener)
+        monkeypatch.setattr(env.appraisal, "_run_stage2", explode)
+        try:
+            with caplog.at_level("WARNING", logger="corvidae.appraisal"):
+                await self._run(env, "kx")
+            assert [h["stage2"] for h in heard] == [None]
+            assert "kx" in caplog.text
+        finally:
+            await _teardown(env)
+
+    async def test_cancelled_stage2_notifies_no_one(self, tmp_path, monkeypatch):
+        """#1033: cancellation (shutdown) is not a miss; no listener hears it."""
+        env = await build_env(tmp_path, chat_text=json.dumps(CLAIMS_STAGE2))
+        heard = []
+
+        async def listener(**kwargs):
+            heard.append(kwargs)
+
+        async def cancelled(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        env.appraisal.add_stage2_listener(listener)
+        monkeypatch.setattr(env.appraisal, "_run_stage2", cancelled)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await self._run(env, "kc")
             assert heard == []
         finally:
             await _teardown(env)

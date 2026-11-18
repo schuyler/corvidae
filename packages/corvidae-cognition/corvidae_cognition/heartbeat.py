@@ -280,8 +280,8 @@ class HeartbeatPlugin(CorvidaePlugin):
         self._retired_goal_limit: int = DEFAULT_RETIRED_GOAL_LIMIT
         self._memory: MemoryPlugin | None = None
         self._idle: IdleTracker | None = None
-        # The kernel ChannelRegistry, duck-typed: corvidae.channel is not
-        # part of the plugin API (tests/test_kernel_boundary.py).
+        # The kernel ChannelRegistry, duck-typed. The duck typing dates from
+        # a since-removed import allowlist (#1026); it could now be typed.
         self._registry = None
         self._watch: IdleWatch | None = None
         # Diff state: what the previous beat sent. A persistent channel
