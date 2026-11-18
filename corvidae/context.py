@@ -517,12 +517,14 @@ class ContextWindow:
         the head of the in-memory window (``message_log`` is never touched),
         snapping the cut forward past a straddling tool cycle when that can be
         done without dropping the newest row. The newest row is always kept;
-        if it alone does not fit, its content is truncated in memory only,
-        with a visible marker. Pure and synchronous; it cannot fail.
+        if it alone does not fit, it is truncated in memory only: content and
+        reasoning_content with a visible marker, oversized tool-call arguments
+        replaced by valid JSON naming how much was kept (#1045). Pure and
+        synchronous; it cannot fail.
 
         Returns:
             ``(dropped, truncated)``: the rows removed (oldest first) and
-            whether the newest row's content was truncated. ``([], False)``
+            whether the newest row was truncated. ``([], False)``
             when the window already fits, or is empty.
         """
         # Nothing to do when the window already fits (or there is no row to cut).
@@ -563,17 +565,64 @@ class ContextWindow:
         truncated = False
         newest = self.messages[-1]
         if isinstance(newest, dict) and fixed + message_tokens(newest, self.fence_key) > max_tokens:
-            content = str(newest.get("content") or "")
-            total = len(content)
             room = max_tokens - fixed
+            # The row's size can sit in content, reasoning_content or a tool
+            # call's arguments (#1045), so every one of them is cut to the same
+            # k. Text fields as they are stored; arguments only where they are
+            # a string inside a dict function, other shapes stand as they are.
+            texts = {
+                key: str(newest.get(key) or "")
+                for key in ("content", "reasoning_content") if key in newest
+            }
+            calls = newest.get("tool_calls")
+            calls = calls if isinstance(calls, list) else []
+
+            def has_args(call: object) -> bool:
+                """Whether ``call`` carries string arguments that can be cut."""
+                return (
+                    isinstance(call, dict) and isinstance(call.get("function"), dict)
+                    and isinstance(call["function"].get("arguments"), str)
+                )
+
+            # The longest cuttable field; 0 when there is none, so the search
+            # below finds nothing that fits and the row stands (#392).
+            total = max(
+                [len(t) for t in texts.values()]
+                + [len(c["function"]["arguments"]) for c in calls if has_args(c)],
+                default=0,
+            )
+
+            def cut_text(text: str, k: int) -> str:
+                """``text`` cut to its first k characters plus a marker."""
+                return text[:k] + (
+                    "\n\n[truncated to fit the context window: showing the "
+                    f"first {k} of {len(text)} characters]"
+                )
+
+            def cut_call(call: object, k: int) -> object:
+                """``call`` with arguments longer than k replaced by valid JSON
+                naming how much was kept; id, type and name are carried over,
+                so result pairing and rendering still work."""
+                if not has_args(call) or len(call["function"]["arguments"]) <= k:
+                    return call
+                args = call["function"]["arguments"]
+                stub = json.dumps(
+                    {"_truncated": f"first {k} of {len(args)} characters: {args[:k]}"}
+                )
+                return {**call, "function": {**call["function"], "arguments": stub}}
 
             def candidate(k: int) -> dict:
-                """The newest row cut to its first k characters plus marker."""
-                marker = (
-                    "\n\n[truncated to fit the context window: showing the "
-                    f"first {k} of {total} characters]"
-                )
-                return {**newest, "content": content[:k] + marker}
+                """The newest row with every field longer than k cut to k.
+
+                A field no longer than k keeps its stored value and type (None,
+                a list of parts), so only what is cut changes form.
+                """
+                row = {**newest, **{
+                    key: cut_text(t, k) for key, t in texts.items() if len(t) > k
+                }}
+                if any(has_args(c) for c in calls):
+                    row["tool_calls"] = [cut_call(c, k) for c in calls]
+                return row
 
             # Binary search the largest k measured to fit; lo always holds a
             # k already known to fit, since token counts are not monotone in k.

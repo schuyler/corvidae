@@ -34,7 +34,7 @@ from corvidae.tool import Tool, ToolContext, tool_to_schema
 
 logger = logging.getLogger("corvidae.silence")
 
-# Same literal as critique.py's NO_REPLY_MARKER; critique is unchanged.
+# Same literal as critique.py's NO_REPLY_MARKER, which critique's own veto keys on.
 NO_REPLY = "NO_REPLY"
 
 
@@ -47,6 +47,34 @@ def _carries_no_reply(text: str) -> bool:
     distinctive control string; ordinary prose does not contain it.
     """
     return NO_REPLY in text
+
+
+def decline_kind(response_text: str) -> str | None:
+    """The decline shape a final's text has: ``"no_reply"``, ``"empty"``, or None.
+
+    The text alone is not a decline: the final must also have gone unsent
+    (``is_decline``). A text that carries the token, or is empty once
+    stripped, is the agent's own signal for silence (PRD §3.7 Output gate
+    items 5-6); any other text is a response, even when a gate withheld it.
+    """
+    text = response_text.strip()
+    if _carries_no_reply(text):
+        return "no_reply"
+    if text == "":
+        return "empty"
+    return None
+
+
+def is_decline(channel, response_text: str) -> bool:
+    """True when the final ``on_agent_response`` reports is a decline (#420).
+
+    A decline is a final that was not sent and whose text carries
+    ``NO_REPLY`` or is empty. A response another gate withheld has content
+    and is not one. Call it before the hook's first await: ``final_was_unsent``
+    reads the newest assistant row of the live window. Appraisal and critique
+    skip a decline; this module owns the definition so the three cannot drift.
+    """
+    return final_was_unsent(channel) and decline_kind(response_text) is not None
 
 
 # The built-in instruction appended to a conversational channel's system
@@ -287,12 +315,8 @@ class SilencePlugin(CorvidaePlugin):
         if not unsent or ended:
             return
         # Only the two decline shapes count; another gate's veto is not ours.
-        text = response_text.strip()
-        if _carries_no_reply(text):
-            kind = "no_reply"
-        elif text == "":
-            kind = "empty"
-        else:
+        kind = decline_kind(response_text)
+        if kind is None:
             return
         if trace_id is None:
             logger.warning(

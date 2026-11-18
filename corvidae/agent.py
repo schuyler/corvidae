@@ -346,6 +346,31 @@ class Agent(CorvidaePlugin):
         # Channel id -> the pending retry of its unreachable-backend turn.
         self._turn_retries: dict[str, _TurnRetry] = {}
 
+    def waiting_work(self) -> dict[str, int]:
+        """Accepted, unfinished work per channel id (zero entries omitted).
+
+        Per channel: items on its SerialQueue (queued or in flight) plus
+        TaskQueue tasks, queued or running, whose ``Task.channel`` is it.
+        """
+        # Channel queues: queued items plus the turn in flight.
+        counts = {cid: len(q.pending_items()) for cid, q in self.queues.items()}
+        # TaskQueue: tasks each channel started, queued or running.
+        task_queue = getattr(self.pm.get_plugin("task"), "task_queue", None)
+        if task_queue is not None:
+            for cid, n in task_queue.pending_by_channel().items():
+                counts[cid] = counts.get(cid, 0) + n
+        return {cid: n for cid, n in counts.items() if n}
+
+    def waiting_messages(self) -> dict[str, int]:
+        """Accepted, unfinished USER items per channel id (zeros omitted)."""
+        counts: dict[str, int] = {}
+        # Transport messages only: notifications and tool results never count.
+        for cid, q in self.queues.items():
+            n = sum(1 for i in q.pending_items() if i.role == QueueItemRole.USER)
+            if n:
+                counts[cid] = n
+        return counts
+
     @property
     def tools(self) -> dict[str, Callable]:
         """Public read-only access to the tool dict."""

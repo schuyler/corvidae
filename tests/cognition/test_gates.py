@@ -458,18 +458,15 @@ class TestTunableFlips:
 
 
 class TestWithheldStillCritiqued:
-    """WP2.7's deferred assertion is now unreachable, and this says why.
+    """PRD §3.7 Critique 3: a response a gate withheld is still judged.
 
-    Critique is eligible only for ``reminder`` origin and for admitted ``user``
-    traces; a user final is never withheld, so the one origin that could be both
-    withheld and eligible was the reminder. Exempting reminders from the gate
-    (the change above) removed the last vehicle, and a test that constructs an
-    impossible combination would assert nothing. Kept as a class so the next
-    reader finds the reasoning rather than a gap: if a new origin becomes
-    eligible *and* withholdable, this is where its test goes.
+    Before #1031 no origin could be both withheld and eligible (critique judged
+    only ``reminder`` and admitted ``user`` traces, and the gate exempts both).
+    Now every main-loop turn with a trace is judged, so a withheld background
+    final, a heartbeat's for one, must stay eligible.
     """
 
-    async def test_no_origin_is_both_withheld_and_eligible(self, make_env):
+    async def test_every_withheld_final_is_eligible(self, make_env):
         from corvidae_cognition.critique import CritiquePlugin
 
         env = await make_env(config={"gate": {"send": {"min_salience": 1.0}}})
@@ -479,24 +476,17 @@ class TestWithheldStillCritiqued:
 
         withheld: list[str] = []
         for origin in ("reminder", "user", "critique", "heartbeat", "task"):
-            eligible = critique._eligible("t1", {"origin": origin})
             verdict = await env.gates.should_send_response(
                 channel=env.channel, text="x", emission="final",
                 trace_id="t1", annotations={"origin": origin},
             )
-            assert not (eligible and verdict is False), origin
             if verdict is False:
                 withheld.append(origin)
-        # The assertion above is only worth something if the gate can withhold
-        # at all under this fixture: an exempt-everything gate would pass it
-        # vacuously.
-        assert withheld, "no origin was withheld, so the property is untested"
-        # The same guard on the other half: a broken _eligible that returned
-        # False for everything would satisfy the assertion above silently.
-        assert any(
-            critique._eligible("t1", {"origin": origin})
-            for origin in ("reminder", "user", "critique", "heartbeat", "task")
-        ), "no origin was eligible, so the property is untested"
+                assert critique._eligible("t1"), origin
+        # The property is only worth something if the gate withholds at all
+        # under this fixture, and withholds a background origin.
+        assert "heartbeat" in withheld, withheld
+
 
 class _FakePM:
     def __init__(self, **plugins):

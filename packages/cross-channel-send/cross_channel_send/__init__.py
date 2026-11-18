@@ -15,28 +15,33 @@ notification's annotations. The receiving context's attribution carries the
 hop_count, so the next send from that context increments it again. When
 hop_count exceeds max_hops (config, default 3), the send is refused.
 
-Cognition consumers see origin "agent_send" in annotations. Verified against the
-cognition source (2026-11-05):
-- critique._eligible: exempt. Eligible iff origin == "reminder", or origin
-  is absent and the trace was admitted (user). "agent_send" matches
-  neither, so a sent instruction never forks a critique.
-- funnel: neutral. Origin keys the deferred-registration queue as
-  (channel.id, origin); "agent_send" is just a new vocabulary value,
-  queued and drained on the next same-origin turn of the channel.
-- gates: the send's final response is a non-user origin, so the decide
-  gate's salience withholding applies to it exactly as to a reminder's
-  reply (engaged inbound messages are unaffected; the engagement gate is
-  inbound-only).
-- appraisal: stage 2 runs (it skips only origin "critique") — one silent
-  appraisal task per sent instruction.
-- outcome_log: the exchange row's origin column records "agent_send"
-  (record_exchange takes annotations["origin"] verbatim, default "task").
+Origin: the note carries the sending turn's ``annotations["origin"]``
+verbatim and never stamps one of its own (PRD §3.5.10, #1034), so a note sent
+from a reminder turn wakes a reminder-origin turn. A user turn has no origin
+("user" is inferred from admission), so its note carries none. The sender is
+named by ``source_channel``/``source_trace_id`` and by the kernel's
+``origin_channel``/``origin_trace`` metadata. How the cognition consumers read
+the woken turn (its trace is minted at dequeue, never admitted), checked
+against their source on 2026-11-17:
+- critique: every main-loop turn with a trace is judged (#1031), so the
+  woken turn is, whatever its origin. A note from a correction carries
+  origin "critique", so the woken turn's findings never wake another turn.
+- funnel: origin keys the deferred-registration queue as (channel.id,
+  origin); a woken turn with no origin drains only the next-turn queue.
+- gates: no origin reads as "task", so the decide gate's salience
+  withholding applies to a user chain's woken turn; a reminder chain's is
+  never withheld; a ``gate.send.quiet_origins`` origin stays quiet on the
+  channel it sends to.
+- appraisal: stage 2 runs on every origin (#1031).
+- outcome_log: the exchange row's origin column records the carried origin,
+  or "task" when there is none.
 """
 
 from __future__ import annotations
 
 import logging
 
+from corvidae.admission import offer_work
 from corvidae.attribution import get_attribution
 from corvidae.channel import ChannelNotReady, ChannelRegistry, resolve_persisted_channel
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
@@ -172,17 +177,37 @@ class CrossChannelSendPlugin(CorvidaePlugin):
                     f"{channel_id!r} (hop {hop} > max {self._max_hops})."
                 )
 
+            # The note names its sender and its hop; it carries the sending
+            # turn's origin verbatim and never stamps one of its own, so the
+            # woken turn follows how the chain started (PRD §3.5.10, #1034).
+            # A turn with no origin (a user turn) sends a note with none.
+            note_annotations = {
+                "source_channel": source_channel,
+                "source_trace_id": attribution.get("trace_id"),
+                "hop_count": hop,
+            }
+            if "origin" in annotations:
+                note_annotations["origin"] = annotations["origin"]
+
+            # Offer the note to the admission seam; a refusal is the result
+            # and nothing reaches on_notify.
+            refusal = await offer_work(
+                self.pm,
+                channel=target,
+                kind="note",
+                source_channel=source_channel,
+                trace_id=attribution.get("trace_id"),
+                annotations=annotations,
+            )
+            if refusal is not None:
+                return refusal
+
             await self.pm.ahook.on_notify(
                 channel=target,
                 source=f"agent_send from {source_channel}",
                 text=text,
                 tool_call_id=None,
-                annotations={
-                    "origin": "agent_send",
-                    "source_channel": source_channel,
-                    "source_trace_id": attribution.get("trace_id"),
-                    "hop_count": hop,
-                },
+                annotations=note_annotations,
             )
             return f"Queued on {channel_id}."
         except Exception:

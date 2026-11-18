@@ -38,6 +38,7 @@ from corvidae.task import Task
 from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.probe import ReadOnlyProbe
+from corvidae_cognition.silence import is_decline
 
 # Named explicitly: corvidae/logging.py configures the "corvidae" logger,
 # and __name__ would be corvidae_cognition.appraisal.
@@ -159,6 +160,11 @@ DEFAULT_STAGE2_FORK_PROMPT = (
     '  "past_claims": [{"claim": "...", "queries": ["..."]}]\n'
     "}"
 )
+
+#: The numeric stage-2 dimensions other plugins may select on (critique
+#: lens thresholds validate against this); the schema below defines them.
+STAGE2_DIMENSIONS: tuple[str, ...] = (
+    "valence", "stakes", "ambiguity", "commitment_density", "novelty")
 
 # JSON schema constraining the stage-2 call on servers that honour it
 # (llama-server grammar / json_schema via extra_body). Providers that ignore
@@ -482,6 +488,23 @@ class AppraisalPrior:
         )
 
 
+def _declined(channel, response_text: str, trace_id: str | None) -> bool:
+    """Whether this final is a decline (#420), failing toward appraising.
+
+    A check that raises costs one stage-2 call rather than dropping one, and
+    logs a warning so the break is visible.
+    """
+    try:
+        return is_decline(channel, response_text)
+    except Exception:
+        logger.warning(
+            "could not tell whether the final of %s on %s was declined; "
+            "appraising it", trace_id, channel.id, exc_info=True,
+            extra={"channel": channel.id, "trace_id": trace_id},
+        )
+        return False
+
+
 class AppraisalPlugin(CorvidaePlugin):
     """Stage-1 appraisal: heuristics + FTS5 probe behind a pull API.
 
@@ -737,9 +760,12 @@ class AppraisalPlugin(CorvidaePlugin):
     def add_stage2_listener(self, callback: Callable[..., Awaitable[None]]) -> None:
         """Register a coroutine function to hear each completed stage 2.
 
-        After a stage-2 vector is persisted, every listener is awaited with
-        keyword arguments ``channel, trace_id, response_text, annotations, stage2``,
-        outside the appraisal attribution. A failed stage 2 notifies no one.
+        Every enqueued stage 2 notifies each listener exactly once, awaited
+        with keyword arguments ``channel, trace_id, response_text, annotations,
+        stage2``, outside the appraisal attribution: ``stage2`` is the
+        persisted vector, or ``None`` when no vector was produced (the fork
+        missed, the reply was unusable, or the task raised). A listener must
+        accept ``None``. Cancellation (shutdown) notifies no one.
         A listener's exception is logged and never reaches the others. This
         is a push, not a wait: a consumer that awaited stage 2 from a queued
         task would hold a TaskQueue worker the stage-2 task may need.
@@ -770,14 +796,22 @@ class AppraisalPlugin(CorvidaePlugin):
     ) -> None:
         """Enqueue the silent stage-2 appraisal task (never on the response path).
 
-        Fires once per exchange-ending turn. Never for ``annotations["origin"] ==
-        "critique"`` exchanges — nothing downstream consumes them and it
-        doubles cost. The task is silent (``deliver=False``): its empty
-        result triggers no on_notify and therefore no main-model turn
-        (trap #10).
+        Fires once per exchange-ending turn, whatever its origin: a correction
+        (``critique`` origin) is judged too, and its provenance check needs
+        the claims stage 2 lists (#1031). Never for a decline (#420): the
+        agent's choice to stay silent is not a response, so
+        ``get_last_stage2`` keeps the channel's last answered exchange. The
+        task is silent (``deliver=False``): its empty result triggers no
+        on_notify and therefore no main-model turn (trap #10).
         """
-        origin = (annotations or {}).get("origin")
-        if trace_id is None or origin == "critique":
+        if trace_id is None:
+            return
+        if _declined(channel, response_text, trace_id):
+            logger.debug(
+                "stage-2 appraisal skipped for %s on %s: the turn was declined",
+                trace_id, channel.id,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
             return
         task_plugin = self.pm.get_plugin("task") if hasattr(self, "pm") else None
         queue = getattr(task_plugin, "task_queue", None)
@@ -787,11 +821,23 @@ class AppraisalPlugin(CorvidaePlugin):
         text_in = self.get_originating_text(trace_id) or request_text
 
         async def _work() -> str:
-            stage2 = await self._run_stage2(channel, trace_id, text_in, response_text, logprobs)
-            # Listeners run after _run_stage2 has reset its attribution, so
-            # their own work isn't billed to appraisal.
-            if stage2 is not None:
-                await self._notify_stage2(channel, trace_id, response_text, annotations, stage2)
+            # An unexpected Exception is a miss like any other: log it and
+            # notify with None. Cancellation (shutdown) is a BaseException,
+            # passes through, and notifies no one.
+            try:
+                stage2 = await self._run_stage2(
+                    channel, trace_id, text_in, response_text, logprobs)
+            except Exception:
+                logger.warning(
+                    "stage-2 appraisal failed unexpectedly for trace %s on %s; "
+                    "listeners are told stage 2 is missing", trace_id, channel.id,
+                    exc_info=True, extra={"channel": channel.id, "trace_id": trace_id},
+                )
+                stage2 = None
+            # Every enqueued stage 2 notifies exactly once, with the vector or
+            # None on a miss. Listeners run after _run_stage2 has reset its
+            # attribution, so their own work isn't billed to appraisal.
+            await self._notify_stage2(channel, trace_id, response_text, annotations, stage2)
             return ""
 
         try:

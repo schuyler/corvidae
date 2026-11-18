@@ -21,7 +21,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from corvidae.admission import offer_work
 from corvidae.attribution import (
+    get_attribution,
     lease_scope,
     agent_depth_refusal,
     next_agent_depth,
@@ -141,6 +143,19 @@ class ForkToolPlugin(CorvidaePlugin):
         depth = next_agent_depth(max_agent_depth)
         if depth is None:
             return agent_depth_refusal(max_agent_depth)
+        # Offer the work to the admission seam before anything is built or
+        # enqueued; the result lands on the calling channel.
+        attr = get_attribution()
+        refusal = await offer_work(
+            self.pm,
+            channel=channel,
+            kind="fork",
+            source_channel=channel.id,
+            trace_id=attr.get("trace_id"),
+            annotations=attr.get("annotations") or {},
+        )
+        if refusal is not None:
+            return refusal
         tools_dict = registry.as_dict()
         tool_schemas = registry.schemas()
 

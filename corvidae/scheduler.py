@@ -1,16 +1,19 @@
 """SchedulerPlugin — reminders and periodic jobs (#59).
 
 The clock-driven producer: one ``schedule`` table in the persistence
-database, one asyncio timer task, and three tools. A due row fires as a
+database, one asyncio timer task, and five tools. A due row fires as a
 plain ``on_notify`` call, so the whole notification pipeline (serial
 queue, persistence, origin-keyed consumers, attribution, the outbound send)
 runs unchanged; the model's reply on the row's channel is the unprompted
 message. Design: plans/scheduler.md.
 
-Rows come from two sources:
+Rows come from three sources:
     - reminders, created by the ``remind_me`` tool, pinned to the channel
       the tool ran on (there is no channel argument — scoping is a
       security property, see docs/threat-model.md);
+    - recurring jobs the agent sets with ``add_job`` (cron), pinned the same
+      way, always origin ``reminder``, and counted against the same
+      per-channel cap as reminders (#814);
     - jobs, declared by the operator under ``scheduler.jobs`` and synced by
       ``name`` on startup and on every config reload.
 
@@ -57,8 +60,7 @@ from corvidae.clock import MAX_WALL_SLEEP_SECONDS, Clock
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.tool import Tool, tool_to_schema
 from corvidae.cron import CronParseError, parse_cron, next_fire as cron_next_fire, cron_description
-from corvidae.scheduler_file import read_jobs as read_jobs_file, write_jobs as write_jobs_file
-from corvidae.scheduler_crud import add_job as crud_add, update_job as crud_update, remove_job as crud_remove, list_jobs as crud_list
+from corvidae.scheduler_file import read_jobs as read_jobs_file
 from corvidae.scheduler_watch import FileWatcher
 
 logger = logging.getLogger(__name__)
@@ -384,11 +386,22 @@ def frame_firing(row: ScheduleRow, tz: tzinfo, overdue: float | None) -> str:
         )
     else:
         created = datetime.fromtimestamp(row.created_at, tz).strftime("%Y-%m-%d %H:%M (%Z)")
-        body = (
-            f"A reminder you set on {created} for this conversation is due. "
-            f"Reminder text: {_quote_as_data(row.text)}. "
-            "Decide whether and how to act on it."
-        )
+        cron_expr = _cron_expr_from_spec(row.schedule_spec)
+        if cron_expr is not None:
+            # A recurring job the agent set with add_job (#814): framed as
+            # the agent's, never as the operator's.
+            body = (
+                f"A recurring job you set on {created} for this conversation "
+                f'(cron "{cron_description(cron_expr)}") is due. '
+                f"Job prompt: {_quote_as_data(row.text)}. "
+                "Decide whether and how to act on it."
+            )
+        else:
+            body = (
+                f"A reminder you set on {created} for this conversation is due. "
+                f"Reminder text: {_quote_as_data(row.text)}. "
+                "Decide whether and how to act on it."
+            )
     if overdue is not None:
         return f"[overdue by {format_duration(overdue)}, daemon was down]\n{body}"
     return body
@@ -1083,9 +1096,12 @@ class SchedulerPlugin(CorvidaePlugin):
     # Reminder operations (the tools' backing)
     # ------------------------------------------------------------------
 
-    async def add_reminder(self, channel_id: str, text: str, fire_at: float) -> int:
-        """Insert a one-shot reminder; raises ValueError over the channel cap
-        or when the DB is not open."""
+    async def add_reminder(self, channel_id: str, text: str, fire_at: float,
+                           schedule_spec: str | None = None) -> int:
+        """Insert a tool-created row: a one-shot reminder, or a recurring job
+        when ``schedule_spec`` is a cron spec. Raises ValueError over the
+        channel cap (reminders and jobs count together) or when the DB is
+        not open."""
         db = await self._ensure_schema()
         if db is None:
             raise ValueError("the schedule database is not available yet")
@@ -1100,13 +1116,15 @@ class SchedulerPlugin(CorvidaePlugin):
                 (count,) = await cursor.fetchone()
             if count >= self._max_per_channel:
                 raise ValueError(
-                    f"this conversation already has {count} pending reminders "
-                    f"(limit {self._max_per_channel}); cancel one first"
+                    f"this conversation already has {count} pending reminders and jobs "
+                    f"(limit {self._max_per_channel}, scheduler.max_reminders_per_channel); "
+                    f"cancel one first"
                 )
+            # Origin is always 'reminder': a tool never chooses it (#814).
             cursor = await db.execute(
                 "INSERT INTO schedule (channel_id, origin, text, next_fire_at, created_at, "
-                "created_by, enabled) VALUES (?, 'reminder', ?, ?, ?, 'tool', 1)",
-                (channel_id, text, fire_at, self._clock.now()),
+                "created_by, enabled, schedule_spec) VALUES (?, 'reminder', ?, ?, ?, 'tool', 1, ?)",
+                (channel_id, text, fire_at, self._clock.now(), schedule_spec),
             )
             row_id = cursor.lastrowid
             await db.commit()
@@ -1121,6 +1139,51 @@ class SchedulerPlugin(CorvidaePlugin):
         return await self._fetch(
             db, "channel_id = ? AND enabled = 1 ORDER BY next_fire_at", (channel_id,),
         )
+
+    async def update_job_on(self, row_id: int, channel_id: str,
+                            cron_expr: str | None, text: str | None) -> str:
+        """Change a recurring job the agent set on ``channel_id``; returns the
+        tool's reply. Another channel's row reads as not found so its
+        existence is not leaked; operator jobs and one-shot reminders are
+        refused. ``cron_expr`` is already validated by the caller."""
+        db = await self._ensure_schema()
+        if db is None:
+            return "Error: the schedule database is not available yet."
+        async with self._db_lock:
+            rows = await self._fetch(db, "id = ?", (row_id,))
+            row = rows[0] if rows else None
+            if row is None or row.channel_id != channel_id:
+                return f"Error: no job #{row_id} in this conversation."
+            if row.created_by == "config":
+                return (f"Error: #{row_id} is the operator's scheduled job "
+                        f"\"{row.name}\" and cannot be changed from here.")
+            if _cron_expr_from_spec(row.schedule_spec) is None:
+                return (f"Error: #{row_id} is a one-shot reminder, not a recurring job; "
+                        f"cancel it with cancel_reminder and set a new one.")
+            if not row.enabled:
+                return f"Job #{row_id} is not pending ({row.disabled_reason})."
+            # Apply only the fields given; a new cron also moves the next fire.
+            new_text = text if text is not None else row.text
+            spec, next_fire = row.schedule_spec, row.next_fire_at
+            if cron_expr is not None:
+                spec = f"cron={cron_expr};tz={self._tz_name}"
+                next_fire = self._cron_next(cron_expr)
+            await db.execute(
+                "UPDATE schedule SET text = ?, schedule_spec = ?, next_fire_at = ? WHERE id = ?",
+                (new_text, spec, next_fire, row_id),
+            )
+            await db.commit()
+        self.wake()
+        logger.info("scheduler: job updated",
+                    extra={"schedule_id": row_id, "channel": channel_id})
+        return f"Job #{row_id} updated; next at {format_time(next_fire, self._tz)}."
+
+    def _cron_next(self, cron_expr: str) -> float:
+        """The next fire time of ``cron_expr`` after now, in the scheduler's
+        timezone. Raises CronParseError if it does not parse or never matches."""
+        return cron_next_fire(
+            parse_cron(cron_expr), datetime.fromtimestamp(self._clock.now(), self._tz), self._tz,
+        ).timestamp()
 
     async def cancel_reminder_on(self, row_id: int, channel_id: str) -> str:
         """Disable a tool-created row on ``channel_id``; returns the tool's
@@ -1154,11 +1217,13 @@ class SchedulerPlugin(CorvidaePlugin):
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
-        """Register remind_me, list_reminders, cancel_reminder.
+        """Register remind_me, list_reminders, cancel_reminder, add_job,
+        update_job.
 
-        All three act on ``_ctx.channel`` only; there is no channel
+        All five act on ``_ctx.channel`` only; there is no channel
         argument, so a speaker on one transport cannot schedule a message
-        to another (docs/threat-model.md).
+        to another, and no origin argument, so a tool-created row always
+        carries origin ``reminder`` (docs/threat-model.md, #814).
         """
         plugin = self
 
@@ -1209,12 +1274,15 @@ class SchedulerPlugin(CorvidaePlugin):
                     preview = row.text if len(row.text) <= 80 else row.text[:77] + "..."
                     lines.append(f"#{row.id} {due} [operator job \"{row.name}\", {sched}, "
                                  f"read-only] {preview}")
+                elif (cron_expr := _cron_expr_from_spec(row.schedule_spec)) is not None:
+                    lines.append(f'#{row.id} {due} [your job, cron "{cron_description(cron_expr)}"]: '
+                                 f"{row.text}")
                 else:
                     lines.append(f"#{row.id} {due}: {row.text}")
             return "\n".join(lines)
 
         async def cancel_reminder(id: int, _ctx) -> str:  # noqa: A002 - tool arg name per plan
-            """Cancel a pending reminder in this conversation by its id (from list_reminders). Operator scheduled jobs cannot be cancelled."""
+            """Cancel a pending reminder or recurring job in this conversation by its id (from list_reminders). Operator scheduled jobs cannot be cancelled."""
             channel = _ctx.channel
             if channel is None:
                 return "Error: no channel context available"
@@ -1225,38 +1293,67 @@ class SchedulerPlugin(CorvidaePlugin):
                 return f"Error: {id!r} is not a reminder id; use the number from list_reminders"
             return await plugin.cancel_reminder_on(row_id, channel.id)
 
-        # CRUD tools for the YAML jobs file (operator-facing). They act on
-        # the operator's jobs file, not a channel; the file must be
-        # configured, and mutations are picked up by the watcher's reload.
-        jobs_file = plugin._jobs_file_path
+        # Recurring jobs the agent sets (#814): schedule rows like reminders,
+        # on the calling channel only, origin always 'reminder'. The
+        # operator's jobs file is never written from here.
+        def check_cron(cron: str) -> str | None:
+            """An error reply if ``cron`` does not parse or never matches."""
+            try:
+                plugin._cron_next(cron)
+            except CronParseError as exc:
+                return (f"Error: cron {cron!r} is not usable: {exc}; give five fields "
+                        f"(minute hour day month weekday) that match a real time")
+            return None
 
-        async def add_job(name: str, channel: str, cron: str, prompt: str = "", origin: str = "reminder", _ctx=None) -> str:
-            """Add a job to the scheduler jobs file: a name, a channel (transport:scope), a 5-field cron, and a prompt. Synced on the next reload."""
-            if jobs_file is None:
-                return "Error: no scheduler jobs_file is configured"
-            return crud_add(jobs_file, name, channel, cron, prompt, origin)
+        def check_prompt(prompt: str) -> str | None:
+            """An error reply if ``prompt`` is empty or too long."""
+            if not prompt:
+                return "Error: job prompt is empty"
+            if len(prompt) > MAX_REMINDER_TEXT_CHARS:
+                return f"Error: job prompt is longer than {MAX_REMINDER_TEXT_CHARS} characters"
+            return None
 
-        async def update_job(name: str, channel: str = "", cron: str = "", origin: str = "", prompt: str = "", _ctx=None) -> str:
-            """Update fields of an existing job in the scheduler jobs file. Only the fields you provide are changed (channel, cron, origin, prompt)."""
-            if jobs_file is None:
-                return "Error: no scheduler jobs_file is configured"
-            changes = {k: v for k, v in (("channel", channel), ("cron", cron), ("origin", origin), ("prompt", prompt)) if v}
-            if not changes:
-                return "Error: provide at least one field to update (channel, cron, origin, prompt)"
-            return crud_update(jobs_file, name, **changes)
+        async def add_job(cron: str, prompt: str, _ctx) -> str:
+            """Set a recurring job in this conversation: a 5-field cron expression (minute hour day month weekday, in the configured timezone) and the prompt to act on each time. List jobs with list_reminders and stop one with cancel_reminder."""
+            channel = _ctx.channel
+            if channel is None:
+                return "Error: no channel context available"
+            cron, prompt = (cron or "").strip(), (prompt or "").strip()
+            error = check_cron(cron) or check_prompt(prompt)
+            if error:
+                return error
+            next_fire = plugin._cron_next(cron)
+            try:
+                row_id = await plugin.add_reminder(
+                    channel.id, prompt, next_fire,
+                    schedule_spec=f"cron={cron};tz={plugin._tz_name}",
+                )
+            except ValueError as exc:
+                return f"Error: {exc}"
+            logger.info("scheduler: job set",
+                        extra={"schedule_id": row_id, "channel": channel.id})
+            return (f'Job #{row_id} set: cron "{cron_description(cron)}", '
+                    f"next at {format_time(next_fire, plugin._tz)}.")
 
-        async def remove_job(name: str, _ctx=None) -> str:
-            """Remove a job from the scheduler jobs file by name."""
-            if jobs_file is None:
-                return "Error: no scheduler jobs_file is configured"
-            return crud_remove(jobs_file, name)
+        async def update_job(id: int, _ctx, cron: str = "", prompt: str = "") -> str:  # noqa: A002 - matches cancel_reminder
+            """Change a recurring job you set in this conversation, by its id (from list_reminders). Only the fields you give change: cron, prompt; pass an empty string to leave a field unchanged."""
+            channel = _ctx.channel
+            if channel is None:
+                return "Error: no channel context available"
+            # Tool args are not type-checked; accept "12" and "#12" as well.
+            try:
+                row_id = int(str(id).strip().lstrip("#"))
+            except ValueError:
+                return f"Error: {id!r} is not a job id; use the number from list_reminders"
+            if not cron and not prompt:
+                return "Error: provide at least one field to update (cron, prompt)"
+            cron_expr = cron.strip() if cron else None
+            text = prompt.strip() if prompt else None
+            error = ((check_cron(cron_expr) if cron_expr is not None else None)
+                     or (check_prompt(text) if text is not None else None))
+            if error:
+                return error
+            return await plugin.update_job_on(row_id, channel.id, cron_expr, text)
 
-        async def list_jobs(_ctx=None) -> str:
-            """List all jobs in the scheduler jobs file."""
-            if jobs_file is None:
-                return "Error: no scheduler jobs_file is configured"
-            return crud_list(jobs_file)
-
-        for fn in (remind_me, list_reminders, cancel_reminder,
-                    add_job, update_job, remove_job, list_jobs):
+        for fn in (remind_me, list_reminders, cancel_reminder, add_job, update_job):
             tool_registry.append(Tool(name=fn.__name__, fn=fn, schema=tool_to_schema(fn)))
