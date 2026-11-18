@@ -33,6 +33,7 @@ from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.tool import Tool, tool_to_schema
 from corvidae_cognition.funnel import FunnelPlugin
 from corvidae_cognition.memory import MemoryPlugin
+from corvidae_cognition.heartbeat import frame_beat
 
 logger = logging.getLogger("corvidae.goals")
 
@@ -138,6 +139,34 @@ class GoalsPlugin(CorvidaePlugin):
             await self._ensure_schema()
         except Exception:
             logger.warning("goals schema creation deferred", exc_info=True)
+
+    @hookimpl
+    async def transform_heartbeat_prompt(
+        self,
+        memories: list[dict],
+        retired: list[dict] | None,
+        prompt: str,
+        goals_instruction: str,
+        *,
+        diff: bool,
+        open_goals: list[dict] | None,
+    ) -> str:
+        """Shape the beat: pursuable goals only, no memories.
+
+        Filters the open-goal list to ``open`` and ``in-progress``
+        (drops ``blocked`` and ``waiting``), caps at five, and skips
+        the memory block. The full board is still available via the
+        ``list_goals`` tool; the beat shows what's actionable now.
+        """
+        if open_goals:
+            open_goals = [
+                g for g in open_goals
+                if g.get("status", "open") in ("open", "in-progress")
+            ][:5]
+        return frame_beat(
+            [], retired, prompt, goals_instruction,
+            diff=diff, open_goals=open_goals,
+        )
 
     def _memory(self) -> MemoryPlugin:
         return get_dependency(self.pm, "memory", MemoryPlugin)

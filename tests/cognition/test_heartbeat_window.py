@@ -138,7 +138,7 @@ async def test_heartbeat_implements_only_lifecycle_hooks(
     only hooks it implements are its lifecycle ones."""
     rig = await rig_factory()
     names = {caller.name for caller in rig.plugin.pm.get_hookcallers(rig.hb)}
-    assert names <= {"on_init", "on_start", "on_stop", "on_compaction"}
+    assert names <= {"on_init", "on_start", "on_stop", "on_compaction", "transform_heartbeat_prompt"}
 
 
 async def test_each_beat_extends_the_previous_window(

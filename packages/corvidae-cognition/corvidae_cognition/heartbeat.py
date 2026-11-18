@@ -38,7 +38,7 @@ import logging
 import math
 
 from corvidae.prompts import resolve_prompt
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.idle import IdleTracker, IdleWatch
 from corvidae_cognition.memory import MemoryPlugin, _format_age
 
@@ -258,6 +258,30 @@ def frame_beat(
     )
 
 
+class HeartbeatSpec:
+    """Hook specifications for the heartbeat plugin."""
+
+    @hookspec(firstresult=True)
+    async def transform_heartbeat_prompt(
+        self,
+        memories: list[dict],
+        retired: list[dict] | None,
+        prompt: str,
+        goals_instruction: str,
+        *,
+        diff: bool,
+        open_goals: list[dict] | None,
+    ) -> str:
+        """Transform the heartbeat beat text before delivery.
+
+        ``firstresult`` over a trylast seed (the seed calls ``frame_beat``
+        with the parameters unchanged). Plugins that implement this hook
+        can reshape the beat: filter goals, drop memories, add context.
+        The goals plugin uses it to show only pursuable goals and skip
+        the memory block.
+        """
+
+
 class HeartbeatPlugin(CorvidaePlugin):
     """Starts a reviewing turn on internal:heartbeat after system-wide quiet.
 
@@ -271,6 +295,7 @@ class HeartbeatPlugin(CorvidaePlugin):
     # than declared: a config that disables memory still starts.
     depends_on = frozenset({"idle", "registry"})
     model_visible_annotations = frozenset({"origin"})
+    hookspecs = HeartbeatSpec
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -288,6 +313,23 @@ class HeartbeatPlugin(CorvidaePlugin):
         # already has the old content; re-sending it is the deluge (#716).
         self._last_memory_ids: set[int] = set()
         self._last_goal_ids: set[int] = set()
+
+    @hookimpl(trylast=True)
+    async def transform_heartbeat_prompt(
+        self,
+        memories: list[dict],
+        retired: list[dict] | None,
+        prompt: str,
+        goals_instruction: str,
+        *,
+        diff: bool,
+        open_goals: list[dict] | None,
+    ) -> str:
+        """Identity seed: assemble the beat text via frame_beat."""
+        return frame_beat(
+            memories, retired, prompt, goals_instruction,
+            diff=diff, open_goals=open_goals,
+        )
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -400,21 +442,32 @@ class HeartbeatPlugin(CorvidaePlugin):
         # First beat: no prior state at all → full mode for both.
         is_first = not self._last_memory_ids and not self._last_goal_ids
         if is_first:
-            text = frame_beat(
-                memories, retired,
-                self._prompt, self._goals_instruction,
-                diff=False,
-                open_goals=open_goals_list,
-            )
+            beat_memories, beat_retired, beat_diff = memories, retired, False
         else:
             # Subsequent beats: diff for memories, diff-or-full for goals.
             # Goals are full when _last_goal_ids was just reset (compaction).
             goals_full = retired is not None and not self._last_goal_ids
-            text = frame_beat(
-                new_memories,
-                retired if goals_full else new_retired,
+            beat_memories = new_memories
+            beat_retired = retired if goals_full else new_retired
+            beat_diff = True
+
+        try:
+            text = await self.pm.ahook.transform_heartbeat_prompt(
+                beat_memories, beat_retired,
                 self._prompt, self._goals_instruction,
-                diff=True,
+                diff=beat_diff,
+                open_goals=open_goals_list,
+            )
+        except Exception:
+            logger.warning(
+                "heartbeat: transform_heartbeat_prompt failed; "
+                "falling back to frame_beat",
+                exc_info=True,
+            )
+            text = frame_beat(
+                beat_memories, beat_retired,
+                self._prompt, self._goals_instruction,
+                diff=beat_diff,
                 open_goals=open_goals_list,
             )
 
