@@ -1312,14 +1312,13 @@ evidence that produced it.
 
 **Heartbeat.** The heartbeat is a turn the agent starts when the system
 is idle (§3.1.16), with a latency bound so a busy system can't starve it.
-Every beat reviews the open and retired goals, assesses itself, and acts
-only when the assessment warrants it. Anything else a beat carries,
-recent memory included, is optional context that the operator or a plugin
-chooses for the beat's work; recency alone is not a reason to include it.
-It runs on a channel no transport owns, so it reaches a person by
-speaking on that person's channel or leaving a note for its context
-(§3.5.9–10), like any turn. Putting it to sleep is durable across
-restarts.
+Every beat reviews the extant goals, open and retired, and any other
+information that might be relevant to taking action; it assesses itself
+and acts only when the assessment warrants it. Recent memory is not a
+fixed input. It runs on a channel no transport owns, so it reaches a
+person by speaking on that person's channel or leaving a note for its
+context (§3.5.9–10), like any turn. Putting it to sleep is durable
+across restarts.
 
 **People, observations, semantic facts.** A person is one record across
 every channel, as the agent is one identity (principle 14). Each identity a
@@ -1856,7 +1855,7 @@ record that holds the reasoning.
 | Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
 | Hedging vocabulary is persona, not architecture | §3.11.5; diverges from the Persyn spec |
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
-| The heartbeat reviews goals on every beat; memory is optional context, not a fixed input: the newest memories across every channel are mostly unrelated to what the beat is deciding | §3.7 Heartbeat; owner, 2026-11-18 |
+| The heartbeat reviews the extant goals and any other information that might be relevant to taking action; recent memory is not a fixed input, since the newest memories across every channel are mostly unrelated to what the beat is deciding | §3.7 Heartbeat; owner, 2026-11-18 |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
 | The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
 | Reminders and jobs the agent sets act on the calling channel only, with origin `reminder`; cross-channel reach is §3.5.9's alone, so the scheduler is not a second, unaudited path between channels or around the critique of reminders. Supersedes "a reminder may target any channel" | §3.9.7; #814; owner, 2026-11-17 |
