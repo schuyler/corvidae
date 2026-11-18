@@ -383,8 +383,8 @@ def _scrub_outcomes_detail(outcomes_json: str | None, tombstone: str) -> str | N
 
     The critique stores objection objects (claim text + reason) in the
     outcomes envelope's provenance.detail and critique.detail lists.
-    Redacting a message must reach that text (PRD \u00a73.7 Memory 8:
-    redact cascades to every derived surface). Counts and lens names
+    Redacting a message should reach that text; docs/redaction.md lists
+    this surface among those redact covers. Counts and lens names
     survive; the words do not.
 
     No outcomes, no detail, or detail already tombstoned \u2192 None.

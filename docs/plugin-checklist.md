@@ -222,15 +222,12 @@ For an in-repo plugin (step 2) the same code goes in
    example `source_trace_id`) to record where it came from.
 8. **Provenance comes from code, not from the model.** Derive the sending
    channel from `corvidae.attribution.get_attribution()`, never from a tool
-   argument. (`get_attribution` is not yet in the guide's export table, which
-   lists only `set_attribution` and `reset_attribution`; if you use it, add it to
-   the table in the same change, per trap 9.)
-9. **Import only the documented kernel API**: the table in
-   `docs/plugin-guide.md`, "What the kernel exports to plugins". Do not import
-   `corvidae.agent`. The kernel never imports a plugin.
-   `tests/test_kernel_boundary.py` enforces the allowlist for the cognition
-   package; extend its scan to your package, and add a module to the allowlist
-   and the guide's table only deliberately.
+   argument.
+9. **Prefer the kernel modules the bundled plugins already use**: the table in
+   `docs/plugin-guide.md`, "What the kernel exports to plugins". Before a
+   formal release nothing is a stable API, and nothing checks your imports; a
+   module outside the table is more likely to change, and that is your
+   plugin's risk to carry. The kernel never imports a plugin.
 10. **Channel ids are persistence keys** (`transport:scope`). Never derive them
     from names or reformat them.
 11. **Transports** (anything that owns channels) subclass `TransportPlugin` and

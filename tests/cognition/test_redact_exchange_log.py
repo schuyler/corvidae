@@ -314,7 +314,7 @@ class TestFormsAndReporting:
 
 
 class TestOutcomesDetail:
-    """#503: redact must reach outcomes.detail text (PRD \u00a73.7 Memory 8)."""
+    """#503: redact must reach outcomes.detail text (docs/redaction.md)."""
 
     OUTCOMES = {
         "provenance": {

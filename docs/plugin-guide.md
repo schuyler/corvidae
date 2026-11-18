@@ -123,7 +123,7 @@ Built-in `corvidae acp` (from `corvidae.channels.acp:acp_command`) starts an ACP
 
 ## Registering a redact scrubber
 
-`corvidae redact` (see "Operator redaction" in [design.md](design.md)) tombstones `message_log` rows and cascades to memory. A plugin package that copies conversation text into a table of its own registers a scrubber under the `corvidae.redact` entry-point group, so a redaction reaches that copy too. The kernel never names the table.
+`corvidae redact` (see "Operator redaction" in [design.md](design.md)) tombstones `message_log` rows and cascades to memory. A plugin package that copies conversation text into a table of its own registers a scrubber under the `corvidae.redact` entry-point group, so a redaction reaches that copy too. The kernel never names the table. Redaction is on hold pending an overhaul, because no scrubber can find a paraphrase ([redaction.md](redaction.md)); scrubbers still run, and still narrow the gap, so keep registering one.
 
 ```toml
 [project.entry-points."corvidae.redact"]
@@ -156,7 +156,7 @@ at startup; see [Declaring hooks in a plugin](#declaring-hooks-in-a-plugin).
 | Prefix | pluggy spec | Resolution | Core uses result | Implementations |
 |---|---|---|---|---|
 | `on_`, `before_`, `after_` | broadcast | none | no | any number; side effects allowed, including on objects passed in |
-| `should_` | broadcast | `resolve_reject_wins` | yes, `bool` | any number; `False` from any one rejects; `None` abstains |
+| `should_` | broadcast | `resolve_reject_wins` | yes, `bool` | any number; `False` from any one rejects; `None` abstains. `should_start_work` is the one exception: it returns `WorkRefusal \| None` (K1 adds one result type to the veto grammar, so a refusal carries its limit and remedy), is not dispatched through `pm.ahook` but by `corvidae.admission.offer_work`, and the first `WorkRefusal` wins |
 | `resolve_` | `firstresult=True` | first non-`None` | yes | any number; first to answer wins, so order matters and the docstring says who answers |
 | `transform_` | `firstresult=True` wrapper chain with a seed in `_SeedHooksPlugin` | chain | yes | any number, LIFO |
 | bare imperative | broadcast | caller-defined over the result list | sometimes | any number; the docstring states what the caller does with results |
@@ -616,6 +616,7 @@ The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwa
 |------|------|------|
 | `on_message(channel, sender: str, text: str, trace_id: str)` | async broadcast | Inbound message arrives; the transport mints and passes the id (see [Traces](#traces)) |
 | `should_process_message(channel, sender: str, text: str, trace_id: str \| None)` | async broadcast, reject-wins | Gate: decide whether to process a message. Return False to reject, True to accept, None for no opinion. |
+| `should_start_work(channel, kind: str, source_channel: str \| None, trace_id: str \| None, annotations: dict)` | async or sync, called by `offer_work`, first `WorkRefusal` wins | Gate on internal work about to start (`subagent` kind `task`, `fork` kind `fork`, `notify_other_channel` kind `note`). Return a `corvidae.admission.WorkRefusal(limit, remedy)` to refuse, anything else for no opinion. See [Refusing internal work](#refusing-internal-work). |
 | `on_message_admitted(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message admits a USER message |
 | `on_message_rejected(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |
 | `should_send_response(channel, text: str, emission: str, trace_id: str \| None, annotations: dict)` | async broadcast, reject-wins | Outbound gate, before each emission (`final`, `progress`, `thinking`, `error`). Return False to withhold, None for no opinion. See [Output gating](#output-gating). |
@@ -875,6 +876,7 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text, trace_id)` | reject-wins (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `should_send_response(channel, text, emission, trace_id, annotations)` | reject-wins (broadcast) | `bool \| None` | Any `False` withholds the emission; anything else sends it |
+| `should_start_work(channel, kind, source_channel, trace_id, annotations)` | first refusal wins (called by hand) | `WorkRefusal \| None` | The first `WorkRefusal` stops the work and becomes the starting tool's result; anything else is no opinion |
 | `resolve_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and gives its remedy: a timeout or an HTTP error asks the user to try again, while an unreachable backend the daemon has scheduled a retry for says the answer will come when the model server is back. When no retry could be scheduled (no kernel clock registered), the unreachable message falls back to asking the user to try again rather than promising a retry that will not happen. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.providers.<name>.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
 | `resolve_compaction(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `transform_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
@@ -1010,12 +1012,14 @@ As a last-resort safety net, `execute_tool_call` detects a sync callable registe
 
 ## What the kernel exports to plugins
 
-A plugin outside the `corvidae` package (the `corvidae-cognition` plugins,
-`cross-channel-send`, or your own) should import only these kernel modules.
-This is the API the bundled plugins use, and
-`tests/test_kernel_boundary.py` fails if a bundled plugin imports any other
-kernel module. Changing a signature here is a plugin-API change and needs a
-line in this guide.
+These are the kernel modules and names the bundled plugins (the
+`corvidae-cognition` plugins, `cross-channel-send`, and the rest under
+`packages/`) import. The table is a map, not a contract: before a formal
+release there is no declared plugin API, and anything here may change. A
+plugin may import any kernel module, listed or not; one outside this table
+is more likely to change without a note here, and keeping up with it is the
+plugin owner's job. Nothing checks what a plugin imports, and a bundled
+plugin has no special standing (#1026).
 
 | Module | Names |
 |---|---|
@@ -1031,6 +1035,7 @@ line in this guide.
 | `corvidae.tool` | `Tool`, `ToolContext`, `tool_to_schema` |
 | `corvidae.persistence` | `PersistencePlugin`, `add_column_if_missing`, `view_rows`, `decodable_summaries` |
 | `corvidae.llm_plugin` | `LLMPlugin` |
+| `corvidae.prompts` | `resolve_prompt` |
 | `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |
 | `corvidae.idle` | `IdleTracker`, `IdleWatch` |
 | `corvidae.spill` | `NotificationSpill` (see [Spilling a long notification](#spilling-a-long-notification)) |
@@ -1343,6 +1348,43 @@ class FilterPlugin(CorvidaePlugin):
         return None  # No opinion; other plugins decide
 ```
 
+### Refusing internal work
+
+`should_start_work` is the gate for work the agent starts itself, as
+`should_process_message` is for work a sender starts. `subagent` (kind
+`task`), `fork` (kind `fork`) and `notify_other_channel` (kind `note`) offer
+their work before they enqueue anything; `channel` is the queue it would land
+on and `source_channel` where it comes from. Return a `WorkRefusal` to
+refuse:
+
+```python
+from corvidae.admission import WorkRefusal
+
+class BudgetPlugin(CorvidaePlugin):
+    @hookimpl
+    async def should_start_work(self, channel, kind: str, source_channel: str | None, trace_id: str | None, annotations: dict) -> WorkRefusal | None:
+        if self.spent >= self.budget:
+            return WorkRefusal("budget.max", "wait for running work to finish, or raise budget.max in agent.yaml")
+        return None  # No opinion
+```
+
+`limit` is the config key reached and `remedy` the plain-language next step;
+the starting tool returns `Not started: <limit> reached — <remedy>` as its
+result and the kernel logs one warning naming the kind, both channels and the
+limit. Declare all five parameters without defaults. Never offered, so never
+refusable: the result of work already started (a task completion
+notification, a deferred tool result) and the Task that carries an ordinary
+tool call. `Agent.waiting_work()` and `Agent.waiting_messages()` tell a
+verdict how much accepted work is waiting (see
+[design.md](design.md#agent)).
+
+Unlike `should_process_message`, an implementation that raises does not take
+the call down: `offer_work` calls each implementation itself, logs the
+exception (`should_start_work implementation <plugin> raised ...`) and treats
+it as no opinion, so one broken plugin cannot hide another's refusal. The
+cost is that a broken limiter fails open; log and return `None` yourself if
+you want a different message.
+
 When a message is admitted or rejected, plugins are notified via `on_message_admitted` or `on_message_rejected`. These fire exactly once per message. The `on_message_persisted` hook fires after the trace-originating message (the initial USER message or a standalone notification) has been written to the database, regardless of persistence outcome; it fires once per message in a coalesced burst, in arrival order, though only the last message's trace gets the turn (see Traces) — it receives the database rowid (nullable), the originating text, and the item's annotations dict:
 
 ```python
@@ -1625,6 +1667,8 @@ For `firstresult=True` hooks (`resolve_compaction`, `resolve_conversation`, `res
 
 For `should_process_message` (broadcast, resolved with `resolve_reject_wins`), exceptions propagate to the call site.
 
+For `should_start_work`, `offer_work` catches each implementation's exception, logs it with the plugin name and treats it as no opinion; the other implementations still vote (see [Refusing internal work](#refusing-internal-work)).
+
 For `should_send_response`, the Agent catches any exception, logs it at WARNING and sends the emission anyway (fail open). apluggy gathers a broadcast's implementations concurrently without `return_exceptions`, so one raising implementation discards every sibling's verdict for that emission; once any plugin registers a `wrapper=True` implementation on the hook (as `outbound_cap` does, to count after the combined verdict), apluggy awaits the implementations one after another instead, and a raising one stops the rest from running. Either way a gate that can fail should catch and log its own errors and return None, and a slow gate adds its latency to every emission when the hook is wrapped. The serialisation is an apluggy artefact, not intended behaviour: [#904](https://github.com/schuyler/corvidae/issues/904) carries the fix (gather the non-wrappers once every wrapper is set up, each run to completion, the first exception thrown into the wrappers), and `test_wrapped_should_send_response_gates_run_concurrently` in `tests/test_outbound_cap/` is a strict xfail that fails once the lock picks it up, so this paragraph gets rewritten then.
 
 For `transform_display_text`, `transform_system_prompt` and `transform_tool_result` (wrapper chain hooks), pluggy propagates exceptions from wrapper implementations to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`, and `transform_system_prompt` in `channel_system_prompt`.
@@ -1751,13 +1795,15 @@ Registered by `RuntimeSettingsPlugin` (entry point name: `runtime_settings`).
 
 ### SchedulerPlugin tools
 
-Registered by `SchedulerPlugin` (entry point name: `scheduler`). All three act on `_ctx.channel` only and take no channel argument, so a speaker on one channel cannot schedule a message to another ([threat-model.md](threat-model.md)).
+Registered by `SchedulerPlugin` (entry point name: `scheduler`). All five act on `_ctx.channel` only and take no channel or origin argument, so a speaker on one channel cannot schedule a message to another, and every row a tool creates carries origin `reminder` ([threat-model.md](threat-model.md), #814).
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
-| `remind_me` | `when: str`, `text: str` | Creates a one-shot reminder on the calling channel. `when` is a relative duration (`20m`, `2h`, `3d`, `1h30m`), an ISO 8601 time (no offset means `scheduler.timezone`), or `HH:MM` for the next occurrence; a bare number is refused as ambiguous. The tool does the date arithmetic and returns the resolved absolute time, e.g. `Reminder #12 set for Fri 2026-10-23 14:22 PDT (in 20m).` Refuses past times, empty text, text over 2000 characters, and more than `scheduler.max_reminders_per_channel` pending reminders. |
+| `remind_me` | `when: str`, `text: str` | Creates a one-shot reminder on the calling channel. `when` is a relative duration (`20m`, `2h`, `3d`, `1h30m`), an ISO 8601 time (no offset means `scheduler.timezone`), or `HH:MM` for the next occurrence; a bare number is refused as ambiguous. The tool does the date arithmetic and returns the resolved absolute time, e.g. `Reminder #12 set for Fri 2026-10-23 14:22 PDT (in 20m).` Refuses past times, empty text, text over 2000 characters, and more than `scheduler.max_reminders_per_channel` pending reminders and jobs on the channel. |
 | `list_reminders` | — | Pending rows on the calling channel, earliest first, with ids and due times. Operator jobs targeting the channel are listed as read-only. |
-| `cancel_reminder` | `id: int` | Cancels a tool-created reminder on the calling channel. Refuses operator jobs; another channel's row reads as not found. |
+| `cancel_reminder` | `id: int` | Cancels a tool-created reminder or recurring job on the calling channel. Refuses operator jobs; another channel's row reads as not found. |
+| `add_job` | `cron: str`, `prompt: str` | Creates a recurring job on the calling channel: a 5-field cron expression in `scheduler.timezone` and the prompt to act on at each firing. Refuses a cron that does not parse or never matches, an empty prompt or one over 2000 characters, and a channel at `scheduler.max_reminders_per_channel` (reminders and jobs count together). Returns the job's id and next fire time. |
+| `update_job` | `id: int`, `cron: str = ""`, `prompt: str = ""` | Changes the cron and/or prompt of a recurring job the agent set on the calling channel. Refuses operator jobs and one-shot reminders; another channel's row reads as not found. |
 
 ## Bundled plugins
 
@@ -2178,11 +2224,11 @@ tools_dict, schemas = tools_plugin.get_tools()
 
 ### SchedulerPlugin (`corvidae/scheduler.py`)
 
-Clock-driven producer of reminders and operator jobs (the heartbeat is cognition's `HeartbeatPlugin` now; see [cognition.md](cognition.md#heartbeatplugin)). Entry point name: `"scheduler"`; `depends_on = {"registry", "persistence", "clock"}`. Owns the `schedule` table in `sessions.db` (created on first use) and one timer task, which sleeps until the earliest due row and is woken early whenever a row changes. A due row fires through `on_notify` with `source` and `annotations["origin"]` set to `reminder`, so persistence, critique eligibility, attribution, and the outbound send work unchanged. Jobs under `scheduler.jobs` sync by name on start and on every reload. Full behaviour: [design.md](design.md#schedulerplugin); keys: [configuration.md](configuration.md#scheduler--reminders-and-periodic-jobs).
+Clock-driven producer of reminders, the agent's recurring jobs and operator jobs (the heartbeat is cognition's `HeartbeatPlugin` now; see [cognition.md](cognition.md#heartbeatplugin)). Entry point name: `"scheduler"`; `depends_on = {"registry", "persistence", "clock"}`. Owns the `schedule` table in `sessions.db` (created on first use) and one timer task, which sleeps until the earliest due row and is woken early whenever a row changes. A due row fires through `on_notify` with `source` and `annotations["origin"]` set to `reminder`, so persistence, critique eligibility, attribution, and the outbound send work unchanged. Jobs under `scheduler.jobs` sync by name on start and on every reload. Full behaviour: [design.md](design.md#schedulerplugin); keys: [configuration.md](configuration.md#scheduler--reminders-and-periodic-jobs).
 
 It follows the two patterns a plugin owning persistent state and a background task needs. Schema creation is lazy on first use (`PersistencePlugin.db` may not be open during its `on_start`, as with `MemoryPlugin`). The timer is an `asyncio.Task` cancelled in `on_stop` (as with `ConfigWatcherPlugin`). It sleeps on the kernel clock, so its tests use a fake clock and never sleep.
 
-**Without this plugin:** no reminders and no scheduled jobs; the three tools are absent.
+**Without this plugin:** no reminders and no scheduled jobs; the five tools are absent.
 
 ### ConfigWatcherPlugin (`corvidae/config_watcher.py`)
 

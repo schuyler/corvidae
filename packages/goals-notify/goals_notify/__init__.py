@@ -3,12 +3,12 @@
 Implements ``on_goals_state_changed`` (owned by the goals plugin in
 corvidae-cognition) and turns each change into one ``notify_other_channel``
 call to the goal's ``origin_channel``. Delivery, the notification fields
-(``source="agent_send from <actor>"``, ``origin: "agent_send"``,
-``source_channel``, ``source_trace_id``) and the ``hop_count`` loop guard all
-come from cross_channel_send, which reads them from the changing turn's
-attribution: the goals plugin fires the hook inside the tool call that made
-the change. Every change wakes the origin channel; its turn and the decide
-gate decide whether anything is said.
+(``source="agent_send from <actor>"``, ``source_channel``,
+``source_trace_id``, and the changing turn's own ``origin`` when it has one)
+and the ``hop_count`` loop guard all come from cross_channel_send, which
+reads them from the changing turn's attribution: the goals plugin fires the
+hook inside the tool call that made the change. Every change wakes the origin
+channel; its turn and the decide gate decide whether anything is said.
 
 Skipped: a goal with no origin (seeded with ``corvidae goals seed``) and a
 change made on the origin channel itself (which includes heartbeat-created

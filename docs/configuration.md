@@ -281,7 +281,7 @@ Each stage has a fork instruction:
 | `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | Appended to the dropped prefix. |
 | `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | Followed by a size sentence (`memory.entry_target_tokens`) and a sentence naming where the range starts. Restart-only, like the rest of `memory.*`. The output schema is fixed in code: an override must still ask for the reply shape: `entries` (each with a `narrative` and `topic_tags`), `participants` and `importance`. A legacy `summary` reply is still read as one entry. |
 | `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
-| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits. An override must ask for its per-claim verdicts format or every run skips. |
+| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md`; for a lens a plugin adds, the brief it declared | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits. An override must ask for its per-claim verdicts format or every run skips. For an added lens the override replaces the brief only: critique appends the reply format itself. |
 
 These are resolved by `resolve_prompt` (#411): a string is inline text,
 `{"file": path}` or a list of paths reads files relative to the config
@@ -387,7 +387,7 @@ These are recommendations, not hardcoded blocks: `set_settings` writes are chann
 The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) as of this writing:
 
 - `appraisal.novelty.no_probe_default`, `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`, `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.stage2_prompt`, `appraisal.weights.commitment`, `appraisal.weights.disagreement`, `appraisal.weights.imperative`, `appraisal.weights.novelty`, `appraisal.weights.question`
-- `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.lens.novelty`, `critique.lens.retention`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.sample_below_rate`
+- `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.lens.novelty`, `critique.lens.retention`, `critique.lens.<name>.<dimension>` and `critique.lens.<name>.sample_rate` (for each lens a plugin adds), `critique.proactivity.enabled`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.sample_below_rate`
 - `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.enforce`, `gate.send.min_salience`, `gate.send.quiet_origins`
 - `outbound_cap.count_progress`, `outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`, `outbound_cap.window_seconds`
 
@@ -415,6 +415,8 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 
 `critique.provenance.enabled` (default `true`) switches the provenance check. It has no other tunables; its instruction is the static `critique.fork_prompt.provenance`. Stage-2 appraisal detects the past claims and a fork of the window judges them, so the check needs the `appraisal` plugin and `agent.forks` covering `critique`. See [cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy).
 
+`critique.proactivity.enabled` (default `true`) switches the proactivity check: when a reply asks permission ("want me to…", "should I…"), a fork of the window judges whether the subject is the agent's to act on, and a finding wakes the channel (on a correction it waits, #1031). Its instruction is the static `critique.fork_prompt.proactivity`.
+
 *(The `critique.*` tunable keys are not individually tabulated here; the complete list is under "Runtime-tunable gate parameters" above.)*
 
 ### The retention lens (#742)
@@ -427,9 +429,21 @@ A knowledge base root turns on a critique lens that asks a different question fr
 | `critique.lens.novelty` | float | `0.6` | Novelty at or above which the retention lens may fire (the appraisal stage-1 novelty, 1 − familiarity with the probe). Both thresholds must be crossed. |
 | `critique.lens.retention` | float | `0.5` | Commitment density at or above which the retention lens may fire, alongside `critique.lens.novelty`. |
 
-The lens flags, it does not file. Each objection carries the `file` it belongs in and the `content` to append, and a retention finding wakes the channel: the critique turn's stub names the root and tells the agent to read the file and append the content as a new section only if it is missing, then reply `NO_REPLY` (withheld, so the turn is silent by default). Stylistic findings from the same run are queued without a wake and admitted on the channel's next turn of any origin, which is usually this filing turn, so the agent sees them where it is told to stay silent rather than on its next reply; findings queued before a provenance wake behave the same way, and changing that is [#889](https://github.com/schuyler/corvidae/issues/889). With the lens on, the provenance check's wake uses the same stub, because one stub governs a channel's pending critique findings whichever wake fires first. The agent files in that turn after reading the file and deciding the fact is really missing — the check is why a lens is the mechanism rather than an automatic write. Updates are additive (a section to append to, never a rewrite), the knowledge base directory must be writable by the daemon, and the lens inherits the `critique` stage's profile and fork settings like the other lenses. Set the two thresholds high enough that an ordinary exchange does not fire it: the lens costs a fork per selection, and its findings cost a turn.
+The lens flags, it does not file. Each objection carries the `file` it belongs in and the `content` to append, and a retention finding wakes the channel (except on a turn that is itself a critique turn, whose findings all wait for the next turn; #1031): the critique turn's stub names the root and tells the agent to read the file and append the content as a new section only if it is missing, then reply `NO_REPLY` (withheld, so the turn is silent by default). Stylistic findings from the same run are queued without a wake and admitted on the channel's next turn of any origin, which is usually this filing turn, so the agent sees them where it is told to stay silent rather than on its next reply; findings queued before a provenance wake behave the same way, and changing that is [#889](https://github.com/schuyler/corvidae/issues/889). With the lens on, the provenance check's wake uses the same stub, because one stub governs a channel's pending critique findings whichever wake fires first. The agent files in that turn after reading the file and deciding the fact is really missing — the check is why a lens is the mechanism rather than an automatic write. Updates are additive (a section to append to, never a rewrite), the knowledge base directory must be writable by the daemon, and the lens inherits the `critique` stage's profile and fork settings like the other lenses. Set the two thresholds high enough that an ordinary exchange does not fire it: the lens costs a fork per selection, and its findings cost a turn.
 
 Leave `critique.retention.root` unset to file into recall's root. An explicit value wins; pointing it at a directory recall does not index is legal, and `CritiquePlugin` logs one `WARNING` at startup naming both, because facts filed where recall cannot look are written down and then re-learned. The check runs at `on_init`, so a `set_settings`-style hot change of either key is not covered by it.
+
+### Lenses other plugins add (#1033)
+
+A plugin can contribute critique lenses through `on_critique_init`; see [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init) for the hook and the lens type. Each added lens brings its own keys, named after the lens. Its defaults are whatever the contributing plugin declared:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `critique.lens.<name>.<dimension>` | float | the lens's declared limit | The limit for that lens's threshold on a stage-2 dimension (`valence`, `stakes`, `ambiguity`, `commitment_density`, `novelty`). Whether it is a minimum or a maximum is the lens's declaration. Runtime-tunable per channel. |
+| `critique.lens.<name>.sample_rate` | float | the lens's declared rate | Probability the lens runs on a judged turn its thresholds and patterns don't select. Runtime-tunable per channel. Like `critique.sample_below_rate`, an agent that tunes it to zero stops measuring what selection misses: block it with `immutable_settings` where that matters. |
+| `critique.fork_prompt.<name>` | string | the lens's declared brief | Replaces the brief. Critique still appends the objections reply format. Static config, reloaded on the next fork. |
+
+A malformed lens is rejected at startup with a warning naming the plugin, the lens and the fix, and the other lenses load; nothing a lens declares stops the daemon. A value written through `set_settings` must be a number: a string in one of these keys makes that lens's decision raise for the turn (the built-in checks have already been decided by then).
 
 #### `gate.*` — engagement and decide gates
 
@@ -443,7 +457,7 @@ Requires the cognition extra. `GatePlugin` (entry point `gates`) reads these per
 | `gate.send.min_salience` | `0.15` | A final from a non-user origin (reminder, heartbeat, task, critique) whose outbound salience is below this is withheld: stored as `unsent`, never sent. A reply to a user is never withheld by this key. |
 | `gate.send.allow_progress` | `true` | False suppresses the intermediate text sent alongside tool calls. |
 | `gate.send.allow_thinking` | `true` | False suppresses reasoning (`OutboundThinking`). |
-| `gate.send.quiet_origins` | `[]` | Origins whose turns send nothing to the human, e.g. `[webhook:github]`: their final, progress, thinking and error fallback are withheld whatever their salience, and the agent's `speak_up` tool lets one turn's final through the normal policy (#790, #936). The error fallback is the second half of the flood guard: an outage while a burst of notifications arrives used to send one "model call failed" per turn, and the failure is still logged at ERROR with its traceback whatever this veto does. `speak_up` is offered whenever the gates plugin is loaded, whatever this list holds, so a reload that adds an origin has its hatch at once (#925). Origins are matched exactly (`webhook:<endpoint>`, `heartbeat`, `inotify`, …). `user` and `reminder` are ignored with a warning; a value that is not a list of strings fails open with a warning. Runtime-tunable per channel through `set_settings` (#928): an override replaces this list on that channel (`[]` un-quiets every origin there) and outlasts a hot reload that edits this list, until `set_settings` clears it with `null` or the daemon restarts. On channels without an override, hot reload changes the veto on the next decision. Adding the key to `agent.immutable_settings` blocks new writes, `null` included, but does not clear an override already set: restart, or unlock, clear and lock again. See the recommended blocklist below. |
+| `gate.send.quiet_origins` | `[]` | Origins whose turns send nothing to the human, e.g. `[webhook:github]`: their final, progress, thinking and error fallback are withheld whatever their salience, and the agent's `speak_up` tool lets one turn's final through the normal policy (#790, #936). The error fallback is the second half of the flood guard: an outage while a burst of notifications arrives used to send one "model call failed" per turn, and the failure is still logged at ERROR with its traceback whatever this veto does. `speak_up` is offered whenever the gates plugin is loaded, whatever this list holds, so a reload that adds an origin has its hatch at once (#925). Origins are matched exactly (`webhook:<endpoint>`, `heartbeat`, `inotify`, …). A `notify_other_channel` note carries its sender's origin to the turn it wakes (#1034), so a quiet origin stays quiet on the channel it sends to. `user` and `reminder` are ignored with a warning; a value that is not a list of strings fails open with a warning. Runtime-tunable per channel through `set_settings` (#928): an override replaces this list on that channel (`[]` un-quiets every origin there) and outlasts a hot reload that edits this list, until `set_settings` clears it with `null` or the daemon restarts. On channels without an override, hot reload changes the veto on the next decision. Adding the key to `agent.immutable_settings` blocks new writes, `null` included, but does not clear an override already set: restart, or unlock, clear and lock again. See the recommended blocklist below. |
 
 ```yaml
 gate:
@@ -507,13 +521,13 @@ The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)
 
 ## `scheduler` — reminders and periodic jobs
 
-`SchedulerPlugin` fires due rows of its `schedule` table into their channels as notifications (see [design.md](design.md#schedulerplugin)). The agent creates one-shot reminders with the `remind_me` tool, always on the channel it is talking on; the operator declares recurring jobs here. The heartbeat is no longer a scheduler job: it is its own plugin, started on system idle (see [`heartbeat`](#heartbeat--a-turn-on-system-idle)). The block is optional: without it the tools still work, in UTC, with the defaults below.
+`SchedulerPlugin` fires due rows of its `schedule` table into their channels as notifications (see [design.md](design.md#schedulerplugin)). The agent creates one-shot reminders with the `remind_me` tool and recurring jobs with `add_job`, always on the channel it is talking on; the operator declares their own jobs here. The heartbeat is no longer a scheduler job: it is its own plugin, started on system idle (see [`heartbeat`](#heartbeat--a-turn-on-system-idle)). The block is optional: without it the tools still work, in UTC, with the defaults below.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `scheduler.timezone` | IANA name | `UTC` | Timezone for `when` values with no offset (ISO without offset, bare `HH:MM`), for `at` anchors, for day-step recurrence (a daily job keeps its wall-clock time across DST), and for times shown to the model. An unknown name logs a warning and uses UTC. |
 | `scheduler.catch_up_window` | float (seconds) | `3600` | On startup, a one-shot reminder that came due while the daemon was down fires once (prefixed `[overdue by …, daemon was down]`) if it is late by less than this; older ones are disabled as `missed`. |
-| `scheduler.max_reminders_per_channel` | integer | `50` | Pending tool-created reminders allowed per channel. `remind_me` refuses beyond it. Bounds what a hostile speaker can park in the table ([threat-model.md](threat-model.md)). |
+| `scheduler.max_reminders_per_channel` | integer | `50` | Pending tool-created reminders and jobs allowed per channel, counted together. `remind_me` and `add_job` refuse beyond it. Bounds what a hostile speaker can park in the table ([threat-model.md](threat-model.md)). |
 | `scheduler.jobs` | list | `[]` | Operator jobs, synced by `name` on startup and on every reload. See below. |
 | `scheduler.jobs_file` | path | — | Path to a YAML file with job definitions (relative to `agent.yaml`). When set and the file exists, jobs are read from the file instead of `scheduler.jobs`. The file is watched for changes (mtime polling, 5 s); edits trigger a re-sync without a restart. Format (YAML):
 ```
@@ -556,7 +570,7 @@ scheduler:
       prompt: "Good morning. Here's what's on today."
 ```
 
-The four CRUD tools (`add_job`, `update_job`, `remove_job`, `list_jobs`) write to the `jobs_file` and trigger a hot reload. They are registered on every channel; see [threat-model.md](threat-model.md) for the exposure.
+No tool writes the `jobs_file` or `scheduler.jobs`: both are the operator's. The agent's own recurring jobs (`add_job`, `update_job`) are schedule rows on the calling channel, origin `reminder`, under `max_reminders_per_channel`; `list_reminders` lists them and `cancel_reminder` stops them (#814). See [threat-model.md](threat-model.md) finding 7.
 
 A job costs a main-model turn per firing on the shared backend; keep intervals in hours. The firing text is framed as data for the model to judge ("Decide whether and how to act on it"), not as an order.
 
@@ -625,6 +639,31 @@ Two things are never capped: a channel with no limit configured, and a channel n
 The window limit exists because the between-human counter does not bound a channel where a human keeps talking, or one whose counter keeps being reset: a turn that sends several messages per human message is unbounded in time under `max_messages` alone. With `max_messages_per_window` set, a channel can send at most N messages in any window of `window_seconds` regardless of who is talking. Note the PRD trade-off (output gate item 4): this limit **can** withhold a direct reply to a human — someone who sends N+1 messages inside the window can have an answer held until the window slides — which is why it ships unset and off. When the window slides open, one `WARNING` says how many messages it withheld; each withholding line names which limit fired, and a message held while both are reached names both.
 
 The agent can raise or clear its own cap with `set_settings` unless the keys are blocked; see `agent.immutable_settings` and the blocklist above. Known gaps, accepted for the MVP: sends that bypass the output gate (`send_signal_attachment`, `signal_react`, tool-status events, the restart notice) are not capped, and the cap bounds messages, not turns ([#793](https://github.com/schuyler/corvidae/issues/793)).
+
+---
+
+## `limits` — bound inbound floods and waiting work (#1050)
+
+Requires the core-periphery extra (`--extra core-periphery`; `packages/corvidae-core-periphery`, plugin name `limits`). Without it, or without a `limits:` block, nothing is bounded and the plugin gives no verdicts. `LimitsPlugin` bounds two things: how many messages one channel may have waiting (it implements `should_process_message`), and how much accepted work may be waiting across all channels before new internal work is refused (it implements `should_start_work`, [design.md](design.md#the-admission-seam-should_start_work)).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `limits.inbound_per_channel` | integer | `50` | A channel's next message is rejected while this many of its transport messages (USER items) are accepted and not yet answered. Counts per channel only: a coalesced turn counts every message it absorbed until the turn ends, notifications and tool results never count, and a turn retry counts once it is re-queued (it is the same unanswered message), not while it waits on its timer. There is no bypass by sender. |
+| `limits.notice_interval` | integer, seconds | `300` | A rejection is logged at WARNING (`limits: rejected a message from <sender> on <channel>: ...`) at most once per channel per this many seconds, on the kernel clock. |
+| `limits.max_waiting` | integer | `200` | New `subagent`, `fork` and `notify_other_channel` work is refused while the internal work waiting across all channels is at least this: `Agent.waiting_work()` (queued and in-flight channel-queue items plus TaskQueue tasks, queued or running, by the channel that started them) less `Agent.waiting_messages()`. Messages from users never count; `inbound_per_channel` bounds them (#1052). |
+
+Every present value must be a positive whole number, at least 1; keys left out take their default. A non-mapping block (`limits: 5`), an unknown key, or a bool, float, string, `0` or negative value aborts startup with a `Config error` naming the key and the rejected value with the accepted values, or, for an unknown key, the accepted keys.
+
+A refused subagent, fork or note returns `Not started: limits.max_waiting reached — <N> items of internal work are waiting; wait for some to finish, or raise limits.max_waiting in agent.yaml` as the tool's result and logs a WARNING naming the kind, both channels and the limit; nothing is enqueued. The result of work already started (a task completion, a deferred tool result) is never refused, so a ceiling never strands accepted work.
+
+Known limits, accepted for phase 1:
+
+- The starting tool's own call is a running Task when it asks, and counts toward `max_waiting`, so for `subagent`, `fork` and `notify_other_channel` the effective ceiling is at most `max_waiting - 1` (the other tool calls of the same response count too).
+- No notice is sent to a rejected sender yet; the rejection is only the WARNING above. A notice needs a transport-declared one-to-one flag (TRD §9.1, #1051).
+- Concurrent arrivals on one channel can each pass the inbound check before either is enqueued, so the cap can be overshot by a few (a `shortcut:` in the plugin; a per-channel admission counter is the upgrade).
+- The count misses a result in transit between a task finishing and its notification being enqueued, and a turn retry waiting on a timer, so it can read a little low.
+- Channels that are stopped are not left out of the sum (nothing stops a channel yet).
+- The block is read at startup. There is no hot reload; restart to change it.
 
 ---
 
@@ -737,7 +776,7 @@ sqlite3 sessions.db \
 uv run corvidae redact --db sessions.db message <id> [<id> ...]
 ```
 
-Pass the ids explicitly rather than using the `range` form: `message_log` ids are global across all channels, so an id range spans whatever other channels were active in the same window. The redaction cascades to intersecting memory records, to both FTS surfaces, and to the text `exchange_log` copies from the conversation (stage-2 `past_claims` and the provenance and critique objection detail in `outcomes`); see "Operator redaction" in [design.md](design.md). The jsonl logs are separate files and are not touched — delete them yourself.
+Pass the ids explicitly rather than using the `range` form: `message_log` ids are global across all channels, so an id range spans whatever other channels were active in the same window. The redaction cascades to intersecting memory records, to both FTS surfaces, and to the text `exchange_log` copies from the conversation (stage-2 `past_claims` and the provenance and stylistic critique objection detail in `outcomes`, but not proactivity's (#1003) or that of lenses other plugins add); see "Operator redaction" in [design.md](design.md). The jsonl logs are separate files and are not touched — delete them yourself. Stop the daemon first: its context window still holds the text, and a compaction could write it back. Redaction is not complete even then: copies on other channels and anything the agent later restated in its own words survive it, and redaction is on hold pending an overhaul ([redaction.md](redaction.md) lists what it does not reach).
 
 ---
 
