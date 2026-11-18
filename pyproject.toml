@@ -91,6 +91,10 @@ inotify = [
 planning = [
     "corvidae-planning",
 ]
+# The Grice alignment lens: flags replies that violate Grice's maxims (#914).
+grice = [
+    "corvidae-grice",
+]
 
 [project.scripts]
 corvidae = "corvidae.main:corvidae"
@@ -206,3 +210,4 @@ corvidae-core-periphery = { workspace = true }
     corvidae-vision = { workspace = true }
     rss-reader = { workspace = true }
 corvidae-planning = { workspace = true }
+corvidae-grice = { workspace = true }
