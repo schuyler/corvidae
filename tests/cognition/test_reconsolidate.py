@@ -197,21 +197,38 @@ async def test_snapshot_refuses_an_existing_destination(tmp_path):
     assert dest.read_text() == "precious"
 
 
-async def test_a_db_that_is_not_a_copy_is_refused(tmp_path):
+async def test_a_failed_snapshot_leaves_no_copy_and_names_both_paths(tmp_path, monkeypatch):
+    # A half-written copy would look resumable, so a failed backup removes it.
     live = tmp_path / "live.db"
     await make_live_db(live)
+    dest = tmp_path / "copy.db"
+
+    def half_backup(source, target):
+        target.write_bytes(b"partial")
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(rc, "_backup", half_backup)
     with pytest.raises(click.ClickException) as err:
+        await rc.snapshot_database(live, dest)
+    assert not dest.exists()
+    assert str(live) in err.value.message and str(dest) in err.value.message
+    assert "retry" in err.value.message
+
+
+async def test_an_adopted_copy_is_refused_whatever_the_config_says(tmp_path):
+    # The operator swaps a variant in for sessions.db, as docs/cognition.md
+    # describes. The marker comes with it, so the file still looks like a
+    # copy; it now sits at the path it was snapshotted from, which is the tell.
+    live = tmp_path / "sessions.db"
+    await make_live_db(live)
+    variant = tmp_path / "variant-a.db"
+    await rc.snapshot_database(live, variant)
+    variant.replace(live)
+    with pytest.raises(click.ClickException) as err:
+        # live_path=None: a --config that names some other database.
         rc.check_is_copy(live, live_path=None)
-    assert str(live) in err.value.message
+    assert str(live) in err.value.message and "adopted" in err.value.message
     assert "--snapshot-from" in err.value.message
-
-
-async def test_the_configured_live_db_is_refused_even_when_marked(tmp_path, copy):
-    # A marked file that is also the daemon's configured db is still live.
-    with pytest.raises(click.ClickException) as err:
-        rc.check_is_copy(copy, live_path=copy)
-    assert str(copy) in err.value.message
-    assert "daemon.session_db" in err.value.message
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +335,21 @@ async def test_since_until_select_by_created_at_and_leave_the_rest(copy):
                        "WHERE trigger = 'reconsolidate'")[0]
     assert spans[0] >= 9 and spans[1] <= 15
     assert report.records_superseded == 1
+
+
+async def test_overlapping_selected_records_are_redone_once(copy):
+    # Near-dup merges leave active records whose ranges overlap. Their union
+    # is one stretch, so no message is consolidated twice.
+    first = add_record(copy, CHAN, 1, 13, created_at=500.0)
+    second = add_record(copy, CHAN, 7, 23, created_at=500.0)
+    report, _, _ = await run(copy, since=0.0)
+    assert report.failed == []
+    spans = sorted(rows(copy, "SELECT msg_id_start, msg_id_end FROM memory_reply"))
+    assert len(spans) >= 2
+    for (_, end), (start, _) in zip(spans, spans[1:]):
+        assert start > end, f"segments overlap: {spans}"
+    assert [rows(copy, "SELECT indexed FROM memory WHERE id = ?", i)[0][0]
+            for i in (first, second)] == [0, 0]
 
 
 async def test_min_source_tokens_narrows_to_big_stretches(copy):
@@ -595,11 +627,6 @@ async def test_a_database_without_a_memory_table_is_refused_with_the_remedy(tmp_
 
 
 # ---------------------------------------------------------------------------
-# Redaction reaches the stored replies
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # CLI surface
 # ---------------------------------------------------------------------------
 
@@ -750,6 +777,56 @@ def test_a_stop_on_a_transport_error_names_the_remedy_and_keeps_finished_segment
     assert "ConnectionError" in result.output and str(copy) in result.output
     assert "rerun the same command" in result.output
     assert rows(copy, "SELECT COUNT(*) FROM memory_reply") == [(1,)]
+
+
+def _cli_setup(tmp_path, monkeypatch, client_cls):
+    """A live db, a config with one profile, a prompt file, and a fake client class."""
+    live = tmp_path / "sessions.db"
+    asyncio.run(make_live_db(live))
+    (tmp_path / "agent.yaml").write_text(
+        "llm:\n  providers:\n    main:\n      base_url: http://127.0.0.1:1/v1\n"
+        "  profiles:\n    main:\n      model: m\n"
+    )
+    prompt = tmp_path / "sys.txt"
+    prompt.write_text(SYSTEM)
+    monkeypatch.setattr(rc, "LLMClient", client_cls)
+    return live, prompt
+
+
+def test_cli_iso_since_until_select_records_by_their_date(tmp_path, monkeypatch):
+    # The form the docs show: ISO dates, UTC. 500 s after the epoch is
+    # 00:08:20; the window 00:06:40-00:10:00 holds only the middle record.
+    live, prompt = _cli_setup(tmp_path, monkeypatch, FakeLLMClient)
+    early = add_record(live, CHAN, 1, 7, created_at=100.0)
+    inside = add_record(live, CHAN, 9, 15, created_at=500.0)
+    late = add_record(live, CHAN, 17, 23, created_at=900.0)
+    copy = tmp_path / "c.db"
+    result = invoke("--db", str(copy), "--snapshot-from", str(live),
+                    "--config", str(tmp_path / "agent.yaml"), "--system-prompt", str(prompt),
+                    "--segment-budget", "420", "--channel", CHAN,
+                    "--since", "1970-01-01T00:06:40", "--until", "1970-01-01T00:10:00")
+    assert result.exit_code == 0, result.output
+    assert [rows(copy, "SELECT indexed FROM memory WHERE id = ?", i)[0][0]
+            for i in (early, inside, late)] == [1, 0, 1]
+
+
+def test_cli_exits_non_zero_listing_segments_with_no_usable_reply(tmp_path, monkeypatch):
+    class Garbled(FakeLLMClient):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.replies = lambda n: "not json at all"
+
+    live, prompt = _cli_setup(tmp_path, monkeypatch, Garbled)
+    old = add_record(live, CHAN, 1, 23)
+    copy = tmp_path / "c.db"
+    result = invoke("--db", str(copy), "--snapshot-from", str(live),
+                    "--config", str(tmp_path / "agent.yaml"), "--system-prompt", str(prompt),
+                    "--segment-budget", "420", "--channel", CHAN)
+    assert result.exit_code != 0
+    # Names what was left (channel and range) and the remedy.
+    assert "no usable reply" in result.output and f"{CHAN} " in result.output
+    assert "rerun the same command" in result.output
+    assert rows(copy, "SELECT indexed FROM memory WHERE id = ?", old) == [(1,)]
 
 
 def test_per_channel_config_reaches_the_view_inputs():

@@ -177,7 +177,8 @@ def _backup(source: Path, dest: Path) -> None:
             dst.execute(COPY_MARKER_DDL)
             dst.execute(
                 "INSERT INTO reconsolidation_copy (source, created_at) VALUES (?, ?)",
-                (str(source), time.time()),
+                # Resolved, so check_is_copy can compare it from any directory.
+                (str(source.resolve()), time.time()),
             )
             dst.commit()
         finally:
@@ -229,11 +230,17 @@ def check_is_copy(path: Path, *, live_path: Path | None) -> None:
             f"{path} is the daemon's live database (daemon.session_db); refusing to "
             "rewrite it — pass --snapshot-from with it and a new --db path"
         )
+    # Read the marker, and the path each snapshot that made this file came from.
     conn = sqlite3.connect(path)
     try:
         marked = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reconsolidation_copy'"
         ).fetchone()
+        sources = (
+            [row[0] for row in conn.execute("SELECT source FROM reconsolidation_copy")]
+            if marked is not None
+            else []
+        )
     finally:
         conn.close()
     if marked is None:
@@ -241,6 +248,17 @@ def check_is_copy(path: Path, *, live_path: Path | None) -> None:
             f"{path} is not a reconsolidation copy (no reconsolidation_copy marker); "
             "make one with --snapshot-from <the daemon's sessions.db> and a new --db path"
         )
+    # A copy sitting at the path it was snapshotted from has been adopted: the
+    # operator swapped it in for sessions.db, so the daemon may be writing it,
+    # whatever --config says. The marker came along with the swap.
+    for source in sources:
+        source_path = Path(source)
+        if source_path.exists() and os.path.samefile(path, source_path):
+            raise click.ClickException(
+                f"{path} is the file its copy was snapshotted from ({source_path}), so "
+                "it was adopted as a live database; refusing to rewrite it — pass "
+                "--snapshot-from with it and a new --db path"
+            )
 
 
 async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:

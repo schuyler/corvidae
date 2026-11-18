@@ -1439,8 +1439,10 @@ corvidae reconsolidate --db copy.db --snapshot-from sessions.db \
 ```
 
 - **A copy only.** `--snapshot-from` copies the file with sqlite's backup API
-  and adds a `reconsolidation_copy` marker. A `--db` without the marker, or
-  the file `daemon.session_db` names, is refused. One copy per variant.
+  and adds a `reconsolidation_copy` marker recording the source's path. A
+  `--db` without the marker, the file `daemon.session_db` names, or a copy
+  sitting at the path it was snapshotted from (an adopted copy, see below) is
+  refused. One copy per variant.
 - **Segments.** Each channel is re-segmented from id 0 (or from the selected
   records) with `build_catchup_segments` at `--segment-budget` tokens, which
   replaces `max_context_tokens`. The channel's `reasoning_history` is resolved
@@ -1482,8 +1484,9 @@ corvidae reconsolidate --db copy.db --snapshot-from sessions.db \
   stopped run keeps what finished, and rerunning the same command skips the
   segments that have a `memory_reply` row. A reply unusable twice leaves its
   segment (old records untouched) and the run exits non-zero listing it.
-- **`--dry-run`** writes nothing and calls no model: per channel, the records
-  selected and met, and each segment's rows and estimated tokens.
+- **`--dry-run`** writes nothing to the copy and calls no model: per channel,
+  the records selected and met, and each segment's rows and estimated tokens.
+  With `--snapshot-from` it still makes the copy.
 
 shortcut: no valence, no near-dup merge, no halving of a rejected embedding
 batch, and no widening of a scoped stretch over a record that reaches past it. A record whose range runs
@@ -1491,7 +1494,10 @@ past a stretch is superseded even though part of its range is not redone;
 `--dry-run` shows which. Upgrade if a measurement needs it.
 
 To adopt a variant the operator replaces `sessions.db` with the copy while the
-daemon is stopped; the command never does.
+daemon is stopped; the command never does. The marker comes along, and the
+adopted file now sits at the path its snapshot came from, so the command
+refuses it as `--db` whichever `--config` is passed; to try another variant,
+snapshot it again with `--snapshot-from`.
 
 ### GoalsPlugin (`packages/corvidae-cognition/corvidae_cognition/goals.py`)
 
