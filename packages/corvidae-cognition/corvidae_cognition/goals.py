@@ -164,7 +164,7 @@ class GoalsPlugin(CorvidaePlugin):
                 if g.get("status", "open") in ("open", "in-progress")
             ][:5]
         return frame_beat(
-            [], None, prompt, goals_instruction,
+            [], [], prompt, goals_instruction,
             diff=diff, open_goals=open_goals,
         )
 

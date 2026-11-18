@@ -68,13 +68,13 @@ class TestGoalsTransformHeartbeatPrompt:
         )
         assert "recent memory" not in text
 
-    async def test_keeps_retired_goals(self, plugin: GoalsPlugin) -> None:
+    async def test_suppresses_retired_goals(self, plugin: GoalsPlugin) -> None:
         retired = [{"id": 99, "age_seconds": 7200, "summary": "retired goal summary"}]
         text = await plugin.transform_heartbeat_prompt(
             [], retired, "prompt", "goals instruction",
             diff=False, open_goals=[_goal(1)],
         )
-        assert "retired goal summary" in text
+        assert "retired goal summary" not in text
 
 
 class TestHeartbeatSeed:
