@@ -1136,7 +1136,7 @@ class Agent(CorvidaePlugin):
         async def _write() -> None:
             try:
                 await outcome_log.upsert_exchange(
-                    trace_id, channel.id, None,
+                    trace_id, channel.id, "declined",
                     outcomes={"send": {
                         "emission": "final",
                         "origin": "declined",
@@ -1151,7 +1151,14 @@ class Agent(CorvidaePlugin):
                     extra={"trace_id": trace_id, "channel": channel.id},
                 )
 
-        task = asyncio.create_task(_write())
+        try:
+            task = asyncio.create_task(_write())
+        except RuntimeError:
+            logger.warning(
+                "decline outcome task creation failed for %s",
+                trace_id, exc_info=True,
+            )
+            return
         self._decline_tasks.add(task)
         task.add_done_callback(self._decline_tasks.discard)
 

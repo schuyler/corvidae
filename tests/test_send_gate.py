@@ -1,3 +1,4 @@
+import asyncio
 """RED tests for WP2.8: the should_send_response hook, MessageType.UNSENT and
 its four firing sites (plans/implementation/phase-2.md WP2.8; docs/prd.md
 §3.7 "Output gate and the right to silence").
@@ -681,6 +682,9 @@ class TestEmptyFinalAndCutOff:
         plugin._mark_started()
 
         await _say(plugin, channel)
+        # Let the fire-and-forget task complete
+        if plugin._decline_tasks:
+            await asyncio.gather(*plugin._decline_tasks)
 
         # The gate was not consulted (empty final bypasses it)
         assert gate.emissions() == []
