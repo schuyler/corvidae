@@ -710,6 +710,24 @@ class CritiqueSpec:
         warning naming the plugin; the others load.
         """
 
+    @hookspec(firstresult=True)
+    async def transform_critique_prompt(
+        self, channel, trace_id: str, lens_name: str, instruction: str,
+    ) -> str:
+        """Transform the fork instruction before the critique fork runs.
+
+        Fires in _fork_lens after the base instruction is assembled
+        (fork prompt + exchange quote) and before agent.fork is called.
+        Implementers receive the instruction and return the (possibly
+        modified) instruction. The first non-None return wins (same
+        resolution as transform_system_prompt); None passes the
+        instruction through unchanged.
+
+        Use this to inject lens-specific context into the fork prompt —
+        e.g. the planning lens appends the current goal list so the fork
+        can reference specific goal ids.
+        """
+
 
 class CritiquePlugin(CorvidaePlugin):
     """Deferred, salience-gated self-critique plus the provenance check."""
@@ -717,6 +735,13 @@ class CritiquePlugin(CorvidaePlugin):
     depends_on = frozenset({"task", "llm"})
     # Owns the on_critique_init hook; its implementers add lenses at startup.
     hookspecs = CritiqueSpec
+
+    @hookimpl(trylast=True)
+    async def transform_critique_prompt(
+        self, channel, trace_id: str, lens_name: str, instruction: str,
+    ) -> str:
+        """Seed: pass the instruction through unchanged."""
+        return instruction
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -1894,6 +1919,26 @@ class CritiquePlugin(CorvidaePlugin):
                 f"\n\nThe knowledge base root is «{quote(str(root))}»: every "
                 "file you name is a path under it."
             )
+        # Plugins may transform the instruction (e.g. append the goal list).
+        # A failing transform must not cost the lens its fork.
+        if self.pm is not None:
+            try:
+                transformed = await self.pm.ahook.transform_critique_prompt(
+                    channel=channel, trace_id=trace_id,
+                    lens_name=lens, instruction=instruction,
+                )
+                if isinstance(transformed, list):
+                    transformed = next(
+                        (t for t in transformed if t is not None), None)
+                if transformed is not None:
+                    instruction = transformed
+            except Exception:
+                logger.warning(
+                    'transform_critique_prompt hook failed for lens %s; '
+                    'using the untransformed instruction',
+                    lens, exc_info=True,
+                    extra={'channel': channel.id, 'trace_id': trace_id},
+                )
         # Containment check; a string is the reason the lens must skip.
         agent = self._fork_target(channel, trace_id)
         if isinstance(agent, str):
