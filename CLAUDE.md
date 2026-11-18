@@ -156,3 +156,14 @@ The container is ephemeral and the repo is cloned fresh, so nothing survives
 unless it is committed and pushed. There is no `gh` CLI — use the GitHub MCP
 tools. Always open a pull request when work is complete, so it can be
 reviewed and merged even if the session goes idle before that happens.
+
+## Responding to the owner
+
+The owner often reads on a phone and needs replies short enough to take
+in at a glance.
+
+- Keep every reply under 150 words.
+- Handle one point per reply. If there is more to say, end with a line
+  saying so, and wait to be asked.
+- Don't repeat a question you have already asked. Hold open questions
+  until the owner asks whether you have any.
