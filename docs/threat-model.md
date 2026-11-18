@@ -1,10 +1,22 @@
 # Threat model
 
-What can go wrong when corvidae reads text it didn't write, and what the
-code does about it. Written from a security review, conducted 2026-10-22,
-of the tree at commit `cca7604`, then updated for the documentation fixes
-that landed alongside it. It is a snapshot, not a policy: when the code
-moves, this document is wrong until someone fixes it.
+This document is the record of the risks and costs the PRD's decisions
+create (principle 9: "the standing record of what that costs"), kept
+current whenever untrusted text can reach somewhere new or a tool can do
+something new. It derives from the PRD: a finding records a cost the PRD
+accepted, not a requirement the PRD imposes. A mitigation described here is
+an option the operator can apply, or a statement of what the tree does now
+— neither is a requirement unless the PRD states it. If a finding implies
+something must be built, the change belongs in the PRD.
+
+One exception: where the PRD incorporates a passage of this document by
+reference, that passage is binding as part of the PRD requirement that
+cites it, and is marked so here. Today that is the Signal download gate's
+allowlist ("Signal attachment downloads", cited by PRD §3.2).
+
+First written from a security review conducted 2026-10-22 of the tree at
+commit `cca7604`, then updated for the documentation fixes that landed
+alongside that review.
 
 ## The short version
 
@@ -820,10 +832,10 @@ What it doesn't protect against, so you know:
   plugin.
 - **Panels show untrusted text.** A panel that displays prompts, tool
   output or other people's messages puts untrusted text in an
-  authenticated page. Panel script must render it as text (`textContent`),
-  never markup. The CSP stops inline script if a panel gets that wrong,
-  but not injected HTML that spoofs the console or exfiltrates through
-  links.
+  authenticated page. A panel whose script renders it as markup rather
+  than as text (`textContent`) exposes the console to it: the CSP stops
+  inline script, but not injected HTML that spoofs the console or
+  exfiltrates through links. The control is in the panel's own script.
 
 - **The context panel shows everything the model sees.** When
   `context_panel` is configured, anyone holding the console token can read
@@ -2091,7 +2103,11 @@ unlocked. The bundled-copy restore mechanism (deferred) would provide a
 recovery path for accidental or malicious overwrites of framework-shipped
 skills.
 
-## What to do first
+## What would reduce the risk most
+
+The controls below are listed by leverage. Items 2 and 3 are operator
+controls available today. Items 4 through 8 would change the tree, so each
+needs a PRD decision before it is built (see the preamble).
 
 1. Done (#206): `set_settings` allowlists its undotted keys, which closed
    the only outright bypass.
@@ -2149,6 +2165,9 @@ A marker file (`state/restart.json`) survives the restart. On the next boot, the
 On safe-mode boot (plugins disabled after a crash loop) or after an abnormal previous run (detected from `state/boot-history.jsonl`, written by an external boot supervisor), the plugin sends a notice to the home channel. This is the only notification that does not require a prior restart request.
 
 ### Signal attachment downloads
+
+*Binding by reference: PRD §3.2's Signal bullet specifies the download gate's
+allowlist here. Changing the allowlist below changes that requirement.*
 
 Signal attachments are downloaded to disk for allowlisted senders when the
 MIME type passes the download gate. The gate is a prefix allowlist
