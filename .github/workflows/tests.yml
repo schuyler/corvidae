@@ -96,6 +96,7 @@ jobs:
 
       - name: Install dependencies (all extras)
         run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra github-webhook --extra goals-notify --extra vision --extra core-periphery
+          uv pip install --no-deps -e packages/corvidae-planning
 
       # About 26 test sites skip when sqlite-vec can't load, and the Discord
       # tests skip without the SDK, as do the Signal tests without `emoji` and
@@ -140,7 +141,7 @@ jobs:
       - name: Install dependencies (no sqlite-vec)
         run: |
           uv sync --locked --extra dev --extra acp
-          uv pip install --no-deps -e packages/corvidae-cognition
+          uv pip install --no-deps -e packages/corvidae-cognition -e packages/corvidae-planning
 
       - name: Check sqlite-vec really is absent
         run: |
