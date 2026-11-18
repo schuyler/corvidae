@@ -92,6 +92,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+import uuid
+
 import aiosqlite
 
 from corvidae.attribution import (
@@ -2651,9 +2653,15 @@ class MemoryPlugin(CorvidaePlugin):
         attribution_token = set_attribution(
             stage="consolidation", channel_id=channel_id, trigger=trigger
         )
-        # Catch-up consolidation is plugin-owned upkeep, one queue for its
-        # views and rubric calls; forks inside it re-key to the channel (#363).
-        lease = lease_scope("upkeep:memory:consolidation")
+        # Catch-up consolidation is plugin-owned upkeep: one queue PER RUN for
+        # its views and rubric calls, so concurrent runs for different channels
+        # are distinct queues in the lease table, snapshot and metrics (#985).
+        # The id is the run's trace_id when attribution holds one, else an id
+        # minted once per run (never None/empty). Forks inside re-key to the
+        # channel as before (#363).
+        _trace = get_attribution().get("trace_id")
+        _run_id = _trace if _trace else uuid.uuid4().hex
+        lease = lease_scope(f"memory:consolidation:{_run_id}")
         lease.__enter__()
         # The message-id range and what is already stored, for the failure log.
         range_desc = f"up to {range_end}"

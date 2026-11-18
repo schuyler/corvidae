@@ -26,6 +26,7 @@ from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from helpers import build_plugin_and_channel, window_of
 from test_lease_scopes import ScriptedSession, loud_unleased_records, usage_rows
 
+from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.channel import Channel
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.metrics import UsageLogPlugin
@@ -33,8 +34,19 @@ from corvidae.metrics import UsageLogPlugin
 from .test_appraisal_stage2 import VALID_STAGE2_JSON
 from .test_memory_consolidation import CONSOLIDATION_JSON, EMBED_CONFIG, seed_dialog
 
-# The key AC8 names for catch-up consolidation and the rubric call.
-UPKEEP_KEY = "upkeep:memory:consolidation"
+# The per-run consolidation lease key (#985): memory:consolidation:<id>, where
+# <id> is the run's trace_id or a minted id (never None/empty). Two concurrent
+# runs get distinct ids, so the key is a per-run queue, not one shared upkeep.
+CONSOLIDATION_KEY_PREFIX = "memory:consolidation:"
+
+
+def _is_consolidation_key(key: object) -> bool:
+    """True for a per-run consolidation key with a non-empty id suffix."""
+    return (
+        isinstance(key, str)
+        and key.startswith(CONSOLIDATION_KEY_PREFIX)
+        and len(key) > len(CONSOLIDATION_KEY_PREFIX)
+    )
 CRITIQUE_VERDICT = json.dumps(
     {"objections": [{"claim": "it was Tuesday", "objection": "you said Monday"}]}
 )
@@ -225,8 +237,8 @@ async def test_compaction_consolidation_fork_is_keyed_by_channel(
 async def test_catchup_consolidation_view_is_keyed_by_upkeep(
     env: Env, caplog: pytest.LogCaptureFixture, via_idle_watch: bool
 ) -> None:
-    """AC8: the catch-up view (a range out of the window) carries
-    upkeep:memory:consolidation, also when the idle watch triggers it from an
+    """The catch-up view (a range out of the window) carries a per-run
+    memory:consolidation:<id> key, also when the idle watch triggers it from an
     empty context."""
     caplog.set_level(logging.WARNING)
     persistence = env.plugin.pm.get_plugin("persistence")
@@ -241,15 +253,18 @@ async def test_catchup_consolidation_view_is_keyed_by_upkeep(
     await env.memory.wait_for_background_tasks()
 
     pairs = await keyed_posts(env)
-    assert [key for kind, key in pairs if kind == "view"] == [UPKEEP_KEY]
+    view_keys = [key for kind, key in pairs if kind == "view"]
+    assert len(view_keys) == 1
+    assert _is_consolidation_key(view_keys[0]), view_keys
     assert loud_unleased_records(caplog) == []
 
 
 async def test_rubric_score_during_catchup_commit_is_keyed_by_upkeep(
     env: Env, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """AC8: the rubric score call made while a catch-up commit runs carries
-    upkeep:memory:consolidation."""
+    """The rubric score call made while a catch-up commit runs carries the
+    run's memory:consolidation:<id> key — and the same key as the view that
+    run produced (the id is minted once per run, not per call)."""
     caplog.set_level(logging.WARNING)
     persistence = env.plugin.pm.get_plugin("persistence")
     ids = await seed_dialog(persistence, env.channel, DIALOG)
@@ -258,5 +273,108 @@ async def test_rubric_score_during_catchup_commit_is_keyed_by_upkeep(
     await env.memory._consolidate_range(env.channel.id, ids[-1], "compaction")
 
     pairs = await keyed_posts(env)
-    assert [key for kind, key in pairs if kind == "rubric"] == [UPKEEP_KEY]
+    view_keys = [key for kind, key in pairs if kind == "view"]
+    rubric_keys = [key for kind, key in pairs if kind == "rubric"]
+    assert len(view_keys) == 1 and len(rubric_keys) == 1, (view_keys, rubric_keys)
+    assert _is_consolidation_key(view_keys[0]) and _is_consolidation_key(rubric_keys[0])
+    # Intra-run stability: one id for the whole run, so the view and the rubric
+    # it commits share a key.
+    assert view_keys[0] == rubric_keys[0], (view_keys, rubric_keys)
+    assert loud_unleased_records(caplog) == []
+
+
+async def test_rubric_after_fork_uses_the_per_run_key(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    """After a fork record, the rubric (called in _commit) runs under the run's
+    per-run key, not the channel key the fork re-keyed to (#985): the fork's
+    lease scope restores the outer per-run key on exit. This is the trickiest
+    path the PR touches — outer per-run scope, fork re-keys to the channel,
+    rubric runs back under the per-run key."""
+    caplog.set_level(logging.WARNING)
+    persistence = env.plugin.pm.get_plugin("persistence")
+    ids = await seed_dialog(persistence, env.channel, DIALOG)
+    # The range is in the live window: _live_record takes the fork path
+    # (outcome == "record"), which commits via _commit -> rubric (the fork
+    # record has no importance, so the rubric rates the range).
+    env.channel.conversation = window_of(
+        env.channel.id, ids, contents=[text for _role, text in DIALOG])
+
+    await env.memory._consolidate_range(env.channel.id, ids[-1], "idle")
+    await env.memory.wait_for_background_tasks()
+
+    rows = await usage_rows(env.db)
+    fork_keys = [key for stage, key, mode in rows if stage == "consolidation" and mode == "fork"]
+    rubric_keys = [key for stage, key, mode in rows if stage == "consolidation" and mode == "rubric"]
+    assert len(fork_keys) == 1, (fork_keys, rows)
+    # The fork carries the channel key (re-keyed inside _live_record).
+    assert fork_keys[0] == env.channel.id, fork_keys
+    # The rubric (after the fork) carries the run's per-run key.
+    assert len(rubric_keys) == 1, (rubric_keys, rows)
+    assert _is_consolidation_key(rubric_keys[0]), rubric_keys
+    # The fork and rubric keys differ: the fork is the channel, the rubric is
+    # the per-run key (the fork's lease scope restored the outer key).
+    assert fork_keys[0] != rubric_keys[0], (fork_keys, rubric_keys)
+    assert loud_unleased_records(caplog) == []
+
+
+async def test_consolidation_with_trace_id_uses_it_as_the_key(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The run's trace_id, when attribution holds one, is the key suffix
+    (#985): the key is exactly memory:consolidation:<that-trace-id>. The
+    trace_id is an attribution field independent of the trigger; a compaction
+    range that has left the window is rebuilt as a view, so the per-run key is
+    observable."""
+    caplog.set_level(logging.WARNING)
+    persistence = env.plugin.pm.get_plugin("persistence")
+    ids = await seed_dialog(persistence, env.channel, DIALOG)
+    env.channel.conversation = None
+
+    # An outer attribution with a known trace_id (as a turn would set).
+    token = set_attribution(trace_id="known-trace-123")
+    try:
+        await env.memory._consolidate_range(env.channel.id, ids[-1], "compaction")
+    finally:
+        reset_attribution(token)
+    await env.memory.wait_for_background_tasks()
+
+    pairs = await keyed_posts(env)
+    view_keys = [key for kind, key in pairs if kind == "view"]
+    assert view_keys == ["memory:consolidation:known-trace-123"], view_keys
+    assert loud_unleased_records(caplog) == []
+
+
+async def test_consolidation_runs_have_distinct_keys(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two non-fork consolidation runs get distinct per-run keys (#985), so the
+    lease attribution (usage_log.lease_key) is per stream, not one shared
+    upkeep queue. Both runs have no trace id (compaction trigger), so each
+    mints its own id."""
+    caplog.set_level(logging.WARNING)
+    persistence = env.plugin.pm.get_plugin("persistence")
+    env.channel.conversation = None
+
+    ids1 = await seed_dialog(persistence, env.channel, DIALOG)
+    await env.memory._consolidate_range(env.channel.id, ids1[-1], "compaction")
+    await env.memory.wait_for_background_tasks()
+
+    # A fresh range past the watermark: a second run, its own queue.
+    second = [
+        ("user", "the radio dropped again"),
+        ("assistant", "same brownout pattern, likely the detector"),
+        ("user", "yes, every time the heater kicks in"),
+        ("assistant", "check the detector fuse and the brownout setting"),
+    ]
+    ids2 = await seed_dialog(persistence, env.channel, second)
+    await env.memory._consolidate_range(env.channel.id, ids2[-1], "compaction")
+    await env.memory.wait_for_background_tasks()
+
+    pairs = await keyed_posts(env)
+    view_keys = [key for kind, key in pairs if kind == "view"]
+    # One view per run; both per-run consolidation keys, distinct.
+    assert len(view_keys) == 2, view_keys
+    assert all(_is_consolidation_key(k) for k in view_keys), view_keys
+    assert view_keys[0] != view_keys[1], view_keys
     assert loud_unleased_records(caplog) == []
