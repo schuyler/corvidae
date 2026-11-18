@@ -1012,6 +1012,47 @@ def _measured_size(messages: list[dict]) -> int:
     return count_tokens(messages[0]["content"]) + sum(message_tokens(m) for m in messages[1:])
 
 
+def _merge_overlapping_segments(
+    own_ranges: list[tuple[int, int]], after_id: int,
+) -> list[list[int]]:
+    """Merge neighbouring segments (in view order) whose id-ranges overlap, so the
+    resulting groups' id-ranges increase strictly (max_id(group k) <
+    min_id(group k+1)) and tile the range. #947.
+
+    ``own_ranges[i]`` is the (min id, max id) of segment i's own rows. Two
+    passes: the first groups consecutive segments by running max; the second
+    re-merges neighbouring groups whose id-ranges still overlap — a late segment
+    can carry an id below an earlier group's max (a severe clock step-back), and
+    pass 1's running max only looks forward, so a single left-to-right re-merge
+    closes the gap (non-overlap is transitive across view-ordered groups, so one
+    pass suffices). In-order ranges never overlap, so no merge happens and each
+    segment is its own group.
+    """
+    groups: list[list[int]] = []
+    current: list[int] = []
+    group_max = after_id
+    for i, (lo, hi) in enumerate(own_ranges):
+        if lo <= group_max:
+            current.append(i)
+            group_max = max(group_max, hi)
+        else:
+            if current:
+                groups.append(current)
+            current = [i]
+            group_max = hi
+    if current:
+        groups.append(current)
+    merged: list[tuple[list[int], int]] = []  # (indices, g_max)
+    for g in groups:
+        g_min = min(own_ranges[i][0] for i in g)
+        g_max = max(own_ranges[i][1] for i in g)
+        if merged and g_min <= merged[-1][1]:
+            merged[-1] = (merged[-1][0] + g, max(merged[-1][1], g_max))
+        else:
+            merged.append((list(g), g_max))
+    return [idx for idx, _ in merged]
+
+
 async def build_catchup_segments(
     db: aiosqlite.Connection, channel_id: str, after_id: int, through_id: int,
     inputs: ViewInputs, fork_prompt: str,
@@ -1080,64 +1121,82 @@ async def build_catchup_segments(
         for own in _segment_run(run_view, own_ids, inputs, fork_prompt, index):
             plans.append((run_view, own, index, fit_sums))
 
-    # 6. Spans: segment k ends at the last range row before segment k+1's
-    # first non-summary row; the last ends at the last range row.
+    # 6. Spans. A clock step-back makes the view's timestamp order disagree with
+    #    id order, so a later segment in view order can hold a smaller id: the
+    #    old bisect then raised (ValueError), left an empty span (IndexError), or
+    #    overlapped a neighbour (a row stored in two records, PRD 3.7 Memory 1).
+    #    Merge neighbouring raw segments whose id-spans overlap so the segments'
+    #    id-spans increase strictly and tile (after_id, through_id]; the view
+    #    stays in timestamp order and each end_id is a contiguous frontier.
+    #    In-order timestamps never overlap, so no merge happens and the cut is
+    #    unchanged. #947.
     all_ids = [row[0] for row in range_rows]
-    firsts = [min(run_view[k]["_db_id"] for k in own) for run_view, own, _, _ in plans]
-    ends = []
-    for nxt in firsts[1:]:
-        # all_ids is ascending (ORDER BY id): the last id below nxt.
-        below = bisect_left(all_ids, nxt)
-        if below == 0:
-            raise ValueError(
-                f"catch-up for channel {channel_id}: a segment starts at message id "
-                f"{nxt}, below every range row after {after_id}; the view's row order "
-                "disagrees with id order (a clock that stepped back), so the range "
-                "cannot be split; report it with the channel's message_log timestamps"
-            )
-        ends.append(all_ids[below - 1])
-    ends.append(all_ids[-1])
+    own_ranges = []
+    for run_view, own, index, fit_sums in plans:
+        ids = [run_view[k]["_db_id"] for k in own]
+        own_ranges.append((min(ids), max(ids)))
+    groups = _merge_overlapping_segments(own_ranges, after_id)
+    # end_id: the last range row before the next group's first own id; the last
+    # group's span runs to through_id (covers trailing summary rows). The groups'
+    # id-ranges are disjoint (the merge), so each end_id is a contiguous frontier.
+    group_min = [min(own_ranges[i][0] for i in g) for g in groups]
+    ends = [all_ids[bisect_left(all_ids, m) - 1] for m in group_min[1:]] + [through_id]
 
-    # 7. One request per segment.
+    # 7. One request per merged group.
     segments: list[CatchupSegment] = []
     # The system prompt's size, as fit_to_budget counts it against the budget.
     fixed = count_tokens(inputs.system_prompt)
     start_after = after_id
-    for (run_view, own, index, fit_sums), end_id in zip(plans, ends):
+    for indices, end_id in zip(groups, ends):
+        run_view, own, index, fit_sums = plans[indices[-1]]
+        end = own[-1] + 1  # the group's last own row (in the last run's view)
         seg_rows = range_rows[bisect_right(all_ids, start_after):bisect_right(all_ids, end_id)]
         start_after = end_id
         seg_ids = {r[0] for r in seg_rows if r[2] != "summary"}
         window = ContextWindow(channel_id)
         window.system_prompt = inputs.system_prompt
         window.fence_key = inputs.fence_key
-        end = own[-1] + 1
         dialog_ids = _dialog_ids(seg_rows)
 
         def instruction() -> str:
             """The consolidation instruction over the window as it stands."""
             return fork_prompt + "\n\n" + _fork_range_sentence(window.messages, dialog_ids)
 
-        def first_at(ids: set[int]) -> int:
-            """The first position in run_view[:end] carrying one of ``ids`` (end if none)."""
-            return min((index.pos[i] for i in ids if index.pos.get(i, end) < end), default=end)
-
-        # I0: the instruction's size on the untrimmed window run_view[:end],
-        # reserved by fitting the window to what is left.
-        sentence = _indexed_range_sentence(run_view, index, first_at(dialog_ids), end)
-        reserve = message_tokens({"role": "user", "content": fork_prompt + "\n\n" + sentence})
-        budget = inputs.max_tokens - reserve
-        # The window starts at the largest clean boundary s, at or before the
-        # segment's first own row, whose tail is still over the budget: the fit
-        # then cuts and snaps exactly as on the whole prefix, and drops the
-        # same own rows, without copying or measuring the history below s
-        # (#396). When the whole prefix fits, s is 0 and nothing is skipped.
-        over = fixed + fit_sums[end] - budget
-        # Capped below end: the fit always keeps the newest row, so s may not pass it.
-        s = bisect_left(fit_sums, over, 0, min(first_at(seg_ids), end - 1) + 1) - 1
-        s = index.prev_clean[s] if s > 0 else 0
-        # Shallow copies: the policy's in-place stripping must not alter rows
-        # a later segment reuses as context.
-        window.messages = [dict(m) for m in run_view[s:end]]
+        # The group's view. Same run (the common case): one slice from the
+        # first segment's window start to the group's end. A merge across a run
+        # boundary (rare): the concatenation of the constituent runs' slices.
+        if all(plans[i][0] is run_view for i in indices):
+            def first_at(ids: set[int]) -> int:
+                """The first position in run_view[:end] carrying one of ``ids`` (end if none)."""
+                return min((index.pos[i] for i in ids if index.pos.get(i, end) < end), default=end)
+            # I0: the instruction's size on the untrimmed window run_view[:end],
+            # reserved by fitting the window to what is left.
+            sentence = _indexed_range_sentence(run_view, index, first_at(dialog_ids), end)
+            reserve = message_tokens({"role": "user", "content": fork_prompt + "\n\n" + sentence})
+            budget = inputs.max_tokens - reserve
+            # The window starts at the largest clean boundary s, at or before the
+            # group's first own row, whose tail is still over the budget: the fit
+            # then cuts and snaps exactly as on the whole prefix, and drops the
+            # same own rows, without copying or measuring the history below s
+            # (#396). When the whole prefix fits, s is 0 and nothing is skipped.
+            over = fixed + fit_sums[end] - budget
+            # Capped below end: the fit always keeps the newest row, so s may not pass it.
+            s = bisect_left(fit_sums, over, 0, min(first_at(seg_ids), end - 1) + 1) - 1
+            s = index.prev_clean[s] if s > 0 else 0
+            # Shallow copies: the policy's in-place stripping must not alter rows
+            # a later segment reuses as context.
+            window.messages = [dict(m) for m in run_view[s:end]]
+        else:
+            # A merge across a run boundary (rare): concatenate the constituent
+            # runs' full tails (from each run's start to its last own row in the
+            # group); the join is fitted to the budget below.
+            window.messages = []
+            for i in indices:
+                rv, ow, _ix, _fs = plans[i]
+                window.messages += [dict(m) for m in rv[:ow[-1] + 1]]
+            sentence = _fork_range_sentence(window.messages, dialog_ids)
+            reserve = message_tokens({"role": "user", "content": fork_prompt + "\n\n" + sentence})
+            budget = inputs.max_tokens - reserve
         # Then the live loop's order: fit, then the reasoning_history policy.
         dropped, truncated = window.fit_to_budget(budget)
         inputs.apply_reasoning_history(window.messages)

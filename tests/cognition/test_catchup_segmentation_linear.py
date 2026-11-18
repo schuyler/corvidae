@@ -24,6 +24,7 @@ from corvidae_cognition.memory import (
     _dialog_ids,
     _fork_range_sentence,
     _measured_size,
+    _merge_overlapping_segments,
     build_catchup_segments,
     consolidation_instruction,
     logger,
@@ -239,6 +240,123 @@ async def test_window_keeps_newest_row_when_span_holds_no_view_row():
     ]
 
 
+
+
+# ---------------------------------------------------------------------------
+# #947: out-of-order timestamps — the segments tile the range (no crash, no
+# empty span, no overlapping coverage / silent double-store)
+# ---------------------------------------------------------------------------
+
+
+async def _out_of_order_db(n: int, ts_map: dict) -> aiosqlite.Connection:
+    """n no-summary rows (ids 1..n) with the given {0-based index: timestamp}
+    overrides; the rest stamped at their id (in order). Big rows so a moderate
+    budget forces a real split."""
+    db = await aiosqlite.connect(":memory:")
+    await db.execute(
+        "CREATE TABLE message_log (id INTEGER PRIMARY KEY, channel_id TEXT, "
+        "message TEXT, timestamp REAL, message_type TEXT)"
+    )
+    rows = [
+        (i + 1, CHANNEL,
+         json.dumps({"role": "user", "content": f"m{i} " + "word " * 150}),
+         ts_map.get(i, float(i)), "message")
+        for i in range(n)
+    ]
+    await db.executemany("INSERT INTO message_log VALUES (?, ?, ?, ?, ?)", rows)
+    return db
+
+
+async def test_out_of_order_timestamps_tile_the_range():
+    """#947: a clock step-back makes the view's timestamp order disagree with id
+    order. build_catchup_segments must not raise, and the segments' id-spans must
+    increase strictly and tile (after_id, through_id]: every range row in exactly
+    one segment. This single property catches all three regression shapes — the
+    later-segment-smallest-id (ValueError), the empty id span (IndexError), and
+    the overlapping coverage that double-stores a row (PRD 3.7 Memory 1)."""
+    # (n, ts_map, label, min_segments). The mild step-back keeps the segments'
+    # id-spans mostly disjoint (the merge leaves >=2 groups, a non-trivial tile);
+    # the full reversal overlaps everything (the merge consolidates to one group,
+    # whose single span still must tile the range).
+    cases = [
+        (12, {5: 3.5}, "mild clock step-back", 2),
+        (8, {i: float(8 - i) for i in range(8)}, "fully reversed", 1),
+    ]
+    for n, ts_map, label, min_segs in cases:
+        db = await _out_of_order_db(n, ts_map)
+        try:
+            segs = await build_catchup_segments(db, CHANNEL, 0, n, inputs(1500), FORK_PROMPT)
+        finally:
+            await db.close()
+        ends = [s.end_id for s in segs]
+        assert len(segs) >= min_segs, f"{label}: expected >= {min_segs} segs, got {len(segs)}"
+        assert ends == sorted(ends) and len(set(ends)) == len(ends), (
+            f"{label}: end_ids not strictly increasing: {ends}"
+        )
+        assert ends[-1] == n, f"{label}: last end_id {ends[-1]} != through_id {n}"
+        seen = [r[0] for s in segs for r in s.rows]
+        assert sorted(seen) == list(range(1, n + 1)), (
+            f"{label}: seg_rows do not tile the range (overlap or gap): {sorted(seen)}"
+        )
+
+
+async def test_out_of_order_with_summary_boundary_tiles():
+    """#947: a run under a summary (id order) followed by a no-summary run with
+    out-of-order timestamps. The merge stays within the no-summary run; the
+    segments' id-spans still increase strictly and tile the whole range."""
+    db = await aiosqlite.connect(":memory:")
+    await db.execute(
+        "CREATE TABLE message_log (id INTEGER PRIMARY KEY, channel_id TEXT, "
+        "message TEXT, timestamp REAL, message_type TEXT)"
+    )
+    rows = [
+        (1, CHANNEL, json.dumps({"role": "user", "content": "a " + "word " * 150}), 0.0, "message"),
+        (2, CHANNEL, json.dumps({"role": "assistant", "content": "b " + "word " * 150}), 1.0, "message"),
+        (3, CHANNEL, json.dumps({"role": "assistant", "content": "[Summary of earlier conversation]\nS"}), 2.0, "summary"),
+        (4, CHANNEL, json.dumps({"role": "user", "content": "c " + "word " * 150}), 5.0, "message"),
+        (5, CHANNEL, json.dumps({"role": "assistant", "content": "d " + "word " * 150}), 7.0, "message"),
+        (6, CHANNEL, json.dumps({"role": "user", "content": "e " + "word " * 150}), 6.0, "message"),
+    ]
+    await db.executemany("INSERT INTO message_log VALUES (?, ?, ?, ?, ?)", rows)
+    try:
+        segs = await build_catchup_segments(db, CHANNEL, 0, 6, inputs(1000), FORK_PROMPT)
+    finally:
+        await db.close()
+    ends = [s.end_id for s in segs]
+    assert ends == sorted(ends) and len(set(ends)) == len(ends), f"end_ids not strictly increasing: {ends}"
+    assert ends[-1] == 6, f"last end_id {ends[-1]} != through_id 6"
+    seen = [r[0] for s in segs for r in s.rows if s.rows]
+    # Non-summary rows must tile (1,2,4,5,6); the summary row (3) attaches by span.
+    non_summary = sorted(i for i in seen if i != 3)
+    assert non_summary == [1, 2, 4, 5, 6], f"non-summary rows do not tile: {non_summary}"
+
+
+
+def test_merge_overlapping_segments_is_transitive():
+    """#947 (review finding): a late raw segment can carry an id below an earlier
+    group's max (a severe clock step-back). Pass 1's running max only looks
+    forward, so the merge must be transitive: the groups' id-ranges increase
+    strictly (max_id(group k) < min_id(group k+1)). This is the case pass 1 alone
+    gets wrong — it emits [0], [1], [2, 3] with group 1's max (4) >= group 2's min
+    (3); the re-merge must fold them so no frontier is crossed."""
+    # own_ranges in view order: group A (ids 1-2, 4), segment i (5-8), segment j
+    # (3-6). Segment j's min (3) is below group A's max (4).
+    own_ranges = [(1, 2), (4, 4), (5, 8), (3, 6)]
+    groups = _merge_overlapping_segments(own_ranges, 0)
+    # Every segment is in exactly one group (no loss, no duplication).
+    flat = [i for g in groups for i in g]
+    assert sorted(flat) == [0, 1, 2, 3], f"segments lost or duplicated: {flat}"
+    # The groups' id-ranges increase strictly: a valid contiguous frontier.
+    for k in range(len(groups) - 1):
+        gk_max = max(own_ranges[i][1] for i in groups[k])
+        gk1_min = min(own_ranges[i][0] for i in groups[k + 1])
+        assert gk_max < gk1_min, (
+            f"group {k} max {gk_max} >= group {k + 1} min {gk1_min}: "
+            f"frontier crossed (groups={groups})"
+        )
+    # In-order ranges never overlap: each segment is its own group.
+    assert _merge_overlapping_segments([(1, 1), (2, 2), (3, 3)], 0) == [[0], [1], [2]]
+
 # ---------------------------------------------------------------------------
 # R1: linear work at 10k rows, counted
 # ---------------------------------------------------------------------------
@@ -441,27 +559,41 @@ async def _oracle_build_catchup_segments(
         for own in _oracle_segment_run(run_view, own_ids, inputs, fork_prompt):
             plans.append((run_view, own, own_ids))
 
-    # 6. Spans: segment k ends at the last range row before segment k+1's
-    # first non-summary row; the last ends at the last range row.
+    # 6. Spans. Merge neighbouring raw segments whose id-spans overlap so the
+    #    segments' id-spans increase strictly and tile (after_id, through_id]
+    #    (a clock step-back makes the view's timestamp order disagree with id
+    #    order). #947. The oracle keeps the pre-#396 full-prefix view; only the
+    #    span/merge logic here must match production.
     all_ids = [row[0] for row in range_rows]
-    firsts = [min(run_view[k]["_db_id"] for k in own) for run_view, own, _ in plans]
-    ends = [
-        max(i for i in all_ids if i < nxt) for nxt in firsts[1:]
-    ] + [all_ids[-1]]
+    own_ranges = []
+    for run_view, own, _ in plans:
+        ids = [run_view[k]["_db_id"] for k in own]
+        own_ranges.append((min(ids), max(ids)))
+    groups = _merge_overlapping_segments(own_ranges, after_id)
+    group_min = [min(own_ranges[i][0] for i in g) for g in groups]
+    ends = [max(i for i in all_ids if i < m) for m in group_min[1:]] + [all_ids[-1]]
 
-    # 7. One request per segment.
+    # 7. One request per merged group.
     segments: list[CatchupSegment] = []
     start_after = after_id
-    for (run_view, own, _), end_id in zip(plans, ends):
+    for indices, end_id in zip(groups, ends):
+        run_view, own, _ = plans[indices[-1]]
+        end = own[-1] + 1  # the group's last own row (in the last run's view)
         seg_rows = [r for r in range_rows if start_after < r[0] <= end_id]
         start_after = end_id
         seg_ids = {r[0] for r in seg_rows if r[2] != "summary"}
         window = ContextWindow(channel_id)
         window.system_prompt = inputs.system_prompt
         window.fence_key = inputs.fence_key
-        # Shallow copies: the policy's in-place stripping must not alter rows
-        # a later segment reuses as context.
-        window.messages = [dict(m) for m in run_view[:own[-1] + 1]]
+        # The group's view: the prefix up to the group's last own row (same run)
+        # or the concatenation of the constituent runs' prefixes (rare).
+        if all(plans[i][0] is run_view for i in indices):
+            window.messages = [dict(m) for m in run_view[:end]]
+        else:
+            window.messages = []
+            for i in indices:
+                rv, ow, _ = plans[i]
+                window.messages += [dict(m) for m in rv[:ow[-1] + 1]]
         dialog_ids = _dialog_ids(seg_rows)
 
         def instruction() -> str:

@@ -1164,3 +1164,117 @@ class TestRubricPriorHint:
             assert closes[0].outcome == "cancelled", closes[0].outcome
         finally:
             await db.close()
+
+
+
+
+# --- #947: catch-up consolidation with out-of-order timestamps ---
+
+
+class TestCatchupOutOfOrderTimestamps:
+    """#947: catch-up consolidation of a range whose timestamps are out of
+    id order completes. Every range row reaches some segment, and nothing
+    raises.
+
+    The bug: when no summary is in force, view_rows orders by (timestamp, id).
+    If the clock stepped back, a later segment in that order can hold the
+    range's smallest id, and bisect_left returns 0 -> ValueError.
+    """
+
+    SMALL_BUDGET_CONFIG = {
+        **EMBED_CONFIG,
+        "agent": {"max_context_tokens": 200},
+    }
+
+    def _set_small_budget(self, memory):
+        """Set a small max_tokens on the FakeForkAgent to force segmentation."""
+        agent = memory.pm.get_plugin("agent")
+        agent.max_tokens = 200
+
+    async def _seed_and_set_ts(self, db, persistence, channel, n, ts_by_index):
+        """Seed n messages, set timestamps per ts_by_index {i: ts}."""
+        ids = []
+        for i in range(n):
+            rowid = await persistence.persist_message(
+                channel=channel,
+                message={
+                    "role": "user" if i % 2 == 0 else "assistant",
+                    "content": f"msg {i} " + "x" * 100,
+                },
+                message_type=MessageType.MESSAGE,
+            )
+            ids.append(rowid)
+        for i, ts in ts_by_index.items():
+            await db.execute(
+                "UPDATE message_log SET timestamp = ? WHERE id = ?", (ts, ids[i])
+            )
+        await db.commit()
+        return ids
+
+    async def test_clock_step_back_consolidates(self):
+        """ids 1..5, clock steps back so id 5 has an earlier ts than id 4.
+        Small budget forces multiple segments; the out-of-order ts can place
+        the smallest id in a later segment."""
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            config=self.SMALL_BUDGET_CONFIG
+        )
+        self._set_small_budget(memory)
+        # ts: id0=0, id1=1, id2=2, id3=3, id4=0.5 (step back)
+        # timestamp order: id0(0), id4(0.5), id1(1), id2(2), id3(3)
+        # id4 (5th in id order) appears 2nd in timestamp order.
+        ids = await self._seed_and_set_ts(
+            db, persistence, channel, 5,
+            {0: 0.0, 1: 1.0, 2: 2.0, 3: 3.0, 4: 0.5},
+        )
+        await memory._consolidate_range(channel.id, ids[-1], "idle")
+        wm = await fetch_watermark(db, channel.id)
+        assert wm == ids[-1], f"watermark {wm} != {ids[-1]}"
+        await db.close()
+
+    async def test_reversed_timestamps_consolidate(self):
+        """All timestamps reversed: id 0 has the latest ts. In timestamp
+        order, the smallest id appears last. Small budget forces the last
+        segment to hold the smallest id -> the old ValueError."""
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            config=self.SMALL_BUDGET_CONFIG
+        )
+        self._set_small_budget(memory)
+        n = 8
+        # ts: id0=8, id1=7, ..., id7=1 (reversed)
+        ids = await self._seed_and_set_ts(
+            db, persistence, channel, n,
+            {i: float(n - i) for i in range(n)},
+        )
+        await memory._consolidate_range(channel.id, ids[-1], "idle")
+        wm = await fetch_watermark(db, channel.id)
+        assert wm == ids[-1]
+        await db.close()
+
+    async def test_out_of_order_with_summary_boundary(self):
+        """Two runs: one under a summary (id order), one without (timestamp
+        order). The no-summary run has out-of-order timestamps."""
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            config=self.SMALL_BUDGET_CONFIG
+        )
+        self._set_small_budget(memory)
+        ids1 = await seed_dialog(persistence, channel, [
+            ("user", "a"), ("assistant", "b"),
+        ])
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, message_type, timestamp) "
+            "VALUES (?, ?, 'summary', ?)",
+            (channel.id, '{"role":"assistant","content":"[Summary]"}', 10.0),
+        )
+        await db.commit()
+        ids2 = await seed_dialog(persistence, channel, [
+            ("user", "c"), ("assistant", "d"), ("user", "e"),
+        ])
+        await db.execute("UPDATE message_log SET timestamp = 20.0 WHERE id = ?", (ids2[0],))
+        await db.execute("UPDATE message_log SET timestamp = 22.0 WHERE id = ?", (ids2[1],))
+        await db.execute("UPDATE message_log SET timestamp = 21.0 WHERE id = ?", (ids2[2],))
+        await db.commit()
+        all_ids = ids1 + ids2
+        await memory._consolidate_range(channel.id, all_ids[-1], "idle")
+        wm = await fetch_watermark(db, channel.id)
+        assert wm == all_ids[-1]
+        await db.close()
