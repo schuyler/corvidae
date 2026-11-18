@@ -66,7 +66,7 @@ jobs:
       # skips itself without the extra, and running it here is what proves the
       # skip still works (#965).
       - name: Run kernel tests
-        run: uv run --no-sync pytest -q --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/rss-reader/tests --ignore=tests/test_github_webhook --ignore=tests/test_goals_notify --ignore=tests/test_core_periphery --ignore=tests/test_planning
+        run: uv run --no-sync pytest -q --ignore=tests/cognition --ignore=tests/test_cross_channel_send --ignore=tests/test_webhook_notify --ignore=tests/test_context_panel --ignore=tests/corvidae_restart --ignore=tests/test_timepiece --ignore=tests/test_inotify --ignore=tests/test_outbound_cap --ignore=packages/rss-reader/tests --ignore=tests/test_github_webhook --ignore=tests/test_goals_notify --ignore=tests/test_core_periphery --ignore=tests/test_planning --ignore=tests/test_grice
 
       # Advisory until the tree is clean (#111, #455): the output is in the
       # log, but a finding does not fail the run. Drop continue-on-error in
@@ -96,7 +96,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies (all extras)
-        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra github-webhook --extra goals-notify --extra vision --extra core-periphery --extra planning
+        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra github-webhook --extra goals-notify --extra vision --extra core-periphery --extra planning --extra grice
 
       # About 26 test sites skip when sqlite-vec can't load, and the Discord
       # tests skip without the SDK, as do the Signal tests without `emoji` and
