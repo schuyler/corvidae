@@ -1548,7 +1548,7 @@ The filter is `owns(channel)`, which by default is `channel.matches_transport(se
 A transport that holds state for the length of a turn (Discord's and Signal's typing slots, ACP's pending prompt, the CLI's input prompt) releases it in `send_message`, which runs when a final is sent. Discord and Signal release every outstanding slot there, since one final can answer a coalesced burst (PRD §3.1.19). A final the gate vetoed, or an empty one, never gets there, so the transport also implements `on_agent_response` and releases the same state when `corvidae.hooks.final_was_unsent(channel)` is true. A sent final's row is a normal message, so it releases in `send_message` only: once per final either way. Three rules:
 
 - Open with `if not self.owns(channel): return`. `on_agent_response` reaches every transport.
-- Do the ownership check, `final_was_unsent` and the release synchronously, before the first `await`. Implementations run under `asyncio.gather` and the kernel may move on when a sibling raises.
+- Do the ownership check, `final_was_unsent` and the release synchronously, before the first `await`. Implementations run concurrently, so another transport's implementation can interleave at any `await`.
 - If `final_was_unsent` raises, log a warning and release nothing. A stuck indicator is better than a double release.
 
 The `IRCPlugin` and web transports keep nothing per turn, so they don't need it.
