@@ -897,13 +897,13 @@ and lists them in every heartbeat beat (#1091), never in an ordinary turn. Three
 `HeartbeatPlugin` (#134; off unless `heartbeat.after` is set) starts a
 turn on `internal:heartbeat` after a quiet spell. The turn carries the
 agent's recent memory summaries, added by the memory plugin's
-`collect_heartbeat_prompts` contribution (#1079), and runs with the agent's normal tools.
+`on_heartbeat_collect_prompts` contribution (#1079), and runs with the agent's normal tools.
 The beat's text is `heartbeat.prompt` plus the sections any loaded plugin
-adds through `collect_heartbeat_prompts` (#1084), so a plugin that
+adds through `on_heartbeat_collect_prompts` (#1084), so a plugin that
 implements the hook can put text in front of that unwatched turn: it is
 plugin code, trusted as plugin code is, and a section built from stored
 text (memory, retired-goal conclusions) is framed as data. One that raises
-is logged and skipped.
+is logged and skipped (observe hooks fail soft).
 Memory summaries are distilled from conversation, so text an untrusted
 speaker wrote can reach a tool-using turn hours later, when no person is
 in the loop to notice. This is finding 3 and finding 7 again with the

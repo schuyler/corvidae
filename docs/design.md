@@ -100,7 +100,16 @@ class AgentSpec:
 ```
 
 `create_plugin_manager()` in `hooks.py` creates the manager and adds
-the `AgentSpec` hookspecs.
+the `AgentSpec` hookspecs. It also replaces `pm.ahook` with a `PolicyAHook`:
+for an observe hook (`on_`/`before_`/`after_`, except `on_init` and
+`on_start`, the `FAIL_HARD_HOOKS`) it dispatches through apluggy's
+`pm.ahook_isolated`, so each implementation runs to completion, a failure is
+logged at WARNING naming the hook and plugin, and the other values come back
+in hook order; every other hook keeps apluggy's own dispatch. It adds
+`pm.ahook_raise` beside it, which logs the same way and then raises the first
+failure once every implementation has finished. A call site whose `except`
+acts on the failure (an error tool result, a cursor rewind) uses
+`ahook_raise`, so its fallback never runs while a sibling is still in flight.
 
 ### Plugin-declared hookspecs
 
@@ -121,7 +130,7 @@ grammar (`HOOK_GRAMMAR` in `hooks.py`, the same table
 registered plugin name right after the prefix (`on_web_<name>`). It also
 checks the pluggy options match the prefix, installs the specs, and
 requires the owner's own `trylast` seed for each `transform_` hook and
-refuses a `wrapper=True`/`hookwrapper=True` impl on a `collect_` hook. Bare
+leaves wrappers on fail-soft hooks to the startup check below. Bare
 imperatives are kernel-only. Every failure raises `PluginValidationError`
 naming the hook, the plugin and the fix.
 
@@ -144,7 +153,7 @@ plugin.
 The `webhook` plugin owns `on_webhook_subscribe(subscriptions)`, through which
 plugins register handlers for webhook endpoints; see "Webhook ingress" under
 Transports. The `web` plugin owns `on_web_console_init(panels)`, through which
-plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path). The `heartbeat` plugin (cognition extra) owns `collect_heartbeat_prompts(channel)`, a `collect_` hook through which a plugin adds one section to the beat's text; see [cognition.md](cognition.md#heartbeatplugin). The `critique` plugin (cognition extra) owns `on_critique_init(config, add_lens)`, through which plugins add critique lenses; see "CritiquePlugin: lenses other plugins add" in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init). It also owns `transform_critique_prompt(channel, trace_id, lens_name, instruction)`, through which a plugin adds live context to a lens's fork instruction; see [cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt).
+plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path). The `heartbeat` plugin (cognition extra) owns `on_heartbeat_collect_prompts(channel)`, an observe hook whose `str | None` values the plugin combines: sections in hook order, then the heartbeat prompt; see [cognition.md](cognition.md#heartbeatplugin). The `critique` plugin (cognition extra) owns `on_critique_init(config, add_lens)`, through which plugins add critique lenses; see "CritiquePlugin: lenses other plugins add" in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init). It also owns `transform_critique_prompt(channel, trace_id, lens_name, instruction)`, through which a plugin adds live context to a lens's fork instruction; see [cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt).
 
 ### Funnel pull path
 
@@ -192,10 +201,10 @@ at most one (persistence) returns a value.
 
 Hook names follow a grammar: the prefix tells you the resolution
 (`on_`/`before_`/`after_` observe, `should_` vetoes, `resolve_` takes the
-first non-None result, `transform_` runs a wrapper chain, `collect_`
-gathers contributions for the caller to combine through
-`corvidae.hooks.collect_results`, which isolates one
-implementation's failure from the rest), and a short
+first non-None result, `transform_` runs a wrapper chain; observe hooks
+fail soft in the kernel's dispatch, so one implementation's failure is
+logged and the rest still run, and a caller may combine the returned
+values), and a short
 allowlist of bare imperatives covers the rest. The table and the rule for
 adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);
 `tests/test_hook_grammar.py` enforces the name/option half for
@@ -5133,7 +5142,10 @@ stop the daemon.
 Next, `install_plugin_hookspecs(pm)` installs the hookspecs plugins
 declare ([Plugin-declared hookspecs](#plugin-declared-hookspecs)), and
 the hook arg-binding guard checks every impl against the full set of
-specs. Then `validate_dependencies(pm)` runs
+specs. `check_fail_soft_wrappers(pm)` then refuses a
+`wrapper=True`/`hookwrapper=True` impl on any fail-soft hook, naming the
+hook, the plugin and the fix, since `ahook_isolated` can't drive wrappers
+(a wrapper on `on_init` or `on_start` is allowed). Then `validate_dependencies(pm)` runs
 to verify every plugin's `depends_on` set names a registered plugin.
 Startup aborts with `RuntimeError` if any dependency is missing.
 `report_orphan_hookimpls(pm)` then logs any hookimpl left with no spec,

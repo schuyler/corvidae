@@ -38,7 +38,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
 | `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that contains `NO_REPLY` goes unsent, and each decline is recorded in `exchange_log`. It adds the instruction to the system prompt of chat channels, and with `silence.mode: tool` or `both` an `end_turn` tool |
-| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn is `heartbeat.prompt` plus the sections plugins add through `collect_heartbeat_prompts` (memory's recent records, goals' pick rule and retired conclusions), and acts only if something warrants it. Asleep unless configured |
+| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn is `heartbeat.prompt` plus the sections plugins add ahead of it through `on_heartbeat_collect_prompts` (memory's recent records, goals' retired conclusions and pick rule), and acts only if something warrants it. Asleep unless configured |
 | `SkillsPlugin` | `skills` | Scans a skills directory for `SKILL.md` files; contributes an index (name + description) to the system prompt via `transform_system_prompt` at conversation start and compaction; provides a `use_skill` tool that loads a skill's full text on demand |
 
 Entry-point names are the same as when these plugins lived in the kernel, so
@@ -1143,7 +1143,7 @@ too. Memory's own beat section uses it (below). It raises `RuntimeError` while t
 is not open.
 
 **Heartbeat contribution (#1079).** This plugin implements
-`collect_heartbeat_prompts` (`tryfirst`, so its section precedes goals'
+`on_heartbeat_collect_prompts` (`tryfirst`, so its section precedes goals'
 `trylast` one) and returns the newest `memory.heartbeat_limit` (default 5; `0`
 adds none) memories through `recent`, framed as the agent's own summaries and
 as data, oldest first. It keeps its own only-what's-new state (#716): all of
@@ -1570,7 +1570,7 @@ while the heartbeat is the one changing it).
 
 **Goals list (#1091):** open goals reach the agent in the heartbeat's beat
 and nowhere else; no turn admits a goals entry to a window. Goals'
-`collect_heartbeat_prompts` section opens with the list, in full on every
+`on_heartbeat_collect_prompts` section opens with the list, in full on every
 beat. With open goals it reads:
 
 ```
@@ -1648,7 +1648,7 @@ and an empty `TEXT`. The daemon reads the table each beat, so the goal
 reaches the heartbeat at its next beat.
 
 **Heartbeat contribution (#1084).** This plugin implements
-`collect_heartbeat_prompts` (`trylast`, so its section ends the beat) and
+`on_heartbeat_collect_prompts` (`trylast`, so its sections end the beat, just before the prompt) and
 returns three things: the open goals list above (every beat, in full), the newest `goals.heartbeat_retired_limit`
 (default 5) retirement records (agent-wide, newest first, each with its age,
 framed as data), and `GOALS_INSTRUCTION`, the pick rule that tells the model to
@@ -2224,11 +2224,12 @@ traffic that never stops it never beats; that is accepted until #214.
 **What a beat is.** `heartbeat.prompt` (`DEFAULT_HEARTBEAT_PROMPT`; documented
 copy in `prompts/heartbeat.md`, and the key's resolution in
 [configuration.md](configuration.md#heartbeat--a-turn-on-system-idle)) is the
-whole beat unless plugins add to it. The plugin owns `collect_heartbeat_prompts(channel)`
-and gathers it with `collect_results` (PRD §3.1.10); every implementation
-returns one section or `None`, and the sections follow the prompt, separated by
-blank lines, in hook order. A raising implementation is logged and skipped, and
-the beat goes out without its section. Before notifying, the beat re-checks that
+whole beat unless plugins add to it. The plugin owns `on_heartbeat_collect_prompts(channel)`
+and calls it through `pm.ahook`, which fails soft (PRD §3.1.10); every implementation
+returns one section or `None`, and the sections come first, in hook order, then
+the prompt last, separated by blank lines. A raising implementation is logged
+at WARNING naming the hook and plugin and skipped, and the beat goes out without
+its section. Before notifying, the beat re-checks that
 the system is still quiet (a message may have landed during the gather), then
 calls `on_notify` on `internal:heartbeat` with `source="heartbeat"` and
 `annotations={"origin": "heartbeat"}`. The heartbeat adds nothing of its own; two implementations ship in other plugins. Memory's
