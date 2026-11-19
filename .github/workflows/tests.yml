@@ -96,7 +96,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies (all extras)
-        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra github-webhook --extra goals-notify --extra vision --extra core-periphery --extra planning --extra grice
+        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition --extra cross-channel-send --extra webhook-notify --extra context-panel --extra restart --extra timepiece --extra inotify --extra rss --extra signal --extra outbound-cap --extra github-webhook --extra goals-notify --extra vision --extra core-periphery --extra planning --extra alignment
 
       # About 26 test sites skip when sqlite-vec can't load, and the Discord
       # tests skip without the SDK, as do the Signal tests without `emoji` and
