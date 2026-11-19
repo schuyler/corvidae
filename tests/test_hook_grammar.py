@@ -166,3 +166,16 @@ def test_retired_name_is_not_a_hookspec(name: str) -> None:
     options, so tests 1 and 2 cannot see that the core reads its result.
     """
     assert not hasattr(AgentSpec, name), f"{name!r} is still a hookspec on AgentSpec"
+
+
+# --- Test 6: the collect class (#1083) -----------------------------------------
+
+
+def test_collect_class_is_broadcast_with_collect_prefix() -> None:
+    """collect_ hooks are broadcast: every implementation contributes.
+
+    AgentSpec has no collect_ hook yet, so tests 1-2 never reach this class;
+    the startup check on plugin-declared specs reads the same table
+    (tests/test_plugin_hookspecs.py exercises it).
+    """
+    assert GRAMMAR["collect"] == (("collect_",), {"firstresult": False})

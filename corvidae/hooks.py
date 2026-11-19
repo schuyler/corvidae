@@ -14,11 +14,14 @@ Exports:
                       and dispatch to send_* methods
     create_plugin_manager()     — create and configure the PluginManager
     resolve_reject_wins()       — resolve broadcast gate-hook result lists
+    collect_results()           — call a collect_ hook, isolating failures
     get_dependency()            — typed plugin lookup
     validate_dependencies()     — dependency graph verification at startup
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import warnings
 from typing import TYPE_CHECKING, ClassVar, TypeVar
@@ -35,6 +38,8 @@ from corvidae.outbound import (
 )
 
 if TYPE_CHECKING:
+    from pluggy import HookCaller, HookImpl
+
     from corvidae.admission import WorkRefusal
     from corvidae.channel import Channel
     from corvidae.context import ContextWindow, MessageType
@@ -59,6 +64,7 @@ HOOK_GRAMMAR: dict[str, tuple[tuple[str, ...], dict[str, bool]]] = {
     "veto": (("should_",), {"firstresult": False}),
     "resolve": (("resolve_",), {"firstresult": True}),
     "transform": (("transform_",), {"firstresult": True}),
+    "collect": (("collect_",), {"firstresult": False}),
 }
 
 # Bare imperative names: broadcast, caller-defined use of the result list.
@@ -105,7 +111,7 @@ def install_plugin_hookspecs(pm: pluggy.PluginManager) -> None:
     2. Per plugin: check the hook grammar, the owner segment
        (``<prefix><plugin>_<name>``) and the pluggy options, install the
        specs, then check each ``transform_`` hook has the owner's own
-       ``trylast`` seed.
+       ``trylast`` seed and each ``collect_`` hook has no wrapper impl.
 
     Raises:
         PluginValidationError: naming the hook, the plugin and the fix.
@@ -169,6 +175,8 @@ def install_plugin_hookspecs(pm: pluggy.PluginManager) -> None:
         for hook_name in names:
             if grammar_class(hook_name) == "transform":
                 _check_transform_seed(pm, plugin_name, plugin, hook_name)
+            elif grammar_class(hook_name) == "collect":
+                _check_collect_has_no_wrappers(pm, hook_name)
 
 
 def _check_plugin_hook_name(
@@ -225,6 +233,27 @@ def _check_transform_seed(
             f"registers no seed for it. Add an @hookimpl(trylast=True) "
             f"{hook_name} to {type(plugin).__name__} that returns its input "
             f"unchanged, as _SeedHooksPlugin does for kernel transforms.",
+        )
+
+
+def _check_collect_has_no_wrappers(pm: pluggy.PluginManager, hook_name: str) -> None:
+    """Refuse a wrapper impl on a collect_ hook (#1083).
+
+    collect_results calls each implementation for one contribution and
+    doesn't drive pluggy's wrapper protocol, so a wrapper would hand back
+    its generator object as a contribution.
+    """
+    # Every impl registered so far, including ones registered before the spec.
+    for impl in getattr(pm.hook, hook_name).get_hookimpls():
+        option = "wrapper" if impl.wrapper else "hookwrapper" if impl.hookwrapper else None
+        if option is None:
+            continue
+        raise pluggy.PluginValidationError(
+            impl.plugin,
+            f"Plugin {impl.plugin_name!r} implements collect hook {hook_name!r} "
+            f"with {option}=True, but collect_ hooks don't run wrappers: each "
+            f"implementation returns one contribution (or None). Remove "
+            f"{option}=True and return the contribution.",
         )
 
 
@@ -303,6 +332,85 @@ def resolve_single_result(results: list, hook_name: str) -> object | None:
             hook_name, len(non_none),
         )
     return non_none[0] if non_none else None
+
+
+async def collect_results(hook: HookCaller, /, **kwargs: object) -> list[object]:
+    """Call a ``collect_`` hook and return its contributions (PRD §3.1.10).
+
+    Every implementation runs concurrently. Contributions come back in hook
+    order -- ``tryfirst``, then the rest (no guaranteed order), then
+    ``trylast`` -- with ``None`` dropped. An implementation that raises an
+    ``Exception`` is logged at WARNING, naming the hook and the plugin, and
+    skipped; the others' contributions are kept. A ``BaseException`` (e.g.
+    ``CancelledError``) propagates, after every sibling has finished.
+
+    Not dispatched through ``pm.ahook``: its gather loses every sibling's
+    contribution when one implementation raises.
+
+    Args:
+        hook: The hook caller, e.g. ``pm.hook.collect_web_panels``.
+        **kwargs: The hook's arguments, by keyword only. Each implementation
+            receives the ones it declares, as pluggy passes them.
+
+    Raises:
+        TypeError: the arguments don't match the hook's spec (an unknown or
+            missing name); no implementation runs.
+    """
+
+    async def call_one(impl: HookImpl) -> object:
+        """Run one implementation; an Exception becomes a logged skip."""
+        try:
+            # Pass only the declared arguments the caller supplied, as
+            # offer_work does; a missing one fails as this impl's TypeError.
+            impl_kwargs = {k: kwargs[k] for k in impl.argnames if k in kwargs}
+            result = impl.function(**impl_kwargs)
+            # A sync implementation's return value is its contribution.
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        except Exception:
+            _resolve_logger.warning(
+                "collect hook %s: the implementation in plugin %r raised; "
+                "its contribution is skipped",
+                hook.name, impl.plugin_name,
+                exc_info=True,
+            )
+            return None
+
+    # The caller's arguments must match the spec; otherwise a caller's typo
+    # would surface as every impl's TypeError, logged against plugins that
+    # did nothing wrong. Spec parameters with defaults (kwargnames) may be
+    # passed but aren't required. A hook whose
+    # owner isn't loaded has no spec, so there is nothing to check against.
+    if hook.spec is not None:
+        expected = tuple(hook.spec.argnames)
+        accepted = expected + tuple(hook.spec.kwargnames)
+        unknown = sorted(set(kwargs) - set(accepted))
+        missing = [name for name in expected if name not in kwargs]
+        if unknown or missing:
+            problems = []
+            if unknown:
+                problems.append(f"unknown argument(s) {', '.join(map(repr, unknown))}")
+            if missing:
+                problems.append(f"missing argument(s) {', '.join(map(repr, missing))}")
+            raise TypeError(
+                f"collect_results({hook.name}): {'; '.join(problems)}. "
+                f"The hook takes: {', '.join(accepted)}; fix the call to pass those."
+            )
+
+    # pluggy calls hookimpls last-registered first (tryfirst ... trylast);
+    # gather keeps that order and, with return_exceptions, lets every
+    # sibling finish before anything is raised.
+    impls = list(reversed(hook.get_hookimpls()))
+    results = await asyncio.gather(*(call_one(i) for i in impls), return_exceptions=True)
+
+    # call_one catches every Exception, so a BaseException that is not an
+    # Exception escaped it and must propagate. A contribution that happens
+    # to be an Exception instance is an ordinary value.
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(result, Exception):
+            raise result
+    return [r for r in results if r is not None]
 
 
 def get_dependency(pm: pluggy.PluginManager, name: str, expected_type: type[T]) -> T:

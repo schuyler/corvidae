@@ -120,7 +120,8 @@ grammar (`HOOK_GRAMMAR` in `hooks.py`, the same table
 `tests/test_hook_grammar.py` uses for `AgentSpec`), with the owner's
 registered plugin name right after the prefix (`on_web_<name>`). It also
 checks the pluggy options match the prefix, installs the specs, and
-requires the owner's own `trylast` seed for each `transform_` hook. Bare
+requires the owner's own `trylast` seed for each `transform_` hook and
+refuses a `wrapper=True`/`hookwrapper=True` impl on a `collect_` hook. Bare
 imperatives are kernel-only. Every failure raises `PluginValidationError`
 naming the hook, the plugin and the fix.
 
@@ -191,7 +192,10 @@ at most one (persistence) returns a value.
 
 Hook names follow a grammar: the prefix tells you the resolution
 (`on_`/`before_`/`after_` observe, `should_` vetoes, `resolve_` takes the
-first non-None result, `transform_` runs a wrapper chain), and a short
+first non-None result, `transform_` runs a wrapper chain, `collect_`
+gathers contributions for the caller to combine through
+`corvidae.hooks.collect_results`, which isolates one
+implementation's failure from the rest), and a short
 allowlist of bare imperatives covers the rest. The table and the rule for
 adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);
 `tests/test_hook_grammar.py` enforces the name/option half for
