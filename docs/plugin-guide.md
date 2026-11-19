@@ -205,7 +205,13 @@ skipped; the others' contributions are kept. A `BaseException` such as
 Implementations may be `async` or plain functions. A `wrapper=True` or
 `hookwrapper=True` implementation on a `collect_` hook fails startup,
 since the helper doesn't drive wrappers. No kernel hook is a `collect_` hook
-yet; plugins declare their own (below).
+yet; plugins declare their own (below). The first is the heartbeat's
+`collect_heartbeat_prompts(channel) -> str | None`: return one section of the
+beat's text, or `None` for none. `GoalsPlugin` implements it with
+`@hookimpl(trylast=True)`, so its call to action ends the beat; use
+`tryfirst` or `trylast` the same way to place yours. The section lands in a
+tool-using turn nobody is watching, so write it as data, not as an
+instruction a stranger's text could reach (`docs/threat-model.md`, finding 11).
 
 ### Adding a hook
 

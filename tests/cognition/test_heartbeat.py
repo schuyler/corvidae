@@ -25,10 +25,8 @@ from corvidae.persistence import PersistencePlugin, init_db
 from corvidae_cognition.heartbeat import (
     DEFAULT_HEARTBEAT_PROMPT,
     DEFAULT_MEMORY_LIMIT,
-    DEFAULT_RETIRED_GOAL_LIMIT,
-    GOALS_INSTRUCTION,
     MEMORY_HEADER,
-    frame_beat,
+    memory_section,
     HEARTBEAT_CHANNEL,
     HeartbeatPlugin,
 )
@@ -227,9 +225,10 @@ async def test_repeats_once_per_period_while_quiet(make_env):
     assert len(env.beats) == 5
 
 
-async def test_memory_read_failure_retries_next_period(make_env, caplog):
-    """H1: a failed memory read skips that beat with a warning and the next
-    one comes `after` seconds later; beats don't stop."""
+async def test_memory_read_failure_skips_the_section_not_the_beat(make_env, caplog):
+    """H1, #1084: a failed memory read is logged at WARNING, naming the hook
+    and the plugin with the traceback, and the beat still goes out as the
+    prompt alone; the next beat reads memory again."""
     env = await make_env(AWAKE)
     real_recent = env.memory.recent
     failures = [RuntimeError("database is locked")]
@@ -240,25 +239,17 @@ async def test_memory_read_failure_retries_next_period(make_env, caplog):
         return await real_recent(limit)
 
     env.memory.recent = flaky_recent
-    with caplog.at_level(logging.WARNING, logger="corvidae.heartbeat"):
+    with caplog.at_level(logging.WARNING):
         await env.clock.advance(AFTER)
-    assert env.beats == []
-    records = [
-        r for r in caplog.records
-        if r.name == "corvidae.heartbeat" and r.levelno == logging.WARNING
-    ]
+    assert [b["text"] for b in env.beats] == [DEFAULT_HEARTBEAT_PROMPT]
+    records = [r for r in caplog.records if "collect_heartbeat_prompts" in r.getMessage()]
     assert len(records) == 1
-    message = records[0].getMessage()
-    assert HEARTBEAT_CHANNEL in message
-    assert "RuntimeError" in message
-    assert f"retrying in {AFTER}" in message
+    assert "heartbeat" in records[0].getMessage()
     # The log line carries the traceback.
     assert records[0].exc_info is not None
-    # The retry waits a full period, not less.
-    await env.clock.advance(AFTER - 1)
-    assert env.beats == []
-    await env.clock.advance(1)
-    assert len(env.beats) == 1
+    # The next beat reads memory again, so its section is the full first one.
+    await env.clock.advance(AFTER)
+    assert MEMORY_HEADER in env.beats[1]["text"]
 
 
 @pytest.mark.parametrize("bad", [0, float("nan")])
@@ -346,36 +337,14 @@ async def test_rejects_a_bad_memory_limit(make_env, bad):
     assert "agent.yaml" in message
 
 
-@pytest.mark.parametrize("bad", [-1, 2.5, True, "20"])
-async def test_rejects_a_bad_retired_goal_limit(make_env, bad):
-    """A negative, fractional, boolean or string retired_goal_limit fails
-    startup, naming the key, the rejected value, what is accepted and where
-    to fix it."""
-    with pytest.raises(ValueError) as exc:
-        await make_env({"heartbeat": {"retired_goal_limit": bad}}, with_memory=False)
-    message = str(exc.value)
-    assert "heartbeat.retired_goal_limit" in message
-    assert f"got {bad!r}" in message
-    assert "whole number" in message
-    assert "0 or more" in message
-    assert "agent.yaml" in message
-
-
-def test_review_limits_default_to_five_and_accept_zero():
-    """Absent or null limits are 5; 0 is a valid count (reviews none)."""
-    from corvidae_cognition.heartbeat import (
-        parse_memory_limit,
-        parse_retired_goal_limit,
-    )
+def test_memory_limit_defaults_to_five_and_accepts_zero():
+    """An absent or null limit is 5; 0 is a valid count (reviews none)."""
+    from corvidae_cognition.heartbeat import parse_memory_limit
 
     assert parse_memory_limit({}) == 5
     assert parse_memory_limit({"heartbeat": {"memory_limit": None}}) == 5
     assert parse_memory_limit({"heartbeat": {"memory_limit": 0}}) == 0
     assert parse_memory_limit({"heartbeat": {"memory_limit": 5}}) == 5
-    assert parse_retired_goal_limit({}) == 5
-    assert parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": None}}) == 5
-    assert parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": 0}}) == 0
-    assert parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": 7}}) == 7
 
 
 async def test_beat_obeys_memory_limit(make_env):
@@ -396,151 +365,33 @@ async def test_beat_obeys_memory_limit(make_env):
     assert "oldest: the first plan." not in text
 
 
-# --- Diff-mode tests (#716) -------------------------------------------------
-
-class TestHeartbeatDiffMode:
-    """Diff-based heartbeat prompt: only new items, instruction at tail."""
-
-    def test_first_beat_is_full_mode(self):
-        """First beat (no prior state) sends all memories and goals."""
-        memories = [
-            {"id": 1, "age_seconds": 60, "channel_id": "c1", "summary": "mem1"},
-            {"id": 2, "age_seconds": 120, "channel_id": "c2", "summary": "mem2"},
-        ]
-        retired = [
-            {"id": 10, "age_seconds": 300, "summary": "goal1"},
-        ]
-        text = frame_beat(memories, retired, diff=False)
-        # Full mode: all items present
-        assert "mem1" in text
-        assert "mem2" in text
-        assert "goal1" in text
-        # Goals instruction at the tail (last line)
-        assert text.strip().endswith(GOALS_INSTRUCTION.strip())
-
-    def test_diff_mode_no_new_items_minimal(self):
-        """Diff mode with no new items sends a minimal one-liner."""
-        text = frame_beat([], [], diff=True)
-        assert "no new memories or goals" in text
-        assert "dream up new ones" in text
-        assert "You don't rest" in text
-        # Should be short (not the full prompt)
-        assert len(text) < 200
-
-    def test_diff_mode_only_new_items(self):
-        """Diff mode sends only new memories and goals."""
-        memories = [
-            {"id": 3, "age_seconds": 30, "channel_id": "c3", "summary": "new_mem"},
-        ]
-        retired = [
-            {"id": 11, "age_seconds": 60, "summary": "new_goal"},
-        ]
-        text = frame_beat(memories, retired, diff=True)
-        # New items present
-        assert "new_mem" in text
-        assert "new_goal" in text
-        # Goals instruction at the tail
-        assert text.strip().endswith(GOALS_INSTRUCTION.strip())
-
-    def test_diff_mode_no_goals_plugin(self):
-        """Diff mode with no goals plugin (retired=None)."""
-        memories = [
-            {"id": 3, "age_seconds": 30, "channel_id": "c3", "summary": "new_mem"},
-        ]
-        text = frame_beat(memories, None, diff=True)
-        assert "new_mem" in text
-        # No goals instruction (no goals plugin)
-        assert GOALS_INSTRUCTION not in text
-
-    def test_full_mode_goals_instruction_at_tail(self):
-        """Full mode also has goals instruction at the tail."""
-        memories = [
-            {"id": 1, "age_seconds": 60, "channel_id": "c1", "summary": "mem1"},
-        ]
-        retired = [
-            {"id": 10, "age_seconds": 300, "summary": "goal1"},
-        ]
-        text = frame_beat(memories, retired, diff=False)
-        # Goals instruction is the last thing
-        assert text.strip().endswith(GOALS_INSTRUCTION.strip())
-        # Memories and goals data come before the instruction
-        mem_pos = text.index("mem1")
-        goal_pos = text.index("goal1")
-        instr_pos = text.index(GOALS_INSTRUCTION)
-        assert mem_pos < instr_pos
-        assert goal_pos < instr_pos
-
-    def test_post_compaction_goals_full_memories_diff(self):
-        """After compaction: goals are full (reset), memories are diff (kept)."""
-        # Simulate: last beat sent memories 1,2 and goals 10,11
-        plugin = HeartbeatPlugin()
-        plugin._last_memory_ids = {1, 2}
-        plugin._last_goal_ids = {10, 11}
-
-        # Compaction resets only goal IDs
-        plugin._last_goal_ids = set()
-
-        # Next beat: memories 1,2,3 (3 is new), goals 10,11,12 (all "new" because reset)
-        memories = [
-            {"id": 1, "age_seconds": 300, "channel_id": "c1", "summary": "old_mem1"},
-            {"id": 2, "age_seconds": 200, "channel_id": "c2", "summary": "old_mem2"},
-            {"id": 3, "age_seconds": 100, "channel_id": "c3", "summary": "new_mem3"},
-        ]
-        retired = [
-            {"id": 10, "age_seconds": 500, "summary": "old_goal10"},
-            {"id": 11, "age_seconds": 400, "summary": "old_goal11"},
-            {"id": 12, "age_seconds": 300, "summary": "new_goal12"},
-        ]
-
-        # Diff for memories: only 3 is new
-        new_memories = [m for m in memories if m["id"] not in plugin._last_memory_ids]
-        assert [m["id"] for m in new_memories] == [3]
-
-        # Goals are full (reset): all 10, 11, 12
-        goals_full = retired is not None and not plugin._last_goal_ids
-        assert goals_full is True
-
-        # frame_beat gets: new memories only, all goals
-        text = frame_beat(
-            new_memories,
-            retired,  # full goals
-            diff=True,
-        )
-        # New memory present
-        assert "new_mem3" in text
-        # Old memories NOT present (diff)
-        assert "old_mem1" not in text
-        assert "old_mem2" not in text
-        # All goals present (full after compaction)
-        assert "old_goal10" in text
-        assert "old_goal11" in text
-        assert "new_goal12" in text
-        # Call-to-action at tail
-        assert text.strip().endswith(GOALS_INSTRUCTION.strip())
+# --- The memory section and its diff (#716, #1084) ---------------------------
 
 
-def test_prompt_after_data_blocks():
-    """The imperative prompt text comes after all data blocks."""
-    memories = [
-        {"id": 1, "age_seconds": 60, "channel_id": "c1", "summary": "mem1"},
-    ]
-    retired = [
-        {"id": 10, "age_seconds": 300, "summary": "goal1"},
-    ]
-    prompt = "DO THE THING."
-    text = frame_beat(memories, retired, prompt=prompt, diff=False)
-    # Data blocks come before the prompt
-    mem_pos = text.index("mem1")
-    goal_pos = text.index("goal1")
-    prompt_pos = text.index("DO THE THING.")
-    assert mem_pos < prompt_pos
-    assert goal_pos < prompt_pos
+def _mem(id_: int, summary: str, age: float = 60) -> dict:
+    return {"id": id_, "age_seconds": age, "channel_id": "c1", "summary": summary}
 
 
-def test_default_limits_are_five():
-    """Default memory and retired-goal limits are 5, not 20."""
+def test_full_memory_section_lists_oldest_first():
+    """The first beat lists every memory, the newest nearest the prompt."""
+    text = memory_section([_mem(2, "newer", 30), _mem(1, "older", 90)], full=True)
+    assert text.startswith(MEMORY_HEADER)
+    assert text.index("older") < text.index("newer")
+
+
+def test_full_memory_section_with_no_memories_says_none():
+    """The prompt tells the model to read memories, so an empty first beat says so."""
+    assert memory_section([], full=True).endswith("(none)")
+
+
+def test_diff_memory_section_with_nothing_new_is_no_section():
+    """Nothing new, so nothing to add (and no 'nothing new' text either)."""
+    assert memory_section([], full=False) is None
+
+
+def test_default_memory_limit_is_five():
+    """The default memory limit is 5, not 20."""
     assert DEFAULT_MEMORY_LIMIT == 5
-    assert DEFAULT_RETIRED_GOAL_LIMIT == 5
 
 
 def test_memory_header_says_oldest_first():

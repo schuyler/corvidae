@@ -156,28 +156,35 @@ def test_heartbeat_goals_copy_is_the_goals_instruction():
     """#860: prompts/heartbeat-goals.md is the documented copy of
     GOALS_INSTRUCTION, verbatim and bare, so it can also serve as the
     heartbeat.goals_instruction file without sending a doc header."""
-    from corvidae_cognition.heartbeat import GOALS_INSTRUCTION
+    from corvidae_cognition.goals import GOALS_INSTRUCTION
 
     copy = (REPO / "prompts" / "heartbeat-goals.md").read_text()
     assert _flat(copy) == _flat(GOALS_INSTRUCTION)
 
 
 def test_heartbeat_doc_example_is_what_a_beat_sends():
-    """#860: the framing example in prompts/heartbeat.md is frame_beat's own
-    output for the sample it shows, open goals and status markers included."""
-    from corvidae_cognition.heartbeat import frame_beat
+    """#860, #1084: the framing example in prompts/heartbeat.md is the beat's
+    own text for the sample it shows: the prompt, then the memory section,
+    then goals' retired block and instruction, joined by blank lines."""
+    import asyncio
 
-    beat = frame_beat(
-        memories=[{"age_seconds": 3 * 3600, "channel_id": "irc:#lex",
-                   "summary": "<summary>"}],
-        retired=[{"age_seconds": 2 * 86400,
-                  "summary": 'I retired my goal "<text>" (set <date>). <conclusion>'}],
-        open_goals=[
-            {"age_seconds": 18 * 60, "id": 6, "summary": "<goal text>",
-             "status": "in-progress"},
-            {"age_seconds": 3600, "id": 4, "summary": "<goal text>", "status": "open"},
-            {"age_seconds": 7200, "id": 3, "summary": "<goal text>", "status": "waiting"},
-        ],
+    from corvidae_cognition.goals import GoalsPlugin
+    from corvidae_cognition.heartbeat import DEFAULT_HEARTBEAT_PROMPT, memory_section
+
+    goals = GoalsPlugin()
+
+    async def retired_goals(limit):
+        return [{"id": 10, "age_seconds": 2 * 86400,
+                 "summary": 'I retired my goal "<text>" (set <date>). <conclusion>'}]
+
+    goals.retired_goals = retired_goals
+    memories = memory_section(
+        [{"age_seconds": 3 * 3600, "channel_id": "irc:#lex", "summary": "<summary>"}],
+        full=True,
+    )
+    beat = "\n\n".join(
+        [DEFAULT_HEARTBEAT_PROMPT, memories,
+         asyncio.run(goals.collect_heartbeat_prompts(channel=None))]
     )
     doc = (REPO / "prompts" / "heartbeat.md").read_text()
     assert _flat(beat) in _flat(doc)

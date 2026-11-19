@@ -5,7 +5,7 @@ wiring config -> resolve_prompt -> the prompt that goes out for:
 
 - memory.rubric_prompt               -> RubricPrior.score() system message
 - heartbeat.prompt                   -> HeartbeatPlugin._prompt
-- heartbeat.goals_instruction        -> HeartbeatPlugin._goals_instruction
+- heartbeat.goals_instruction        -> GoalsPlugin._instruction
 - memory.consolidation_fork_prompt   -> resolve_consolidation_fork_prompt()
 - appraisal.stage2_fork_prompt       -> AppraisalPlugin._fork_prompt
 - critique.fork_prompt.<lens>        -> CritiquePlugin._fork_prompts
@@ -21,9 +21,9 @@ from corvidae_cognition.appraisal import AppraisalPlugin
 from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, CritiquePlugin
 from corvidae_cognition.heartbeat import (
     DEFAULT_HEARTBEAT_PROMPT,
-    GOALS_INSTRUCTION,
     HeartbeatPlugin,
 )
+from corvidae_cognition.goals import GOALS_INSTRUCTION, GoalsPlugin
 from corvidae_cognition.memory import (
     DEFAULT_CONSOLIDATION_FORK_PROMPT,
     RUBRIC_PROMPT,
@@ -93,12 +93,15 @@ class TestHeartbeatPromptRouting:
             "heartbeat": {
                 "after": 60,
                 "prompt": "HB INLINE",
-                "goals_instruction": "GOALS INLINE",
             }
         }
         await plugin.on_init(_FakePM({"memory": object()}), cfg)
         assert plugin._prompt == "HB INLINE"
-        assert plugin._goals_instruction == "GOALS INLINE"
+        goals = GoalsPlugin()
+        await goals.on_init(
+            _FakePM(), {"heartbeat": {"after": 60, "goals_instruction": "GOALS INLINE"}}
+        )
+        assert goals._instruction == "GOALS INLINE"
 
     async def test_file_prompt_resolved_at_init(self, tmp_path: Path):
         (tmp_path / "hb.md").write_text("From the heartbeat file.\n")
@@ -115,7 +118,9 @@ class TestHeartbeatPromptRouting:
         cfg = {"heartbeat": {"after": 60}}
         await plugin.on_init(_FakePM({"memory": object()}), cfg)
         assert plugin._prompt == DEFAULT_HEARTBEAT_PROMPT
-        assert plugin._goals_instruction == GOALS_INSTRUCTION
+        goals = GoalsPlugin()
+        await goals.on_init(_FakePM(), cfg)
+        assert goals._instruction == GOALS_INSTRUCTION
 
 
 class TestConsolidationPromptRouting:

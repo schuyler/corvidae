@@ -377,12 +377,12 @@ agent:
 # heartbeat:
 #   after: 3600                        # seconds of quiet before a beat; also the gap between beats
 #   prompt: {file: my-heartbeat.md}                         # or an inline string / list of paths; absent = built-in
-#   goals_instruction: {file: prompts/heartbeat-goals.md}   # goals paragraph; absent = built-in
+#   goals_instruction: {file: prompts/heartbeat-goals.md}   # goals paragraph (read by goals until #1079); absent = built-in
 #   # Point `prompt` at your own file, not prompts/heartbeat.md: the shipped
 #   # copy is documentation and opens with a header, which `resolve_prompt`
 #   # would send to the model along with the instruction.
 #   memory_limit: 5                    # newest in-scope memories a beat reviews; 0 = none
-#   retired_goal_limit: 5              # newest retired goals a beat reviews; 0 = none
+#   retired_goal_limit: 5              # newest retired goals a beat reviews (read by goals until #1079); 0 = none
 
 # Skills directory (cognition). The index appears in the system prompt at
 # conversation start and compaction; use_skill loads full text on demand.

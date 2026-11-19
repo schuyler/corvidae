@@ -11,11 +11,17 @@ import pytest
 
 from corvidae.channel import ChannelRegistry
 from corvidae.context import ContextWindow
-from corvidae.hooks import create_plugin_manager, hookimpl, validate_dependencies
+from corvidae.hooks import (
+    create_plugin_manager,
+    hookimpl,
+    install_plugin_hookspecs,
+    validate_dependencies,
+)
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.persistence import PersistencePlugin
 from corvidae_cognition import heartbeat
 from corvidae_cognition.funnel import FunnelPlugin
+from corvidae_cognition import goals as goals_mod
 from corvidae_cognition.goals import GoalsPlugin
 from corvidae_cognition.heartbeat import HEARTBEAT_CHANNEL, HeartbeatPlugin
 from corvidae_cognition.memory import MemoryPlugin
@@ -125,6 +131,8 @@ async def make_env(tmp_path, monkeypatch):
 
         hb = HeartbeatPlugin()
         pm.register(hb, name="heartbeat")
+        # Plugin-owned hookspecs (collect_heartbeat_prompts) are installed at startup.
+        install_plugin_hookspecs(pm)
         validate_dependencies(pm)
         await hb.on_init(pm=pm, config=config)
 
@@ -176,8 +184,8 @@ async def test_beat_with_a_retired_goal_carries_instruction_header_and_record(ma
     await env.clock.advance(AFTER)
     assert len(env.agent.calls) == 1
     text = env.agent.calls[0]["text"]
-    assert heartbeat.GOALS_INSTRUCTION in text
-    assert heartbeat.RETIRED_GOALS_HEADER in text
+    assert goals_mod.GOALS_INSTRUCTION in text
+    assert goals_mod.RETIRED_GOALS_HEADER in text
     assert "I concluded it is done, because cron runs." in text
 
 
@@ -210,8 +218,8 @@ async def test_beat_without_goals_plugin_carries_no_goals_text(make_env):
     assert len(env.agent.calls) == 1
     text = env.agent.calls[0]["text"]
     assert heartbeat.DEFAULT_HEARTBEAT_PROMPT in text
-    assert heartbeat.GOALS_INSTRUCTION not in text
-    assert heartbeat.RETIRED_GOALS_HEADER not in text
+    assert goals_mod.GOALS_INSTRUCTION not in text
+    assert goals_mod.RETIRED_GOALS_HEADER not in text
 
 
 async def test_beat_obeys_retired_goal_limit(make_env, monkeypatch):
@@ -233,56 +241,202 @@ async def test_beat_obeys_retired_goal_limit(make_env, monkeypatch):
     text = env.agent.calls[0]["text"]
     # The conclusion can also surface in the memory section (a beat reviews
     # the whole memory, #168); the limit governs the retired-goals list, so
-    # assert on that section only. With the new order (retired goals first),
-    # the memory section follows the retired-goals section, so extract only
-    # up to the next section marker.
-    retired_start = text.index(heartbeat.RETIRED_GOALS_HEADER)
-    retired_end = len(text)
-    for marker in ("Open goals", heartbeat.MEMORY_HEADER):
-        idx = text.find(marker, retired_start)
-        if idx != -1:
-            retired_end = min(retired_end, idx)
-    retired_section = text[retired_start:retired_end]
+    # assert on that block only: from its header to the end of the text (goals'
+    # section is last).
+    retired_section = text[text.index(goals_mod.RETIRED_GOALS_HEADER):]
     assert "New conclusion: the schedule holds." in retired_section
     assert "Old conclusion: it ran every night." not in retired_section
 
 
-# --- #808: the open-goals list is the queue the pick rule works from ---------
-
-
-def _queue() -> list[dict]:
-    """Three open goals in queue order, one per status the pick rule cares about."""
-    return [
-        {"id": 7, "age_seconds": 60.0, "summary": "front goal", "status": "open"},
-        {"id": 3, "age_seconds": 120.0, "summary": "wip goal", "status": "in-progress"},
-        {"id": 9, "age_seconds": 180.0, "summary": "stuck goal", "status": "blocked"},
-    ]
-
-
-def test_open_goals_header_says_front_of_queue_first():
-    """The list is rendered in queue order, so its header must say so; a
-    model told 'newest first' would read the front goal as the newest."""
-    text = heartbeat.frame_beat([], [], open_goals=_queue())
-    assert "Open goals, front of the queue first:" in text
-    assert "newest first" not in text.split("Goals you retired")[0]
-
-
-def test_open_goals_list_shows_status_for_non_open_goals():
-    """in-progress and blocked are states the model can set; the list it
-    reads must show them or the pick rule has nothing to act on."""
-    text = heartbeat.frame_beat([], [], open_goals=_queue())
-    lines = {int(m.group(1)): m.group(0) for m in re.finditer(r"#(\d+)\).*", text)}
-    assert "in-progress" in lines[3]
-    assert "blocked" in lines[9]
-    # An open goal needs no label: open is the default.
-    assert "open" not in lines[7].split("front goal")[0]
+# --- #808: the pick rule ------------------------------------------------------
 
 
 def test_goals_instruction_states_the_pick_rule():
     """#808: resume an in-progress goal, else take the first goal that is
     neither blocked nor waiting; and the sentence must read as a sentence."""
-    text = heartbeat.GOALS_INSTRUCTION
+    text = goals_mod.GOALS_INSTRUCTION
     assert "in-progress" in text
     assert "blocked" in text and "waiting" in text
     # A leftover fragment from an earlier wording ("... next. do it.").
     assert ". do it" not in text
+
+
+# --- #1084: the beat is a bare prompt that plugins fill ------------------------
+
+
+class RaisingContributor:
+    """A plugin whose beat contribution fails; the beat must survive it."""
+
+    @hookimpl
+    async def collect_heartbeat_prompts(self, channel):
+        raise RuntimeError("contributor blew up")
+
+
+async def test_beat_is_prompt_then_memory_then_goals_section(make_env):
+    """R7: through a real plugin manager, the delivered text is the prompt,
+    the heartbeat's memory section, then goals' retired block and instruction
+    at the tail (the call to action is the last thing in the window)."""
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    await add_message(env, "irc:#test", "talking about the wiki backup")
+    await env.tools["add_goal"]("Get the wiki backup job running", _ctx=ctx)
+    await env.tools["retire_goal"](1, "I concluded it is done, because cron runs.", _ctx=ctx)
+
+    await env.clock.advance(AFTER)
+    text = env.agent.calls[0]["text"]
+    assert text.startswith(heartbeat.DEFAULT_HEARTBEAT_PROMPT)
+    positions = [
+        text.index(heartbeat.MEMORY_HEADER),
+        text.index(goals_mod.RETIRED_GOALS_HEADER),
+        text.index(goals_mod.GOALS_INSTRUCTION),
+    ]
+    assert positions == sorted(positions)
+    assert text.rstrip().endswith(goals_mod.GOALS_INSTRUCTION)
+
+
+async def test_beat_does_not_render_the_open_goals_list(make_env):
+    """R3: open goals reach the beat through the window's goals entry only;
+    the beat's own text no longer lists them."""
+    env = await make_env(with_goals=True)
+    await env.tools["add_goal"]("Watch the kestrel nest", _ctx=ctx_for("irc:#test"))
+
+    await env.clock.advance(AFTER)
+    text = env.agent.calls[0]["text"]
+    assert "Watch the kestrel nest" not in text
+    assert "Open goals" not in text
+
+
+async def test_a_raising_contributor_is_skipped_and_the_others_kept(make_env, caplog):
+    """R7: one plugin's failing collect_heartbeat_prompts is logged, naming
+    the hook and the plugin, and the beat still carries the other sections."""
+    env = await make_env(with_goals=True)
+    env.pm.register(RaisingContributor(), name="flaky")
+
+    with caplog.at_level("WARNING"):
+        await env.clock.advance(AFTER)
+    text = env.agent.calls[0]["text"]
+    assert heartbeat.MEMORY_HEADER in text
+    assert goals_mod.GOALS_INSTRUCTION in text
+    assert any(
+        "collect_heartbeat_prompts" in r.getMessage() and "flaky" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+async def test_second_beat_with_nothing_new_omits_the_retired_block(make_env):
+    """R7/R4: goals keeps its own only-what's-new state. Beat two repeats the
+    instruction but not the conclusions already in the window."""
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    await add_message(env, "irc:#test", "talking about the wiki backup")
+    await env.tools["add_goal"]("Get the wiki backup job running", _ctx=ctx)
+    await env.tools["retire_goal"](1, "I concluded it is done, because cron runs.", _ctx=ctx)
+
+    await env.clock.advance(AFTER)
+    await env.clock.advance(AFTER)
+    first, second = (c["text"] for c in env.agent.calls)
+    assert goals_mod.RETIRED_GOALS_HEADER in first
+    assert goals_mod.RETIRED_GOALS_HEADER not in second
+    assert "I concluded it is done" not in second
+    assert heartbeat.MEMORY_HEADER not in second
+    assert goals_mod.GOALS_INSTRUCTION in second
+
+
+async def test_compaction_of_the_beat_channel_resets_goals_diff_state(make_env):
+    """R4: after the beat channel compacts, goals sends its retired block
+    in full again, because the summary may not have kept structured data."""
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    await add_message(env, "irc:#test", "talking about the wiki backup")
+    await env.tools["add_goal"]("Get the wiki backup job running", _ctx=ctx)
+    await env.tools["retire_goal"](1, "I concluded it is done, because cron runs.", _ctx=ctx)
+
+    await env.clock.advance(AFTER)
+    channel = env.agent.calls[0]["channel"]
+    await env.pm.ahook.on_compaction(
+        channel=channel, summary_msg={}, retain_count=0, compacted_ids=[]
+    )
+    await env.clock.advance(AFTER)
+    assert goals_mod.RETIRED_GOALS_HEADER in env.agent.calls[1]["text"]
+    # Another channel's compaction doesn't reset it: a third beat is diffed.
+    await env.pm.ahook.on_compaction(
+        channel=SimpleNamespace(id="irc:#test"), summary_msg={}, retain_count=0, compacted_ids=[]
+    )
+    await env.clock.advance(AFTER)
+    assert goals_mod.RETIRED_GOALS_HEADER not in env.agent.calls[2]["text"]
+
+
+async def test_beat_with_no_sections_is_the_bare_prompt(make_env):
+    """R2: no goals, and nothing new in memory on beat two: no sections come
+    back, so the beat is exactly heartbeat.prompt (no 'nothing new' text)."""
+    env = await make_env(with_goals=False)
+
+    await env.clock.advance(AFTER)
+    await env.clock.advance(AFTER)
+    assert env.agent.calls[1]["text"] == heartbeat.DEFAULT_HEARTBEAT_PROMPT
+
+
+@pytest.mark.parametrize("bad", [-1, 2.5, True, "20"])
+async def test_goals_rejects_a_bad_retired_goal_limit(bad):
+    """A negative, fractional, boolean or string heartbeat.retired_goal_limit
+    fails goals' startup, naming the key, the value, what is accepted and
+    where to fix it (the key stays under heartbeat.* until #1079)."""
+    with pytest.raises(ValueError) as exc:
+        await GoalsPlugin().on_init(
+            MagicMock(), {"heartbeat": {"retired_goal_limit": bad}}
+        )
+    message = str(exc.value)
+    assert "heartbeat.retired_goal_limit" in message
+    assert f"got {bad!r}" in message
+    assert "0 or more" in message
+    assert "agent.yaml" in message
+
+
+def test_retired_goal_limit_defaults_to_five_and_accepts_zero():
+    """Absent or null is 5; 0 is a valid count (reviews none)."""
+    assert goals_mod.parse_retired_goal_limit({}) == 5
+    assert goals_mod.parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": None}}) == 5
+    assert goals_mod.parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": 0}}) == 0
+    assert goals_mod.parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": 7}}) == 7
+
+
+async def test_goals_instruction_override_is_what_the_hook_returns():
+    """heartbeat.goals_instruction sets the instruction goals contributes."""
+    plugin = GoalsPlugin()
+    await plugin.on_init(MagicMock(), {"heartbeat": {"goals_instruction": "PICK ONE."}})
+
+    async def none_retired(limit):
+        return []
+
+    plugin.retired_goals = none_retired
+    section = await plugin.collect_heartbeat_prompts(channel=None)
+    assert section.endswith("PICK ONE.")
+    assert goals_mod.GOALS_INSTRUCTION not in section
+
+
+async def test_later_beat_sends_only_the_new_memory_and_retired_goal(make_env):
+    """R4/R5: between beats one memory arrives and one goal is retired; beat
+    two carries those and leaves out what beat one already sent."""
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    await add_message(env, "irc:#test", "talking about the wiki backup")
+    await env.tools["add_goal"]("Old job", _ctx=ctx)
+    await env.tools["retire_goal"](1, "OLDCONCLUSION it ran nightly.", _ctx=ctx)
+    await env.clock.advance(AFTER)
+    await env.tools["add_goal"]("New job", _ctx=ctx)
+    await env.tools["retire_goal"](2, "NEWCONCLUSION the schedule holds.", _ctx=ctx)
+
+    await env.clock.advance(AFTER)
+    first, second = (c["text"] for c in env.agent.calls)
+    assert "OLDCONCLUSION" in first
+    # Beat two: the new conclusion (retired block and its memory record) is
+    # present once each; the old one is not repeated anywhere.
+    # The new memory record reaches beat two through the heartbeat's own
+    # memory section (before goals' block), not only through goals' retired
+    # block: a memory section dropped after beat one would fail here.
+    assert "NEWCONCLUSION" in second[
+        second.index(heartbeat.MEMORY_HEADER) : second.index(goals_mod.RETIRED_GOALS_HEADER)
+    ]
+    assert "OLDCONCLUSION" not in second
+    # Joined by blank lines: pins the separator on the real path.
+    assert f"\n\n{goals_mod.RETIRED_GOALS_HEADER}" in second
