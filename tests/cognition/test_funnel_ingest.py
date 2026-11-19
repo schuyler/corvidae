@@ -112,7 +112,7 @@ async def make(config: dict | None = None, clock: Clock | None = None) -> Simple
     pm.register(provider, name="provider")
     install_plugin_hookspecs(pm)
     await funnel.on_init(pm=pm, config=config or {})
-    pm.ahook.on_notify = AsyncMock()
+    pm.ahook_raise.on_notify = AsyncMock()
     channel = Channel(transport="test", scope="funnel-ingest")
     channel.conversation = ContextWindow(channel.id)
     return SimpleNamespace(

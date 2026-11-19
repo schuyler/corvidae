@@ -250,7 +250,7 @@ async def test_memory_read_failure_skips_the_section_not_the_beat(make_env, capl
     with caplog.at_level(logging.WARNING):
         await env.clock.advance(AFTER)
     assert [b["text"] for b in env.beats] == [DEFAULT_HEARTBEAT_PROMPT]
-    records = [r for r in caplog.records if "collect_heartbeat_prompts" in r.getMessage()]
+    records = [r for r in caplog.records if "on_heartbeat_collect_prompts" in r.getMessage()]
     assert len(records) == 1
     assert "memory" in records[0].getMessage()
     # The log line carries the traceback.
@@ -294,7 +294,8 @@ async def test_beat_carries_prompt_and_recent_memory(make_env):
     await env.clock.advance(AFTER)
     assert len(env.beats) == 1
     text = env.beats[0]["text"]
-    assert DEFAULT_HEARTBEAT_PROMPT in text
+    # #1094: the sections come first and the prompt is the last thing.
+    assert text.endswith(DEFAULT_HEARTBEAT_PROMPT)
     # Chronological order (oldest first): the most recent memories are
     # at the tail, next to the call-to-action.
     chronological = [
@@ -436,22 +437,22 @@ async def test_memory_section_is_none_when_nothing_new_and_survives_compaction(m
     await env.seed_memory("irc:#lex", "ALPHA the first plan.", now - 60)
     beat_channel = SimpleNamespace(id=HEARTBEAT_CHANNEL)
 
-    first = await env.memory.collect_heartbeat_prompts(channel=beat_channel)
+    first = await env.memory.on_heartbeat_collect_prompts(channel=beat_channel)
     assert memory_mod.MEMORY_HEADER in first and "ALPHA" in first
-    assert await env.memory.collect_heartbeat_prompts(channel=beat_channel) is None
+    assert await env.memory.on_heartbeat_collect_prompts(channel=beat_channel) is None
     # The beat channel compacts, through the real broadcast.
     await env.pm.ahook.on_compaction(
         channel=beat_channel, summary_msg={}, retain_count=0, compacted_ids=[]
     )
     await env.seed_memory("irc:#lex", "BETA the second plan.", now - 30)
-    third = await env.memory.collect_heartbeat_prompts(channel=beat_channel)
+    third = await env.memory.on_heartbeat_collect_prompts(channel=beat_channel)
     assert "BETA" in third and "ALPHA" not in third
 
 
 @pytest.mark.parametrize("owner", ["memory", "goals"])
 def test_heartbeat_disabled_logs_no_orphan_warning(owner, caplog):
     """#1079: a config without the heartbeat plugin but with memory or goals
-    loaded does not WARN that their collect_heartbeat_prompts hookimpl has no
+    loaded does not WARN that their on_heartbeat_collect_prompts hookimpl has no
     spec; they declare the heartbeat as an optional dependency."""
     from corvidae.hooks import report_orphan_hookimpls
     from corvidae_cognition.goals import GoalsPlugin
@@ -460,4 +461,4 @@ def test_heartbeat_disabled_logs_no_orphan_warning(owner, caplog):
     pm.register(MemoryPlugin() if owner == "memory" else GoalsPlugin(), name=owner)
     with caplog.at_level(logging.WARNING):
         report_orphan_hookimpls(pm)
-    assert [r.getMessage() for r in caplog.records if "collect_heartbeat_prompts" in r.getMessage()] == []
+    assert [r.getMessage() for r in caplog.records if "on_heartbeat_collect_prompts" in r.getMessage()] == []

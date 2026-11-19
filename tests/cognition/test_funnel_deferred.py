@@ -26,11 +26,11 @@ import pytest
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
 from corvidae_cognition.funnel import FunnelPlugin
-from corvidae.hooks import create_plugin_manager
+from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.persistence import PersistencePlugin, init_db
 
 
-async def build_funnel(config: dict | None = None):
+async def build_funnel(config: dict | None = None, *, stub_notify: bool = True):
     """Register persistence + funnel on a fresh pm with an in-memory DB.
 
     Returns (funnel, channel, conv, db). on_notify is replaced with an
@@ -48,7 +48,10 @@ async def build_funnel(config: dict | None = None):
     pm.register(funnel, name="funnel")
     await funnel.on_init(pm=pm, config=config or {})
 
-    pm.ahook.on_notify = AsyncMock()
+    # stub_notify=False leaves the real dispatcher in place for tests that
+    # register their own on_notify implementations.
+    if stub_notify:
+        pm.ahook_raise.on_notify = AsyncMock()
 
     channel = Channel(transport="test", scope="funnel-deferred")
     conv = ContextWindow(channel.id)
@@ -78,8 +81,8 @@ class TestStubCoalescing:
         await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["verdict three"])
 
         # Exactly one stub for the pair — later registrations only queue.
-        pm.ahook.on_notify.assert_awaited_once()
-        kwargs = pm.ahook.on_notify.await_args.kwargs
+        pm.ahook_raise.on_notify.assert_awaited_once()
+        kwargs = pm.ahook_raise.on_notify.await_args.kwargs
         assert kwargs["channel"] is channel
         assert kwargs["source"] == "critique"
         assert kwargs["tool_call_id"] is None
@@ -109,7 +112,7 @@ class TestStubCoalescing:
         await funnel.before_agent_turn(channel=channel, trace_id="k1", annotations={"origin": "critique"})
 
         await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["second"])
-        assert pm.ahook.on_notify.await_count == 2
+        assert pm.ahook_raise.on_notify.await_count == 2
 
         await db.close()
 
@@ -120,7 +123,7 @@ class TestStubCoalescing:
         await funnel.ingest_and_wake(
             channel, origin="critique", source="critique", entries=["a", "b"]
         )
-        text = pm.ahook.on_notify.await_args.kwargs["text"]
+        text = pm.ahook_raise.on_notify.await_args.kwargs["text"]
         assert "2" in text
         assert "critique" in text
 
@@ -132,7 +135,7 @@ class TestStubCoalescing:
         pm = funnel.pm
 
         await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=[])
-        pm.ahook.on_notify.assert_not_awaited()
+        pm.ahook_raise.on_notify.assert_not_awaited()
 
         await funnel.before_agent_turn(channel=channel, trace_id="k1", annotations={"origin": "critique"})
         assert _window_context_text(conv) == ""
@@ -195,7 +198,7 @@ class TestFailureAndBudget:
         pm = funnel.pm
 
         await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["kept verdict"])
-        assert pm.ahook.on_notify.await_count == 1
+        assert pm.ahook_raise.on_notify.await_count == 1
 
         async def boom(*args, **kwargs):
             raise RuntimeError("admission exploded")
@@ -208,7 +211,7 @@ class TestFailureAndBudget:
 
         # A fresh registration fires a fresh stub (flag was cleared first).
         await funnel.ingest_and_wake(channel, origin="critique", source="critique", entries=["second verdict"])
-        assert pm.ahook.on_notify.await_count == 2
+        assert pm.ahook_raise.on_notify.await_count == 2
 
         # The next successful drain admits BOTH the kept and the new payload.
         await funnel.before_agent_turn(channel=channel, trace_id="k2", annotations={"origin": "critique"})
@@ -316,12 +319,12 @@ class TestMidDrainRegistrationWedge:
         await funnel.ingest_and_wake(
             channel, origin="critique", source="critique", entries=["payload A"]
         )
-        assert pm.ahook.on_notify.await_count == 1
+        assert pm.ahook_raise.on_notify.await_count == 1
 
         # Stub 1's turn drains; B registers mid-drain (stub 2 fires) and is
         # consumed by this same drain.
         await funnel.before_agent_turn(channel=channel, trace_id="k1", annotations={"origin": "critique"})
-        assert pm.ahook.on_notify.await_count == 2
+        assert pm.ahook_raise.on_notify.await_count == 2
         window = _window_context_text(conv)
         assert "payload A" in window
         assert "payload B" in window
@@ -337,7 +340,7 @@ class TestMidDrainRegistrationWedge:
         await funnel.ingest_and_wake(
             channel, origin="critique", source="critique", entries=["payload C"]
         )
-        assert pm.ahook.on_notify.await_count == 3
+        assert pm.ahook_raise.on_notify.await_count == 3
         await funnel.before_agent_turn(channel=channel, trace_id="k3", annotations={"origin": "critique"})
         assert "payload C" in _window_context_text(conv)
 
@@ -375,7 +378,7 @@ class TestIngestWithoutStub:
         funnel, channel, conv, db = await build_funnel()
 
         funnel.ingest(channel, source="critique", entries=["a style note"])
-        funnel.pm.ahook.on_notify.assert_not_awaited()
+        funnel.pm.ahook_raise.on_notify.assert_not_awaited()
 
         await db.close()
 
@@ -388,8 +391,38 @@ class TestStubText:
             channel, origin="critique", source="critique",
             entries=["a verdict"], stub_text="custom stub words",
         )
-        funnel.pm.ahook.on_notify.assert_awaited_once()
-        assert funnel.pm.ahook.on_notify.await_args.kwargs["text"] == "custom stub words"
-        assert funnel.pm.ahook.on_notify.await_args.kwargs["annotations"]["origin"] == "critique"
+        funnel.pm.ahook_raise.on_notify.assert_awaited_once()
+        assert funnel.pm.ahook_raise.on_notify.await_args.kwargs["text"] == "custom stub words"
+        assert funnel.pm.ahook_raise.on_notify.await_args.kwargs["annotations"]["origin"] == "critique"
+
+        await db.close()
+
+
+class TestStubFailureClearsPending:
+    async def test_raising_sibling_impl_clears_the_pending_flag(self, caplog):
+        """#1094 req 8: a real on_notify hookimpl raises on a real plugin
+        manager; the funnel still clears the stub-pending flag so the next
+        registration re-arms the channel, and logs the failure."""
+        funnel, channel, conv, db = await build_funnel(stub_notify=False)
+
+        class _RaisingNotify:
+            """A sibling whose on_notify always fails."""
+
+            @hookimpl
+            async def on_notify(self, channel, source, text, tool_call_id, annotations):
+                raise RuntimeError("sibling on_notify exploded")
+
+        funnel.pm.register(_RaisingNotify(), name="raising_notify")
+
+        with caplog.at_level(logging.WARNING):
+            await funnel.ingest_and_wake(
+                channel, origin="critique", source="critique", entries=["verdict"]
+            )
+
+        assert (channel.id, "critique") not in funnel._stub_pending
+        assert any(
+            "deferred-registration stub failed" in r.getMessage()
+            for r in caplog.records
+        )
 
         await db.close()

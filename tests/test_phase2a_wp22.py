@@ -109,7 +109,7 @@ class TestSilentTaskCompletion:
         """deliver=False task completes without firing on_notify (spy) --
         no OutboundToolStatus, no on_notify, no downstream main-model turn."""
         pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
+        pm.ahook_raise.on_notify = AsyncMock()
         pm.ahook.send = AsyncMock()
         plugin = TaskPlugin(pm)
         await plugin.on_start(config={})
@@ -128,7 +128,7 @@ class TestSilentTaskCompletion:
 
         await plugin._on_task_complete(task, "silent work output")
 
-        pm.ahook.on_notify.assert_not_awaited()
+        pm.ahook_raise.on_notify.assert_not_awaited()
         assert sent(pm, OutboundToolStatus) == []
 
         await plugin.on_stop()
@@ -137,7 +137,7 @@ class TestSilentTaskCompletion:
         """deliver=True (default/existing) behavior is unchanged -- on_notify
         still fires."""
         pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
+        pm.ahook_raise.on_notify = AsyncMock()
         plugin = TaskPlugin(pm)
         await plugin.on_start(config={})
 
@@ -155,7 +155,7 @@ class TestSilentTaskCompletion:
 
         await plugin._on_task_complete(task, "normal work output")
 
-        pm.ahook.on_notify.assert_awaited_once()
+        pm.ahook_raise.on_notify.assert_awaited_once()
 
         await plugin.on_stop()
 
@@ -169,7 +169,7 @@ class TestSilentTaskCompletion:
         that worker-level failure logging is an unmodified code path outside
         WP2.2's scope and is unaffected by the deliver flag either way."""
         pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
+        pm.ahook_raise.on_notify = AsyncMock()
         pm.ahook.send = AsyncMock()
         plugin = TaskPlugin(pm)
         await plugin.on_start(config={})
@@ -190,7 +190,7 @@ class TestSilentTaskCompletion:
         failure_result = "Task deadbeef failed: boom"
         await plugin._on_task_complete(task, failure_result)
 
-        pm.ahook.on_notify.assert_not_awaited()
+        pm.ahook_raise.on_notify.assert_not_awaited()
         assert sent(pm, OutboundToolStatus) == []
 
         await plugin.on_stop()

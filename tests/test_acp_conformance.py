@@ -68,7 +68,7 @@ async def test_gate_b_initialize_session_prompt_cancel(tmp_path) -> None:
     async def _reply_on_message(*, channel, sender: str, text: str, trace_id: str) -> None:
         await plugin.send(channel=channel, event=OutboundMessage(text=f"echo:{text}"))
 
-    plugin.pm.ahook.on_message = _reply_on_message
+    plugin.pm.ahook_raise.on_message = _reply_on_message
     prompt_resp = await agent.prompt(
         session_id=session_id,
         prompt=[text_block("gate-b")],
@@ -80,7 +80,7 @@ async def test_gate_b_initialize_session_prompt_cancel(tmp_path) -> None:
     async def _block_on_message(*, channel, sender: str, text: str, trace_id: str) -> None:
         channel.pending_tool_call_ids.add("call_gate_b")
 
-    plugin.pm.ahook.on_message = _block_on_message
+    plugin.pm.ahook_raise.on_message = _block_on_message
     pending = asyncio.create_task(
         agent.prompt(session_id=session_id, prompt=[text_block("again")])
     )

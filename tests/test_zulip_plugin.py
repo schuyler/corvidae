@@ -39,6 +39,7 @@ from corvidae.hooks import (
     TransportPlugin,
     _check_hook_arg_binding,
     create_plugin_manager,
+    hookimpl,
     resolve_reject_wins,
 )
 from corvidae.outbound import (
@@ -387,7 +388,7 @@ class Harness:
 
     @property
     def on_message(self) -> AsyncMock:
-        return self.pm.ahook.on_message
+        return self.pm.ahook_raise.on_message
 
     def texts(self) -> list[str]:
         """Texts of every on_message call so far, in order."""
@@ -442,7 +443,7 @@ async def _start(
             channel=channel, trace_id=trace_id, sender=sender, text=text
         )
 
-    pm.ahook.on_message = AsyncMock(side_effect=_admit)
+    pm.ahook_raise.on_message = AsyncMock(side_effect=_admit)
 
     config: dict = {}
     if not omit_block:
@@ -1610,7 +1611,7 @@ class TestTyping:
                     channel=channel, trace_id=trace_id, sender=sender, text=text
                 )
 
-            h.pm.ahook.on_message = AsyncMock(side_effect=_veto)
+            h.pm.ahook_raise.on_message = AsyncMock(side_effect=_veto)
             h.server.push(dm_msg("vetoed"))
             await _wait_until(lambda: h.on_message.await_count >= 1)
             await asyncio.sleep(0.2)
@@ -1918,7 +1919,46 @@ async def test_a_failed_delivery_does_not_mark_the_message_seen(tmp_path):
     h = await _start()
     try:
         # The plugin's hook relay is the real sender: make that one raise.
-        h.pm.ahook.on_message = AsyncMock(side_effect=RuntimeError("boom"))
+        h.pm.ahook_raise.on_message = AsyncMock(side_effect=RuntimeError("boom"))
+        h.server.push_backlog(
+            channel_msg("@**Corvidae Bot** unhandleable", topic="plans"),
+            flags=["mentioned"],
+        )
+        h.plugin._cursor_dir = tmp_path
+        channel_id = "zulip:7"
+        h.plugin._cursor = {
+            channel_id: {"last": 0, "narrow": [{"operator": "channel", "operand": 7}]}
+        }
+
+        await h.plugin._catch_up()
+
+        got = h.plugin._cursor.get(channel_id, {}).get("last", 0)
+        assert got == 0, f"a failed delivery was recorded as seen: cursor={got}"
+    finally:
+        await stop(h)
+
+
+class _RaisingOnMessage:
+    """A real on_message implementation that fails, as a broken sibling would."""
+
+    @hookimpl
+    async def on_message(self, channel, sender, text, trace_id):
+        raise RuntimeError("sibling on_message exploded")
+
+
+async def test_a_raising_sibling_impl_still_rewinds_the_cursor(tmp_path):
+    """#1094 req 8: the failure comes from a real hookimpl on a real plugin
+    manager (no stubbed hook), and the message is still not marked seen.
+
+    on_message is a fail-soft observe hook, so the site must dispatch through
+    pm.ahook_raise to keep the rewind-and-retry behaviour.
+    """
+    h = await _start()
+    try:
+        # Drop the harness's stub so the real dispatcher runs, then register
+        # an implementation that raises.
+        del h.pm.ahook_raise.on_message
+        h.pm.register(_RaisingOnMessage(), name="raising_sibling")
         h.server.push_backlog(
             channel_msg("@**Corvidae Bot** unhandleable", topic="plans"),
             flags=["mentioned"],
@@ -1962,7 +2002,7 @@ async def test_a_failed_delivery_stops_the_batch_rather_than_being_skipped(tmp_p
             if calls["n"] == 2:
                 raise RuntimeError("boom")
 
-        h.pm.ahook.on_message = AsyncMock(side_effect=_fail_on_the_second)
+        h.pm.ahook_raise.on_message = AsyncMock(side_effect=_fail_on_the_second)
         h.plugin._cursor_dir = tmp_path
         channel_id = "zulip:7"
         h.plugin._cursor = {

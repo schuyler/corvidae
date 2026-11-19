@@ -797,7 +797,7 @@ async def _no_queue_setup(
         pm.register(_RaisingNotifier(), name="raiser")
     if wholesale:
         # Simulates the Agent hookimpl being missing.
-        pm.ahook.on_notify = AsyncMock(side_effect=RuntimeError("no on_notify"))
+        pm.ahook_raise.on_notify = AsyncMock(side_effect=RuntimeError("no on_notify"))
 
     async def my_tool(x: str) -> str:
         """A tool."""

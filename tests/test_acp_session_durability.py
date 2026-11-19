@@ -165,7 +165,7 @@ class TestLoadSessionReplay:
         async def _reply(*, channel, sender: str, text: str, trace_id: str) -> None:
             await plugin.send(channel=channel, event=OutboundMessage(text="ok"))
 
-        plugin.pm.ahook.on_message = _reply
+        plugin.pm.ahook_raise.on_message = _reply
         await agent.prompt(session_id=session_id, prompt=[text_block("again")])
 
         assert registry.get(f"acp:{session_id}") is channel
@@ -233,7 +233,7 @@ class TestResumeAndClose:
         async def _block(*, channel, sender: str, text: str, trace_id: str) -> None:
             channel.pending_tool_call_ids.add("call_close")
 
-        plugin.pm.ahook.on_message = _block
+        plugin.pm.ahook_raise.on_message = _block
         pending = asyncio.create_task(
             agent.prompt(session_id=session_id, prompt=[text_block("busy")])
         )

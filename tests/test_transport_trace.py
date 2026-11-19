@@ -10,6 +10,8 @@ requirements.
 from __future__ import annotations
 
 import asyncio
+import logging
+import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pluggy
@@ -119,43 +121,65 @@ class TestAgentUsesCallerId:
 class TestMissingIdFailsLoudly:
     async def test_omitted_trace_id_raises_hook_call_error(self, agent_env):
         """O2: a caller that omits trace_id gets HookCallError, not a
-        silently-unlinked message."""
+        silently-unlinked message. A missing argument is a caller bug, so
+        fail-soft dispatch (#1094) refuses it before any impl runs."""
         plugin, channel, rec = agent_env
 
-        # pluggy warns about the missing spec argument, then the Agent's
-        # impl (which requires it) raises.
-        with pytest.warns(UserWarning, match="trace_id"), \
-                pytest.raises(pluggy.HookCallError):
-            await plugin.pm.ahook.on_message(
-                channel=channel, sender="user", text="hello",
-            )
+        # pluggy may warn about the missing spec argument; the error is the
+        # contract, so the warning is not asserted.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(pluggy.HookCallError, match="trace_id"):
+                await plugin.pm.ahook.on_message(
+                    channel=channel, sender="user", text="hello",
+                )
         # Nothing may have been gated or admitted.
         assert rec.events == []
 
     @pytest.mark.parametrize("bad", [None, ""])
-    async def test_falsy_trace_id_raises_value_error(self, agent_env, bad):
-        """O2: a None or empty trace_id raises ValueError before any
-        gate hook fires (no silent fallback mint)."""
+    async def test_falsy_trace_id_is_a_warning_naming_hook_and_plugin(
+        self, agent_env, caplog, bad
+    ):
+        """O2, #1094: a None or empty trace_id is rejected before any gate hook
+        fires (no silent fallback mint); on_message is an observe hook, so the
+        ValueError is logged as a WARNING naming the hook and the agent plugin
+        rather than raised out of the transport."""
         plugin, channel, rec = agent_env
 
-        with pytest.raises(ValueError):
+        with caplog.at_level(logging.WARNING):
             await plugin.pm.ahook.on_message(
                 channel=channel, sender="user", text="hello",
                 trace_id=bad,
             )
+
+        records = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "on_message" in r.getMessage() and "agent" in r.getMessage()
+        ]
+        assert len(records) == 1, [r.getMessage() for r in caplog.records]
+        assert records[0].exc_info is not None
+        assert isinstance(records[0].exc_info[1], ValueError)
         assert rec.events == []
 
-    async def test_falsy_id_raises_even_before_agent_is_ready(self, agent_env):
+    async def test_falsy_id_warns_even_before_agent_is_ready(self, agent_env, caplog):
         """O2/D1: the id check runs before the readiness check, so a
-        mis-wired transport fails loudly even while the agent is starting."""
+        mis-wired transport is reported even while the agent is starting."""
         plugin, channel, rec = agent_env
         # Model the agent-not-ready window.
         plugin._client = None
 
-        with pytest.raises(ValueError):
+        with caplog.at_level(logging.WARNING):
             await plugin.pm.ahook.on_message(
                 channel=channel, sender="user", text="hello", trace_id=None,
             )
+
+        assert any(
+            r.levelno == logging.WARNING
+            and "on_message" in r.getMessage() and "agent" in r.getMessage()
+            and isinstance(r.exc_info[1] if r.exc_info else None, ValueError)
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
         assert rec.events == []
 
 

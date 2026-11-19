@@ -181,7 +181,7 @@ async def beat_text(env) -> str:
     """The goals section of a beat, as the heartbeat would collect it."""
     # The retired-goals query joins memory, whose table this fixture creates lazily.
     await env.memory._ensure_schema()
-    return await env.goals.collect_heartbeat_prompts(env.channel)
+    return await env.goals.on_heartbeat_collect_prompts(env.channel)
 
 
 async def rows(env, sql: str, params=()) -> list[tuple]:

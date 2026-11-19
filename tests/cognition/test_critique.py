@@ -646,10 +646,10 @@ class TestExecution:
         appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
         env = await build_critique(tmp_path, appraisal=appraisal,
                                    chat_text=EMPTY_VERDICT, with_funnel=True)
-        env.pm.ahook.on_notify = AsyncMock()
+        env.pm.ahook_raise.on_notify = AsyncMock()
         await _fire(env, "kempty", origin="user")
         await _run_next_task(env.task)
-        env.pm.ahook.on_notify.assert_not_awaited()
+        env.pm.ahook_raise.on_notify.assert_not_awaited()
         outcomes = await _read_outcomes(env.db, "kempty")
         assert outcomes["critique"]["objections"] == 0
         # The lens fork carried the exchange attribution.
@@ -664,7 +664,7 @@ class TestExecution:
         env = await build_critique(tmp_path, appraisal=appraisal,
                                    chat_text=OBJECTION_VERDICT, with_funnel=True)
         notify = AsyncMock()
-        env.pm.ahook.on_notify = notify
+        env.pm.ahook_raise.on_notify = notify
         # Spy on both funnel entry points; ingest keeps its real behaviour.
         ingest = Mock(wraps=env.funnel.ingest)
         env.funnel.ingest = ingest
@@ -708,7 +708,7 @@ class TestRetentionDelivery:
             with_funnel=True,
             config={"critique": {"retention": {"root": "values/"}}},
         )
-        env.pm.ahook.on_notify = AsyncMock()
+        env.pm.ahook_raise.on_notify = AsyncMock()
         env.funnel.ingest = Mock(wraps=env.funnel.ingest)
         env.funnel.ingest_and_wake = AsyncMock()
         await _fire(env, key, origin=origin)

@@ -249,6 +249,7 @@ class TestSpecsBeforeGuardAndInit:
             with patch("corvidae.runtime.create_plugin_manager", return_value=pm), \
                  patch("corvidae.runtime.configure_logging"), \
                  patch("corvidae.runtime.install_plugin_hookspecs", side_effect=recorder("install")), \
+                 patch("corvidae.runtime.check_fail_soft_wrappers", side_effect=recorder("wrappers")), \
                  patch("corvidae.runtime._check_hook_arg_binding", side_effect=recorder("guard")), \
                  patch("corvidae.runtime.validate_dependencies", side_effect=recorder("deps")), \
                  patch("corvidae.runtime.report_orphan_hookimpls", side_effect=recorder("orphans")):
@@ -256,7 +257,7 @@ class TestSpecsBeforeGuardAndInit:
         finally:
             os.unlink(config_path)
 
-        assert order == ["load", "install", "guard", "deps", "orphans", "on_init"], order
+        assert order == ["load", "install", "wrappers", "guard", "deps", "orphans", "on_init"], order
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +557,6 @@ class TestOwnerSegment:
             ("after_web_x", {}),
             ("should_web_x", {}),
             ("resolve_web_x", {"firstresult": True}),
-            ("collect_web_x", {}),  # #1083
         ],
     )
     def test_every_prefixed_class_is_accepted(self, name: str, opts: dict) -> None:
@@ -588,7 +588,6 @@ class TestGrammarCheck:
             ("should_web_thing", True),
             ("resolve_web_thing", False),
             ("transform_web_thing", False),
-            ("collect_web_thing", True),  # #1083
         ],
     )
     def test_options_not_matching_prefix_fail(self, name: str, firstresult: bool) -> None:
@@ -633,31 +632,6 @@ class TestGrammarCheck:
         assert "transform_web_text" in message
         assert "'web'" in message
         assert "trylast" in message
-
-    @pytest.mark.parametrize("option", ["wrapper", "hookwrapper"])
-    def test_wrapper_on_collect_hook_fails(self, option: str) -> None:
-        """#1083: collect_results calls each impl for one contribution and
-        doesn't drive wrappers, so startup refuses a wrapper impl, naming
-        the hook, the implementing plugin and the fix."""
-
-        class Spec:
-            @hookspec
-            async def collect_web_parts(self, value: int) -> object:
-                pass
-
-        class Wrapping:
-            @hookimpl(**{option: True})
-            def collect_web_parts(self, value: int):
-                yield
-
-        message = _install_error(
-            _pm(("web", _owner_with(Spec)), ("wrapping", Wrapping()))
-        )
-
-        assert "collect_web_parts" in message
-        assert "'wrapping'" in message
-        assert f"{option}=True" in message
-        assert f"Remove {option}=True" in message  # the remedy
 
     def test_transform_seed_from_another_plugin_does_not_count(self) -> None:
         class Spec:

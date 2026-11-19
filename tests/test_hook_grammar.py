@@ -168,14 +168,9 @@ def test_retired_name_is_not_a_hookspec(name: str) -> None:
     assert not hasattr(AgentSpec, name), f"{name!r} is still a hookspec on AgentSpec"
 
 
-# --- Test 6: the collect class (#1083) -----------------------------------------
+# --- Test 6: the collect class is retired (#1094) ------------------------------
 
 
-def test_collect_class_is_broadcast_with_collect_prefix() -> None:
-    """collect_ hooks are broadcast: every implementation contributes.
-
-    AgentSpec has no collect_ hook yet, so tests 1-2 never reach this class;
-    the startup check on plugin-declared specs reads the same table
-    (tests/test_plugin_hookspecs.py exercises it).
-    """
-    assert GRAMMAR["collect"] == (("collect_",), {"firstresult": False})
+def test_grammar_has_no_collect_class() -> None:
+    """#1094: collect_ is gone from the grammar; contributors are on_ hooks."""
+    assert "collect" not in GRAMMAR

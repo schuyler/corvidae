@@ -75,7 +75,7 @@ async def test_status_change_notifies_origin_with_the_send_fields():
     # changing turn's attribution; on_notify sees every field #808 names.
     pm, registry, xcs = await _build()
     on_notify = AsyncMock()
-    pm.ahook.on_notify = on_notify
+    pm.ahook_raise.on_notify = on_notify
     _in_turn(ACTOR, hop_count=1)
 
     await _fire(pm, old="open", new="blocked")

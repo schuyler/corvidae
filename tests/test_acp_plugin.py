@@ -126,7 +126,7 @@ class TestAcpSessionsAndPrompt:
             # Simulate the agent loop finishing a text-only turn.
             await plugin.send(channel=channel, event=OutboundMessage(text=f"reply:{text}"))
 
-        plugin.pm.ahook.on_message = _fake_on_message
+        plugin.pm.ahook_raise.on_message = _fake_on_message
 
         response = await agent.prompt(
             session_id=session_id,
@@ -165,7 +165,7 @@ class TestAcpSessionsAndPrompt:
             channel.pending_tool_call_ids.discard("call_1")
             await plugin.send(channel=channel, event=OutboundMessage(text="done"))
 
-        plugin.pm.ahook.on_message = _fake_on_message
+        plugin.pm.ahook_raise.on_message = _fake_on_message
 
         prompt_task = asyncio.create_task(
             agent.prompt(session_id=session_id, prompt=[text_block("go")])
@@ -191,7 +191,7 @@ class TestAcpCancel:
             # Enqueue-style: leave the prompt future pending (tools in flight).
             channel.pending_tool_call_ids.add("call_1")
 
-        plugin.pm.ahook.on_message = _fake_on_message
+        plugin.pm.ahook_raise.on_message = _fake_on_message
 
         prompt_task = asyncio.create_task(
             agent.prompt(session_id=session_id, prompt=[text_block("go")])
@@ -232,7 +232,7 @@ class TestAcpCancel:
             traces.append(trace_id)
             channel.pending_tool_call_ids.add("call_1")
 
-        plugin.pm.ahook.on_message = _fake_on_message
+        plugin.pm.ahook_raise.on_message = _fake_on_message
 
         first = asyncio.create_task(
             agent.prompt(session_id=session_id, prompt=[text_block("one")])
@@ -290,7 +290,7 @@ class TestAcpCancel:
         async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
             channel.pending_tool_call_ids.add("call_1")
 
-        plugin.pm.ahook.on_message = _fake_on_message
+        plugin.pm.ahook_raise.on_message = _fake_on_message
 
         prompt = asyncio.create_task(
             agent.prompt(session_id=session_id, prompt=[text_block("go")])
@@ -402,7 +402,7 @@ class TestAcpIgnoredClientInput:
         async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
             await plugin.send(channel=channel, event=OutboundMessage(text=f"reply:{text}"))
 
-        plugin.pm.ahook.on_message = _fake_on_message
+        plugin.pm.ahook_raise.on_message = _fake_on_message
 
         with caplog.at_level("WARNING"):
             response = await asyncio.wait_for(
@@ -464,7 +464,7 @@ class TestPromptAlwaysCompletes:
 
             asyncio.create_task(_deliver())
 
-        plugin.pm.ahook.on_message = _fake_on_message
+        plugin.pm.ahook_raise.on_message = _fake_on_message
 
         response = await asyncio.wait_for(
             agent.prompt(session_id=created.session_id, prompt=[text_block("hi")]),
@@ -483,9 +483,38 @@ class TestPromptAlwaysCompletes:
         async def _boom(channel, sender: str, text: str, trace_id: str) -> None:
             raise RuntimeError("queue full")
 
-        plugin.pm.ahook.on_message = _boom
+        plugin.pm.ahook_raise.on_message = _boom
 
         with pytest.raises(RuntimeError):
+            await asyncio.wait_for(
+                agent.prompt(session_id=created.session_id, prompt=[text_block("hi")]),
+                timeout=2,
+            )
+
+        assert plugin._active_prompts.get(created.session_id) is None
+
+    async def test_raising_sibling_impl_drops_the_future(self, tmp_path):
+        """#1094 req 8: a real on_message hookimpl on a real plugin manager
+        raises; prompt() still abandons the future and surfaces the error
+        instead of waiting on a turn that never started. on_message is
+        fail-soft, so the site must dispatch through pm.ahook_raise."""
+        from acp import text_block
+
+        from corvidae.hooks import hookimpl
+
+        plugin, _registry, agent = await _init_acp_plugin()
+        created = await agent.new_session(cwd=str(tmp_path))
+
+        class _RaisingOnMessage:
+            """A sibling whose on_message always fails."""
+
+            @hookimpl
+            async def on_message(self, channel, sender, text, trace_id):
+                raise RuntimeError("sibling on_message exploded")
+
+        plugin.pm.register(_RaisingOnMessage(), name="raising_sibling")
+
+        with pytest.raises(RuntimeError, match="sibling on_message exploded"):
             await asyncio.wait_for(
                 agent.prompt(session_id=created.session_id, prompt=[text_block("hi")]),
                 timeout=2,
@@ -508,7 +537,7 @@ class TestConcurrentPrompt:
             channel.pending_tool_call_ids.add("call_1")
             enqueued.set()
 
-        plugin.pm.ahook.on_message = _enqueue
+        plugin.pm.ahook_raise.on_message = _enqueue
 
         first = asyncio.create_task(
             agent.prompt(session_id=created.session_id, prompt=[text_block("first")])

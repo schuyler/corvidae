@@ -404,7 +404,7 @@ async def test_idle_upkeep_enqueues_no_turn(make_env, retention_runs):
     agent, channel, db = await build_plugin_and_channel()
     pm = agent.pm
     persistence = pm.get_plugin("persistence")
-    pm.ahook.on_notify = AsyncMock()
+    pm.ahook_raise.on_notify = AsyncMock()
     env = await make_env(pm=pm, db=db, persistence=persistence, channel=channel)
 
     try:
@@ -420,7 +420,7 @@ async def test_idle_upkeep_enqueues_no_turn(make_env, retention_runs):
         # Neither started a turn: nothing queued, nothing notified.
         assert all(q.is_empty for q in agent.queues.values())
         assert pm.get_plugin("task").task_queue.is_idle
-        pm.ahook.on_notify.assert_not_called()
+        pm.ahook_raise.on_notify.assert_not_called()
     finally:
         await pm.get_plugin("task").on_stop()
 
