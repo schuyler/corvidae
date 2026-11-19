@@ -2242,9 +2242,10 @@ restart or the restart tool's pre-flight):
    keeps one alive) hangs the process there forever, and `atexit` runs
    only after that join, so it cannot help. `Runtime.run(exit_watchdog=True)`
    arms a daemon thread in a `finally` around `await self.stop()`, so it
-   is armed even when an `on_stop` raises (apluggy's broadcast propagates
-   the first exception and skips the rest of shutdown, the likeliest way
-   to leak). If the process is still alive `exit_timeout` seconds later,
+   is armed even when shutdown fails (an `on_stop` that raises is logged
+   and skipped by the fail-soft dispatch, but `agent.on_stop` raising, a
+   `BaseException` or the timeout still cuts the rest of shutdown short,
+   the likeliest way to leak). If the process is still alive `exit_timeout` seconds later,
    the thread logs a WARNING naming the non-daemon threads still running
    and the key, flushes the root logger's handlers (not
    `logging.shutdown()`, which runs from `atexit` and would close
@@ -2292,7 +2293,9 @@ config error's `SystemExit` before any plugin loads finds nothing to close),
 `Runtime.run` runs `_cleanup_failed_start()` before re-raising: the
 `on_stop` broadcast, `idle.stop()` and `clock.close()`, under the same
 bound as `stop()`, `daemon.shutdown_timeout` (3 s by default). As there, an
-`on_stop` that raises skips the last two;
+`on_stop` that raises an `Exception` is logged and skipped (observe hooks
+fail soft), so the last two still run; a `BaseException` or the timeout
+skips them;
 `asyncio.run` cancels leftover timers on exit. `agent.on_stop` is skipped, since the Agent may not
 have started. Without this, persistence's open aiosqlite connection (a
 non-daemon worker thread) kept the interpreter from exiting, so a daemon
