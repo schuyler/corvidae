@@ -556,6 +556,7 @@ class TestOwnerSegment:
             ("after_web_x", {}),
             ("should_web_x", {}),
             ("resolve_web_x", {"firstresult": True}),
+            ("collect_web_x", {}),  # #1083
         ],
     )
     def test_every_prefixed_class_is_accepted(self, name: str, opts: dict) -> None:
@@ -587,6 +588,7 @@ class TestGrammarCheck:
             ("should_web_thing", True),
             ("resolve_web_thing", False),
             ("transform_web_thing", False),
+            ("collect_web_thing", True),  # #1083
         ],
     )
     def test_options_not_matching_prefix_fail(self, name: str, firstresult: bool) -> None:

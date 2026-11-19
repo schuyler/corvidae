@@ -14,11 +14,14 @@ Exports:
                       and dispatch to send_* methods
     create_plugin_manager()     — create and configure the PluginManager
     resolve_reject_wins()       — resolve broadcast gate-hook result lists
+    collect_contributions()     — call a collect_ hook, isolating failures
     get_dependency()            — typed plugin lookup
     validate_dependencies()     — dependency graph verification at startup
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import warnings
 from typing import TYPE_CHECKING, ClassVar, TypeVar
@@ -35,6 +38,8 @@ from corvidae.outbound import (
 )
 
 if TYPE_CHECKING:
+    from pluggy import HookCaller, HookImpl
+
     from corvidae.admission import WorkRefusal
     from corvidae.channel import Channel
     from corvidae.context import ContextWindow, MessageType
@@ -59,6 +64,7 @@ HOOK_GRAMMAR: dict[str, tuple[tuple[str, ...], dict[str, bool]]] = {
     "veto": (("should_",), {"firstresult": False}),
     "resolve": (("resolve_",), {"firstresult": True}),
     "transform": (("transform_",), {"firstresult": True}),
+    "collect": (("collect_",), {"firstresult": False}),
 }
 
 # Bare imperative names: broadcast, caller-defined use of the result list.
@@ -303,6 +309,60 @@ def resolve_single_result(results: list, hook_name: str) -> object | None:
             hook_name, len(non_none),
         )
     return non_none[0] if non_none else None
+
+
+async def collect_contributions(hook: HookCaller, /, **kwargs: object) -> list[object]:
+    """Call a ``collect_`` hook and return its contributions (PRD §3.1.10).
+
+    Every implementation runs concurrently. Contributions come back in hook
+    order -- ``tryfirst``, then the rest (no guaranteed order), then
+    ``trylast`` -- with ``None`` dropped. An implementation that raises an
+    ``Exception`` is logged at WARNING, naming the hook and the plugin, and
+    skipped; the others' contributions are kept. A ``BaseException`` (e.g.
+    ``CancelledError``) propagates, after every sibling has finished.
+
+    Not dispatched through ``pm.ahook``: its gather loses every sibling's
+    contribution when one implementation raises.
+
+    Args:
+        hook: The hook caller, e.g. ``pm.hook.collect_web_panels``.
+        **kwargs: The hook's arguments, by keyword only. Each implementation
+            receives the ones it declares, as pluggy passes them.
+    """
+
+    async def call_one(impl: HookImpl) -> object:
+        """Run one implementation; an Exception becomes a logged skip."""
+        try:
+            # Pass only the declared arguments the caller supplied, as
+            # offer_work does; a missing one fails as this impl's TypeError.
+            impl_kwargs = {k: kwargs[k] for k in impl.argnames if k in kwargs}
+            result = impl.function(**impl_kwargs)
+            # A sync implementation's return value is its contribution.
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        except Exception:
+            _resolve_logger.warning(
+                "collect hook %s: the implementation in plugin %r raised; "
+                "its contribution is skipped",
+                hook.name, impl.plugin_name,
+                exc_info=True,
+            )
+            return None
+
+    # pluggy calls hookimpls last-registered first (tryfirst ... trylast);
+    # gather keeps that order and, with return_exceptions, lets every
+    # sibling finish before anything is raised.
+    impls = list(reversed(hook.get_hookimpls()))
+    results = await asyncio.gather(*(call_one(i) for i in impls), return_exceptions=True)
+
+    # call_one catches every Exception, so a BaseException that is not an
+    # Exception escaped it and must propagate. A contribution that happens
+    # to be an Exception instance is an ordinary value.
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(result, Exception):
+            raise result
+    return [r for r in results if r is not None]
 
 
 def get_dependency(pm: pluggy.PluginManager, name: str, expected_type: type[T]) -> T:
