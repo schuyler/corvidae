@@ -1523,8 +1523,9 @@ channel, task id and tool call id and, for a tool task, calls
 `Agent.deliver_tool_error`, which queues an error `role: "tool"` result
 straight onto the channel's serial queue. Without it the id would stay in
 `pending_tool_call_ids` and the tool cycle would never finish (#173). The
-broadcast runs every hookimpl via `asyncio.gather`, so a third-party
-hookimpl can raise after `Agent.on_notify` already queued the real result.
+call (`pm.ahook_raise`) runs every hookimpl to completion and then raises
+the first failure, so a third-party hookimpl's raise arrives after
+`Agent.on_notify` already queued the real result.
 The Agent therefore records each queued tool result as
 `(channel_id, tool_call_id)` in `_queued_tool_results` until the item is
 processed (dropped in the same step that discards the id from
