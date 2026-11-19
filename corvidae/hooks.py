@@ -351,6 +351,10 @@ async def collect_results(hook: HookCaller, /, **kwargs: object) -> list[object]
         hook: The hook caller, e.g. ``pm.hook.collect_web_panels``.
         **kwargs: The hook's arguments, by keyword only. Each implementation
             receives the ones it declares, as pluggy passes them.
+
+    Raises:
+        TypeError: the arguments don't match the hook's spec (an unknown or
+            missing name); no implementation runs.
     """
 
     async def call_one(impl: HookImpl) -> object:
@@ -372,6 +376,27 @@ async def collect_results(hook: HookCaller, /, **kwargs: object) -> list[object]
                 exc_info=True,
             )
             return None
+
+    # The caller's arguments must match the spec; otherwise a caller's typo
+    # would surface as every impl's TypeError, logged against plugins that
+    # did nothing wrong. Spec parameters with defaults (kwargnames) may be
+    # passed but aren't required. A hook whose
+    # owner isn't loaded has no spec, so there is nothing to check against.
+    if hook.spec is not None:
+        expected = tuple(hook.spec.argnames)
+        accepted = expected + tuple(hook.spec.kwargnames)
+        unknown = sorted(set(kwargs) - set(accepted))
+        missing = [name for name in expected if name not in kwargs]
+        if unknown or missing:
+            problems = []
+            if unknown:
+                problems.append(f"unknown argument(s) {', '.join(map(repr, unknown))}")
+            if missing:
+                problems.append(f"missing argument(s) {', '.join(map(repr, missing))}")
+            raise TypeError(
+                f"collect_results({hook.name}): {'; '.join(problems)}. "
+                f"The hook takes: {', '.join(accepted)}; fix the call to pass those."
+            )
 
     # pluggy calls hookimpls last-registered first (tryfirst ... trylast);
     # gather keeps that order and, with return_exceptions, lets every

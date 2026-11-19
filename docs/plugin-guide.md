@@ -194,7 +194,9 @@ parts = await collect_results(self.pm.hook.collect_web_panels, channel=channel)
 ```
 
 It runs every implementation concurrently, with the hook's arguments by
-keyword only (each implementation receives the ones it declares). It
+keyword only (each implementation receives the ones it declares); an
+argument the hook's spec doesn't name, or one it names without a default
+that the call leaves out, raises `TypeError` before any implementation runs. It
 returns the non-`None` contributions in hook order: `tryfirst`, then the
 rest in no guaranteed order, then `trylast`. An implementation that raises
 an `Exception` is logged at WARNING, naming the hook and the plugin, and

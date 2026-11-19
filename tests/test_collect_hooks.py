@@ -233,3 +233,84 @@ async def test_implementations_run_concurrently() -> None:
     )
 
     assert parts == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# R10: the caller's arguments are checked against the hook's spec
+# ---------------------------------------------------------------------------
+
+
+class _Recorder:
+    """Records whether its collect_web_parts ran."""
+
+    def __init__(self) -> None:
+        self.ran = False
+
+    @hookimpl
+    async def collect_web_parts(self, value: int) -> object:
+        self.ran = True
+        return "ran"
+
+
+@pytest.mark.parametrize(
+    "kwargs, bad",
+    [
+        ({"value": 1, "extra": "x", "chanel": 2}, "chanel"),  # unknown
+        ({"value": 1}, "extra"),  # missing
+    ],
+    ids=["unknown", "missing"],
+)
+async def test_caller_argument_mismatch_raises_before_any_impl_runs(
+    kwargs: dict[str, object], bad: str
+) -> None:
+    """A caller's typo is the caller's error: TypeError at the call site,
+    naming the hook, the argument and what the hook takes; no impl runs."""
+    recorder = _Recorder()
+    pm = _pm(("recorder", recorder))
+
+    with pytest.raises(TypeError) as excinfo:
+        await collect_results(pm.hook.collect_web_parts, **kwargs)
+
+    message = str(excinfo.value)
+    assert "collect_web_parts" in message
+    assert repr(bad) in message
+    assert "value, extra" in message  # the arguments the hook takes
+    assert not recorder.ran
+
+
+async def test_spec_argument_with_default_may_be_passed() -> None:
+    """A spec parameter with a default (pluggy's kwargnames) is accepted
+    but not required, and reaches an impl that declares it."""
+
+    class Spec:
+        @hookspec
+        async def collect_web_opts(self, value: int, opt: str = "d") -> object:
+            pass
+
+    class Owner(CorvidaePlugin):
+        hookspecs = Spec
+
+    class Taker:
+        @hookimpl
+        async def collect_web_opts(self, value: int, opt: str) -> object:
+            return opt
+
+    pm = create_plugin_manager()
+    pm.register(Owner(), name="web")
+    pm.register(Taker(), name="taker")
+    install_plugin_hookspecs(pm)
+
+    parts = await collect_results(pm.hook.collect_web_opts, value=1, opt="o")
+
+    assert parts == ["o"]
+
+
+async def test_hook_without_spec_skips_the_argument_check() -> None:
+    """An impl whose owner isn't loaded has no spec to check against; the
+    helper still calls it."""
+    pm = create_plugin_manager()
+    pm.register(_Recorder(), name="recorder")
+
+    parts = await collect_results(pm.hook.collect_web_parts, value=1)
+
+    assert parts == ["ran"]
