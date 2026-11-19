@@ -198,7 +198,7 @@ class TestPromiseAdmission:
         env.pm.register(raiser, name="raiser")
         raiser.offer(env.channel.id, "broken", pending())
         env.provider.offer(env.channel.id, "memory", resolved("sibling entry"))
-        with caplog.at_level(logging.WARNING, logger="corvidae.funnel"):
+        with caplog.at_level(logging.WARNING):
             await turn(env)
         await turn(env)
         assert "sibling entry" in text_of(env.conv)
