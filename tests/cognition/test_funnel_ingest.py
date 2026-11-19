@@ -202,7 +202,9 @@ class TestPromiseAdmission:
             await turn(env)
         await turn(env)
         assert "sibling entry" in text_of(env.conv)
-        assert any(env.channel.id in m for m in logged(caplog))
+        # The fail-soft dispatcher logs the failure, naming the hook and the
+        # plugin (#1094); the call site's own except no longer sees it.
+        assert any("on_funnel_ingest" in m and "raiser" in m for m in logged(caplog))
 
     async def test_oversize_promise_entry_is_dropped_with_warning_naming_the_budget_key(self, build, caplog):
         env = await build(config={"funnel": {"budgets": {"memory": 12}}})
