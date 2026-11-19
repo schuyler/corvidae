@@ -379,8 +379,8 @@ class GoalsPlugin(CorvidaePlugin):
 
         async def add_goal(text: str, position: str = "append", _ctx=None) -> str:
             """Add an open goal. position is 'prepend' (front of the queue,
-            high priority) or 'append' (back, the default). Open goals appear,
-            with ids, in the latest goals CONTEXT entry in your window."""
+            high priority) or 'append' (back, the default). list_goals shows
+            the open goals with their ids."""
             text = _collapse(text)
             if not text:
                 return "Error: text is empty; say what the goal is"
@@ -408,8 +408,8 @@ class GoalsPlugin(CorvidaePlugin):
             return f"Goal #{cursor.lastrowid} added."
 
         async def update_goal(id: int, text: str, _ctx=None) -> str:
-            """Replace the text of an open goal. Open goals appear, with ids, in the
-            latest goals CONTEXT entry in your window."""
+            """Replace the text of an open goal. list_goals shows the open goals
+            with their ids."""
             text = _collapse(text)
             if not text:
                 return "Error: text is empty; say what the goal is now"
@@ -433,8 +433,7 @@ class GoalsPlugin(CorvidaePlugin):
         async def retire_goal(id: int, conclusion: str, _ctx=None) -> str:
             """Retire an open goal and record what you concluded. conclusion is what
             you concluded and why, in the first person: 'I concluded X, because Y'.
-            Open goals appear, with ids, in the latest goals CONTEXT entry in your
-            window."""
+            list_goals shows the open goals with their ids."""
             if _ctx is None or _ctx.channel is None:
                 return "Error: no channel context available"
             conclusion = conclusion.strip()

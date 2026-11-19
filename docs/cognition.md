@@ -34,7 +34,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
 | `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), the provenance check, and the lenses other plugins contribute through `on_critique_init` |
-| `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
+| `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a list of the open ones in every heartbeat beat |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
 | `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that contains `NO_REPLY` goes unsent, and each decline is recorded in `exchange_log`. It adds the instruction to the system prompt of chat channels, and with `silence.mode: tool` or `both` an `end_turn` tool |
@@ -1517,7 +1517,7 @@ snapshot it again with `--snapshot-from`.
 
 ### GoalsPlugin (`packages/corvidae-cognition/corvidae_cognition/goals.py`)
 
-Keeps the agent's open goals in SQLite and shows them in the window. Entry
+Keeps the agent's open goals in SQLite and shows them to the heartbeat. Entry
 point name: `"goals"`; `depends_on = frozenset({"persistence", "memory",
 "funnel", "clock"})`. Owns the `goals` table in `sessions.db` (`id`, `text`,
 `created_at`, `updated_at`, `retired_at`, `memory_id`, `status`,
@@ -1644,8 +1644,8 @@ with no prompt hash and no model, since no consolidation call produced it
 from a second process, registered under the `corvidae.commands` entry-point
 group. `PATH` must be an existing `sessions.db` in WAL mode (the daemon sets
 it on startup); the command refuses a missing file or another journal mode,
-and an empty `TEXT`. The daemon reads the table each turn, so the goal
-appears on every channel at its next turn.
+and an empty `TEXT`. The daemon reads the table each beat, so the goal
+reaches the heartbeat at its next beat.
 
 **Heartbeat contribution (#1084).** This plugin implements
 `collect_heartbeat_prompts` (`trylast`, so its section ends the beat) and
