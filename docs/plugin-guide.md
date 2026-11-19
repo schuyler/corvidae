@@ -623,7 +623,7 @@ deviation** from **accidental mess**:
 | Dirty tree (uncommitted changes) | **Refuse** — genuine risk of lost work |
 | Clean tree, expected state | **Pass** |
 | Clean tree, unexpected state (e.g., non-main branch) | **Pass** with a WARNING log line — deliberate and reproducible |
-| Missing resource / not a repo | **Refuse** — genuine problem |
+| Missing checkout / not a repo | **Refuse** — genuine problem |
 
 A clean, reproducible state on a different branch is deliberate: the
 agent or operator chose to run this code. A dirty tree is not: a
