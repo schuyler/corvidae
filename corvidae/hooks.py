@@ -14,7 +14,7 @@ Exports:
                       and dispatch to send_* methods
     create_plugin_manager()     — create and configure the PluginManager
     resolve_reject_wins()       — resolve broadcast gate-hook result lists
-    collect_contributions()     — call a collect_ hook, isolating failures
+    collect_results()           — call a collect_ hook, isolating failures
     get_dependency()            — typed plugin lookup
     validate_dependencies()     — dependency graph verification at startup
 """
@@ -311,7 +311,7 @@ def resolve_single_result(results: list, hook_name: str) -> object | None:
     return non_none[0] if non_none else None
 
 
-async def collect_contributions(hook: HookCaller, /, **kwargs: object) -> list[object]:
+async def collect_results(hook: HookCaller, /, **kwargs: object) -> list[object]:
     """Call a ``collect_`` hook and return its contributions (PRD §3.1.10).
 
     Every implementation runs concurrently. Contributions come back in hook

@@ -193,7 +193,7 @@ Hook names follow a grammar: the prefix tells you the resolution
 (`on_`/`before_`/`after_` observe, `should_` vetoes, `resolve_` takes the
 first non-None result, `transform_` runs a wrapper chain, `collect_`
 gathers contributions for the caller to combine through
-`corvidae.hooks.collect_contributions`, which isolates one
+`corvidae.hooks.collect_results`, which isolates one
 implementation's failure from the rest), and a short
 allowlist of bare imperatives covers the rest. The table and the rule for
 adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);

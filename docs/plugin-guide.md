@@ -159,7 +159,7 @@ at startup; see [Declaring hooks in a plugin](#declaring-hooks-in-a-plugin).
 | `should_` | broadcast | `resolve_reject_wins` | yes, `bool` | any number; `False` from any one rejects; `None` abstains. `should_start_work` is the one exception: it returns `WorkRefusal \| None` (K1 adds one result type to the veto grammar, so a refusal carries its limit and remedy), is not dispatched through `pm.ahook` but by `corvidae.admission.offer_work`, and the first `WorkRefusal` wins |
 | `resolve_` | `firstresult=True` | first non-`None` | yes | any number; first to answer wins, so order matters and the docstring says who answers |
 | `transform_` | `firstresult=True` wrapper chain with a seed in `_SeedHooksPlugin` | chain | yes | any number, LIFO |
-| `collect_` | broadcast, called with `collect_contributions` | the caller combines the list of contributions | yes | any number; each returns one contribution or `None` for none; one that raises is logged and skipped |
+| `collect_` | broadcast, called with `collect_results` | the caller combines the list of contributions | yes | any number; each returns one contribution or `None` for none; one that raises is logged and skipped |
 | bare imperative | broadcast | caller-defined over the result list | sometimes | any number; the docstring states what the caller does with results |
 
 The observe class has three prefixes because `before_agent_turn`,
@@ -185,12 +185,12 @@ with `resolve_single_result`).
 
 A `collect_` hook is a contribution point: each implementation returns one
 piece, and the caller combines them. Call it with
-`corvidae.hooks.collect_contributions`, not `pm.ahook`:
+`corvidae.hooks.collect_results`, not `pm.ahook`:
 
 ```python
-from corvidae.hooks import collect_contributions
+from corvidae.hooks import collect_results
 
-parts = await collect_contributions(self.pm.hook.collect_web_panels, channel=channel)
+parts = await collect_results(self.pm.hook.collect_web_panels, channel=channel)
 ```
 
 It runs every implementation concurrently, with the hook's arguments by
@@ -1696,7 +1696,7 @@ For `should_start_work`, `offer_work` catches each implementation's exception, l
 
 For `should_send_response`, the Agent catches any exception, logs it at WARNING and sends the emission anyway (fail open). apluggy gathers a broadcast's implementations concurrently without `return_exceptions`, so one raising implementation discards every sibling's verdict for that emission; once any plugin registers a `wrapper=True` implementation on the hook (as `outbound_cap` does, to count after the combined verdict), apluggy awaits the implementations one after another instead, and a raising one stops the rest from running. Either way a gate that can fail should catch and log its own errors and return None, and a slow gate adds its latency to every emission when the hook is wrapped. The serialisation is an apluggy artefact, not intended behaviour: [#904](https://github.com/schuyler/corvidae/issues/904) carries the fix (gather the non-wrappers once every wrapper is set up, each run to completion, the first exception thrown into the wrappers), and `test_wrapped_should_send_response_gates_run_concurrently` in `tests/test_outbound_cap/` is a strict xfail that fails once the lock picks it up, so this paragraph gets rewritten then.
 
-For a `collect_` hook called with `collect_contributions`, each implementation's `Exception` is caught, logged at WARNING with the hook and plugin names and the traceback, and its contribution skipped; the others are kept.
+For a `collect_` hook called with `collect_results`, each implementation's `Exception` is caught, logged at WARNING with the hook and plugin names and the traceback, and its contribution skipped; the others are kept.
 
 For `transform_display_text`, `transform_system_prompt` and `transform_tool_result` (wrapper chain hooks), pluggy propagates exceptions from wrapper implementations to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`, and `transform_system_prompt` in `channel_system_prompt`.
 
@@ -1720,7 +1720,7 @@ If you write a transport with history replay, skip `message_type == "unsent"` ro
 
 ## Async considerations
 
-All broadcast hooks are `async`. Corvidae uses apluggy's `pm.ahook.*` for async dispatch. The exception is a `collect_` hook, which is called with `collect_contributions` (see [Hook grammar](#hook-grammar)) and whose implementations may also be plain functions.
+All broadcast hooks are `async`. Corvidae uses apluggy's `pm.ahook.*` for async dispatch. The exception is a `collect_` hook, which is called with `collect_results` (see [Hook grammar](#hook-grammar)) and whose implementations may also be plain functions.
 
 For hooks with `firstresult=True` (`resolve_compaction`, `resolve_conversation`, `resolve_llm_error`), `pm.ahook.<hook>(...)` returns a single value (or None) directly:
 
