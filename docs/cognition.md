@@ -2236,8 +2236,8 @@ calls `on_notify` on `internal:heartbeat` with `source="heartbeat"` and
 (see [MemoryPlugin](#memoryplugin-packagescorvidae-cognitioncorvidae_cognitionmemorypy)), `tryfirst`, returns the recent
 memories under `memory.heartbeat_limit` (default 5), framed as the agent's own summaries and as data, oldest first: all of
 them on the first beat, then only those not yet sent (none new means no
-section). Goals' (see [GoalsPlugin](#goalsplugin-packagescorvidae-cognitioncorvidae_cognitiongoalspy)) ends the beat with its pick
-rule and retired conclusions. With neither (memory or goals disabled, say), a beat is the bare prompt; the default prompt is plugin-neutral ("Review the sections below, if there are any, ...") so it reads true either way. Nothing
+section). Goals' (see [GoalsPlugin](#goalsplugin-packagescorvidae-cognitioncorvidae_cognitiongoalspy)), `trylast`, is the last
+section: its retired conclusions, then its pick rule, directly before the prompt, which ends the beat. With neither (memory or goals disabled, say), a beat is the bare prompt; the default prompt is plugin-neutral ("Review the sections above, if there are any, ...") so it reads true either way. Nothing
 adds a "nothing new" line. The memory and goals state is committed when the hook
 runs, so a beat that the quiet re-check then skips doesn't resend its items.
 `prompts/heartbeat.md` shows a full beat. The turn then runs the

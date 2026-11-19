@@ -157,7 +157,7 @@ plugins add read-only sections to the console's chat page; see "Web" under Trans
 
 ### Funnel pull path
 
-Some sources cannot give their entries when asked, so they hand the funnel promises instead. An implementation of `on_funnel_ingest` calls `submit(source, future)` and returns; the future resolves to an `Ingest` or to `None`. Implementers submit rather than return because apluggy's `ahook` gathers implementations without `return_exceptions`: one raising implementation would lose every other one's return value. Each channel's `before_agent_turn` runs four steps in order, none of which returns early: expire (only when `funnel.ingest_ttl` is set), sweep finished promises into the channel's next-turn queue, drain the queues through the normal admission path, then collect by calling the hook. Collecting last means a promise submitted in a turn is first swept in the next; a promise that finished after the sweep and is re-submitted in that same collect is carried to the turn's own drain rather than superseded and lost (#726). A submit for a `(channel, source)` that already has a pending promise cancels that promise, and `on_stop` cancels all of them. Expiry runs only at the channel's next turn, so an idle channel's pending promise runs until then or until shutdown. The contract and its limits are in [cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy). A source that searches per user turn does not implement the hook by hand: `RecallSourceMixin` (`corvidae_cognition/recall.py`) does, adding the user-turn gate, a per-channel cooldown and single search in flight, a timeout and fail-soft logging, so the source supplies `search` and `render` only ([Recall sources](cognition.md#recall-sources-packagescorvidae-cognitioncorvidae_cognitionrecallpy)).
+Some sources cannot give their entries when asked, so they hand the funnel promises instead. An implementation of `on_funnel_ingest` calls `submit(source, future)` and returns; the future resolves to an `Ingest` or to `None`. Implementers submit rather than return because a source's entries may not be ready within the turn that asks: the future lets an entry arrive in a later turn, swept in when it resolves. Each channel's `before_agent_turn` runs four steps in order, none of which returns early: expire (only when `funnel.ingest_ttl` is set), sweep finished promises into the channel's next-turn queue, drain the queues through the normal admission path, then collect by calling the hook. Collecting last means a promise submitted in a turn is first swept in the next; a promise that finished after the sweep and is re-submitted in that same collect is carried to the turn's own drain rather than superseded and lost (#726). A submit for a `(channel, source)` that already has a pending promise cancels that promise, and `on_stop` cancels all of them. Expiry runs only at the channel's next turn, so an idle channel's pending promise runs until then or until shutdown. The contract and its limits are in [cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy). A source that searches per user turn does not implement the hook by hand: `RecallSourceMixin` (`corvidae_cognition/recall.py`) does, adding the user-turn gate, a per-channel cooldown and single search in flight, a timeout and fail-soft logging, so the source supplies `search` and `render` only ([Recall sources](cognition.md#recall-sources-packagescorvidae-cognitioncorvidae_cognitionrecallpy)).
 
 ### Funnel `ponder` tool
 
@@ -5140,12 +5140,12 @@ entry-point names are offered as choices. It is not an error and does not
 stop the daemon.
 
 Next, `install_plugin_hookspecs(pm)` installs the hookspecs plugins
-declare ([Plugin-declared hookspecs](#plugin-declared-hookspecs)), and
-the hook arg-binding guard checks every impl against the full set of
-specs. `check_fail_soft_wrappers(pm)` then refuses a
+declare ([Plugin-declared hookspecs](#plugin-declared-hookspecs)).
+`check_fail_soft_wrappers(pm)` then refuses a
 `wrapper=True`/`hookwrapper=True` impl on any fail-soft hook, naming the
 hook, the plugin and the fix, since `ahook_isolated` can't drive wrappers
-(a wrapper on `on_init` or `on_start` is allowed). Then `validate_dependencies(pm)` runs
+(a wrapper on `on_init` or `on_start` is allowed), and the hook
+arg-binding guard checks every impl against the full set of specs. Then `validate_dependencies(pm)` runs
 to verify every plugin's `depends_on` set names a registered plugin.
 Startup aborts with `RuntimeError` if any dependency is missing.
 `report_orphan_hookimpls(pm)` then logs any hookimpl left with no spec,

@@ -1701,6 +1701,8 @@ For `should_process_message` (broadcast, resolved with `resolve_reject_wins`), e
 
 For `should_start_work`, `offer_work` catches each implementation's exception, logs it with the plugin name and treats it as no opinion; the other implementations still vote (see [Refusing internal work](#refusing-internal-work)).
 
+For `transform_display_text`, `transform_system_prompt` and `transform_tool_result` (wrapper chain hooks), pluggy propagates exceptions from wrapper implementations to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`, and `transform_system_prompt` in `channel_system_prompt`.
+
 For `should_send_response`, the Agent catches any exception, logs it at WARNING and sends the emission anyway (fail open). With `outbound_cap`'s `wrapper=True` implementation loaded, apluggy gathers the gates concurrently ([#904](https://github.com/schuyler/corvidae/issues/904), landed in apluggy), each runs to completion, and a raising gate no longer stops the others; the first exception is thrown into the wrappers. Without a wrapper, apluggy's plain broadcast still lets the first exception discard the siblings' verdicts for that emission, so a gate that can fail should still catch and log its own errors and return None.
 
 ## Output gating
