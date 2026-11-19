@@ -135,10 +135,11 @@ async def test_heartbeat_implements_only_lifecycle_hooks(
     rig_factory: Callable[..., Awaitable[Rig]],
 ) -> None:
     """R1: HeartbeatPlugin registers no hook that could edit the window; the
-    only hooks it implements are its lifecycle ones."""
+    only hooks it implements are its lifecycle ones and its own beat
+    contribution, which feeds the notification text (#1084)."""
     rig = await rig_factory()
     names = {caller.name for caller in rig.plugin.pm.get_hookcallers(rig.hb)}
-    assert names <= {"on_init", "on_start", "on_stop", "on_compaction"}
+    assert names <= {"on_init", "on_start", "on_stop", "collect_heartbeat_prompts"}
 
 
 async def test_each_beat_extends_the_previous_window(

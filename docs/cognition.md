@@ -38,7 +38,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
 | `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that contains `NO_REPLY` goes unsent, and each decline is recorded in `exchange_log`. It adds the instruction to the system prompt of chat channels, and with `silence.mode: tool` or `both` an `end_turn` tool |
-| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn reviews recent memory (and goals, when loaded) and acts only if something warrants it. Asleep unless configured |
+| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn is `heartbeat.prompt` plus the sections plugins add through `collect_heartbeat_prompts` (recent memory from the heartbeat itself, goals' pick rule and retired conclusions), and acts only if something warrants it. Asleep unless configured |
 | `SkillsPlugin` | `skills` | Scans a skills directory for `SKILL.md` files; contributes an index (name + description) to the system prompt via `transform_system_prompt` at conversation start and compaction; provides a `use_skill` tool that loads a skill's full text on demand |
 
 Entry-point names are the same as when these plugins lived in the kernel, so
@@ -1531,12 +1531,12 @@ still works: the row is inserted without a position, with a warning, and
 the daemon's migration then orders it by id.) A goal's status is
 `open`, `in-progress` (being worked, so a restart resumes it rather than
 re-picking), `blocked` (waiting on something external) or `waiting` (done,
-awaiting review); retiring sets `retired_at`. The heartbeat lists open goals
-front of the queue first, marks every goal that is not plain `open` with its
-status, and its goals instruction tells the model to resume an in-progress
-goal, otherwise take the first goal that is neither blocked nor waiting. That
-pick rule is a prompt, not a framework rule, and the heartbeat still decides
-whether a beat warrants action at all.
+awaiting review); retiring sets `retired_at`. The goals entry lists open goals
+front of the queue first and marks every goal that is not plain `open` with its
+status, and the goals instruction the beat carries tells the model to resume an
+in-progress goal, otherwise take the first goal that is neither blocked nor
+waiting. That pick rule is a prompt, not a framework rule, and the heartbeat
+still decides whether a beat warrants action at all.
 
 The plugin owns a hook spec (`GoalsSpec`, as the funnel owns `FunnelSpec`):
 `on_goals_state_changed(goal_id, kind, old_status, new_status,
@@ -1632,13 +1632,20 @@ it on startup); the command refuses a missing file or another journal mode,
 and an empty `TEXT`. The daemon reads the table each turn, so the goal
 appears on every channel at its next turn.
 
-**Heartbeat review.** A beat's turn carries the goals entry like any other
-turn. When this plugin is loaded, the heartbeat also asks
-`retired_goals(heartbeat.retired_goal_limit)` (default 5) for the newest
-retirement records (agent-wide, newest
-first, each with its age) and appends them to the beat with an instruction
-to take a next step on an open goal or retire a finished one, and not to
-take up a retired goal again without something new (see HeartbeatPlugin).
+**Heartbeat contribution (#1084).** A beat's turn carries the goals entry
+like any other turn, so the heartbeat no longer renders the open goals. This
+plugin implements `collect_heartbeat_prompts` (`trylast`, so its section ends
+the beat) and returns two things: the newest `heartbeat.retired_goal_limit`
+(default 5) retirement records (agent-wide, newest first, each with its age,
+framed as data), and `GOALS_INSTRUCTION`, the pick rule that tells the model to
+take a next step on an open goal or retire a finished one, and not to take up a
+retired goal again without something new. The instruction goes on every beat.
+The retired block follows the funnel's only-what's-new rule (#716): full on the
+first beat and again after the beat channel compacts (the plugin's own
+`on_compaction` resets its state, since a summary may not keep structured data),
+otherwise only records not yet sent, and omitted when there are none.
+`heartbeat.retired_goal_limit` and `heartbeat.goals_instruction` are read here
+until #1079 retires them; a bad limit fails this plugin's startup.
 
 **Without this plugin:** the goal tools, the goals entry and the `goals`
 table are absent. Goals already in an existing database stay there unread.
@@ -2197,24 +2204,26 @@ any channel cancels the pending beat. The result is at most one beat per
 `after` seconds, never two at once, and none during a conversation. Under
 traffic that never stops it never beats; that is accepted until #214.
 
-**What a beat is.** The plugin reads `MemoryPlugin.recent(heartbeat.memory_limit)` (default 5),
-re-checks that the system is still quiet (a message may have landed
-during the read), and calls `on_notify` on `internal:heartbeat` with
-`source="heartbeat"` and `annotations={"origin": "heartbeat"}`. Without the
-goals plugin the text is the memories, framed as the agent's own summaries and
-as data (or `(none)`), followed by the heartbeat prompt
-(`DEFAULT_HEARTBEAT_PROMPT`, overridable with `heartbeat.prompt`; documented
+**What a beat is.** `heartbeat.prompt` (`DEFAULT_HEARTBEAT_PROMPT`; documented
 copy in `prompts/heartbeat.md`, and the key's resolution in
-[configuration.md](configuration.md#heartbeat--a-turn-on-system-idle)). When
-the goals plugin is loaded, the beat leads with the conclusions of up to
-`heartbeat.retired_goal_limit` retired goals (default 5,
-`GoalsPlugin.retired_goals`), framed as data, then the open goals front of the
-queue first, each not plainly open marked `[in-progress]`, `[blocked]` or
-`[waiting]`; then the memories and the prompt; and it ends with
-`GOALS_INSTRUCTION`, the queue's pick rule (overridable with
-`heartbeat.goals_instruction`; documented copy in `prompts/heartbeat-goals.md`),
-so the call-to-action is last. `prompts/heartbeat.md` shows a full beat. A failed memory or retired-goals read
-skips the beat, which is retried after one period. The turn then runs the
+[configuration.md](configuration.md#heartbeat--a-turn-on-system-idle)) is the
+whole beat unless plugins add to it. The plugin owns `collect_heartbeat_prompts(channel)`
+and gathers it with `collect_results` (PRD §3.1.10); every implementation
+returns one section or `None`, and the sections follow the prompt, separated by
+blank lines, in hook order. A raising implementation is logged and skipped, and
+the beat goes out without its section. Before notifying, the beat re-checks that
+the system is still quiet (a message may have landed during the gather), then
+calls `on_notify` on `internal:heartbeat` with `source="heartbeat"` and
+`annotations={"origin": "heartbeat"}`. Two implementations ship. The heartbeat's
+own, `tryfirst` and interim until #1079 moves it to the memory plugin, reads
+`MemoryPlugin.recent(heartbeat.memory_limit)` (default 5) and returns the
+memories framed as the agent's own summaries and as data, oldest first: all of
+them on the first beat, then only those not yet sent (none new means no
+section). Goals' (see [GoalsPlugin](#goalsplugin-packagescorvidae-cognitioncorvidae_cognitiongoalspy)) ends the beat with its pick
+rule and retired conclusions. With neither, a beat is the bare prompt. Nothing
+adds a "nothing new" line. The memory and goals state is committed when the hook
+runs, so a beat that the quiet re-check then skips doesn't resend its items.
+`prompts/heartbeat.md` shows a full beat. The turn then runs the
 ordinary notification pipeline with the agent's normal tools. The `heartbeat`
 origin follows the general conventions: critique judges it like any other
 turn (#1031), the decide gate treats it as non-user, and `exchange_log`
