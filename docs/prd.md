@@ -390,22 +390,24 @@ one is a bug even if its tests pass.
     observe (return value ignored; in-place mutation of passed objects
     allowed), `should_` vetoes (reject wins), `resolve_` takes the first
     non-None result, `transform_` is a wrapper chain over a seed,
-    `collect_` gathers one contribution from every implementation, in hook
-    order (`tryfirst`, the rest, `trylast`), for the caller to combine,
-    with an implementation that raises logged and skipped rather than
-    costing the others theirs, and a short allowlist of bare imperatives (`send`, `register_tools`,
-    `persist_message`) documents what the caller does with results. A test
+    `collect_` gathers contributions for the caller to combine (see
+    below), and a short allowlist of bare imperatives (`send`,
+    `register_tools`, `persist_message`) documents what the caller does with results. A test
     enforces the prefixes against pluggy options for the kernel's
     `AgentSpec`. A hook only one plugin calls is owned by that plugin
     (`hookspecs` on its class), not added to `AgentSpec`. Its name carries
     the owner's plugin name right after the prefix
     (`on_<plugin>_<name>`), it uses a prefixed class (bare imperatives are
     kernel-only), and it has exactly one owner. Startup checks all of this
-    and fails naming the hook, the plugin and the fix.
+    and fails naming the hook, the plugin and the fix. A `collect_` hook
+    returns its contributions in hook order (`tryfirst`, then the rest in
+    no guaranteed order, then `trylast`); implementations may run
+    concurrently. `None` contributes nothing. An implementation that
+    raises an `Exception` is logged at WARNING, naming the hook and the
+    plugin, and skipped; the others' contributions are kept.
 11. A new hookspec, kernel or plugin-owned, is admitted only when it is a decision point, an
     observation or a contribution point with at least two plausible
-    implementers, or the pair of
-    an existing observability hook. A single-consumer observation gets a
+    implementers, or the pair of an existing observability hook. A single-consumer observation gets a
     `annotations` entry or a return value on an existing hook instead.
 12. Hook parameters with defaults can be dropped silently by pluggy; a
     startup guard rejects implementations that re-declare a spec-required
