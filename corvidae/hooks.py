@@ -111,7 +111,7 @@ def install_plugin_hookspecs(pm: pluggy.PluginManager) -> None:
     2. Per plugin: check the hook grammar, the owner segment
        (``<prefix><plugin>_<name>``) and the pluggy options, install the
        specs, then check each ``transform_`` hook has the owner's own
-       ``trylast`` seed.
+       ``trylast`` seed and each ``collect_`` hook has no wrapper impl.
 
     Raises:
         PluginValidationError: naming the hook, the plugin and the fix.
@@ -175,6 +175,8 @@ def install_plugin_hookspecs(pm: pluggy.PluginManager) -> None:
         for hook_name in names:
             if grammar_class(hook_name) == "transform":
                 _check_transform_seed(pm, plugin_name, plugin, hook_name)
+            elif grammar_class(hook_name) == "collect":
+                _check_collect_has_no_wrappers(pm, hook_name)
 
 
 def _check_plugin_hook_name(
@@ -231,6 +233,27 @@ def _check_transform_seed(
             f"registers no seed for it. Add an @hookimpl(trylast=True) "
             f"{hook_name} to {type(plugin).__name__} that returns its input "
             f"unchanged, as _SeedHooksPlugin does for kernel transforms.",
+        )
+
+
+def _check_collect_has_no_wrappers(pm: pluggy.PluginManager, hook_name: str) -> None:
+    """Refuse a wrapper impl on a collect_ hook (#1083).
+
+    collect_results calls each implementation for one contribution and
+    doesn't drive pluggy's wrapper protocol, so a wrapper would hand back
+    its generator object as a contribution.
+    """
+    # Every impl registered so far, including ones registered before the spec.
+    for impl in getattr(pm.hook, hook_name).get_hookimpls():
+        option = "wrapper" if impl.wrapper else "hookwrapper" if impl.hookwrapper else None
+        if option is None:
+            continue
+        raise pluggy.PluginValidationError(
+            impl.plugin,
+            f"Plugin {impl.plugin_name!r} implements collect hook {hook_name!r} "
+            f"with {option}=True, but collect_ hooks don't run wrappers: each "
+            f"implementation returns one contribution (or None). Remove "
+            f"{option}=True and return the contribution.",
         )
 
 

@@ -634,6 +634,31 @@ class TestGrammarCheck:
         assert "'web'" in message
         assert "trylast" in message
 
+    @pytest.mark.parametrize("option", ["wrapper", "hookwrapper"])
+    def test_wrapper_on_collect_hook_fails(self, option: str) -> None:
+        """#1083: collect_results calls each impl for one contribution and
+        doesn't drive wrappers, so startup refuses a wrapper impl, naming
+        the hook, the implementing plugin and the fix."""
+
+        class Spec:
+            @hookspec
+            async def collect_web_parts(self, value: int) -> object:
+                pass
+
+        class Wrapping:
+            @hookimpl(**{option: True})
+            def collect_web_parts(self, value: int):
+                yield
+
+        message = _install_error(
+            _pm(("web", _owner_with(Spec)), ("wrapping", Wrapping()))
+        )
+
+        assert "collect_web_parts" in message
+        assert "'wrapping'" in message
+        assert f"{option}=True" in message
+        assert f"Remove {option}=True" in message  # the remedy
+
     def test_transform_seed_from_another_plugin_does_not_count(self) -> None:
         class Spec:
             @hookspec(firstresult=True)

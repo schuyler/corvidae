@@ -120,7 +120,8 @@ grammar (`HOOK_GRAMMAR` in `hooks.py`, the same table
 `tests/test_hook_grammar.py` uses for `AgentSpec`), with the owner's
 registered plugin name right after the prefix (`on_web_<name>`). It also
 checks the pluggy options match the prefix, installs the specs, and
-requires the owner's own `trylast` seed for each `transform_` hook. Bare
+requires the owner's own `trylast` seed for each `transform_` hook and
+refuses a `wrapper=True`/`hookwrapper=True` impl on a `collect_` hook. Bare
 imperatives are kernel-only. Every failure raises `PluginValidationError`
 naming the hook, the plugin and the fix.
 

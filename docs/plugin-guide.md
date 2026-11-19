@@ -200,9 +200,9 @@ rest in no guaranteed order, then `trylast`. An implementation that raises
 an `Exception` is logged at WARNING, naming the hook and the plugin, and
 skipped; the others' contributions are kept. A `BaseException` such as
 `CancelledError` propagates once the siblings have finished.
-Implementations may be `async` or plain functions. Don't register a
-`wrapper=True` or `hookwrapper=True` implementation on a `collect_` hook:
-the helper doesn't drive wrappers. No kernel hook is a `collect_` hook
+Implementations may be `async` or plain functions. A `wrapper=True` or
+`hookwrapper=True` implementation on a `collect_` hook fails startup,
+since the helper doesn't drive wrappers. No kernel hook is a `collect_` hook
 yet; plugins declare their own (below).
 
 ### Adding a hook
@@ -261,6 +261,9 @@ declaration breaks one of these rules:
 - **Transform seeds come from the owner.** A `transform_` hook needs an
   `@hookimpl(trylast=True)` on the owner itself that returns its input
   unchanged, which is what `_SeedHooksPlugin` provides for kernel transforms.
+- **No wrappers on collect hooks.** A `collect_` hook's implementations
+  each return one contribution; startup refuses one registered with
+  `wrapper=True` or `hookwrapper=True`, naming the implementing plugin.
 
 The owner segment is the plugin's registered name: its entry-point name,
 or the `name=` passed to `pm.register`. Renaming an entry point renames
