@@ -181,7 +181,7 @@ async def beat_text(env) -> str:
     """The goals section of a beat, as the heartbeat would collect it."""
     # The retired-goals query joins memory, whose table this fixture creates lazily.
     await env.memory._ensure_schema()
-    return await env.goals.collect_heartbeat_prompts(env.channel)
+    return await env.goals.on_heartbeat_collect_prompts(env.channel)
 
 
 async def rows(env, sql: str, params=()) -> list[tuple]:
@@ -624,7 +624,8 @@ class TestG6ReviewLoop:
 
     async def test_subscriber_failure_does_not_undo_retirement(self, env, caplog):
         """A subscriber that raises, dispatched through pluggy, must not undo a
-        committed retirement; the failure is logged at WARNING naming the goal."""
+        committed retirement; the failure is logged at WARNING naming the hook
+        and the subscriber's plugin (the fail-soft dispatcher, #1094)."""
         import logging
 
         class _Raiser(CorvidaePlugin):
@@ -647,7 +648,9 @@ class TestG6ReviewLoop:
         assert "retired" in result.lower()
         assert (await rows(env, "SELECT retired_at FROM goals WHERE id = ?", (goal_id,)))[0][0] is not None
         assert any(
-            r.levelno == logging.WARNING and f"goal {goal_id}" in r.getMessage()
+            r.levelno == logging.WARNING
+            and "on_goals_state_changed" in r.getMessage()
+            and "_Raiser" in r.getMessage()
             for r in caplog.records
         )
 

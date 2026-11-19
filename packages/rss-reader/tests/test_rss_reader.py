@@ -718,3 +718,50 @@ async def test_no_prompt_when_absent(tmp_path: Path):
     for call in mock_channel.notify.call_args_list:
         text = call.kwargs.get("text") or call.args[0] if call.args else call.kwargs["text"]
         assert not text.startswith("Summarise")
+
+
+@pytest.mark.asyncio
+async def test_poll_once_does_not_mark_seen_when_an_on_notify_impl_raises(tmp_path: Path):
+    """#1094 req 8: through a real NotificationSpill on a real plugin manager,
+    a raising on_notify implementation makes notify raise, so the item is not
+    marked delivered and is retried next poll. on_notify is fail-soft, so the
+    spill must dispatch through pm.ahook_raise to keep that."""
+    from corvidae.hooks import create_plugin_manager, hookimpl
+    from corvidae.spill import NotificationSpill
+
+    class _RaisingNotify:
+        """A sibling whose on_notify always fails."""
+
+        @hookimpl
+        async def on_notify(self, channel, source, text, tool_call_id, annotations):
+            raise RuntimeError("sibling on_notify exploded")
+
+    pm = create_plugin_manager()
+    pm.register(_RaisingNotify(), name="raising_notify")
+    spill = NotificationSpill()
+    spill.pm = pm
+
+    plugin = _make_plugin({})
+    plugin._spill = spill
+    plugin._feeds = ["https://example.com/feed"]
+    plugin._targets = ("signal:+15551234567",)
+    plugin._max_items = 10
+    plugin._state_path = tmp_path / "seen.json"
+    plugin._max_chars = 2000
+    plugin._poll_secs = 60
+
+    mock_resp = MagicMock()
+    mock_resp.content = RSS_SAMPLE
+    mock_resp.raise_for_status = MagicMock()
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=MagicMock())):
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            await plugin._poll_once()
+
+    # Neither item was delivered, so neither guid may be recorded as seen.
+    seen = plugin._load_seen()
+    assert seen.get("https://example.com/feed", []) == []

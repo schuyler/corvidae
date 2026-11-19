@@ -100,7 +100,16 @@ class AgentSpec:
 ```
 
 `create_plugin_manager()` in `hooks.py` creates the manager and adds
-the `AgentSpec` hookspecs.
+the `AgentSpec` hookspecs. It also replaces `pm.ahook` with a `PolicyAHook`:
+for an observe hook (`on_`/`before_`/`after_`, except `on_init` and
+`on_start`, the `FAIL_HARD_HOOKS`) it dispatches through apluggy's
+`pm.ahook_isolated`, so each implementation runs to completion, a failure is
+logged at WARNING naming the hook and plugin, and the other values come back
+in hook order; every other hook keeps apluggy's own dispatch. It adds
+`pm.ahook_raise` beside it, which logs the same way and then raises the first
+failure once every implementation has finished. A call site whose `except`
+acts on the failure (an error tool result, a cursor rewind) uses
+`ahook_raise`, so its fallback never runs while a sibling is still in flight.
 
 ### Plugin-declared hookspecs
 
@@ -121,7 +130,7 @@ grammar (`HOOK_GRAMMAR` in `hooks.py`, the same table
 registered plugin name right after the prefix (`on_web_<name>`). It also
 checks the pluggy options match the prefix, installs the specs, and
 requires the owner's own `trylast` seed for each `transform_` hook and
-refuses a `wrapper=True`/`hookwrapper=True` impl on a `collect_` hook. Bare
+leaves wrappers on fail-soft hooks to the startup check below. Bare
 imperatives are kernel-only. Every failure raises `PluginValidationError`
 naming the hook, the plugin and the fix.
 
@@ -144,11 +153,11 @@ plugin.
 The `webhook` plugin owns `on_webhook_subscribe(subscriptions)`, through which
 plugins register handlers for webhook endpoints; see "Webhook ingress" under
 Transports. The `web` plugin owns `on_web_console_init(panels)`, through which
-plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path). The `heartbeat` plugin (cognition extra) owns `collect_heartbeat_prompts(channel)`, a `collect_` hook through which a plugin adds one section to the beat's text; see [cognition.md](cognition.md#heartbeatplugin). The `critique` plugin (cognition extra) owns `on_critique_init(config, add_lens)`, through which plugins add critique lenses; see "CritiquePlugin: lenses other plugins add" in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init). It also owns `transform_critique_prompt(channel, trace_id, lens_name, instruction)`, through which a plugin adds live context to a lens's fork instruction; see [cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt).
+plugins add read-only sections to the console's chat page; see "Web" under Transports. The `funnel` plugin (cognition extra) owns `on_funnel_ingest(channel, trace_id, annotations, submit)`, the pull path described under [Funnel pull path](#funnel-pull-path). The `heartbeat` plugin (cognition extra) owns `on_heartbeat_collect_prompts(channel)`, an observe hook whose `str | None` values the plugin combines: sections in hook order, then the heartbeat prompt; see [cognition.md](cognition.md#heartbeatplugin). The `critique` plugin (cognition extra) owns `on_critique_init(config, add_lens)`, through which plugins add critique lenses; see "CritiquePlugin: lenses other plugins add" in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init). It also owns `transform_critique_prompt(channel, trace_id, lens_name, instruction)`, through which a plugin adds live context to a lens's fork instruction; see [cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt).
 
 ### Funnel pull path
 
-Some sources cannot give their entries when asked, so they hand the funnel promises instead. An implementation of `on_funnel_ingest` calls `submit(source, future)` and returns; the future resolves to an `Ingest` or to `None`. Implementers submit rather than return because apluggy's `ahook` gathers implementations without `return_exceptions`: one raising implementation would lose every other one's return value. Each channel's `before_agent_turn` runs four steps in order, none of which returns early: expire (only when `funnel.ingest_ttl` is set), sweep finished promises into the channel's next-turn queue, drain the queues through the normal admission path, then collect by calling the hook. Collecting last means a promise submitted in a turn is first swept in the next; a promise that finished after the sweep and is re-submitted in that same collect is carried to the turn's own drain rather than superseded and lost (#726). A submit for a `(channel, source)` that already has a pending promise cancels that promise, and `on_stop` cancels all of them. Expiry runs only at the channel's next turn, so an idle channel's pending promise runs until then or until shutdown. The contract and its limits are in [cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy). A source that searches per user turn does not implement the hook by hand: `RecallSourceMixin` (`corvidae_cognition/recall.py`) does, adding the user-turn gate, a per-channel cooldown and single search in flight, a timeout and fail-soft logging, so the source supplies `search` and `render` only ([Recall sources](cognition.md#recall-sources-packagescorvidae-cognitioncorvidae_cognitionrecallpy)).
+Some sources cannot give their entries when asked, so they hand the funnel promises instead. An implementation of `on_funnel_ingest` calls `submit(source, future)` and returns; the future resolves to an `Ingest` or to `None`. Implementers submit rather than return because a source's entries may not be ready within the turn that asks: the future lets an entry arrive in a later turn, swept in when it resolves. Each channel's `before_agent_turn` runs four steps in order, none of which returns early: expire (only when `funnel.ingest_ttl` is set), sweep finished promises into the channel's next-turn queue, drain the queues through the normal admission path, then collect by calling the hook. Collecting last means a promise submitted in a turn is first swept in the next; a promise that finished after the sweep and is re-submitted in that same collect is carried to the turn's own drain rather than superseded and lost (#726). A submit for a `(channel, source)` that already has a pending promise cancels that promise, and `on_stop` cancels all of them. Expiry runs only at the channel's next turn, so an idle channel's pending promise runs until then or until shutdown. The contract and its limits are in [cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy). A source that searches per user turn does not implement the hook by hand: `RecallSourceMixin` (`corvidae_cognition/recall.py`) does, adding the user-turn gate, a per-channel cooldown and single search in flight, a timeout and fail-soft logging, so the source supplies `search` and `render` only ([Recall sources](cognition.md#recall-sources-packagescorvidae-cognitioncorvidae_cognitionrecallpy)).
 
 ### Funnel `ponder` tool
 
@@ -192,10 +201,10 @@ at most one (persistence) returns a value.
 
 Hook names follow a grammar: the prefix tells you the resolution
 (`on_`/`before_`/`after_` observe, `should_` vetoes, `resolve_` takes the
-first non-None result, `transform_` runs a wrapper chain, `collect_`
-gathers contributions for the caller to combine through
-`corvidae.hooks.collect_results`, which isolates one
-implementation's failure from the rest), and a short
+first non-None result, `transform_` runs a wrapper chain; observe hooks
+fail soft in the kernel's dispatch, so one implementation's failure is
+logged and the rest still run, and a caller may combine the returned
+values), and a short
 allowlist of bare imperatives covers the rest. The table and the rule for
 adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);
 `tests/test_hook_grammar.py` enforces the name/option half for
@@ -1514,8 +1523,9 @@ channel, task id and tool call id and, for a tool task, calls
 `Agent.deliver_tool_error`, which queues an error `role: "tool"` result
 straight onto the channel's serial queue. Without it the id would stay in
 `pending_tool_call_ids` and the tool cycle would never finish (#173). The
-broadcast runs every hookimpl via `asyncio.gather`, so a third-party
-hookimpl can raise after `Agent.on_notify` already queued the real result.
+call (`pm.ahook_raise`) runs every hookimpl to completion and then raises
+the first failure, so a third-party hookimpl's raise arrives after
+`Agent.on_notify` already queued the real result.
 The Agent therefore records each queued tool result as
 `(channel_id, tool_call_id)` in `_queued_tool_results` until the item is
 processed (dropped in the same step that discards the id from
@@ -2233,9 +2243,10 @@ restart or the restart tool's pre-flight):
    keeps one alive) hangs the process there forever, and `atexit` runs
    only after that join, so it cannot help. `Runtime.run(exit_watchdog=True)`
    arms a daemon thread in a `finally` around `await self.stop()`, so it
-   is armed even when an `on_stop` raises (apluggy's broadcast propagates
-   the first exception and skips the rest of shutdown, the likeliest way
-   to leak). If the process is still alive `exit_timeout` seconds later,
+   is armed even when shutdown fails (an `on_stop` that raises is logged
+   and skipped by the fail-soft dispatch, but `agent.on_stop` raising, a
+   `BaseException` or the timeout still cuts the rest of shutdown short,
+   the likeliest way to leak). If the process is still alive `exit_timeout` seconds later,
    the thread logs a WARNING naming the non-daemon threads still running
    and the key, flushes the root logger's handlers (not
    `logging.shutdown()`, which runs from `atexit` and would close
@@ -2283,7 +2294,9 @@ config error's `SystemExit` before any plugin loads finds nothing to close),
 `Runtime.run` runs `_cleanup_failed_start()` before re-raising: the
 `on_stop` broadcast, `idle.stop()` and `clock.close()`, under the same
 bound as `stop()`, `daemon.shutdown_timeout` (3 s by default). As there, an
-`on_stop` that raises skips the last two;
+`on_stop` that raises an `Exception` is logged and skipped (observe hooks
+fail soft), so the last two still run; a `BaseException` or the timeout
+skips them;
 `asyncio.run` cancels leftover timers on exit. `agent.on_stop` is skipped, since the Agent may not
 have started. Without this, persistence's open aiosqlite connection (a
 non-daemon worker thread) kept the interpreter from exiting, so a daemon
@@ -5131,9 +5144,12 @@ entry-point names are offered as choices. It is not an error and does not
 stop the daemon.
 
 Next, `install_plugin_hookspecs(pm)` installs the hookspecs plugins
-declare ([Plugin-declared hookspecs](#plugin-declared-hookspecs)), and
-the hook arg-binding guard checks every impl against the full set of
-specs. Then `validate_dependencies(pm)` runs
+declare ([Plugin-declared hookspecs](#plugin-declared-hookspecs)).
+`check_fail_soft_wrappers(pm)` then refuses a
+`wrapper=True`/`hookwrapper=True` impl on any fail-soft hook, naming the
+hook, the plugin and the fix, since `ahook_isolated` can't drive wrappers
+(a wrapper on `on_init` or `on_start` is allowed), and the hook
+arg-binding guard checks every impl against the full set of specs. Then `validate_dependencies(pm)` runs
 to verify every plugin's `depends_on` set names a registered plugin.
 Startup aborts with `RuntimeError` if any dependency is missing.
 `report_orphan_hookimpls(pm)` then logs any hookimpl left with no spec,

@@ -565,21 +565,20 @@ class _BrokenMetrics:
 
 async def test_r12_failing_on_metrics_consumer_is_logged_and_shutdown_completes(make_stack, caplog) -> None:
     """R12 rescue: an on_metrics consumer that raises never breaks a call or
-    shutdown; LLMPlugin logs a warning naming the lease metric, the key and
-    the provider."""
+    shutdown; the fail-soft dispatcher logs a warning naming the hook and the
+    consumer's plugin (#1094)."""
     stack = await make_stack(1)
     stack.plugin.pm.register(_BrokenMetrics(), name="broken_metrics")
     script(stack, {})
 
-    with caplog.at_level("WARNING", logger="corvidae.llm_plugin"):
+    with caplog.at_level("WARNING"):
         await send(stack, stack.a, "A1")
         await until(lambda: len(sent_texts(stack.plugin.pm, OutboundMessage)) >= 1, "A's reply")
         await stack.llm.on_stop()
 
-    messages = [r.getMessage() for r in caplog.records if r.name == "corvidae.llm_plugin"]
-    assert any(
-        "lease.grant" in m and stack.a.id in m and "main" in m for m in messages
-    ), messages
+    # Shutdown completed above; the consumer's failure was logged, not raised.
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("on_metrics" in m and "broken_metrics" in m for m in messages), messages
 
 
 async def test_r13_usage_log_created_before_this_change_gains_lease_wait_ms_in_place(tmp_path) -> None:

@@ -132,7 +132,7 @@ async def make_env(tmp_path, monkeypatch):
 
         hb = HeartbeatPlugin()
         pm.register(hb, name="heartbeat")
-        # Plugin-owned hookspecs (collect_heartbeat_prompts) are installed at startup.
+        # Plugin-owned hookspecs (on_heartbeat_collect_prompts) are installed at startup.
         install_plugin_hookspecs(pm)
         validate_dependencies(pm)
         await hb.on_init(pm=pm, config=config)
@@ -263,15 +263,16 @@ class RaisingContributor:
     """A plugin whose beat contribution fails; the beat must survive it."""
 
     @hookimpl
-    async def collect_heartbeat_prompts(self, channel):
+    async def on_heartbeat_collect_prompts(self, channel):
         raise RuntimeError("contributor blew up")
 
 
-async def test_beat_is_prompt_then_memory_then_goals_section(make_env):
-    """R7, #1079 AC1: through a real plugin manager with heartbeat, memory and
-    goals, the delivered text is the prompt, memory's section (its own hook,
-    tryfirst), then goals' retired block and instruction at the tail (the
-    call to action is the last thing in the window)."""
+async def test_beat_is_memory_then_goals_sections_then_prompt(make_env):
+    """R7, #1079 AC1, #1094 req 5: through a real plugin manager with
+    heartbeat, memory and goals, the delivered text is memory's section (its
+    own hook, tryfirst), then goals' retired block and instruction, then the
+    heartbeat prompt last (the call to action is the last thing in the window,
+    and says \"above\")."""
     env = await make_env(with_goals=True)
     ctx = ctx_for("irc:#test")
     await add_message(env, "irc:#test", "talking about the wiki backup")
@@ -280,14 +281,16 @@ async def test_beat_is_prompt_then_memory_then_goals_section(make_env):
 
     await env.clock.advance(AFTER)
     text = env.agent.calls[0]["text"]
-    assert text.startswith(heartbeat.DEFAULT_HEARTBEAT_PROMPT)
+    assert text.endswith(heartbeat.DEFAULT_HEARTBEAT_PROMPT)
     positions = [
         text.index(memory_mod.MEMORY_HEADER),
         text.index(goals_mod.RETIRED_GOALS_HEADER),
         text.index(goals_mod.GOALS_INSTRUCTION),
+        text.index(heartbeat.DEFAULT_HEARTBEAT_PROMPT),
     ]
     assert positions == sorted(positions)
-    assert text.rstrip().endswith(goals_mod.GOALS_INSTRUCTION)
+    # Sections are separated from the prompt by one blank line.
+    assert text.endswith(f"\n\n{heartbeat.DEFAULT_HEARTBEAT_PROMPT}")
 
 
 async def test_beat_lists_the_open_goals_in_full_every_time(make_env):
@@ -305,7 +308,7 @@ async def test_beat_lists_the_open_goals_in_full_every_time(make_env):
 
 
 async def test_a_raising_contributor_is_skipped_and_the_others_kept(make_env, caplog):
-    """R7: one plugin's failing collect_heartbeat_prompts is logged, naming
+    """R7: one plugin's failing on_heartbeat_collect_prompts is logged, naming
     the hook and the plugin, and the beat still carries the other sections."""
     env = await make_env(with_goals=True)
     env.pm.register(RaisingContributor(), name="flaky")
@@ -315,8 +318,9 @@ async def test_a_raising_contributor_is_skipped_and_the_others_kept(make_env, ca
     text = env.agent.calls[0]["text"]
     assert memory_mod.MEMORY_HEADER in text
     assert goals_mod.GOALS_INSTRUCTION in text
+    assert text.endswith(heartbeat.DEFAULT_HEARTBEAT_PROMPT)
     assert any(
-        "collect_heartbeat_prompts" in r.getMessage() and "flaky" in r.getMessage()
+        "on_heartbeat_collect_prompts" in r.getMessage() and "flaky" in r.getMessage()
         for r in caplog.records
     )
 
@@ -390,7 +394,7 @@ async def _goals_limit_seen(config: dict) -> int:
 
     plugin.retired_goals = retired
     plugin._goals_list_text = no_list  # no DB behind this plugin
-    await plugin.collect_heartbeat_prompts(channel=None)
+    await plugin.on_heartbeat_collect_prompts(channel=None)
     return seen[0]
 
 
@@ -432,7 +436,7 @@ async def test_goals_heartbeat_instruction_override_is_what_the_hook_returns():
 
     plugin.retired_goals = none_retired
     plugin._goals_list_text = no_list  # no DB behind this plugin
-    section = await plugin.collect_heartbeat_prompts(channel=None)
+    section = await plugin.on_heartbeat_collect_prompts(channel=None)
     assert section.endswith("PICK ONE.")
     assert goals_mod.GOALS_INSTRUCTION not in section
 

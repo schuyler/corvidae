@@ -35,7 +35,7 @@ async def _observe(kind: str, config: dict):
             return []
 
         plugin.recent = recent
-        await plugin.collect_heartbeat_prompts(channel=SimpleNamespace(id="x"))
+        await plugin.on_heartbeat_collect_prompts(channel=SimpleNamespace(id="x"))
         return seen[0]
     plugin = GoalsPlugin()
     await plugin.on_init(MagicMock(), config)
@@ -50,7 +50,7 @@ async def _observe(kind: str, config: dict):
 
     plugin.retired_goals = retired
     plugin._goals_list_text = no_list  # no DB behind this plugin
-    section = await plugin.collect_heartbeat_prompts(channel=None)
+    section = await plugin.on_heartbeat_collect_prompts(channel=None)
     return seen[0] if kind == "retired_limit" else section
 
 

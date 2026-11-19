@@ -155,11 +155,10 @@ at startup; see [Declaring hooks in a plugin](#declaring-hooks-in-a-plugin).
 
 | Prefix | pluggy spec | Resolution | Core uses result | Implementations |
 |---|---|---|---|---|
-| `on_`, `before_`, `after_` | broadcast | none | no | any number; side effects allowed, including on objects passed in |
+| `on_`, `before_`, `after_` | broadcast | none; fail soft (see below) | no, except where a caller combines the returned values | any number; side effects allowed, including on objects passed in; one that raises is logged at WARNING naming the hook and plugin, and the others' values come back in hook order. `on_init` and `on_start` fail hard |
 | `should_` | broadcast | `resolve_reject_wins` | yes, `bool` | any number; `False` from any one rejects; `None` abstains. `should_start_work` is the one exception: it returns `WorkRefusal \| None` (K1 adds one result type to the veto grammar, so a refusal carries its limit and remedy), is not dispatched through `pm.ahook` but by `corvidae.admission.offer_work`, and the first `WorkRefusal` wins |
 | `resolve_` | `firstresult=True` | first non-`None` | yes | any number; first to answer wins, so order matters and the docstring says who answers |
 | `transform_` | `firstresult=True` wrapper chain with a seed in `_SeedHooksPlugin` | chain | yes | any number, LIFO |
-| `collect_` | broadcast, called with `collect_results` | the caller combines the list of contributions | yes | any number; each returns one contribution or `None` for none; one that raises is logged and skipped |
 | bare imperative | broadcast | caller-defined over the result list | sometimes | any number; the docstring states what the caller does with results |
 
 The observe class has three prefixes because `before_agent_turn`,
@@ -183,42 +182,35 @@ The bare imperative allowlist is `send` (transports receive it through
 `persist_message` (every implementation runs; the caller resolves the list
 with `resolve_single_result`).
 
-A `collect_` hook is a contribution point: each implementation returns one
-piece, and the caller combines them. Call it with
-`corvidae.hooks.collect_results`, not `pm.ahook`:
+Observe hooks fail soft by prefix. The kernel dispatches `pm.ahook.<hook>`
+for any `on_`, `before_` or `after_` hook through apluggy's `ahook_isolated`:
+every implementation runs to completion, an `Exception` from one is logged at
+WARNING naming the hook and the plugin (with the traceback) and skipped, and
+the call returns the other implementations' values in hook order (`tryfirst`,
+then the rest in no guaranteed order, then `trylast`), `None`s kept. A
+`BaseException` such as `CancelledError` propagates once the siblings have
+finished. `on_init` and `on_start` are the exceptions: a plugin that can't
+initialise or start should stop startup, so they keep apluggy's plain dispatch
+and a raise propagates. A `wrapper=True` or `hookwrapper=True` implementation
+on a fail-soft hook fails startup, since `ahook_isolated` can't drive wrappers.
 
-```python
-from corvidae.hooks import collect_results
-
-parts = await collect_results(self.pm.hook.collect_web_panels, channel=channel)
-```
-
-It runs every implementation concurrently, with the hook's arguments by
-keyword only (each implementation receives the ones it declares); an
-argument the hook's spec doesn't name, or one it names without a default
-that the call leaves out, raises `TypeError` before any implementation runs. It
-returns the non-`None` contributions in hook order: `tryfirst`, then the
-rest in no guaranteed order, then `trylast`. An implementation that raises
-an `Exception` is logged at WARNING, naming the hook and the plugin, and
-skipped; the others' contributions are kept. A `BaseException` such as
-`CancelledError` propagates once the siblings have finished.
-Implementations may be `async` or plain functions. A `wrapper=True` or
-`hookwrapper=True` implementation on a `collect_` hook fails startup,
-since the helper doesn't drive wrappers. No kernel hook is a `collect_` hook
-yet; plugins declare their own (below). The first is the heartbeat's
-`collect_heartbeat_prompts(channel) -> str | None`: return one section of the
-beat's text, or `None` for none. `MemoryPlugin` implements it with
+An observe hook can also be a contribution point: each implementation returns
+one piece and the caller combines the returned list. The first is the
+heartbeat's `on_heartbeat_collect_prompts(channel) -> str | None`: return one
+section of the beat's text, or `None` for none. The beat is the sections in
+hook order, then the heartbeat prompt last. `MemoryPlugin` implements it with
 `@hookimpl(tryfirst=True)` (recent memories) and `GoalsPlugin` with
-`@hookimpl(trylast=True)`, so its call to action ends the beat; use
-`tryfirst` or `trylast` the same way to place yours. The section lands in a
-tool-using turn nobody is watching, so write it as data, not as an
-instruction a stranger's text could reach (`docs/threat-model.md`, finding 11).
+`@hookimpl(trylast=True)`, so its instruction is the last section, directly
+before the prompt; use `tryfirst` or `trylast` the same way to place yours.
+The section lands in a tool-using turn nobody is watching, so write it as
+data, not as an instruction a stranger's text could reach
+(`docs/threat-model.md`, finding 11).
 
 ### Adding a hook
 
 A hookspec earns a name when it is a decision point (veto, resolve,
 transform), when it is an observation or a contribution point
-(`collect_`) with at least two plausible implementers, or when it is an
+(an observe hook whose returned values the caller combines) with at least two plausible implementers, or when it is an
 observability hook that pairs with an
 existing one (`on_llm_request` with `on_llm_response`). A single-consumer
 observation does not get a hookspec; it gets an entry in `annotations`, a return
@@ -261,7 +253,7 @@ declaration breaks one of these rules:
 - **Grammar, with the owner named.** The name starts with a grammar prefix
   from the table above, then the owning plugin's registered name and an
   underscore: `on_web_…`, `should_web_…`, `resolve_web_…`,
-  `transform_web_…`, `collect_web_…`. Bare imperatives stay kernel-only.
+  `transform_web_…`. Bare imperatives stay kernel-only.
   The prefix still fixes the pluggy options (`resolve_`/`transform_` need
   `firstresult=True`; the others must not have it).
 - **One owner per hook.** A name declared by two plugins, or by a plugin
@@ -270,9 +262,10 @@ declaration breaks one of these rules:
 - **Transform seeds come from the owner.** A `transform_` hook needs an
   `@hookimpl(trylast=True)` on the owner itself that returns its input
   unchanged, which is what `_SeedHooksPlugin` provides for kernel transforms.
-- **No wrappers on collect hooks.** A `collect_` hook's implementations
-  each return one contribution; startup refuses one registered with
-  `wrapper=True` or `hookwrapper=True`, naming the implementing plugin.
+- **No wrappers on fail-soft hooks.** An `on_`, `before_` or `after_` hook
+  other than `on_init`/`on_start` runs through `ahook_isolated`, which can't
+  drive wrappers; startup refuses an implementation registered with
+  `wrapper=True` or `hookwrapper=True`, naming the hook and the plugin.
 
 The owner segment is the plugin's registered name: its entry-point name,
 or the `name=` passed to `pm.register`. Renaming an entry point renames
@@ -691,7 +684,7 @@ Window messages carry internal `_`-prefixed tags (`_message_type`, `_db_id`). Ev
 
 A trace is everything one inbound item causes: its turns, its tool tasks, follow-up turns from their completions, and every LLM call in them. One exception: when several user messages are queued back to back, they coalesce into one turn (PRD §3.1.19), and that turn belongs to the last message's trace. Each earlier message's trace gets `on_message_admitted` and `on_message_persisted` and nothing else — no `before_agent_turn`, no `should_send_response`, no `on_agent_response`. Per-trace state opened at admission or persistence must not wait on a turn hook to close (bound it, as the cognition plugins do with LRUs). A `before_agent_turn` implementation that needs every message the turn answers can read them from the window with `corvidae.context.unanswered_user_messages(channel.conversation.messages)`. Each trace has an opaque `trace_id`. One exists for every inbound user message and for every notification-born queue item that isn't itself a continuation of an existing trace. The transport mints a user message's id with `corvidae.trace.mint_trace_id()` and passes it to `on_message`; the Agent mints at dequeue for a notification-born item with no inherited id. It travels alongside the `annotations` dict — extensible, plugin-owned and opaque to the framework — through the messaging and extension-point hooks above, into `Task.trace_id`/`Task.annotations`, and back out through the completion notification's `annotations` (`TaskPlugin._on_task_complete` merges `{"task_id", "trace_id", **task.annotations}`). This is how a tool cycle several hops deep still carries the trace id and annotations its originating message started with.
 
-**Transport contract.** A transport mints a fresh, unique id per inbound message, passes it as `trace_id` to `on_message`, and matches `should_process_message`, `on_message_admitted`, `on_message_rejected` and `on_message_persisted` back to its message by that id, never by ordering or context inheritance. Import `mint_trace_id` from `corvidae.trace` (stdlib only), not from `corvidae.agent`. The Agent uses the id verbatim. Omitting the argument raises `pluggy.HookCallError`; a falsy id raises `ValueError`. The lifecycle hooks broadcast to every plugin, and unlike `send` they get no filtering from `TransportPlugin`, so each of a transport's lifecycle hookimpls opens with an ownership check (`if not self.owns(channel): return`; Discord and Signal spell it `channel.matches_transport(...)`, which is the same test for them) and ignores ids it never minted.
+**Transport contract.** A transport mints a fresh, unique id per inbound message, passes it as `trace_id` to `on_message`, and matches `should_process_message`, `on_message_admitted`, `on_message_rejected` and `on_message_persisted` back to its message by that id, never by ordering or context inheritance. Import `mint_trace_id` from `corvidae.trace` (stdlib only), not from `corvidae.agent`. The Agent uses the id verbatim. Omitting the argument raises `pluggy.HookCallError` (a caller bug, loud even on a fail-soft hook); a falsy id makes the Agent raise `ValueError`, which the fail-soft dispatch logs at WARNING naming `on_message` and the plugin rather than raising it to the transport. The lifecycle hooks broadcast to every plugin, and unlike `send` they get no filtering from `TransportPlugin`, so each of a transport's lifecycle hookimpls opens with an ownership check (`if not self.owns(channel): return`; Discord and Signal spell it `channel.matches_transport(...)`, which is the same test for them) and ignores ids it never minted.
 
 `on_message_admitted` or `on_message_rejected` fires before `on_message` returns, unless the agent drops the message without either (for example, it is not ready yet). State a transport took before the call (a typing slot, a pending read receipt, an unsent-message entry) can therefore be released in a `finally` when the id was not admitted:
 
@@ -1555,7 +1548,7 @@ The filter is `owns(channel)`, which by default is `channel.matches_transport(se
 A transport that holds state for the length of a turn (Discord's and Signal's typing slots, ACP's pending prompt, the CLI's input prompt) releases it in `send_message`, which runs when a final is sent. Discord and Signal release every outstanding slot there, since one final can answer a coalesced burst (PRD §3.1.19). A final the gate vetoed, or an empty one, never gets there, so the transport also implements `on_agent_response` and releases the same state when `corvidae.hooks.final_was_unsent(channel)` is true. A sent final's row is a normal message, so it releases in `send_message` only: once per final either way. Three rules:
 
 - Open with `if not self.owns(channel): return`. `on_agent_response` reaches every transport.
-- Do the ownership check, `final_was_unsent` and the release synchronously, before the first `await`. Implementations run under `asyncio.gather` and the kernel may move on when a sibling raises.
+- Do the ownership check, `final_was_unsent` and the release synchronously, before the first `await`. Implementations run concurrently, so another transport's implementation can interleave at any `await`.
 - If `final_was_unsent` raises, log a warning and release nothing. A stuck indicator is better than a double release.
 
 The `IRCPlugin` and web transports keep nothing per turn, so they don't need it.
@@ -1694,7 +1687,9 @@ naming `plugins.disabled`, the value, and the installed entry-point names.
 
 ## Hook exception safety
 
-Broadcast hook calls from `Agent` are wrapped in `try/except`. If a plugin raises an exception from `before_agent_turn`, `after_persist_assistant`, `on_agent_response`, or `send`, the exception is logged at WARNING or ERROR level and processing continues. Plugins do not need to catch their own exceptions to protect the queue consumer.
+One rule covers the observe class: observe hooks (`on_`, `before_`, `after_`) fail soft in the kernel's dispatch, so `await pm.ahook.<hook>(...)` never raises because an implementation did. Each failure is logged at WARNING with the hook and plugin names and the traceback, every other implementation still runs, and their values come back in hook order. A caller may combine the returned values. `on_init` and `on_start` fail hard: a raise propagates. `should_`, `resolve_` and `transform_` hooks and the bare imperatives keep apluggy's dispatch and the per-hook policies below. Plugins do not need to catch their own exceptions to protect the queue consumer. The hand-written `try/except` blocks that remain around observe calls are now redundant for logging ([#1097](https://github.com/schuyler/corvidae/issues/1097) removes them).
+
+A call site whose `except` must act on a failure (deliver an error tool result, rewind a cursor, tell the model a send failed) calls `pm.ahook_raise.<hook>(...)` instead. It logs each failure the same way, waits for every implementation to finish, then raises the first failure in hook order. A missing argument still raises `HookCallError` on either accessor; it is a caller bug and surfaces before any implementation runs. Fail-soft calls go through `ahook_isolated`, so they do not appear in pluggy's hook-call tracing.
 
 For `firstresult=True` hooks (`resolve_compaction`, `resolve_conversation`, `resolve_llm_error`), pluggy propagates the first handler's exception immediately — the chain stops and no further handlers run. The call sites in `Agent` handle these as follows:
 
@@ -1706,11 +1701,9 @@ For `should_process_message` (broadcast, resolved with `resolve_reject_wins`), e
 
 For `should_start_work`, `offer_work` catches each implementation's exception, logs it with the plugin name and treats it as no opinion; the other implementations still vote (see [Refusing internal work](#refusing-internal-work)).
 
-For `should_send_response`, the Agent catches any exception, logs it at WARNING and sends the emission anyway (fail open). apluggy gathers a broadcast's implementations concurrently without `return_exceptions`, so one raising implementation discards every sibling's verdict for that emission; once any plugin registers a `wrapper=True` implementation on the hook (as `outbound_cap` does, to count after the combined verdict), apluggy awaits the implementations one after another instead, and a raising one stops the rest from running. Either way a gate that can fail should catch and log its own errors and return None, and a slow gate adds its latency to every emission when the hook is wrapped. The serialisation is an apluggy artefact, not intended behaviour: [#904](https://github.com/schuyler/corvidae/issues/904) carries the fix (gather the non-wrappers once every wrapper is set up, each run to completion, the first exception thrown into the wrappers), and `test_wrapped_should_send_response_gates_run_concurrently` in `tests/test_outbound_cap/` is a strict xfail that fails once the lock picks it up, so this paragraph gets rewritten then.
-
-For a `collect_` hook called with `collect_results`, each implementation's `Exception` is caught, logged at WARNING with the hook and plugin names and the traceback, and its contribution skipped; the others are kept.
-
 For `transform_display_text`, `transform_system_prompt` and `transform_tool_result` (wrapper chain hooks), pluggy propagates exceptions from wrapper implementations to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`, and `transform_system_prompt` in `channel_system_prompt`.
+
+For `should_send_response`, the Agent catches any exception, logs it at WARNING and sends the emission anyway (fail open). With `outbound_cap`'s `wrapper=True` implementation loaded, apluggy gathers the gates concurrently ([#904](https://github.com/schuyler/corvidae/issues/904), landed in apluggy), each runs to completion, and a raising gate no longer stops the others; the first exception is thrown into the wrappers. Without a wrapper, apluggy's plain broadcast still lets the first exception discard the siblings' verdicts for that emission, so a gate that can fail should still catch and log its own errors and return None.
 
 ## Output gating
 
@@ -1732,7 +1725,7 @@ If you write a transport with history replay, skip `message_type == "unsent"` ro
 
 ## Async considerations
 
-All broadcast hooks are `async`. Corvidae uses apluggy's `pm.ahook.*` for async dispatch. The exception is a `collect_` hook, which is called with `collect_results` (see [Hook grammar](#hook-grammar)) and whose implementations may also be plain functions.
+All broadcast hooks are `async`. Corvidae uses apluggy's `pm.ahook.*` for async dispatch; for observe hooks the kernel replaces that accessor with a fail-soft one (see [Hook exception safety](#hook-exception-safety)).
 
 For hooks with `firstresult=True` (`resolve_compaction`, `resolve_conversation`, `resolve_llm_error`), `pm.ahook.<hook>(...)` returns a single value (or None) directly:
 

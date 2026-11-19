@@ -202,7 +202,8 @@ class CrossChannelSendPlugin(CorvidaePlugin):
             if refusal is not None:
                 return refusal
 
-            await self.pm.ahook.on_notify(
+            # ahook_raise, not the fail-soft ahook: the except below tells the model the send failed (#1094).
+            await self.pm.ahook_raise.on_notify(
                 channel=target,
                 source=f"agent_send from {source_channel}",
                 text=text,

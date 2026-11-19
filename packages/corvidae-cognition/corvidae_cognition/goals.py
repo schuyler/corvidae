@@ -178,12 +178,13 @@ class GoalsPlugin(CorvidaePlugin):
         )
 
     @hookimpl(trylast=True)
-    async def collect_heartbeat_prompts(self, channel) -> str | None:
+    async def on_heartbeat_collect_prompts(self, channel) -> str | None:
         """Goals' beat section: new retired conclusions, then the pick rule.
 
         The retired block is full on the first beat and after a compaction of
         the beat channel, and otherwise only what's new; the instruction goes
-        on every beat. Trylast, so the call to action is the window's tail.
+        on every beat. Trylast, so the call to action is the last section, just
+        before the heartbeat prompt.
         """
         retired = await self.retired_goals(self._retired_goal_limit)
         full = self._last_retired_ids is None

@@ -1026,7 +1026,8 @@ class WebPlugin(TransportPlugin):
         try:
             self._broadcast(channel.id, {"type": "user", "conversation": name,
                                          "text": text, "id": entry.id})
-            await self.pm.ahook.on_message(channel=channel, sender="web", text=text,
+            # ahook_raise, not the fail-soft ahook: the frame handler answers a raise with an error frame (#1094).
+            await self.pm.ahook_raise.on_message(channel=channel, sender="web", text=text,
                                            trace_id=entry.trace_id)
         finally:
             # Admission fires before on_message returns, so an entry still

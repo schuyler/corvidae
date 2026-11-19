@@ -164,9 +164,9 @@ def test_heartbeat_goals_copy_is_the_goals_instruction():
 
 def test_heartbeat_doc_example_is_what_a_beat_sends():
     """#860, #1084: the framing example in prompts/heartbeat.md is the beat's
-    own text for the sample it shows: the prompt, then the memory section,
-    then goals' open list, retired block and instruction, joined by blank
-    lines."""
+    own text for the sample it shows: the memory section, goals' open list,
+    retired block and instruction, then the prompt last, joined by blank
+    lines (#1094)."""
     import asyncio
 
     from corvidae_cognition.goals import GoalsPlugin
@@ -194,8 +194,8 @@ def test_heartbeat_doc_example_is_what_a_beat_sends():
         full=True,
     )
     beat = "\n\n".join(
-        [DEFAULT_HEARTBEAT_PROMPT, memories,
-         asyncio.run(goals.collect_heartbeat_prompts(channel=None))]
+        [memories, asyncio.run(goals.on_heartbeat_collect_prompts(channel=None)),
+         DEFAULT_HEARTBEAT_PROMPT]
     )
     doc = (REPO / "prompts" / "heartbeat.md").read_text()
     assert _flat(beat) in _flat(doc)
@@ -250,9 +250,11 @@ def test_consolidation_prompt_carries_the_attribution_rules():
 def test_default_heartbeat_prompt_names_no_memories_and_reviews_what_follows():
     """#1079 AC4: the default beat prompt is true whatever sections follow, so
     it does not name memories (case-insensitive) and still tells the model to
-    review what follows."""
+    review what is above it."""
     from corvidae_cognition.heartbeat import DEFAULT_HEARTBEAT_PROMPT
 
     assert "memories" not in DEFAULT_HEARTBEAT_PROMPT.lower()
     assert "review" in DEFAULT_HEARTBEAT_PROMPT.lower()
-    assert "below" in DEFAULT_HEARTBEAT_PROMPT.lower() or "follow" in DEFAULT_HEARTBEAT_PROMPT.lower()
+    # #1094: the prompt comes after the sections it points at.
+    assert "above" in DEFAULT_HEARTBEAT_PROMPT.lower()
+    assert "below" not in DEFAULT_HEARTBEAT_PROMPT.lower()

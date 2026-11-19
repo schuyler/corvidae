@@ -487,7 +487,8 @@ class TaskPlugin(CorvidaePlugin):
             # A result that answers no tool call is cut here (#744); one that
             # does is cut by the Agent when it stores the result row (#575).
             if not (not task.tool_call_id and await self._notify_cut(task, text, annotations)):
-                await self.pm.ahook.on_notify(
+                # ahook_raise, not the fail-soft ahook: the except below delivers an error tool result (#1094).
+                await self.pm.ahook_raise.on_notify(
                     channel=task.channel,
                     source="task",
                     text=text,

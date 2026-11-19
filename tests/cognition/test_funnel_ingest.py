@@ -112,7 +112,7 @@ async def make(config: dict | None = None, clock: Clock | None = None) -> Simple
     pm.register(provider, name="provider")
     install_plugin_hookspecs(pm)
     await funnel.on_init(pm=pm, config=config or {})
-    pm.ahook.on_notify = AsyncMock()
+    pm.ahook_raise.on_notify = AsyncMock()
     channel = Channel(transport="test", scope="funnel-ingest")
     channel.conversation = ContextWindow(channel.id)
     return SimpleNamespace(
@@ -198,11 +198,13 @@ class TestPromiseAdmission:
         env.pm.register(raiser, name="raiser")
         raiser.offer(env.channel.id, "broken", pending())
         env.provider.offer(env.channel.id, "memory", resolved("sibling entry"))
-        with caplog.at_level(logging.WARNING, logger="corvidae.funnel"):
+        with caplog.at_level(logging.WARNING):
             await turn(env)
         await turn(env)
         assert "sibling entry" in text_of(env.conv)
-        assert any(env.channel.id in m for m in logged(caplog))
+        # The fail-soft dispatcher logs the failure, naming the hook and the
+        # plugin (#1094); the call site's own except no longer sees it.
+        assert any("on_funnel_ingest" in m and "raiser" in m for m in logged(caplog))
 
     async def test_oversize_promise_entry_is_dropped_with_warning_naming_the_budget_key(self, build, caplog):
         env = await build(config={"funnel": {"budgets": {"memory": 12}}})

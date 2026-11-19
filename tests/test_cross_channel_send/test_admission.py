@@ -59,7 +59,7 @@ async def test_refused_note_returns_text_and_does_not_notify():
         gate = _RefusingGate()
         pm.register(gate, name="gate")
         notify = AsyncMock()
-        pm.ahook.on_notify = notify
+        pm.ahook_raise.on_notify = notify
 
         result = await plugin.notify_other_channel(ch_b.id, "hello bob")
 

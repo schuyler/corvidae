@@ -407,7 +407,8 @@ class FunnelPlugin(CorvidaePlugin):
         pending_count = sum(len(p.entries) for p in self._deferred[pair])
         self._stub_pending.add(pair)
         try:
-            await self.pm.ahook.on_notify(
+            # ahook_raise, not the fail-soft ahook: the except below clears the pending stub (#1094).
+            await self.pm.ahook_raise.on_notify(
                 channel=channel,
                 source=source,
                 text=(

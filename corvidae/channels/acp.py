@@ -190,7 +190,8 @@ class CorvidaeAcpAgent:
         future = self._plugin.begin_prompt(session_id, prompt_trace)
         started = False
         try:
-            await self._plugin.pm.ahook.on_message(
+            # ahook_raise, not the fail-soft ahook: the finally below abandons the prompt only on a raise (#1094).
+            await self._plugin.pm.ahook_raise.on_message(
                 channel=channel,
                 sender="user",
                 text=text,

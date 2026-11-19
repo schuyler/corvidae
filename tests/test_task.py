@@ -554,7 +554,7 @@ class TestTaskPlugin:
     async def test_on_start_creates_queue_and_worker(self):
         """on_start initializes task_queue and starts the worker task."""
         pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
+        pm.ahook_raise.on_notify = AsyncMock()
         plugin = TaskPlugin(pm)
 
         assert plugin.task_queue is None
@@ -572,7 +572,7 @@ class TestTaskPlugin:
     async def test_on_stop_cancels_worker(self):
         """on_stop cancels the worker task cleanly."""
         pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
+        pm.ahook_raise.on_notify = AsyncMock()
         plugin = TaskPlugin(pm)
 
         await plugin.on_start(config={})
@@ -586,7 +586,7 @@ class TestTaskPlugin:
     async def test_on_task_complete_fires_on_notify(self):
         """_on_task_complete fires on_notify with correct arguments."""
         pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
+        pm.ahook_raise.on_notify = AsyncMock()
         plugin = TaskPlugin(pm)
         await plugin.on_start(config={})
 
@@ -604,8 +604,8 @@ class TestTaskPlugin:
 
         await plugin._on_task_complete(task, "work output")
 
-        pm.ahook.on_notify.assert_awaited_once()
-        call_kwargs = pm.ahook.on_notify.call_args.kwargs
+        pm.ahook_raise.on_notify.assert_awaited_once()
+        call_kwargs = pm.ahook_raise.on_notify.call_args.kwargs
         assert call_kwargs["channel"] is channel
         assert call_kwargs["source"] == "task"
         assert task.task_id in call_kwargs["text"]
@@ -646,7 +646,7 @@ class TestTaskPlugin:
         from corvidae.tool import Tool
 
         pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
+        pm.ahook_raise.on_notify = AsyncMock()
         plugin = TaskPlugin(pm)
         await plugin.on_start(config={})
 
@@ -1019,7 +1019,7 @@ class TestTaskPluginConfig:
     async def test_on_start_reads_max_task_workers_from_config(self):
         """When config has daemon.max_task_workers=3, TaskQueue gets max_workers=3."""
         pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
+        pm.ahook_raise.on_notify = AsyncMock()
         plugin = TaskPlugin(pm)
 
         config = {"daemon": {"max_task_workers": 3}}
@@ -1036,7 +1036,7 @@ class TestTaskPluginConfig:
     async def test_on_start_defaults_to_4_workers(self):
         """With no config, TaskQueue should have max_workers=4 (not 1)."""
         pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
+        pm.ahook_raise.on_notify = AsyncMock()
         plugin = TaskPlugin(pm)
 
         await plugin.on_start(config={})
@@ -1495,7 +1495,7 @@ class TestTaskResultPersistence:
         deque mutated during iteration.
         """
         pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
+        pm.ahook_raise.on_notify = AsyncMock()
         plugin = TaskPlugin(pm)
         results_file = tmp_path / "task-results.jsonl"
         config = {"daemon": {"task_results_path": str(results_file)}, "_base_dir": tmp_path}
@@ -1596,7 +1596,7 @@ class TestTaskResultTool:
     async def test_task_result_tool_returns_stored_result(self, tmp_path):
         """End to end: configured path, completed task, tool returns the result."""
         pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
+        pm.ahook_raise.on_notify = AsyncMock()
         plugin = TaskPlugin(pm)
         results_file = tmp_path / "subdir" / "task-results.jsonl"
         config = {

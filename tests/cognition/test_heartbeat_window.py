@@ -139,7 +139,7 @@ async def test_heartbeat_implements_only_lifecycle_hooks(
     contribution, which feeds the notification text (#1084)."""
     rig = await rig_factory()
     names = {caller.name for caller in rig.plugin.pm.get_hookcallers(rig.hb)}
-    assert names <= {"on_init", "on_start", "on_stop", "collect_heartbeat_prompts"}
+    assert names <= {"on_init", "on_start", "on_stop", "on_heartbeat_collect_prompts"}
 
 
 async def test_each_beat_extends_the_previous_window(

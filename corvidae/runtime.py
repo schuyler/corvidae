@@ -30,6 +30,7 @@ from corvidae.channel import ChannelRegistry, load_channel_config, validate_agen
 from corvidae.clock import Clock
 from corvidae.hooks import (
     _check_hook_arg_binding,
+    check_fail_soft_wrappers,
     create_plugin_manager,
     install_plugin_hookspecs,
     report_orphan_hookimpls,
@@ -337,6 +338,11 @@ class Runtime:
         #     another plugin's hook.
         install_plugin_hookspecs(self.pm)
 
+        # 8b'. Refuse a wrapper on a fail-soft observe hook (#1094): those run
+        #      through pm.ahook_isolated, which can't drive wrappers. After 8b
+        #      so plugin-owned hooks have their specs.
+        check_fail_soft_wrappers(self.pm)
+
         # 8c. Guard the full, real plugin set against pluggy's silent-drop
         #     arg-binding bug class. create_plugin_manager() only checks the
         #     seed hooks; the real entry-point plugins are not registered
@@ -384,7 +390,8 @@ class Runtime:
         8.  Load entry-point plugins (corvidae group).
         8a. Log the effective plugin set, and warn for each disabled name that names no plugin.
         8b. Install plugin-declared hookspecs (install_plugin_hookspecs), so
-            every spec exists before the guard below and before on_init.
+            every spec exists before the guard below and before on_init;
+            then check_fail_soft_wrappers.
         8c. Run the hook arg-binding guard over the full plugin set.
         9.  Validate plugin dependencies, then report hookimpls left with no
             spec (report_orphan_hookimpls).

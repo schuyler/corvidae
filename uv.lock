@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -215,7 +215,7 @@ wheels = [
 [[package]]
 name = "apluggy"
 version = "1.1.2"
-source = { git = "https://github.com/schuyler/apluggy.git?rev=main#4905916fb5e04194bd396d8749cd0b3e5b325a93" }
+source = { git = "https://github.com/schuyler/apluggy.git?rev=main#23d7eb10bae94d743d996a2e79c7a2488e7945dd" }
 dependencies = [
     { name = "pluggy" },
 ]

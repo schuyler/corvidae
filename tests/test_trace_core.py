@@ -282,7 +282,7 @@ class TestTaskPluginMetaRoundTrip:
         from corvidae.task import Task, TaskPlugin
 
         pm = MagicMock()
-        pm.ahook.on_notify = AsyncMock()
+        pm.ahook_raise.on_notify = AsyncMock()
         pm.ahook.send = AsyncMock()
         plugin = TaskPlugin()
         plugin.pm = pm
@@ -298,7 +298,7 @@ class TestTaskPluginMetaRoundTrip:
         )
         await plugin._on_task_complete(task, "the result")
 
-        call_kwargs = pm.ahook.on_notify.call_args.kwargs
+        call_kwargs = pm.ahook_raise.on_notify.call_args.kwargs
         assert call_kwargs["annotations"] == {
             "task_id": task.task_id,
             "trace_id": "tid-1",
