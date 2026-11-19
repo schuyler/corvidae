@@ -45,7 +45,11 @@ async def _observe(kind: str, config: dict):
         seen.append(limit)
         return []
 
+    async def no_list():
+        return None
+
     plugin.retired_goals = retired
+    plugin._goals_list_text = no_list  # no DB behind this plugin
     section = await plugin.collect_heartbeat_prompts(channel=None)
     return seen[0] if kind == "retired_limit" else section
 

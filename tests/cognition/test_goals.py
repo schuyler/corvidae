@@ -177,6 +177,13 @@ def goals_messages(channel) -> list[str]:
     ]
 
 
+async def beat_text(env) -> str:
+    """The goals section of a beat, as the heartbeat would collect it."""
+    # The retired-goals query joins memory, whose table this fixture creates lazily.
+    await env.memory._ensure_schema()
+    return await env.goals.collect_heartbeat_prompts(env.channel)
+
+
 async def rows(env, sql: str, params=()) -> list[tuple]:
     async with env.db.execute(sql, params) as cursor:
         return await cursor.fetchall()
@@ -230,8 +237,8 @@ async def test_g1_tools_round_trip(env):
     assert row[2] is not None
 
 
-async def test_g1_seed_cli_appears_on_any_channel(env):
-    """`corvidae goals --db PATH seed X` in a second process; the next turn on any channel shows X."""
+async def test_g1_seed_cli_reaches_the_next_beat(env):
+    """`corvidae goals --db PATH seed X` in a second process; the next beat lists X."""
     from click.testing import CliRunner
 
     result = await asyncio.to_thread(
@@ -240,13 +247,18 @@ async def test_g1_seed_cli_appears_on_any_channel(env):
     )
     assert result.exit_code == 0, (result.output, result.exception)
 
+    assert "Watch the kestrel nest" in await beat_text(env)
+
+
+async def test_no_turn_admits_a_goals_entry(env):
+    """#1091: goals reach the beat only; an ordinary turn, on any channel,
+    leaves the window without a goals entry."""
+    await env.tools["add_goal"]("Watch the kestrel nest", _ctx=ctx_for(env.channel))
     other = Channel(transport="discord", scope="general")
     other.conversation = ContextWindow(other.id)
-    await turn(env, other)
-
-    entries = goals_messages(other)
-    assert len(entries) == 1
-    assert "Watch the kestrel nest" in entries[0]
+    for channel in (env.channel, other):
+        await turn(env, channel)
+        assert goals_messages(channel) == []
 
 
 # ---------------------------------------------------------------------------
@@ -255,39 +267,31 @@ async def test_g1_seed_cli_appears_on_any_channel(env):
 
 
 async def test_g2_supersession_and_empty_list(env):
-    """One entry per change; the last entry is current; retiring the last goal appends 'No open goals'."""
+    """Each beat carries the current list; retiring the last goal says 'No open goals'."""
     ctx = ctx_for(env.channel)
     await add_message(env, env.channel.id, "context")
 
     t0 = env.clock.now()
     await env.tools["add_goal"]("Write the goals plugin", _ctx=ctx)
-    await turn(env)
-    first = goals_messages(env.channel)
-    assert len(first) == 1
-    assert f"Open goals as of {utc(t0)} (this list replaces any earlier goals list):" in first[0]
-    assert "#1 Write the goals plugin" in first[0]
+    first = await beat_text(env)
+    assert f"Open goals as of {utc(t0)} (this list replaces any earlier goals list):" in first
+    assert "#1 Write the goals plugin" in first
 
     env.clock.jump(60)
     await env.tools["update_goal"](1, "Write and test the goals plugin", _ctx=ctx)
-    await turn(env)
-    entries = goals_messages(env.channel)
-    assert len(entries) == 2
-    latest = entries[-1]
+    latest = await beat_text(env)
     assert f"as of {utc(t0 + 60)}" in latest
-    assert "this list replaces any earlier goals list" in latest
     assert "#1 Write and test the goals plugin" in latest
     assert "#1 Write the goals plugin" not in latest
 
     env.clock.jump(60)
     await env.tools["retire_goal"](1, "I concluded it shipped, because tests pass.", _ctx=ctx)
-    await turn(env)
-    entries = goals_messages(env.channel)
-    assert len(entries) == 3
+    last = await beat_text(env)
     assert (
         f"No open goals as of {utc(t0 + 120)} (this replaces any earlier goals list)."
-        in entries[-1]
+        in last
     )
-    assert "#1" not in entries[-1]
+    assert "Open goals as of" not in last
 
 
 # ---------------------------------------------------------------------------
@@ -729,16 +733,15 @@ async def test_list_goals_follows_queue_order(env):
 
 
 async def test_goals_entry_follows_queue_order_and_marks_status(env):
-    """The per-turn goals entry matches the heartbeat's list: queue order, and
-    a goal that is not plain open carries its status."""
+    """The beat's list is in queue order, and a goal that is not plain open
+    carries its status."""
     ctx = ctx_for(env.channel)
     await env.tools["add_goal"]("back", _ctx=ctx)
     await env.tools["add_goal"]("front", position="prepend", _ctx=ctx)
     front_id = (await rows(env, "SELECT id FROM goals WHERE text = 'front'"))[0][0]
     await env.tools["set_goal_status"](front_id, "in-progress", _ctx=ctx)
-    await turn(env, env.channel)
 
-    entry_lines = goals_messages(env.channel)[0].splitlines()
+    entry_lines = (await beat_text(env)).splitlines()
     goal_lines = [ln for ln in entry_lines if ln.startswith("#")]
     assert "front" in goal_lines[0] and "[in-progress]" in goal_lines[0]
     assert "back" in goal_lines[1] and "[" not in goal_lines[1]
@@ -747,7 +750,7 @@ async def test_goals_entry_follows_queue_order_and_marks_status(env):
 async def test_set_goal_status_unknown_id_names_the_remedy(env):
     """An unknown id names the id and says where the valid ids are."""
     result = await env.tools["set_goal_status"](99, "blocked", _ctx=ctx_for(env.channel))
-    assert "#99" in result and "latest goals entry" in result
+    assert "#99" in result and "list_goals" in result
 
 
 async def test_set_goal_status_bad_status_lists_accepted_values(env):

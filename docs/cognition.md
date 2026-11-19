@@ -34,7 +34,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
 | `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), the provenance check, and the lenses other plugins contribute through `on_critique_init` |
-| `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
+| `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a list of the open ones in every heartbeat beat |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
 | `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that contains `NO_REPLY` goes unsent, and each decline is recorded in `exchange_log`. It adds the instruction to the system prompt of chat channels, and with `silence.mode: tool` or `both` an `end_turn` tool |
@@ -1517,7 +1517,7 @@ snapshot it again with `--snapshot-from`.
 
 ### GoalsPlugin (`packages/corvidae-cognition/corvidae_cognition/goals.py`)
 
-Keeps the agent's open goals in SQLite and shows them in the window. Entry
+Keeps the agent's open goals in SQLite and shows them to the heartbeat. Entry
 point name: `"goals"`; `depends_on = frozenset({"persistence", "memory",
 "funnel", "clock"})`. Owns the `goals` table in `sessions.db` (`id`, `text`,
 `created_at`, `updated_at`, `retired_at`, `memory_id`, `status`,
@@ -1545,7 +1545,7 @@ still works: the row is inserted without a position, with a warning, and
 the daemon's migration then orders it by id.) A goal's status is
 `open`, `in-progress` (being worked, so a restart resumes it rather than
 re-picking), `blocked` (waiting on something external) or `waiting` (done,
-awaiting review); retiring sets `retired_at`. The goals entry lists open goals
+awaiting review); retiring sets `retired_at`. The beat's goals list lists open goals
 front of the queue first and marks every goal that is not plain `open` with its
 status, and the goals instruction the beat carries tells the model to resume an
 in-progress goal, otherwise take the first goal that is neither blocked nor
@@ -1568,10 +1568,10 @@ it sends each change to the goal's `origin_channel` through
 origin made the change itself (so a goal the heartbeat created stays silent
 while the heartbeat is the one changing it).
 
-**Goals entry:** `before_agent_turn` admits one CONTEXT entry through the
-funnel under the source `goals` (budget `funnel.budgets.goals`, falling
-back to `funnel.default_budget`; see [configuration.md](configuration.md)).
-With open goals it reads:
+**Goals list (#1091):** open goals reach the agent in the heartbeat's beat
+and nowhere else; no turn admits a goals entry to a window. Goals'
+`collect_heartbeat_prompts` section opens with the list, in full on every
+beat. With open goals it reads:
 
 ```
 Open goals as of 2026-10-30 14:02:11 UTC (this list replaces any earlier goals list):
@@ -1580,20 +1580,21 @@ Open goals as of 2026-10-30 14:02:11 UTC (this list replaces any earlier goals l
 ```
 
 Goals are listed in queue order (`position`, then `id`), the order the
-goals entry and the beat's pick rule use. A goal that is not plain `open` carries its status in
+beat's list and its pick rule use. A goal that is not plain `open` carries its status in
 brackets.
 
 With none, including when every goal is retired, it reads `No open goals as
 of … (this replaces any earlier goals list).` A database with no goal rows
-at all admits nothing. The timestamp is the latest `updated_at` over all
-rows, retired ones included, not the current time, so the entry changes only
-when a goal does and the funnel's dedupe drops an unchanged one. The
-supersession clause is what lets an older entry still in the window be read
-as stale: the latest entry is current.
+at all adds no list. The timestamp is the latest `updated_at` over all
+rows, retired ones included, not the current time, so the text changes only
+when a goal does. The supersession clause is what lets an older beat still
+in the beat channel's window be read as stale: the latest list is current.
+The list is not sent through the funnel, so no funnel budget can drop it
+and leave a stale copy standing.
 
 **Visibility:** goals are agent-wide. Every channel sees every goal, as it
-sees every memory. A goal added or retired on one channel shows up on the
-others at their next turn; see finding 10 in
+sees every memory. A goal added or retired on one channel reaches the
+heartbeat at its next beat; see finding 10 in
 [threat-model.md](threat-model.md).
 
 **Concurrency:** `retire_goal` and `set_goal_status` take one plugin-level
@@ -1643,13 +1644,12 @@ with no prompt hash and no model, since no consolidation call produced it
 from a second process, registered under the `corvidae.commands` entry-point
 group. `PATH` must be an existing `sessions.db` in WAL mode (the daemon sets
 it on startup); the command refuses a missing file or another journal mode,
-and an empty `TEXT`. The daemon reads the table each turn, so the goal
-appears on every channel at its next turn.
+and an empty `TEXT`. The daemon reads the table each beat, so the goal
+reaches the heartbeat at its next beat.
 
-**Heartbeat contribution (#1084).** A beat's turn carries the goals entry
-like any other turn, so the heartbeat no longer renders the open goals. This
-plugin implements `collect_heartbeat_prompts` (`trylast`, so its section ends
-the beat) and returns two things: the newest `goals.heartbeat_retired_limit`
+**Heartbeat contribution (#1084).** This plugin implements
+`collect_heartbeat_prompts` (`trylast`, so its section ends the beat) and
+returns three things: the open goals list above (every beat, in full), the newest `goals.heartbeat_retired_limit`
 (default 5) retirement records (agent-wide, newest first, each with its age,
 framed as data), and `GOALS_INSTRUCTION`, the pick rule that tells the model to
 take a next step on an open goal or retire a finished one, and not to take up a
@@ -1664,7 +1664,7 @@ plugin's startup. They replace `heartbeat.retired_goal_limit` and
 `heartbeat.goals_instruction`, which still work for one release, log a
 WARNING naming the new key, and fail startup when set beside their new key.
 
-**Without this plugin:** the goal tools, the goals entry and the `goals`
+**Without this plugin:** the goal tools, the beat's goals list and the `goals`
 table are absent. Goals already in an existing database stay there unread.
 
 ### OutcomeLogPlugin (`packages/corvidae-cognition/corvidae_cognition/outcome_log.py`)
@@ -2276,7 +2276,7 @@ back only once they are consolidated; the review shows only the newest
 outreach that compaction has summarized out of the window. Today it
 can't happen: there is no send, note or read tool yet (#234, #235), so a
 beat can't reach anyone. The bounds once they land are the
-window, the goals entry (a beat that records an outreach as a goal step sees
+window, the beat's goals list (a beat that records an outreach as a goal step sees
 it in later beats), and the target channel's memories, once its rows have been consolidated and
 are among the newest `memory.heartbeat_limit`; the
 PRD's per-destination limit on messages the agent starts caps repeats too,

@@ -190,10 +190,9 @@ async def test_beat_with_a_retired_goal_carries_instruction_header_and_record(ma
     assert "I concluded it is done, because cron runs." in text
 
 
-async def test_beat_turn_carries_the_open_goals_entry(make_env):
-    """AC 2 (regression pin; may already pass): a beat's notification turn on
-    internal:heartbeat, through the plugin manager, gets the goals CONTEXT
-    entry in that channel's window."""
+async def test_beat_turn_admits_no_goals_context_entry(make_env):
+    """#1091: the beat's turn on internal:heartbeat, through the plugin
+    manager, gets the goals in the beat text and no goals CONTEXT entry."""
     env = await make_env(with_goals=True)
     await env.tools["add_goal"]("Watch the kestrel nest", _ctx=ctx_for("irc:#test"))
 
@@ -201,14 +200,11 @@ async def test_beat_turn_carries_the_open_goals_entry(make_env):
     assert len(env.agent.calls) == 1
     channel = env.agent.calls[0]["channel"]
     assert channel.id == HEARTBEAT_CHANNEL
-    entries = [
-        m["content"]
-        for m in channel.conversation.messages
-        if m.get("role") == "system"
-        and m.get("content", "").startswith("[CONTEXT from goals")
+    assert not [
+        m for m in channel.conversation.messages
+        if m.get("content", "").startswith("[CONTEXT from goals")
     ]
-    assert len(entries) == 1
-    assert "Watch the kestrel nest" in entries[0]
+    assert "Watch the kestrel nest" in env.agent.calls[0]["text"]
 
 
 async def test_beat_without_goals_plugin_carries_no_goals_text(make_env):
@@ -294,16 +290,18 @@ async def test_beat_is_prompt_then_memory_then_goals_section(make_env):
     assert text.rstrip().endswith(goals_mod.GOALS_INSTRUCTION)
 
 
-async def test_beat_does_not_render_the_open_goals_list(make_env):
-    """R3: open goals reach the beat through the window's goals entry only;
-    the beat's own text no longer lists them."""
+async def test_beat_lists_the_open_goals_in_full_every_time(make_env):
+    """#1091: the beat is the one place open goals reach the agent, and each
+    beat carries the whole list, ahead of the pick rule."""
     env = await make_env(with_goals=True)
     await env.tools["add_goal"]("Watch the kestrel nest", _ctx=ctx_for("irc:#test"))
 
     await env.clock.advance(AFTER)
-    text = env.agent.calls[0]["text"]
-    assert "Watch the kestrel nest" not in text
-    assert "Open goals" not in text
+    await env.clock.advance(AFTER)
+    for call in env.agent.calls:
+        text = call["text"]
+        assert "#1 Watch the kestrel nest" in text
+        assert text.index("Open goals as of") < text.index(goals_mod.GOALS_INSTRUCTION)
 
 
 async def test_a_raising_contributor_is_skipped_and_the_others_kept(make_env, caplog):
@@ -387,7 +385,11 @@ async def _goals_limit_seen(config: dict) -> int:
         seen.append(limit)
         return []
 
+    async def no_list():
+        return None
+
     plugin.retired_goals = retired
+    plugin._goals_list_text = no_list  # no DB behind this plugin
     await plugin.collect_heartbeat_prompts(channel=None)
     return seen[0]
 
@@ -425,7 +427,11 @@ async def test_goals_heartbeat_instruction_override_is_what_the_hook_returns():
     async def none_retired(limit):
         return []
 
+    async def no_list():
+        return None
+
     plugin.retired_goals = none_retired
+    plugin._goals_list_text = no_list  # no DB behind this plugin
     section = await plugin.collect_heartbeat_prompts(channel=None)
     assert section.endswith("PICK ONE.")
     assert goals_mod.GOALS_INSTRUCTION not in section

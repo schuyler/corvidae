@@ -1,9 +1,8 @@
-"""GoalsPlugin — the agent's open goals, kept in SQLite and shown in the window (#133).
+"""GoalsPlugin — the agent's open goals, kept in SQLite and shown to the heartbeat (#133).
 
-Goals are agent-wide: every channel sees every goal. Open goals enter each
-window as one CONTEXT entry admitted through the funnel; the entry carries
-its own "replaces any earlier goals list" clause, so the latest one is
-current. Retiring a goal writes a memory record of the conclusion first,
+Goals are agent-wide. Open goals reach the agent in the heartbeat's beat
+and nowhere else (#1091): goals' beat section lists them in full, every
+beat. Retiring a goal writes a memory record of the conclusion first,
 so no goal is retired without its record.
 
 Tools:
@@ -11,7 +10,7 @@ Tools:
   disable creation alone.
 
 Operator: ``corvidae goals --db PATH seed TEXT`` inserts a goal from a
-second process; the daemon reads the table every turn.
+second process; the daemon reads the table every beat.
 
 Heartbeat: ``retired_goals`` gives the heartbeat's review the newest
 retirement records (agent-wide).
@@ -32,7 +31,6 @@ import click
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.tool import Tool, tool_to_schema
 from corvidae_cognition.config_keys import read_count, read_prompt
-from corvidae_cognition.funnel import FunnelPlugin
 from corvidae_cognition.heartbeat import HEARTBEAT_CHANNEL
 from corvidae_cognition.memory import MemoryPlugin, _format_age
 
@@ -133,7 +131,7 @@ class GoalsSpec:
 
 
 class GoalsPlugin(CorvidaePlugin):
-    """Goals table, the three goal tools, and the per-turn goals entry."""
+    """Goals table, the goal tools, and goals' section of the heartbeat's beat."""
 
     hookspecs = GoalsSpec
     depends_on = frozenset({"persistence", "memory", "funnel", "clock"})
@@ -195,6 +193,11 @@ class GoalsPlugin(CorvidaePlugin):
         # Committed on read, as memory's heartbeat section is.
         self._last_retired_ids = {g["id"] for g in retired}
         parts: list[str] = []
+        # Open goals reach the agent here and nowhere else (#1091); the list
+        # goes out in full every beat, so a stale copy can't outlive a change.
+        open_list = await self._goals_list_text()
+        if open_list:
+            parts.append(open_list)
         if fresh or full:
             lines = [
                 f"- ({_format_age(g['age_seconds'])}) {g['summary']}" for g in fresh
@@ -286,7 +289,7 @@ class GoalsPlugin(CorvidaePlugin):
         if goal is None:
             return (
                 f"Error: no open goal #{goal_id}; "
-                "the ids are in the latest goals entry"
+                "call list_goals for the open ids"
             )
         if goal.retired_at is not None:
             return (
@@ -376,8 +379,8 @@ class GoalsPlugin(CorvidaePlugin):
 
         async def add_goal(text: str, position: str = "append", _ctx=None) -> str:
             """Add an open goal. position is 'prepend' (front of the queue,
-            high priority) or 'append' (back, the default). Open goals appear,
-            with ids, in the latest goals CONTEXT entry in your window."""
+            high priority) or 'append' (back, the default). list_goals shows
+            the open goals with their ids."""
             text = _collapse(text)
             if not text:
                 return "Error: text is empty; say what the goal is"
@@ -405,8 +408,8 @@ class GoalsPlugin(CorvidaePlugin):
             return f"Goal #{cursor.lastrowid} added."
 
         async def update_goal(id: int, text: str, _ctx=None) -> str:
-            """Replace the text of an open goal. Open goals appear, with ids, in the
-            latest goals CONTEXT entry in your window."""
+            """Replace the text of an open goal. list_goals shows the open goals
+            with their ids."""
             text = _collapse(text)
             if not text:
                 return "Error: text is empty; say what the goal is now"
@@ -430,8 +433,7 @@ class GoalsPlugin(CorvidaePlugin):
         async def retire_goal(id: int, conclusion: str, _ctx=None) -> str:
             """Retire an open goal and record what you concluded. conclusion is what
             you concluded and why, in the first person: 'I concluded X, because Y'.
-            Open goals appear, with ids, in the latest goals CONTEXT entry in your
-            window."""
+            list_goals shows the open goals with their ids."""
             if _ctx is None or _ctx.channel is None:
                 return "Error: no channel context available"
             conclusion = conclusion.strip()
@@ -556,7 +558,7 @@ class GoalsPlugin(CorvidaePlugin):
                 if goal is None or goal.retired_at is not None:
                     return (
                         f"Error: no open goal #{id}; "
-                        "the ids are in the latest goals entry"
+                        "call list_goals for the open ids"
                     )
                 now = plugin._now()
                 async with db.execute(
@@ -586,36 +588,24 @@ class GoalsPlugin(CorvidaePlugin):
         for fn in (add_goal, update_goal, retire_goal, list_goals, set_goal_status):
             tool_registry.append(Tool(name=fn.__name__, fn=fn, schema=tool_to_schema(fn)))
 
-    @hookimpl
-    async def before_agent_turn(self, channel, trace_id, annotations) -> None:
-        """Admit the current goals entry; the funnel dedupes an unchanged one."""
-        conv = getattr(channel, "conversation", None)
-        if conv is None:
-            return
+    async def _goals_list_text(self) -> str | None:
+        """The open-goals list for a beat; None when no goal was ever added."""
         goals = await self._all_goals()
         if not goals:
-            return
-        # The last-change time, not "now": the entry changes only when a goal does.
+            return None
+        # The last-change time, not "now": the text changes only when a goal does.
         as_of = _utc(max(g.updated_at for g in goals))
         open_goals = [g for g in goals if g.retired_at is None]
-        if open_goals:
-            lines = [
-                f"Open goals as of {as_of} (this list replaces any earlier goals list):"
-            ]
-            # Queue order is pick order; in-progress, blocked and waiting
-            # goals carry their status so the model can see the queue's state.
-            lines += [
-                f"#{g.id} " + (f"[{g.status}] " if g.status != "open" else "") + g.text
-                for g in open_goals
-            ]
-            entry = "\n".join(lines)
-        else:
-            entry = (
-                f"No open goals as of {as_of} "
-                "(this replaces any earlier goals list)."
-            )
-        funnel = get_dependency(self.pm, "funnel", FunnelPlugin)
-        await funnel.admit(channel, conv, "goals", [entry])
+        if not open_goals:
+            return f"No open goals as of {as_of} (this replaces any earlier goals list)."
+        lines = [f"Open goals as of {as_of} (this list replaces any earlier goals list):"]
+        # Queue order is pick order; in-progress, blocked and waiting
+        # goals carry their status so the model can see the queue's state.
+        lines += [
+            f"#{g.id} " + (f"[{g.status}] " if g.status != "open" else "") + g.text
+            for g in open_goals
+        ]
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

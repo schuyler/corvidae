@@ -1309,8 +1309,9 @@ fixture for the retrieval eval set.
 
 **Goals.** Goals persist in SQLite, are created by the agent through a
 tool or seeded by the operator out of band, enter the window as a deduped
-CONTEXT entry with as-of framing (a later goals entry supersedes every
-earlier one), and are reviewed and retired by the heartbeat. Retirement is
+list in the heartbeat's beat, in full every beat and in no other turn (#1091;
+the list carries as-of framing, so a later list supersedes every earlier one),
+and are reviewed and retired by the heartbeat. Retirement is
 a consolidation event: retiring a goal writes a memory record ("I
 concluded X, because...") and the heartbeat's review reads retired-goal
 records beside the open list, so an agent with a clock but no memory of
@@ -1365,7 +1366,7 @@ Audience filtering is a capability, not a requirement: the framework can
 filter by who is present, and the operator decides whether it does
 (principle 15). With the sensitivity plugin loaded, anything that enters a
 window from elsewhere (retrieved records, notes and reads from other
-channels, the goals entry) is filtered by who is present in that window.
+channels) is filtered by who is present in that window.
 It never gates a reply, and text already in a window is not filtered
 again. Without the plugin, nothing is filtered by audience. An
 idle scan is upkeep (principle 13) that runs preferably when the system is
