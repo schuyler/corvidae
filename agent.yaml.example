@@ -124,6 +124,7 @@ agent:
 #                                     # round(n*0.75) words; overruns are stored in full and logged
 #                                     # (positive integer; changes prompt_hash; restart)
 #   half_life_days: 30                # retrieval recency decay (e-folding time, days)
+#   heartbeat_limit: 5                # newest memories a heartbeat beat reviews, every channel's; 0 = none
 #   rubric_prompt: "Rate importance"  # or a file path; the importance rubric
 #   retrieval:
 #     band_on: relative               # relative | score | similarity: what strong/moderate/weak is applied
@@ -370,19 +371,28 @@ agent:
 
 # Heartbeat (cognition; optional): a turn the agent starts after this many
 # seconds of system-wide quiet, on internal:heartbeat (no transport owns it,
-# so nothing reaches anyone). It reviews recent memory and acts only if
-# something warrants it; prompt: prompts/heartbeat.md. Absent = asleep:
-# delete or comment out the block and restart to put it to sleep. Needs
-# memory; it reviews the newest records of the whole memory, every channel's.
+# so nothing reaches anyone). It reviews the sections plugins add (memory's
+# recent records, goals' retired goals) and acts only if something warrants
+# it; prompt: prompts/heartbeat.md. Absent = asleep: delete or comment out
+# the block and restart to put it to sleep. Doesn't need memory; with memory
+# loaded, the beat carries the newest records of the whole memory, every
+# channel's (memory.heartbeat_limit).
 # heartbeat:
 #   after: 3600                        # seconds of quiet before a beat; also the gap between beats
 #   prompt: {file: my-heartbeat.md}                         # or an inline string / list of paths; absent = built-in
-#   goals_instruction: {file: prompts/heartbeat-goals.md}   # goals paragraph (read by goals until #1079); absent = built-in
 #   # Point `prompt` at your own file, not prompts/heartbeat.md: the shipped
 #   # copy is documentation and opens with a header, which `resolve_prompt`
 #   # would send to the model along with the instruction.
-#   memory_limit: 5                    # newest in-scope memories a beat reviews; 0 = none
-#   retired_goal_limit: 5              # newest retired goals a beat reviews (read by goals until #1079); 0 = none
+#   # Deprecated spellings, still read for one release (WARNING at startup);
+#   # setting one with its new key fails startup. Use the new key instead:
+#   #   memory_limit -> memory.heartbeat_limit
+#   #   retired_goal_limit -> goals.heartbeat_retired_limit
+#   #   goals_instruction -> goals.heartbeat_instruction
+
+# Goals (cognition): the goals plugin's section of the heartbeat's beat.
+# goals:
+#   heartbeat_retired_limit: 5         # newest retired goals a beat reviews; 0 = none
+#   heartbeat_instruction: {file: prompts/heartbeat-goals.md}   # goals paragraph; absent = built-in
 
 # Skills directory (cognition). The index appears in the system prompt at
 # conversation start and compaction; use_skill loads full text on demand.

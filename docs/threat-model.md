@@ -896,7 +896,8 @@ and shows them in a CONTEXT entry on every turn. Three things follow.
 
 `HeartbeatPlugin` (#134; off unless `heartbeat.after` is set) starts a
 turn on `internal:heartbeat` after a quiet spell. The turn carries the
-agent's recent memory summaries and runs with the agent's normal tools.
+agent's recent memory summaries, added by the memory plugin's
+`collect_heartbeat_prompts` contribution (#1079), and runs with the agent's normal tools.
 The beat's text is `heartbeat.prompt` plus the sections any loaded plugin
 adds through `collect_heartbeat_prompts` (#1084), so a plugin that
 implements the hook can put text in front of that unwatched turn: it is
@@ -993,7 +994,7 @@ tools. The static keys are read from operator config alone (through
 dotted name (`agent.request_logprobs`) is accepted but has no effect, and an
 undotted one is refused by the allowlist. Every prompt the framework sends on the agent's behalf now has a config
 key resolved by `resolve_prompt` (#411, #287): `heartbeat.prompt`,
-`heartbeat.goals_instruction`, `tools.subagent.system_prompt`,
+`goals.heartbeat_instruction` (and its deprecated alias `heartbeat.goals_instruction`), `tools.subagent.system_prompt`,
 `memory.rubric_prompt`, `silence.instruction`, and the fork prompts. Each is a new override point:
 on a channel with `write_file`, the agent can rewrite the prompt file the
 key points at. The change applies when the key is next resolved: on an

@@ -38,7 +38,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
 | `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that contains `NO_REPLY` goes unsent, and each decline is recorded in `exchange_log`. It adds the instruction to the system prompt of chat channels, and with `silence.mode: tool` or `both` an `end_turn` tool |
-| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn is `heartbeat.prompt` plus the sections plugins add through `collect_heartbeat_prompts` (recent memory from the heartbeat itself, goals' pick rule and retired conclusions), and acts only if something warrants it. Asleep unless configured |
+| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn is `heartbeat.prompt` plus the sections plugins add through `collect_heartbeat_prompts` (memory's recent records, goals' pick rule and retired conclusions), and acts only if something warrants it. Asleep unless configured |
 | `SkillsPlugin` | `skills` | Scans a skills directory for `SKILL.md` files; contributes an index (name + description) to the system prompt via `transform_system_prompt` at conversation start and compaction; provides a `use_skill` tool that loads a skill's full text on demand |
 
 Entry-point names are the same as when these plugins lived in the kernel, so
@@ -1139,11 +1139,25 @@ rows`.
 records (indexed, not redacted) of the whole memory, every channel's, as
 `{summary, channel_id, age_seconds}` dicts, newest first, with ages from the
 kernel clock. Nothing is left out by owner, so a caller sees its own records
-too. `HeartbeatPlugin` uses it. It raises `RuntimeError` while the memory DB
+too. Memory's own beat section uses it (below). It raises `RuntimeError` while the memory DB
 is not open.
 
+**Heartbeat contribution (#1079).** This plugin implements
+`collect_heartbeat_prompts` (`tryfirst`, so its section precedes goals'
+`trylast` one) and returns the newest `memory.heartbeat_limit` (default 5; `0`
+adds none) memories through `recent`, framed as the agent's own summaries and
+as data, oldest first. It keeps its own only-what's-new state (#716): all of
+them on the first beat, then only those not yet sent, and no section when
+none are new. Unlike goals' state it is not reset by compaction of the beat
+channel, since memories are narrative a summary carries. A failed read raises
+and the beat goes out without the section. `heartbeat.memory_limit` still
+works for one release, logs a WARNING naming `memory.heartbeat_limit`, and
+fails startup when set beside it. Without a heartbeat the hook is never
+called.
+
 **Without this plugin:** no memory records form and no retrieval happens;
-compaction remains plain lossy summarization.
+compaction remains plain lossy summarization. A heartbeat still beats, with
+no memory section.
 
 A malformed consolidation reply is retried once; if the retry is also
 unusable, the range is stored as its raw transcript rather than being
@@ -1635,7 +1649,7 @@ appears on every channel at its next turn.
 **Heartbeat contribution (#1084).** A beat's turn carries the goals entry
 like any other turn, so the heartbeat no longer renders the open goals. This
 plugin implements `collect_heartbeat_prompts` (`trylast`, so its section ends
-the beat) and returns two things: the newest `heartbeat.retired_goal_limit`
+the beat) and returns two things: the newest `goals.heartbeat_retired_limit`
 (default 5) retirement records (agent-wide, newest first, each with its age,
 framed as data), and `GOALS_INSTRUCTION`, the pick rule that tells the model to
 take a next step on an open goal or retire a finished one, and not to take up a
@@ -1644,8 +1658,11 @@ The retired block follows the funnel's only-what's-new rule (#716): full on the
 first beat and again after the beat channel compacts (the plugin's own
 `on_compaction` resets its state, since a summary may not keep structured data),
 otherwise only records not yet sent, and omitted when there are none.
-`heartbeat.retired_goal_limit` and `heartbeat.goals_instruction` are read here
-until #1079 retires them; a bad limit fails this plugin's startup.
+`goals.heartbeat_retired_limit` and `goals.heartbeat_instruction` (the
+latter resolved like `heartbeat.prompt`) are read here; a bad limit fails this
+plugin's startup. They replace `heartbeat.retired_goal_limit` and
+`heartbeat.goals_instruction`, which still work for one release, log a
+WARNING naming the new key, and fail startup when set beside their new key.
 
 **Without this plugin:** the goal tools, the goals entry and the `goals`
 table are absent. Goals already in an existing database stay there unread.
@@ -2191,8 +2208,8 @@ A `NO_REPLY` that was actually sent (say another gate's veto raised and the send
 
 A turn the agent starts on its own when nothing else is happening (PRD
 §3.7 Heartbeat, principle 13). Entry point name: `"heartbeat"`;
-`depends_on = {"idle", "registry"}`. It needs `memory` only when awake, so
-a config that disables memory still starts while the heartbeat sleeps.
+`depends_on = {"idle", "registry"}`. It does not need `memory`: with memory
+disabled it starts and beats without a memory section.
 
 **When it beats.** At `on_start`, if `heartbeat.after` is set, it registers
 a system idle watch (`IdleTracker.watch_system`) with that period. The
@@ -2214,13 +2231,12 @@ blank lines, in hook order. A raising implementation is logged and skipped, and
 the beat goes out without its section. Before notifying, the beat re-checks that
 the system is still quiet (a message may have landed during the gather), then
 calls `on_notify` on `internal:heartbeat` with `source="heartbeat"` and
-`annotations={"origin": "heartbeat"}`. Two implementations ship. The heartbeat's
-own, `tryfirst` and interim until #1079 moves it to the memory plugin, reads
-`MemoryPlugin.recent(heartbeat.memory_limit)` (default 5) and returns the
-memories framed as the agent's own summaries and as data, oldest first: all of
+`annotations={"origin": "heartbeat"}`. The heartbeat adds nothing of its own; two implementations ship in other plugins. Memory's
+(see [MemoryPlugin](#memoryplugin-packagescorvidae-cognitioncorvidae_cognitionmemorypy)), `tryfirst`, returns the recent
+memories under `memory.heartbeat_limit` (default 5), framed as the agent's own summaries and as data, oldest first: all of
 them on the first beat, then only those not yet sent (none new means no
 section). Goals' (see [GoalsPlugin](#goalsplugin-packagescorvidae-cognitioncorvidae_cognitiongoalspy)) ends the beat with its pick
-rule and retired conclusions. With neither, a beat is the bare prompt. Nothing
+rule and retired conclusions. With neither (memory or goals disabled, say), a beat is the bare prompt; the default prompt is plugin-neutral ("Review the sections below, if there are any, ...") so it reads true either way. Nothing
 adds a "nothing new" line. The memory and goals state is committed when the hook
 runs, so a beat that the quiet re-check then skips doesn't resend its items.
 `prompts/heartbeat.md` shows a full beat. The turn then runs the
@@ -2244,7 +2260,7 @@ don't exist yet; when they land, the beat uses them like any other turn,
 with no allowlist. The prompt tells the model that most beats warrant
 nothing, and to say so in one line and stop.
 
-**What it reviews.** The newest `heartbeat.memory_limit` (default 5)
+**What it reviews.** With memory loaded, the newest `memory.heartbeat_limit` (default 5)
 indexed, unredacted records of the whole memory, every channel's, listed
 oldest first. The beat reaches every channel's records (#168). Records consolidated from the
 beat channel itself are in the list too, so a beat can see an earlier
@@ -2256,13 +2272,13 @@ there. A beat sees its own earlier actions only in the window, which, after a co
 the summary, then the most recent rows `agent.compaction_retention` keeps,
 then the beats since. Older beats leave the window, and memory brings them
 back only once they are consolidated; the review shows only the newest
-`heartbeat.memory_limit` records. So once the send and note tools exist, a beat could repeat an
+`memory.heartbeat_limit` records. So once the send and note tools exist, a beat could repeat an
 outreach that compaction has summarized out of the window. Today it
 can't happen: there is no send, note or read tool yet (#234, #235), so a
 beat can't reach anyone. The bounds once they land are the
 window, the goals entry (a beat that records an outreach as a goal step sees
 it in later beats), and the target channel's memories, once its rows have been consolidated and
-are among the newest `heartbeat.memory_limit`; the
+are among the newest `memory.heartbeat_limit`; the
 PRD's per-destination limit on messages the agent starts caps repeats too,
 but only when the operator sets it. The
 cross-channel tools (§3.5.9–11) should record each outreach where a later
@@ -2276,14 +2292,11 @@ so sleep is set in `agent.yaml` and survives every restart;
 `plugins.disabled: [heartbeat]` also works. A config reload doesn't change
 it.
 
-**Failures.** A memory or retired-goals read that raises is logged as a WARNING naming the
-channel and the exception, and that beat is skipped; the tracker retries
-`after` seconds later. An invalid `heartbeat.after` (zero, negative, non-finite,
+**Failures.** A contributor whose read raises (memory's or goals') is logged as a
+WARNING naming the hook and the exception; its section is left out and the
+beat still goes out. An invalid `heartbeat.after` (zero, negative, non-finite,
 boolean, non-numeric) fails startup with a `ValueError`, naming the
-key, the value and what is accepted, and an awake
-heartbeat without the memory plugin fails startup with a `RuntimeError`
-saying to enable memory or remove `heartbeat.after`.
+key, the value and what is accepted, while an awake
+heartbeat without the memory plugin starts and beats with no memory section.
 
-There is no goal review yet: goals (#133) are a separate plugin, and
-whichever of the two lands second wires the beat to the goals store.
 Distillation and rehearsal are not part of the heartbeat.
