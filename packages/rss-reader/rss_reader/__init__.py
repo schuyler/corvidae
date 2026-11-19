@@ -176,6 +176,8 @@ class RSSPlugin(CorvidaePlugin):
             self._state_path: Path = Path(DEFAULT_STATE_FILE)
             self._max_chars: int = DEFAULT_MAX_CHARS
             self._prompt: str = ""
+            self._delivery: str = "notify"
+            self._queue_path: Path = Path("Journal/reading-queue.md")
             self._task: asyncio.Task | None = None
             return
 
@@ -219,6 +221,16 @@ class RSSPlugin(CorvidaePlugin):
         if not isinstance(prompt, str):
             raise _bad("rss.prompt", prompt, "use a string")
         self._prompt: str = prompt.strip()
+
+        delivery = block.get("delivery", "notify")
+        if delivery not in ("notify", "reading_queue"):
+            raise _bad("rss.delivery", delivery, "use 'notify' or 'reading_queue'")
+        self._delivery: str = delivery
+
+        queue_file = block.get("reading_queue_file", "Journal/reading-queue.md")
+        if not isinstance(queue_file, str) or not queue_file:
+            raise _bad("rss.reading_queue_file", queue_file, "use a file path")
+        self._queue_path: Path = Path(queue_file)
 
         self._task = None
 
@@ -298,18 +310,27 @@ class RSSPlugin(CorvidaePlugin):
             title = item.get("title", "(untitled)")
             link = item.get("link", "")
             summary = item.get("summary", "")
-            text = f"[RSS] {title}\n{link}"
-            if summary:
-                text += f"\n{summary}"
-            prompt = self._prompt
-            if prompt:
-                text = f"{prompt}\n\n{text}"
             origin = f"rss:{feed_url}"
             try:
-                await self._spill.notify(
-                    channels, source=origin, text=text,
-                    annotations={"origin": origin}, limit=self._max_chars,
-                )
+                if self._delivery == "reading_queue":
+                    entry = f"- [{title}]({link})"
+                    if summary:
+                        entry += f" — {summary[:200]}"
+                    self._queue_path.parent.mkdir(parents=True, exist_ok=True)
+                    with self._queue_path.open("a") as f:
+                        f.write(entry + "\n")
+                    logger.info("rss: queued %s to %s", title, self._queue_path)
+                else:
+                    text = f"[RSS] {title}\n{link}"
+                    if summary:
+                        text += f"\n{summary}"
+                    prompt = self._prompt
+                    if prompt:
+                        text = f"{prompt}\n\n{text}"
+                    await self._spill.notify(
+                        channels, source=origin, text=text,
+                        annotations={"origin": origin}, limit=self._max_chars,
+                    )
                 delivered.append((feed_url, item.get("guid", "")))
             except Exception as exc:
                 logger.warning("rss: delivery failed for %s: %s", feed_url, exc)

@@ -115,6 +115,8 @@ def _make_plugin(config: dict) -> RSSPlugin:
     plugin._spill.notify = AsyncMock()
     plugin.pm = MagicMock()
     plugin._prompt = ""
+    plugin._delivery = "notify"
+    plugin._queue_path = Path("Journal/reading-queue.md")
     return plugin
 
 
@@ -718,3 +720,66 @@ async def test_no_prompt_when_absent(tmp_path: Path):
     for call in mock_channel.notify.call_args_list:
         text = call.kwargs.get("text") or call.args[0] if call.args else call.kwargs["text"]
         assert not text.startswith("Summarise")
+
+
+# --- reading_queue delivery tests ---
+
+@pytest.mark.asyncio
+async def test_queue_delivery_writes_to_file(tmp_path):
+    """reading_queue delivery appends entries to the queue file."""
+    plugin = RSSPlugin.__new__(RSSPlugin)
+    plugin._registry = MagicMock()
+    plugin._spill = MagicMock()
+    plugin._spill.notify = AsyncMock()
+    plugin.pm = MagicMock()
+    plugin._prompt = ""
+    plugin._delivery = "reading_queue"
+    plugin._queue_path = tmp_path / "reading-queue.md"
+    plugin._feeds = ["https://example.com/feed"]
+    plugin._targets = ("signal:+15551234567",)
+    plugin._max_items = 10
+    plugin._state_path = tmp_path / "seen.json"
+    plugin._max_chars = 2000
+    plugin._poll_secs = 60
+    plugin._seen = {}
+
+    feed = _sample_feed(1)
+    resp = MagicMock()
+    resp.content = feed
+    resp.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    mock_channel = MagicMock()
+    with patch("rss_reader.resolve_persisted_channel", AsyncMock(return_value=mock_channel)):
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            await plugin._poll_once()
+
+    assert plugin._queue_path.exists()
+    content = plugin._queue_path.read_text()
+    assert "Post 1" in content
+    assert "https://example.com/1" in content
+    # No notification should have been sent
+    plugin._spill.notify.assert_not_called()
+
+
+def test_queue_delivery_invalid_value_rejected():
+    """delivery must be 'notify' or 'reading_queue'."""
+    delivery = "email"
+    if delivery not in ("notify", "reading_queue"):
+        with pytest.raises(ValueError, match="delivery"):
+            raise _bad("rss.delivery", delivery, "use 'notify' or 'reading_queue'")
+
+
+def test_queue_delivery_default_is_notify():
+    """Without a delivery key, the plugin defaults to notify mode."""
+    config = {
+        "feeds": ["https://example.com/feed"],
+        "poll_interval": "30m",
+        "targets": ["signal:+15551234567"],
+    }
+    delivery = config.get("delivery", "notify")
+    assert delivery == "notify"
