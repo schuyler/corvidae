@@ -12,24 +12,30 @@ on_init, then on_start, and only then is the idle tracker started.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from importlib.metadata import entry_points
 
 import aiosqlite
 import pytest
 
 from corvidae.channel import ChannelRegistry
-from corvidae.hooks import create_plugin_manager, hookimpl, validate_dependencies
+from corvidae.hooks import (
+    create_plugin_manager,
+    hookimpl,
+    install_plugin_hookspecs,
+    validate_dependencies,
+)
 from corvidae.llm_plugin import LLMPlugin
 from helpers import with_chat_llm
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae_cognition.heartbeat import (
     DEFAULT_HEARTBEAT_PROMPT,
-    DEFAULT_MEMORY_LIMIT,
-    MEMORY_HEADER,
-    memory_section,
     HEARTBEAT_CHANNEL,
     HeartbeatPlugin,
 )
+# The memory section and its header live with the memory plugin (#1079);
+# reached as attributes so a missing symbol fails the test that needs it.
+from corvidae_cognition import memory as memory_mod
 from corvidae_cognition.memory import MemoryPlugin
 from fake_clock import install_kernel_clock
 
@@ -121,6 +127,9 @@ async def make_env():
 
         heartbeat = HeartbeatPlugin()
         pm.register(heartbeat, name="heartbeat")
+        # Runtime installs each plugin's hookspecs; without it a beat with no
+        # contributor has no hook to call (#1079).
+        install_plugin_hookspecs(pm)
         # Runtime validates declared dependencies before on_init.
         validate_dependencies(pm)
         await heartbeat.on_init(pm=pm, config=config)
@@ -159,14 +168,13 @@ async def test_asleep_heartbeat_needs_no_memory_plugin(make_env):
     assert env.beats == []
 
 
-async def test_awake_heartbeat_without_memory_fails_with_remedy(make_env):
-    """H2 needs memory: heartbeat.after without the memory plugin fails
-    startup, naming memory and how to fix it."""
-    with pytest.raises(RuntimeError) as exc:
-        await make_env(AWAKE, with_memory=False)
-    message = str(exc.value)
-    assert "memory" in message and "heartbeat.after" in message
-    assert "enable" in message and "remove" in message
+async def test_awake_heartbeat_without_memory_starts_and_beats_prompt_only(make_env):
+    """#1079 AC3: heartbeat.after with the memory plugin not loaded starts
+    without error, and the beat is the prompt alone (no other plugin adds a
+    section here)."""
+    env = await make_env(AWAKE, with_memory=False)
+    await env.clock.advance(AFTER)
+    assert [b["text"] for b in env.beats] == [DEFAULT_HEARTBEAT_PROMPT]
 
 
 # ---------------------------------------------------------------------------
@@ -226,9 +234,9 @@ async def test_repeats_once_per_period_while_quiet(make_env):
 
 
 async def test_memory_read_failure_skips_the_section_not_the_beat(make_env, caplog):
-    """H1, #1084: a failed memory read is logged at WARNING, naming the hook
-    and the plugin with the traceback, and the beat still goes out as the
-    prompt alone; the next beat reads memory again."""
+    """H1, #1084, #1079: a failed memory read is logged at WARNING, naming the
+    hook and the memory plugin with the traceback, and the beat still goes
+    out as the prompt alone; the next beat reads memory again."""
     env = await make_env(AWAKE)
     real_recent = env.memory.recent
     failures = [RuntimeError("database is locked")]
@@ -244,12 +252,12 @@ async def test_memory_read_failure_skips_the_section_not_the_beat(make_env, capl
     assert [b["text"] for b in env.beats] == [DEFAULT_HEARTBEAT_PROMPT]
     records = [r for r in caplog.records if "collect_heartbeat_prompts" in r.getMessage()]
     assert len(records) == 1
-    assert "heartbeat" in records[0].getMessage()
+    assert "memory" in records[0].getMessage()
     # The log line carries the traceback.
     assert records[0].exc_info is not None
     # The next beat reads memory again, so its section is the full first one.
     await env.clock.advance(AFTER)
-    assert MEMORY_HEADER in env.beats[1]["text"]
+    assert memory_mod.MEMORY_HEADER in env.beats[1]["text"]
 
 
 @pytest.mark.parametrize("bad", [0, float("nan")])
@@ -319,38 +327,61 @@ async def test_sleep_survives_restart(make_env):
 
 
 # ---------------------------------------------------------------------------
-# heartbeat.memory_limit / heartbeat.retired_goal_limit
+# memory.heartbeat_limit (#1079 AC5, AC6)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("bad", [-1, 2.5, True, "20"])
-async def test_rejects_a_bad_memory_limit(make_env, bad):
-    """A negative, fractional, boolean or string memory_limit fails startup,
-    naming the key, the rejected value, what is accepted and where to fix it."""
+async def test_rejects_a_bad_memory_heartbeat_limit(make_env, bad):
+    """#1079 AC6: a negative, fractional, boolean or string
+    memory.heartbeat_limit fails startup, naming the key, the rejected value,
+    what is accepted and where to fix it."""
     with pytest.raises(ValueError) as exc:
-        await make_env({"heartbeat": {"memory_limit": bad}}, with_memory=False)
+        await make_env({"memory": {"heartbeat_limit": bad}})
     message = str(exc.value)
-    assert "heartbeat.memory_limit" in message
+    assert "memory.heartbeat_limit" in message
     assert f"got {bad!r}" in message
     assert "whole number" in message
     assert "0 or more" in message
     assert "agent.yaml" in message
 
 
-def test_memory_limit_defaults_to_five_and_accepts_zero():
-    """An absent or null limit is 5; 0 is a valid count (reviews none)."""
-    from corvidae_cognition.heartbeat import parse_memory_limit
+async def test_memory_heartbeat_limit_null_is_default_and_zero_is_accepted():
+    """#1079 AC5/AC6: a null memory.heartbeat_limit is the default 5; 0 is a
+    valid count."""
+    from corvidae.hooks import create_plugin_manager
+    from corvidae.llm_plugin import LLMPlugin
 
-    assert parse_memory_limit({}) == 5
-    assert parse_memory_limit({"heartbeat": {"memory_limit": None}}) == 5
-    assert parse_memory_limit({"heartbeat": {"memory_limit": 0}}) == 0
-    assert parse_memory_limit({"heartbeat": {"memory_limit": 5}}) == 5
+    limits = {}
+    for label, value in (("null", None), ("zero", 0)):
+        pm = create_plugin_manager()
+        pm.register(LLMPlugin(), name="llm")
+        plugin = MemoryPlugin()
+        await plugin.on_init(
+            pm=pm, config=with_chat_llm({"memory": {"heartbeat_limit": value}})
+        )
+        limits[label] = plugin._heartbeat_limit
+    assert limits == {"null": 5, "zero": 0}
 
 
-async def test_beat_obeys_memory_limit(make_env):
-    """A beat reviews only the newest ``heartbeat.memory_limit`` memories:
-    the limit bounds the notification, so it bounds the beat's prompt."""
-    config = {"heartbeat": {"after": AFTER, "memory_limit": 2}}
+async def test_beat_reviews_five_memories_by_default(make_env):
+    """#1079 AC5: with memory.heartbeat_limit absent, a beat carries the
+    newest five memories and not the sixth."""
+    env = await make_env(AWAKE)
+    now = env.clock.now()
+    # Six memories, oldest first; only the oldest should be left out.
+    for i in range(6):
+        await env.seed_memory("irc:#lex", f"MEM{i} plan.", now - 1000 + i * 10)
+    await env.clock.advance(AFTER)
+    text = env.beats[0]["text"]
+    assert "MEM0 plan." not in text
+    assert all(f"MEM{i} plan." in text for i in range(1, 6))
+
+
+async def test_beat_obeys_memory_heartbeat_limit(make_env):
+    """#1079 AC5: a beat reviews only the newest ``memory.heartbeat_limit``
+    memories: the limit bounds the notification, so it bounds the prompt."""
+    config = {"heartbeat": {"after": AFTER}, "memory": {"heartbeat_limit": 2}}
     env = await make_env(config)
     now = env.clock.now()
     await env.seed_memory("irc:#lex", "oldest: the first plan.", now - 7200)
@@ -365,7 +396,7 @@ async def test_beat_obeys_memory_limit(make_env):
     assert "oldest: the first plan." not in text
 
 
-# --- The memory section and its diff (#716, #1084) ---------------------------
+# --- The memory section and its diff (#716, #1084, #1079) --------------------
 
 
 def _mem(id_: int, summary: str, age: float = 60) -> dict:
@@ -374,27 +405,59 @@ def _mem(id_: int, summary: str, age: float = 60) -> dict:
 
 def test_full_memory_section_lists_oldest_first():
     """The first beat lists every memory, the newest nearest the prompt."""
-    text = memory_section([_mem(2, "newer", 30), _mem(1, "older", 90)], full=True)
-    assert text.startswith(MEMORY_HEADER)
+    text = memory_mod.memory_section([_mem(2, "newer", 30), _mem(1, "older", 90)], full=True)
+    assert text.startswith(memory_mod.MEMORY_HEADER)
     assert text.index("older") < text.index("newer")
 
 
 def test_full_memory_section_with_no_memories_says_none():
-    """The prompt tells the model to read memories, so an empty first beat says so."""
-    assert memory_section([], full=True).endswith("(none)")
+    """A full first beat with no memories still says so."""
+    assert memory_mod.memory_section([], full=True).endswith("(none)")
 
 
 def test_diff_memory_section_with_nothing_new_is_no_section():
     """Nothing new, so nothing to add (and no 'nothing new' text either)."""
-    assert memory_section([], full=False) is None
-
-
-def test_default_memory_limit_is_five():
-    """The default memory limit is 5, not 20."""
-    assert DEFAULT_MEMORY_LIMIT == 5
+    assert memory_mod.memory_section([], full=False) is None
 
 
 def test_memory_header_says_oldest_first():
     """Memory header reflects chronological (oldest-first) order."""
-    assert "oldest first" in MEMORY_HEADER
-    assert "newest first" not in MEMORY_HEADER
+    assert "oldest first" in memory_mod.MEMORY_HEADER
+    assert "newest first" not in memory_mod.MEMORY_HEADER
+
+
+async def test_memory_section_is_none_when_nothing_new_and_survives_compaction(make_env):
+    """#1079 AC2: the memory plugin's own hook returns the full section
+    first, None when nothing is new, and keeps that diff when the beat
+    channel compacts (memories are narrative the summary already carries):
+    after compaction only a memory added since is returned."""
+    env = await make_env(AWAKE)
+    now = env.clock.now()
+    await env.seed_memory("irc:#lex", "ALPHA the first plan.", now - 60)
+    beat_channel = SimpleNamespace(id=HEARTBEAT_CHANNEL)
+
+    first = await env.memory.collect_heartbeat_prompts(channel=beat_channel)
+    assert memory_mod.MEMORY_HEADER in first and "ALPHA" in first
+    assert await env.memory.collect_heartbeat_prompts(channel=beat_channel) is None
+    # The beat channel compacts, through the real broadcast.
+    await env.pm.ahook.on_compaction(
+        channel=beat_channel, summary_msg={}, retain_count=0, compacted_ids=[]
+    )
+    await env.seed_memory("irc:#lex", "BETA the second plan.", now - 30)
+    third = await env.memory.collect_heartbeat_prompts(channel=beat_channel)
+    assert "BETA" in third and "ALPHA" not in third
+
+
+@pytest.mark.parametrize("owner", ["memory", "goals"])
+def test_heartbeat_disabled_logs_no_orphan_warning(owner, caplog):
+    """#1079: a config without the heartbeat plugin but with memory or goals
+    loaded does not WARN that their collect_heartbeat_prompts hookimpl has no
+    spec; they declare the heartbeat as an optional dependency."""
+    from corvidae.hooks import report_orphan_hookimpls
+    from corvidae_cognition.goals import GoalsPlugin
+
+    pm = create_plugin_manager()
+    pm.register(MemoryPlugin() if owner == "memory" else GoalsPlugin(), name=owner)
+    with caplog.at_level(logging.WARNING):
+        report_orphan_hookimpls(pm)
+    assert [r.getMessage() for r in caplog.records if "collect_heartbeat_prompts" in r.getMessage()] == []

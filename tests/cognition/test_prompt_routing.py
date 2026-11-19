@@ -5,7 +5,7 @@ wiring config -> resolve_prompt -> the prompt that goes out for:
 
 - memory.rubric_prompt               -> RubricPrior.score() system message
 - heartbeat.prompt                   -> HeartbeatPlugin._prompt
-- heartbeat.goals_instruction        -> GoalsPlugin._instruction
+- goals.heartbeat_instruction        -> GoalsPlugin._instruction
 - memory.consolidation_fork_prompt   -> resolve_consolidation_fork_prompt()
 - appraisal.stage2_fork_prompt       -> AppraisalPlugin._fork_prompt
 - critique.fork_prompt.<lens>        -> CritiquePlugin._fork_prompts
@@ -85,7 +85,7 @@ class TestRubricPromptRouting:
 
 
 class TestHeartbeatPromptRouting:
-    """heartbeat.prompt / heartbeat.goals_instruction at on_init."""
+    """heartbeat.prompt / goals.heartbeat_instruction at on_init."""
 
     async def test_inline_prompts_resolved_at_init(self):
         plugin = HeartbeatPlugin()
@@ -99,7 +99,7 @@ class TestHeartbeatPromptRouting:
         assert plugin._prompt == "HB INLINE"
         goals = GoalsPlugin()
         await goals.on_init(
-            _FakePM(), {"heartbeat": {"after": 60, "goals_instruction": "GOALS INLINE"}}
+            _FakePM(), {"goals": {"heartbeat_instruction": "GOALS INLINE"}}
         )
         assert goals._instruction == "GOALS INLINE"
 
@@ -112,6 +112,17 @@ class TestHeartbeatPromptRouting:
         }
         await plugin.on_init(_FakePM({"memory": object()}), cfg)
         assert plugin._prompt == "From the heartbeat file."
+
+    async def test_goals_instruction_file_resolved_at_init(self, tmp_path: Path):
+        """#1079 AC5: goals.heartbeat_instruction takes the file form too."""
+        (tmp_path / "g.md").write_text("Pick from the file.\n")
+        goals = GoalsPlugin()
+        cfg = {
+            "_base_dir": str(tmp_path),
+            "goals": {"heartbeat_instruction": {"file": "g.md"}},
+        }
+        await goals.on_init(_FakePM(), cfg)
+        assert goals._instruction == "Pick from the file."
 
     async def test_defaults_when_keys_absent(self):
         plugin = HeartbeatPlugin()

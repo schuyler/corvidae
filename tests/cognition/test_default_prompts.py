@@ -155,7 +155,7 @@ def test_consolidation_instruction_asks_for_entries():
 def test_heartbeat_goals_copy_is_the_goals_instruction():
     """#860: prompts/heartbeat-goals.md is the documented copy of
     GOALS_INSTRUCTION, verbatim and bare, so it can also serve as the
-    heartbeat.goals_instruction file without sending a doc header."""
+    goals.heartbeat_instruction file without sending a doc header."""
     from corvidae_cognition.goals import GOALS_INSTRUCTION
 
     copy = (REPO / "prompts" / "heartbeat-goals.md").read_text()
@@ -169,7 +169,8 @@ def test_heartbeat_doc_example_is_what_a_beat_sends():
     import asyncio
 
     from corvidae_cognition.goals import GoalsPlugin
-    from corvidae_cognition.heartbeat import DEFAULT_HEARTBEAT_PROMPT, memory_section
+    from corvidae_cognition.heartbeat import DEFAULT_HEARTBEAT_PROMPT
+    from corvidae_cognition.memory import memory_section
 
     goals = GoalsPlugin()
 
@@ -234,3 +235,14 @@ def test_consolidation_prompt_carries_the_attribution_rules():
     for rule in (ATTRIBUTION_RULES, OUTSIDER_RULE, PRINCIPALS_RULE, NO_MARKUP_RULE):
         assert rule in prompt, f"the code default lacks: {rule}"
         assert rule in copy, f"the prompts/ copy lacks: {rule}"
+
+
+def test_default_heartbeat_prompt_names_no_memories_and_reviews_what_follows():
+    """#1079 AC4: the default beat prompt is true whatever sections follow, so
+    it does not name memories (case-insensitive) and still tells the model to
+    review what follows."""
+    from corvidae_cognition.heartbeat import DEFAULT_HEARTBEAT_PROMPT
+
+    assert "memories" not in DEFAULT_HEARTBEAT_PROMPT.lower()
+    assert "review" in DEFAULT_HEARTBEAT_PROMPT.lower()
+    assert "below" in DEFAULT_HEARTBEAT_PROMPT.lower() or "follow" in DEFAULT_HEARTBEAT_PROMPT.lower()

@@ -5186,7 +5186,7 @@ CritiquePlugin      → "task", "llm"; soft-uses "agent" for forks              
 OutcomeLogPlugin    → "persistence"                                               (cognition extra)
 AppraisalPlugin     → "persistence"; soft-uses "agent" for forks                  (cognition extra)
 SilencePlugin       → none; soft-uses "outcome_log" to record declines          (cognition extra)
-HeartbeatPlugin     → "idle", "registry"; needs "memory" only when awake          (cognition extra)
+HeartbeatPlugin     → "idle", "registry"; no hard dependency on "memory"            (cognition extra)
 UsageLogPlugin      → "persistence"
 SchedulerPlugin     → "registry", "persistence", "clock"
 ```

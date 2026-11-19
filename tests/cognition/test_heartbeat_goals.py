@@ -24,6 +24,7 @@ from corvidae_cognition.funnel import FunnelPlugin
 from corvidae_cognition import goals as goals_mod
 from corvidae_cognition.goals import GoalsPlugin
 from corvidae_cognition.heartbeat import HEARTBEAT_CHANNEL, HeartbeatPlugin
+from corvidae_cognition import memory as memory_mod
 from corvidae_cognition.memory import MemoryPlugin
 from fake_clock import install_kernel_clock
 
@@ -223,11 +224,9 @@ async def test_beat_without_goals_plugin_carries_no_goals_text(make_env):
 
 
 async def test_beat_obeys_retired_goal_limit(make_env, monkeypatch):
-    """The beat reviews only the newest ``heartbeat.retired_goal_limit``
+    """The beat reviews only the newest ``goals.heartbeat_retired_limit``
     retired goals; older conclusions stay out of the notification."""
-    monkeypatch.setitem(
-        CONFIG, "heartbeat", {"after": AFTER, "retired_goal_limit": 1}
-    )
+    monkeypatch.setitem(CONFIG, "goals", {"heartbeat_retired_limit": 1})
     env = await make_env(with_goals=True)
     ctx = ctx_for("irc:#test")
     await add_message(env, "irc:#test", "talking about the two jobs")
@@ -273,9 +272,10 @@ class RaisingContributor:
 
 
 async def test_beat_is_prompt_then_memory_then_goals_section(make_env):
-    """R7: through a real plugin manager, the delivered text is the prompt,
-    the heartbeat's memory section, then goals' retired block and instruction
-    at the tail (the call to action is the last thing in the window)."""
+    """R7, #1079 AC1: through a real plugin manager with heartbeat, memory and
+    goals, the delivered text is the prompt, memory's section (its own hook,
+    tryfirst), then goals' retired block and instruction at the tail (the
+    call to action is the last thing in the window)."""
     env = await make_env(with_goals=True)
     ctx = ctx_for("irc:#test")
     await add_message(env, "irc:#test", "talking about the wiki backup")
@@ -286,7 +286,7 @@ async def test_beat_is_prompt_then_memory_then_goals_section(make_env):
     text = env.agent.calls[0]["text"]
     assert text.startswith(heartbeat.DEFAULT_HEARTBEAT_PROMPT)
     positions = [
-        text.index(heartbeat.MEMORY_HEADER),
+        text.index(memory_mod.MEMORY_HEADER),
         text.index(goals_mod.RETIRED_GOALS_HEADER),
         text.index(goals_mod.GOALS_INSTRUCTION),
     ]
@@ -315,7 +315,7 @@ async def test_a_raising_contributor_is_skipped_and_the_others_kept(make_env, ca
     with caplog.at_level("WARNING"):
         await env.clock.advance(AFTER)
     text = env.agent.calls[0]["text"]
-    assert heartbeat.MEMORY_HEADER in text
+    assert memory_mod.MEMORY_HEADER in text
     assert goals_mod.GOALS_INSTRUCTION in text
     assert any(
         "collect_heartbeat_prompts" in r.getMessage() and "flaky" in r.getMessage()
@@ -338,7 +338,7 @@ async def test_second_beat_with_nothing_new_omits_the_retired_block(make_env):
     assert goals_mod.RETIRED_GOALS_HEADER in first
     assert goals_mod.RETIRED_GOALS_HEADER not in second
     assert "I concluded it is done" not in second
-    assert heartbeat.MEMORY_HEADER not in second
+    assert memory_mod.MEMORY_HEADER not in second
     assert goals_mod.GOALS_INSTRUCTION in second
 
 
@@ -376,34 +376,51 @@ async def test_beat_with_no_sections_is_the_bare_prompt(make_env):
     assert env.agent.calls[1]["text"] == heartbeat.DEFAULT_HEARTBEAT_PROMPT
 
 
+async def _goals_limit_seen(config: dict) -> int:
+    """Init goals on ``config`` and return the limit its beat section asks
+    for, read off the call to retired_goals."""
+    plugin = GoalsPlugin()
+    await plugin.on_init(MagicMock(), config)
+    seen: list[int] = []
+
+    async def retired(limit):
+        seen.append(limit)
+        return []
+
+    plugin.retired_goals = retired
+    await plugin.collect_heartbeat_prompts(channel=None)
+    return seen[0]
+
+
 @pytest.mark.parametrize("bad", [-1, 2.5, True, "20"])
-async def test_goals_rejects_a_bad_retired_goal_limit(bad):
-    """A negative, fractional, boolean or string heartbeat.retired_goal_limit
-    fails goals' startup, naming the key, the value, what is accepted and
-    where to fix it (the key stays under heartbeat.* until #1079)."""
+async def test_goals_rejects_a_bad_heartbeat_retired_limit(bad):
+    """#1079 AC6: a negative, fractional, boolean or string
+    goals.heartbeat_retired_limit fails goals' startup, naming the key, the
+    value, what is accepted and where to fix it."""
     with pytest.raises(ValueError) as exc:
         await GoalsPlugin().on_init(
-            MagicMock(), {"heartbeat": {"retired_goal_limit": bad}}
+            MagicMock(), {"goals": {"heartbeat_retired_limit": bad}}
         )
     message = str(exc.value)
-    assert "heartbeat.retired_goal_limit" in message
+    assert "goals.heartbeat_retired_limit" in message
     assert f"got {bad!r}" in message
     assert "0 or more" in message
     assert "agent.yaml" in message
 
 
-def test_retired_goal_limit_defaults_to_five_and_accepts_zero():
-    """Absent or null is 5; 0 is a valid count (reviews none)."""
-    assert goals_mod.parse_retired_goal_limit({}) == 5
-    assert goals_mod.parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": None}}) == 5
-    assert goals_mod.parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": 0}}) == 0
-    assert goals_mod.parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": 7}}) == 7
+async def test_heartbeat_retired_limit_defaults_to_five_and_accepts_zero():
+    """#1079 AC5: absent or null is 5; 0 is a valid count (reviews none)."""
+    assert await _goals_limit_seen({}) == 5
+    assert await _goals_limit_seen({"goals": {"heartbeat_retired_limit": None}}) == 5
+    assert await _goals_limit_seen({"goals": {"heartbeat_retired_limit": 0}}) == 0
+    assert await _goals_limit_seen({"goals": {"heartbeat_retired_limit": 7}}) == 7
 
 
-async def test_goals_instruction_override_is_what_the_hook_returns():
-    """heartbeat.goals_instruction sets the instruction goals contributes."""
+async def test_goals_heartbeat_instruction_override_is_what_the_hook_returns():
+    """#1079 AC5: goals.heartbeat_instruction sets the instruction goals
+    contributes."""
     plugin = GoalsPlugin()
-    await plugin.on_init(MagicMock(), {"heartbeat": {"goals_instruction": "PICK ONE."}})
+    await plugin.on_init(MagicMock(), {"goals": {"heartbeat_instruction": "PICK ONE."}})
 
     async def none_retired(limit):
         return []
@@ -435,7 +452,7 @@ async def test_later_beat_sends_only_the_new_memory_and_retired_goal(make_env):
     # memory section (before goals' block), not only through goals' retired
     # block: a memory section dropped after beat one would fail here.
     assert "NEWCONCLUSION" in second[
-        second.index(heartbeat.MEMORY_HEADER) : second.index(goals_mod.RETIRED_GOALS_HEADER)
+        second.index(memory_mod.MEMORY_HEADER) : second.index(goals_mod.RETIRED_GOALS_HEADER)
     ]
     assert "OLDCONCLUSION" not in second
     # Joined by blank lines: pins the separator on the real path.
