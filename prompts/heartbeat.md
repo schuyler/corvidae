@@ -12,9 +12,9 @@ loaded, goals adds its retired goals' conclusions and then its instruction
 (`heartbeat.goals_instruction`, documented in `heartbeat-goals.md`) at the
 tail, so the call-to-action is the last thing in the window. Open goals are
 not listed here: they reach every turn, beats included, as the goals entry in
-the window. The first beat, and the first after a compaction of the beat's
-window, carry every memory or retired goal (up to the limits); later beats
-carry only what is new, and a beat with nothing new is the prompt alone, plus
+the window. The first beat carries every memory and retired goal (up to the limits), and
+the first beat after a compaction of the beat's window carries every retired
+goal again (memories keep their diff); later beats carry only what is new, and a beat with nothing new is the prompt alone, plus
 the goals instruction when goals is loaded.
 
 ```

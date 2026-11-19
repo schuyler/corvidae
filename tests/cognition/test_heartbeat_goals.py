@@ -241,16 +241,9 @@ async def test_beat_obeys_retired_goal_limit(make_env, monkeypatch):
     text = env.agent.calls[0]["text"]
     # The conclusion can also surface in the memory section (a beat reviews
     # the whole memory, #168); the limit governs the retired-goals list, so
-    # assert on that section only. With the new order (retired goals first),
-    # the memory section follows the retired-goals section, so extract only
-    # up to the next section marker.
-    retired_start = text.index(goals_mod.RETIRED_GOALS_HEADER)
-    retired_end = len(text)
-    for marker in (heartbeat.MEMORY_HEADER,):
-        idx = text.find(marker, retired_start)
-        if idx != -1:
-            retired_end = min(retired_end, idx)
-    retired_section = text[retired_start:retired_end]
+    # assert on that block only: from its header to the end of the text (goals'
+    # section is last).
+    retired_section = text[text.index(goals_mod.RETIRED_GOALS_HEADER):]
     assert "New conclusion: the schedule holds." in retired_section
     assert "Old conclusion: it ran every night." not in retired_section
 
@@ -365,6 +358,12 @@ async def test_compaction_of_the_beat_channel_resets_goals_diff_state(make_env):
     )
     await env.clock.advance(AFTER)
     assert goals_mod.RETIRED_GOALS_HEADER in env.agent.calls[1]["text"]
+    # Another channel's compaction doesn't reset it: a third beat is diffed.
+    await env.pm.ahook.on_compaction(
+        channel=SimpleNamespace(id="irc:#test"), summary_msg={}, retain_count=0, compacted_ids=[]
+    )
+    await env.clock.advance(AFTER)
+    assert goals_mod.RETIRED_GOALS_HEADER not in env.agent.calls[2]["text"]
 
 
 async def test_beat_with_no_sections_is_the_bare_prompt(make_env):
@@ -401,8 +400,38 @@ def test_retired_goal_limit_defaults_to_five_and_accepts_zero():
     assert goals_mod.parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": 7}}) == 7
 
 
-async def test_goals_instruction_override_reaches_the_beat():
-    """heartbeat.goals_instruction still sets goals' instruction (interim)."""
+async def test_goals_instruction_override_is_what_the_hook_returns():
+    """heartbeat.goals_instruction sets the instruction goals contributes."""
     plugin = GoalsPlugin()
     await plugin.on_init(MagicMock(), {"heartbeat": {"goals_instruction": "PICK ONE."}})
-    assert plugin._instruction == "PICK ONE."
+
+    async def none_retired(limit):
+        return []
+
+    plugin.retired_goals = none_retired
+    section = await plugin.collect_heartbeat_prompts(channel=None)
+    assert section.endswith("PICK ONE.")
+    assert goals_mod.GOALS_INSTRUCTION not in section
+
+
+async def test_later_beat_sends_only_the_new_memory_and_retired_goal(make_env):
+    """R4/R5: between beats one memory arrives and one goal is retired; beat
+    two carries those and leaves out what beat one already sent."""
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    await add_message(env, "irc:#test", "talking about the wiki backup")
+    await env.tools["add_goal"]("Old job", _ctx=ctx)
+    await env.tools["retire_goal"](1, "OLDCONCLUSION it ran nightly.", _ctx=ctx)
+    await env.clock.advance(AFTER)
+    await env.tools["add_goal"]("New job", _ctx=ctx)
+    await env.tools["retire_goal"](2, "NEWCONCLUSION the schedule holds.", _ctx=ctx)
+
+    await env.clock.advance(AFTER)
+    first, second = (c["text"] for c in env.agent.calls)
+    assert "OLDCONCLUSION" in first
+    # Beat two: the new conclusion (retired block and its memory record) is
+    # present once each; the old one is not repeated anywhere.
+    assert "NEWCONCLUSION" in second
+    assert "OLDCONCLUSION" not in second
+    # Joined by blank lines: pins the separator on the real path.
+    assert f"\n\n{goals_mod.RETIRED_GOALS_HEADER}" in second

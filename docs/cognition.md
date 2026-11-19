@@ -1566,7 +1566,7 @@ Open goals as of 2026-10-30 14:02:11 UTC (this list replaces any earlier goals l
 ```
 
 Goals are listed in queue order (`position`, then `id`), the order the
-heartbeat uses. A goal that is not plain `open` carries its status in
+goals entry and the beat's pick rule use. A goal that is not plain `open` carries its status in
 brackets.
 
 With none, including when every goal is retired, it reads `No open goals as
@@ -2244,9 +2244,9 @@ don't exist yet; when they land, the beat uses them like any other turn,
 with no allowlist. The prompt tells the model that most beats warrant
 nothing, and to say so in one line and stop.
 
-**What it reviews.** The newest 20 indexed, unredacted records of the whole
-memory, every channel's, newest first. There is nothing to configure: the
-beat reaches every channel's records (#168). Records consolidated from the
+**What it reviews.** The newest `heartbeat.memory_limit` (default 5)
+indexed, unredacted records of the whole memory, every channel's, listed
+oldest first. The beat reaches every channel's records (#168). Records consolidated from the
 beat channel itself are in the list too, so a beat can see an earlier
 beat's conclusions once they are consolidated.
 
@@ -2255,14 +2255,14 @@ and §3.7 Heartbeat let a beat speak on another channel or leave a note
 there. A beat sees its own earlier actions only in the window, which, after a compaction, holds
 the summary, then the most recent rows `agent.compaction_retention` keeps,
 then the beats since. Older beats leave the window, and memory brings them
-back only once they are consolidated; the review shows only the newest 20
-records. So once the send and note tools exist, a beat could repeat an
+back only once they are consolidated; the review shows only the newest
+`heartbeat.memory_limit` records. So once the send and note tools exist, a beat could repeat an
 outreach that compaction has summarized out of the window. Today it
 can't happen: there is no send, note or read tool yet (#234, #235), so a
 beat can't reach anyone. The bounds once they land are the
 window, the goals entry (a beat that records an outreach as a goal step sees
 it in later beats), and the target channel's memories, once its rows have been consolidated and
-are among the newest 20; the
+are among the newest `heartbeat.memory_limit`; the
 PRD's per-destination limit on messages the agent starts caps repeats too,
 but only when the operator sets it. The
 cross-channel tools (§3.5.9–11) should record each outreach where a later
