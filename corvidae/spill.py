@@ -281,7 +281,8 @@ class NotificationSpill(CorvidaePlugin):
         self, channel: Channel, source: str, text: str, annotations: dict | None
     ) -> None:
         """Fire on_notify for one channel with a fresh copy of the annotations."""
-        await self.pm.ahook.on_notify(
+        # ahook_raise, not the fail-soft ahook: callers (the RSS reader) retry a delivery that raised (#1094).
+        await self.pm.ahook_raise.on_notify(
             channel=channel,
             source=source,
             text=text,

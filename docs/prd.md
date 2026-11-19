@@ -387,24 +387,27 @@ one is a bug even if its tests pass.
    deliver an error result to the model; a silent stall is never an
    outcome.
 10. A hook's name states its resolution semantics: `on_`/`before_`/`after_`
-    observe (return value ignored; in-place mutation of passed objects
-    allowed), `should_` vetoes (reject wins), `resolve_` takes the first
-    non-None result, `transform_` is a wrapper chain over a seed,
-    `collect_` gathers contributions for the caller to combine (see
-    below), and a short allowlist of bare imperatives (`send`,
-    `register_tools`, `persist_message`) documents what the caller does
-    with results. A test enforces the prefixes against pluggy options for
-    the kernel's `AgentSpec`. A hook only one plugin calls is owned by that plugin
-    (`hookspecs` on its class), not added to `AgentSpec`. Its name carries
-    the owner's plugin name right after the prefix
+    observe (in-place mutation of passed objects allowed; a caller may
+    combine the values implementations return, which come back in hook
+    order: `tryfirst`, then the rest in no guaranteed order, then
+    `trylast`), `should_` vetoes (reject wins), `resolve_` takes the first
+    non-None result, `transform_` is a wrapper chain over a seed, and a
+    short allowlist of bare imperatives (`send`, `register_tools`,
+    `persist_message`) documents what the caller does with results.
+    Observe hooks fail soft, by prefix, in the kernel's dispatch: every
+    implementation runs concurrently and to completion, one that raises an
+    `Exception` is logged at WARNING naming the hook and the plugin and
+    contributes nothing, and the others' values are returned; a
+    `BaseException` propagates once the rest have finished. `on_init` and
+    `on_start` are the exceptions and propagate, so a plugin that cannot
+    start stops the daemon. A wrapper implementation on a fail-soft hook
+    fails startup. A test enforces the prefixes against pluggy options for
+    the kernel's `AgentSpec`. A hook only one plugin calls is owned by that
+    plugin (`hookspecs` on its class), not added to `AgentSpec`. Its name
+    carries the owner's plugin name right after the prefix
     (`on_<plugin>_<name>`), it uses a prefixed class (bare imperatives are
     kernel-only), and it has exactly one owner. Startup checks all of this
-    and fails naming the hook, the plugin and the fix. A `collect_` hook
-    returns its contributions in hook order (`tryfirst`, then the rest in
-    no guaranteed order, then `trylast`); implementations may run
-    concurrently. `None` contributes nothing. An implementation that
-    raises an `Exception` is logged at WARNING, naming the hook and the
-    plugin, and skipped; the others' contributions are kept.
+    and fails naming the hook, the plugin and the fix.
 11. A new hookspec, kernel or plugin-owned, is admitted only when it is a
     decision point, an observation or a contribution point with at least
     two plausible implementers, or the pair of an existing observability
@@ -1885,7 +1888,7 @@ record that holds the reasoning.
 | `resolve_compaction` keeps `firstresult`; the first non-None return is how a plugin replaces the compactor | #23 |
 | `transform_system_prompt` is append-only: a transform that modifies the identity+register prefix is rejected with a WARNING listing the hook's implementors (the seed plugin among them; the offending wrapper is not singled out); the untransformed prompt is used. The seed is re-composed from config at each boundary, so there is no accumulation. The hook re-runs at every boundary (conversation start, restart, compaction), not just conversation start | #136; proposed 2026-11-01, implemented 2026-11-04 |
 | Same repository, second distribution for cognition; no compatibility aliases on renamed hooks | principle 1; §1 |
-| Hooks gain a `collect_` class: a broadcast whose contributions the caller combines, one contributor's failure isolated from the rest. It serves independent contributions that may await (the heartbeat's beat first); hooks that improvise the pattern today may migrate later | §3.1.10; owner, 2026-11-19 |
+| Observe hooks (`on_`/`before_`/`after_`) fail soft by prefix, applied once in the kernel's dispatch through apluggy's `ahook_isolated`, not at each call site; only `on_init` and `on_start` fail hard (`on_web_console_init` is not exempt). This retires the `collect_` class, which bypassed apluggy dispatch to isolate failures for one hook | §3.1.10; owner, 2026-11-19; #1094 |
 | No typed event bus unless the observe class passes 20 hooks or a third `send`-shaped consolidation appears | §3.1.11 |
 | `thinking.py` is kernel | principle 1 |
 | A hook only one plugin calls is owned by that plugin, not `AgentSpec`; names are `<prefix><owner>_<name>`, one owner per hook, checked at startup; the admission criterion (§3.1.11) still applies | #229 |

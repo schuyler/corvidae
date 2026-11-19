@@ -4116,11 +4116,11 @@ class MemoryPlugin(CorvidaePlugin):
         return None, code
 
     @hookimpl(tryfirst=True)
-    async def collect_heartbeat_prompts(self, channel) -> str | None:
+    async def on_heartbeat_collect_prompts(self, channel) -> str | None:
         """Memory's beat section (#1079): recent memories not sent before.
 
         Tryfirst, so it precedes goals' trylast section. A failed read
-        raises, and the beat's gather logs it and skips this section.
+        raises, and the fail-soft hook dispatch logs it and skips this section.
         """
         memories = await self.recent(self._heartbeat_limit)
         last = self._last_heartbeat_memory_ids

@@ -2223,7 +2223,8 @@ class Agent(CorvidaePlugin):
                 notify_annotations = {"trace_id": trace_id, **annotations}
                 # One call's failed delivery must not stop the rest.
                 try:
-                    await self.pm.ahook.on_notify(
+                    # ahook_raise, not the fail-soft ahook: the except below queues the error directly (#1094).
+                    await self.pm.ahook_raise.on_notify(
                         channel=channel,
                         source="task",
                         text=text,

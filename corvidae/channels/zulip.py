@@ -1160,7 +1160,8 @@ class ZulipPlugin(TransportPlugin):
             if took_slot:
                 await self._begin_typing(channel, topic)
             channel.addressed = addressed
-            await self.pm.ahook.on_message(
+            # ahook_raise, not the fail-soft ahook: the except below rewinds the cursor (#1094).
+            await self.pm.ahook_raise.on_message(
                 channel=channel,
                 sender=sender,
                 text=text,

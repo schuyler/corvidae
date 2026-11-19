@@ -721,16 +721,6 @@ class RendezvousGate:
         return None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=TimeoutError,
-    reason=(
-        "#904: apluggy awaits a broadcast hook's implementations one by one "
-        "once any wrapper=True hookimpl (outbound_cap's) is registered. When "
-        "the lock carries the apluggy fix this XPASSes and strict fails it: "
-        "remove this marker and the plugin-guide caveat together."
-    ),
-)
 async def test_wrapped_should_send_response_gates_run_concurrently(h):
     """Output gates stay concurrent with outbound_cap's wrapper loaded.
 

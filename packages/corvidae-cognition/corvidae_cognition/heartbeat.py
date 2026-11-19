@@ -2,10 +2,10 @@
 
 When no channel has had inbound or in-flight work for ``heartbeat.after``
 seconds, the plugin sends one notification to ``internal:heartbeat``, a
-channel no transport owns. The notification is ``heartbeat.prompt`` plus
-the sections plugins add through ``collect_heartbeat_prompts`` (#1084): the
-memory plugin's recent memories and, when goals is loaded, its retired-goal
-conclusions and pick rule. The heartbeat itself adds none. The turn runs
+channel no transport owns. The notification is the sections plugins add
+through ``on_heartbeat_collect_prompts`` (#1084, #1094) -- the memory plugin's
+recent memories and, when goals is loaded, its goals sections and pick rule --
+followed by ``heartbeat.prompt``, last. The heartbeat itself adds none. The turn runs
 the ordinary notification pipeline with the agent's normal tools, and acts only if the review warrants it
 (PRD §3.7 Heartbeat). Nothing it writes reaches a person: that needs a
 cross-channel send (PRD §3.5.9), which goes through its own gate.
@@ -32,8 +32,8 @@ compaction, like any other channel's.
 
 Logging:
     - INFO: asleep at start, each beat sent
-    - WARNING: a contributor raised (logged by collect_results; its section
-      is skipped and the beat still goes out)
+    - WARNING: a contributor raised (logged by the fail-soft hook dispatch;
+      its section is skipped and the beat still goes out)
 """
 
 from __future__ import annotations
@@ -44,7 +44,6 @@ import math
 from corvidae.prompts import resolve_prompt
 from corvidae.hooks import (
     CorvidaePlugin,
-    collect_results,
     get_dependency,
     hookimpl,
     hookspec,
@@ -63,7 +62,7 @@ DEFAULT_HEARTBEAT_PROMPT = (
     "occupying your attention. This is your opportunity to decide what to "
     "do next. Nobody reads this channel, and nothing you write here reaches "
     "anyone.\n\n"
-    "Review the sections below, if there are any, and ask whether anything "
+    "Review the sections above, if there are any, and ask whether anything "
     "in them needs something from you now: a promise you made and haven't "
     "kept, something you said you would check, a mistake you should "
     "correct.\n\n"
@@ -120,14 +119,14 @@ class HeartbeatSpec:
     """Hooks the heartbeat plugin owns."""
 
     @hookspec
-    async def collect_heartbeat_prompts(self, channel) -> str | None:
+    async def on_heartbeat_collect_prompts(self, channel) -> str | None:
         """Contribute one section of the heartbeat's beat (#1084).
 
-        Called by the beat on ``internal:heartbeat`` through
-        ``collect_results``. Return the section's text, or None to add
-        nothing. Sections follow ``heartbeat.prompt`` in hook order
-        (``tryfirst`` first, ``trylast`` last), separated by blank lines.
-        A raising implementation is logged and skipped.
+        Called by the beat on ``internal:heartbeat``. Return the section's
+        text, or None to add nothing. Sections come in hook order
+        (``tryfirst`` first, ``trylast`` last), separated by blank lines,
+        and ``heartbeat.prompt`` follows them, last. A raising
+        implementation is logged and skipped (observe hooks fail soft).
         """
 
 
@@ -186,23 +185,23 @@ class HeartbeatPlugin(CorvidaePlugin):
         """The system watch callback: gather the beat's sections, re-check
         quiet, notify.
 
-        Never raises for a failed contributor: the gather logs and skips it,
-        and an exception escaping the callback would stop the tracker
-        re-arming the watch.
+        Never raises for a failed contributor: the fail-soft dispatch logs
+        and skips it, and an exception escaping the callback would stop the
+        tracker re-arming the watch.
         """
         transport, _, scope = HEARTBEAT_CHANNEL.partition(":")
         channel = self._registry.get_or_create(transport, scope)
-        # Each plugin adds its section; the beat is the prompt plus those.
-        sections = await collect_results(
-            self.pm.hook.collect_heartbeat_prompts, channel=channel
-        )
+        # Each plugin adds its section (None adds nothing); the beat is those
+        # sections followed by the prompt, so the instruction comes last.
+        contributions = await self.pm.ahook.on_heartbeat_collect_prompts(channel=channel)
+        sections = [s for s in contributions if s is not None]
         # The gather awaited; a message may have arrived. Never beat while busy.
         if not self._idle.system_quiet():
             return
         logger.info(
             "heartbeat: beat", extra={"channel": channel.id, "sections": len(sections)}
         )
-        text = "\n\n".join([self._prompt, *map(str, sections)])
+        text = "\n\n".join([*map(str, sections), self._prompt])
         await self.pm.ahook.on_notify(
             channel=channel,
             source="heartbeat",

@@ -14,16 +14,17 @@ Exports:
                       and dispatch to send_* methods
     create_plugin_manager()     — create and configure the PluginManager
     resolve_reject_wins()       — resolve broadcast gate-hook result lists
-    collect_results()           — call a collect_ hook, isolating failures
+    PolicyAHook                 — pm.ahook / pm.ahook_raise: observe hooks
+                                  fail soft, every other hook as apluggy
+    check_fail_soft_wrappers()  — refuse wrappers on fail-soft hooks at startup
     get_dependency()            — typed plugin lookup
     validate_dependencies()     — dependency graph verification at startup
 """
 from __future__ import annotations
 
-import asyncio
-import inspect
 import logging
 import warnings
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 import apluggy as pluggy
@@ -38,8 +39,6 @@ from corvidae.outbound import (
 )
 
 if TYPE_CHECKING:
-    from pluggy import HookCaller, HookImpl
-
     from corvidae.admission import WorkRefusal
     from corvidae.channel import Channel
     from corvidae.context import ContextWindow, MessageType
@@ -64,7 +63,6 @@ HOOK_GRAMMAR: dict[str, tuple[tuple[str, ...], dict[str, bool]]] = {
     "veto": (("should_",), {"firstresult": False}),
     "resolve": (("resolve_",), {"firstresult": True}),
     "transform": (("transform_",), {"firstresult": True}),
-    "collect": (("collect_",), {"firstresult": False}),
 }
 
 # Bare imperative names: broadcast, caller-defined use of the result list.
@@ -111,7 +109,7 @@ def install_plugin_hookspecs(pm: pluggy.PluginManager) -> None:
     2. Per plugin: check the hook grammar, the owner segment
        (``<prefix><plugin>_<name>``) and the pluggy options, install the
        specs, then check each ``transform_`` hook has the owner's own
-       ``trylast`` seed and each ``collect_`` hook has no wrapper impl.
+       ``trylast`` seed.
 
     Raises:
         PluginValidationError: naming the hook, the plugin and the fix.
@@ -175,8 +173,6 @@ def install_plugin_hookspecs(pm: pluggy.PluginManager) -> None:
         for hook_name in names:
             if grammar_class(hook_name) == "transform":
                 _check_transform_seed(pm, plugin_name, plugin, hook_name)
-            elif grammar_class(hook_name) == "collect":
-                _check_collect_has_no_wrappers(pm, hook_name)
 
 
 def _check_plugin_hook_name(
@@ -233,27 +229,6 @@ def _check_transform_seed(
             f"registers no seed for it. Add an @hookimpl(trylast=True) "
             f"{hook_name} to {type(plugin).__name__} that returns its input "
             f"unchanged, as _SeedHooksPlugin does for kernel transforms.",
-        )
-
-
-def _check_collect_has_no_wrappers(pm: pluggy.PluginManager, hook_name: str) -> None:
-    """Refuse a wrapper impl on a collect_ hook (#1083).
-
-    collect_results calls each implementation for one contribution and
-    doesn't drive pluggy's wrapper protocol, so a wrapper would hand back
-    its generator object as a contribution.
-    """
-    # Every impl registered so far, including ones registered before the spec.
-    for impl in getattr(pm.hook, hook_name).get_hookimpls():
-        option = "wrapper" if impl.wrapper else "hookwrapper" if impl.hookwrapper else None
-        if option is None:
-            continue
-        raise pluggy.PluginValidationError(
-            impl.plugin,
-            f"Plugin {impl.plugin_name!r} implements collect hook {hook_name!r} "
-            f"with {option}=True, but collect_ hooks don't run wrappers: each "
-            f"implementation returns one contribution (or None). Remove "
-            f"{option}=True and return the contribution.",
         )
 
 
@@ -332,85 +307,6 @@ def resolve_single_result(results: list, hook_name: str) -> object | None:
             hook_name, len(non_none),
         )
     return non_none[0] if non_none else None
-
-
-async def collect_results(hook: HookCaller, /, **kwargs: object) -> list[object]:
-    """Call a ``collect_`` hook and return its contributions (PRD §3.1.10).
-
-    Every implementation runs concurrently. Contributions come back in hook
-    order -- ``tryfirst``, then the rest (no guaranteed order), then
-    ``trylast`` -- with ``None`` dropped. An implementation that raises an
-    ``Exception`` is logged at WARNING, naming the hook and the plugin, and
-    skipped; the others' contributions are kept. A ``BaseException`` (e.g.
-    ``CancelledError``) propagates, after every sibling has finished.
-
-    Not dispatched through ``pm.ahook``: its gather loses every sibling's
-    contribution when one implementation raises.
-
-    Args:
-        hook: The hook caller, e.g. ``pm.hook.collect_web_panels``.
-        **kwargs: The hook's arguments, by keyword only. Each implementation
-            receives the ones it declares, as pluggy passes them.
-
-    Raises:
-        TypeError: the arguments don't match the hook's spec (an unknown or
-            missing name); no implementation runs.
-    """
-
-    async def call_one(impl: HookImpl) -> object:
-        """Run one implementation; an Exception becomes a logged skip."""
-        try:
-            # Pass only the declared arguments the caller supplied, as
-            # offer_work does; a missing one fails as this impl's TypeError.
-            impl_kwargs = {k: kwargs[k] for k in impl.argnames if k in kwargs}
-            result = impl.function(**impl_kwargs)
-            # A sync implementation's return value is its contribution.
-            if inspect.isawaitable(result):
-                result = await result
-            return result
-        except Exception:
-            _resolve_logger.warning(
-                "collect hook %s: the implementation in plugin %r raised; "
-                "its contribution is skipped",
-                hook.name, impl.plugin_name,
-                exc_info=True,
-            )
-            return None
-
-    # The caller's arguments must match the spec; otherwise a caller's typo
-    # would surface as every impl's TypeError, logged against plugins that
-    # did nothing wrong. Spec parameters with defaults (kwargnames) may be
-    # passed but aren't required. A hook whose
-    # owner isn't loaded has no spec, so there is nothing to check against.
-    if hook.spec is not None:
-        expected = tuple(hook.spec.argnames)
-        accepted = expected + tuple(hook.spec.kwargnames)
-        unknown = sorted(set(kwargs) - set(accepted))
-        missing = [name for name in expected if name not in kwargs]
-        if unknown or missing:
-            problems = []
-            if unknown:
-                problems.append(f"unknown argument(s) {', '.join(map(repr, unknown))}")
-            if missing:
-                problems.append(f"missing argument(s) {', '.join(map(repr, missing))}")
-            raise TypeError(
-                f"collect_results({hook.name}): {'; '.join(problems)}. "
-                f"The hook takes: {', '.join(accepted)}; fix the call to pass those."
-            )
-
-    # pluggy calls hookimpls last-registered first (tryfirst ... trylast);
-    # gather keeps that order and, with return_exceptions, lets every
-    # sibling finish before anything is raised.
-    impls = list(reversed(hook.get_hookimpls()))
-    results = await asyncio.gather(*(call_one(i) for i in impls), return_exceptions=True)
-
-    # call_one catches every Exception, so a BaseException that is not an
-    # Exception escaped it and must propagate. A contribution that happens
-    # to be an Exception instance is an ordinary value.
-    for result in results:
-        if isinstance(result, BaseException) and not isinstance(result, Exception):
-            raise result
-    return [r for r in results if r is not None]
 
 
 def get_dependency(pm: pluggy.PluginManager, name: str, expected_type: type[T]) -> T:
@@ -622,6 +518,97 @@ def _check_hook_arg_binding(pm: pluggy.PluginManager) -> None:
                 )
 
 
+# Observe hooks that fail hard: a plugin that can't init or start stops the
+# daemon (PRD §3.1 item 10). Every other observe hook fails soft.
+FAIL_HARD_HOOKS: frozenset[str] = frozenset({"on_init", "on_start"})
+
+
+def is_fail_soft(name: str) -> bool:
+    """True when ``name`` is an observe hook that dispatches fail-soft."""
+    return grammar_class(name) == "observe" and name not in FAIL_HARD_HOOKS
+
+
+class PolicyAHook:
+    """``pm.ahook``'s replacement: the hook's prefix sets its failure policy.
+
+    A fail-soft hook (``on_``/``before_``/``after_``, except FAIL_HARD_HOOKS)
+    runs through ``pm.ahook_isolated``: every implementation runs to
+    completion, each one that raises an ``Exception`` is logged at WARNING
+    naming the hook and the plugin, and the call returns the others' values
+    in hook order (``None`` included). A ``BaseException`` propagates once the
+    rest have finished. Every other hook goes to apluggy's own ``AHook``
+    (``strict``), unchanged.
+
+    With ``reraise=True`` (``pm.ahook_raise``), a fail-soft call logs the same
+    way and then raises the first failure in hook order. It is for call sites
+    whose ``except`` does more than log (PRD §3.1 item 9).
+    """
+
+    def __init__(self, pm: pluggy.PluginManager, strict: object, *, reraise: bool = False) -> None:
+        # Underscored so they never shadow a hook of the same name.
+        self._pm = pm
+        self._strict = strict
+        self._reraise = reraise
+
+    def __getattr__(self, name: str) -> Callable[..., Awaitable[object]]:
+        # Non-observe and fail-hard hooks keep apluggy's dispatch.
+        if not is_fail_soft(name):
+            return getattr(self._strict, name)
+
+        async def call(**kwargs: object) -> list[object]:
+            # Run every implementation to completion; each outcome is reported.
+            outcomes = await getattr(self._pm.ahook_isolated, name)(**kwargs)
+
+            # Log each failure against its plugin; keep the other values.
+            values: list[object] = []
+            failures: list[BaseException] = []
+            for plugin_name, result in outcomes:
+                if result.exception is not None:
+                    _pm_logger.warning(
+                        "hook %s: the implementation in plugin %r raised; skipped",
+                        name, plugin_name,
+                        exc_info=result.exception,
+                    )
+                    failures.append(result.exception)
+                else:
+                    values.append(result.get_result())
+
+            # pm.ahook_raise: hand the first failure to the call site's except.
+            if self._reraise and failures:
+                raise failures[0]
+            return values
+
+        return call
+
+
+def check_fail_soft_wrappers(pm: pluggy.PluginManager) -> None:
+    """Refuse a wrapper implementation on a fail-soft hook (#1094).
+
+    Fail-soft hooks run through ``pm.ahook_isolated``, which can't drive the
+    wrapper protocol. Called once at startup, after plugin hookspecs are
+    installed, so plugin-owned hooks are covered too.
+
+    Raises:
+        PluginValidationError: naming the hook, the plugin and the fix.
+    """
+    for hook_name, caller in list(vars(pm.hook).items()):
+        # Only real hook callers with a spec, on a fail-soft hook.
+        if getattr(caller, "spec", None) is None or not is_fail_soft(hook_name):
+            continue
+        for impl in caller.get_hookimpls():
+            option = "wrapper" if impl.wrapper else "hookwrapper" if impl.hookwrapper else None
+            if option is None:
+                continue
+            raise pluggy.PluginValidationError(
+                impl.plugin,
+                f"Plugin {impl.plugin_name!r} implements {hook_name!r} with "
+                f"{option}=True, but observe hooks fail soft through "
+                f"pm.ahook_isolated, which can't run wrappers. Remove "
+                f"{option}=True and implement {hook_name} as a plain async "
+                f"hookimpl.",
+            )
+
+
 def create_plugin_manager() -> pluggy.PluginManager:
     """Create and configure the plugin manager with AgentSpec hooks.
 
@@ -631,6 +618,11 @@ def create_plugin_manager() -> pluggy.PluginManager:
     Logs a DEBUG message when the manager is created.
     """
     pm = pluggy.PluginManager("corvidae")
+    # The hook's prefix sets its failure policy (PRD §3.1 item 10): replace
+    # pm.ahook once here so no call site has to choose.
+    strict = pm.ahook
+    pm.ahook = PolicyAHook(pm, strict)  # type: ignore[attr-defined]
+    pm.ahook_raise = PolicyAHook(pm, strict, reraise=True)  # type: ignore[attr-defined]
     pm.add_hookspecs(AgentSpec)
     pm.register(_SeedHooksPlugin(), name="_seed_hooks")
 
