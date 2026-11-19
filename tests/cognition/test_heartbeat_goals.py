@@ -431,7 +431,12 @@ async def test_later_beat_sends_only_the_new_memory_and_retired_goal(make_env):
     assert "OLDCONCLUSION" in first
     # Beat two: the new conclusion (retired block and its memory record) is
     # present once each; the old one is not repeated anywhere.
-    assert "NEWCONCLUSION" in second
+    # The new memory record reaches beat two through the heartbeat's own
+    # memory section (before goals' block), not only through goals' retired
+    # block: a memory section dropped after beat one would fail here.
+    assert "NEWCONCLUSION" in second[
+        second.index(heartbeat.MEMORY_HEADER) : second.index(goals_mod.RETIRED_GOALS_HEADER)
+    ]
     assert "OLDCONCLUSION" not in second
     # Joined by blank lines: pins the separator on the real path.
     assert f"\n\n{goals_mod.RETIRED_GOALS_HEADER}" in second
