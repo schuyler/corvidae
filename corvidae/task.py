@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 # Result string used when a task raises an unhandled exception.
 # Format with task_id=<str> and error=<exc or "(unknown error)">.
 TASK_FAILURE_TEMPLATE = "Task {task_id} failed: {error}"
+# Result string used when a task ends by cancellation (#504-2). Distinct
+# from the failure template so a cancel is never mistaken for a crash.
+# Format with task_id=<str>.
+TASK_CANCELLED_TEMPLATE = "Task {task_id} cancelled."
 # Number of completed task records shown in TaskQueue.status() output.
 STATUS_HISTORY_COUNT = 3
 
@@ -213,17 +217,55 @@ class TaskQueue:
                     extra={"task_id": task.task_id, "result_length": len(result)},
                 )
             except asyncio.CancelledError:
-                # Worker was cancelled while awaiting; don't orphan the work.
-                work_task.cancel()
-                try:
-                    self._active_tasks.remove(task)
-                except ValueError:
-                    pass
+                # The awaited work ended by cancellation (#504-2). Two
+                # sources, and the handler must tell them apart:
+                #   - the WORKER task was cancelled (daemon shutdown):
+                #     record synchronously, best-effort detached notify,
+                #     propagate so the worker can exit.
+                #   - the WORK was cancelled (timeout controller, future
+                #     task-level cancel API): fall through to the normal
+                #     completion tail — record, persist, deliver, keep
+                #     draining. Before this, both paths left the task in
+                #     neither .completed nor the JSONL (invisible loss),
+                #     and the unconditional re-raise killed the worker
+                #     forever (run_worker never respawns workers).
+                worker_cancelled = asyncio.current_task().cancelling() > 0
+                result = TASK_CANCELLED_TEMPLATE.format(task_id=task.task_id)
+                work_task.cancel()  # idempotent here; not-orphaned on shutdown
                 logger.info(
                     "task cancelled",
-                    extra={"task_id": task.task_id, "description": task.description},
+                    extra={
+                        "task_id": task.task_id,
+                        "description": task.description,
+                        "worker_cancelled": worker_cancelled,
+                    },
                 )
-                raise
+                if worker_cancelled:
+                    # Record before propagating: the durable surfaces must
+                    # show the loss even when the detached notify below
+                    # races shutdown. Same append-before-deliver ordering
+                    # discipline as the success path (#594-2).
+                    self.completed.append((task.task_id, result))
+                    self._persist_result(task, result)
+                    try:
+                        self._active_tasks.remove(task)
+                    except ValueError:
+                        pass
+                    # Awaiting on_complete here would raise CancelledError
+                    # again before delivery could complete; dispatch the
+                    # notification detached. Its durability is best-effort;
+                    # .completed + JSONL are the referent.
+                    try:
+                        asyncio.get_running_loop().call_soon(
+                            asyncio.ensure_future, on_complete(task, result)
+                        )
+                    except RuntimeError:  # loop already closed — records stand
+                        pass
+                    raise
+                # Work-level cancellation: fall through to the normal
+                # completion tail below (append -> persist -> on_complete),
+                # which removes the task from _active_tasks and keeps the
+                # worker alive for the next queue item.
             except Exception as exc:
                 logger.warning(
                     "task failed",
