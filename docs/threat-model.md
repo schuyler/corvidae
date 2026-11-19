@@ -865,14 +865,14 @@ What it doesn't protect against, so you know:
 - **What you type is untrusted text too.** Paste a web page into the chat
   and it's in the context, same as anywhere else; see finding 3.
 
-### 10. Goals are agent-wide and re-enter every window
+### 10. Goals are agent-wide and re-enter every beat
 
 `GoalsPlugin` (#133) keeps open goals the agent can add, update and retire,
-and shows them in a CONTEXT entry on every turn. Three things follow.
+and lists them in every heartbeat beat (#1091), never in an ordinary turn. Three things follow.
 
 - **No compartment.** Goals are agent-wide: every channel sees every goal,
   as it sees every memory. A goal written from a private channel
-  appears on a public one at its next turn. #220 recorded this as a
+  reaches the heartbeat at its next beat. #220 recorded this as a
   variance from PRD principle 14; under the revised principle 14 it is what
   the PRD requires of memory too (finding 15). Nothing in a goal is scoped
   to its origin. The heartbeat's review shows every retired goal's
@@ -881,12 +881,12 @@ and shows them in a CONTEXT entry on every turn. Three things follow.
 - **Injected text can steer them.** Untrusted text on any channel can make
   the model call `add_goal`, `update_goal` or `retire_goal`, seeded goals
   included: the tools don't check who set a goal. An added goal
-  re-enters every window on every channel until it is retired, which is
+  re-enters every beat until it is retired, which is
   persistence for injected text of the same kind as finding 7 but without a
-  firing time or a per-channel scope. The entry is admitted through the
-  funnel, so it gets the funnel's framing and budget, a soft mitigation as in
-  finding 3. `channels.<id>.tools.disabled` can remove the goal tools on a
-  public channel; the entry still shows there.
+  firing time or a per-channel scope. The list is part of the beat's own
+  text, outside the funnel, so it has no funnel framing or budget.
+  `channels.<id>.tools.disabled` can remove the goal tools on a public
+  channel; goals added elsewhere still reach the beat.
 - **`redact` doesn't reach goal text.** `corvidae redact` has no scrubber for
   the `goals` table. Text in a goal, or a retired goal's text, survives a
   redaction of the message it came from. A retirement record is an ordinary
@@ -1310,7 +1310,7 @@ decision (2026-11-01), and these are its costs.
   other channels' raw dialog to the critic, so a critique objection can carry
   it into the window. The sensitivity plugin (#138) is the capability an
   operator can load against this: it filters what enters a window
-  (retrieval, notes, reads, the goals entry, and the memory tools' raw
+  (retrieval, notes, reads, and the memory tools' raw
   reads, `search_transcripts` and `recall_raw`) by who is present, though not
   text already in the window. It is off unless loaded, and it isn't built.
   **Without it, this gap is accepted:**
