@@ -39,8 +39,10 @@ def _call(call_id):
 def _tool_window() -> ContextWindow:
     """Summary head, a two-call cycle (index 2) whose results (3, 5) are
     interleaved with a user message, then a CONTEXT row and a user turn.
-    Clean cuts: 0-2 and 6-9; the snap rules treat 3-5 as straddling the cycle,
-    though under the #346 render only cut 3 diverges from the full window."""
+    Clean cuts: 0-2, 4-5 and 6-9 (#1046). ``a`` answers inline (result 3), so
+    cut 3 straddles it; ``b`` answers late (result 5, after the user row at 4),
+    so it belongs to no cycle and cuts 4 and 5 may fall between it and its
+    call."""
     conv = ContextWindow("test:scope")
     conv.system_prompt = "You are Lex."
     rows = [
@@ -147,7 +149,7 @@ def test_fork_prompt_rejects_out_of_range_cut(cut):
 
 
 @pytest.mark.parametrize("cut,back,forward", [
-    (0, 0, 0), (2, 2, 2), (3, 2, 6), (4, 2, 6), (5, 2, 6), (6, 6, 6), (9, 9, 9),
+    (0, 0, 0), (2, 2, 2), (3, 2, 4), (4, 4, 4), (5, 5, 5), (6, 6, 6), (9, 9, 9),
 ])
 def test_snap_both_directions(cut, back, forward):
     messages = _tool_window().messages
@@ -155,9 +157,12 @@ def test_snap_both_directions(cut, back, forward):
     assert snap_cut_forward(messages, cut) == forward
 
 
-def test_snap_reaches_a_fixpoint_and_ignores_unanswered_calls():
-    """Two overlapping cycles x (call 1, result 3) and y (call 2, result 4);
-    z (call 6) is never answered and never straddles."""
+def test_snap_ignores_late_results_and_unanswered_calls():
+    """Call x (row 1) is answered at row 3, after the assistant row that calls
+    y (row 2) moved on, so x's result is late (#1046): x belongs to no cycle
+    and never straddles, where it once chained into y's cycle. y (call 2,
+    result 4) is inline and still straddles cuts 3 and 4. z (call 6) is
+    never answered and never straddles."""
     messages = [
         {"role": "user", "content": "go"},
         {"role": "assistant", "content": "", "tool_calls": [_call("x")]},
@@ -168,9 +173,26 @@ def test_snap_reaches_a_fixpoint_and_ignores_unanswered_calls():
         {"role": "assistant", "content": "", "tool_calls": [_call("z")]},
         {"role": "user", "content": "hello?"},
     ]
-    assert snap_cut_to_tool_boundary(messages, 4) == 1
-    assert snap_cut_forward(messages, 2) == 5
+    assert snap_cut_to_tool_boundary(messages, 4) == 2
+    assert snap_cut_forward(messages, 2) == 2
     assert snap_cut_to_tool_boundary(messages, 7) == 7
+    assert snap_cut_forward(messages, 7) == 7
+
+
+@pytest.mark.parametrize("cut", [2, 3])
+def test_snap_keeps_a_cycle_whole_across_a_system_row(cut):
+    """R4 guard (#1046): call, a CONTEXT row, then its result. Only a system
+    row sits between them, so nobody moved on and the result is inline: a cut
+    in between backs up to the call and forward moves past the result."""
+    messages = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": "", "tool_calls": [_call("x")]},
+        {"role": "system", "content": "[CONTEXT]\nfact"},
+        {"role": "tool", "tool_call_id": "x", "content": "X"},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert snap_cut_to_tool_boundary(messages, cut) == 1
+    assert snap_cut_forward(messages, cut) == 4
 
 
 # ---------------------------------------------------------------------------

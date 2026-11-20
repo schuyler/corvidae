@@ -371,9 +371,9 @@ class CompactionPlugin(CorvidaePlugin):
         (halfway from compaction_retention to compaction_threshold), counted
         the way the trigger counts it: system prompt, a summary allowance,
         and the kept messages. The back-up must also drop some dialog, not
-        just the previous summary. A long-running call
-        near the head with chat interleaved behind it would otherwise pull
-        the cut back so far that compaction drops almost nothing and runs
+        just the previous summary. A long uninterrupted
+        cycle near the head (only system rows between call and results)
+        with a long tail behind it would otherwise pull the cut back so far that compaction drops almost nothing and runs
         again every few messages. Then the cut moves forward past the
         cycle's last result instead, dropping it whole, but only while at
         least half the retention budget survives. Otherwise (the result is
