@@ -71,8 +71,8 @@ Findings are rated by consequence, not reachability (PRD principle 12).
 * **Important:**
   * the change deviates from scope in either direction. Too much implementation is as much a deviation as too little (an option nobody asked for, an abstraction with one caller, a config key with no user), and so is a test suite past its use-by: tests that re-prove behaviour another test already proves. Past 3:1 (test lines against the non-test lines changed in the same PR), the reviewer checks for exactly that. **A regression test for the bug being fixed is always in scope.**
   * a test the change adds that no mutation of the change makes fail, or whose claim rests on values neither the test nor the code under test set.
-  * a path the change adds that no test reaches.
-  * a claim the change makes, or leaves standing, that the code or another doc contradicts.
+  * a claim the change makes that its own code contradicts: the PR body, or a docstring or doc it writes, says the change does something it does not.
+* **Worth fixing, never important:** a documentation nit -- a doc, docstring or comment the change leaves stale, or one it should have updated and did not -- and a path the change adds that no test reaches. The author fixes them in the same PR, and the fix does not start a fresh review round.
 * **Everything else is non-blocking.**
 * **Verdicts:** `SOUND` (no findings), `APPROVE WITH FOLLOW-UPS` (non-blocking findings only), `NEEDS-CHANGES` (a critical or important finding). The verdict opens the review, as "Issues and pull requests" asks.
 
@@ -89,7 +89,7 @@ Findings are rated by consequence, not reachability (PRD principle 12).
 
 ## Rounds
 
-* **Severity sets the verdict; the author's triage ends the loop.** The loop ends when every critical and important finding is fixed or disclosed as skipped, and nothing has changed since the last round.
+* **Severity sets the verdict; the author's triage ends the loop.** The loop ends when every critical and important finding is fixed or disclosed as skipped, and nothing has changed since the last round except fixes for findings rated worth fixing.
 * **Re-review is cold, never a conversation with the first reviewer.** The new reviewer checks that the fixes landed, marks a finding that comes back as a recurrence, and does not reopen the rest.
 * **Meta-review when findings recur.** When a finding recurs or a second round ends `NEEDS-CHANGES`, stop fixing and sweep the whole change for the class behind the findings. Post the diagnosis on the PR -- a flawed design, a flawed remedy, reviewer noise, or scope creep -- and take it to the owner unless the loop is converging.
 * **From the third round on, a round ending `NEEDS-CHANGES` stops the loop** until the owner says to continue.
