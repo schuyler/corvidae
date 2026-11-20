@@ -60,9 +60,17 @@ def _patched(pm):
 
 
 async def _start(config_path: str, pm) -> Runtime:
-    """Run Runtime.start() against ``pm``."""
+    """Run Runtime.start() against ``pm``, with one fake entry-point plugin."""
+    from tests import plugin_loader_fixtures as fx
+    from tests.plugin_loader_fixtures import ep, entry_points_for
+
+    # Count constructor calls from this start only.
+    fx.CALLS.clear()
     a, b, c = _patched(pm)
-    with a, b, c:
+    with a, b, c, patch(
+        "corvidae.runtime.entry_points",
+        side_effect=entry_points_for(ep("plain", "Plain")),
+    ):
         rt = Runtime(config_path=config_path)
         await rt.start()
     return rt
@@ -75,6 +83,10 @@ class TestNullPluginsSection:
         pm, agent = _mock_pm()
         await _start(config_file({"llm": _LLM, "plugins": plugins}), pm)
         agent.on_start.assert_awaited_once()
+        # Nothing is disabled: the one entry-point plugin was loaded.
+        from tests import plugin_loader_fixtures as fx
+
+        assert fx.CALLS["Plain"] == 1
         pm.set_blocked.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -103,12 +115,16 @@ class TestNullPluginsSection:
         err = lines[0]
         assert needle in err and "memory" in err and path in err, err
         assert "list" in err, err  # the accepted form
+        # The error stops startup before any entry-point plugin is built.
+        from tests import plugin_loader_fixtures as fx
+
+        assert fx.CALLS["Plain"] == 0
         pm.set_blocked.assert_not_called()
 
 
 class TestLoadedExcludesBlocked:
     async def test_blocked_names_are_not_listed_as_loaded(self, config_file, caplog):
-        # pluggy keeps a blocked name as (name, None); it is not loaded.
+        # A blocked name is never registered (or is (name, None)); it is not loaded.
         pm, _agent = _mock_pm()
         pm.list_name_plugin.return_value = [
             ("agent", MagicMock()), ("scheduler", None), ("registry", MagicMock()),

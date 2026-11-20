@@ -75,7 +75,8 @@ one is a bug even if its tests pass.
 1. **Every capability is an optional plugin.** The kernel is the agent
    loop, the queues, the context window, channels, hooks, tools, the LLM
    client, the task queue, the clock, and persistence. Everything else loads
-   from an entry point, can be disabled by name in `plugins.disabled`,
+   from an entry point, can be disabled by name in `plugins.disabled` or
+   replaced by an installed subclass in `plugins.replace` (#1107),
    declares its dependencies in `depends_on` (or `optional_depends_on`
    for one it works without), and documents what the system
    does without it. The cognition plugins (memory, retention, funnel,
@@ -425,9 +426,13 @@ one is a bug even if its tests pass.
     dependency. `on_start` is broadcast concurrently; the Agent
     starts after the broadcast, and producers that inject notifications
     wait on `Agent.started`.
-14. A plugin that fails to import or instantiate is logged and skipped; a
-    misspelled `plugins.disabled` entry shows up in the startup log as
-    blocked-but-still-loaded.
+14. A plugin that fails to import or instantiate is logged at ERROR and
+    skipped, and startup continues; a skipped plugin that others
+    hard-depend on still stops startup at dependency validation. A
+    `plugins.replace` target that fails this way falls back to the bundled
+    plugin, logged at ERROR, not fatal; a misconfigured `plugins.replace`
+    stops startup (#1107). A misspelled `plugins.disabled` entry shows up
+    in the startup log as blocked-but-still-loaded.
 15. The kernel provides a clock: plugins can have work run after time
     passes, with no inbound traffic. The scheduler (§3.9) uses it.
 16. A channel is idle when it has had no inbound item (a message or a
@@ -1838,6 +1843,7 @@ record that holds the reasoning.
 | Decision | Where |
 |---|---|
 | apluggy entry points, not a hand-written registration order; `depends_on` validated at startup | principle 1; §3.1.13 |
+| A bundled plugin is replaced by naming an installed entry point that subclasses it in `plugins.replace`, never by an import path; a replacement that fails to load falls back loudly to the bundled plugin | principle 1; §3.1.14; #1107, operator, 2026-11-20 |
 | Single-turn dispatch; multi-turn reasoning emerges from notifications | principle 3; §3.1.2 |
 | Only startup is fatal, on named paths; after start, no channel content can fail its turns repeatedly. Enforced by a prompt build that cannot fail plus a wedge breaker, not by cataloguing per-turn call sites: catching exceptions doesn't stop a deterministic failure from recurring every turn | principle 5; §3.1.17–18; #352, #353 |
 | Tail-append CONTEXT; no mid-window mutation | principle 2; diverges from the Persyn spec's per-query memory swap |

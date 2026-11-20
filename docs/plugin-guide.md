@@ -51,7 +51,7 @@ Plugins are loaded via setuptools entry points. Declare them in `pyproject.toml`
 my_plugin = "my_package:MyPlugin"
 ```
 
-`Runtime.start()` calls `pm.load_setuptools_entrypoints("corvidae")`, which instantiates each entry point class with no arguments and registers it. Then `install_plugin_hookspecs(pm)` installs [plugin-declared hooks](#declaring-hooks-in-a-plugin), the arg-binding guard checks every hookimpl, `validate_dependencies(pm)` runs, hookimpls with no spec are reported, and `pm.ahook.on_init(pm=pm, config=config)` broadcasts to all registered plugins.
+`Runtime.start()` loads the `corvidae` entry-point group through `corvidae/plugin_loader.py`, which instantiates each entry point class with no arguments and registers it under its entry-point name. Disabled plugins are never loaded, a `plugins.replace` target takes its slot ([Replacing a bundled plugin](#replacing-a-bundled-plugin)), and a plugin that fails to import or instantiate is logged at `ERROR` and skipped. Then `install_plugin_hookspecs(pm)` installs [plugin-declared hooks](#declaring-hooks-in-a-plugin), the arg-binding guard checks every hookimpl, `validate_dependencies(pm)` runs, hookimpls with no spec are reported, and `pm.ahook.on_init(pm=pm, config=config)` broadcasts to all registered plugins.
 
 All plugin classes must be instantiable with no arguments. `pm` and `config` are delivered via `on_init`.
 
@@ -1629,7 +1629,7 @@ instead of a live process with a dead transport.
 
 ## Registration order
 
-Plugins are loaded via `pm.load_setuptools_entrypoints("corvidae")`. The entry point loading order is non-deterministic — it is not guaranteed to match any specific sequence. The following plugins are registered:
+Plugins are loaded from the `corvidae` entry-point group by `corvidae/plugin_loader.py`. The entry point loading order is non-deterministic — it is not guaranteed to match any specific sequence. The following plugins are registered:
 
 ```
 registry          (ChannelRegistry)     — explicit, before entry points load
@@ -1670,6 +1670,26 @@ config_watcher    (ConfigWatcherPlugin) — entry point
 
 `ChannelRegistry`, the `Clock` (`"clock"`) and the `IdleTracker` (`"idle"`) are registered by `Runtime.start()` before the entry points load, so any plugin can depend on them. See [Acting on time and quiet](#acting-on-time-and-quiet).
 
+## Replacing a bundled plugin
+
+A distribution can take over one of the kernel's own plugin slots (`llm`, `agent`, `persistence`, `tools`, a transport) without forking the kernel.
+
+1. **Subclass the bundled class.** The target must be a subclass of the class behind the slot's entry point (`LLMPlugin` for `llm`). Startup stops with a `Config error` naming both classes otherwise. A subclass inherits the hookimpls, so override only what you change.
+2. **The whole surface is the contract.** Other plugins reach the slot through `get_dependency(pm, "llm", LLMPlugin)` and through its hooks, so a replacement has to keep every method, attribute and hook behaviour they use. This matters most for `agent`, `persistence` and `tools`, which nearly everything else touches. Nothing checks this for you beyond the subclass test.
+3. **Ship it as an entry point** in your own distribution's `[project.entry-points.corvidae]`, under a name of your own: `my_llm = "my_package:MyLLM"`. Import paths in config are refused on purpose; only installed entry points can be named.
+4. **Configure it:**
+
+   ```yaml
+   plugins:
+     replace:
+       llm: my_llm
+   ```
+
+   The plugin registers under the slot name `llm`; the bundled `llm` is never instantiated and `my_llm` is not also registered under its own name. Other plugins must refer to it as `llm`. A plugin whose `depends_on` names `my_llm` fails dependency validation.
+5. **Restart to apply.** It is read once at startup; a reload that changes it logs the restart-only warning.
+
+If the target fails to import or instantiate, the loader logs an `ERROR` naming the slot and target, and the bundled plugin fills the slot, so the daemon still boots. Handling state is then your job: anything the replacement wrote (rows in its own tables, a changed file format) that the bundled plugin cannot read stays unread after a fallback. The restart plugin's pre-flight refuses a restart that would fall back.
+
 ## Plugin disable
 
 Disable entry-point plugins via the `plugins.disabled` config key:
@@ -1680,7 +1700,7 @@ plugins:
     - compaction          # disable the built-in compaction plugin
 ```
 
-Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml`. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before loading entry points. Blocked plugins are not instantiated.
+Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml`. The loader leaves each named entry point out of its plan before loading anything, so a disabled plugin is never imported or instantiated.
 
 Only entry-point plugins can be disabled this way. Manually registered plugins (e.g., `ChannelRegistry`) cannot be blocked via config.
 
@@ -1688,8 +1708,8 @@ This is a startup-time mechanism. It does not interact with hot-reload.
 
 Right after entry points load, `Runtime.start()` logs a `"plugins loaded"`
 line with `loaded` (the sorted names that actually registered, not the
-blocked ones) and
-`blocked` (the `plugins.disabled` list from config, verbatim). Compare the
+disabled ones),
+`blocked` (the `plugins.disabled` list from config, verbatim), `replaced` (slot to target) and `fallbacks` (slot to the failed target). Compare the
 two to confirm a disable took effect. A name that matches no installed
 plugin (a typo, a retired name, a plugin from an extra that isn't
 installed) blocks nothing, and `Runtime.start()` logs one `WARNING` for it

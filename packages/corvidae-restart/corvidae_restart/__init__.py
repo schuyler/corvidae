@@ -217,6 +217,10 @@ class RestartPlugin(CorvidaePlugin):
         )
 
         self._blocked = list((config.get("plugins") or {}).get("disabled") or [])
+        # The loader's report of swaps and fallbacks (absent in a bare test config).
+        report = config.get("_plugin_load")
+        self._replaced = dict(getattr(report, "replaced", {}) or {})
+        self._fallbacks = dict(getattr(report, "fallbacks", {}) or {})
         self._loaded = sorted(
             name
             for name, plugin in pm.list_name_plugin()
@@ -557,6 +561,15 @@ class RestartPlugin(CorvidaePlugin):
             f"Plugins loaded: {', '.join(self._loaded) or 'none'}",
             f"Plugins blocked: {', '.join(self._blocked) or 'none'}",
         ]
+        # Replacement plugins in use, and ones that failed so bundled filled in.
+        if self._replaced:
+            swaps = ", ".join(f"{s} → {t}" for s, t in self._replaced.items())
+            lines.append(f"Plugins replaced: {swaps}")
+        if self._fallbacks:
+            failed = ", ".join(
+                f"{t} failed, bundled {s} used" for s, t in self._fallbacks.items()
+            )
+            lines.append(f"Plugin fallbacks: {failed}")
         if self._safe_mode:
             lines.append(f"Safe mode: {self._safe_mode_label}")
         return lines

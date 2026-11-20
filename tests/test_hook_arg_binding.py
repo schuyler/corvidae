@@ -114,8 +114,8 @@ class TestRealPluginManagerIntegration:
 
     create_plugin_manager() itself only registers the internal
     _seed_hooks plugin; the real corvidae plugins are loaded afterwards
-    by runtime.py via pm.load_setuptools_entrypoints("corvidae"). This
-    test reproduces that same sequence so the guard is actually exercised
+    by runtime.py through corvidae.plugin_loader. This test approximates that sequence
+    with pluggy's own loader so the guard is actually exercised
     against the full real plugin set, not just the seed plugin.
     """
 
@@ -133,7 +133,7 @@ class TestRuntimeStartupCoverage:
     """Prove the guard actually runs at real startup via the runtime path.
 
     runtime.Runtime.start() calls create_plugin_manager(), then
-    pm.load_setuptools_entrypoints("corvidae"), then
+    register_planned (the plugin loader), then
     _check_hook_arg_binding(pm) before validate_dependencies. Without that
     second guard call, the real entry-point plugins would never be checked
     at startup — create_plugin_manager() only registers _seed_hooks. These
@@ -154,11 +154,11 @@ class TestRuntimeStartupCoverage:
 
         # It is actually invoked inside Runtime.load_plugins() (the part of
         # startup shared with the restart pre-flight), after
-        # load_setuptools_entrypoints (so the real plugins are registered
-        # by the time it runs).
+        # register_planned (so the real plugins are registered by the time
+        # it runs).
         src = inspect.getsource(runtime.Runtime.load_plugins)
         assert "_check_hook_arg_binding(self.pm)" in src
-        load_idx = src.index("load_setuptools_entrypoints")
+        load_idx = src.index("register_planned(")
         guard_idx = src.index("_check_hook_arg_binding(self.pm)")
         assert guard_idx > load_idx, (
             "guard must run AFTER entry-point plugins are registered"

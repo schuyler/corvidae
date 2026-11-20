@@ -499,6 +499,17 @@ channels:
 #   preflight_timeout_seconds: 120
 #   notify_delay_seconds: 5
 
+# --- Plugin selection ---
+# plugins.disabled leaves entry-point plugins out. plugins.replace fills a
+# bundled plugin's slot with another installed entry-point plugin (a
+# subclass of the bundled class, shipped in your own distribution); import
+# paths are refused. If the replacement fails to load, the bundled plugin is
+# used and an ERROR is logged. Both need a restart.
+# plugins:
+#   disabled: []
+#   replace:
+#     llm: my_llm                      # slot (bundled name): installed entry point
+
 # --- Timepiece (requires --extra timepiece) ---
 # Appends a wall-clock CONTEXT line to a channel's window before a turn, at
 # most once per interval. Runs with these defaults when the extra is

@@ -34,6 +34,23 @@ async def _run(config_path: str) -> int:
         runtime.setup_logging(config)
         try:
             await runtime.load_plugins(config)
+            # A skipped plugin or a fallen-back replacement means the daemon
+            # would boot a different plugin set than configured (R14).
+            report = runtime.load_report
+            if report.fallbacks or report.skipped:
+                parts = [
+                    f'plugin "{n}" failed to load (skipped)' for n in report.skipped
+                ] + [
+                    f'plugin "{t}" replacing "{s}" failed to load (bundled used)'
+                    for s, t in report.fallbacks.items()
+                ]
+                print(
+                    f"pre-flight failed: {'; '.join(parts)} — fix or reinstall "
+                    f"them, or remove the plugins.replace entry for a fallen-back "
+                    f"slot, before restarting",
+                    file=sys.stderr,
+                )
+                return 1
         finally:
             # Close whatever load_plugins built; returns at once if it
             # never created a plugin manager.
