@@ -655,44 +655,73 @@ def _repair_cmd(ctx, do_apply):
     db_path = ctx.obj["db_path"]
 
     def _run():
-        conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA busy_timeout = 5000")
-        mode = conn.execute("PRAGMA journal_mode").fetchone()[0].lower()
-        if mode != "wal":
-            conn.close()
+        # Never hand sqlite3 the chance to create an empty database at a
+        # typo'd path: an operator repair must point at the daemon's own file.
+        if not Path(db_path).exists():
             raise click.ClickException(
-                f"Database journal mode is '{mode}' — the goals CLI requires "
-                f"WAL mode; the corvidae daemon sets it on startup ({db_path})"
+                f"No database at {db_path} — pass the session DB the daemon "
+                "uses; repair-statuses never creates one"
             )
-        stale_retired, stale_open = _mismatch_counts(conn)
-        total = stale_retired + stale_open
-        if not do_apply:
+        # isolation_level=None: the transaction is opened explicitly below with
+        # BEGIN IMMEDIATE, so the write lock is held across count -> update ->
+        # verify instead of being acquired lazily mid-repair.
+        conn = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout = 5000")
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0].lower()
+            if mode != "wal":
+                raise click.ClickException(
+                    f"Database journal mode is '{mode}' — the goals CLI requires "
+                    f"WAL mode; the corvidae daemon sets it on startup ({db_path})"
+                )
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(goals)")}
+            if not {"status", "retired_at"} <= columns:
+                raise click.ClickException(
+                    f"{db_path} has no goals table with status/retired_at — "
+                    "start the corvidae daemon once to create and migrate it"
+                )
+            stale_retired, stale_open = _mismatch_counts(conn)
+            total = stale_retired + stale_open
+            if not do_apply:
+                click.echo(
+                    f"{total} mismatches: {stale_retired} retired rows with an open-"
+                    f"family status, {stale_open} 'retired' rows with no retired_at"
+                    + (" — pass --apply to repair" if total else "")
+                )
+                return
+            conn.execute("BEGIN IMMEDIATE")
+            committed = False
+            try:
+                retired = conn.execute(
+                    "UPDATE goals SET status = 'retired'"
+                    " WHERE retired_at IS NOT NULL AND status != 'retired'"
+                ).rowcount
+                opened = conn.execute(
+                    "UPDATE goals SET status = 'open'"
+                    " WHERE retired_at IS NULL AND status = 'retired'"
+                ).rowcount
+                # Verified inside the write transaction: a concurrent daemon
+                # write cannot land between the repair and the check, so a
+                # failure here means the repair itself was wrong (and gets
+                # rolled back) rather than someone else moving a row.
+                after_a, after_b = _mismatch_counts(conn)
+                if after_a or after_b:
+                    raise click.ClickException(
+                        f"post-repair verification failed: {after_a + after_b} "
+                        "mismatches remain; rolled back, nothing written"
+                    )
+                conn.execute("COMMIT")
+                committed = True
+            finally:
+                if not committed and conn.in_transaction:
+                    conn.execute("ROLLBACK")
             click.echo(
-                f"{total} mismatches: {stale_retired} retired rows with an open-"
-                f"family status, {stale_open} 'retired' rows with no retired_at"
-                + (" — pass --apply to repair" if total else "")
+                f"repaired {retired + opened} rows ({retired} -> retired,"
+                f" {opened} -> open); 0 mismatches remain (status now matches"
+                " the retired_at partition)"
             )
+        finally:
             conn.close()
-            return
-        conn.execute(
-            "UPDATE goals SET status = 'retired'"
-            " WHERE retired_at IS NOT NULL AND status != 'retired'"
-        )
-        conn.execute(
-            "UPDATE goals SET status = 'open'"
-            " WHERE retired_at IS NULL AND status = 'retired'"
-        )
-        conn.commit()
-        after_a, after_b = _mismatch_counts(conn)
-        conn.close()
-        if after_a or after_b:
-            raise click.ClickException(
-                f"post-repair verification failed: {after_a + after_b} mismatches remain"
-            )
-        click.echo(
-            f"repaired {total} rows; 0 mismatches remain (status now matches the"
-            " retired_at partition)"
-        )
 
     _run()
 

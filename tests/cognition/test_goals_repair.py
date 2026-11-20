@@ -106,3 +106,45 @@ def test_requires_existing_db(tmp_path):
         goals_command, ["--db", str(tmp_path / "nope.db"), "repair-statuses"]
     )
     assert result.exit_code != 0
+
+
+def test_apply_does_not_create_a_missing_db(tmp_path):
+    """sqlite3.connect() would happily create an empty file at a typo'd path."""
+    missing = tmp_path / "session.db"  # the classic typo of sessions.db
+    result = CliRunner().invoke(
+        goals_command, ["--db", str(missing), "repair-statuses", "--apply"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert not missing.exists()
+    assert str(missing) in result.output
+
+
+def test_missing_goals_table_reports_cleanly(tmp_path):
+    """An existing but goal-less database is a message, not a traceback."""
+    db = tmp_path / "other.db"
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA journal_mode=wal")
+    conn.execute("CREATE TABLE unrelated (id INTEGER)")
+    conn.commit()
+    conn.close()
+    result = CliRunner().invoke(
+        goals_command, ["--db", str(db), "repair-statuses"], catch_exceptions=False
+    )
+    assert result.exit_code != 0
+    assert "goals table" in result.output
+
+
+def test_apply_reports_the_rows_it_actually_changed(tmp_path):
+    """The headline number is rows whose status changed, not a stale pre-count."""
+    db = _make_db(tmp_path)
+    before = _statuses(db)
+    result = CliRunner().invoke(
+        goals_command, ["--db", str(db), "repair-statuses", "--apply"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    after = _statuses(db)
+    changed = sum(1 for k in before if before[k] != after[k])
+    assert changed == 3
+    assert f"repaired {changed} rows" in result.output
