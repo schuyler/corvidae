@@ -374,10 +374,15 @@ async def test_burst_during_tool_cycle_is_charged_to_the_cycle(make_env):
     # Both results arrive together in a single later call.
     assert len(llm.calls) == 3
     # Background results carry task.py's "[Task <id>] " prefix; compare the rest.
-    results = [
-        m["content"].split("] ", 1)[1] for m in llm.calls[2] if m.get("role") == "tool"
+    # Both land after the burst's reply, so they reach the model as system
+    # frames (#346), not role: tool rows.
+    frames = [
+        m["content"] for m in llm.calls[2]
+        if m.get("role") == "system" and "still running" in m.get("content", "")
     ]
-    assert sorted(results) == ["A-RESULT:1", "B-RESULT:2"]
+    assert len(frames) == 2
+    assert sum("A-RESULT:1" in f for f in frames) == 1
+    assert sum("B-RESULT:2" in f for f in frames) == 1
 
 
 # ---------------------------------------------------------------------------

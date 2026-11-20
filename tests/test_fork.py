@@ -39,7 +39,8 @@ def _call(call_id):
 def _tool_window() -> ContextWindow:
     """Summary head, a two-call cycle (index 2) whose results (3, 5) are
     interleaved with a user message, then a CONTEXT row and a user turn.
-    Clean cuts: 0-2 and 6-9; 3-5 straddle the cycle."""
+    Clean cuts: 0-2 and 6-9; the snap rules treat 3-5 as straddling the cycle,
+    though under the #346 render only cut 3 diverges from the full window."""
     conv = ContextWindow("test:scope")
     conv.system_prompt = "You are Lex."
     rows = [
@@ -114,11 +115,19 @@ def test_fork_cut_leaves_unanswered_call_abandoned():
     assert _tool_content(prompt, "c1") == TOOL_RESULT_ABANDONED
 
 
-def test_fork_cut_after_result_renders_the_result():
-    """A call whose result is before the cut renders that result (R3)."""
+def test_fork_cut_after_result_renders_the_late_result_as_a_frame():
+    """A late result before the cut renders as a system frame, as in the full
+    window (#346 R2); the call's block keeps the pending placeholder."""
+    from corvidae.context import TOOL_RESULT_PENDING
+
     conv = _straddle_window()
     prompt = build_fork_prompt(conv, 4, INSTRUCTION, frozenset(), "system")
-    assert _tool_content(prompt, "c1") == "late"
+    assert _tool_content(prompt, "c1") == TOOL_RESULT_PENDING
+    frame = prompt[-2]
+    assert frame["role"] == "system"
+    assert "tool_call_id" not in frame
+    assert "the earlier shell call shown above as still running" in frame["content"]
+    assert frame["content"].endswith("late")
 
 
 def test_fork_without_cut_unchanged_and_pure():
