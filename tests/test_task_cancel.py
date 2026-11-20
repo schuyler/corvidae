@@ -172,6 +172,44 @@ class TestTaskCancellationRecord:
         assert [ln["task_id"] for ln in lines] == [t1.task_id, t2.task_id]
         assert "cancel" in lines[0]["result"].lower()
 
+    async def test_shutdown_notify_failure_does_not_mask_or_warn(self, caplog):
+        """A raising detached on_complete on the shutdown path: the
+        CancelledError still propagates, and the async exception is
+        consumed and logged (no 'never retrieved' warning path)."""
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="corvidae.task")
+        queue = TaskQueue(max_workers=1)
+        channel = _make_channel()
+        started = asyncio.Event()
+        done = asyncio.Event()
+
+        async def long_work():
+            started.set()
+            await asyncio.sleep(3600)
+            return "never"
+
+        async def raising_notify(t, r):
+            done.set()
+            raise RuntimeError("notify exploded")
+
+        await queue.queue.put(Task(work=long_work, channel=channel))
+        worker = asyncio.create_task(queue.run_worker(raising_notify))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+        await asyncio.wait_for(done.wait(), timeout=2)
+        for _ in range(20):
+            if any("detached task-notify failed" in r.message for r in caplog.records):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("raising detached notify must be logged by _notice_done")
+        assert not queue._detached_notices or all(
+            f.done() for f in queue._detached_notices
+        )
+
     async def test_shutdown_cancel_still_propagates(self, tmp_path: Path):
         """Fix must not swallow shutdown: CancelledError still escapes
         _run_one_worker when the worker task itself is cancelled."""
