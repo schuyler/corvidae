@@ -378,7 +378,7 @@ class GoalsPlugin(CorvidaePlugin):
         plugin = self
 
         async def add_goal(text: str, position: str = "append", _ctx=None) -> str:
-            """Add an open goal with outcome + pointer only; use set_goal_status for state.
+            """Add an open goal with outcome + pointer only; use set_goal_status for state. position: prepend (front of the queue) or append (default).
 
             position is 'prepend' (front of the queue, high priority) or
             'append' (back, the default). list_goals shows the open goals
