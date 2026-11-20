@@ -13,6 +13,7 @@ Exports:
     TransportPlugin — transport base class: the outbound ``send`` filter
                       and dispatch to send_* methods
     create_plugin_manager()     — create and configure the PluginManager
+    CorvidaePluginManager       — wraps fail-soft hookimpls at registration
     resolve_reject_wins()       — resolve broadcast gate-hook result lists
     PolicyAHook                 — pm.ahook / pm.ahook_raise: observe hooks
                                   fail soft, every other hook as apluggy
@@ -22,9 +23,12 @@ Exports:
 """
 from __future__ import annotations
 
+import functools
+import inspect
 import logging
 import warnings
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 import apluggy as pluggy
@@ -39,6 +43,8 @@ from corvidae.outbound import (
 )
 
 if TYPE_CHECKING:
+    from pluggy import HookimplOpts
+
     from corvidae.admission import WorkRefusal
     from corvidae.channel import Channel
     from corvidae.context import ContextWindow, MessageType
@@ -528,16 +534,105 @@ def is_fail_soft(name: str) -> bool:
     return grammar_class(name) == "observe" and name not in FAIL_HARD_HOOKS
 
 
+# True only while PolicyAHook dispatches a fail-soft hook (#1104). A wrapped
+# hookimpl catches its failure only then; any other call -- a direct
+# ``plugin.on_x(...)``, ``impl.function(...)`` or ``pm.hook.on_x(...)`` --
+# runs the original and raises as it always did.
+_IN_FAIL_SOFT_DISPATCH: ContextVar[bool] = ContextVar(
+    "corvidae_in_fail_soft_dispatch", default=False
+)
+
+
+class _Failed:
+    """A fail-soft hookimpl's exception, returned as its result (#1104)."""
+
+    __slots__ = ("exc",)
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+
+def _fail_soft_wrapper(original: Callable[..., object]) -> Callable[..., object]:
+    """Wrap a fail-soft hookimpl so its failure can come back as a value.
+
+    The wrapper is a plain function, so outside fail-soft dispatch it returns
+    whatever the original returns, coroutine or value, and a direct call is
+    unchanged. During dispatch it returns a coroutine that runs the original
+    and returns ``_Failed(exc)`` for anything it raises, so apluggy's stock
+    gather runs every implementation to completion. ``functools.wraps``
+    carries the hookimpl marker across, and pluggy's ``varnames`` unwraps to
+    the original's signature.
+    """
+
+    async def guarded(*args: object, **kwargs: object) -> object:
+        # Runs in the task gather made for it, so resetting the flag is local:
+        # a direct call this implementation makes raises normally.
+        _IN_FAIL_SOFT_DISPATCH.set(False)
+        try:
+            result = original(*args, **kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        except BaseException as exc:  # noqa: BLE001 - PolicyAHook logs or re-raises it
+            return _Failed(exc)
+
+    @functools.wraps(original)
+    def wrapper(*args: object, **kwargs: object) -> object:
+        # Outside fail-soft dispatch, behave exactly like the original.
+        if not _IN_FAIL_SOFT_DISPATCH.get():
+            return original(*args, **kwargs)
+        return guarded(*args, **kwargs)
+
+    # Keep reporting as a coroutine function, so code that checks (such as
+    # AsyncMock(wraps=...)) still awaits a direct call.
+    if inspect.iscoroutinefunction(original):
+        inspect.markcoroutinefunction(wrapper)
+    # Marks the attribute as already wrapped, so registering the plugin again
+    # (here or with another manager) doesn't wrap it twice.
+    wrapper._corvidae_fail_soft = True  # type: ignore[attr-defined]
+    return wrapper
+
+
+class CorvidaePluginManager(pluggy.PluginManager):
+    """apluggy's PluginManager, wrapping fail-soft hookimpls at registration.
+
+    ``parse_hookimpl_opts`` is pluggy's documented override point. ``register``
+    calls it once per attribute, after apluggy has instantiated a factory
+    plugin and before pluggy reads the attribute. So shadowing the attribute
+    here makes pluggy bind the wrapper. The original is untouched on the
+    class, and ``HookImpl`` is never modified.
+    """
+
+    def parse_hookimpl_opts(self, plugin: object, name: str) -> HookimplOpts | None:  # type: ignore[override]
+        opts = super().parse_hookimpl_opts(plugin, name)
+        if opts is None:
+            return None
+        # Only plain implementations of fail-soft hooks; wrappers stay refused
+        # by check_fail_soft_wrappers.
+        hook_name = opts.get("specname") or name
+        if not is_fail_soft(hook_name) or opts.get("wrapper") or opts.get("hookwrapper"):
+            return opts
+        original = getattr(plugin, name)
+        # Already wrapped: the plugin was registered before (here or elsewhere).
+        if getattr(original, "_corvidae_fail_soft", False):
+            return opts
+        # A plugin that refuses the attribute (__slots__, a guarded
+        # __setattr__) fails registration here rather than running unwrapped.
+        setattr(plugin, name, _fail_soft_wrapper(original))
+        return opts
+
+
 class PolicyAHook:
     """``pm.ahook``'s replacement: the hook's prefix sets its failure policy.
 
     A fail-soft hook (``on_``/``before_``/``after_``, except FAIL_HARD_HOOKS)
-    runs through ``pm.ahook_isolated``: every implementation runs to
-    completion, each one that raises an ``Exception`` is logged at WARNING
-    naming the hook and the plugin, and the call returns the others' values
-    in hook order (``None`` included). A ``BaseException`` propagates once the
-    rest have finished. Every other hook goes to apluggy's own ``AHook``
-    (``strict``), unchanged.
+    is dispatched by apluggy's own ``AHook`` with ``_IN_FAIL_SOFT_DISPATCH``
+    set, so each implementation (wrapped by ``CorvidaePluginManager``)
+    returns its failure as a ``_Failed`` value. Every implementation runs to
+    completion, each ``Exception`` is logged at WARNING naming the hook and
+    the plugin, and the call returns the others' values in hook order
+    (``None`` included). A ``BaseException`` propagates once the rest have
+    finished. Every other hook goes to ``strict`` unchanged.
 
     With ``reraise=True`` (``pm.ahook_raise``), a fail-soft call logs the same
     way and then raises the first failure in hook order. It is for call sites
@@ -556,23 +651,41 @@ class PolicyAHook:
             return getattr(self._strict, name)
 
         async def call(**kwargs: object) -> list[object]:
-            # Run every implementation to completion; each outcome is reported.
-            outcomes = await getattr(self._pm.ahook_isolated, name)(**kwargs)
+            # Plugin names in the order apluggy calls the impls (pluggy runs
+            # them last-registered first); no await before dispatch builds
+            # its coroutines, so results line up with these names.
+            caller = getattr(self._pm.hook, name, None)
+            impls = caller.get_hookimpls() if caller is not None else []
+            names = [impl.plugin_name for impl in reversed(impls)]
+
+            # Dispatch with the flag set; reset it even if dispatch raises, so
+            # later direct calls in this task still raise.
+            token = _IN_FAIL_SOFT_DISPATCH.set(True)
+            try:
+                results = await getattr(self._strict, name)(**kwargs)
+            finally:
+                _IN_FAIL_SOFT_DISPATCH.reset(token)
 
             # Log each failure against its plugin; keep the other values.
             values: list[object] = []
             failures: list[BaseException] = []
-            for plugin_name, result in outcomes:
-                if result.exception is not None:
+            for plugin_name, result in zip(names, results, strict=True):
+                if not isinstance(result, _Failed):
+                    values.append(result)
+                    continue
+                failures.append(result.exc)
+                if isinstance(result.exc, Exception):
                     _pm_logger.warning(
                         "hook %s: the implementation in plugin %r raised; skipped",
                         name, plugin_name,
-                        exc_info=result.exception,
+                        exc_info=result.exc,
                     )
-                    failures.append(result.exception)
-                else:
-                    values.append(result.get_result())
 
+            # A BaseException (CancelledError, KeyboardInterrupt) propagates
+            # now that every sibling has finished.
+            for exc in failures:
+                if not isinstance(exc, Exception):
+                    raise exc
             # pm.ahook_raise: hand the first failure to the call site's except.
             if self._reraise and failures:
                 raise failures[0]
@@ -584,8 +697,8 @@ class PolicyAHook:
 def check_fail_soft_wrappers(pm: pluggy.PluginManager) -> None:
     """Refuse a wrapper implementation on a fail-soft hook (#1094).
 
-    Fail-soft hooks run through ``pm.ahook_isolated``, which can't drive the
-    wrapper protocol. Called once at startup, after plugin hookspecs are
+    A wrapper would receive a failed implementation's ``_Failed`` value in
+    its result list rather than an exception (#1104). Called once at startup, after plugin hookspecs are
     installed, so plugin-owned hooks are covered too.
 
     Raises:
@@ -602,8 +715,8 @@ def check_fail_soft_wrappers(pm: pluggy.PluginManager) -> None:
             raise pluggy.PluginValidationError(
                 impl.plugin,
                 f"Plugin {impl.plugin_name!r} implements {hook_name!r} with "
-                f"{option}=True, but observe hooks fail soft through "
-                f"pm.ahook_isolated, which can't run wrappers. Remove "
+                f"{option}=True, but observe hooks fail soft, so a wrapper "
+                f"would receive a failed implementation as a value. Remove "
                 f"{option}=True and implement {hook_name} as a plain async "
                 f"hookimpl.",
             )
@@ -617,7 +730,7 @@ def create_plugin_manager() -> pluggy.PluginManager:
 
     Logs a DEBUG message when the manager is created.
     """
-    pm = pluggy.PluginManager("corvidae")
+    pm = CorvidaePluginManager("corvidae")
     # The hook's prefix sets its failure policy (PRD §3.1 item 10): replace
     # pm.ahook once here so no call site has to choose.
     strict = pm.ahook

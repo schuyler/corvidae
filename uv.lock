@@ -216,7 +216,7 @@ wheels = [
 [[package]]
 name = "apluggy"
 version = "1.1.2"
-source = { git = "https://github.com/schuyler/apluggy.git?rev=main#23d7eb10bae94d743d996a2e79c7a2488e7945dd" }
+source = { git = "https://github.com/schuyler/apluggy.git?rev=main#665f95e4ff3f42de32fbb73e7eb411cba3db42b9" }
 dependencies = [
     { name = "pluggy" },
 ]

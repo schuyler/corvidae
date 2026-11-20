@@ -102,12 +102,21 @@ class AgentSpec:
 `create_plugin_manager()` in `hooks.py` creates the manager and adds
 the `AgentSpec` hookspecs. It also replaces `pm.ahook` with a `PolicyAHook`:
 for an observe hook (`on_`/`before_`/`after_`, except `on_init` and
-`on_start`, the `FAIL_HARD_HOOKS`) it dispatches through apluggy's
-`pm.ahook_isolated`, so each implementation runs to completion, a failure is
-logged at WARNING naming the hook and plugin, and the other values come back
-in hook order; every other hook keeps apluggy's own dispatch. It adds
+`on_start`, the `FAIL_HARD_HOOKS`) it dispatches through apluggy's own
+`AHook` with a context variable set. The manager is a
+`CorvidaePluginManager`, whose `parse_hookimpl_opts` override shadows each
+fail-soft, non-wrapper implementation on the plugin object, at registration,
+with a `functools.wraps` wrapper. While the context variable is set, the
+wrapper returns anything the implementation raises as a `_Failed` value.
+Otherwise it calls the original, so a direct call is unchanged. The stock
+gather therefore runs each implementation to completion. A failure is logged
+at WARNING naming the hook and plugin, the other values come back in hook
+order, and a `BaseException` that is not an `Exception` (such as
+`CancelledError`) is re-raised once they have all finished. Every
+other hook keeps apluggy's own dispatch. It adds
 `pm.ahook_raise` beside it, which logs the same way and then raises the first
-failure once every implementation has finished. A call site whose `except`
+failure once every implementation has finished (a `CancelledError` or other
+non-`Exception` failure takes precedence over an `Exception`). A call site whose `except`
 acts on the failure (an error tool result, a cursor rewind) uses
 `ahook_raise`, so its fallback never runs while a sibling is still in flight.
 
@@ -5160,8 +5169,8 @@ Next, `install_plugin_hookspecs(pm)` installs the hookspecs plugins
 declare ([Plugin-declared hookspecs](#plugin-declared-hookspecs)).
 `check_fail_soft_wrappers(pm)` then refuses a
 `wrapper=True`/`hookwrapper=True` impl on any fail-soft hook, naming the
-hook, the plugin and the fix, since `ahook_isolated` can't drive wrappers
-(a wrapper on `on_init` or `on_start` is allowed), and the hook
+hook, the plugin and the fix, since a wrapper would receive a failed
+implementation as a value (a wrapper on `on_init` or `on_start` is allowed), and the hook
 arg-binding guard checks every impl against the full set of specs. Then `validate_dependencies(pm)` runs
 to verify every plugin's `depends_on` set names a registered plugin.
 Startup aborts with `RuntimeError` if any dependency is missing.
