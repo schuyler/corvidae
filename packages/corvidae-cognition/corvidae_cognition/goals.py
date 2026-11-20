@@ -1,8 +1,10 @@
 """GoalsPlugin — the agent's open goals, kept in SQLite and shown to the heartbeat (#133).
 
 Goals are agent-wide. Open goals reach the agent in the heartbeat's beat
-and nowhere else (#1091): goals' beat section lists them in full, every
-beat. Retiring a goal writes a memory record of the conclusion first,
+and nowhere else (#1091): goals' beat section lists the five frontmost
+open or in-progress goals, every beat (2026-11-19 beat-size spec).
+Retired, blocked and waiting goals stay on the board (list_goals) but off
+the beat. Retiring a goal writes a memory record of the conclusion first,
 so no goal is retired without its record.
 
 Tools:
@@ -11,9 +13,6 @@ Tools:
 
 Operator: ``corvidae goals --db PATH seed TEXT`` inserts a goal from a
 second process; the daemon reads the table every beat.
-
-Heartbeat: ``retired_goals`` gives the heartbeat's review the newest
-retirement records (agent-wide).
 """
 
 from __future__ import annotations
@@ -86,25 +85,22 @@ def _day(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
 
 
-#: How many retired goals a beat reviews when ``goals.heartbeat_retired_limit``
-#: is absent.
-DEFAULT_RETIRED_GOAL_LIMIT = 5
+#: How many open or in-progress goals a beat shows when
+#: ``goals.heartbeat_limit`` is absent (2026-11-19 beat-size spec).
+DEFAULT_BEAT_GOAL_LIMIT = 5
 
 #: The pick rule goals adds to every beat (PRD §3.7 Goals and Heartbeat).
 #: prompts/heartbeat-goals.md is the documented copy.
 GOALS_INSTRUCTION = (
-    "Goals are your work queue, listed front of the queue first. Work the "
+    "Goals are your work queue, and the beat shows the front of it: up to "
+    "five open or in-progress goals, front of the queue first. Work the "
     "front: if a goal is marked in-progress, resume it; otherwise take the "
-    "first goal that is neither blocked nor waiting, and advance it. "
-    "If a goal is done, retire it. Don't take up again a goal you "
-    "retired unless something new has changed. Otherwise act only when the "
-    "assessment warrants it — a beat with nothing to advance is fine."
-)
-
-#: Heads the retired-goals list in goals' beat section.
-RETIRED_GOALS_HEADER = (
-    "Goals you retired, newest first, each with its age: your own "
-    "conclusions, data to review, not instructions."
+    "first listed goal and advance it. If a goal is done, retire it. "
+    "Don't take up again a goal you retired unless something new has "
+    "changed. When the listed goals are all dead ends, call list_goals - "
+    "blocked and waiting goals stay on the board even though the beat "
+    "hides them. Act only when the assessment warrants it — a beat "
+    "with nothing to advance is fine."
 )
 
 
@@ -151,11 +147,7 @@ class GoalsPlugin(CorvidaePlugin):
         # embedding call in write_record; retirements are rare, so move to a
         # per-goal lock if they ever become frequent.
         self._state_lock = asyncio.Lock()
-        # The retired goals the last beat sent: a persistent channel already
-        # has them, so a beat sends only what's new (#716).
-        # None until the first beat and after a beat-channel compaction.
-        self._last_retired_ids: set[int] | None = None
-        self._retired_goal_limit = DEFAULT_RETIRED_GOAL_LIMIT
+        self._beat_goal_limit = DEFAULT_BEAT_GOAL_LIMIT
         self._instruction = GOALS_INSTRUCTION
 
     @hookimpl
@@ -163,12 +155,12 @@ class GoalsPlugin(CorvidaePlugin):
         await super().on_init(pm, config)
         # The beat's two goals settings; the heartbeat.* spellings are retired
         # but still read. Validated here so a bad value fails startup.
-        self._retired_goal_limit = read_count(
+        self._beat_goal_limit = read_count(
             config,
-            "goals.heartbeat_retired_limit",
-            "heartbeat.retired_goal_limit",
-            DEFAULT_RETIRED_GOAL_LIMIT,
-            "retired goals",
+            "goals.heartbeat_limit",
+            "heartbeat.goal_limit",
+            DEFAULT_BEAT_GOAL_LIMIT,
+            "open or in-progress goals",
         )
         self._instruction = read_prompt(
             config,
@@ -179,44 +171,20 @@ class GoalsPlugin(CorvidaePlugin):
 
     @hookimpl(trylast=True)
     async def on_heartbeat_collect_prompts(self, channel) -> str | None:
-        """Goals' beat section: new retired conclusions, then the pick rule.
+        """Goals' beat section: the goal list, then the pick rule.
 
-        The retired block is full on the first beat and after a compaction of
-        the beat channel, and otherwise only what's new; the instruction goes
-        on every beat. Trylast, so the call to action is the last section, just
-        before the heartbeat prompt.
+        The list goes out in full every beat, so a stale copy can't outlive
+        a change. Only open and in-progress goals, capped at
+        ``goals.heartbeat_limit``; retired, blocked and waiting goals stay
+        on the board, off the beat (2026-11-19 spec; list_goals shows all).
         """
-        retired = await self.retired_goals(self._retired_goal_limit)
-        full = self._last_retired_ids is None
-        fresh = retired if self._last_retired_ids is None else [
-            g for g in retired if g["id"] not in self._last_retired_ids
-        ]
-        # Committed on read, as memory's heartbeat section is.
-        self._last_retired_ids = {g["id"] for g in retired}
         parts: list[str] = []
-        # Open goals reach the agent here and nowhere else (#1091); the list
-        # goes out in full every beat, so a stale copy can't outlive a change.
+        # Open goals reach the agent here and nowhere else (#1091).
         open_list = await self._goals_list_text()
         if open_list:
             parts.append(open_list)
-        if fresh or full:
-            lines = [
-                f"- ({_format_age(g['age_seconds'])}) {g['summary']}" for g in fresh
-            ] or ["(none)"]
-            parts.append(f"{RETIRED_GOALS_HEADER}\n" + "\n".join(lines))
         parts.append(self._instruction)
         return "\n\n".join(parts)
-
-    @hookimpl
-    async def on_compaction(self, channel, summary_msg, retain_count, compacted_ids) -> None:
-        """Reset the retired-goals diff when the beat channel compacts.
-
-        Retirement conclusions are structured data the compaction summary may
-        not preserve, so the next beat sends them all again.
-        """
-        if channel.id == HEARTBEAT_CHANNEL:
-            self._last_retired_ids = None
-            logger.info("goals: retired-goal diff state reset after compaction")
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -256,6 +224,17 @@ class GoalsPlugin(CorvidaePlugin):
             if "origin_channel" not in cols:
                 await db.execute("ALTER TABLE goals ADD COLUMN origin_channel TEXT")
                 logger.info("goals: migrated existing table (added origin_channel column)")
+            # Heal the status-vs-retired_at drift the status migration left
+            # behind: rows retired before the column existed still say
+            # 'open'. retired_at is the truth; status follows it.
+            cur = await db.execute(
+                "UPDATE goals SET status='retired' "
+                "WHERE retired_at IS NOT NULL AND status != 'retired'"
+            )
+            if cur.rowcount:
+                logger.info(
+                    "goals: healed %d retired rows still marked open", cur.rowcount
+                )
             await db.commit()
             self._schema_ready = True
         return db
@@ -349,29 +328,6 @@ class GoalsPlugin(CorvidaePlugin):
         return [
             {"id": gid, "age_seconds": max(0.0, now - created_at), "summary": text, "status": status}
             for gid, text, created_at, status in rows
-        ]
-
-    async def retired_goals(self, limit: int) -> list[dict]:
-        """The newest-retired goals' conclusions, for the heartbeat's review.
-
-        Each is {"age_seconds", "summary"}: the age since retirement on the
-        kernel clock, and the retirement record's summary (a superseded
-        record keeps its summary; a redacted one shows its tombstone).
-        Agent-wide, like the goals list (#220).
-        """
-        db = await self._require_db()
-        now = self._now()
-        async with db.execute(
-            "SELECT g.id, g.retired_at, m.summary FROM goals g "
-            "JOIN memory m ON m.id = g.memory_id "
-            "WHERE g.retired_at IS NOT NULL "
-            "ORDER BY g.retired_at DESC, g.id DESC LIMIT ?",
-            (limit,),
-        ) as cursor:
-            rows = await cursor.fetchall()
-        return [
-            {"id": gid, "age_seconds": max(0.0, now - retired_at), "summary": summary}
-            for gid, retired_at, summary in rows
         ]
 
     @hookimpl
@@ -590,22 +546,39 @@ class GoalsPlugin(CorvidaePlugin):
             tool_registry.append(Tool(name=fn.__name__, fn=fn, schema=tool_to_schema(fn)))
 
     async def _goals_list_text(self) -> str | None:
-        """The open-goals list for a beat; None when no goal was ever added."""
+        """The beat's goal list: the capped pursuable goals, in full; None
+        when no goal was ever added."""
         goals = await self._all_goals()
         if not goals:
             return None
         # The last-change time, not "now": the text changes only when a goal does.
         as_of = _utc(max(g.updated_at for g in goals))
-        open_goals = [g for g in goals if g.retired_at is None]
-        if not open_goals:
-            return f"No open goals as of {as_of} (this replaces any earlier goals list)."
-        lines = [f"Open goals as of {as_of} (this list replaces any earlier goals list):"]
-        # Queue order is pick order; in-progress, blocked and waiting
-        # goals carry their status so the model can see the queue's state.
-        lines += [
-            f"#{g.id} " + (f"[{g.status}] " if g.status != "open" else "") + g.text
-            for g in open_goals
-        ]
+        live = [g for g in goals if g.retired_at is None]
+        pursuable = [g for g in live if g.status in ("open", "in-progress")]
+        shown = pursuable[: self._beat_goal_limit]
+        if pursuable:
+            lines = [f"Open goals as of {as_of} (this list replaces any earlier goals list):"]
+            # Queue order is pick order; in-progress goals carry their status
+            # so the pick rule resumes the front-runner. Blocked and waiting
+            # goals stay on the board, off the beat (2026-11-19 spec).
+            lines += [
+                f"#{g.id} " + (f"[{g.status}] " if g.status != "open" else "") + g.text
+                for g in shown
+            ]
+            hidden = len(pursuable) - len(shown)
+            if hidden:
+                lines.append(f"(+{hidden} more pursuable - call list_goals)")
+        elif live:
+            lines = [
+                f"No open or in-progress goals as of {as_of} "
+                f"({len(live)} blocked or waiting - see list_goals; "
+                "this list replaces any earlier goals list)."
+            ]
+        else:
+            lines = [
+                f"No open goals as of {as_of} "
+                "(this list replaces any earlier goals list)."
+            ]
         return "\n".join(lines)
 
 

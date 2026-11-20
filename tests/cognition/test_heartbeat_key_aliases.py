@@ -39,19 +39,13 @@ async def _observe(kind: str, config: dict):
         return seen[0]
     plugin = GoalsPlugin()
     await plugin.on_init(MagicMock(), config)
-    seen = []
-
-    async def retired(limit):
-        seen.append(limit)
-        return []
-
+    if kind == "goal_limit":
+        return plugin._beat_goal_limit
     async def no_list():
         return None
 
-    plugin.retired_goals = retired
     plugin._goals_list_text = no_list  # no DB behind this plugin
-    section = await plugin.on_heartbeat_collect_prompts(channel=None)
-    return seen[0] if kind == "retired_limit" else section
+    return await plugin.on_heartbeat_collect_prompts(channel=None)
 
 
 #: kind, (old block, old key), (new block, new key), old value, new value,
@@ -62,8 +56,8 @@ CASES = [
         3, 4, id="memory-limit",
     ),
     pytest.param(
-        "retired_limit", ("heartbeat", "retired_goal_limit"),
-        ("goals", "heartbeat_retired_limit"), 3, 4, id="retired-goal-limit",
+        "goal_limit", ("heartbeat", "goal_limit"),
+        ("goals", "heartbeat_limit"), 3, 4, id="goal-limit",
     ),
     pytest.param(
         "instruction", ("heartbeat", "goals_instruction"),

@@ -1571,20 +1571,26 @@ while the heartbeat is the one changing it).
 **Goals list (#1091):** open goals reach the agent in the heartbeat's beat
 and nowhere else; no turn admits a goals entry to a window. Goals'
 `on_heartbeat_collect_prompts` section opens with the list, in full on every
-beat. With open goals it reads:
+beat: the frontmost open or in-progress goals up to
+`goals.heartbeat_limit` (default 5), in queue order. Blocked and waiting
+goals stay on the board (`list_goals`) but off the beat; a final line names
+any pursuable goals the cap left out. With pursuable goals it reads:
 
 ```
 Open goals as of 2026-10-30 14:02:11 UTC (this list replaces any earlier goals list):
 #5 [in-progress] Learn what Schuyler wants from the wiki
 #3 Finish the migration notes
+(+2 more pursuable - call list_goals)
 ```
 
 Goals are listed in queue order (`position`, then `id`), the order the
-beat's list and its pick rule use. A goal that is not plain `open` carries its status in
-brackets.
+beat's list and its pick rule use. An `in-progress` goal carries its status
+in brackets; `blocked` and `waiting` goals are not listed.
 
-With none, including when every goal is retired, it reads `No open goals as
-of … (this replaces any earlier goals list).` A database with no goal rows
+With no pursuable goal but some live one, it reads `No open or in-progress
+goals as of … (N blocked or waiting - see list_goals; this replaces any
+earlier goals list).` With none at all, including when every goal is
+retired, `No open goals as of … (this replaces any earlier goals list).` A database with no goal rows
 at all adds no list. The timestamp is the latest `updated_at` over all
 rows, retired ones included, not the current time, so the text changes only
 when a goal does. The supersession clause is what lets an older beat still
@@ -1649,20 +1655,25 @@ reaches the heartbeat at its next beat.
 
 **Heartbeat contribution (#1084).** This plugin implements
 `on_heartbeat_collect_prompts` (`trylast`, so its sections end the beat, just before the prompt) and
-returns three things: the open goals list above (every beat, in full), the newest `goals.heartbeat_retired_limit`
-(default 5) retirement records (agent-wide, newest first, each with its age,
-framed as data), and `GOALS_INSTRUCTION`, the pick rule that tells the model to
-take a next step on an open goal or retire a finished one, and not to take up a
-retired goal again without something new. The instruction goes on every beat.
-The retired block follows the funnel's only-what's-new rule (#716): full on the
-first beat and again after the beat channel compacts (the plugin's own
-`on_compaction` resets its state, since a summary may not keep structured data),
-otherwise only records not yet sent, and omitted when there are none.
-`goals.heartbeat_retired_limit` and `goals.heartbeat_instruction` (the
+returns two things: the goals list above (every beat, in full within its
+cap), and `GOALS_INSTRUCTION`, the pick rule that tells the model to resume
+an in-progress goal or advance the first listed one, to retire a finished
+goal, not to take up a retired goal again without something new, and to call
+`list_goals` when the listed goals are all dead ends. Retired, blocked and
+waiting goals do not reach the beat (owner spec, 2026-11-19): a beat acts on
+what it can advance, and the board keeps the rest. The instruction goes on
+every beat.
+`goals.heartbeat_limit` and `goals.heartbeat_instruction` (the
 latter resolved like `heartbeat.prompt`) are read here; a bad limit fails this
-plugin's startup. They replace `heartbeat.retired_goal_limit` and
-`heartbeat.goals_instruction`, which still work for one release, log a
+plugin's startup. `heartbeat.goal_limit` and
+`heartbeat.goals_instruction` still work for one release, log a
 WARNING naming the new key, and fail startup when set beside their new key.
+
+**Schema heal:** a goal's `retired_at` is the truth and `status` follows it.
+The status column was added by migration with an `'open'` default, so rows
+retired before it existed still said `open`; each fresh schema pass heals
+those rows to `status='retired'` and logs the count. Queries (and this
+plugin's list) filter on `retired_at`, not `status`.
 
 **Without this plugin:** the goal tools, the beat's goals list and the `goals`
 table are absent. Goals already in an existing database stay there unread.
