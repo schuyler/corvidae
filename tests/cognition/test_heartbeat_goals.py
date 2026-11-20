@@ -291,8 +291,10 @@ async def test_blocked_and_retired_goals_do_not_inflate_the_hidden_count(make_en
         await env.tools["add_goal"](f"Task {name}", _ctx=ctx)
     await env.tools["add_goal"]("Task blocked", _ctx=ctx)
     await env.tools["add_goal"]("Task retired", _ctx=ctx)
-    await env.tools["set_goal_status"](7, "blocked", _ctx=ctx)
-    await env.tools["retire_goal"](8, "Done elsewhere.", _ctx=ctx)
+    # (ids: seven=7, blocked=8, retired=9 - the off-by-one here once made
+    # this test pass for the wrong reasons; reviewer gate caught it.)
+    await env.tools["set_goal_status"](8, "blocked", _ctx=ctx)
+    await env.tools["retire_goal"](9, "Done elsewhere.", _ctx=ctx)
 
     await env.clock.advance(AFTER)
     text = env.agent.calls[0]["text"]
@@ -346,10 +348,16 @@ async def test_removed_retired_limit_keys_fail_startup(make_env, dead_key):
     block, key = dead_key
     CONFIG.setdefault(block, {})[key] = 3
     try:
-        with pytest.raises(ValueError, match=re.escape(key)):
+        with pytest.raises(ValueError, match=re.escape(f"{block}.{key} was removed")):
             await make_env(with_goals=True)
     finally:
         CONFIG[block].pop(key, None)
+
+
+async def test_heartbeat_goal_limit_is_not_a_cap_alias():
+    """heartbeat.goal_limit never shipped, so it is NOT a deprecated alias:
+    it configures nothing, silently - the cap stays at its default."""
+    assert await _beat_limit_seen({"heartbeat": {"goal_limit": 2}}) == 5
 
 
 async def test_blocked_goals_become_visible_as_the_board_frees_slots(make_env):
