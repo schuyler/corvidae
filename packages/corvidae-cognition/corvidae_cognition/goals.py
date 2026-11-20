@@ -1,7 +1,7 @@
 """GoalsPlugin — the agent's open goals, kept in SQLite and shown to the heartbeat (#133).
 
 Goals are agent-wide. Open goals reach the agent in the heartbeat's beat
-and nowhere else (#1091): goals' beat section lists the five frontmost
+and nowhere else (#1091): goals' beat section lists the frontmost
 open or in-progress goals, every beat (2026-11-19 beat-size spec).
 Retired, blocked and waiting goals stay on the board (list_goals) but off
 the beat. Retiring a goal writes a memory record of the conclusion first,

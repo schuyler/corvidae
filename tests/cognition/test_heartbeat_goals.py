@@ -1,6 +1,6 @@
 """Tests for the heartbeat's goal review (#133 addendum, H2 goals half).
 
-The 2026-11-19 beat-size spec (Schuyler): a beat carries the five frontmost
+The 2026-11-19 beat-size spec (Schuyler): a beat carries the frontmost
 open or in-progress goals and the pick rule, and nothing else about goals —
 no retired conclusions, no blocked or waiting goals. They stay on the board
 (list_goals) but off the beat.
@@ -261,7 +261,7 @@ async def test_beat_shows_only_pursuable_goals(make_env):
 
 
 async def test_beat_lists_only_the_five_frontmost_pursuable(make_env):
-    """Seven open goals: the beat carries the five frontmost in queue order,
+    """Seven open goals, default cap 5: the beat carries the frontmost in queue order,
     and names how many it left out so the board's size stays visible."""
     env = await make_env(with_goals=True)
     ctx = ctx_for("irc:#test")
