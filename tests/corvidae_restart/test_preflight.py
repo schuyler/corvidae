@@ -12,6 +12,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 # Minimal llm section: Runtime.start requires a default chat profile.
 MINIMAL_LLM = """\
 llm:
@@ -239,17 +241,29 @@ def run_report_child(
     )
 
 
-def test_preflight_fails_when_a_plugin_was_skipped_or_fell_back(tmp_path: Path) -> None:
-    """R14: a skipped plugin or a fallen-back replacement fails the pre-flight.
+@pytest.mark.parametrize(
+    "fallbacks, skipped, needles",
+    [
+        # Skipped alone: names the plugin and says it was skipped.
+        ("{}", '["rss"]', ("rss", "skipped")),
+        # Fallback alone: names slot and target and says bundled was used.
+        ('{"llm": "my_llm"}', "[]", ("llm", "my_llm", "bundled used")),
+    ],
+)
+def test_preflight_fails_when_a_plugin_was_skipped_or_fell_back(
+    tmp_path: Path, fallbacks: str, skipped: str, needles: tuple[str, ...]
+) -> None:
+    """R14: a skipped plugin, or a fallen-back replacement, each alone fails the pre-flight.
 
     The stderr line names each plugin and the remedy; logging is disabled in
     the pre-flight, so the failure must be written to stderr directly.
     """
     path = write_config(tmp_path)
-    result = run_report_child(path, '{"llm": "my_llm"}', '["rss"]')
+    result = run_report_child(path, fallbacks, skipped)
 
     assert result.returncode == 1, result.stderr
-    assert "rss" in result.stderr and "my_llm" in result.stderr and "llm" in result.stderr
+    for needle in needles:
+        assert needle in result.stderr, (needle, result.stderr)
     assert "fix or reinstall" in result.stderr, result.stderr
     assert "pre-flight OK" not in result.stderr, result.stderr
 

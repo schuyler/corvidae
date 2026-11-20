@@ -62,13 +62,14 @@ def _patched(pm):
 async def _start(config_path: str, pm) -> Runtime:
     """Run Runtime.start() against ``pm``, with one fake entry-point plugin."""
     from tests import plugin_loader_fixtures as fx
-    from tests.test_plugin_loader import ep
+    from tests.plugin_loader_fixtures import ep, entry_points_for
 
     # Count constructor calls from this start only.
     fx.CALLS.clear()
     a, b, c = _patched(pm)
     with a, b, c, patch(
-        "corvidae.runtime.entry_points", return_value=[ep("plain", "Plain")]
+        "corvidae.runtime.entry_points",
+        side_effect=entry_points_for(ep("plain", "Plain")),
     ):
         rt = Runtime(config_path=config_path)
         await rt.start()

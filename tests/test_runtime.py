@@ -835,7 +835,7 @@ class TestRuntimeStart:
         """
         from corvidae.runtime import Runtime
         from tests import plugin_loader_fixtures as fx
-        from tests.test_plugin_loader import ep
+        from tests.plugin_loader_fixtures import ep, entry_points_for
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False
@@ -853,7 +853,7 @@ class TestRuntimeStart:
                 "corvidae.runtime.configure_logging"
             ), patch(
                 "corvidae.runtime.entry_points",
-                return_value=[ep("plain", "Plain")],
+                side_effect=entry_points_for(ep("plain", "Plain")),
             ):
                 rt = Runtime(config_path=config_path)
                 await rt.start()
@@ -962,7 +962,7 @@ class TestRuntimeStart:
         """
         from corvidae.runtime import Runtime
         from tests import plugin_loader_fixtures as fx
-        from tests.test_plugin_loader import ep
+        from tests.plugin_loader_fixtures import ep, entry_points_for
 
         config_data = {
             "llm": {
@@ -988,7 +988,7 @@ class TestRuntimeStart:
                 "corvidae.runtime.configure_logging"
             ), patch(
                 "corvidae.runtime.entry_points",
-                return_value=[ep("compaction", "Plain"), ep("other", "OtherBundled")],
+                side_effect=entry_points_for(ep("compaction", "Plain"), ep("other", "OtherBundled")),
             ):
                 rt = Runtime(config_path=config_path)
                 await rt.start()
@@ -1010,7 +1010,7 @@ class TestRuntimeStart:
         """
         from corvidae.runtime import Runtime
         from tests import plugin_loader_fixtures as fx
-        from tests.test_plugin_loader import ep
+        from tests.plugin_loader_fixtures import ep, entry_points_for
 
         # Config with no 'plugins' key at all
         config_data = {
@@ -1036,7 +1036,7 @@ class TestRuntimeStart:
                 "corvidae.runtime.configure_logging"
             ), patch(
                 "corvidae.runtime.entry_points",
-                return_value=[ep("plain", "Plain"), ep("other", "OtherBundled")],
+                side_effect=entry_points_for(ep("plain", "Plain"), ep("other", "OtherBundled")),
             ):
                 rt = Runtime(config_path=config_path)
                 await rt.start()

@@ -8,7 +8,6 @@ fake entry points and a real plugin manager; two Runtime tests drive the
 from __future__ import annotations
 
 import logging
-from importlib.metadata import EntryPoint
 from pathlib import Path
 
 import pytest
@@ -16,18 +15,13 @@ import yaml
 
 from corvidae.hooks import create_plugin_manager, get_dependency
 from tests import plugin_loader_fixtures as fx
+from tests.plugin_loader_fixtures import ep
 
 # Module path the fake entry points resolve through.
 FIX = "tests.plugin_loader_fixtures"
 
 # The kernel objects Runtime registers before loading entry points.
 KERNEL = frozenset({"registry", "clock", "idle", "spill", "_seed_hooks"})
-
-
-def ep(name: str, target: str) -> EntryPoint:
-    """A fake ``corvidae`` entry point; ``target`` is a class name or module path."""
-    value = target if ("." in target or ":" in target) else f"{FIX}:{target}"
-    return EntryPoint(name=name, value=value, group="corvidae")
 
 
 # Entry points shared by most tests: a bundled "llm" slot and a good target.
@@ -113,17 +107,27 @@ def test_r4_kernel_object_slot_is_rejected() -> None:
 def test_r5_unknown_slot_lists_installed_names() -> None:
     """R5: an unknown slot names it and lists installed entry points."""
     with pytest.raises(ValueError) as excinfo:
-        load([BUNDLED_LLM, MY_LLM], {"replace": {"nope": "my_llm"}})
+        # "unrelated" is installed but not in the mapping: only a real list of
+        # installed names can put it in the message.
+        load(
+            [BUNDLED_LLM, MY_LLM, ep("unrelated", "Plain")],
+            {"replace": {"nope": "my_llm"}},
+        )
     msg = str(excinfo.value)
     assert "nope" in msg and "llm" in msg and "my_llm" in msg
+    assert "unrelated" in msg
 
 
 def test_r5_unknown_target_lists_installed_names() -> None:
     """R5: an unknown target names it and lists installed entry points."""
     with pytest.raises(ValueError) as excinfo:
-        load([BUNDLED_LLM, MY_LLM], {"replace": {"llm": "ghost"}})
+        load(
+            [BUNDLED_LLM, MY_LLM, ep("unrelated", "Plain")],
+            {"replace": {"llm": "ghost"}},
+        )
     msg = str(excinfo.value)
     assert "ghost" in msg and "llm" in msg and "my_llm" in msg
+    assert "unrelated" in msg
 
 
 # --- R6 -----------------------------------------------------------------------
@@ -189,11 +193,23 @@ def test_r7_target_in_disabled_is_rejected() -> None:
 
 
 def test_r7_one_target_in_two_slots_is_rejected() -> None:
-    """R7: one target cannot fill two slots."""
+    """R7: one target cannot fill two slots.
+
+    Only ``plan_plugins`` runs: the planning check, not the R3 subclass check
+    (GoodTarget is not an OtherBundled), is what must reject this.
+    """
+    from corvidae import plugin_loader as pl
+
     eps = [BUNDLED_LLM, ep("other", "OtherBundled"), ep("my_llm", "GoodTarget")]
+    cfg = pl.parse_plugins_section(
+        {"plugins": {"replace": {"llm": "my_llm", "other": "my_llm"}}}
+    )
     with pytest.raises(ValueError) as excinfo:
-        load(eps, {"replace": {"llm": "my_llm", "other": "my_llm"}})
-    assert "my_llm" in str(excinfo.value)
+        pl.plan_plugins(eps, cfg, KERNEL)
+    msg = str(excinfo.value)
+    assert "my_llm" in msg and "more than one slot" in msg, msg
+    assert "llm" in msg and "other" in msg, msg
+    assert "plugins.replace" in msg, msg
 
 
 @pytest.mark.parametrize(
@@ -232,15 +248,22 @@ def test_null_or_empty_replace_means_none(replace) -> None:
 @pytest.mark.parametrize(
     "replace, needle",
     [
-        ({"llm": "my_llm", "my_llm": "extra"}, "my_llm"),
+        ({"llm": "my_llm", "my_llm": "extra"}, "is itself replaced"),
         ({"llm": "llm"}, "cannot replace itself"),
     ],
 )
 def test_chain_and_self_replacement_are_rejected(replace, needle) -> None:
-    """Fix-now: a chain is order-dependent and ``llm: llm`` is meaningless."""
+    """Fix-now: a chain is order-dependent and ``llm: llm`` is meaningless.
+
+    Only ``plan_plugins`` runs, so the R3 subclass check cannot rescue the
+    chain case: its own wording has to be produced by the planning check.
+    """
+    from corvidae import plugin_loader as pl
+
     eps = [BUNDLED_LLM, MY_LLM, ep("extra", "Plain")]
+    cfg = pl.parse_plugins_section({"plugins": {"replace": replace}})
     with pytest.raises(ValueError) as excinfo:
-        load(eps, {"replace": replace})
+        pl.plan_plugins(eps, cfg, KERNEL)
     assert needle in str(excinfo.value) and "llm" in str(excinfo.value)
 
 
@@ -283,7 +306,7 @@ async def _runtime_load(tmp_path: Path, monkeypatch, eps, plugins: dict):
     from corvidae.runtime import Runtime
 
     config, path = _runtime_config(tmp_path, plugins)
-    monkeypatch.setattr("corvidae.runtime.entry_points", lambda **kw: eps)
+    monkeypatch.setattr("corvidae.runtime.entry_points", fx.entry_points_for(*eps))
     monkeypatch.setattr("corvidae.runtime.check_entry_point_duplicates", lambda g="corvidae": None)
     rt = Runtime(config_path=path)
     await rt.load_plugins(config)
@@ -318,11 +341,32 @@ async def test_load_report_reaches_plugins_through_reserved_config_key(
     tmp_path, monkeypatch
 ) -> None:
     """R11 feed: config["_plugin_load"] is the runtime's LoadReport at on_init."""
+    fx.CAPTURED.clear()
     rt, config = await _runtime_load(
-        tmp_path, monkeypatch, [BUNDLED_LLM, MY_LLM], {"replace": {"llm": "my_llm"}}
+        tmp_path,
+        monkeypatch,
+        [BUNDLED_LLM, MY_LLM, ep("capture", "InitCapture")],
+        {"replace": {"llm": "my_llm"}},
     )
+    # The key was present when the plugin's own on_init ran, not just after.
+    assert fx.CAPTURED.get("report") is rt.load_report, fx.CAPTURED
     assert config["_plugin_load"] is rt.load_report
     assert rt.load_report.replaced == {"llm": "my_llm"}
+
+
+async def test_unknown_replace_target_exits_with_config_error(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """R5 at Runtime level: a bad plugins.replace value is one Config error line."""
+    with pytest.raises(SystemExit) as excinfo:
+        await _runtime_load(
+            tmp_path, monkeypatch, [BUNDLED_LLM, MY_LLM],
+            {"replace": {"llm": "ghost"}},
+        )
+    assert excinfo.value.code == 1
+    stderr = capsys.readouterr().err
+    assert "Config error:" in stderr, stderr
+    assert "plugins.replace" in stderr and "ghost" in stderr, stderr
 
 
 # --- R10 ----------------------------------------------------------------------
