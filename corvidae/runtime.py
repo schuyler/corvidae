@@ -64,7 +64,8 @@ def check_entry_point_duplicates(group: str = "corvidae") -> None:
     """Fail loudly when two distributions claim one entry-point name (#238 R6).
 
     The loader keys entry points by name, so an install-order winner would
-    otherwise be silent. The error names the entry point, both distributions, and the remedy.
+    otherwise be silent. The error names the entry point, both distributions,
+    and the remedy.
     """
     import importlib.metadata
 

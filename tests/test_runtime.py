@@ -1555,7 +1555,8 @@ async def _start_with_plugin_set(
             "corvidae.runtime.create_plugin_manager", return_value=mock_pm
         ), patch("corvidae.runtime.validate_dependencies"), patch(
             "corvidae.runtime.configure_logging"
-        ):
+        ), patch("corvidae.runtime.entry_points", return_value=[]):
+            # No entry points: the mocked pm declares the loaded set itself.
             with caplog.at_level(logging.INFO, logger="corvidae.runtime"):
                 rt = Runtime(config_path=config_path)
                 await rt.start()

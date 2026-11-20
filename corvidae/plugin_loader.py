@@ -44,8 +44,8 @@ def parse_plugins_section(config: dict) -> PluginsConfig:
         return PluginsConfig((), {})
     if not isinstance(plugins, dict):
         raise ValueError(
-            f"plugins must be a mapping with `disabled` and `replace` keys, "
-            f"got {plugins!r}"
+            f"plugins must be a mapping with a `disabled` list and a `replace` "
+            f"mapping, got {plugins!r}"
         )
     # An unknown key is a typo that would otherwise silently do nothing.
     unknown = sorted(str(k) for k in plugins if k not in KNOWN_PLUGINS_KEYS)

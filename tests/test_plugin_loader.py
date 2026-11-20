@@ -308,6 +308,9 @@ async def _runtime_load(tmp_path: Path, monkeypatch, eps, plugins: dict):
     config, path = _runtime_config(tmp_path, plugins)
     monkeypatch.setattr("corvidae.runtime.entry_points", fx.entry_points_for(*eps))
     monkeypatch.setattr("corvidae.runtime.check_entry_point_duplicates", lambda g="corvidae": None)
+    # The kernel spill object depends on "tools", which these fake entry
+    # points do not install; dependency validation is not under test here.
+    monkeypatch.setattr("corvidae.runtime.validate_dependencies", lambda pm: None)
     rt = Runtime(config_path=path)
     await rt.load_plugins(config)
     return rt, config
