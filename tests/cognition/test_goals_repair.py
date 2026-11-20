@@ -148,3 +148,46 @@ def test_apply_reports_the_rows_it_actually_changed(tmp_path):
     changed = sum(1 for k in before if before[k] != after[k])
     assert changed == 3
     assert f"repaired {changed} rows" in result.output
+
+
+def test_verification_failure_rolls_back_everything(tmp_path, monkeypatch):
+    """If the post-update check fails, nothing is written and it says so.
+
+    The two UPDATEs cover both mismatch predicates, so the check cannot fail on
+    real data; the count is forced to prove the branch rolls back rather than
+    committing a partial repair.
+    """
+    import corvidae_cognition.goals as goals_mod
+
+    db = _make_db(tmp_path)
+    before = _statuses(db)
+    monkeypatch.setattr(goals_mod, "_mismatch_counts", lambda conn: (1, 0))
+    result = CliRunner().invoke(
+        goals_command, ["--db", str(db), "repair-statuses", "--apply"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "rolled back" in result.output
+    assert _statuses(db) == before
+
+
+def test_write_lock_contention_is_a_message_not_a_traceback(tmp_path, monkeypatch):
+    """A live daemon holding the write lock is an operator-facing message."""
+    import corvidae_cognition.goals as goals_mod
+
+    db = _make_db(tmp_path)
+    held = sqlite3.connect(db)
+    held.execute("PRAGMA journal_mode=wal")
+    held.execute("BEGIN IMMEDIATE")
+    held.execute("UPDATE goals SET status = status")  # take the write lock
+    monkeypatch.setattr(goals_mod, "_REPAIR_BUSY_TIMEOUT_MS", 100)
+    try:
+        result = CliRunner().invoke(
+            goals_command, ["--db", str(db), "repair-statuses", "--apply"],
+            catch_exceptions=False,
+        )
+    finally:
+        held.rollback()
+        held.close()
+    assert result.exit_code != 0
+    assert "write lock" in result.output

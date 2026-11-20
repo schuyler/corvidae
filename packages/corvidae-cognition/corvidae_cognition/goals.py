@@ -640,6 +640,20 @@ def _mismatch_counts(conn):
     return int(a or 0), int(b or 0)
 
 
+# How long the repair waits for the daemon's write lock before giving up. A
+# module constant so a test can drive the contention path without a 5s wait.
+_REPAIR_BUSY_TIMEOUT_MS = 5000
+
+
+def _rollback_quiet(conn):
+    """Best-effort rollback, so a failed repair never reports rows it wrote."""
+    try:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+    except sqlite3.Error:
+        logger.warning("goals repair-statuses: rollback failed", exc_info=True)
+
+
 @goals_command.command("repair-statuses")
 @click.option("--apply", "do_apply", is_flag=True, help="Write the repairs (default: report only)")
 @click.pass_context
@@ -662,12 +676,14 @@ def _repair_cmd(ctx, do_apply):
                 f"No database at {db_path} — pass the session DB the daemon "
                 "uses; repair-statuses never creates one"
             )
-        # isolation_level=None: the transaction is opened explicitly below with
-        # BEGIN IMMEDIATE, so the write lock is held across count -> update ->
-        # verify instead of being acquired lazily mid-repair.
+        # isolation_level=None: the transaction is opened explicitly below, so
+        # the write lock is held across update -> verify -> commit instead of
+        # being acquired lazily in the middle of the repair. Counts for the
+        # report are taken inside it; the dry-run count is a single SELECT and
+        # therefore one snapshot.
         conn = sqlite3.connect(db_path, isolation_level=None)
         try:
-            conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute(f"PRAGMA busy_timeout = {_REPAIR_BUSY_TIMEOUT_MS}")
             mode = conn.execute("PRAGMA journal_mode").fetchone()[0].lower()
             if mode != "wal":
                 raise click.ClickException(
@@ -680,17 +696,23 @@ def _repair_cmd(ctx, do_apply):
                     f"{db_path} has no goals table with status/retired_at — "
                     "start the corvidae daemon once to create and migrate it"
                 )
-            stale_retired, stale_open = _mismatch_counts(conn)
-            total = stale_retired + stale_open
             if not do_apply:
+                stale_retired, stale_open = _mismatch_counts(conn)
+                total = stale_retired + stale_open
                 click.echo(
                     f"{total} mismatches: {stale_retired} retired rows with an open-"
                     f"family status, {stale_open} 'retired' rows with no retired_at"
                     + (" — pass --apply to repair" if total else "")
                 )
                 return
-            conn.execute("BEGIN IMMEDIATE")
-            committed = False
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                raise click.ClickException(
+                    f"could not take the write lock within "
+                    f"{_REPAIR_BUSY_TIMEOUT_MS / 1000:g}s ({exc}) — the "
+                    "corvidae daemon is writing; try again in a moment"
+                ) from exc
             try:
                 retired = conn.execute(
                     "UPDATE goals SET status = 'retired'"
@@ -706,15 +728,23 @@ def _repair_cmd(ctx, do_apply):
                 # rolled back) rather than someone else moving a row.
                 after_a, after_b = _mismatch_counts(conn)
                 if after_a or after_b:
+                    # Roll back before claiming it: the message has to be true
+                    # when it is raised, not after the exception propagates.
+                    conn.execute("ROLLBACK")
                     raise click.ClickException(
                         f"post-repair verification failed: {after_a + after_b} "
                         "mismatches remain; rolled back, nothing written"
                     )
                 conn.execute("COMMIT")
-                committed = True
+            except sqlite3.OperationalError as exc:
+                _rollback_quiet(conn)
+                raise click.ClickException(
+                    f"repair aborted before commit ({exc}); nothing written"
+                ) from exc
             finally:
-                if not committed and conn.in_transaction:
-                    conn.execute("ROLLBACK")
+                # No-op after a commit (nothing is open); covers a ClickException
+                # raised above if a rollback there ever failed.
+                _rollback_quiet(conn)
             click.echo(
                 f"repaired {retired + opened} rows ({retired} -> retired,"
                 f" {opened} -> open); 0 mismatches remain (status now matches"
