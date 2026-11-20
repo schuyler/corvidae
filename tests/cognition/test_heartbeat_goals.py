@@ -2,7 +2,8 @@
 
 The 2026-11-19 beat-size spec (Schuyler): a beat carries the frontmost
 open or in-progress goals and the pick rule, and nothing else about goals —
-no retired conclusions, no blocked or waiting goals. They stay on the board
+no retired conclusions, no blocked or waiting goals - and no mention of them
+either (owner ruling 2026-11-19). They stay on the board
 (list_goals) but off the beat.
 """
 
@@ -389,8 +390,9 @@ async def test_beat_with_only_blocked_goals_says_so_without_naming_them(make_env
 
     await env.clock.advance(AFTER)
     text = env.agent.calls[0]["text"]
-    assert "No open or in-progress goals as of" in text
-    assert "2 blocked or waiting" in text
+    # The beat does not count or name them either (owner ruling).
+    assert "No open goals as of" in text
+    assert "blocked" not in text.split(goals_mod.GOALS_INSTRUCTION)[0].split("Open goals")[-1]
     assert "Stuck task" not in text
     assert "Patient task" not in text
     assert goals_mod.GOALS_INSTRUCTION in text
@@ -401,11 +403,13 @@ async def test_beat_with_only_blocked_goals_says_so_without_naming_them(make_env
 
 def test_goals_instruction_states_the_pick_rule():
     """#808 + the 2026-11-19 spec: resume an in-progress goal, else take the
-    first listed goal; the escape hatch for dead ends is list_goals; and the
+    first listed goal; nothing off the beat is mentioned (owner ruling); and the
     sentence must read as a sentence."""
     text = goals_mod.GOALS_INSTRUCTION
     assert "in-progress" in text
-    assert "list_goals" in text
+    # Owner ruling 2026-11-19: the pick rule must not point the beat at
+    # anything off the beat.
+    assert "list_goals" not in text
     assert "front of the queue" in text
     # The count belongs to the cap (goals.heartbeat_limit), not the rule:
     # the instruction stays true whatever the limit is set to.

@@ -96,9 +96,7 @@ GOALS_INSTRUCTION = (
     "front: if a goal is marked in-progress, resume it; otherwise take the "
     "first listed goal and advance it. If a goal is done, retire it. "
     "Don't take up again a goal you retired unless something new has "
-    "changed. When the listed goals are all dead ends, call list_goals - "
-    "blocked and waiting goals stay on the board even though the beat "
-    "hides them. Act only when the assessment warrants it — a beat "
+    "changed. Act only when the assessment warrants it — a beat "
     "with nothing to advance is fine."
 )
 
@@ -551,8 +549,10 @@ class GoalsPlugin(CorvidaePlugin):
             return None
         # The last-change time, not "now": the text changes only when a goal does.
         as_of = _utc(max(g.updated_at for g in goals))
-        live = [g for g in goals if g.retired_at is None]
-        pursuable = [g for g in live if g.status in ("open", "in-progress")]
+        pursuable = [
+            g for g in goals
+            if g.retired_at is None and g.status in ("open", "in-progress")
+        ]
         shown = pursuable[: self._beat_goal_limit]
         if pursuable:
             lines = [f"Open or in-progress goals as of {as_of} (this list replaces any earlier goals list):"]
@@ -566,13 +566,9 @@ class GoalsPlugin(CorvidaePlugin):
             hidden = len(pursuable) - len(shown)
             if hidden:
                 lines.append(f"(+{hidden} more pursuable - call list_goals)")
-        elif live:
-            lines = [
-                f"No open or in-progress goals as of {as_of} "
-                f"({len(live)} blocked or waiting - see list_goals; "
-                "this list replaces any earlier goals list)."
-            ]
         else:
+            # Blocked, waiting and retired goals are not named here either:
+            # the beat has nothing to do with them (owner ruling, 2026-11-19).
             lines = [
                 f"No open goals as of {as_of} "
                 "(this replaces any earlier goals list)."

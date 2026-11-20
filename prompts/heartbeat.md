@@ -27,7 +27,7 @@ Open or in-progress goals as of 2026-10-30 14:02:11 UTC (this list replaces any 
 #5 [in-progress] Learn what the team wants from the wiki
 #3 Finish the migration notes
 
-Goals are your work queue, and the beat shows the front of it: the frontmost open or in-progress goals, front of the queue first. Work the front: if a goal is marked in-progress, resume it; otherwise take the first listed goal and advance it. If a goal is done, retire it. Don't take up again a goal you retired unless something new has changed. When the listed goals are all dead ends, call list_goals - blocked and waiting goals stay on the board even though the beat hides them. Act only when the assessment warrants it — a beat with nothing to advance is fine.
+Goals are your work queue, and the beat shows the front of it: the frontmost open or in-progress goals, front of the queue first. Work the front: if a goal is marked in-progress, resume it; otherwise take the first listed goal and advance it. If a goal is done, retire it. Don't take up again a goal you retired unless something new has changed. Act only when the assessment warrants it — a beat with nothing to advance is fine.
 
 This is your heartbeat. It becomes active when nothing else is occupying your attention. This is your opportunity to decide what to do next. Nobody reads this channel, and nothing you write here reaches anyone.
 
