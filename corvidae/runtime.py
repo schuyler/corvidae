@@ -91,7 +91,7 @@ def _warn_unknown_disabled(disabled: list[str], registered: set[str]) -> None:
     so it gets a WARNING naming the key, the value and the plugin names it
     could have meant, beyond the INFO "plugins loaded" line. Known names are
     every ``corvidae`` entry point from every installed distribution plus the
-    plugins registered directly before blocking; only the entry-point names
+    kernel objects registered directly before step 8 (``kernel_names``); only the entry-point names
     are offered as choices, since the kernel objects are not meant to be
     disabled.
     """

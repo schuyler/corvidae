@@ -5118,11 +5118,14 @@ point that resolves to a non-callable object registers as it is, as pluggy
 does. Pluggy's own registration errors are not load failures and propagate.
 
 A `plugins.replace` entry (`slot: target`) loads the target under the slot's
-name. The bundled class is loaded first for the subclass check; a target
-that is not a subclass raises `ValueError`, which `Runtime.start()` turns
+name. The bundled class is loaded first for the subclass check (if it
+fails to import, the slot is skipped and the target is not tried); a target
+that is not a subclass, or a bundled entry point that is not a class,
+raises `ValueError`, which `Runtime.start()` turns
 into a `Config error` line and `SystemExit(1)`, as it does for every error
 `plan_plugins` raises (unknown or kernel slot, a slot or target also in
-`disabled`, a plugin replacing itself, a chain, one target in two slots).
+`disabled`, a plugin replacing itself, a chain, one target in two slots,
+an installed entry point named like a kernel object).
 If the target fails to import or construct, the bundled class is
 instantiated for the slot, one `ERROR` names the slot, target, exception
 type and remedy, and the slot is recorded in `LoadReport.fallbacks`. If the
@@ -5133,10 +5136,10 @@ bundled plugin fails as well, one `ERROR` names both and the slot lands in
 `skipped`), kept as `Runtime.load_report` and handed to plugins as the
 reserved config key `_plugin_load`, set before `on_init` and, like
 `_base_dir`, left out of the reload diff. corvidae-restart reads it in
-`on_init`: its boot notice adds `Plugins replaced: llm → my_llm` and
-`Plugin fallbacks: my_llm failed, bundled llm used`, and its pre-flight
-exits 1 with a `preflight:` line when `skipped` or `fallbacks` is
-non-empty, so a restart that would boot a different plugin set than the
+`on_init` for its boot notice, which adds `Plugins replaced: llm → my_llm`
+and `Plugin fallbacks: my_llm failed, bundled llm used`. Its pre-flight
+reads `Runtime.load_report` directly and exits 1 with a `pre-flight
+failed:` line when `skipped` or `fallbacks` is non-empty, so a restart that would boot a different plugin set than the
 config names is refused. `plugins.replace` is restart-only: no plugin
 claims `plugins` in `reloadable_keys`, so `ConfigWatcherPlugin` logs the
 restart-only warning for a change.

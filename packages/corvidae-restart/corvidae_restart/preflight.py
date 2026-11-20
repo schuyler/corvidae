@@ -45,8 +45,9 @@ async def _run(config_path: str) -> int:
                     for s, t in report.fallbacks.items()
                 ]
                 print(
-                    f"preflight: {'; '.join(parts)} — fix or reinstall them "
-                    f"before restarting",
+                    f"pre-flight failed: {'; '.join(parts)} — fix or reinstall "
+                    f"them, or remove the plugins.replace entry for a fallen-back "
+                    f"slot, before restarting",
                     file=sys.stderr,
                 )
                 return 1
