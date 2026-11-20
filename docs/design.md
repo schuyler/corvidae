@@ -4870,7 +4870,7 @@ model whether the agent's reply violates any of Grice's four maxims
 patterns; the sample rate is its only trigger. Findings land in
 `outcomes.critique.alignment` and reach the channel's next turn through the
 critique funnel. Install the alignment extra to load it, list
-`corvidae_alignment` under `plugins.disabled` to switch it off, and
+`alignment` under `plugins.disabled` to switch it off, and
 override the brief with `critique.fork_prompt.alignment`.
 
 ### GitHub events (`github-webhook` package)

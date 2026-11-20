@@ -84,8 +84,8 @@ class TestEntryPoint:
         from importlib.metadata import entry_points
         eps = entry_points(group="corvidae")
         names = [ep.name for ep in eps]
-        assert "corvidae_alignment" in names, (
-            f"corvidae_alignment entry point missing; found: {names}"
+        assert "alignment" in names, (
+            f"alignment entry point missing; found: {names}"
         )
-        ep = next(ep for ep in eps if ep.name == "corvidae_alignment")
+        ep = next(ep for ep in eps if ep.name == "alignment")
         assert ep.value == "corvidae_alignment:AlignmentLensPlugin"
