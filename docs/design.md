@@ -4877,6 +4877,19 @@ planning extra to load it, list `corvidae_planning` under
 `plugins.disabled` to switch it off, and override the brief with
 `critique.fork_prompt.planning`.
 
+### Alignment lens (`corvidae-alignment` package)
+
+`AlignmentLensPlugin` (#914) adds one critique lens, `alignment`, through
+`on_critique_init`. It fires at its sample rate (default 0.1,
+`critique.lens.alignment.sample_rate`) on judged turns and asks the fork
+model whether the agent's reply violates any of Grice's four maxims
+(Quantity, Quality, Relation, Manner). The lens declares no thresholds or
+patterns; the sample rate is its only trigger. Findings land in
+`outcomes.critique.alignment` and reach the channel's next turn through the
+critique funnel. Install the alignment extra to load it, list
+`alignment` under `plugins.disabled` to switch it off, and
+override the brief with `critique.fork_prompt.alignment`.
+
 ### GitHub events (`github-webhook` package)
 
 `GithubWebhookPlugin` subscribes one handler to each endpoint in

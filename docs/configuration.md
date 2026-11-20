@@ -445,6 +445,8 @@ A plugin can contribute critique lenses through `on_critique_init`; see [cogniti
 
 The planning extra's lens (`corvidae-planning`, #1067; see [design.md](design.md#planning-lens-corvidae-planning-package)) is named `planning`. It declares no thresholds, so its only keys are `critique.lens.planning.sample_rate` (default `0.1`) and `critique.fork_prompt.planning`.
 
+The alignment extra's lens (`corvidae-alignment`, #914) is named `alignment`. It declares no thresholds, so its only keys are `critique.lens.alignment.sample_rate` (default `0.1`) and `critique.fork_prompt.alignment`.
+
 A malformed lens is rejected at startup with a warning naming the plugin, the lens and the fix, and the other lenses load; nothing a lens declares stops the daemon. A value written through `set_settings` must be a number: a string in one of these keys makes that lens's decision raise for the turn (the built-in checks have already been decided by then).
 
 #### `gate.*` — engagement and decide gates

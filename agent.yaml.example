@@ -185,6 +185,8 @@ agent:
 #     #   sample_rate: 0.05             # chance it runs when not selected
 #     # planning:                     # the planning extra's lens (#1067)
 #     #   sample_rate: 0.1              # its only trigger; it has no thresholds
+#     # alignment:                   # the alignment extra's lens (#914)
+#     #   sample_rate: 0.1              # its only trigger; it has no thresholds
 
 # Engagement and decide gates (optional; cognition extra, see
 # docs/configuration.md "gate.*"). Runtime-tunable per channel via set_settings.

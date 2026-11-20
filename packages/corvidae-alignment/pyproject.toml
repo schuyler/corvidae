@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "corvidae-alignment"
+version = "0.0.1"
+description = "Grice alignment lens: flags replies that violate Grice's cooperative maxims"
+requires-python = ">=3.13"
+dependencies = ["corvidae", "corvidae-cognition"]
+
+[project.entry-points.corvidae]
+alignment = "corvidae_alignment:AlignmentLensPlugin"
+
+[tool.uv.sources]
+corvidae = { workspace = true }
+corvidae-cognition = { workspace = true }
+
+# Explicit, so a later docs/ directory here can't break the build.
+[tool.setuptools.packages.find]
+include = ["corvidae_alignment*"]
