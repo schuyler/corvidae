@@ -2815,7 +2815,11 @@ JSONL result persistence. Starts/stops the worker on lifecycle hooks.
 Registers the `task_status` and `task_result` tools. On task completion,
 persists a JSONL record (when enabled) and fires `on_notify`; a result with
 no `tool_call_id` over `tools.max_result_chars` goes through the spill service
-first (#744).
+first (#744). Work-level cancellation falls through to that same tail, so a
+cancelled task still gets a terminal record and an `on_notify` of
+`Task <id> cancelled.` (#504-2). Delivery during shutdown is best-effort: the
+notice is dispatched detached and a failure there is logged, never raised,
+because raising would mask the `CancelledError` that shutdown must propagate.
 
 Results are kept in two places: an in-memory bounded deque (last
 `completed_task_buffer` entries, serving `task_status` and the fast path of
