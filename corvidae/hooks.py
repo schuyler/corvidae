@@ -581,6 +581,10 @@ def _fail_soft_wrapper(original: Callable[..., object]) -> Callable[..., object]
             return original(*args, **kwargs)
         return guarded(*args, **kwargs)
 
+    # Keep reporting as a coroutine function, so code that checks (such as
+    # AsyncMock(wraps=...)) still awaits a direct call.
+    if inspect.iscoroutinefunction(original):
+        inspect.markcoroutinefunction(wrapper)
     wrapper._corvidae_fail_soft = True  # type: ignore[attr-defined]
     return wrapper
 

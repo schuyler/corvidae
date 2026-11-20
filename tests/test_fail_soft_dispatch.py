@@ -11,7 +11,9 @@ wrapper on a fail-soft hook. Every test builds a real plugin manager.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
+from unittest.mock import AsyncMock
 
 import apluggy as pluggy
 import pytest
@@ -423,3 +425,14 @@ async def test_direct_call_after_a_failed_dispatch_still_raises() -> None:
 
     with pytest.raises(ValueError, match="boom"):
         await bad.on_notify(**_NOTIFY)
+
+
+async def test_registered_impl_is_still_a_coroutine_function() -> None:
+    """R5: a wrapped async impl still reports as one, so AsyncMock(wraps=...) awaits it."""
+    bad = _Bad()
+    pm = create_plugin_manager()
+    pm.register(bad, name="bad")
+
+    assert inspect.iscoroutinefunction(bad.on_notify)
+    with pytest.raises(ValueError, match="boom"):
+        await AsyncMock(wraps=bad.on_notify)(**_NOTIFY)
