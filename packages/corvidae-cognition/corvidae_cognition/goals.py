@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -624,6 +625,76 @@ def goals_command(ctx, db_path):
         raise click.ClickException(f"Database not found: {db_path}")
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db_path
+
+
+def _mismatch_counts(conn):
+    """(retired_at-set-but-not-retired, retired-status-but-open-row) counts."""
+    cur = conn.execute(
+        "SELECT"
+        " SUM(retired_at IS NOT NULL AND status != 'retired'),"
+        " SUM(retired_at IS NULL AND status = 'retired')"
+        " FROM goals"
+    )
+    a, b = cur.fetchone()
+    cur.close()
+    return int(a or 0), int(b or 0)
+
+
+@goals_command.command("repair-statuses")
+@click.option("--apply", "do_apply", is_flag=True, help="Write the repairs (default: report only)")
+@click.pass_context
+def _repair_cmd(ctx, do_apply):
+    """Reconcile goal status with the retired_at partition (#205).
+
+    Pre-migration rows carry a lying status: retired_at is set but status
+    was left at the DDL default 'open'. The beat list filters on
+    retired_at (so the board is correct), but direct SQL on status misleads.
+    The retired_at column is the ground truth; this command makes status
+    agree with it, in both directions. Dry-run unless --apply.
+    """
+    db_path = ctx.obj["db_path"]
+
+    def _run():
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA busy_timeout = 5000")
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0].lower()
+        if mode != "wal":
+            conn.close()
+            raise click.ClickException(
+                f"Database journal mode is '{mode}' — the goals CLI requires "
+                f"WAL mode; the corvidae daemon sets it on startup ({db_path})"
+            )
+        stale_retired, stale_open = _mismatch_counts(conn)
+        total = stale_retired + stale_open
+        if not do_apply:
+            click.echo(
+                f"{total} mismatches: {stale_retired} retired rows with an open-"
+                f"family status, {stale_open} 'retired' rows with no retired_at"
+                + (" — pass --apply to repair" if total else "")
+            )
+            conn.close()
+            return
+        conn.execute(
+            "UPDATE goals SET status = 'retired'"
+            " WHERE retired_at IS NOT NULL AND status != 'retired'"
+        )
+        conn.execute(
+            "UPDATE goals SET status = 'open'"
+            " WHERE retired_at IS NULL AND status = 'retired'"
+        )
+        conn.commit()
+        after_a, after_b = _mismatch_counts(conn)
+        conn.close()
+        if after_a or after_b:
+            raise click.ClickException(
+                f"post-repair verification failed: {after_a + after_b} mismatches remain"
+            )
+        click.echo(
+            f"repaired {total} rows; 0 mismatches remain (status now matches the"
+            " retired_at partition)"
+        )
+
+    _run()
 
 
 @goals_command.command("seed")
