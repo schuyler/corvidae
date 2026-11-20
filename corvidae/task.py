@@ -311,12 +311,42 @@ class TaskQueue:
         is already closing, the notification is dropped — the durable
         records were written before this call.
         """
+        coro = None
         try:
-            fut = asyncio.ensure_future(on_complete(task, result))
-        except RuntimeError:  # loop closing — records already durable
+            coro = on_complete(task, result)
+            fut = asyncio.ensure_future(coro)
+        except Exception:
+            # Never throw from here: the caller is a CancelledError handler
+            # that must propagate CancelledError, and shutdown must not be
+            # masked by a notification problem. The durable records were
+            # written before this call.
+            if coro is not None:
+                close = getattr(coro, "close", None)
+                if close is not None:
+                    close()  # don't leave an unawaited-coroutine warning
+            logger.warning(
+                "detached task-notify dispatch failed",
+                extra={"task_id": task.task_id},
+                exc_info=True,
+            )
             return
         self._detached_notices.add(fut)
-        fut.add_done_callback(self._detached_notices.discard)
+        fut.add_done_callback(lambda f: self._notice_done(f, task))
+
+    def _notice_done(self, fut: asyncio.Task, task: Task) -> None:
+        """Release the strong ref and consume the result so a raised
+        exception never surfaces as an asyncio 'exception was never
+        retrieved' warning at GC time."""
+        self._detached_notices.discard(fut)
+        if fut.cancelled():
+            return
+        exc = fut.exception()
+        if exc is not None:
+            logger.warning(
+                "detached task-notify failed",
+                extra={"task_id": task.task_id},
+                exc_info=exc,
+            )
 
     def _persist_result(self, task: Task, result: str) -> None:
         """Append one JSONL record for a completed task (sync — see call site).
