@@ -138,6 +138,9 @@ def test_r5_unknown_target_lists_installed_names() -> None:
     [
         (ep("my_llm", "tests.plugin_loader_boom:Anything"), "ImportError"),
         (ep("my_llm", "CtorBoom"), "RuntimeError"),
+        # Regression: a ValueError from the target is a load failure, not R3.
+        (ep("my_llm", "CtorValueError"), "ValueError"),
+        (ep("my_llm", "tests.plugin_loader_boom_value:Anything"), "ValueError"),
     ],
 )
 def test_r6_failing_target_falls_back_to_bundled(caplog, target_ep, exc_type) -> None:
@@ -167,6 +170,23 @@ def test_both_target_and_bundled_failing_skips_the_slot(caplog) -> None:
     assert len(msgs) == 1, msgs
     assert "neither" in msgs[0] and "llm" in msgs[0] and "my_llm" in msgs[0]
     assert "boom-target-ctor" in msgs[0] or "RuntimeError" in msgs[0]
+
+
+def test_bundled_class_import_failure_skips_the_slot(caplog) -> None:
+    """Design: the bundled class fails to import; the slot is skipped, target untried."""
+    fx.CALLS.clear()
+    bundled = ep("llm", "tests.plugin_loader_boom:Anything")
+    with caplog.at_level(logging.ERROR):
+        pm, report = load([bundled, MY_LLM], {"replace": {"llm": "my_llm"}})
+    # Nothing serves the slot and the target was never constructed.
+    assert pm.get_plugin("llm") is None
+    assert report.skipped == ["llm"] and report.fallbacks == {} and report.replaced == {}
+    assert fx.CALLS["GoodTarget"] == 0
+    # One ERROR names the bundled entry point and a remedy valid under R7.
+    msgs = errors(caplog)
+    assert len(msgs) == 1, msgs
+    for needle in ('"llm"', "ImportError", "remove plugins.replace.llm"):
+        assert needle in msgs[0], msgs[0]
 
 
 # --- R7 / R8 and parsing --------------------------------------------------------

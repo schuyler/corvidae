@@ -86,6 +86,14 @@ class CtorBoom(Bundled):
         raise RuntimeError("boom-ctor")
 
 
+class CtorValueError(Bundled):
+    """A target whose constructor raises ValueError (must fall back, not stop startup)."""
+
+    def __init__(self) -> None:
+        CALLS[type(self).__name__] += 1
+        raise ValueError("API_KEY not set")
+
+
 class BundledCtorBoom(CorvidaePlugin):
     """A bundled plugin whose constructor raises (both-failing case)."""
 

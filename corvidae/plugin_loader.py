@@ -175,12 +175,19 @@ def _instantiate(ep: EntryPoint) -> Any:
     return obj() if callable(obj) else obj
 
 
-def _skip(report: LoadReport, name: str, ep_name: str, exc: Exception) -> None:
-    """Log an R13 skip for ``ep_name`` and record ``name`` as skipped."""
+def _skip(
+    report: LoadReport, name: str, ep_name: str, exc: Exception, remedy: str = ""
+) -> None:
+    """Log an R13 skip for ``ep_name`` and record ``name`` as skipped.
+
+    ``remedy`` overrides the default advice (a replaced slot cannot simply be
+    added to plugins.disabled while plugins.replace still names it).
+    """
+    remedy = remedy or f'add "{ep_name}" to plugins.disabled'
     logger.error(
         'plugin "%s" failed to load (%s: %s); skipped — fix or reinstall its '
-        'distribution, or add "%s" to plugins.disabled',
-        ep_name, type(exc).__name__, exc, ep_name, exc_info=True,
+        "distribution, or %s",
+        ep_name, type(exc).__name__, exc, remedy, exc_info=True,
     )
     report.skipped.append(name)
 
@@ -206,28 +213,42 @@ def register_planned(pm: Any, plan: list[PlanEntry]) -> LoadReport:
             slot, target = entry.name, entry.ep.name
             # The bundled class is needed for the subclass check; without it
             # the slot is skipped and the target is not tried.
+            # A replaced slot can only be disabled once plugins.replace drops it.
+            slot_remedy = (
+                f'remove plugins.replace.{slot} and add "{slot}" to plugins.disabled'
+            )
             try:
                 bundled = entry.fallback.load()
             except Exception as exc:
-                _skip(report, slot, entry.fallback.name, exc)
+                _skip(report, slot, entry.fallback.name, exc, slot_remedy)
                 continue
             target_exc: Exception | None = None
+            # Import the target; any failure here falls back to the bundled one.
             try:
                 cls = entry.ep.load()
-                # The target must be a subclass of the bundled class.
-                if not (isinstance(cls, type) and issubclass(cls, bundled)):
+            except Exception as exc:
+                target_exc = exc
+            if target_exc is None:
+                # The subclass check is a config error, raised outside the
+                # load-failure catches so a ValueError from the target's own
+                # import or constructor still falls back (R6), never stops startup.
+                if not (
+                    isinstance(cls, type)
+                    and isinstance(bundled, type)
+                    and issubclass(cls, bundled)
+                ):
                     raise ValueError(
                         f'plugins.replace.{slot}: "{target}" '
                         f"({getattr(cls, '__name__', repr(cls))}) must subclass "
                         f"{getattr(bundled, '__name__', repr(bundled))}, "
                         f"the plugin it replaces"
                     )
-                instance = cls()
-                report.replaced[slot] = target
-            except ValueError:
-                raise
-            except Exception as exc:
-                target_exc = exc
+                # Construct the target; a constructor failure falls back too.
+                try:
+                    instance = cls()
+                    report.replaced[slot] = target
+                except Exception as exc:
+                    target_exc = exc
             if target_exc is not None:
                 # Target failed to import or construct: the bundled one fills the slot.
                 try:
@@ -236,10 +257,10 @@ def register_planned(pm: Any, plan: list[PlanEntry]) -> LoadReport:
                     logger.error(
                         'plugin "%s" replacing "%s" failed (%s: %s) and the '
                         'bundled "%s" failed too (%s: %s); neither loaded, '
-                        'slot skipped — fix or reinstall them, or add "%s" to '
-                        "plugins.disabled",
+                        'slot skipped — fix or reinstall them, or remove '
+                        'plugins.replace.%s and add "%s" to plugins.disabled',
                         target, slot, type(target_exc).__name__, target_exc,
-                        slot, type(bexc).__name__, bexc, slot,
+                        slot, type(bexc).__name__, bexc, slot, slot,
                         exc_info=True,
                     )
                     report.skipped.append(slot)
