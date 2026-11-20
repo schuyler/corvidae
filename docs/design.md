@@ -111,10 +111,12 @@ wrapper returns anything the implementation raises as a `_Failed` value.
 Otherwise it calls the original, so a direct call is unchanged. The stock
 gather therefore runs each implementation to completion. A failure is logged
 at WARNING naming the hook and plugin, the other values come back in hook
-order, and a `BaseException` is re-raised once they have all finished. Every
+order, and a `BaseException` that is not an `Exception` (such as
+`CancelledError`) is re-raised once they have all finished. Every
 other hook keeps apluggy's own dispatch. It adds
 `pm.ahook_raise` beside it, which logs the same way and then raises the first
-failure once every implementation has finished. A call site whose `except`
+failure once every implementation has finished (a `CancelledError` or other
+non-`Exception` failure takes precedence over an `Exception`). A call site whose `except`
 acts on the failure (an error tool result, a cursor rewind) uses
 `ahook_raise`, so its fallback never runs while a sibling is still in flight.
 

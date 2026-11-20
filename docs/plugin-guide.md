@@ -201,8 +201,8 @@ During the kernel's fail-soft dispatch, the wrapper returns a raise as a value.
 Everywhere else it behaves exactly like your method. A direct call such as
 `plugin.on_message(...)` in a test, or another plugin calling your method,
 raises as it always did, and the wrapper still reports as a coroutine function.
-A plugin that can't take a new attribute (`__slots__` without the hook's name, a
-guarded `__setattr__`) fails registration.
+A plugin object that can't take a new attribute (for example one with
+`__slots__` and no `__dict__`, or a guarded `__setattr__`) fails registration.
 
 An observe hook can also be a contribution point: each implementation returns
 one piece and the caller combines the returned list. The first is the
@@ -1699,7 +1699,7 @@ naming `plugins.disabled`, the value, and the installed entry-point names.
 
 One rule covers the observe class: observe hooks (`on_`, `before_`, `after_`) fail soft in the kernel's dispatch, so `await pm.ahook.<hook>(...)` never raises because an implementation did. Each failure is logged at WARNING with the hook and plugin names and the traceback, every other implementation still runs, and their values come back in hook order. A caller may combine the returned values. `on_init` and `on_start` fail hard: a raise propagates. `should_`, `resolve_` and `transform_` hooks and the bare imperatives keep apluggy's dispatch and the per-hook policies below. Plugins do not need to catch their own exceptions to protect the queue consumer. The hand-written `try/except` blocks that remain around observe calls are now redundant for logging ([#1097](https://github.com/schuyler/corvidae/issues/1097) removes them).
 
-A call site whose `except` must act on a failure (deliver an error tool result, rewind a cursor, tell the model a send failed) calls `pm.ahook_raise.<hook>(...)` instead. It logs each failure the same way, waits for every implementation to finish, then raises the first failure in hook order. A missing argument still raises `HookCallError` on either accessor; it is a caller bug and surfaces before any implementation runs.
+A call site whose `except` must act on a failure (deliver an error tool result, rewind a cursor, tell the model a send failed) calls `pm.ahook_raise.<hook>(...)` instead. It logs each failure the same way, waits for every implementation to finish, then raises the first failure in hook order; a `CancelledError` or other non-`Exception` failure takes precedence. A missing argument still raises `HookCallError` on either accessor; it is a caller bug and surfaces before any implementation runs.
 
 For `firstresult=True` hooks (`resolve_compaction`, `resolve_conversation`, `resolve_llm_error`), pluggy propagates the first handler's exception immediately — the chain stops and no further handlers run. The call sites in `Agent` handle these as follows:
 
