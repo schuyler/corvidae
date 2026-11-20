@@ -107,6 +107,7 @@ from corvidae.context import (
     ContextWindow,
     MessageType,
     count_tokens,
+    late_result_ids,
     message_tokens,
     well_formed_calls,
 )
@@ -841,6 +842,7 @@ class _RunIndex:
     next_opener: list[int]    # [k] -> first position >= k that _is_opener (len(view) if none)
     next_clean: list[int]     # [k] -> smallest clean boundary >= k
     prev_clean: list[int]     # [k] -> largest clean boundary <= k
+    first_result: dict[str, int]  # tool-call id -> view position of its first result
 
 
 def _run_index(view: list[dict]) -> _RunIndex:
@@ -852,7 +854,8 @@ def _run_index(view: list[dict]) -> _RunIndex:
     it considers together with all of that call's results, so it answers as
     it would on the whole view. Ids are collected from every well-formed call
     and every string ``tool_call_id``: a superset of what the helpers read,
-    which can only mark more boundaries dirty.
+    which can only mark more boundaries dirty. Late calls (#1046) are left
+    out: their results belong to no cycle, so they span nothing.
     """
     n = len(view)
     # First position of each row id: what a front-to-back scan finds first.
@@ -868,14 +871,20 @@ def _run_index(view: list[dict]) -> _RunIndex:
     next_opener = [n] * (n + 1)
     for k in range(n - 1, -1, -1):
         next_opener[k] = k if _is_opener(view[k]) else next_opener[k + 1]
-    # Each tool-call id's first and last position.
+    # Each tool-call id's first and last position, and each result's first.
+    late = late_result_ids(view)
     span: dict[str, list[int]] = {}
+    first_result: dict[str, int] = {}
     for k, m in enumerate(view):
         ids = [c["id"] for c in well_formed_calls(m)]
         call_id = m.get("tool_call_id")
         if isinstance(call_id, str):
             ids.append(call_id)
+            if m.get("role") == "tool" and call_id:
+                first_result.setdefault(call_id, k)
         for call in ids:
+            if call in late:
+                continue
             span.setdefault(call, [k, k])[1] = k
     # Boundary s is dirty when an id sits both before it and at or after it
     # (first < s <= last): mark those ranges with a difference array.
@@ -896,7 +905,7 @@ def _run_index(view: list[dict]) -> _RunIndex:
     next_clean = [n] * (n + 1)
     for boundary in range(n, -1, -1):
         next_clean[boundary] = boundary if clean[boundary] else next_clean[boundary + 1]
-    return _RunIndex(pos, first_nonsummary, next_opener, next_clean, prev_clean)
+    return _RunIndex(pos, first_nonsummary, next_opener, next_clean, prev_clean, first_result)
 
 
 def _indexed_range_sentence(view: list[dict], index: _RunIndex, first: int, end: int) -> str:
@@ -1220,8 +1229,17 @@ async def build_catchup_segments(
                 "consolidation profile's context",
                 channel_id, window.messages[-1].get("_db_id"), inputs.max_tokens,
             )
+        # Calls in the window whose first result lies at or past its end render
+        # as pending, not abandoned (#1046). Cross-run groups use the last
+        # plan's index (shortcut: earlier runs' calls render abandoned).
+        pending = frozenset(
+            c["id"]
+            for m in window.messages
+            for c in well_formed_calls(m)
+            if index.first_result.get(c["id"], -1) >= end
+        )
         messages = build_fork_prompt(
-            window, None, instruction(), frozenset(), inputs.mid_role
+            window, None, instruction(), pending, inputs.mid_role
         )
         measured = _measured_size(messages)
         if measured > inputs.max_tokens:

@@ -218,6 +218,43 @@ def result_call_id(msg: object) -> str | None:
     return call_id if isinstance(call_id, str) and call_id else None
 
 
+def late_result_ids(messages: list) -> set[str]:
+    """Ids of well-formed calls whose first result arrives after the talk moved on.
+
+    A result is late (#346, #1046) when it sits at or after the first
+    user/assistant row following its call: a tool cycle is a call and the
+    results that arrive before anyone speaks or the agent takes another turn.
+    Rows that are not dicts never count as moving on. One backward pass, so
+    the render (``build_prompt``) and every cut share one definition.
+    """
+    # First result position per call id (by result_call_id).
+    result_at: dict[str, int] = {}
+    for i, m in enumerate(messages):
+        call_id = result_call_id(m)
+        if call_id is not None and call_id not in result_at:
+            result_at[call_id] = i
+
+    # next_move[i]: the first row after i that is a user or assistant message
+    # (len when none), found in one backward pass.
+    n = len(messages)
+    next_move = [n] * n
+    nxt = n
+    for i in range(n - 1, -1, -1):
+        next_move[i] = nxt
+        m = messages[i]
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant"):
+            nxt = i
+
+    # A call is late when its first result is at or past that next move.
+    late: set[str] = set()
+    for i, m in enumerate(messages):
+        for c in well_formed_calls(m):
+            r = result_at.get(c["id"])
+            if r is not None and r >= next_move[i]:
+                late.add(c["id"])
+    return late
+
+
 def message_tokens(msg: dict, fence_key: bytes | None = None) -> int:
     """Token count of a message the way it actually gets sent: the
     JSON-serialized visible dict, not just `content`. Catches size hiding in
@@ -351,24 +388,14 @@ class ContextWindow:
             if call_id is not None and call_id not in result_at:
                 result_at[call_id] = i
 
-        # next_move[i]: the first row after i that is a user or assistant
-        # message (len when none), found in one backward pass. Rows that are
-        # not dicts never count as moving on (#346).
-        n = len(self.messages)
-        next_move = [n] * n
-        nxt = n
-        for i in range(n - 1, -1, -1):
-            next_move[i] = nxt
-            m = self.messages[i]
-            if isinstance(m, dict) and m.get("role") in ("user", "assistant"):
-                nxt = i
+        # Calls whose first result arrives after the conversation moved on
+        # (#346): the shared rule, also used by the cut helpers (#1046).
+        late_calls = late_result_ids(self.messages)
 
         # Only well-formed calls are placed or claimed; the rest are dropped
-        # from the render below, where each row's loss is logged once. A call
-        # whose first result arrives after the next user/assistant row has a
-        # late result (#346): its row index maps to the tool's name.
+        # from the render below, where each row's loss is logged once. A late
+        # call's result row index maps to the tool's name.
         emit_at = {}
-        late_calls = set()
         late_rows = {}
         for i, msg in enumerate(self.messages):
             calls = well_formed_calls(msg)
@@ -376,8 +403,7 @@ class ContextWindow:
                 continue
             for c in calls:
                 r = result_at.get(c["id"])
-                if r is not None and r >= next_move[i]:
-                    late_calls.add(c["id"])
+                if c["id"] in late_calls and r is not None:
                     fn = c.get("function")
                     name = fn.get("name") if isinstance(fn, dict) else None
                     late_rows[r] = name if isinstance(name, str) and name else "tool"

@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from corvidae.attribution import reset_attribution, set_attribution
-from corvidae.context import ContextWindow, well_formed_calls
+from corvidae.context import ContextWindow, late_result_ids, well_formed_calls
 
 if TYPE_CHECKING:
     from corvidae.agent import Agent
@@ -244,15 +244,26 @@ def _first_result_index(messages: list[dict]) -> dict[str, int]:
     return result_at
 
 
+def _straddling_result_index(messages: list[dict]) -> dict[str, int]:
+    """First-result index of the calls a cut can straddle: late results excluded.
+
+    A late result (#1046) belongs to no cycle: it renders where it arrived,
+    so a cut between its call and it splits nothing.
+    """
+    late = late_result_ids(messages)
+    return {k: v for k, v in _first_result_index(messages).items() if k not in late}
+
+
 def snap_cut_forward(messages: list[dict], cut: int) -> int:
     """Move ``cut`` forward past the last result of every straddling cycle.
 
     The other way to clear a straddle (see
     :func:`snap_cut_to_tool_boundary`): drop the whole cycle instead of
     keeping it. Moving forward can straddle a later call whose results sit
-    further on, so this repeats until stable. May return ``len(messages)``.
+    further on, so this repeats until stable. A late result (#1046) never
+    straddles. May return ``len(messages)``.
     """
-    result_at = _first_result_index(messages)
+    result_at = _straddling_result_index(messages)
     while True:
         new_cut = cut
         for i in range(cut):
@@ -279,10 +290,9 @@ def snap_cut_to_tool_boundary(messages: list[dict], cut: int) -> int:
     (in flight or abandoned) renders in place either way and never
     straddles. A late result (user or assistant row between call and
     result, #346) renders framed where it arrived and the call stays in
-    place, so the prefix differs from the full window only in that result;
-    the cut stays conservative and still backs up over it.
+    place; it belongs to no cycle, so the cut may fall between them (#1046).
     """
-    result_at = _first_result_index(messages)
+    result_at = _straddling_result_index(messages)
 
     # Back up to the earliest straddling call; repeat to a fixpoint.
     while True:
