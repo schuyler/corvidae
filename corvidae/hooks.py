@@ -43,6 +43,8 @@ from corvidae.outbound import (
 )
 
 if TYPE_CHECKING:
+    from pluggy import HookimplOpts
+
     from corvidae.admission import WorkRefusal
     from corvidae.channel import Channel
     from corvidae.context import ContextWindow, MessageType
@@ -585,6 +587,8 @@ def _fail_soft_wrapper(original: Callable[..., object]) -> Callable[..., object]
     # AsyncMock(wraps=...)) still awaits a direct call.
     if inspect.iscoroutinefunction(original):
         inspect.markcoroutinefunction(wrapper)
+    # Marks the attribute as already wrapped, so registering the plugin again
+    # (here or with another manager) doesn't wrap it twice.
     wrapper._corvidae_fail_soft = True  # type: ignore[attr-defined]
     return wrapper
 
@@ -599,7 +603,7 @@ class CorvidaePluginManager(pluggy.PluginManager):
     class, and ``HookImpl`` is never modified.
     """
 
-    def parse_hookimpl_opts(self, plugin: object, name: str):  # type: ignore[override]
+    def parse_hookimpl_opts(self, plugin: object, name: str) -> HookimplOpts | None:  # type: ignore[override]
         opts = super().parse_hookimpl_opts(plugin, name)
         if opts is None:
             return None
@@ -651,7 +655,8 @@ class PolicyAHook:
             # them last-registered first); no await before dispatch builds
             # its coroutines, so results line up with these names.
             caller = getattr(self._pm.hook, name, None)
-            names = [impl.plugin_name for impl in reversed(caller.get_hookimpls())] if caller else []
+            impls = caller.get_hookimpls() if caller is not None else []
+            names = [impl.plugin_name for impl in reversed(impls)]
 
             # Dispatch with the flag set; reset it even if dispatch raises, so
             # later direct calls in this task still raise.
