@@ -115,13 +115,25 @@ async def test_short_span_cycle_backs_up_and_hooks_fire_in_order():
     ]
 
 
-async def test_long_span_cycle_is_dropped_whole_when_the_tail_survives():
+async def test_long_span_call_is_dropped_and_its_late_result_kept_as_an_orphan_frame():
+    """R3 (#1046): the call c1 near the head has 80 rows of chat before its
+    result, so the result is late and the cycle never straddles the cut. The
+    cut falls inside the stretch: c1 is compacted away, its result (db 83) is
+    kept, and the prompt renders that result as a system orphan frame."""
     conv = _long_span_window(trailing_exchanges=20)
     max_tokens = int(conv.token_estimate() / 0.9)
     result, order, _ = await _compact(conv, max_tokens=max_tokens)
     assert result and conv.token_estimate() < 0.8 * max_tokens
-    assert len(conv.messages) == 1 + 40  # summary + the trailing exchanges
-    assert 83 in order.calls[0][1] and _orphans(conv.messages) == []
+    # The call is dropped; the result and the chat behind it are kept.
+    compacted = order.calls[0][1]
+    assert 2 in compacted and 83 not in compacted
+    kept = [m for m in conv.messages if m.get("_db_id") == 83]
+    assert len(kept) == 1 and not any(m.get("tool_calls") for m in conv.messages)
+    # The kept result renders framed, with no tool message lacking its call.
+    prompt = conv.build_prompt(frozenset())
+    assert not any(m["role"] == "tool" for m in prompt)
+    frames = [m for m in prompt[1:] if m["role"] == "system" and m["content"].endswith("job done")]
+    assert len(frames) == 1
 
 
 @pytest.mark.parametrize("trailing", [0, 3])
