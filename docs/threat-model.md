@@ -883,13 +883,15 @@ and lists them in every heartbeat beat (#1091), never in an ordinary turn. Three
   reaches the heartbeat at its next beat. #220 recorded this as a
   variance from PRD principle 14; under the revised principle 14 it is what
   the PRD requires of memory too (finding 15). Nothing in a goal is scoped
-  to its origin. The heartbeat's review shows every retired goal's
-  conclusion too, whatever channel it was retired on, so a conclusion
-  written on a private channel reaches the heartbeat's window.
+  to its origin. The beat's goals list no longer carries retired goals at
+  all (2026-11-19); a retirement's memory record can still reach the
+  beat's window through memory's section, on whatever channel it was
+  retired.
 - **Injected text can steer them.** Untrusted text on any channel can make
   the model call `add_goal`, `update_goal` or `retire_goal`, seeded goals
   included: the tools don't check who set a goal. An added goal
-  re-enters every beat until it is retired, which is
+  re-enters every beat while it stays open or in-progress and within the
+  beat's cap, which is
   persistence for injected text of the same kind as finding 7 but without a
   firing time or a per-channel scope. The list is part of the beat's own
   text, outside the funnel, so it has no funnel framing or budget.
@@ -910,7 +912,7 @@ The beat's text is `heartbeat.prompt` plus the sections any loaded plugin
 adds through `on_heartbeat_collect_prompts` (#1084), so a plugin that
 implements the hook can put text in front of that unwatched turn: it is
 plugin code, trusted as plugin code is, and a section built from stored
-text (memory, retired-goal conclusions) is framed as data. One that raises
+text (memory, the goals list) is framed as data. One that raises
 is logged and skipped (observe hooks fail soft).
 Memory summaries are distilled from conversation, so text an untrusted
 speaker wrote can reach a tool-using turn hours later, when no person is

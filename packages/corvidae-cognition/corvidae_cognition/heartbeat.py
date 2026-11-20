@@ -20,9 +20,10 @@ Config:
       after: 3600    # seconds of system-wide quiet; absent = asleep
 
 The sections' own settings live with their plugins: ``memory.heartbeat_limit``,
-``goals.heartbeat_retired_limit`` and ``goals.heartbeat_instruction``
-(``heartbeat.memory_limit``, ``heartbeat.retired_goal_limit`` and
-``heartbeat.goals_instruction`` still work for one release, with a warning).
+``goals.heartbeat_limit`` and ``goals.heartbeat_instruction``
+(``heartbeat.memory_limit`` and ``heartbeat.goals_instruction`` still work
+for one release, with a warning; ``goals.heartbeat_limit`` never had a
+``heartbeat.*`` spelling).
 
 Sleep is durable because it lives in agent.yaml: without
 ``heartbeat.after`` the plugin registers nothing, at every start.

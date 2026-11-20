@@ -374,7 +374,7 @@ agent:
 # Heartbeat (cognition; optional): a turn the agent starts after this many
 # seconds of system-wide quiet, on internal:heartbeat (no transport owns it,
 # so nothing reaches anyone). It reviews the sections plugins add (memory's
-# recent records, goals' retired goals) and acts only if something warrants
+# recent records, a capped goals list) and acts only if something warrants
 # it; prompt: prompts/heartbeat.md. Absent = asleep: delete or comment out
 # the block and restart to put it to sleep. Doesn't need memory; with memory
 # loaded, the beat carries the newest records of the whole memory, every
@@ -388,12 +388,13 @@ agent:
 #   # Deprecated spellings, still read for one release (WARNING at startup);
 #   # setting one with its new key fails startup. Use the new key instead:
 #   #   memory_limit -> memory.heartbeat_limit
-#   #   retired_goal_limit -> goals.heartbeat_retired_limit
 #   #   goals_instruction -> goals.heartbeat_instruction
+#   # retired_goal_limit and goals.heartbeat_retired_limit are gone: the beat
+#   # no longer reviews retired goals, and setting either fails startup.
 
 # Goals (cognition): the goals plugin's section of the heartbeat's beat.
 # goals:
-#   heartbeat_retired_limit: 5         # newest retired goals a beat reviews; 0 = none
+#   heartbeat_limit: 5                 # frontmost open/in-progress goals a beat shows; 0 = none
 #   heartbeat_instruction: {file: prompts/heartbeat-goals.md}   # goals paragraph; absent = built-in
 
 # Skills directory (cognition). The index appears in the system prompt at
