@@ -473,28 +473,79 @@ class TestBuildPromptResumedTurnOrdering:
         from corvidae.context import TOOL_RESULT_PENDING
 
         cw = self._late_result_window()
+        # The result lands after the user's question and the reply.
         cw.append({"role": "tool", "tool_call_id": "c1", "content": "TOKEN-EELGRASS-71"})
 
         prompt = cw.build_prompt(frozenset())
 
+        # The call precedes the question it was made before, with a placeholder.
         call_idx = next(i for i, m in enumerate(prompt) if m.get("tool_calls"))
         question_idx = next(i for i, m in enumerate(prompt) if m.get("content") == "what is 6*7")
         assert call_idx < question_idx
         assert prompt[call_idx + 1] == {
             "role": "tool", "tool_call_id": "c1", "content": TOOL_RESULT_PENDING,
         }
+        # The prompt ends on the framed late result, not a tool message.
         last = prompt[-1]
         assert last["role"] == "system"
         assert "tool_call_id" not in last
         assert "the earlier web_fetch call shown above as still running" in last["content"]
         assert "TOKEN-EELGRASS-71" in last["content"]
+        # Pins the frame's exact shape: bracketed label, blank line, framed result.
+        assert last["content"] == (
+            "[result of the earlier web_fetch call shown above as still running]"
+            "\n\nTOKEN-EELGRASS-71"
+        )
+
+    def test_late_result_of_a_nameless_call_renders_the_label_with_tool(self):
+        """Pins the fallback: a call with no function name still renders, and
+        the label says "tool" rather than raising or printing None."""
+        cw = ContextWindow("test:scope")
+        cw.system_prompt = "sys"
+        cw.append({"role": "user", "content": "go"})
+        # Call with no function name at all.
+        cw.append({"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]})
+        cw.append({"role": "user", "content": "meanwhile"})
+        cw.append({"role": "tool", "tool_call_id": "c1", "content": "done"})
+
+        last = cw.build_prompt(frozenset())[-1]
+
+        assert last["content"] == (
+            "[result of the earlier tool call shown above as still running]\n\ndone"
+        )
+
+    def test_non_dict_row_between_call_and_result_does_not_move_on(self, caplog):
+        """Pins the isinstance skip: a non-dict row is not a user/assistant
+        row, so the result stays inline in the call's block, and build_prompt
+        warns about the row instead of raising."""
+        cw = ContextWindow("test:scope")
+        cw.system_prompt = "sys"
+        cw.append({"role": "user", "content": "go"})
+        cw.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}],
+        })
+        # A row the window can hold but that is not a message object.
+        cw.messages.append(["not", "a", "message"])
+        cw.append({"role": "tool", "tool_call_id": "c1", "content": "fetched"})
+
+        with caplog.at_level("WARNING", logger="corvidae.context"):
+            prompt = cw.build_prompt(frozenset())
+
+        # Inline: the real result sits right under the call, no frame at all.
+        assert [m["role"] for m in prompt] == ["system", "user", "assistant", "tool"]
+        assert prompt[-1]["tool_call_id"] == "c1"
+        assert "fetched" in prompt[-1]["content"]
+        assert any("not a message object" in r.getMessage() for r in caplog.records)
 
     def test_346_late_result_leaves_the_earlier_prompt_as_an_exact_prefix(self):
         """R3: the prompt before the result is appended is an exact prefix of
         the prompt after (KV-cache reuse)."""
         cw = self._late_result_window()
+        # Render while the call is still pending.
         before = cw.build_prompt(frozenset({"c1"}))
 
+        # Append the late result, then render again with the pending set drained.
         cw.append({"role": "tool", "tool_call_id": "c1", "content": "TOKEN-EELGRASS-71"})
         after = cw.build_prompt(frozenset())
 
@@ -524,6 +575,7 @@ class TestBuildPromptResumedTurnOrdering:
 
         prompt = cw.build_prompt(frozenset())
 
+        # A is in place with a placeholder, B's block is inline, A's frame is last.
         assert [m["role"] for m in prompt] == [
             "system", "user", "assistant", "tool", "assistant", "tool", "system",
         ]

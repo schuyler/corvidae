@@ -117,6 +117,8 @@ TOOL_RESULT_PENDING = "[still running — the result will arrive in a later mess
 TOOL_RESULT_ABANDONED = "[did not complete — no result was returned]"
 #: Frame for a tool result whose call is no longer in the window (#79).
 ORPHAN_RESULT_LABEL = "result of an earlier tool call that is no longer shown"
+#: Frame for a tool result that arrived after the conversation moved on (#346).
+LATE_RESULT_LABEL = "result of the earlier {name} call shown above as still running"
 
 #: Label the not-sent marker opens with. The Agent appends the marker (a
 #: CONTEXT system row) right after the assistant row whose emission a
@@ -317,8 +319,12 @@ class ContextWindow:
         An assistant tool_calls message is deferred to the arrival index of
         the last of its results, so call+results emit as one contiguous
         block there (synthesizing a placeholder for any call with no result
-        yet). If any call in the message is unanswered, the block emits in
-        place instead. A tool message whose call is not in the window
+        yet), when every result arrived before the next user or assistant
+        row. If any call is unanswered, or a result arrived after the
+        conversation moved on (#346), the block emits in place instead; a
+        late result's call shows the pending placeholder and the result
+        renders where it arrived as a framed system message naming the tool
+        (``LATE_RESULT_LABEL``), without ``tool_call_id``. A tool message whose call is not in the window
         (compaction dropped the call, whether it was answered or still in
         flight, #79) keeps its place but renders as a framed system
         notification without ``tool_call_id``, like an untargeted
@@ -345,14 +351,39 @@ class ContextWindow:
             if call_id is not None and call_id not in result_at:
                 result_at[call_id] = i
 
+        # next_move[i]: the first row after i that is a user or assistant
+        # message (len when none), found in one backward pass. Rows that are
+        # not dicts never count as moving on (#346).
+        n = len(self.messages)
+        next_move = [n] * n
+        nxt = n
+        for i in range(n - 1, -1, -1):
+            next_move[i] = nxt
+            m = self.messages[i]
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant"):
+                nxt = i
+
         # Only well-formed calls are placed or claimed; the rest are dropped
-        # from the render below, where each row's loss is logged once.
+        # from the render below, where each row's loss is logged once. A call
+        # whose first result arrives after the next user/assistant row has a
+        # late result (#346): its row index maps to the tool's name.
         emit_at = {}
+        late_calls = set()
+        late_rows = {}
         for i, msg in enumerate(self.messages):
             calls = well_formed_calls(msg)
             if not calls:
                 continue
-            if all(c["id"] in result_at for c in calls):
+            for c in calls:
+                r = result_at.get(c["id"])
+                if r is not None and r >= next_move[i]:
+                    late_calls.add(c["id"])
+                    fn = c.get("function")
+                    name = fn.get("name") if isinstance(fn, dict) else None
+                    late_rows[r] = name if isinstance(name, str) and name else "tool"
+            if all(c["id"] in result_at for c in calls) and not any(
+                c["id"] in late_calls for c in calls
+            ):
                 emit_at[i] = max(result_at[c["id"]] for c in calls)
             else:
                 emit_at[i] = i
@@ -363,13 +394,18 @@ class ContextWindow:
             msg = self.messages[i]
             out = [self._renderable(msg)]
             for call in well_formed_calls(msg):
-                result = self.messages[result_at[call["id"]]] if call["id"] in result_at else None
+                # A late result renders later; its call keeps the placeholder.
+                is_late = call["id"] in late_calls
+                result = (
+                    self.messages[result_at[call["id"]]]
+                    if call["id"] in result_at and not is_late else None
+                )
                 out.append(frame(result, _visible(result), self.channel_id, self.fence_key)[1] if result is not None else {
                     "role": "tool",
                     "tool_call_id": call["id"],
                     "content": (
                         TOOL_RESULT_PENDING
-                        if call["id"] in pending_tool_call_ids
+                        if is_late or call["id"] in pending_tool_call_ids
                         else TOOL_RESULT_ABANDONED
                     ),
                 })
@@ -406,6 +442,15 @@ class ContextWindow:
                 )
             if i in anchored:
                 out += block(anchored[i])
+            # A late result renders here as a framed system message (#346).
+            if i in late_rows:
+                _, framed = frame(msg, _visible(msg), self.channel_id, self.fence_key)
+                label = LATE_RESULT_LABEL.format(name=late_rows[i])
+                out.append({
+                    "role": "system",
+                    "content": f"[{label}]\n\n{framed.get('content', '')}",
+                })
+                continue
             # A result whose call is in the window was emitted inside its
             # call's block above. Compare through result_call_id: the raw
             # field can be unhashable (#392).
