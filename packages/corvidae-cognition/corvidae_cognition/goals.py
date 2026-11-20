@@ -556,7 +556,7 @@ class GoalsPlugin(CorvidaePlugin):
         pursuable = [g for g in live if g.status in ("open", "in-progress")]
         shown = pursuable[: self._beat_goal_limit]
         if pursuable:
-            lines = [f"Open goals as of {as_of} (this list replaces any earlier goals list):"]
+            lines = [f"Open or in-progress goals as of {as_of} (this list replaces any earlier goals list):"]
             # Queue order is pick order; in-progress goals carry their status
             # so the pick rule resumes the front-runner. Blocked and waiting
             # goals stay on the board, off the beat (2026-11-19 spec).

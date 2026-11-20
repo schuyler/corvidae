@@ -177,7 +177,7 @@ def test_heartbeat_doc_example_is_what_a_beat_sends():
 
     async def goals_list():
         return (
-            "Open goals as of 2026-10-30 14:02:11 UTC "
+            "Open or in-progress goals as of 2026-10-30 14:02:11 UTC "
             "(this list replaces any earlier goals list):\n"
             "#5 [in-progress] Learn what the team wants from the wiki\n"
             "#3 Finish the migration notes"

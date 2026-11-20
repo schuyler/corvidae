@@ -197,7 +197,7 @@ async def test_beat_with_a_retired_goal_carries_the_instruction_but_not_the_reco
     assert goals_mod.GOALS_INSTRUCTION in text
     assert text.count(goals_mod.GOALS_INSTRUCTION) == 1
     # The goals section: list block, one blank line, instruction. Nothing else.
-    idx_open = text.index("Open goals as of")
+    idx_open = text.index("Open or in-progress goals as of")
     idx_inst = text.index(goals_mod.GOALS_INSTRUCTION)
     assert text.count("\n\n", idx_open, idx_inst) == 1
     # The retired goal is off the list too (#2 shows, #1 doesn't).
@@ -232,7 +232,7 @@ async def test_beat_without_goals_plugin_carries_no_goals_text(make_env):
     text = env.agent.calls[0]["text"]
     assert heartbeat.DEFAULT_HEARTBEAT_PROMPT in text
     assert goals_mod.GOALS_INSTRUCTION not in text
-    assert "Open goals as of" not in text
+    assert "Open or in-progress goals as of" not in text
 
 
 # --- the 2026-11-19 beat-size spec: status filter and the five-goal cap -------
@@ -305,7 +305,7 @@ async def test_beat_with_limit_zero_shows_no_goals_but_names_them(make_env, monk
     await env.clock.advance(AFTER)
     text = env.agent.calls[0]["text"]
     assert "Task one" not in text and "Task two" not in text
-    idx = text.index("Open goals as of")
+    idx = text.index("Open or in-progress goals as of")
     assert "(+2 more pursuable - call list_goals)" in text[idx:]
     assert goals_mod.GOALS_INSTRUCTION in text
 
@@ -391,7 +391,7 @@ async def test_beat_is_memory_then_goals_sections_then_prompt(make_env):
     assert text.endswith(heartbeat.DEFAULT_HEARTBEAT_PROMPT)
     positions = [
         text.index(memory_mod.MEMORY_HEADER),
-        text.index("Open goals as of"),
+        text.index("Open or in-progress goals as of"),
         text.index(goals_mod.GOALS_INSTRUCTION),
         text.index(heartbeat.DEFAULT_HEARTBEAT_PROMPT),
     ]
@@ -412,7 +412,7 @@ async def test_beat_lists_the_front_of_the_board_in_full_every_time(make_env):
     for call in env.agent.calls:
         text = call["text"]
         assert "#1 Watch the kestrel nest" in text
-        assert text.index("Open goals as of") < text.index(goals_mod.GOALS_INSTRUCTION)
+        assert text.index("Open or in-progress goals as of") < text.index(goals_mod.GOALS_INSTRUCTION)
 
 
 async def test_a_raising_contributor_is_skipped_and_the_others_kept(make_env, caplog):
@@ -453,7 +453,7 @@ async def test_second_beat_repeats_the_list_and_never_a_retired_block(make_env):
         # The retired goal is off the goals list; its conclusion may surface
         # in memory's section (a retirement writes a memory record) - that's
         # memory's business, not the beat's goals block.
-        assert "Get the wiki backup job running" not in text[text.index("Open goals as of"):]
+        assert "Get the wiki backup job running" not in text[text.index("Open or in-progress goals as of"):]
     # Beat two repeats the list; the beat-one conclusion is not repeated.
     assert "Durable task" in second
     assert "I concluded it is done" not in second
