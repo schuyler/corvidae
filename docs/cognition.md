@@ -1587,10 +1587,11 @@ Goals are listed in queue order (`position`, then `id`), the order the
 beat's list and its pick rule use. An `in-progress` goal carries its status
 in brackets; `blocked` and `waiting` goals are not listed.
 
-With no pursuable goal but some live one, it reads `No open or in-progress
-goals as of … (this replaces any earlier goals list).` Blocked, waiting and
-retired goals are not named in that line either (owner ruling, 2026-11-19):
-the beat has nothing to do with them, so it doesn't even count them. With none at all, including when every goal is
+With none, including when every goal is retired or only blocked and waiting
+remain, it reads `No open goals as of … (this replaces any earlier goals
+list).` Blocked, waiting and retired goals are not named in that line (owner
+ruling, 2026-11-19): the beat has nothing to do with them, so it does not
+even count them. With none at all, including when every goal is
 retired, `No open goals as of … (this replaces any earlier goals list).` A database with no goal rows
 at all adds no list. The timestamp is the latest `updated_at` over all
 rows, retired ones included, not the current time, so the text changes only
@@ -1659,8 +1660,8 @@ reaches the heartbeat at its next beat.
 returns two things: the goals list above (every beat, in full within its
 cap), and `GOALS_INSTRUCTION`, the pick rule that tells the model to resume
 an in-progress goal or advance the first listed one, to retire a finished
-goal, not to take up a retired goal again without something new, and to call
- Nothing off the beat is mentioned there at all (owner ruling, 2026-11-19): retired, blocked and
+goal, not to take up a retired goal again without something new. Nothing off
+the beat is mentioned there at all (owner ruling, 2026-11-19): retired, blocked and
 waiting goals do not reach the beat (owner spec, 2026-11-19): a beat acts on
 what it can advance, and the board keeps the rest. The instruction goes on
 every beat.

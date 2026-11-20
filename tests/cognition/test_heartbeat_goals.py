@@ -392,7 +392,8 @@ async def test_beat_with_only_blocked_goals_says_so_without_naming_them(make_env
     text = env.agent.calls[0]["text"]
     # The beat does not count or name them either (owner ruling).
     assert "No open goals as of" in text
-    assert "blocked" not in text.split(goals_mod.GOALS_INSTRUCTION)[0].split("Open goals")[-1]
+    line = text.split(goals_mod.GOALS_INSTRUCTION)[0].split("Open goals")[-1]
+    assert "blocked" not in line and "waiting" not in line
     assert "Stuck task" not in text
     assert "Patient task" not in text
     assert goals_mod.GOALS_INSTRUCTION in text
