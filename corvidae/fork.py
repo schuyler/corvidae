@@ -268,7 +268,8 @@ def snap_cut_forward(messages: list[dict], cut: int) -> int:
 def snap_cut_to_tool_boundary(messages: list[dict], cut: int) -> int:
     """Move ``cut`` back until no tool cycle straddles it.
 
-    build_prompt emits an assistant ``tool_calls`` message at the position
+    For an uninterrupted cycle (only system rows between call and results)
+    build_prompt emits the assistant ``tool_calls`` message at the position
     of its last result. If a call sits before ``cut`` and any of its results
     at or after it, the prefix renders the call in place with placeholder
     results while the full window renders it later with the real ones, so
@@ -276,7 +277,10 @@ def snap_cut_to_tool_boundary(messages: list[dict], cut: int) -> int:
     keeping its results). Backing up to the call can land inside an earlier
     cycle, so this repeats until stable. A call with no result anywhere
     (in flight or abandoned) renders in place either way and never
-    straddles.
+    straddles. A late result (user or assistant row between call and
+    result, #346) renders framed where it arrived and the call stays in
+    place, so the prefix differs from the full window only in that result;
+    the cut stays conservative and still backs up over it.
     """
     result_at = _first_result_index(messages)
 

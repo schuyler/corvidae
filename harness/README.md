@@ -14,7 +14,7 @@ is the run's pass/fail.
 
 ## What it checks
 
-Nine IRC channels, one probe each, every pass criterion mechanical (planted
+Ten IRC channels, one probe each, every pass criterion mechanical (planted
 tokens grepped from replies, or facts read straight out of `sessions.db`):
 
 | Probe | Channel | Checks |
@@ -22,6 +22,7 @@ tokens grepped from replies, or facts read straight out of `sessions.db`):
 | `smoke_echo` | `#p-smoke` | Basic round trip |
 | `tool_loop` | `#p-toolloop` | Multi-hop tool use through the task queue |
 | `interleave` | `#p-interleave` | A second message gets answered while a slow tool call is in flight |
+| `result_turn` | `#p-resultturn` | A queued tool result processed after the agent answered an interleaved message gets no greeting/opener reply (#346) |
 | `burst` | `#p-burst` | Three messages sent during a slow model call get one reply after it, one model call for all three (#398) |
 | `compaction` | `#p-compact` | A capacity-limited channel compacts under paced filler load, confirmed by a real summary row |
 | `restart_recovery` | `#p-restart` | Conversation history survives a daemon restart |
@@ -125,6 +126,18 @@ queue depth rather than compaction. `interleave` and `burst` are the two
 deliberate exceptions: sending the second message while the first's tool call
 is still in flight is `interleave`'s subject, and queueing three messages
 behind an in-flight model call is `burst`'s.
+
+`result_turn` replays the #346 incident. It asks the bot to `web_fetch` the slow
+server's `/slow-r` path (13 s), sends "What is 17+25?" once the server has the
+request, and waits for the 42 reply and then for the tool row. In `message_log`
+the 42 assistant row must have a lower id than the tool row carrying the token,
+or the probe fails as `INCONCLUSIVE` (the sequence never interleaved, so
+nothing was tested). Every assistant row after the tool row must then not open
+like a new conversation (`GREETING_RE` in `driver.py`: a greeting word at the
+start, or "what/how can/may I help/assist"). Whether the agent reports the
+token or stays silent is its own call, so no reply within 60 s passes. The
+verdict logic is `result_turn_verdict`. Run it with the default profile:
+`harness/run-remote.sh [rev]`.
 
 `burst` asks for the numbers 1 to 400 on one line (a slow model call; a slow
 tool would not hold the queue), then four seconds later sends three lines

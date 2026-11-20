@@ -906,14 +906,22 @@ All operations are synchronous; no database access:
 
 - `append(message, message_type=MessageType.MESSAGE)` — appends to in-memory list with `_message_type` tag
 - `build_prompt()` — returns `[system_msg, *messages]` with `_message_type` stripped.
-  Every assistant `tool_calls` message is emitted contiguously with its results,
-  at the arrival position of its *last* result (in place, with placeholders, if
-  any call is still unanswered) — a corvidae convention, not compliance with a
-  documented rule, since the OpenAI and Anthropic formats make tool-result
-  adjacency normative but say nothing about a user turn arriving inside a tool
-  cycle. The consequence this ordering secures: the emitted prompt never ends on
-  an assistant message, which llama.cpp reads as a prefill and rejects under
-  `enable_thinking`.
+  An assistant `tool_calls` message renders with its results in one of three ways.
+  When every result arrived before the next user or assistant row (only system
+  rows in between), the block is deferred to the arrival position of its *last*
+  result. If any call is unanswered the block is emitted in place with
+  placeholders. If a result arrived after a user or assistant row (#346), the
+  result is *late*: the call's block is emitted in place with
+  `TOOL_RESULT_PENDING` for it, and the result renders where it arrived as a
+  framed `role: system` message, `[result of the earlier {name} call shown above
+  as still running]` plus the framed result, no `tool_call_id`, re-roled like the
+  orphan frame below. The call is never moved past the message that interrupted
+  it. The pending-then-late rendering is a corvidae convention, not compliance
+  with a documented rule, since the OpenAI and Anthropic formats make
+  tool-result adjacency normative but say nothing about a user turn arriving
+  inside a tool cycle. The consequence the block ordering secures: the emitted
+  prompt never ends on an assistant message, which llama.cpp reads as a prefill
+  and rejects under `enable_thinking`.
   A `tool` message whose call is not in the window (compaction dropped the
   call, #79) renders in place as a framed notification:
   `role: system`, content `[result of an earlier tool call that is no longer
@@ -1432,9 +1440,9 @@ persists itself (`corvidae.context.unsent_marker_text`), right after the
 assistant row, so it reloads beside it. It opens `[not sent: <emission>]`
 and tells the model the channel didn't see that text and not to cite it as
 said. Only the progress marker quotes its text (40 characters): `build_prompt`
-moves a tool-calls block to its last result, so a progress marker renders
-before the block it describes and needs the excerpt to say which text it
-means. The final marker sits right below its row; the thinking marker quotes
+defers an uninterrupted tool-calls block to its last result, so a progress
+marker renders before the block it describes and needs the excerpt to say
+which text it means. The final marker sits right below its row; the thinking marker quotes
 nothing, so reasoning never outlives `reasoning_history: drop` inside one.
 
 **Transports never see a vetoed emission, including on replay.** The web
@@ -1685,8 +1693,9 @@ format characters removed, newline and tab kept). The log keeps the
 original text. A cross-channel result with no content fences an empty payload. The
 fenced text is the stored `content` after `clean_payload` (the stored row
 is unchanged); an orphaned result
-(`ContextWindow.build_prompt` rendering it as a `system` message, #79) gets
-the same header and fence inside the orphan label.
+(`ContextWindow.build_prompt` rendering it as a `system` message, #79) and a
+late result (rendered the same way inside the late-result label, #346) get
+the same header and fence inside their label.
 
 #### Untrusted tool results
 

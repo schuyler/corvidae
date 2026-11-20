@@ -74,6 +74,7 @@ irc:
     - "#p-smoke"
     - "#p-toolloop"
     - "#p-interleave"
+    - "#p-resultturn"       # result_turn probe: tool result after an interleaved answer (#346)
     - "#p-burst"            # burst probe: coalescing (#398)
     - "#p-compact"
     - "#p-restart"

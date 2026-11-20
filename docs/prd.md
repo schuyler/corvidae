@@ -704,9 +704,11 @@ Per transport:
 4. A `tool` row whose call compaction dropped renders as a framed system
    notification, never as an orphan `tool` message. The stored row keeps
    `role: tool`.
-5. An assistant `tool_calls` message is emitted contiguously with its
-   results at the position of its last result, with placeholders for
-   calls still unanswered.
+5. A tool call renders where it was made, followed by its results. A call
+   still running shows a placeholder where its result will go. If someone
+   speaks, or the agent takes a turn, before a result arrives, the
+   placeholder stays and the result renders where it arrived, labelled as
+   the result of that earlier call.
 6. `reasoning_history: drop | exchange | keep`, resolved per channel and
    applied to the whole in-memory window before every call, so reloaded
    history obeys it. An agent override of it takes effect at the next
@@ -717,7 +719,8 @@ Per transport:
    `keep_thinking_in_history`, fails at startup and on reload.
 7. `agent.mid_conversation_system_role: system | user` sets the role under
    which every non-leading system message is sent (funnel CONTEXT,
-   notifications without a tool-call id, framed orphan results). It is a
+   notifications without a tool-call id, framed orphan results, framed late
+   results). It is a
    prompt-build rewrite only; the window and the DB keep `role: system`.
    `user` is what strict templates need and what keeps untrusted text out
    of the system role; it is the default, gated on the harness
