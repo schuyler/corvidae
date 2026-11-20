@@ -30,7 +30,7 @@ def completed_exchange_end(messages: list[dict]) -> int:
     Only role "user" counts: tool results and system notifications continue
     the current exchange. In window order this boundary is never later
     than the one a Qwen-family chat template computes, so with the server's
-    preserve_thinking off the template drops everything stripped here. The
+    preserve_thinking off the template drops everything stripped here.
     build_prompt renders a call where it was made, so a call before this
     boundary never renders after it (a late result renders framed where it
     arrived, not as part of the call's block, #346).

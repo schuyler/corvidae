@@ -906,7 +906,7 @@ All operations are synchronous; no database access:
 
 - `append(message, message_type=MessageType.MESSAGE)` — appends to in-memory list with `_message_type` tag
 - `build_prompt()` — returns `[system_msg, *messages]` with `_message_type` stripped.
-  An assistant `tool_calls` message is emitted contiguously with its results.
+  An assistant `tool_calls` message renders with its results in one of three ways.
   When every result arrived before the next user or assistant row (only system
   rows in between), the block is deferred to the arrival position of its *last*
   result. If any call is unanswered the block is emitted in place with
