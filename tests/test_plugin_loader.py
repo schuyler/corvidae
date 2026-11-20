@@ -354,19 +354,32 @@ async def test_load_report_reaches_plugins_through_reserved_config_key(
     assert rt.load_report.replaced == {"llm": "my_llm"}
 
 
-async def test_unknown_replace_target_exits_with_config_error(
-    tmp_path, monkeypatch, capsys
+@pytest.mark.parametrize(
+    ("target_ep", "needles"),
+    [
+        # R5: an unknown target is rejected while planning.
+        (None, ["plugins.replace", "ghost"]),
+        # R3: a non-subclass target is rejected while registering.
+        (ep("ghost", "NotASub"), ["plugins.replace.llm", "NotASub", "Bundled"]),
+    ],
+    ids=["unknown-target", "not-a-subclass"],
+)
+async def test_bad_replace_target_exits_with_config_error(
+    tmp_path, monkeypatch, capsys, target_ep, needles
 ) -> None:
-    """R5 at Runtime level: a bad plugins.replace value is one Config error line."""
+    """R3/R5 at Runtime level: plan and registration errors are one Config error line."""
+    # Only the subclass case installs the "ghost" entry point.
+    eps = [BUNDLED_LLM, MY_LLM] + ([target_ep] if target_ep is not None else [])
     with pytest.raises(SystemExit) as excinfo:
         await _runtime_load(
-            tmp_path, monkeypatch, [BUNDLED_LLM, MY_LLM],
+            tmp_path, monkeypatch, eps,
             {"replace": {"llm": "ghost"}},
         )
     assert excinfo.value.code == 1
     stderr = capsys.readouterr().err
     assert "Config error:" in stderr, stderr
-    assert "plugins.replace" in stderr and "ghost" in stderr, stderr
+    for needle in needles:
+        assert needle in stderr, (needle, stderr)
 
 
 # --- R10 ----------------------------------------------------------------------

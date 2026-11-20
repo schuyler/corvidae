@@ -247,7 +247,7 @@ def run_report_child(
         # Skipped alone: names the plugin and says it was skipped.
         ("{}", '["rss"]', ("rss", "skipped")),
         # Fallback alone: names slot and target and says bundled was used.
-        ('{"llm": "my_llm"}', "[]", ("llm", "my_llm", "bundled used")),
+        ('{"llm": "my_llm"}', "[]", ('replacing "llm"', "my_llm", "bundled used")),
     ],
 )
 def test_preflight_fails_when_a_plugin_was_skipped_or_fell_back(
