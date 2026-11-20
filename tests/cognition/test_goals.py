@@ -274,7 +274,7 @@ async def test_g2_supersession_and_empty_list(env):
     t0 = env.clock.now()
     await env.tools["add_goal"]("Write the goals plugin", _ctx=ctx)
     first = await beat_text(env)
-    assert f"Open goals as of {utc(t0)} (this list replaces any earlier goals list):" in first
+    assert f"Open or in-progress goals as of {utc(t0)} (this list replaces any earlier goals list):" in first
     assert "#1 Write the goals plugin" in first
 
     env.clock.jump(60)
@@ -291,7 +291,7 @@ async def test_g2_supersession_and_empty_list(env):
         f"No open goals as of {utc(t0 + 120)} (this replaces any earlier goals list)."
         in last
     )
-    assert "Open goals as of" not in last
+    assert "Open or in-progress goals as of" not in last
 
 
 # ---------------------------------------------------------------------------

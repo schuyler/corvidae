@@ -1316,15 +1316,16 @@ the changes, is a capability the framework can permit (principles 7 and
 fixture for the retrieval eval set.
 
 **Goals.** Goals persist in SQLite, are created by the agent through a
-tool or seeded by the operator out of band, enter the window as a deduped
-list in the heartbeat's beat, in full every beat and in no other turn (#1091;
-the list carries as-of framing, so a later list supersedes every earlier one),
-and are reviewed and retired by the heartbeat. Retirement is
-a consolidation event: retiring a goal writes a memory record ("I
-concluded X, because...") and the heartbeat's review reads retired-goal
-records beside the open list, so an agent with a clock but no memory of
-its own conclusions cannot re-adopt a concluded purpose from the same
-evidence that produced it.
+tool or seeded by the operator out of band, enter the window as a capped
+list in the heartbeat's beat — the frontmost open or in-progress goals, in
+queue order, up to `goals.heartbeat_limit` — and in no other turn (#1091,
+2026-11-19; the list carries as-of framing, so a later list supersedes every
+earlier one). Blocked and waiting goals stay on the board (visible through
+`list_goals`) but off the beat: the beat acts on what it can advance.
+Retirement is a consolidation event: retiring a goal writes a memory record
+("I concluded X, because..."), and memory's own beat section can surface it,
+so an agent with a clock but no memory of its own conclusions cannot re-adopt
+a concluded purpose from the same evidence that produced it.
 
 **Heartbeat.** The heartbeat is a turn the agent starts when the system
 is idle (§3.1.16), with a latency bound so a busy system can't starve it.

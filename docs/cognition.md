@@ -38,7 +38,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
 | `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that contains `NO_REPLY` goes unsent, and each decline is recorded in `exchange_log`. It adds the instruction to the system prompt of chat channels, and with `silence.mode: tool` or `both` an `end_turn` tool |
-| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn is `heartbeat.prompt` plus the sections plugins add ahead of it through `on_heartbeat_collect_prompts` (memory's recent records, goals' retired conclusions and pick rule), and acts only if something warrants it. Asleep unless configured |
+| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn is `heartbeat.prompt` plus the sections plugins add ahead of it through `on_heartbeat_collect_prompts` (memory's recent records, a capped goals list and pick rule), and acts only if something warrants it. Asleep unless configured |
 | `SkillsPlugin` | `skills` | Scans a skills directory for `SKILL.md` files; contributes an index (name + description) to the system prompt via `transform_system_prompt` at conversation start and compaction; provides a `use_skill` tool that loads a skill's full text on demand |
 
 Entry-point names are the same as when these plugins lived in the kernel, so
@@ -1571,20 +1571,27 @@ while the heartbeat is the one changing it).
 **Goals list (#1091):** open goals reach the agent in the heartbeat's beat
 and nowhere else; no turn admits a goals entry to a window. Goals'
 `on_heartbeat_collect_prompts` section opens with the list, in full on every
-beat. With open goals it reads:
+beat: the frontmost open or in-progress goals up to
+`goals.heartbeat_limit` (default 5), in queue order. Blocked and waiting
+goals stay on the board (`list_goals`) but off the beat; a final line names
+any pursuable goals the cap left out. With pursuable goals it reads:
 
 ```
-Open goals as of 2026-10-30 14:02:11 UTC (this list replaces any earlier goals list):
+Open or in-progress goals as of 2026-10-30 14:02:11 UTC (this list replaces any earlier goals list):
 #5 [in-progress] Learn what Schuyler wants from the wiki
 #3 Finish the migration notes
+(+2 more pursuable - call list_goals)
 ```
 
 Goals are listed in queue order (`position`, then `id`), the order the
-beat's list and its pick rule use. A goal that is not plain `open` carries its status in
-brackets.
+beat's list and its pick rule use. An `in-progress` goal carries its status
+in brackets; `blocked` and `waiting` goals are not listed.
 
-With none, including when every goal is retired, it reads `No open goals as
-of … (this replaces any earlier goals list).` A database with no goal rows
+With none, including when every goal is retired or only blocked and waiting
+remain, it reads `No open goals as of … (this replaces any earlier goals
+list).` Blocked, waiting and retired goals are not named in that line (owner
+ruling, 2026-11-19): the beat has nothing to do with them, so it does not
+even count them. A database with no goal rows
 at all adds no list. The timestamp is the latest `updated_at` over all
 rows, retired ones included, not the current time, so the text changes only
 when a goal does. The supersession clause is what lets an older beat still
@@ -1649,20 +1656,25 @@ reaches the heartbeat at its next beat.
 
 **Heartbeat contribution (#1084).** This plugin implements
 `on_heartbeat_collect_prompts` (`trylast`, so its sections end the beat, just before the prompt) and
-returns three things: the open goals list above (every beat, in full), the newest `goals.heartbeat_retired_limit`
-(default 5) retirement records (agent-wide, newest first, each with its age,
-framed as data), and `GOALS_INSTRUCTION`, the pick rule that tells the model to
-take a next step on an open goal or retire a finished one, and not to take up a
-retired goal again without something new. The instruction goes on every beat.
-The retired block follows the funnel's only-what's-new rule (#716): full on the
-first beat and again after the beat channel compacts (the plugin's own
-`on_compaction` resets its state, since a summary may not keep structured data),
-otherwise only records not yet sent, and omitted when there are none.
-`goals.heartbeat_retired_limit` and `goals.heartbeat_instruction` (the
+returns two things: the goals list above (every beat, in full within its
+cap), and `GOALS_INSTRUCTION`, the pick rule that tells the model to resume
+an in-progress goal or advance the first listed one, to retire a finished
+goal, not to take up a retired goal again without something new. Nothing off
+the beat is mentioned there at all (owner ruling, 2026-11-19): retired, blocked and
+waiting goals do not reach the beat (owner spec, 2026-11-19): a beat acts on
+what it can advance, and the board keeps the rest. The instruction goes on
+every beat.
+`goals.heartbeat_limit` and `goals.heartbeat_instruction` (the
 latter resolved like `heartbeat.prompt`) are read here; a bad limit fails this
-plugin's startup. They replace `heartbeat.retired_goal_limit` and
-`heartbeat.goals_instruction`, which still work for one release, log a
-WARNING naming the new key, and fail startup when set beside their new key.
+plugin's startup. `heartbeat.goals_instruction` still works for one
+release, logs a WARNING naming the new key, and fails startup when set beside
+it. `goals.heartbeat_limit` never had a `heartbeat.*` spelling.
+
+A goal's `retired_at`, not its `status`, is what marks it off the board:
+every query and this plugin's list filter on `retired_at`. (`retire_goal`
+does not yet set `status='retired'` on the row it retires - a known drift,
+tracked separately; the beat is immune because it filters on `retired_at`
+before `status`.)
 
 **Without this plugin:** the goal tools, the beat's goals list and the `goals`
 table are absent. Goals already in an existing database stay there unread.
@@ -2237,7 +2249,7 @@ calls `on_notify` on `internal:heartbeat` with `source="heartbeat"` and
 memories under `memory.heartbeat_limit` (default 5), framed as the agent's own summaries and as data, oldest first: all of
 them on the first beat, then only those not yet sent (none new means no
 section). Goals' (see [GoalsPlugin](#goalsplugin-packagescorvidae-cognitioncorvidae_cognitiongoalspy)), `trylast`, is the last
-section: the open goals list, its retired conclusions, then its pick rule, directly before the prompt, which ends the beat. With neither (memory or goals disabled, say), a beat is the bare prompt; the default prompt is plugin-neutral ("Review the sections above, if there are any, ...") so it reads true either way. Nothing
+section: the capped goals list (open and in-progress only), then its pick rule, directly before the prompt, which ends the beat. With neither (memory or goals disabled, say), a beat is the bare prompt; the default prompt is plugin-neutral ("Review the sections above, if there are any, ...") so it reads true either way. Nothing
 adds a "nothing new" line. The memory and goals state is committed when the hook
 runs, so a beat that the quiet re-check then skips doesn't resend its items.
 `prompts/heartbeat.md` shows a full beat. The turn then runs the

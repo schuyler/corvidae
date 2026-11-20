@@ -64,7 +64,7 @@ def read_count(
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(
             f"{key}: got {value!r}; expected a whole number of {noun}, "
-            "0 or more (0 reviews none) — check agent.yaml, "
+            "0 or more (0 means none) — check agent.yaml, "
             f"or remove the key for the default of {default}"
         )
     return value
