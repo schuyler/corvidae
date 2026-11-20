@@ -975,7 +975,9 @@ def _segment_run(
             m = view[k]
             add = toks[k]
             # A call below the segment's start whose results are own rows
-            # counts as an own row: the fit keeps the call and results together.
+            # counts as an own row: the fit keeps the call and results together
+            # (a late result may still be split from its call; its accounting is
+            # left conservative, #1046).
             ctx = None
             if m.get("role") == "tool" and call_at.get(m.get("tool_call_id"), start) < start:
                 ctx = call_at[m["tool_call_id"]]
