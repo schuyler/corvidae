@@ -31,7 +31,9 @@ which `tests/test_goals_notify/` imports, and the `vision` extra
 (`packages/corvidae-core-periphery`: the `limits` plugin), which
 `tests/test_core_periphery/` imports, and the `planning` extra
 (`packages/corvidae-planning`: the planning critique lens), which
-`tests/test_planning/` imports; without `vision` the vision tests skip, so the
+`tests/test_planning/` imports, and the `alignment` extra
+(`packages/corvidae-alignment`: the Grice alignment critique lens), which
+`tests/test_alignment/` imports; without `vision` the vision tests skip, so the
 kernel suite collects that directory rather than ignoring it, which keeps the skip tested. The
 `cognition` extra includes `sqlite-vec` through the distribution's `vec`
 sub-extra; leave it out to exercise the FTS5-only path (`docs/cognition.md`),

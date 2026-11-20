@@ -54,7 +54,7 @@ jobs:
                                  "webhook_notify", "context_panel", "corvidae_timepiece",
                                  "corvidae_inotify", "emoji", "outbound_cap", "corvidae_core_periphery",
                                  "github_webhook", "goals_notify", "corvidae_vision",
-                                 "corvidae_planning")
+                                 "corvidae_planning", "corvidae_alignment")
                      if importlib.util.find_spec(m) is not None]
           assert not present, f"kernel install has optional packages: {present}"
           import corvidae.channels.discord  # must import without its SDK

@@ -44,8 +44,9 @@ Rules:
   are not violations.
 - One objection per violated maxim (max 4).
 - If no maxim is clearly violated, return an empty objections list.
-- The "claim" is the maxim name and what was violated. The "objection"
-  is a one-sentence rationale."""
+- The "claim" is the maxim name and a quote of the offending
+  passage from the reply.
+- The "objection" is a one-sentence rationale."""
 
 
 class AlignmentLensPlugin(CorvidaePlugin):

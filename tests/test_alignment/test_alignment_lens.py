@@ -51,18 +51,16 @@ class TestGriceLens:
 
     async def test_brief_uses_critiques_objection_format(self):
         """Critique appends its objections tail and parses only objections,
-        so the brief must put the maxim and violation in the claim and must
-        not ask for a reply shape of its own."""
+        so the brief must put the maxim and a quote of the offending passage
+        in the claim (#914) and must not ask for a reply shape of its own."""
         [lens] = await _contributed(AlignmentLensPlugin())
         prompt = lens.fork_prompt
         assert (
-            'The "claim" is the maxim name and what was violated.'
+            'The "claim" is the maxim name and a quote of the offending\n'
+            "  passage from the reply."
             in prompt
         )
-        assert (
-            'The "objection"\n  is a one-sentence rationale.'
-            in prompt
-        )
+        assert '- The "objection" is a one-sentence rationale.' in prompt
         # No custom reply format (no JSON schema, no specific keys beyond
         # claim/objection)
         assert "json" not in prompt.lower()
