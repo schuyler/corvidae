@@ -109,7 +109,8 @@ def test_requires_existing_db(tmp_path):
 
 
 def test_apply_does_not_create_a_missing_db(tmp_path):
-    """sqlite3.connect() would happily create an empty file at a typo'd path."""
+    """The group's --db check fires first ("Database not found"); repair-statuses
+    must not reintroduce the sqlite3.connect() habit that creates a file."""
     missing = tmp_path / "session.db"  # the classic typo of sessions.db
     result = CliRunner().invoke(
         goals_command, ["--db", str(missing), "repair-statuses", "--apply"],

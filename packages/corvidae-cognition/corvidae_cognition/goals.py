@@ -669,13 +669,6 @@ def _repair_cmd(ctx, do_apply):
     db_path = ctx.obj["db_path"]
 
     def _run():
-        # Never hand sqlite3 the chance to create an empty database at a
-        # typo'd path: an operator repair must point at the daemon's own file.
-        if not Path(db_path).exists():
-            raise click.ClickException(
-                f"No database at {db_path} — pass the session DB the daemon "
-                "uses; repair-statuses never creates one"
-            )
         # isolation_level=None: the transaction is opened explicitly below, so
         # the write lock is held across update -> verify -> commit instead of
         # being acquired lazily in the middle of the repair. Counts for the
