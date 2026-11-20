@@ -2081,6 +2081,31 @@ Two things are new.
   review item for plugin authors, not a mechanism. Provenance and
   proactivity don't go through the hook.
 
+### 28. A config edit can route an installed distribution into a core slot (#1107)
+
+`plugins.replace` (`{slot: target}`) makes any installed entry-point plugin
+fill a bundled plugin's slot, including `agent`, `persistence` and `tools`,
+which see every message, every stored row and every tool call. Whoever can
+edit `agent.yaml` (or write it through a tool that edits config) can
+therefore put an installed distribution in front of all of that. This is no
+new reach for code, because the code was already installed and trusted
+(principle 9); it is a new way to select it.
+
+- **Import paths are refused.** A value names an installed entry point,
+  never `module:Class`, so a config edit cannot load code that was never
+  installed. An unknown name stops startup with a `Config error` listing
+  the installed names.
+- **The target must subclass the bundled class,** which keeps a wrong-shaped
+  object out of the slot but does not constrain what a subclass does.
+- **Kernel objects are not replaceable.** `registry`, `clock`, `idle` and
+  `spill` are registered by hand and a slot naming one stops startup.
+- **A failed replacement falls back to the bundled plugin** at `ERROR`, so
+  the daemon still boots; the `"plugins loaded"` line, the restart boot
+  notice and the restart pre-flight all report it.
+- **Restart-only.** A running daemon logs the restart-only warning for an
+  edit and does not swap. Review `plugins.replace` like `plugins.disabled`
+  (finding 2): both change which code guards the agent.
+
 ## Privilege separation
 
 There isn't any. Transports, the LLM loop, tool execution, the SQLite

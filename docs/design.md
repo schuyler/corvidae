@@ -5089,11 +5089,13 @@ fixed hand-written order:
    the `NotificationSpill` as `"spill"`
    (`self.pm.register(..., name=...)` in `Runtime.start()`).
 2. Every other plugin loads from the `corvidae` setuptools entry-point
-   group: `self.pm.load_setuptools_entrypoints("corvidae")`
-   (`runtime.py`), reading `[project.entry-points.corvidae]` in
-   `pyproject.toml`. Names listed in `plugins.disabled` are blocked
-   via `pm.set_blocked(name)` before this call, so disabled plugins are
-   never instantiated.
+   group through `corvidae/plugin_loader.py`, reading
+   `[project.entry-points.corvidae]` in `pyproject.toml`.
+   `parse_plugins_section` validates `plugins:` (unknown keys stop startup),
+   `plan_plugins` drops `plugins.disabled` names and gives each
+   `plugins.replace` target its slot's name, and `register_planned` loads
+   and registers each planned entry. A disabled plugin is never imported or
+   instantiated.
 
 The kernel's entry points (`[project.entry-points.corvidae]` in the root
 `pyproject.toml`): `persistence`, `jsonl_log`, `shell_tools`, `file_tools`,
@@ -5105,10 +5107,39 @@ The kernel's entry points (`[project.entry-points.corvidae]` in the root
 `funnel`, `outcome_log`, `appraisal`, `critique`, `goals` and `silence` from
 `packages/corvidae-cognition/pyproject.toml`.
 
-`Runtime.start()` loads them with pluggy's `load_setuptools_entrypoints`,
-which does not catch errors: an entry point that fails to import stops
-startup. That is why a transport with an optional SDK (ACP, Discord)
-imports it lazily rather than at module load.
+`register_planned` imports and instantiates each entry point inside a
+catch. An entry point that fails to import or construct is skipped: one
+`ERROR` (with traceback) names the entry point, the exception type and the
+remedy, the name goes in `LoadReport.skipped`, and startup continues. A
+skipped plugin that others hard-depend on still stops startup at
+`validate_dependencies`. A transport with an optional SDK (ACP, Discord)
+still imports it lazily, so the plugin loads without the SDK. An entry
+point that resolves to a non-callable object registers as it is, as pluggy
+does. Pluggy's own registration errors are not load failures and propagate.
+
+A `plugins.replace` entry (`slot: target`) loads the target under the slot's
+name. The bundled class is loaded first for the subclass check; a target
+that is not a subclass raises `ValueError`, which `Runtime.start()` turns
+into a `Config error` line and `SystemExit(1)`, as it does for every error
+`plan_plugins` raises (unknown or kernel slot, a slot or target also in
+`disabled`, a plugin replacing itself, a chain, one target in two slots).
+If the target fails to import or construct, the bundled class is
+instantiated for the slot, one `ERROR` names the slot, target, exception
+type and remedy, and the slot is recorded in `LoadReport.fallbacks`. If the
+bundled plugin fails as well, one `ERROR` names both and the slot lands in
+`skipped`. The target's own entry point is never registered separately.
+
+`register_planned` returns a `LoadReport` (`replaced`, `fallbacks`,
+`skipped`), kept as `Runtime.load_report` and handed to plugins as the
+reserved config key `_plugin_load`, set before `on_init` and, like
+`_base_dir`, left out of the reload diff. corvidae-restart reads it in
+`on_init`: its boot notice adds `Plugins replaced: llm → my_llm` and
+`Plugin fallbacks: my_llm failed, bundled llm used`, and its pre-flight
+exits 1 with a `preflight:` line when `skipped` or `fallbacks` is
+non-empty, so a restart that would boot a different plugin set than the
+config names is refused. `plugins.replace` is restart-only: no plugin
+claims `plugins` in `reloadable_keys`, so `ConfigWatcherPlugin` logs the
+restart-only warning for a change.
 
 Entry-point loading does not guarantee a meaningful cross-plugin order;
 plugins that need another plugin's state resolve it lazily via
@@ -5117,16 +5148,16 @@ sequence.
 
 Immediately after entry points load, `Runtime.start()` logs `"plugins
 loaded"` with `loaded` (the sorted names `pm.list_name_plugin()` returns
-with a plugin object; pluggy keeps each blocked name as `(name, None)`, and
-those are left out) and `blocked` (the configured `plugins.disabled` list, verbatim
-— not narrowed to names that matched a real plugin). A disable entry that
+with a plugin object), `blocked` (the configured `plugins.disabled` list,
+verbatim — not narrowed to names that matched a real plugin), `replaced`
+(slot to target that loaded) and `fallbacks` (slot to the target that
+failed). A disable entry that
 names no plugin (a typo, a retired name, a plugin whose distribution is
 not installed) also gets one `WARNING` per distinct name, naming
 `plugins.disabled`, the value, and the installed entry-point names
 (`_warn_unknown_disabled`). A name counts as known when it is a
-`corvidae` entry point of any installed distribution or was registered
-directly before step 7b; that snapshot is taken before blocking, because
-`set_blocked` unregisters a plugin already registered under the name. Only
+`corvidae` entry point of any installed distribution or one of the kernel
+objects registered directly before step 7b. Only
 entry-point names are offered as choices. It is not an error and does not
 stop the daemon.
 
