@@ -1591,8 +1591,7 @@ With none, including when every goal is retired or only blocked and waiting
 remain, it reads `No open goals as of … (this replaces any earlier goals
 list).` Blocked, waiting and retired goals are not named in that line (owner
 ruling, 2026-11-19): the beat has nothing to do with them, so it does not
-even count them. With none at all, including when every goal is
-retired, `No open goals as of … (this replaces any earlier goals list).` A database with no goal rows
+even count them. A database with no goal rows
 at all adds no list. The timestamp is the latest `updated_at` over all
 rows, retired ones included, not the current time, so the text changes only
 when a goal does. The supersession clause is what lets an older beat still
@@ -1667,9 +1666,9 @@ what it can advance, and the board keeps the rest. The instruction goes on
 every beat.
 `goals.heartbeat_limit` and `goals.heartbeat_instruction` (the
 latter resolved like `heartbeat.prompt`) are read here; a bad limit fails this
-plugin's startup. `heartbeat.goal_limit` and
-`heartbeat.goals_instruction` still work for one release, log a
-WARNING naming the new key, and fail startup when set beside their new key.
+plugin's startup. `heartbeat.goals_instruction` still works for one
+release, logs a WARNING naming the new key, and fails startup when set beside
+it. `goals.heartbeat_limit` never had a `heartbeat.*` spelling.
 
 A goal's `retired_at`, not its `status`, is what marks it off the board:
 every query and this plugin's list filter on `retired_at`. (`retire_goal`
