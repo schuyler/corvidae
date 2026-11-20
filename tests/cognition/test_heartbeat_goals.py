@@ -270,8 +270,11 @@ async def test_beat_lists_only_the_five_frontmost_pursuable(make_env):
 
     await env.clock.advance(AFTER)
     text = env.agent.calls[0]["text"]
+    prev = -1
     for name in ("one", "two", "three", "four", "five"):
-        assert f"Task {name}" in text
+        idx = text.index(f"Task {name}")
+        assert idx > prev, f"Task {name} out of queue order"  # frontmost = order, not just membership
+        prev = idx
     assert "Task six" not in text
     assert "Task seven" not in text
     assert "(+2 more" in text

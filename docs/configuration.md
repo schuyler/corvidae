@@ -1271,7 +1271,7 @@ Requires the cross-channel-send extra (`--extra cross-channel-send` on your `uv 
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `goals.heartbeat_limit` | integer | `5` | How many of the frontmost open or in-progress goals the goals plugin puts in a beat; `0` shows none (the beat still names how many it left out). Blocked, waiting and retired goals never count against the cap. A negative, fractional, boolean or string value fails startup with a `ValueError` naming the key, the value and what is accepted. Read at startup only. |
+| `goals.heartbeat_limit` | integer | `5` | How many of the frontmost open or in-progress goals the goals plugin puts in a beat; `0` shows none (the beat still names how many it left out). Blocked, waiting and retired goals never count against the cap and are not listed on the beat at all. A negative, fractional, boolean or string value fails startup with a `ValueError` naming the key, the value and what is accepted. Read at startup only. |
 | `goals.heartbeat_instruction` | string / file / list | built-in | The goals plugin's pick rule, the last section of the beat (resume an in-progress goal, else advance the first that is neither blocked nor waiting; retire what is done). Same resolution as `heartbeat.prompt`. `prompts/heartbeat-goals.md` is the documented copy. Replaces `heartbeat.goals_instruction`. Read at startup only. |
 
 ---
