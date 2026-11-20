@@ -40,6 +40,22 @@ SLOW_SERVER_PORT = 8931
 # ~3s interleaved answer leaves a >3x margin before the fetch is served.
 SLOW_SERVER_DELAY_S = 13
 SLOW_SERVER_TOKEN = "TOKEN-EELGRASS-71"
+# result_turn probe (#346): the slow server's second path, so this probe's
+# request/serve times never collide with interleave's, and its channel.
+SLOW_SERVER_PATH_RESULT_TURN = "/slow-r"
+RESULT_TURN_CHANNEL = "#p-resultturn"
+# Seconds to wait, after the tool result row lands, for the agent's reply to
+# it. Silence is an allowed outcome (the agent may choose not to report), so
+# this bounds the wait rather than requiring a reply.
+RESULT_TURN_REPLY_WAIT_S = 60
+# A reply that opens like a new conversation: a greeting word at the very
+# start, or an offer of help anywhere in it ("Hi there! What can I help you
+# with today?").
+GREETING_RE = re.compile(
+    r"^\W*(hi|hello|hey|howdy|greetings|good\s+(morning|afternoon|evening))\b"
+    r"|\b(what|how)\s+(can|may)\s+i\s+(help|assist)\b",
+    re.IGNORECASE,
+)
 MAX_FILLERS = 12
 
 # burst probe (#398). The slow turn is a long single-line generation (a slow
@@ -420,7 +436,7 @@ class ProbeResult:
 
 class _SlowHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (stdlib method name)
-        if self.path == "/slow":
+        if self.path in ("/slow", SLOW_SERVER_PATH_RESULT_TURN):
             self.server.request_times.append(time.time())
             time.sleep(SLOW_SERVER_DELAY_S)
             self.server.serve_times.append(time.time())
@@ -818,6 +834,74 @@ def tool_messages_since(db_path: Path, channel_id: str, since_ts: float) -> int:
     )[0][0]
 
 
+def message_rows_since(db_path: Path, channel_id: str, since_ts: float) -> list[tuple[int, dict]]:
+    """(id, parsed message) for every message_log row on the channel, oldest first.
+
+    Rows whose JSON does not parse are skipped, not raised on: the probe only
+    needs the role/content ones.
+    """
+    out: list[tuple[int, dict]] = []
+    for row_id, raw in _query(
+        db_path,
+        "SELECT id, message FROM message_log WHERE channel_id = ? AND timestamp >= ? ORDER BY id",
+        (channel_id, since_ts),
+    ):
+        try:
+            msg = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(msg, dict):
+            out.append((row_id, msg))
+    return out
+
+
+def result_turn_verdict(
+    rows: list[tuple[int, dict]], token: str
+) -> tuple[bool | None, str]:
+    """Judge the result turn from message_log rows. True pass, False fail, None inconclusive.
+
+    Inconclusive unless the sequence really interleaved: an assistant row
+    answering 17+25 (contains 42) must precede the tool row carrying `token`.
+    Then every assistant row after the tool row with text content must not
+    open like a new conversation (GREETING_RE). No such row is a pass: staying
+    silent is the agent's own call.
+    """
+    answer_id = next(
+        (
+            i for i, m in rows
+            if m.get("role") == "assistant" and re.search(r"\b42\b", str(m.get("content") or ""))
+        ),
+        None,
+    )
+    tool_id = next(
+        (i for i, m in rows if m.get("role") == "tool" and token in str(m.get("content") or "")),
+        None,
+    )
+    if tool_id is None:
+        return None, f"no tool row carrying {token} in message_log"
+    if answer_id is None:
+        return None, "no assistant row answering 17+25 in message_log"
+    if answer_id > tool_id:
+        return None, (
+            f"tool row (id {tool_id}) landed before the 42 answer (id {answer_id}); "
+            "the sequence did not interleave"
+        )
+    replies = [
+        (i, str(m.get("content")).strip())
+        for i, m in rows
+        if i > tool_id and m.get("role") == "assistant" and str(m.get("content") or "").strip()
+    ]
+    if not replies:
+        return True, f"interleaved (42 answer id {answer_id} < tool row id {tool_id}); agent stayed silent on the result"
+    for i, text in replies:
+        if GREETING_RE.search(text):
+            return False, f"result-turn reply (row {i}) reads as a new conversation: {text[:160]!r}"
+    return True, (
+        f"interleaved (42 answer id {answer_id} < tool row id {tool_id}); "
+        f"{len(replies)} reply row(s) after the result, none a greeting; first: {replies[0][1][:120]!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Run context and probes
 # ---------------------------------------------------------------------------
@@ -1022,6 +1106,90 @@ async def probe_interleave(ctx: RunContext) -> ProbeResult:
         f"interleaved={passed}; tool messages since probe start: {tool_msgs}"
     )
     return ProbeResult("interleave", passed, details, duration, _transcript(ctx, channel, sent))
+
+
+async def probe_result_turn(ctx: RunContext) -> ProbeResult:
+    """#346: the turn that processes a queued tool result is not a fresh greeting.
+
+    Replays the incident: a slow tool call is in flight, the user asks an
+    unrelated question, the agent answers it, then the tool result is
+    processed. Sending M2 mid-flight is this probe's subject, so (like
+    interleave) it calls _send directly.
+    """
+    channel = RESULT_TURN_CHANNEL
+    if not ctx.channel_ready.get(channel):
+        return _skip_result("result_turn", channel)
+    sent: list[tuple[float, str]] = []
+    t0 = time.monotonic()
+    ts0 = time.time()
+    channel_id = f"irc:{channel}"
+    # The server's lists are shared across probes; count from here.
+    base_requests = len(ctx.httpd.request_times)
+
+    # M1: start the slow background tool call.
+    await _send(
+        ctx, channel,
+        f"Fetch http://127.0.0.1:{SLOW_SERVER_PORT}{SLOW_SERVER_PATH_RESULT_TURN} "
+        "with web_fetch and tell me the token.",
+        sent,
+    )
+    deadline = time.monotonic() + TURN_TIMEOUT_S
+    while len(ctx.httpd.request_times) <= base_requests:
+        if time.monotonic() >= deadline:
+            return ProbeResult(
+                "result_turn", False, "M1 never triggered web_fetch", time.monotonic() - t0,
+                _transcript(ctx, channel, sent),
+            )
+        await asyncio.sleep(0.5)
+
+    # M2: an unrelated question while the fetch is in flight.
+    await _send(ctx, channel, "What is 17+25? Reply with just the number.", sent)
+    forty_two_re = re.compile(r"\b42\b")
+    if not await ctx.client.wait_until(
+        channel,
+        lambda msgs: any(m.nick == ctx.bot_nick and forty_two_re.search(m.text) for m in msgs),
+        TURN_TIMEOUT_S,
+    ):
+        return ProbeResult(
+            "result_turn", False, "no reply containing 42 within timeout", time.monotonic() - t0,
+            _transcript(ctx, channel, sent),
+        )
+
+    # Wait for the tool result row, then for the agent's reply (or silence).
+    def tool_row_landed() -> bool:
+        return any(
+            m.get("role") == "tool" and SLOW_SERVER_TOKEN in str(m.get("content") or "")
+            for _i, m in message_rows_since(ctx.session_db, channel_id, ts0)
+        )
+
+    deadline = time.monotonic() + TOOL_TURN_TIMEOUT_S
+    while not tool_row_landed():
+        if time.monotonic() >= deadline:
+            return ProbeResult(
+                "result_turn", False, f"no tool row carrying {SLOW_SERVER_TOKEN} within timeout",
+                time.monotonic() - t0, _transcript(ctx, channel, sent),
+            )
+        await asyncio.sleep(0.5)
+
+    # Poll until an assistant row follows the tool row, or the wait elapses
+    # (silence is allowed).
+    reply_deadline = time.monotonic() + RESULT_TURN_REPLY_WAIT_S
+    while time.monotonic() < reply_deadline:
+        rows = message_rows_since(ctx.session_db, channel_id, ts0)
+        tool_id = next(
+            i for i, m in rows if m.get("role") == "tool" and SLOW_SERVER_TOKEN in str(m.get("content") or "")
+        )
+        if any(i > tool_id and m.get("role") == "assistant" and str(m.get("content") or "").strip()
+               for i, m in rows):
+            break
+        await asyncio.sleep(1.0)
+
+    verdict, detail = result_turn_verdict(message_rows_since(ctx.session_db, channel_id, ts0), SLOW_SERVER_TOKEN)
+    duration = time.monotonic() - t0
+    if verdict is None:
+        # The probe did not exercise the condition, so it reports neither pass nor fail.
+        return ProbeResult("result_turn", False, f"INCONCLUSIVE: {detail}", duration, _transcript(ctx, channel, sent))
+    return ProbeResult("result_turn", verdict, detail, duration, _transcript(ctx, channel, sent))
 
 
 async def probe_compaction(ctx: RunContext) -> ProbeResult:
@@ -1548,6 +1716,7 @@ PROBES: list[Callable[[RunContext], "asyncio.Future[ProbeResult]"]] = [
     probe_smoke_echo,
     probe_tool_loop,
     probe_interleave,
+    probe_result_turn,
     probe_burst,
     probe_compaction,
     probe_restart_recovery,
@@ -1557,7 +1726,7 @@ PROBES: list[Callable[[RunContext], "asyncio.Future[ProbeResult]"]] = [
 ]
 
 ALL_CHANNELS = [
-    "#p-smoke", "#p-toolloop", "#p-interleave", BURST_CHANNEL, "#p-compact", "#p-restart", "#p-slots",
+    "#p-smoke", "#p-toolloop", "#p-interleave", RESULT_TURN_CHANNEL, BURST_CHANNEL, "#p-compact", "#p-restart", "#p-slots",
     REMIND_CHANNEL, REMIND_RESTART_CHANNEL,
 ]
 
