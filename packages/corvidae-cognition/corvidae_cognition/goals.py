@@ -30,8 +30,7 @@ import click
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.tool import Tool, tool_to_schema
 from corvidae_cognition.config_keys import read_count, read_prompt
-from corvidae_cognition.heartbeat import HEARTBEAT_CHANNEL
-from corvidae_cognition.memory import MemoryPlugin, _format_age
+from corvidae_cognition.memory import MemoryPlugin
 
 logger = logging.getLogger("corvidae.goals")
 
@@ -92,8 +91,8 @@ DEFAULT_BEAT_GOAL_LIMIT = 5
 #: The pick rule goals adds to every beat (PRD §3.7 Goals and Heartbeat).
 #: prompts/heartbeat-goals.md is the documented copy.
 GOALS_INSTRUCTION = (
-    "Goals are your work queue, and the beat shows the front of it: up to "
-    "five open or in-progress goals, front of the queue first. Work the "
+    "Goals are your work queue, and the beat shows the front of it: the "
+    "frontmost open or in-progress goals, front of the queue first. Work the "
     "front: if a goal is marked in-progress, resume it; otherwise take the "
     "first listed goal and advance it. If a goal is done, retire it. "
     "Don't take up again a goal you retired unless something new has "
@@ -577,7 +576,7 @@ class GoalsPlugin(CorvidaePlugin):
         else:
             lines = [
                 f"No open goals as of {as_of} "
-                "(this list replaces any earlier goals list)."
+                "(this replaces any earlier goals list)."
             ]
         return "\n".join(lines)
 

@@ -165,8 +165,8 @@ def test_heartbeat_goals_copy_is_the_goals_instruction():
 def test_heartbeat_doc_example_is_what_a_beat_sends():
     """#860, #1084: the framing example in prompts/heartbeat.md is the beat's
     own text for the sample it shows: the memory section, goals' open list,
-    retired block and instruction, then the prompt last, joined by blank
-    lines (#1094)."""
+    and instruction, then the prompt last, joined by blank lines (#1094;
+    the retired block left the beat 2026-11-19)."""
     import asyncio
 
     from corvidae_cognition.goals import GoalsPlugin
@@ -174,10 +174,6 @@ def test_heartbeat_doc_example_is_what_a_beat_sends():
     from corvidae_cognition.memory import memory_section
 
     goals = GoalsPlugin()
-
-    async def retired_goals(limit):
-        return [{"id": 10, "age_seconds": 2 * 86400,
-                 "summary": 'I retired my goal "<text>" (set <date>). <conclusion>'}]
 
     async def goals_list():
         return (
@@ -187,7 +183,6 @@ def test_heartbeat_doc_example_is_what_a_beat_sends():
             "#3 Finish the migration notes"
         )
 
-    goals.retired_goals = retired_goals
     goals._goals_list_text = goals_list
     memories = memory_section(
         [{"age_seconds": 3 * 3600, "channel_id": "irc:#lex", "summary": "<summary>"}],

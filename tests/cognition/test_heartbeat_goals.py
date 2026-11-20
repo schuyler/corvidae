@@ -157,11 +157,10 @@ async def make_env(tmp_path, monkeypatch):
 
     yield make
 
-    for close in reversed(cleanups):
-        try:
-            await close()
-        except Exception:
-            pass
+    for cleanup in reversed(cleanups):
+        result = cleanup()
+        if hasattr(result, "__await__"):
+            await result
 
 
 async def add_message(env, channel_id: str, content: str) -> None:
@@ -278,6 +277,39 @@ async def test_beat_lists_only_the_five_frontmost_pursuable(make_env):
     assert "(+2 more" in text
 
 
+async def test_beat_honors_a_smaller_heartbeat_limit(make_env, monkeypatch):
+    """The cap is configurable: goals.heartbeat_limit=2 shows exactly two and
+    names the other two."""
+    monkeypatch.setitem(CONFIG, "goals", {"heartbeat_limit": 2})
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    for name in ("one", "two", "three", "four"):
+        await env.tools["add_goal"](f"Task {name}", _ctx=ctx)
+
+    await env.clock.advance(AFTER)
+    text = env.agent.calls[0]["text"]
+    assert "Task one" in text and "Task two" in text
+    assert "Task three" not in text and "Task four" not in text
+    assert "(+2 more" in text
+
+
+async def test_beat_with_limit_zero_shows_no_goals_but_names_them(make_env, monkeypatch):
+    """goals.heartbeat_limit=0: the list header survives, no goals show, and
+    the count line carries the board's size."""
+    monkeypatch.setitem(CONFIG, "goals", {"heartbeat_limit": 0})
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    await env.tools["add_goal"]("Task one", _ctx=ctx)
+    await env.tools["add_goal"]("Task two", _ctx=ctx)
+
+    await env.clock.advance(AFTER)
+    text = env.agent.calls[0]["text"]
+    assert "Task one" not in text and "Task two" not in text
+    idx = text.index("Open goals as of")
+    assert "(+2 more pursuable - call list_goals)" in text[idx:]
+    assert goals_mod.GOALS_INSTRUCTION in text
+
+
 async def test_blocked_goals_become_visible_as_the_board_frees_slots(make_env):
     """The cap counts pursuable goals only: with the front goal blocked, the
     sixth goal moves into the five shown slots."""
@@ -324,7 +356,10 @@ def test_goals_instruction_states_the_pick_rule():
     text = goals_mod.GOALS_INSTRUCTION
     assert "in-progress" in text
     assert "list_goals" in text
-    assert "up to five" in text
+    assert "front of the queue" in text
+    # The count belongs to the cap (goals.heartbeat_limit), not the rule:
+    # the instruction stays true whatever the limit is set to.
+    assert "five" not in text
     # A leftover fragment from an earlier wording ("... next. do it.").
     assert ". do it" not in text
 
