@@ -279,10 +279,12 @@ class ContextPanelPlugin(CorvidaePlugin):
 
         The other routes show the window as stored rows. ``build_prompt()`` is
         what the model actually receives: provenance headers and fences,
-        system rows re-roled, a tool block deferred to its last result, and a
-        placeholder for a call still pending. Fetching it on demand is the only
+        system rows re-roled, an uninterrupted tool block deferred to its last
+        result, a placeholder for a call still pending, and a late result
+        framed where it arrived (#346). Fetching it on demand is the only
         way to show it — the body is not append-mostly (a call's block moves
-        when its result arrives), so the panel's cursor cannot tail it.
+        when its last result arrives, and a placeholder is rewritten when a
+        late result lands), so the panel's cursor cannot tail it.
         """
         channel = self._channel(request)
         conv = channel.conversation if channel is not None else None

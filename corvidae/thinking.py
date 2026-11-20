@@ -31,8 +31,9 @@ def completed_exchange_end(messages: list[dict]) -> int:
     the current exchange. In window order this boundary is never later
     than the one a Qwen-family chat template computes, so with the server's
     preserve_thinking off the template drops everything stripped here. The
-    exception is a tool-call block that build_prompt moves past an
-    interleaving user message (docs/configuration.md).
+    build_prompt renders a call where it was made, so a call before this
+    boundary never renders after it (a late result renders framed where it
+    arrived, not as part of the call's block, #346).
     """
     for i in range(len(messages) - 1, -1, -1):
         if messages[i].get("role") == "user":

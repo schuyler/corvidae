@@ -283,7 +283,7 @@ design goal (PRD principle 15). This finding records its cost, and finding
 
 ### 3. Untrusted text is promoted to the `system` role
 
-Four places:
+Five places:
 
 - Funnel-admitted CONTEXT (memories distilled from channel participants,
   critique objections) is appended as `role: system` (`funnel.py`).
@@ -305,6 +305,14 @@ Four places:
   be untrusted (a `web_fetch` page, an MCP reply); an orphaned result of a
   declared tool is fenced as one (finding 6). Unlike the two above it
   is render-only: the stored row stays `role: tool`.
+- A tool result that arrives after a user or assistant message has followed
+  its call (#346) is rendered by `ContextWindow.build_prompt` as a framed
+  `role: system` message where it arrived, headed "result of the earlier
+  {name} call shown above as still running", since a `tool` message there
+  would sit apart from its call. The result can be untrusted (a
+  `web_fetch` page, an MCP reply), and it is fenced as one. Like the
+  orphan path it is render-only: the stored row stays `role: tool`.
+  `mid_conversation_system_role: user` covers it like the others.
 
 The "retrieved data, not instructions" wrapper is the right instinct. But
 message role is a stronger signal to an instruction-tuned model than a

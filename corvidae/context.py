@@ -129,9 +129,9 @@ _UNSENT_MARKER_SUBJECTS = {
     "progress": "Your progress text beginning «{excerpt}» was not shown",
     "thinking": "Your reasoning on your latest turn was not shown",
 }
-#: The progress marker quotes this much of the text: build_prompt moves a
-#: tool-calls block to its last result, so the marker renders before the
-#: block and its position alone can't say which text it means. The final
+#: The progress marker quotes this much of the text: build_prompt defers an
+#: uninterrupted tool-calls block to its last result, so the marker renders
+#: before the block and its position alone can't say which text it means. The final
 #: and thinking markers quote nothing (the final sits right above it;
 #: reasoning must not outlive reasoning_history: drop in a marker).
 _UNSENT_MARKER_EXCERPT_CHARS = 40
