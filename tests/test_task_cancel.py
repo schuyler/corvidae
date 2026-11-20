@@ -60,7 +60,14 @@ class TestTaskCancellationRecord:
         task = Task(work=long_work, channel=channel, description="doomed")
         await queue.queue.put(task)
 
-        worker = asyncio.create_task(queue.run_worker(AsyncMock()))
+        notified = asyncio.Event()
+
+        async def on_complete(t, r):
+            assert t is task
+            assert "cancel" in r.lower()
+            notified.set()
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
         await asyncio.wait_for(started.wait(), timeout=5)
         # Give the worker a beat to register the task as active.
         for _ in range(50):
@@ -71,7 +78,9 @@ class TestTaskCancellationRecord:
 
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
-        await asyncio.sleep(0)  # let detached best-effort dispatch run
+        # Detached shutdown notify is best-effort but must arrive while
+        # the loop is still running (the daemon's loop outlives workers).
+        await asyncio.wait_for(notified.wait(), timeout=2)
 
         recorded = list(queue.completed)
         assert len(recorded) == 1, (
@@ -89,6 +98,11 @@ class TestTaskCancellationRecord:
         assert len(lines) == 1, "cancelled task must get one JSONL record"
         assert lines[0]["task_id"] == task.task_id
         assert "cancel" in lines[0]["result"].lower()
+
+        # queue bookkeeping: task_done ran for the cancelled task, and it
+        # is out of _active_tasks — no phantom active work after shutdown.
+        assert task not in queue._active_tasks
+        await asyncio.wait_for(queue.queue.join(), timeout=2)
 
     async def test_worker_survives_work_cancellation(self, tmp_path: Path):
         """Work-level cancellation (the awaited work raises CancelledError
