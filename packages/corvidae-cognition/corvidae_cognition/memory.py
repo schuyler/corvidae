@@ -932,8 +932,10 @@ def _segment_run(
     ``_run_index``. Returns, per segment, the view indices of its own rows. A
     candidate segment fits when the system prompt, the instruction on its
     untrimmed view and its own rows (plus a context tool call whose results
-    open the segment) total at most the budget. A tool cycle straddling a cut
-    goes whole into the next segment; a unit that alone overflows becomes its
+    open the segment) total at most the budget. A tool cycle (a call and the results
+    before the next user/assistant row) straddling a cut goes whole into the
+    next segment; a call with a late result (#1046) is no cycle, so a
+    segment may end between them; a unit that alone overflows becomes its
     own segment. Each grow step costs O(1): the totals are kept running
     rather than re-summed (#396).
     """

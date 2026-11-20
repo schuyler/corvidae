@@ -985,7 +985,10 @@ All operations are synchronous; no database access:
   the in-memory window (in place; `message_log` is untouched), moving the
   cut forward past a straddling tool cycle (`snap_cut_forward`) unless that
   would drop the newest row, in which case the orphaned result renders as a
-  framed notification. The newest row is always kept; if it alone exceeds
+  framed notification. A late result (it arrives after the next user or
+  assistant row, `late_result_ids`, #1046) belongs to no cycle: the cut may
+  fall between its call and it, and a dropped call's kept result renders as
+  that orphan frame. The newest row is always kept; if it alone exceeds
   the budget it is truncated in memory only (#1045): `content` and
   `reasoning_content` longer than the cut get their first characters and a
   visible marker, and each tool call's string `function.arguments` longer
@@ -2403,11 +2406,14 @@ default priority) returned non-None first. The caller does not use the return va
    the window after compaction (system prompt, a 2000-token summary
    allowance, and the kept messages) stays at or below the midpoint
    between `compaction_retention` and `compaction_threshold`. Otherwise (a
-   long-running call near the head with chat interleaved behind it) move
+   long uninterrupted cycle near the head, with only system rows between
+   call and results, and a long tail behind it) move
    forward with `snap_cut_forward` to drop the cycle whole, if at least
    half the retention budget survives. Otherwise keep the walk's cut, as
    before #51. Backing up without that bound could leave compaction
-   dropping almost nothing and re-running every few messages. In-flight
+   dropping almost nothing and re-running every few messages. A call whose
+   result arrives late (after a user or assistant row, #1046) is not a
+   cycle and the cut may fall between them. In-flight
    calls have no result yet and never straddle; one dropped by compaction
    leaves its later result orphaned, as does the walk's own cut when it
    stands. `build_prompt` renders such orphans as framed notifications
@@ -2640,7 +2646,9 @@ under the same summary, which is one window. A run's view is that summary
 plus the rows reload would load under it (in id order, through the run's
 last row). A run is then cut into *segments* that each fit the channel's
 `max_context_tokens` (system prompt, the instruction and the segment's own
-rows; a tool cycle straddling a cut goes whole into the next segment, and a
+rows; a tool cycle straddling a cut goes whole into the next segment (a call
+with a late result, #1046, is no cycle: a segment may end between them and
+render the call as still running), and a
 unit that alone overflows is its own segment), so every range row lands in
 some view. Each segment's view is trimmed oldest-first with
 `ContextWindow.fit_to_budget` to the budget less the instruction's size, then

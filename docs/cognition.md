@@ -841,7 +841,7 @@ conversation. `build_catchup_segments` (shared with
 force* (the newest decodable summary dated before the row), groups rows
 under the same summary into runs, and rebuilds each run as that summary
 plus the rows reload would load under it. A run is cut into segments that
-each fit the channel's `max_context_tokens`, so a watermark that lagged
+each fit the channel's `max_context_tokens` (a tool cycle goes whole into one segment; a call whose result arrives after a later user or assistant row is no cycle, so a segment may end between them and show the call as still running, #1046), so a watermark that lagged
 across several compactions or a long unsummarized history yields several consolidations and every range row reaches some view. Each
 view is trimmed oldest-first to the budget, put under the channel's
 `reasoning_history`, headed by the channel's system prompt (identity and

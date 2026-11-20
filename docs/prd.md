@@ -664,7 +664,7 @@ Per transport:
    (default 80%), retains the most recent messages that fit
    `compaction_retention` (default 50%), and skips windows of
    `min_messages_to_compact` or fewer. The cut never straddles a tool
-   cycle: back up to keep the cycle when that still drops dialog and
+   cycle. A tool cycle is a call and the results that arrive before anyone speaks or the agent takes another turn. A result that arrives later belongs to no cycle and renders where it arrived (§3.3.5). Back up to keep the cycle when that still drops dialog and
    leaves the window at or below the threshold/retention midpoint,
    otherwise snap forward to drop the cycle whole if half the retention
    budget survives, otherwise keep the walk's cut. Only MESSAGE rows are
