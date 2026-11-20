@@ -38,6 +38,12 @@ from corvidae.hooks import (
 from corvidae.idle import IdleTracker, validate_daemon_config
 from corvidae.llm_plugin import parse_llm_config
 from corvidae.logging import configure_logging
+from corvidae.plugin_loader import (
+    LoadReport,
+    parse_plugins_section,
+    plan_plugins,
+    register_planned,
+)
 from corvidae.shutdown import (
     DEFAULT_SHUTDOWN_TIMEOUTS,
     arm_exit_watchdog,
@@ -57,9 +63,8 @@ logger = logging.getLogger(__name__)
 def check_entry_point_duplicates(group: str = "corvidae") -> None:
     """Fail loudly when two distributions claim one entry-point name (#238 R6).
 
-    pluggy's load_setuptools_entrypoints skips a name it has already
-    registered, so an install-order winner would otherwise be silent. The
-    error names the entry point, both distributions, and the remedy.
+    The loader keys entry points by name, so an install-order winner would
+    otherwise be silent. The error names the entry point, both distributions, and the remedy.
     """
     import importlib.metadata
 
@@ -99,38 +104,6 @@ def _warn_unknown_disabled(disabled: list[str], registered: set[str]) -> None:
                 "it blocks nothing. Installed plugins: %s",
                 name, ", ".join(sorted(entry_point_names)),
             )
-
-
-def disabled_plugins_from(config: dict) -> list[str]:
-    """Return ``plugins.disabled`` as a list of names, validated.
-
-    A missing or null section, or a null ``disabled``, means nothing is
-    disabled. Raises ValueError naming the key, the rejected value and the
-    accepted form for anything else, so a bare string is never iterated
-    letter by letter into a block list.
-    """
-    # A missing or null section disables nothing; it must otherwise be a mapping.
-    plugins = config.get("plugins")
-    if plugins is None:
-        return []
-    if not isinstance(plugins, dict):
-        raise ValueError(
-            f"plugins must be a mapping with a `disabled` list of plugin "
-            f"names, got {plugins!r}"
-        )
-    # A null disabled list is the same as none; anything else must be a
-    # list of names.
-    disabled = plugins.get("disabled")
-    if disabled is None:
-        return []
-    if not isinstance(disabled, list) or not all(
-        isinstance(name, str) for name in disabled
-    ):
-        raise ValueError(
-            f"plugins.disabled must be a list of plugin names (strings), "
-            f"got {disabled!r}"
-        )
-    return disabled
 
 
 def deep_merge(base: dict, overrides: dict) -> dict:
@@ -277,7 +250,8 @@ class Runtime:
             # The llm profiles, defaults and stage map: a bad block exits
             # here, before any plugin loads.
             parse_llm_config(config.get("llm"))
-            disabled_plugins = disabled_plugins_from(config)
+            plugins_cfg = parse_plugins_section(config)
+            disabled_plugins = list(plugins_cfg.disabled)
             # tools.call_timeout / tools.timeouts: reject a bad value at startup.
             parse_tool_timeouts(config.get("tools"))
             # tools.read_file_window_fraction: reject a bad value at startup.
@@ -294,16 +268,11 @@ class Runtime:
             sys.stderr.flush()
             raise SystemExit(1) from exc
 
-        # 7b. Block disabled plugins before loading entry points so they are
-        #     never instantiated. Must precede load_setuptools_entrypoints.
-        #     Snapshot the directly registered names first: set_blocked
-        #     unregisters a plugin already registered under the name, and
-        #     step 8a must still count it as a real plugin name.
-        registered_before_blocking = {
+        # 7b. Snapshot the directly registered kernel names. They are not
+        #     replaceable, and step 8a counts them as real plugin names.
+        kernel_names = frozenset(
             name for name, plugin in self.pm.list_name_plugin() if plugin is not None
-        }
-        for name in disabled_plugins:
-            self.pm.set_blocked(name)
+        )
 
         # 8. Load entry-point plugins. A duplicate name is an operator
         #    error (two distributions shipping the same plugin): one line
@@ -315,21 +284,38 @@ class Runtime:
             sys.stderr.write(f"Config error: {exc}\n")
             sys.stderr.flush()
             raise SystemExit(1) from exc
-        self.pm.load_setuptools_entrypoints("corvidae")
+        # Plan which entry points load under which names (disabled ones are
+        # left out, replacement targets take their slot), then load them. A
+        # bad plugins.replace entry is one Config error line (#1107).
+        try:
+            plan = plan_plugins(
+                list(entry_points(group="corvidae")), plugins_cfg, kernel_names
+            )
+            self.load_report: LoadReport = register_planned(self.pm, plan)
+        except ValueError as exc:
+            sys.stderr.write(f"Config error: {exc} — check {self.config_path}\n")
+            sys.stderr.flush()
+            raise SystemExit(1) from exc
+        # Reserved key so plugins (corvidae-restart) read the report in on_init.
+        config["_plugin_load"] = self.load_report
 
         # 8a. Record the effective plugin set: what actually loaded and what
         # the operator asked to disable, verbatim (a typo must still show up
         # here even though the plugin it was meant to block still loaded).
-        # pluggy keeps each blocked name as (name, None); those did not load.
         loaded_names = sorted(
             name for name, plugin in self.pm.list_name_plugin()
             if plugin is not None
         )
         logger.info(
             "plugins loaded",
-            extra={"loaded": loaded_names, "blocked": disabled_plugins},
+            extra={
+                "loaded": loaded_names,
+                "blocked": disabled_plugins,
+                "replaced": dict(self.load_report.replaced),
+                "fallbacks": dict(self.load_report.fallbacks),
+            },
         )
-        _warn_unknown_disabled(disabled_plugins, registered_before_blocking)
+        _warn_unknown_disabled(disabled_plugins, set(kernel_names))
 
         # 8b. Install the hookspecs plugins declare (#229). Every plugin is
         #     registered by now, and specs must exist before the guard
@@ -378,11 +364,13 @@ class Runtime:
             "idle" and "spill".
         7.  Validate the agent, daemon and llm sections and tools.call_timeout /
             tools.timeouts; load channel config from merged config.
-        7b. Block disabled plugins via pm.set_blocked for each name in
-            config["plugins"]["disabled"]. Must precede step 8 so blocked
-            plugins are never instantiated by the entry-point loader.
-        8.  Load entry-point plugins (corvidae group).
-        8a. Log the effective plugin set, and warn for each disabled name that names no plugin.
+        7b. Snapshot the kernel object names (not replaceable).
+        8.  Plan and load entry-point plugins (corvidae group) through
+            corvidae.plugin_loader: disabled ones are never instantiated,
+            plugins.replace targets take their slot, a plugin that fails to
+            load is skipped. Sets self.load_report and config["_plugin_load"].
+        8a. Log the effective plugin set (loaded, blocked, replaced,
+            fallbacks), and warn for each disabled name that names no plugin.
         8b. Install plugin-declared hookspecs (install_plugin_hookspecs), so
             every spec exists before the guard below and before on_init.
         8c. Run the hook arg-binding guard over the full plugin set.

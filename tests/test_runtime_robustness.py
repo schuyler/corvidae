@@ -124,7 +124,7 @@ class TestNullPluginsSection:
 
 class TestLoadedExcludesBlocked:
     async def test_blocked_names_are_not_listed_as_loaded(self, config_file, caplog):
-        # pluggy keeps a blocked name as (name, None); it is not loaded.
+        # A blocked name is never registered (or is (name, None)); it is not loaded.
         pm, _agent = _mock_pm()
         pm.list_name_plugin.return_value = [
             ("agent", MagicMock()), ("scheduler", None), ("registry", MagicMock()),
