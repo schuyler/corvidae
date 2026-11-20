@@ -10,7 +10,7 @@ requires-python = ">=3.13"
 dependencies = ["corvidae", "corvidae-cognition"]
 
 [project.entry-points.corvidae]
-corvidae-alignment = "corvidae_alignment:AlignmentLensPlugin"
+corvidae_alignment = "corvidae_alignment:AlignmentLensPlugin"
 
 [tool.uv.sources]
 corvidae = { workspace = true }

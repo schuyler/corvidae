@@ -77,14 +77,15 @@ class TestGriceLens:
 
 
 class TestEntryPoint:
-    """The entry point is registered correctly for plugin discovery."""
+    """The entry point is registered under the name `plugins.disabled`
+    matches, the one docs/design.md tells operators to list."""
 
     def test_entry_point_exists(self):
         from importlib.metadata import entry_points
         eps = entry_points(group="corvidae")
         names = [ep.name for ep in eps]
-        assert "corvidae-alignment" in names, (
-            f"corvidae-alignment entry point missing; found: {names}"
+        assert "corvidae_alignment" in names, (
+            f"corvidae_alignment entry point missing; found: {names}"
         )
-        ep = next(ep for ep in eps if ep.name == "corvidae-alignment")
+        ep = next(ep for ep in eps if ep.name == "corvidae_alignment")
         assert ep.value == "corvidae_alignment:AlignmentLensPlugin"
