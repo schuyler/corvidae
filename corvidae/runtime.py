@@ -338,8 +338,8 @@ class Runtime:
         #     another plugin's hook.
         install_plugin_hookspecs(self.pm)
 
-        # 8b'. Refuse a wrapper on a fail-soft observe hook (#1094): those run
-        #      through pm.ahook_isolated, which can't drive wrappers. After 8b
+        # 8b'. Refuse a wrapper on a fail-soft observe hook (#1094): it would
+        #      receive a failed implementation as a value (#1104). After 8b
         #      so plugin-owned hooks have their specs.
         check_fail_soft_wrappers(self.pm)
 
