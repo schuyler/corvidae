@@ -119,6 +119,9 @@ class TaskQueue:
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
         self._active_tasks: list[Task] = []
         self.completed: collections.deque[tuple[str, str]] = collections.deque(maxlen=completed_buffer)
+        # Strong refs to detached shutdown-notify coroutines (#504-2);
+        # entries are self-discarding on completion.
+        self._detached_notices: set[asyncio.Task] = set()
         # When set, every completion (success or failure) appends one JSON
         # line to this file, so results survive the in-memory deque's
         # eviction and a daemon restart. Audit side channel: a write
@@ -253,14 +256,13 @@ class TaskQueue:
                         pass
                     # Awaiting on_complete here would raise CancelledError
                     # again before delivery could complete; dispatch the
-                    # notification detached. Its durability is best-effort;
-                    # .completed + JSONL are the referent.
-                    try:
-                        asyncio.get_running_loop().call_soon(
-                            asyncio.ensure_future, on_complete(task, result)
-                        )
-                    except RuntimeError:  # loop already closed — records stand
-                        pass
+                    # notification detached. Its durability is best-effort
+                    # (the invariant's explicit exception on this path):
+                    # .completed + JSONL are the referent. The strong
+                    # reference in _detached_notices keeps the coroutine
+                    # alive to completion or loop death — never GC'd, and
+                    # the coroutine is constructed only when it will run.
+                    self._dispatch_detached(on_complete, task, result)
                     raise
                 # Work-level cancellation: fall through to the normal
                 # completion tail below (append -> persist -> on_complete),
@@ -293,6 +295,28 @@ class TaskQueue:
             # option if that tradeoff changes.
             self._persist_result(task, result)
             await on_complete(task, result)
+
+    def _dispatch_detached(
+        self,
+        on_complete: Callable[[Task, str], Awaitable[None]],
+        task: Task,
+        result: str,
+    ) -> None:
+        """Schedule a completion notification without awaiting it (#504-2).
+
+        Used only on the shutdown-cancel path, where the current task is
+        cancelled and any await would re-raise before delivery. The
+        returned Task is held in _detached_notices (strong reference, so
+        it is never GC'd mid-flight) and discarded when done. If the loop
+        is already closing, the notification is dropped — the durable
+        records were written before this call.
+        """
+        try:
+            fut = asyncio.ensure_future(on_complete(task, result))
+        except RuntimeError:  # loop closing — records already durable
+            return
+        self._detached_notices.add(fut)
+        fut.add_done_callback(self._detached_notices.discard)
 
     def _persist_result(self, task: Task, result: str) -> None:
         """Append one JSONL record for a completed task (sync — see call site).
