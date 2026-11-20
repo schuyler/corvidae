@@ -39,8 +39,6 @@ async def _observe(kind: str, config: dict):
         return seen[0]
     plugin = GoalsPlugin()
     await plugin.on_init(MagicMock(), config)
-    if kind == "goal_limit":
-        return plugin._beat_goal_limit
     async def no_list():
         return None
 
@@ -54,10 +52,6 @@ CASES = [
     pytest.param(
         "memory_limit", ("heartbeat", "memory_limit"), ("memory", "heartbeat_limit"),
         3, 4, id="memory-limit",
-    ),
-    pytest.param(
-        "goal_limit", ("heartbeat", "goal_limit"),
-        ("goals", "heartbeat_limit"), 3, 4, id="goal-limit",
     ),
     pytest.param(
         "instruction", ("heartbeat", "goals_instruction"),

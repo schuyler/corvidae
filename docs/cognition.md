@@ -38,7 +38,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
 | `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that contains `NO_REPLY` goes unsent, and each decline is recorded in `exchange_log`. It adds the instruction to the system prompt of chat channels, and with `silence.mode: tool` or `both` an `end_turn` tool |
-| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn is `heartbeat.prompt` plus the sections plugins add ahead of it through `on_heartbeat_collect_prompts` (memory's recent records, goals' retired conclusions and pick rule), and acts only if something warrants it. Asleep unless configured |
+| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn is `heartbeat.prompt` plus the sections plugins add ahead of it through `on_heartbeat_collect_prompts` (memory's recent records, a capped goals list and pick rule), and acts only if something warrants it. Asleep unless configured |
 | `SkillsPlugin` | `skills` | Scans a skills directory for `SKILL.md` files; contributes an index (name + description) to the system prompt via `transform_system_prompt` at conversation start and compaction; provides a `use_skill` tool that loads a skill's full text on demand |
 
 Entry-point names are the same as when these plugins lived in the kernel, so
@@ -1577,7 +1577,7 @@ goals stay on the board (`list_goals`) but off the beat; a final line names
 any pursuable goals the cap left out. With pursuable goals it reads:
 
 ```
-Open goals as of 2026-10-30 14:02:11 UTC (this list replaces any earlier goals list):
+Open or in-progress goals as of 2026-10-30 14:02:11 UTC (this list replaces any earlier goals list):
 #5 [in-progress] Learn what Schuyler wants from the wiki
 #3 Finish the migration notes
 (+2 more pursuable - call list_goals)
@@ -1669,11 +1669,11 @@ plugin's startup. `heartbeat.goal_limit` and
 `heartbeat.goals_instruction` still work for one release, log a
 WARNING naming the new key, and fail startup when set beside their new key.
 
-**Schema heal:** a goal's `retired_at` is the truth and `status` follows it.
-The status column was added by migration with an `'open'` default, so rows
-retired before it existed still said `open`; each fresh schema pass heals
-those rows to `status='retired'` and logs the count. Queries (and this
-plugin's list) filter on `retired_at`, not `status`.
+A goal's `retired_at`, not its `status`, is what marks it off the board:
+every query and this plugin's list filter on `retired_at`. (`retire_goal`
+does not yet set `status='retired'` on the row it retires - a known drift,
+tracked separately; the beat is immune because it filters on `retired_at`
+before `status`.)
 
 **Without this plugin:** the goal tools, the beat's goals list and the `goals`
 table are absent. Goals already in an existing database stay there unread.
@@ -2248,7 +2248,7 @@ calls `on_notify` on `internal:heartbeat` with `source="heartbeat"` and
 memories under `memory.heartbeat_limit` (default 5), framed as the agent's own summaries and as data, oldest first: all of
 them on the first beat, then only those not yet sent (none new means no
 section). Goals' (see [GoalsPlugin](#goalsplugin-packagescorvidae-cognitioncorvidae_cognitiongoalspy)), `trylast`, is the last
-section: the open goals list, its retired conclusions, then its pick rule, directly before the prompt, which ends the beat. With neither (memory or goals disabled, say), a beat is the bare prompt; the default prompt is plugin-neutral ("Review the sections above, if there are any, ...") so it reads true either way. Nothing
+section: the capped goals list (open and in-progress only), then its pick rule, directly before the prompt, which ends the beat. With neither (memory or goals disabled, say), a beat is the bare prompt; the default prompt is plugin-neutral ("Review the sections above, if there are any, ...") so it reads true either way. Nothing
 adds a "nothing new" line. The memory and goals state is committed when the hook
 runs, so a beat that the quiet re-check then skips doesn't resend its items.
 `prompts/heartbeat.md` shows a full beat. The turn then runs the

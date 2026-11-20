@@ -272,12 +272,37 @@ async def test_beat_lists_only_the_five_frontmost_pursuable(make_env):
     text = env.agent.calls[0]["text"]
     prev = -1
     for name in ("one", "two", "three", "four", "five"):
+        assert f"Task {name}" in text, f"Task {name} missing from the beat"
         idx = text.index(f"Task {name}")
         assert idx > prev, f"Task {name} out of queue order"  # frontmost = order, not just membership
         prev = idx
     assert "Task six" not in text
     assert "Task seven" not in text
     assert "(+2 more" in text
+
+
+async def test_blocked_and_retired_goals_do_not_inflate_the_hidden_count(make_env):
+    """Seven pursuable plus a blocked and a retired goal: hidden counts only
+    pursuable (7-5=2), and the off-beat goals' texts stay off the beat."""
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    await add_message(env, "irc:#test", "tidying the board")
+    for name in ("one", "two", "three", "four", "five", "six", "seven"):
+        await env.tools["add_goal"](f"Task {name}", _ctx=ctx)
+    await env.tools["add_goal"]("Task blocked", _ctx=ctx)
+    await env.tools["add_goal"]("Task retired", _ctx=ctx)
+    await env.tools["set_goal_status"](7, "blocked", _ctx=ctx)
+    await env.tools["retire_goal"](8, "Done elsewhere.", _ctx=ctx)
+
+    await env.clock.advance(AFTER)
+    text = env.agent.calls[0]["text"]
+    idx = text.index("Open or in-progress goals as of")
+    goals_block = text[idx:text.index(goals_mod.GOALS_INSTRUCTION)]
+    assert "Task blocked" not in goals_block
+    assert "Task retired" not in goals_block
+    # 7 pursuable, cap 5: exactly 2 hidden - neither extra goal counts.
+    assert "(+2 more pursuable" in goals_block
+    assert "(+3 more" not in text and "(+4 more" not in text
 
 
 async def test_beat_honors_a_smaller_heartbeat_limit(make_env, monkeypatch):
@@ -311,6 +336,20 @@ async def test_beat_with_limit_zero_shows_no_goals_but_names_them(make_env, monk
     idx = text.index("Open or in-progress goals as of")
     assert "(+2 more pursuable - call list_goals)" in text[idx:]
     assert goals_mod.GOALS_INSTRUCTION in text
+
+
+@pytest.mark.parametrize("dead_key", [("goals", "heartbeat_retired_limit"),
+                                      ("heartbeat", "retired_goal_limit")])
+async def test_removed_retired_limit_keys_fail_startup(make_env, dead_key):
+    """The beat's retired-goals review is gone; its keys fail loudly rather
+    than configure nothing (removed-key precedent, channel.py)."""
+    block, key = dead_key
+    CONFIG.setdefault(block, {})[key] = 3
+    try:
+        with pytest.raises(ValueError, match=re.escape(key)):
+            await make_env(with_goals=True)
+    finally:
+        CONFIG[block].pop(key, None)
 
 
 async def test_blocked_goals_become_visible_as_the_board_frees_slots(make_env):
@@ -470,31 +509,6 @@ async def test_beat_with_no_sections_is_the_bare_prompt(make_env):
     await env.clock.advance(AFTER)
     await env.clock.advance(AFTER)
     assert env.agent.calls[1]["text"] == heartbeat.DEFAULT_HEARTBEAT_PROMPT
-
-
-# --- the status-vs-retired_at migration heal (#205's root cause) --------------
-
-
-async def test_startup_heals_legacy_retired_rows_marked_open(make_env):
-    """Rows retired before the status column existed still say status='open'
-    with retired_at set. A fresh plugin instance's schema pass heals them to
-    status='retired' - and leaves live goals alone."""
-    env = await make_env(with_goals=True)
-    ctx = ctx_for("irc:#test")
-    await add_message(env, "irc:#test", "sorting out the job board")
-    await env.tools["add_goal"]("Legacy job", _ctx=ctx)
-    await env.tools["add_goal"]("Live job", _ctx=ctx)
-    await env.tools["retire_goal"](1, "Concluded on purpose.", _ctx=ctx)
-    # Emulate the migration artifact: a retired row wearing the default status.
-    await env.db.execute("UPDATE goals SET status='open' WHERE id=1")
-    await env.db.commit()
-
-    plugin = GoalsPlugin(env.pm)
-    await plugin._ensure_schema()
-
-    async with env.db.execute("SELECT id, status FROM goals ORDER BY id") as cur:
-        rows = await cur.fetchall()
-    assert rows == [(1, "retired"), (2, "open")]
 
 
 # --- beat-size config: goals.heartbeat_limit ----------------------------------

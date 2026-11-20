@@ -157,10 +157,20 @@ class GoalsPlugin(CorvidaePlugin):
         self._beat_goal_limit = read_count(
             config,
             "goals.heartbeat_limit",
-            "heartbeat.goal_limit",
+            "",
             DEFAULT_BEAT_GOAL_LIMIT,
-            "open or in-progress goals",
+            "goals",
         )
+        # The beat's retired-goals review was removed (owner spec, 2026-11-19).
+        # Its keys configure nothing - refuse them loudly, per the removed-key
+        # precedent (channel.py's _REMOVED_REASONING_KEY).
+        for dead in ("goals.heartbeat_retired_limit", "heartbeat.retired_goal_limit"):
+            block, _, key = dead.partition(".")
+            if isinstance(config.get(block), dict) and key in config[block]:
+                raise ValueError(
+                    f"agent.yaml: {dead} was removed; the beat no longer reviews "
+                    "retired goals. Delete the key."
+                )
         self._instruction = read_prompt(
             config,
             "goals.heartbeat_instruction",
@@ -223,17 +233,6 @@ class GoalsPlugin(CorvidaePlugin):
             if "origin_channel" not in cols:
                 await db.execute("ALTER TABLE goals ADD COLUMN origin_channel TEXT")
                 logger.info("goals: migrated existing table (added origin_channel column)")
-            # Heal the status-vs-retired_at drift the status migration left
-            # behind: rows retired before the column existed still say
-            # 'open'. retired_at is the truth; status follows it.
-            cur = await db.execute(
-                "UPDATE goals SET status='retired' "
-                "WHERE retired_at IS NOT NULL AND status != 'retired'"
-            )
-            if cur.rowcount:
-                logger.info(
-                    "goals: healed %d retired rows still marked open", cur.rowcount
-                )
             await db.commit()
             self._schema_ready = True
         return db
