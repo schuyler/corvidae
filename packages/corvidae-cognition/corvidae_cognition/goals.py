@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -591,6 +592,128 @@ def goals_command(ctx, db_path):
         raise click.ClickException(f"Database not found: {db_path}")
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db_path
+
+
+def _mismatch_counts(conn):
+    """(retired_at-set-but-not-retired, retired-status-but-open-row) counts."""
+    cur = conn.execute(
+        "SELECT"
+        " SUM(retired_at IS NOT NULL AND status != 'retired'),"
+        " SUM(retired_at IS NULL AND status = 'retired')"
+        " FROM goals"
+    )
+    a, b = cur.fetchone()
+    cur.close()
+    return int(a or 0), int(b or 0)
+
+
+# How long the repair waits for the daemon's write lock before giving up. A
+# module constant so a test can drive the contention path without a 5s wait.
+_REPAIR_BUSY_TIMEOUT_MS = 5000
+
+
+def _rollback_quiet(conn):
+    """Best-effort rollback, so a failed repair never reports rows it wrote."""
+    try:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+    except sqlite3.Error:
+        logger.warning("goals repair-statuses: rollback failed", exc_info=True)
+
+
+@goals_command.command("repair-statuses")
+@click.option("--apply", "do_apply", is_flag=True, help="Write the repairs (default: report only)")
+@click.pass_context
+def _repair_cmd(ctx, do_apply):
+    """Reconcile goal status with the retired_at partition (#205).
+
+    Pre-migration rows carry a lying status: retired_at is set but status
+    was left at the DDL default 'open'. The beat list filters on
+    retired_at (so the board is correct), but direct SQL on status misleads.
+    The retired_at column is the ground truth; this command makes status
+    agree with it, in both directions. Dry-run unless --apply.
+    """
+    db_path = ctx.obj["db_path"]
+
+    def _run():
+        # isolation_level=None: the transaction is opened explicitly below, so
+        # the write lock is held across update -> verify -> commit instead of
+        # being acquired lazily in the middle of the repair. Counts for the
+        # report are taken inside it; the dry-run count is a single SELECT and
+        # therefore one snapshot.
+        conn = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {_REPAIR_BUSY_TIMEOUT_MS}")
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0].lower()
+            if mode != "wal":
+                raise click.ClickException(
+                    f"Database journal mode is '{mode}' — the goals CLI requires "
+                    f"WAL mode; the corvidae daemon sets it on startup ({db_path})"
+                )
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(goals)")}
+            if not {"status", "retired_at"} <= columns:
+                raise click.ClickException(
+                    f"{db_path} has no goals table with status/retired_at — "
+                    "start the corvidae daemon once to create and migrate it"
+                )
+            if not do_apply:
+                stale_retired, stale_open = _mismatch_counts(conn)
+                total = stale_retired + stale_open
+                click.echo(
+                    f"{total} mismatches: {stale_retired} retired rows with an open-"
+                    f"family status, {stale_open} 'retired' rows with no retired_at"
+                    + (" — pass --apply to repair" if total else "")
+                )
+                return
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                raise click.ClickException(
+                    f"could not take the write lock within "
+                    f"{_REPAIR_BUSY_TIMEOUT_MS / 1000:g}s ({exc}) — the "
+                    "corvidae daemon is writing; try again in a moment"
+                ) from exc
+            try:
+                retired = conn.execute(
+                    "UPDATE goals SET status = 'retired'"
+                    " WHERE retired_at IS NOT NULL AND status != 'retired'"
+                ).rowcount
+                opened = conn.execute(
+                    "UPDATE goals SET status = 'open'"
+                    " WHERE retired_at IS NULL AND status = 'retired'"
+                ).rowcount
+                # Verified inside the write transaction: a concurrent daemon
+                # write cannot land between the repair and the check, so a
+                # failure here means the repair itself was wrong (and gets
+                # rolled back) rather than someone else moving a row.
+                after_a, after_b = _mismatch_counts(conn)
+                if after_a or after_b:
+                    # Roll back before claiming it: the message has to be true
+                    # when it is raised, not after the exception propagates.
+                    conn.execute("ROLLBACK")
+                    raise click.ClickException(
+                        f"post-repair verification failed: {after_a + after_b} "
+                        "mismatches remain; rolled back, nothing written"
+                    )
+                conn.execute("COMMIT")
+            except sqlite3.OperationalError as exc:
+                _rollback_quiet(conn)
+                raise click.ClickException(
+                    f"repair aborted before commit ({exc}); nothing written"
+                ) from exc
+            finally:
+                # No-op after a commit (nothing is open); covers a ClickException
+                # raised above if a rollback there ever failed.
+                _rollback_quiet(conn)
+            click.echo(
+                f"repaired {retired + opened} rows ({retired} -> retired,"
+                f" {opened} -> open); 0 mismatches remain (status now matches"
+                " the retired_at partition)"
+            )
+        finally:
+            conn.close()
+
+    _run()
 
 
 @goals_command.command("seed")
