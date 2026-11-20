@@ -332,9 +332,11 @@ class GoalsPlugin(CorvidaePlugin):
         plugin = self
 
         async def add_goal(text: str, position: str = "append", _ctx=None) -> str:
-            """Add an open goal. position is 'prepend' (front of the queue,
-            high priority) or 'append' (back, the default). list_goals shows
-            the open goals with their ids."""
+            """Add an open goal with outcome + pointer only; use set_goal_status for state. position: prepend (front of the queue) or append (default).
+
+            position is 'prepend' (front of the queue, high priority) or
+            'append' (back, the default). list_goals shows the open goals
+            with their ids."""
             text = _collapse(text)
             if not text:
                 return "Error: text is empty; say what the goal is"
@@ -362,8 +364,9 @@ class GoalsPlugin(CorvidaePlugin):
             return f"Goal #{cursor.lastrowid} added."
 
         async def update_goal(id: int, text: str, _ctx=None) -> str:
-            """Replace the text of an open goal. list_goals shows the open goals
-            with their ids."""
+            """Replace the text of an open goal: outcome + pointer only — state belongs to set_goal_status, not the prose.
+
+            list_goals shows the open goals with their ids."""
             text = _collapse(text)
             if not text:
                 return "Error: text is empty; say what the goal is now"

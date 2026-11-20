@@ -205,6 +205,20 @@ async def add_message(env, channel_id: str, content: str) -> int:
 # ---------------------------------------------------------------------------
 
 
+async def test_line1_of_goal_tools_carries_the_contract_to_the_model(env):
+    """#1099 + review 2026-11-20: tool_to_schema sends ONLY docstring line 1
+    as the description and emits no parameter descriptions, so line 1 is the
+    entire surface the model sees. Pin the status-vs-text contract and the
+    position affordance there."""
+    from corvidae.tool import tool_to_schema
+
+    add = tool_to_schema(env.tools["add_goal"])["function"]["description"]
+    upd = tool_to_schema(env.tools["update_goal"])["function"]["description"]
+    assert "set_goal_status" in add
+    assert "prepend" in add and "append" in add
+    assert "set_goal_status" in upd and "open goal" in upd
+
+
 async def test_g1_tools_round_trip(env):
     """add_goal -> update_goal -> retire_goal; the goals row reflects each step."""
     ctx = ctx_for(env.channel)
