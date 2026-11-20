@@ -827,9 +827,15 @@ class TestRuntimeStart:
         finally:
             os.unlink(config_path)
 
-    async def test_start_loads_setuptools_entrypoints(self):
-        """start() calls pm.load_setuptools_entrypoints('corvidae') to load plugins."""
+    async def test_start_registers_entry_point_plugins(self):
+        """start() registers every installed corvidae entry-point plugin under its name.
+
+        The loader (corvidae.plugin_loader) instantiates each entry point and
+        registers the instance; pm.load_setuptools_entrypoints is not used.
+        """
         from corvidae.runtime import Runtime
+        from tests import plugin_loader_fixtures as fx
+        from tests.test_plugin_loader import ep
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False
@@ -837,6 +843,7 @@ class TestRuntimeStart:
             _write_config(f.name)
             config_path = f.name
 
+        fx.CALLS.clear()
         try:
             mock_pm, mock_agent = _make_mock_pm_and_agent()
 
@@ -844,11 +851,20 @@ class TestRuntimeStart:
                 "corvidae.runtime.create_plugin_manager", return_value=mock_pm
             ), patch("corvidae.runtime.validate_dependencies"), patch(
                 "corvidae.runtime.configure_logging"
+            ), patch(
+                "corvidae.runtime.entry_points",
+                return_value=[ep("plain", "Plain")],
             ):
                 rt = Runtime(config_path=config_path)
                 await rt.start()
 
-            mock_pm.load_setuptools_entrypoints.assert_called_once_with("corvidae")
+            # The entry point was instantiated once and registered by name.
+            assert fx.CALLS["Plain"] == 1
+            registered = {
+                call.kwargs.get("name"): call.args[0]
+                for call in mock_pm.register.call_args_list
+            }
+            assert isinstance(registered.get("plain"), fx.Plain)
         finally:
             os.unlink(config_path)
 
@@ -939,17 +955,14 @@ class TestRuntimeStart:
             os.unlink(config_path)
 
     async def test_start_blocks_disabled_plugins(self):
-        """start() calls pm.set_blocked for each name in plugins.disabled config.
+        """start() never instantiates or registers a plugin named in plugins.disabled.
 
-        With the Phase 2 implementation, Runtime.start() reads config.plugins.disabled
-        and calls pm.set_blocked(name) for each entry before loading entry points.
-        pm.set_blocked must be called BEFORE pm.load_setuptools_entrypoints so that
-        blocked plugins are never instantiated.
-
-        This test fails now because Runtime.start() does not yet read plugins.disabled
-        or call pm.set_blocked.
+        The loader leaves a disabled entry point out of its plan, so the
+        plugin's constructor never runs; the others still load.
         """
         from corvidae.runtime import Runtime
+        from tests import plugin_loader_fixtures as fx
+        from tests.test_plugin_loader import ep
 
         config_data = {
             "llm": {
@@ -965,55 +978,39 @@ class TestRuntimeStart:
             yaml.dump(config_data, f)
             config_path = f.name
 
-        # Track the order of set_blocked vs load_setuptools_entrypoints calls
-        call_order: list[str] = []
-
+        fx.CALLS.clear()
         try:
             mock_pm, mock_agent = _make_mock_pm_and_agent()
-
-            def record_set_blocked(name):
-                call_order.append(f"set_blocked:{name}")
-
-            def record_load_entrypoints(group):
-                call_order.append(f"load_entrypoints:{group}")
-
-            mock_pm.set_blocked = record_set_blocked
-            mock_pm.load_setuptools_entrypoints = record_load_entrypoints
 
             with patch(
                 "corvidae.runtime.create_plugin_manager", return_value=mock_pm
             ), patch("corvidae.runtime.validate_dependencies"), patch(
                 "corvidae.runtime.configure_logging"
+            ), patch(
+                "corvidae.runtime.entry_points",
+                return_value=[ep("compaction", "Plain"), ep("other", "OtherBundled")],
             ):
                 rt = Runtime(config_path=config_path)
                 await rt.start()
 
-            # set_blocked("compaction") must have been called
-            assert "set_blocked:compaction" in call_order, (
-                f"pm.set_blocked('compaction') was not called; call_order={call_order!r} — "
-                "Runtime.start() needs to read plugins.disabled and call pm.set_blocked"
-            )
-
-            # set_blocked must be called BEFORE load_setuptools_entrypoints
-            blocked_idx = call_order.index("set_blocked:compaction")
-            entrypoints_idx = call_order.index("load_entrypoints:corvidae")
-            assert blocked_idx < entrypoints_idx, (
-                f"set_blocked must precede load_setuptools_entrypoints; "
-                f"order={call_order!r}"
-            )
+            # The disabled plugin was never constructed or registered.
+            assert fx.CALLS["Plain"] == 0, "disabled plugin was instantiated"
+            names = [c.kwargs.get("name") for c in mock_pm.register.call_args_list]
+            assert "compaction" not in names, names
+            # The enabled one loaded.
+            assert fx.CALLS["OtherBundled"] == 1 and "other" in names, names
         finally:
             os.unlink(config_path)
 
-    async def test_start_no_disabled_section_no_set_blocked_calls(self):
-        """start() never calls pm.set_blocked when plugins.disabled is absent from config.
+    async def test_start_no_disabled_section_loads_every_entry_point(self):
+        """start() loads every entry-point plugin when plugins.disabled is absent.
 
-        When the config has no 'plugins' key, set_blocked should not be called at all.
-
-        This test fails now because Runtime.start() does not yet handle plugins.disabled,
-        but it will pass trivially until the implementation is added; the real value is
-        as a regression guard that the implementation only calls set_blocked when needed.
+        Regression guard: nothing is left out of the plan, and the manager
+        is never asked to block a name.
         """
         from corvidae.runtime import Runtime
+        from tests import plugin_loader_fixtures as fx
+        from tests.test_plugin_loader import ep
 
         # Config with no 'plugins' key at all
         config_data = {
@@ -1029,28 +1026,23 @@ class TestRuntimeStart:
             yaml.dump(config_data, f)
             config_path = f.name
 
-        set_blocked_calls: list[str] = []
-
+        fx.CALLS.clear()
         try:
             mock_pm, mock_agent = _make_mock_pm_and_agent()
-
-            def record_set_blocked(name):
-                set_blocked_calls.append(name)
-
-            mock_pm.set_blocked = record_set_blocked
 
             with patch(
                 "corvidae.runtime.create_plugin_manager", return_value=mock_pm
             ), patch("corvidae.runtime.validate_dependencies"), patch(
                 "corvidae.runtime.configure_logging"
+            ), patch(
+                "corvidae.runtime.entry_points",
+                return_value=[ep("plain", "Plain"), ep("other", "OtherBundled")],
             ):
                 rt = Runtime(config_path=config_path)
                 await rt.start()
 
-            assert set_blocked_calls == [], (
-                f"pm.set_blocked should not be called when plugins.disabled is absent; "
-                f"got calls for: {set_blocked_calls!r}"
-            )
+            assert fx.CALLS["Plain"] == 1 and fx.CALLS["OtherBundled"] == 1
+            mock_pm.set_blocked.assert_not_called()
         finally:
             os.unlink(config_path)
 

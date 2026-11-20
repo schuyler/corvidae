@@ -244,10 +244,17 @@ class TestSpecsBeforeGuardAndInit:
             agent = MagicMock()
             agent.on_start = AsyncMock()
             pm.get_plugin.return_value = agent
-            pm.load_setuptools_entrypoints.side_effect = recorder("load")
+            # The loader's registration step stands in for entry-point
+            # loading; it must still hand the runtime a LoadReport.
+            def fake_register_planned(*args, **kwargs):
+                from corvidae.plugin_loader import LoadReport
+
+                order.append("load")
+                return LoadReport(replaced={}, fallbacks={}, skipped=[])
 
             with patch("corvidae.runtime.create_plugin_manager", return_value=pm), \
                  patch("corvidae.runtime.configure_logging"), \
+                 patch("corvidae.runtime.register_planned", side_effect=fake_register_planned), \
                  patch("corvidae.runtime.install_plugin_hookspecs", side_effect=recorder("install")), \
                  patch("corvidae.runtime._check_hook_arg_binding", side_effect=recorder("guard")), \
                  patch("corvidae.runtime.validate_dependencies", side_effect=recorder("deps")), \

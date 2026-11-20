@@ -732,3 +732,32 @@ async def test_home_notice_carries_a_model_visible_origin(tmp_path):
     await plugin._notify_home("Restart complete")
     assert pm.ahook.notifies[0]["annotations"] == {"origin": "restart"}
     assert RestartPlugin.model_visible_annotations == frozenset({"origin"})
+
+
+# --- #1107: plugin swaps and fallbacks in the boot summary (R11) ---------------
+
+
+async def test_summary_lists_swaps_and_fallbacks(tmp_path):
+    """R11: the load report fed via config["_plugin_load"] shows in the summary."""
+    from corvidae.plugin_loader import LoadReport
+
+    plugin, pm, cfg = make_plugin(tmp_path)
+    cfg["_plugin_load"] = LoadReport(
+        replaced={"llm": "my_llm"},
+        fallbacks={"compaction": "my_compaction"},
+        skipped=["rss"],
+    )
+    await plugin.on_init(pm, cfg)
+    lines = plugin._summary_lines()
+    assert "Plugins replaced: llm → my_llm" in lines
+    assert "Plugin fallbacks: my_compaction failed, bundled compaction used" in lines
+
+
+async def test_summary_has_no_swap_lines_without_a_report(tmp_path):
+    """R11: with no report (or nothing swapped) the summary adds no swap lines."""
+    plugin, pm, cfg = make_plugin(tmp_path)
+    await plugin.on_init(pm, cfg)
+    assert not [
+        line for line in plugin._summary_lines()
+        if line.startswith(("Plugins replaced", "Plugin fallbacks"))
+    ]

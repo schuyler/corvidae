@@ -60,9 +60,16 @@ def _patched(pm):
 
 
 async def _start(config_path: str, pm) -> Runtime:
-    """Run Runtime.start() against ``pm``."""
+    """Run Runtime.start() against ``pm``, with one fake entry-point plugin."""
+    from tests import plugin_loader_fixtures as fx
+    from tests.test_plugin_loader import ep
+
+    # Count constructor calls from this start only.
+    fx.CALLS.clear()
     a, b, c = _patched(pm)
-    with a, b, c:
+    with a, b, c, patch(
+        "corvidae.runtime.entry_points", return_value=[ep("plain", "Plain")]
+    ):
         rt = Runtime(config_path=config_path)
         await rt.start()
     return rt
@@ -75,6 +82,10 @@ class TestNullPluginsSection:
         pm, agent = _mock_pm()
         await _start(config_file({"llm": _LLM, "plugins": plugins}), pm)
         agent.on_start.assert_awaited_once()
+        # Nothing is disabled: the one entry-point plugin was loaded.
+        from tests import plugin_loader_fixtures as fx
+
+        assert fx.CALLS["Plain"] == 1
         pm.set_blocked.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -103,6 +114,10 @@ class TestNullPluginsSection:
         err = lines[0]
         assert needle in err and "memory" in err and path in err, err
         assert "list" in err, err  # the accepted form
+        # The error stops startup before any entry-point plugin is built.
+        from tests import plugin_loader_fixtures as fx
+
+        assert fx.CALLS["Plain"] == 0
         pm.set_blocked.assert_not_called()
 
 

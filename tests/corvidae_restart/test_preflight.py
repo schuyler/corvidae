@@ -221,3 +221,42 @@ def test_missing_config_path_reports_config_error(tmp_path: Path) -> None:
     assert len(result.stderr.splitlines()) == 1, result.stderr
     assert "Config error:" in result.stderr
     assert f"— check {path}" in result.stderr
+
+
+# The child that reports a LoadReport from the plugin load (#1107).
+REPORT_CHILD = Path(__file__).parent.parent / "preflight_report_child.py"
+
+
+def run_report_child(
+    config_path: Path, fallbacks: str, skipped: str
+) -> subprocess.CompletedProcess[str]:
+    """Run the pre-flight with a load that reports the given fallbacks and skips."""
+    return subprocess.run(
+        [sys.executable, "-P", str(REPORT_CHILD), str(config_path), fallbacks, skipped],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_preflight_fails_when_a_plugin_was_skipped_or_fell_back(tmp_path: Path) -> None:
+    """R14: a skipped plugin or a fallen-back replacement fails the pre-flight.
+
+    The stderr line names each plugin and the remedy; logging is disabled in
+    the pre-flight, so the failure must be written to stderr directly.
+    """
+    path = write_config(tmp_path)
+    result = run_report_child(path, '{"llm": "my_llm"}', '["rss"]')
+
+    assert result.returncode == 1, result.stderr
+    assert "rss" in result.stderr and "my_llm" in result.stderr and "llm" in result.stderr
+    assert "fix or reinstall" in result.stderr, result.stderr
+    assert "pre-flight OK" not in result.stderr, result.stderr
+
+
+def test_preflight_passes_when_the_load_report_is_clean(tmp_path: Path) -> None:
+    """R14 guard: an empty report does not fail the pre-flight."""
+    result = run_report_child(write_config(tmp_path), "{}", "[]")
+
+    assert result.returncode == 0, result.stderr
+    assert "pre-flight OK" in result.stderr, result.stderr
