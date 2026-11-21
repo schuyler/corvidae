@@ -427,6 +427,29 @@ class TestLensIsData:
 
 
 class TestSameMachinery:
+    async def test_a_malformed_sample_rate_leaves_provenance_its_turn(self, tmp_path):
+        """R8 guard (ported for #1078): at stage 2, provenance is queued before
+        the lens choice, so a malformed ``critique.sample_below_rate`` override
+        that makes the choice raise can't cost provenance its turn."""
+        async with lens_env(tmp_path, _lens("mine")) as env:
+            env.channel.runtime_overrides["critique.sample_below_rate"] = "high"
+            # "none" wins, so the choice reaches the sample-rate draw.
+            stage2 = {
+                "past_claims": [{"claim": "we agreed on Friday", "queries": ["Friday"]}],
+                "lenses": {"none": 1.0},
+            }
+            [listener] = env.appraisal.stage2_listeners
+            # The malformed value may raise out of the listener; provenance
+            # must already be queued by then.
+            try:
+                await listener(
+                    channel=env.channel, trace_id="kprov", response_text="resp",
+                    annotations={"origin": "reminder"}, stage2=stage2)
+            except TypeError:
+                pass
+            queued = [t.description for t in list(env.task.task_queue.queue._queue)]
+            assert "critique:provenance" in queued
+
     async def test_heartbeat_turn_runs_the_lens(self, tmp_path):
         """R6 / #1031: a heartbeat-origin turn is judged like a user turn."""
         async with lens_env(tmp_path, _lens("mine")) as env:

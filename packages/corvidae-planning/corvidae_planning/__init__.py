@@ -24,7 +24,8 @@ from corvidae_cognition.goals import GoalsPlugin
 logger = logging.getLogger(__name__)
 
 # The lens's name: it keys the fork prompt override, the tunables and the
-# outcome entry (critique.fork_prompt.planning, critique.lens.planning.*).
+# outcome entry (critique.lens.planning.fork_prompt and
+# critique.lens.planning.appraisal_question).
 LENS_NAME = "planning"
 
 # The brief. Critique appends its objections JSON tail, so the reply format

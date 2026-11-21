@@ -204,7 +204,6 @@ STAGE2_EXTRA_BODY = {
 }
 
 
-
 def _extra_body_with_lenses(names: list[str]) -> dict:
     """STAGE2_EXTRA_BODY with a required ``lenses`` object scoring ``names``
     and "none". Built per call from a copy; the shared schema is untouched."""
@@ -278,7 +277,7 @@ def _parse_json_block(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 
-def _lens_vector(raw, offered: list[str], trace_id: str) -> dict[str, float] | None:
+def _lens_vector(raw: object, offered: list[str], trace_id: str) -> dict[str, float] | None:
     """Normalize stage 2's critique vector: shares of 1 over ``offered`` + "none".
 
     Drops (each with a warning naming the entry and the trace) names that

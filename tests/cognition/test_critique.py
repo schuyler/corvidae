@@ -586,6 +586,27 @@ class TestRetentionDelivery:
         assert all(e.startswith("[retention]") for e in kwargs["entries"]), kwargs["entries"]
         await _teardown(env)
 
+    async def test_with_a_root_a_stylistic_finding_still_waits(self, tmp_path):
+        """AC2c (ported for #1078): a knowledge-base root makes retention a
+        waking lens, not every built-in. A constrained finding on a channel
+        with a root goes through ingest and never wakes."""
+        env = await build_critique(
+            tmp_path, appraisal=FakeAppraisal(), chat_text=OBJECTION_VERDICT,
+            with_funnel=True,
+            config={"critique": {"retention": {"root": "values/"}}},
+        )
+        env.pm.ahook_raise.on_notify = AsyncMock()
+        env.funnel.ingest = Mock(wraps=env.funnel.ingest)
+        env.funnel.ingest_and_wake = AsyncMock()
+        # The vector picks constrained; its objection must wait.
+        await _fire(env, "kmixed", vector={"constrained": 1.0})
+        await _run_next_task(env.task)
+        env.funnel.ingest.assert_called_once()
+        entries = env.funnel.ingest.call_args.kwargs["entries"]
+        assert entries and all(e.startswith("[constrained]") for e in entries), entries
+        env.funnel.ingest_and_wake.assert_not_awaited()
+        await _teardown(env)
+
 
 class TestRetentionRootFromRecall:
     """Owner, on #857: the retention root matches recall's root when the

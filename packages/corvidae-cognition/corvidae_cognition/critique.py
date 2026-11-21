@@ -49,9 +49,12 @@ response another gate withheld stays eligible — the agent thought it, so
 critique may still object. A decline (an unsent ``NO_REPLY`` or empty final,
 ``silence.is_decline``) is not a response and is never judged (#420).
 
-Every threshold resolves through ``resolve_tunable`` at decision time
-(operator directive 2): best-guess defaults, runtime-adjustable through both
-surfaces without a restart.
+The stylistic and plugin lenses are chosen per exchange from the critique
+vector stage-2 appraisal returns: each lens's one-line appraisal question is
+scored, and the top share runs unless "none" wins (#1078).
+``critique.sample_below_rate`` resolves through ``resolve_tunable`` at
+decision time (operator directive 2); the questions and fork prompts are
+static config.
 """
 
 from __future__ import annotations
@@ -665,7 +668,9 @@ def _lens_problem(lens: object) -> str | None:
         return f"fork_prompt {lens.fork_prompt!r} must be a non-empty string"
     # The question is one line of the block the appraisal fork reads.
     question = lens.appraisal_question
-    if not isinstance(question, str) or not question.strip():
+    if not isinstance(question, str):
+        return f"appraisal_question {question!r} must be a one-line string"
+    if not question.strip():
         return (
             "no appraisal_question: declare a one-line question the appraisal "
             "fork answers to decide whether this lens runs")
@@ -742,7 +747,7 @@ class CritiquePlugin(CorvidaePlugin):
         self.config: dict = {}
         # Lazy message_fts probe; built in on_start (None until then).
         self._probe: ReadOnlyProbe | None = None
-        # Injectable RNG for the below-threshold sampling draw — tests seed a
+        # Injectable RNG for the "none"-wins sampling draw — tests seed a
         # random.Random; never the module-level random functions (WP2.7 p3).
         self._rng = random.Random()
         # Bounded map of trace id -> originating row's message_log
@@ -1305,7 +1310,7 @@ class CritiquePlugin(CorvidaePlugin):
         return self._rng.choice(offered)
 
     def _choose_lens(
-        self, trace_id: str, channel, vector: dict | None, offered: list[str],
+        self, trace_id: str, channel: object, vector: dict | None, offered: list[str],
         reason: str, warn: bool,
     ) -> tuple[str | None, bool, str]:
         """``(lens, sampled, basis)`` for one exchange.
@@ -1410,7 +1415,8 @@ class CritiquePlugin(CorvidaePlugin):
                     trace_id, outcomes={"lens_selection": selection})
             except Exception:
                 logger.warning(
-                    "critique lens selection persist failed for trace %s",
+                    "critique lens selection persist failed for trace %s; the choice "
+                    "still ran but is missing from exchange_log - check the outcome_log plugin",
                     trace_id, exc_info=True,
                     extra={"channel": channel.id, "trace_id": trace_id},
                 )
