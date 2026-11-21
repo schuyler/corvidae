@@ -73,8 +73,9 @@ PRIOR_W_STAKES_DEFAULT = 0.4      # appraisal.prior.w_stakes
 PRIOR_W_VALENCE_DEFAULT = 0.3     # appraisal.prior.w_valence
 PRIOR_W_NOVELTY_DEFAULT = 0.3     # appraisal.prior.w_novelty
 
-# Documented copy of this text lives in prompts/appraisal.md; the
-# appraisal.stage2_prompt config key overrides it with a literal string.
+# Documented copy of this text lives in prompts/appraisal.md. No live stage
+# reads it: stage 2 runs only as a fork and skips when there is none (#320), so
+# the appraisal.stage2_prompt key is accepted and never consulted (#1129).
 DEFAULT_STAGE2_PROMPT = (
     "You are appraising a completed exchange for the agent's own perception "
     "system. You are given the originating message, the agent's final "

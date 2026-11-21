@@ -4,8 +4,9 @@ The documented copy of the system prompt for `AppraisalPlugin`'s stage-2
 tier-3 call (bootstrap-mapping §3.2; phase-2 WP2.5) — one schema-constrained
 JSON call, a fork of the window on the `appraisal` stage's profile, that scores the completed
 exchange after the response has gone out. Runs as a silent background
-task, never on the response path. Override it with a literal string via the
-`appraisal.stage2_prompt` config key.
+task, never on the response path. Nothing reads a written override: stage 2 runs
+only as a fork, and a missing fork skips rather than calling this prompt (#320),
+so `appraisal.stage2_prompt` is still accepted and is not consulted (#1129).
 
 ---
 
