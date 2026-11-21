@@ -516,3 +516,56 @@ async def test_idle_fork_warns_with_the_real_range(env, caplog):
     assert channel.id in text
     assert f"{ids[0]}-{ids[-1]}" in text, text
     assert "unknown" not in text
+
+
+async def test_a_moved_watermark_makes_the_next_idle_firing_retry(
+    env_with_persistence, caplog,
+):
+    """#1002: the pair is (watermark, MAX(id)), and the watermark half is real.
+
+    A partial advance — a catch-up segment leaving the watermark short of the
+    last row — means work was done and the tail is still un-consolidated, so the
+    idle trigger must try again. Compare MAX(id) alone and this test fails,
+    because nothing about the row count changed.
+    """
+    memory, persistence, stub, channel, db, ids = env_with_persistence
+    agent = _use(memory, FakeForkAgent({"consolidation"}, error=RuntimeError("down")))
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await _idle_firing(memory, channel.id)
+        assert len(agent.calls) == 1
+
+        await db.execute(
+            "INSERT OR REPLACE INTO consolidation_watermark "
+            "(channel_id, last_message_id) VALUES (?, ?)",
+            (channel.id, ids[1]),
+        )
+        await db.commit()
+
+        await _idle_firing(memory, channel.id)
+
+    assert len(agent.calls) == 2, agent.calls
+    assert len(_skip_warnings(caplog)) == 2
+
+
+async def test_a_turn_skip_does_not_suppress_the_next_idle_firing(
+    env_with_persistence, caplog,
+):
+    """#1002: only an idle skip records the pair.
+
+    A turn skip's line promises that the idle trigger retries, so a turn skip
+    must not leave a record that makes the next idle firing return silently.
+    Drop the ``trigger == "idle"`` guard in ``_skip_consolidation`` and this
+    test fails.
+    """
+    memory, persistence, stub, channel, db, ids = env_with_persistence
+    agent = _use(memory, FakeForkAgent({"consolidation"}, error=RuntimeError("down")))
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await memory._consolidate_range(channel.id, ids[-1], "turn")
+        assert len(agent.calls) == 1
+
+        await _idle_firing(memory, channel.id)
+
+    assert len(agent.calls) == 2, agent.calls
+    assert len(_skip_warnings(caplog)) == 2

@@ -3358,16 +3358,22 @@ class MemoryPlugin(CorvidaePlugin):
     ) -> None:
         """Log that an in-window range was skipped: channel, message range and
         what was missing (consolidation has no trace id). The watermark is
-        untouched; ``trigger`` names what retries (idle, turn, or idle or
-        compaction for a turn range skipped with forks off)."""
+        untouched; the line names what retries -- for a turn skip, the next turn
+        (or idle or compaction for a range skipped with forks off); for an idle
+        skip, the things that change its conditions (#342, #1002)."""
         if trigger == "idle":
             # Nothing has changed for a reason to try again; the next idle
             # firing sees this and returns without a fork or a warning (#342).
             self._idle_skips[channel_id] = (watermark, rows[-1][0])
+            # An idle skip is not retried by the next idle firing, so this line
+            # must not promise one. Name what does retry (#1002).
+            retry = "a new message, the turn trigger or compaction retries"
+        else:
+            retry = f"the next {trigger} trigger retries"
         logger.warning(
             "consolidation skipped for channel %s, messages %d-%d: %s; "
-            "the watermark stays at %d and the next %s trigger retries",
-            channel_id, rows[0][0], rows[-1][0], reason, watermark, trigger,
+            "the watermark stays at %d and %s",
+            channel_id, rows[0][0], rows[-1][0], reason, watermark, retry,
             extra={"channel_id": channel_id}, **kwargs,
         )
 
