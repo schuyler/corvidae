@@ -228,10 +228,15 @@ async def _read_outcomes(db, key):
 
 
 async def _fire(env, trace_id="k", origin="user", response_text="resp",
-                originating_text="orig user text"):
+                originating_text="orig user text", vector=None):
     """Simulates the propagated-origin mechanics (§1.4/§1.5): "user" and
     "task" (a subagent or fork-tool result) carry no origin annotation; any
-    other origin is stamped into annotations["origin"]."""
+    other origin is stamped into annotations["origin"].
+
+    ``vector`` (lens name -> share) is the critique vector stage 2 delivers
+    for the trace right after the response (#1078): the appraisal listener
+    runs with it, as the daemon's stage-2 task would. None: stage 2 never
+    lands."""
     await env.outcome.record_exchange(trace_id, env.channel.id, origin=origin)
     if env.appraisal is not None:
         env.appraisal._originating_text[trace_id] = originating_text
@@ -248,6 +253,13 @@ async def _fire(env, trace_id="k", origin="user", response_text="resp",
         channel=env.channel, request_text="req", response_text=response_text,
         trace_id=trace_id, annotations=annotations, logprobs=None,
     )
+    # Stage 2 lands for the same trace, carrying the critique vector.
+    if vector is not None:
+        [listener] = env.appraisal.stage2_listeners
+        await listener(
+            channel=env.channel, trace_id=trace_id, response_text=response_text,
+            annotations=annotations, stage2={"past_claims": [], "lenses": vector},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -302,16 +314,14 @@ class TestSessionDbBaseDirResolution:
 
 class TestEligibility:
     async def test_user_origin_eligible(self, tmp_path):
-        appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
-        env = await build_critique(tmp_path, appraisal=appraisal)
-        await _fire(env, "ku", origin="user")
+        env = await build_critique(tmp_path, appraisal=FakeAppraisal())
+        await _fire(env, "ku", origin="user", vector={"predictive": 1.0})
         assert env.task.task_queue.queue.qsize() == 1
         await _teardown(env)
 
     async def test_reminder_origin_eligible(self, tmp_path):
-        appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
-        env = await build_critique(tmp_path, appraisal=appraisal)
-        await _fire(env, "kr", origin="reminder")
+        env = await build_critique(tmp_path, appraisal=FakeAppraisal())
+        await _fire(env, "kr", origin="reminder", vector={"predictive": 1.0})
         assert env.task.task_queue.queue.qsize() == 1
         await _teardown(env)
 
@@ -319,9 +329,8 @@ class TestEligibility:
     async def test_every_origin_is_judged(self, tmp_path, origin):
         """#1031: no origin is exempt. "task" is a turn with no origin that
         was never admitted (a subagent or fork-tool result landing)."""
-        appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
-        env = await build_critique(tmp_path, appraisal=appraisal)
-        await _fire(env, "ke", origin=origin)
+        env = await build_critique(tmp_path, appraisal=FakeAppraisal())
+        await _fire(env, "ke", origin=origin, vector={"predictive": 1.0})
         assert env.task.task_queue.queue.qsize() == 1
         await _teardown(env)
 
@@ -346,10 +355,10 @@ class TestEligibility:
     async def test_user_exchange_critiqued_against_originating_text(self, tmp_path):
         """A user exchange ending on a tool-result turn is critiqued against
         the ORIGINAL user text (originating_text), not request_text."""
-        appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
-        env = await build_critique(tmp_path, appraisal=appraisal)
+        env = await build_critique(tmp_path, appraisal=FakeAppraisal())
         await _fire(env, "kt", origin="user",
-                    originating_text="the ORIGINAL user question")
+                    originating_text="the ORIGINAL user question",
+                    vector={"predictive": 1.0})
         await _run_next_task(env.task)
         # The lens is a fork (#320); its instruction quotes the original text.
         assert env.stub.chat_calls == []
@@ -364,156 +373,9 @@ class TestEligibility:
 
 
 class TestLensSelection:
-    async def test_high_ambiguity_selects_predictive(self, tmp_path):
-        appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
-        env = await build_critique(tmp_path, appraisal=appraisal,
-                                   chat_text=EMPTY_VERDICT)
-        await _fire(env, "kp", origin="user")
-        await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "kp")
-        assert "predictive" in outcomes["critique"]["lenses"]
-        await _teardown(env)
-
-    async def test_high_commitment_selects_constrained(self, tmp_path):
-        appraisal = FakeAppraisal(stage1={"commitment_density": 0.9})
-        env = await build_critique(tmp_path, appraisal=appraisal,
-                                   chat_text=EMPTY_VERDICT)
-        await _fire(env, "kc", origin="user")
-        await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "kc")
-        assert "constrained" in outcomes["critique"]["lenses"]
-        await _teardown(env)
-
-    async def test_neg_valence_and_disagreement_selects_adversarial(self, tmp_path):
-        appraisal = FakeAppraisal(
-            stage1={"disagreement": 0.9}, stage2={"valence": 0.1},
-        )
-        env = await build_critique(tmp_path, appraisal=appraisal,
-                                   chat_text=EMPTY_VERDICT)
-        await _fire(env, "kadv", origin="user")
-        await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "kadv")
-        assert "adversarial" in outcomes["critique"]["lenses"]
-        await _teardown(env)
-
-    async def test_high_novelty_and_commitment_selects_retention(self, tmp_path):
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
-        )
-        env = await build_critique(
-            tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
-            config={"critique": {"retention": {"root": "values/"}}},
-        )
-        await _fire(env, "kret", origin="user")
-        await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "kret")
-        assert "retention" in outcomes["critique"]["lenses"]
-        await _teardown(env)
-
-    async def test_novelty_alone_does_not_select_retention(self, tmp_path):
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.0, "disagreement": 0.0},
-            stage2={"novelty": 0.9, "ambiguity": 0.0, "valence": 0.5},
-        )
-        env = await build_critique(tmp_path, appraisal=appraisal)
-        env.plugin._rng = FixedRng(value=0.99)  # never sampled
-        await _fire(env, "knov", origin="user", response_text="no claims")
-        assert env.task.task_queue.queue.qsize() == 0
-        await _teardown(env)
-
-    async def test_retention_not_in_random_sampling_pool(self, tmp_path):
-        """Retention is a gated lens, not part of the random-sampling pool.
-        A below-threshold exchange that does sample must never yield retention."""
-        from corvidae_cognition.critique import STYLISTIC_LENSES
-        assert "retention" not in STYLISTIC_LENSES, (
-            "retention must not be in the random-sampling pool"
-        )
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.0, "disagreement": 0.0},
-            stage2={"ambiguity": 0.0, "valence": 0.5},
-        )
-        env = await build_critique(tmp_path, appraisal=appraisal)
-        # Force the sampling path to fire (value below the 0.05 rate)
-        env.plugin._rng = FixedRng(value=0.01)
-        await _fire(env, "krand", origin="user", response_text="no claims")
-        await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "krand")
-        lenses = outcomes["critique"]["lenses"]
-        assert "retention" not in lenses
-        await _teardown(env)
-
-    async def test_novelty_threshold_tunable(self, tmp_path):
-        """Setting critique.lens.novelty to 0.95 suppresses retention
-        at novelty=0.9 (below the raised threshold)."""
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.9},
-            stage2={"novelty": 0.9},
-        )
-        env = await build_critique(
-            tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
-            config={
-                "critique": {"retention": {"root": "values/"},
-                             "lens": {"novelty": 0.95}},
-            },
-        )
-        await _fire(env, "ktune", origin="user")
-        await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "ktune")
-        assert "retention" not in outcomes["critique"]["lenses"]
-        await _teardown(env)
-
-    async def test_commitment_alone_does_not_select_retention(self, tmp_path):
-        appraisal = FakeAppraisal(stage1={"commitment_density": 0.9})
-        env = await build_critique(tmp_path, appraisal=appraisal,
-                                   chat_text=EMPTY_VERDICT)
-        await _fire(env, "kcom", origin="user")
-        await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "kcom")
-        # commitment alone selects constrained, not retention
-        assert "constrained" in outcomes["critique"]["lenses"]
-        assert "retention" not in outcomes["critique"]["lenses"]
-        await _teardown(env)
-
-    async def test_retention_inert_without_a_knowledge_base(self, tmp_path):
-        """#742: no critique.retention.root means nowhere to file, so no lens.
-
-        Novelty and commitment both clear their thresholds, which selects
-        retention in the test above; the only difference here is the missing
-        root. Flagging a fact the agent cannot place is not a critique.
-        """
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
-        )
-        env = await build_critique(tmp_path, appraisal=appraisal,
-                                   chat_text=EMPTY_VERDICT)
-        await _fire(env, "knoroot", origin="user")
-        await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "knoroot")
-        lenses = outcomes.get("critique", {}).get("lenses", [])
-        assert "retention" not in lenses
-        await _teardown(env)
-
-    async def test_retention_threshold_tunable(self, tmp_path):
-        """critique.lens.retention raises the commitment bar on its own.
-
-        Retention used to share critique.lens.commitment with the constrained
-        lens, so an operator could not make one fire without the other.
-        """
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.6}, stage2={"novelty": 0.9},
-        )
-        env = await build_critique(
-            tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
-            config={
-                "critique": {"retention": {"root": "values/"},
-                             "lens": {"retention": 0.95}},
-            },
-        )
-        await _fire(env, "kretune", origin="user")
-        await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "kretune")
-        assert "retention" not in outcomes["critique"]["lenses"]
-        await _teardown(env)
+    """Which lens runs is the critique vector's business (#1078,
+    tests/cognition/test_critique_vector.py); these pin what the old
+    selection tests also proved and still holds."""
 
     async def test_retention_prompt_asks_for_file_and_content(self):
         """The objection has to name where the fact goes and what to write."""
@@ -525,14 +387,11 @@ class TestLensSelection:
 
     async def test_retention_fork_names_the_knowledge_base_root(self, tmp_path):
         """The lens can only name a file if it knows the directory."""
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
-        )
         env = await build_critique(
-            tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT,
+            tmp_path, appraisal=FakeAppraisal(), chat_text=EMPTY_VERDICT,
             config={"critique": {"retention": {"root": "values/"}}},
         )
-        await _fire(env, "kroot", origin="user")
+        await _fire(env, "kroot", origin="user", vector={"retention": 1.0})
         await _run_next_task(env.task)
         instructions = [c["instruction"] for c in env.fork_agent.calls]
         assert any("values/" in text for text in instructions), instructions
@@ -585,26 +444,20 @@ class TestLensSelection:
                     if r.levelname == "WARNING" and "critique.retention.root" in r.getMessage()]
         await _teardown(env)
 
-    async def test_below_threshold_no_task_when_not_sampled(self, tmp_path):
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.0, "disagreement": 0.0},
-            stage2={"ambiguity": 0.0, "valence": 0.5},
-        )
-        env = await build_critique(tmp_path, appraisal=appraisal)
+    async def test_none_winning_queues_no_task_when_not_sampled(self, tmp_path):
+        env = await build_critique(tmp_path, appraisal=FakeAppraisal())
         env.plugin._rng = FixedRng(value=0.99)  # never below the 0.05 rate
-        await _fire(env, "kb", origin="user", response_text="no claims here")
+        await _fire(env, "kb", origin="user", response_text="no claims here",
+                    vector={"none": 1.0})
         assert env.task.task_queue.queue.qsize() == 0
         await _teardown(env)
 
-    async def test_below_threshold_sampled_marks_outcome(self, tmp_path):
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.0, "disagreement": 0.0},
-            stage2={"ambiguity": 0.0, "valence": 0.5},
-        )
-        env = await build_critique(tmp_path, appraisal=appraisal,
+    async def test_none_winning_sampled_marks_outcome(self, tmp_path):
+        env = await build_critique(tmp_path, appraisal=FakeAppraisal(),
                                    chat_text=EMPTY_VERDICT)
         env.plugin._rng = FixedRng(value=0.01, choice_value="predictive")
-        await _fire(env, "ksamp", origin="user", response_text="no claims here")
+        await _fire(env, "ksamp", origin="user", response_text="no claims here",
+                    vector={"none": 1.0})
         assert env.task.task_queue.queue.qsize() == 1
         await _run_next_task(env.task)
         outcomes = await _read_outcomes(env.db, "ksamp")
@@ -618,20 +471,20 @@ class TestLensSelection:
         assert env.task.task_queue.queue.qsize() == 1
         await _teardown(env)
 
-    async def test_threshold_override_takes_effect_without_reinit(self, tmp_path):
-        """Raising critique.lens.ambiguity via runtime_overrides suppresses the
-        lens on the next exchange with no re-init (directive 2)."""
-        appraisal = FakeAppraisal(stage2={"ambiguity": 0.7})
-        env = await build_critique(tmp_path, appraisal=appraisal,
+    async def test_sample_rate_override_takes_effect_without_reinit(self, tmp_path):
+        """Lowering critique.sample_below_rate via runtime_overrides stops the
+        sampled lens on the next exchange with no re-init (directive 2)."""
+        env = await build_critique(tmp_path, appraisal=FakeAppraisal(),
                                    chat_text=EMPTY_VERDICT)
-        # Default ambiguity threshold 0.6 → predictive fires.
-        await _fire(env, "kd1", origin="user")
+        env.plugin._rng = FixedRng(value=0.01, choice_value="predictive")
+        # "none" wins and the draw is below the default rate: a lens is sampled.
+        await _fire(env, "kd1", origin="user", vector={"none": 1.0})
         assert env.task.task_queue.queue.qsize() == 1
         await _run_next_task(env.task)
-        # Raise the bar above 0.7 → no stylistic lens; also disable sampling.
-        env.channel.runtime_overrides["critique.lens.ambiguity"] = 0.95
+        # Set the rate to 0: the same draw no longer samples.
         env.channel.runtime_overrides["critique.sample_below_rate"] = 0.0
-        await _fire(env, "kd2", origin="user", response_text="no claim")
+        await _fire(env, "kd2", origin="user", response_text="no claim",
+                    vector={"none": 1.0})
         assert env.task.task_queue.queue.qsize() == 0
         await _teardown(env)
 
@@ -643,11 +496,10 @@ class TestLensSelection:
 
 class TestExecution:
     async def test_empty_verdict_no_notify_outcome_recorded(self, tmp_path):
-        appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
-        env = await build_critique(tmp_path, appraisal=appraisal,
+        env = await build_critique(tmp_path, appraisal=FakeAppraisal(),
                                    chat_text=EMPTY_VERDICT, with_funnel=True)
         env.pm.ahook_raise.on_notify = AsyncMock()
-        await _fire(env, "kempty", origin="user")
+        await _fire(env, "kempty", origin="user", vector={"predictive": 1.0})
         await _run_next_task(env.task)
         env.pm.ahook_raise.on_notify.assert_not_awaited()
         outcomes = await _read_outcomes(env.db, "kempty")
@@ -660,8 +512,7 @@ class TestExecution:
         await _teardown(env)
 
     async def test_stylistic_objection_registers_without_waking(self, tmp_path):
-        appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
-        env = await build_critique(tmp_path, appraisal=appraisal,
+        env = await build_critique(tmp_path, appraisal=FakeAppraisal(),
                                    chat_text=OBJECTION_VERDICT, with_funnel=True)
         notify = AsyncMock()
         env.pm.ahook_raise.on_notify = notify
@@ -669,7 +520,7 @@ class TestExecution:
         ingest = Mock(wraps=env.funnel.ingest)
         env.funnel.ingest = ingest
         env.funnel.ingest_and_wake = AsyncMock()
-        await _fire(env, "kfull", origin="user")
+        await _fire(env, "kfull", origin="user", vector={"predictive": 1.0})
         await _run_next_task(env.task)
         outcomes = await _read_outcomes(env.db, "kfull")
         assert outcomes["critique"]["objections"] == 1
@@ -700,18 +551,15 @@ class TestRetentionDelivery:
     the content, and wakes the channel so the fact is filed now."""
 
     async def _run_retention(self, tmp_path, key, origin="user"):
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
-        )
         env = await build_critique(
-            tmp_path, appraisal=appraisal, chat_text=RETENTION_VERDICT,
+            tmp_path, appraisal=FakeAppraisal(), chat_text=RETENTION_VERDICT,
             with_funnel=True,
             config={"critique": {"retention": {"root": "values/"}}},
         )
         env.pm.ahook_raise.on_notify = AsyncMock()
         env.funnel.ingest = Mock(wraps=env.funnel.ingest)
         env.funnel.ingest_and_wake = AsyncMock()
-        await _fire(env, key, origin=origin)
+        await _fire(env, key, origin=origin, vector={"retention": 1.0})
         await _run_next_task(env.task)
         return env
 
@@ -738,33 +586,21 @@ class TestRetentionDelivery:
         assert all(e.startswith("[retention]") for e in kwargs["entries"]), kwargs["entries"]
         await _teardown(env)
 
-    async def test_stylistic_findings_in_the_same_run_do_not_wake(self, tmp_path):
-        """AC2c: the fixture's run is constrained + retention; only the
-        retention finding wakes, the constrained one waits for the next turn."""
-        env = await self._run_retention(tmp_path, "kmixed")
-        env.funnel.ingest.assert_called_once()
-        stylistic = env.funnel.ingest.call_args.kwargs["entries"]
-        assert stylistic and all(e.startswith("[constrained]") for e in stylistic), stylistic
-        await _teardown(env)
-
 
 class TestRetentionRootFromRecall:
     """Owner, on #857: the retention root matches recall's root when the
     retention key is unset, so facts are filed where recall reads them."""
 
     async def _env(self, tmp_path, recall, chat_text=EMPTY_VERDICT, with_funnel=False):
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.9}, stage2={"novelty": 0.9},
-        )
         return await build_critique(
-            tmp_path, appraisal=appraisal, chat_text=chat_text,
+            tmp_path, appraisal=FakeAppraisal(), chat_text=chat_text,
             with_funnel=with_funnel, config={"markdown_recall": recall},
         )
 
     async def test_recalls_root_turns_the_lens_on_and_is_named(self, tmp_path):
         """AC9a: the lens runs, and the fork names recall's root."""
         env = await self._env(tmp_path, {"root": "values/"})
-        await _fire(env, "krec", origin="user")
+        await _fire(env, "krec", origin="user", vector={"retention": 1.0})
         await _run_next_task(env.task)
         outcomes = await _read_outcomes(env.db, "krec")
         assert "retention" in outcomes["critique"]["lenses"]
@@ -779,7 +615,7 @@ class TestRetentionRootFromRecall:
         )
         env.funnel.ingest = Mock(wraps=env.funnel.ingest)
         env.funnel.ingest_and_wake = AsyncMock()
-        await _fire(env, "krecw", origin="user")
+        await _fire(env, "krecw", origin="user", vector={"retention": 1.0})
         await _run_next_task(env.task)
         env.funnel.ingest_and_wake.assert_awaited_once()
         assert "values/" in env.funnel.ingest_and_wake.await_args.kwargs["stub_text"]
@@ -788,7 +624,7 @@ class TestRetentionRootFromRecall:
     async def test_several_recall_roots_use_the_first(self, tmp_path):
         """AC9b: the first listed root is the one the lens files into."""
         env = await self._env(tmp_path, {"roots": ["a/", "b/"]})
-        await _fire(env, "kroots", origin="user")
+        await _fire(env, "kroots", origin="user", vector={"retention": 1.0})
         await _run_next_task(env.task)
         instructions = [c["instruction"] for c in env.fork_agent.calls]
         assert any("knowledge base root is «a/»" in t for t in instructions), instructions
@@ -1002,18 +838,19 @@ class TestProvenanceTrigger:
     async def test_on_agent_response_never_selects_provenance(self, tmp_path):
         # Provenance waits for stage-2's claims; the reply's wording alone
         # triggers nothing.
-        appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
-        env = await build_critique(tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT)
+        env = await build_critique(tmp_path, appraisal=FakeAppraisal(), chat_text=EMPTY_VERDICT)
         try:
             # With an originating rowid and an empty message_fts, the old
             # wording-triggered gate would have added "provenance" here.
             await env.plugin.on_message_persisted(
                 channel=env.channel, trace_id="kst", rowid=50, text="q?", annotations={},
             )
-            await _fire(env, "kst", response_text=CLAIM_REPLY)
+            await _fire(env, "kst", response_text=CLAIM_REPLY, vector={"predictive": 1.0})
             await _run_next_task(env.task)
             outcomes = await _read_outcomes(env.db, "kst")
             assert outcomes["critique"]["lenses"] == ["predictive"]
+            # Stage 2 listed no claims, so no provenance task was queued.
+            assert env.task.task_queue.queue.empty()
         finally:
             await _teardown(env)
 

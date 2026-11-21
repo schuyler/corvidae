@@ -74,12 +74,9 @@ async def _transform(plugin, lens_name="planning", instruction="Base instruction
 class TestPlanningLens:
     """The plugin contributes one valid lens."""
 
-    async def test_contributes_one_sample_rate_lens(self):
+    async def test_contributes_one_lens(self):
         [lens] = await _contributed(PlanningLensPlugin())
         assert lens.name == "planning"
-        assert lens.thresholds == ()
-        assert lens.reply_patterns == ()
-        assert lens.sample_rate == 0.1
 
     def test_critique_and_goals_are_optional_dependencies(self):
         """A config that disables either must still boot (docs/cognition.md)."""

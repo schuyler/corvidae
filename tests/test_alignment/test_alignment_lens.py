@@ -24,12 +24,9 @@ async def _contributed(plugin):
 class TestGriceLens:
     """The plugin contributes one valid lens."""
 
-    async def test_contributes_one_sample_rate_lens(self):
+    async def test_contributes_one_lens(self):
         [lens] = await _contributed(AlignmentLensPlugin())
         assert lens.name == "alignment"
-        assert lens.thresholds == ()
-        assert lens.reply_patterns == ()
-        assert lens.sample_rate == 0.1
 
     def test_critique_is_an_optional_dependency(self):
         """A config that disables critique must still boot (docs/cognition.md)."""

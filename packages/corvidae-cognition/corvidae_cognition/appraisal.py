@@ -161,11 +161,6 @@ DEFAULT_STAGE2_FORK_PROMPT = (
     "}"
 )
 
-#: The numeric stage-2 dimensions other plugins may select on (critique
-#: lens thresholds validate against this); the schema below defines them.
-STAGE2_DIMENSIONS: tuple[str, ...] = (
-    "valence", "stakes", "ambiguity", "commitment_density", "novelty")
-
 # JSON schema constraining the stage-2 call on servers that honour it
 # (llama-server grammar / json_schema via extra_body). Providers that ignore
 # it still return the JSON the prompt asks for; _parse_json_block reads it.
@@ -207,6 +202,32 @@ STAGE2_EXTRA_BODY = {
         "json_schema": {"name": "stage2_appraisal", "schema": STAGE2_SCHEMA},
     }
 }
+
+
+
+def _extra_body_with_lenses(names: list[str]) -> dict:
+    """STAGE2_EXTRA_BODY with a required ``lenses`` object scoring ``names``
+    and "none". Built per call from a copy; the shared schema is untouched."""
+    keys = [*names, "none"]
+    schema = {
+        **STAGE2_SCHEMA,
+        "properties": {
+            **STAGE2_SCHEMA["properties"],
+            "lenses": {
+                "type": "object",
+                "properties": {key: {"type": "number"} for key in keys},
+                "required": keys,
+            },
+        },
+        "required": [*STAGE2_SCHEMA["required"], "lenses"],
+    }
+    return {
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "stage2_appraisal", "schema": schema},
+        }
+    }
+
 
 # Surface-heuristic marker sets (tier 1c). Deliberately crude: these are
 # density signals, not NLP — the §6 standing experiment is what tunes the
@@ -257,10 +278,67 @@ def _parse_json_block(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 
-def _stage2_from_text(text: str) -> dict:
-    """Parse a stage-2 reply into the clamped vector; raises on bad output."""
+def _lens_vector(raw, offered: list[str], trace_id: str) -> dict[str, float] | None:
+    """Normalize stage 2's critique vector: shares of 1 over ``offered`` + "none".
+
+    Drops (each with a warning naming the entry and the trace) names that
+    were not offered, and values that are not finite, non-negative real
+    numbers (a bool is not one). Renormalizes the rest to sum to 1; an
+    offered name the reply left out counts as 0. Returns None, with a
+    warning naming the trace and the reason, when the field is missing, is
+    not an object, or has nothing usable left (sums to 0).
+    """
+    # The field must be an object of name -> percentage.
+    if raw is None:
+        logger.warning(
+            "stage-2 lenses for trace %s: the reply has no \"lenses\" field; "
+            "no critique vector for this exchange", trace_id)
+        return None
+    if not isinstance(raw, dict):
+        logger.warning(
+            "stage-2 lenses for trace %s: \"lenses\" is a %s, not an object; "
+            "no critique vector for this exchange", trace_id, type(raw).__name__)
+        return None
+    allowed = {*offered, "none"}
+    usable: dict[str, float] = {}
+    for name, value in raw.items():
+        # An unknown name cannot be run, so it takes no share.
+        if name not in allowed:
+            logger.warning(
+                "stage-2 lenses for trace %s: dropped %r, which was not "
+                "offered (offered: %s)", trace_id, name, ", ".join(sorted(allowed)))
+            continue
+        # A share must be a finite, non-negative real number.
+        if (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0
+        ):
+            logger.warning(
+                "stage-2 lenses for trace %s: dropped %r, whose value %r is not "
+                "a finite non-negative number", trace_id, name, value)
+            continue
+        usable[name] = float(value)
+    total = sum(usable.values())
+    if total <= 0:
+        logger.warning(
+            "stage-2 lenses for trace %s: no usable shares left (sum is 0); "
+            "no critique vector for this exchange", trace_id)
+        return None
+    return {name: value / total for name, value in usable.items()}
+
+
+def _stage2_from_text(
+    text: str, offered: list[str] | None = None, trace_id: str | None = None,
+) -> dict:
+    """Parse a stage-2 reply into the clamped vector; raises on bad output.
+
+    With ``offered`` (the critique lenses the fork was asked to score) the
+    result also carries ``lenses``, the normalized critique vector, unless
+    the reply has no usable one: a bad ``lenses`` field never costs the
+    dimensions.
+    """
     parsed = _parse_json_block(text)
-    return {
+    stage2 = {
         "valence": clamp01(float(parsed["valence"])),
         "stakes": clamp01(float(parsed["stakes"])),
         "ambiguity": clamp01(float(parsed["ambiguity"])),
@@ -269,6 +347,12 @@ def _stage2_from_text(text: str) -> dict:
         "correction": bool(parsed.get("correction", False)),
         "past_claims": _past_claims(parsed.get("past_claims")),
     }
+    # The critique vector, when lenses were offered; absent when unusable.
+    if offered:
+        vector = _lens_vector(parsed.get("lenses"), offered, str(trace_id))
+        if vector is not None:
+            stage2["lenses"] = vector
+    return stage2
 
 
 def _past_claims(raw) -> list[dict]:
@@ -536,6 +620,9 @@ class AppraisalPlugin(CorvidaePlugin):
         # Callbacks awaited after each stage 2 lands (add_stage2_listener):
         # how CritiquePlugin hears past_claims without waiting on a task.
         self._stage2_listeners: list[Callable[..., Awaitable[None]]] = []
+        # The critique lenses stage 2 scores (set_lens_offer): a provider of
+        # (name, question) pairs, or None when no plugin offers any.
+        self._lens_offer: Callable[[], list[tuple[str, str]]] | None = None
         # Trace-keyed LRU of originating text (the exchange's true
         # originating USER/notification text), bounded so long-running
         # exchanges don't leak memory. Fed by on_message_persisted.
@@ -772,6 +859,17 @@ class AppraisalPlugin(CorvidaePlugin):
         """
         self._stage2_listeners.append(callback)
 
+    def set_lens_offer(
+        self, provider: Callable[[], list[tuple[str, str]]] | None,
+    ) -> None:
+        """Register the provider of the critique lenses stage 2 scores.
+
+        Called by CritiquePlugin at start-up. The provider returns the
+        ``(name, question)`` pairs on offer at the moment of each stage-2
+        call; one provider, since critique is the only consumer.
+        """
+        self._lens_offer = provider
+
     async def _notify_stage2(self, channel, trace_id, response_text, annotations, stage2) -> None:
         """Await every stage-2 listener; one failure doesn't stop the rest."""
         for listener in list(self._stage2_listeners):
@@ -965,12 +1063,28 @@ class AppraisalPlugin(CorvidaePlugin):
             f"and the response you sent began «{quote(response_text)}».\n"
             f"Memory retrieval for this exchange: {profile}"
         )
+        # The critique lenses on offer, each with its question (none when no
+        # provider is set or it raised: stage 2 then asks for dimensions only).
+        offer = self._current_offer(trace_id)
+        extra_body = STAGE2_EXTRA_BODY
+        if offer:
+            instruction += (
+                "\n\n[Critique selection] Which ONE of these self-checks is "
+                "most worth running on this exchange, if any? Give each a "
+                'percentage, plus "none", summing to 100.\n'
+                + "\n".join(f"- {name}: {question}" for name, question in offer)
+                + '\nInclude them in your JSON object as "lenses": {'
+                + ", ".join(f'"{name}": 0' for name, _ in offer)
+                + ', "none": 0}.'
+            )
+            extra_body = _extra_body_with_lenses([name for name, _ in offer])
         # Fork and parse; any failure or unusable reply is a miss.
         try:
             result = await agent.fork(
-                channel, instruction, stage="appraisal", extra_body=STAGE2_EXTRA_BODY
+                channel, instruction, stage="appraisal", extra_body=extra_body
             )
-            return _stage2_from_text(result.text)
+            return _stage2_from_text(
+                result.text, [name for name, _ in offer] or None, trace_id)
         except Exception as exc:
             self._skip_stage2(
                 channel, trace_id,
@@ -978,6 +1092,24 @@ class AppraisalPlugin(CorvidaePlugin):
                 exc_info=True,
             )
             return None
+
+    def _current_offer(self, trace_id: str) -> list[tuple[str, str]]:
+        """The lenses on offer for this stage-2 call; empty when none.
+
+        A provider that raises costs the exchange its critique vector, not
+        its dimensions: warn naming the trace and offer nothing.
+        """
+        if self._lens_offer is None:
+            return []
+        try:
+            return list(self._lens_offer())
+        except Exception:
+            logger.warning(
+                "stage-2 lens offer failed for trace %s; stage 2 asks for "
+                "dimensions only and the exchange gets no critique vector",
+                trace_id, exc_info=True, extra={"trace_id": trace_id},
+            )
+            return []
 
     async def _retrieval_profile_summary(self, trace_id: str) -> str:
         """Render the exchange's retrieval profile as a short prompt line."""

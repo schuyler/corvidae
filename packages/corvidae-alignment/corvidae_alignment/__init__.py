@@ -1,8 +1,9 @@
 """Grice alignment lens: flags replies that violate Grice's maxims.
 
 A standalone plugin that contributes a single lens through the
-``on_critique_init`` hook. The lens fires at a sample rate on the turns
-critique judges and asks a fork whether the reply violates any of
+``on_critique_init`` hook. The appraisal fork scores the lens's
+``appraisal_question`` on the turns critique judges; when it wins, the
+lens asks a fork whether the reply violates any of
 Grice's four cooperative maxims (Quantity, Quality, Relation, Manner).
 A finding is an ordinary critique objection: the agent reads it at its
 next turn and decides whether to act.
@@ -63,12 +64,14 @@ class AlignmentLensPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_critique_init(self, config: dict, add_lens) -> None:
-        # One lens, no thresholds or patterns: it runs at its sample rate.
+        # One lens. The appraisal fork scores this question against the
+        # other lenses on each exchange; tune it as
+        # critique.lens.alignment.appraisal_question.
         add_lens(Lens(
             name=LENS_NAME,
             fork_prompt=_FORK_PROMPT,
-            thresholds=(),
-            reply_patterns=(),
-            # Start at 10%; tunable as critique.lens.alignment.sample_rate.
-            sample_rate=0.1,
+            appraisal_question=(
+                "Does the reply break a Gricean maxim: too much or too little, "
+                "unfounded, off-topic, or unclear?"
+            ),
         ))

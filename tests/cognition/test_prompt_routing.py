@@ -182,11 +182,12 @@ class TestAppraisalPromptRouting:
 
 
 class TestCritiquePromptRouting:
-    """critique.fork_prompt.<lens> at on_init / on_config_reload."""
+    """critique.lens.<lens>.fork_prompt (and critique.provenance.fork_prompt)
+    at on_init / on_config_reload."""
 
     async def test_lens_prompts_resolved_at_init(self):
         plugin = CritiquePlugin()
-        cfg = {"critique": {"fork_prompt": {"provenance": "PROV INLINE"}}}
+        cfg = {"critique": {"provenance": {"fork_prompt": "PROV INLINE"}}}
         await plugin.on_init(_FakePM(), cfg)
         assert plugin._fork_prompts["provenance"] == "PROV INLINE"
         assert plugin._fork_prompts["predictive"] == DEFAULT_FORK_PROMPTS["predictive"]
@@ -196,6 +197,6 @@ class TestCritiquePromptRouting:
         await plugin.on_init(_FakePM(), {})
         first = dict(plugin._fork_prompts)
         await plugin.on_config_reload(
-            {"critique": {"fork_prompt": {"provenance": 42}}}
+            {"critique": {"provenance": {"fork_prompt": 42}}}
         )
         assert plugin._fork_prompts == first
