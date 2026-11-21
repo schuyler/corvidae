@@ -488,3 +488,55 @@ async def test_a_plain_fail_soft_hook_still_dispatches_after_the_refusal() -> No
     with pytest.raises(pluggy.PluginValidationError):
         await pm.ahook.on_web_thing(value=1)
     assert await pm.ahook.on_web_other(value=1) == [2]
+
+
+# --- #1113: a static hookimpl keeps its marker through wrapping --------------
+
+
+async def test_a_static_hookimpl_survives_re_registration() -> None:
+    """`@hookimpl` above `@staticmethod` keeps its marker when the impl is wrapped.
+
+    The marker sits on the staticmethod object, which `getattr` unwraps, so the
+    wrapper used to carry a `__dict__` without it: registering the same plugin
+    with a second manager found no marker and pluggy dropped the impl silently.
+    """
+
+    class Static:
+        @hookimpl
+        @staticmethod
+        async def on_notify(channel, source, text, tool_call_id, annotations):
+            return "static"
+
+    plugin = Static()
+    pm1 = create_plugin_manager()
+    pm1.register(plugin, name="static")
+    assert len(pm1.hook.on_notify.get_hookimpls()) == 1
+
+    pm2 = create_plugin_manager()
+    pm2.register(plugin, name="static")
+    assert len(pm2.hook.on_notify.get_hookimpls()) == 1
+    # And the impl is the wrapped one, not the bare staticmethod.
+    [impl] = pm2.hook.on_notify.get_hookimpls()
+    assert getattr(impl.function, "_corvidae_fail_soft", False)
+
+    assert await pm2.ahook.on_notify(
+        channel="irc:#test", source="t", text="x", tool_call_id=None, annotations={},
+    ) == ["static"]
+
+
+async def test_a_static_hookimpl_survives_unregister_and_register() -> None:
+    """The same marker survives an unregister/register cycle on one manager."""
+
+    class Static:
+        @hookimpl
+        @staticmethod
+        async def on_notify(channel, source, text, tool_call_id, annotations):
+            return "static"
+
+    plugin = Static()
+    pm = create_plugin_manager()
+    pm.register(plugin, name="static")
+    pm.unregister(plugin)
+    pm.register(plugin, name="static")
+
+    assert len(pm.hook.on_notify.get_hookimpls()) == 1

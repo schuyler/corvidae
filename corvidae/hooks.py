@@ -552,6 +552,43 @@ class _Failed:
         self.exc = exc
 
 
+def _marker_holder(plugin: object, name: str) -> object | None:
+    """The object pluggy read the hookimpl marker from, if it is not the bound
+    attribute itself.
+
+    A plain ``@hookimpl async def`` keeps its marker on the function, which is
+    what ``getattr`` returns. ``@hookimpl`` above ``@staticmethod`` or
+    ``@classmethod`` puts the marker on the descriptor in the class ``__dict__``,
+    which ``getattr`` unwraps (#1113).
+    """
+    held = vars(type(plugin)).get(name)
+    if held is None:
+        held = vars(plugin).get(name)
+    if held is None or held is getattr(plugin, name, None):
+        return None
+    return held
+
+
+def _copy_hookimpl_marker(holder: object | None, wrapper: Callable[..., object]) -> None:
+    """Copy pluggy's marker attributes from ``holder`` onto ``wrapper`` (#1113).
+
+    The marker lands on whichever object the decorator received: a plain
+    function, or the ``staticmethod`` object that ``@hookimpl`` was applied
+    above. Both are read here; the function behind a descriptor is the fallback.
+    """
+    if holder is None:
+        return
+    for source in (holder, getattr(holder, "__func__", None)):
+        if source is None:
+            continue
+        for key, value in vars(source).items():
+            # Only the marker's own attributes: a dunder must not overwrite what
+            # functools.wraps set on the wrapper.
+            if key.startswith("__"):
+                continue
+            setattr(wrapper, key, value)
+
+
 def _fail_soft_wrapper(original: Callable[..., object]) -> Callable[..., object]:
     """Wrap a fail-soft hookimpl so its failure can come back as a value.
 
@@ -616,9 +653,17 @@ class CorvidaePluginManager(pluggy.PluginManager):
         # Already wrapped: the plugin was registered before (here or elsewhere).
         if getattr(original, "_corvidae_fail_soft", False):
             return opts
+        wrapper = _fail_soft_wrapper(original)
+        # @hookimpl stacked above @staticmethod: the marker sits on the
+        # staticmethod object, which `getattr` unwraps to the plain function, so
+        # functools.wraps in _fail_soft_wrapper copies a __dict__ without it.
+        # Re-registering the same plugin would then find no marker and pluggy
+        # would drop the implementation silently (#1113). Carry the options
+        # across from whichever holder has them.
+        _copy_hookimpl_marker(_marker_holder(plugin, name), wrapper)
         # A plugin that refuses the attribute (__slots__, a guarded
         # __setattr__) fails registration here rather than running unwrapped.
-        setattr(plugin, name, _fail_soft_wrapper(original))
+        setattr(plugin, name, wrapper)
         return opts
 
 
