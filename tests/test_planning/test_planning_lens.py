@@ -105,6 +105,15 @@ class TestPlanningLens:
         assert "null" not in prompt
 
 
+class TestAppraisalQuestion:
+    """#1078 T10: the lens declares the question the appraisal fork answers."""
+
+    async def test_lens_declares_a_one_line_question(self):
+        [lens] = await _contributed(PlanningLensPlugin())
+        assert lens.appraisal_question.strip()
+        assert "\n" not in lens.appraisal_question
+
+
 class TestTransformCritiquePrompt:
     """transform_critique_prompt appends the goal list to the planning fork."""
 
