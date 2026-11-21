@@ -976,3 +976,43 @@ async def test_g4_seed_between_add_goal_read_and_write_keeps_positions_distinct(
     assert sorted(t for t, _ in data) == ["existing", "racer", "seeded"]
     positions = [p for _, p in data]
     assert len(set(positions)) == len(positions), f"tied positions: {data}"
+
+
+async def test_g3_retirement_sets_status_retired(env):
+    """#1119: the row a retirement leaves behind says it is retired.
+
+    The UPDATE that writes `retired_at` wrote no status, so every retired row kept
+    whatever it had while open and the column lied. Drop `status = ?` from that
+    statement and this test fails.
+    """
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "kestrel nest evidence")
+    await env.tools["add_goal"]("Find the kestrel nest", _ctx=ctx)
+    await env.tools["set_goal_status"](1, "in-progress", _ctx=ctx)
+
+    await env.tools["retire_goal"](
+        1, "I concluded the nest is on Brannan Street, because twigs were carried.",
+        _ctx=ctx,
+    )
+
+    (status,) = (await rows(env, "SELECT status FROM goals WHERE id = 1"))[0]
+    assert status == "retired"
+    # And the status column no longer lists it as live work.
+    live = await rows(env, "SELECT id FROM goals WHERE status != 'retired'")
+    assert live == []
+
+
+async def test_g3_retired_status_is_not_settable(env):
+    """#1119: "retired" is what retirement writes, not a status a caller picks.
+
+    Offering it in `set_goal_status` would validate, then answer "no open goal"
+    for the goal the caller just asked to retire by hand.
+    """
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("Find the kestrel nest", _ctx=ctx)
+
+    answer = await env.tools["set_goal_status"](1, "retired", _ctx=ctx)
+
+    assert "status must be one of" in answer
+    (status,) = (await rows(env, "SELECT status FROM goals WHERE id = 1"))[0]
+    assert status == "open"
