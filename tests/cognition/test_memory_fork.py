@@ -196,6 +196,13 @@ async def test_idle_in_window_miss_skips(env, caplog, agent, reason):
               if r.levelno == logging.WARNING and "consolidation skipped for channel" in r.getMessage()]
     assert channel.id in text and f"{ids[0]}-{ids[-1]}" in text
     assert reason in text and "watermark stays at" in text
+    # An idle skip is never retried by the next idle firing (#342), so its line
+    # names what does -- including when the cause is forks being off, which
+    # rules out the turn trigger as well (#1002 review).
+    if "forks are not enabled" in reason:
+        assert "a new message or compaction retries" in text, text
+    else:
+        assert "a new message, the turn trigger or compaction retries" in text, text
 
 
 async def test_idle_skip_is_retried(env):
