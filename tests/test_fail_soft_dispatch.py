@@ -543,10 +543,13 @@ async def test_a_static_hookimpl_survives_unregister_and_register() -> None:
 
 
 async def test_a_slots_plugin_with_a_hookimpl_slot_registers() -> None:
-    """pluggy reads a hookimpl out of a `__slots__` slot; so must the wrapping.
+    """An impl held in a `__slots__` *slot* registers, and re-registers.
 
-    A hand-written marker lookup raised `TypeError: vars() argument must have
-    __dict__ attribute` here, for a shape pluggy supports (#1142 review).
+    This is the shape pluggy supports and the one a hand-written marker lookup
+    broke with `TypeError: vars() argument must have __dict__ attribute`
+    (#1142 review). A `__slots__` plugin that keeps the impl as a class-body
+    method is a different shape: it is refused at `setattr` by design, because a
+    read-only slot cannot be wrapped and running it unwrapped is worse (#1104).
     """
 
     async def on_notify(channel, source, text, tool_call_id, annotations):
@@ -592,12 +595,14 @@ async def test_an_inherited_static_hookimpl_survives_re_registration() -> None:
 async def test_an_instance_attribute_keeps_pluggy_precedence() -> None:
     """An instance value shadows a marked class attribute for pluggy; it must here too.
 
-    Checking the class `__dict__` first gave the wrapper the class's options for
-    an impl pluggy took from the instance (#1142 review).
+    Checking the class `__dict__` first gave the wrapper the *class's* options for
+    an impl pluggy took from the instance, which only shows on the next
+    registration: the class marker says `trylast`, so the order the second
+    manager dispatches in is the assertion (#1142 review).
     """
 
     class Marked:
-        @hookimpl
+        @hookimpl(trylast=True)
         @staticmethod
         async def on_notify(channel, source, text, tool_call_id, annotations):
             return "class"
@@ -605,13 +610,27 @@ async def test_an_instance_attribute_keeps_pluggy_precedence() -> None:
     async def from_instance(channel, source, text, tool_call_id, annotations):
         return "instance"
 
+    class Other:
+        @hookimpl
+        async def on_notify(self, channel, source, text, tool_call_id, annotations):
+            return "other"
+
     plugin = Marked()
     plugin.on_notify = hookimpl(from_instance)
 
-    pm = create_plugin_manager()
-    pm.register(plugin, name="shadow")
+    pm1 = create_plugin_manager()
+    pm1.register(plugin, name="shadow")
+    pm2 = create_plugin_manager()
+    # Other first, so plain (non-trylast) order is shadow then other: a leaked
+    # class marker with trylast would put shadow last and flip this.
+    pm2.register(Other(), name="other")
+    pm2.register(plugin, name="shadow")
 
-    assert len(pm.hook.on_notify.get_hookimpls()) == 1
-    assert await pm.ahook.on_notify(
+    [shadow_impl] = [
+        impl for impl in pm2.hook.on_notify.get_hookimpls()
+        if impl.plugin_name == "shadow"
+    ]
+    assert not shadow_impl.trylast  # the instance marker, not the class one
+    assert await pm2.ahook.on_notify(
         channel="irc:#test", source="t", text="x", tool_call_id=None, annotations={},
-    ) == ["instance"]
+    ) == ["instance", "other"]

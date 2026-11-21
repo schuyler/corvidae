@@ -32,7 +32,6 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 import apluggy as pluggy
-from pluggy._manager import _static_hook_attr  # pluggy's own marker lookup
 
 from corvidae.context import MessageType
 from corvidae.outbound import (
@@ -553,32 +552,6 @@ class _Failed:
         self.exc = exc
 
 
-def _carry_hookimpl_marker(plugin: object, name: str, wrapper: Callable[..., object]) -> None:
-    """Give the wrapper the hookimpl marker pluggy read from ``plugin.name`` (#1113).
-
-    ``@hookimpl`` above ``@staticmethod`` or ``@classmethod`` puts the marker on
-    the descriptor, and ``getattr`` unwraps that to the plain function, so
-    ``functools.wraps`` in ``_fail_soft_wrapper`` copies a ``__dict__`` without
-    it: re-registering the plugin would find no marker and pluggy would drop the
-    implementation silently.
-
-    The lookup is pluggy's own, not a copy of it. It already handles the cases a
-    hand-written version got wrong -- an MRO-inherited impl, a ``__slots__``
-    plugin, and an instance attribute shadowing a marked class attribute -- and
-    a copy would drift from the version in use.
-    """
-    found = _static_hook_attr(plugin, name)
-    if found is None:
-        return
-    holder, _function = found
-    for key, value in vars(holder).items():
-        # Only the marker's own attributes: a dunder must not overwrite what
-        # functools.wraps set on the wrapper.
-        if key.startswith("__"):
-            continue
-        setattr(wrapper, key, value)
-
-
 def _fail_soft_wrapper(original: Callable[..., object]) -> Callable[..., object]:
     """Wrap a fail-soft hookimpl so its failure can come back as a value.
 
@@ -644,13 +617,14 @@ class CorvidaePluginManager(pluggy.PluginManager):
         if getattr(original, "_corvidae_fail_soft", False):
             return opts
         wrapper = _fail_soft_wrapper(original)
-        # @hookimpl stacked above @staticmethod: the marker sits on the
-        # staticmethod object, which `getattr` unwraps to the plain function, so
+        # @hookimpl stacked above @staticmethod or @classmethod: the marker sits
+        # on the descriptor, which `getattr` unwraps to the plain function, so
         # functools.wraps in _fail_soft_wrapper copies a __dict__ without it.
         # Re-registering the same plugin would then find no marker and pluggy
-        # would drop the implementation silently (#1113). Carry the options
-        # across from whichever holder has them.
-        _carry_hookimpl_marker(plugin, name, wrapper)
+        # would drop the implementation silently (#1113). `opts` is exactly the
+        # dict pluggy read from that holder, so setting it on the wrapper is the
+        # whole fix -- no private pluggy name, no copy of its lookup logic.
+        setattr(wrapper, self.project_name + "_impl", dict(opts))
         # A plugin that refuses the attribute (__slots__, a guarded
         # __setattr__) fails registration here rather than running unwrapped.
         setattr(plugin, name, wrapper)
