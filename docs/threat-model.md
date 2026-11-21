@@ -260,12 +260,12 @@ the first one: the only runtime check on confabulation can be switched off
 by the thing being checked.
 
 The fork instructions added for #51 (`appraisal.stage2_fork_prompt`,
-`critique.lens.<lens>.fork_prompt`, `critique.provenance.fork_prompt`, `critique.proactivity.fork_prompt`, `memory.consolidation_fork_prompt`,
+`critique.lens.<lens>.fork_prompt`, `critique.provenance.fork_prompt`, `memory.consolidation_fork_prompt`,
 `agent.compaction_fork_prompt`) and `agent.forks.*` are read from operator
 config only, so `set_settings` can't rewrite them. That covers only calls
 that actually fork. A fork miss (forks off for the stage, the exchange has
 left the window, a refused or unparseable fork) skips stage-2 appraisal, the
-stylistic critique lenses and the provenance check with a warning (#320, PRD
+built-in critique lenses and the provenance check with a warning (#320, PRD
 §3.8.5), so the standalone prompts `appraisal.stage2_prompt` and
 `critique.prompt.<lens>` are no longer reachable from any live stage. They
 stay in the tunable list above, and no stage reads them. Compaction on a
@@ -1588,7 +1588,7 @@ line is plain text in the result, with no kernel header at all.
   `past_claims` (quoted from the reply) and the objection detail critique
   records in `outcomes`. Through the `exchange_log` scrubber the cognition
   extra registers under `corvidae.redact`, `corvidae redact` scrubs the
-  claims and the provenance and stylistic critique detail (#160). A plugin that keeps its own copy of conversation text
+  claims and the provenance and built-in lens critique detail (#160). A plugin that keeps its own copy of conversation text
   and registers no scrubber is not reached. `retrieval_candidate` (#407)
   copies no text, only memory ids and scores, but a row naming a redacted
   memory still records that it was retrieved, so its scrubber deletes
@@ -1600,7 +1600,8 @@ line is plain text in the result, with no kernel header at all.
   `exchange_log`, the owning exchange's claims are tombstoned with their
   counts kept (but not when the message was coalesced into a burst
   answered by a later message's turn, #423). What `redact` still doesn't
-  reach: proactivity's objection detail in `outcomes` (#1003) and that of
+  reach: proactivity's objection detail in `outcomes` written before
+  #1126 (#1003), the objection detail of
   lenses other plugins add (`critique.<name>.detail`, finding 23),
   exchanges whose
   `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
@@ -1940,7 +1941,7 @@ Four things are new.
 
 Accepted residuals. Redaction doesn't reach an added lens's recorded
 objection text (`outcomes.critique.<name>.detail`) while redaction is on
-hold (#1005); proactivity's detail has the same gap (#1003).
+hold (#1005), nor proactivity's detail written before #1126 (#1003).
 
 ### 24. Internal work fans out without bound, and an inbound flood fills a channel (#1050)
 
@@ -2015,16 +2016,22 @@ turns a notification started (`webhook:*`, GitHub events, `rss:*`,
 landing in the launcher's window, and corrections. Two routes are new:
 
 - **Notification text reaches the critics.** On a notification turn the
-  "originating message" the lenses and the proactivity check quote is the
+  "originating message" the lenses quote is the
   notification text, so a webhook payload, a feed item or a GitHub event's
   strings (finding 20) reach a critic fork's instruction, and stage 2 reads
   the exchange to list claims for the provenance check. A critic's
   objections re-enter the window as framed CONTEXT. This is the route a
   user's own text already takes ("The short version", on the provenance
   critic), now open to every sender a notification source carries.
-- **A background turn can start a correction.** A provenance or
-  proactivity finding on a heartbeat or notification turn wakes a
-  `critique`-origin turn on that channel, which may send.
+- **A background turn can start a correction.** A provenance,
+  retention or proactivity finding on a heartbeat or notification turn wakes a
+  `critique`-origin turn on that channel, which may send. A proactivity
+  wake is also told to act: its stub says to do the thing the reply asked
+  permission for (#1126). Untrusted text in the quoted exchange can steer
+  the critic toward naming an action as the agent's to take; what the
+  agent then does is bounded by the Ownership Boundary in its system
+  prompt, which the critic was told to judge by, and by the tools it
+  already holds, not by anything new.
 
 Mitigations and their limits:
 
@@ -2043,15 +2050,17 @@ Mitigations and their limits:
   `cross_channel_send.max_hops` (finding 24).
 - The correction stub defaults to `NO_REPLY`, which critique's veto on
   critique-origin finals withholds.
-- Per channel, `critique.provenance.enabled`, `critique.proactivity.enabled`,
+- Per channel, `critique.provenance.enabled` and
   `critique.sample_below_rate` turn the checks down
   or off (they are agent-writable unless listed in
-  `agent.immutable_settings`, finding 23).
+  `agent.immutable_settings`, finding 23). The proactivity lens's switch,
+  `critique.lens.proactivity.enabled`, is static config the agent can't
+  write (#1126).
 - A decline (an unsent `NO_REPLY` or empty final) is not judged (#420), so a
   background turn that says nothing costs nothing.
 
-Accepted residual: each judged background turn can cost lens, provenance
-and proactivity forks on the shared backend, and a correction turn. How much
+Accepted residual: each judged background turn can cost a lens fork and a
+provenance fork on the shared backend, and a correction turn. How much
 is unmeasured; a harness probe of whether lens objections help on
 notification turns is a follow-up on #1031. A reminder a correction sets can
 still lead to another correction; that loop predates this change.
@@ -2096,12 +2105,12 @@ Two things are new.
   To switch it off, list `corvidae_planning` under `plugins.disabled`.
 - **Plugins can rewrite lens instructions.** `transform_critique_prompt`
   ([cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt))
-  hands every implementer the instruction for each stylistic, retention and
-  added lens fork, and the returned string replaces it. A plugin could
+  hands every implementer the instruction for each built-in lens fork
+  (proactivity included, #1126) and added lens fork, and the returned string replaces it. A plugin could
   soften the built-in critics this way. The text comes from installed
   plugin code, which the operator chose to load (principle 9), so this is a
-  review item for plugin authors, not a mechanism. Provenance and
-  proactivity don't go through the hook.
+  review item for plugin authors, not a mechanism. Provenance doesn't go
+  through the hook.
 
 ### 28. A config edit can route an installed distribution into a core slot (#1107)
 

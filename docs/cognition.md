@@ -33,7 +33,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory`, `search_transcripts` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
-| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), the provenance check, and the lenses other plugins contribute through `on_critique_init` |
+| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), the proactivity lens (permission asked for something the agent owns, #1126), the provenance check, and the lenses other plugins contribute through `on_critique_init` |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a list of the open ones in every heartbeat beat |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
@@ -1709,9 +1709,11 @@ It also registers the `exchange_log` scrubber (`redact_exchange_log`)
 under the `corvidae.redact` entry-point group. When `corvidae redact`
 tombstones a message, the owning exchange's stage-2 `past_claims` text is
 tombstoned (claim and query counts kept), and so is the provenance and
-stylistic critique objection detail in its `outcomes` (see "Operator redaction" in
-[design.md](design.md)). Proactivity's detail (#1003) and the detail of
-lenses other plugins add (`critique.<name>.detail`) are not reached;
+built-in lens objection detail in its `outcomes` (see "Operator redaction" in
+[design.md](design.md)). The detail of
+lenses other plugins add (`critique.<name>.detail`), and proactivity's
+detail written before #1126 under `outcomes.proactivity` (#1003), are not
+reached;
 redaction is on hold (#1005).
 
 The table is created in `on_start` when the DB is already open. At boot it
@@ -1867,18 +1869,23 @@ file them: read the named file under the root and append only what is
 missing. The funnel keeps one pending stub per channel and origin, so the
 first wake's text governs everything queued behind it. That is why the stub
 depends on configuration only, never on which lens woke: it is the retention
-note when a root is set and the provenance note otherwise, and once a loaded
-plugin lens declares `wakes=True` one sentence follows it ("Findings from
+note when a root is set and the provenance note otherwise. While the
+proactivity lens is offered (`critique.lens.proactivity.enabled`, #1126), a
+sentence follows it telling the agent to take the action a proactivity
+finding names and then send nothing unless the other party would otherwise
+act on a wrong belief. Once a loaded
+plugin lens declares `wakes=True` one more sentence comes last ("Findings from
 other self-check lenses may also be in the critique context: reply in the
 channel about one only if your earlier reply could lead the other party to
 take an incorrect action; otherwise send nothing, as above."), so the
 silence default holds for every waking lens however the stubs coalesce. A
 note's opening can therefore name a cause that didn't produce this wake
-(shortcut: the provenance note's first sentence can misstate the cause when
-only a plugin lens woke; rewrite both notes neutrally if a waking plugin lens
-ships in-tree).
+(shortcut: the provenance note's first sentence misstates the cause when
+only proactivity or a plugin lens woke, which under the default config is
+the common case for proactivity; rewrite both notes neutrally when that
+confusion shows up in the harness).
 On a critique-origin turn (a correction, or a turn a note from one woke)
-nothing wakes: its provenance, proactivity and retention findings all wait
+nothing wakes: its provenance, proactivity, retention and other waking findings all wait
 for the channel's next turn, so a correction never starts another (PRD
 §3.7 Critique 4). Retention findings then wait without the filing stub. The plugin's
 `should_send_response` vetoes a `final` on a critique-origin turn whose
@@ -2002,10 +2009,12 @@ vector, not by a rule the lens carries.
 
 ### How a lens is chosen: the critique vector (#1078)
 
-At most one stylistic or plugin lens runs per exchange: the built-ins
-(`predictive`, `constrained`, `adversarial`, and `retention` while a
-knowledge base root is known) and every added lens are *offered* to the
-stage-2 appraisal fork, which scores them.
+At most one built-in or plugin lens runs per exchange: the built-ins
+(`predictive`, `constrained`, `adversarial`, `retention` while a
+knowledge base root is known, and `proactivity` while
+`critique.lens.proactivity.enabled`) and every added lens are *offered* to
+the stage-2 appraisal fork, which scores them. Retention and proactivity
+wake the channel; the other built-ins wait.
 
 - **The offer.** `CritiquePlugin` hands appraisal a provider with
   `AppraisalPlugin.set_lens_offer(provider)` in `on_start`, next to
@@ -2055,9 +2064,11 @@ stage-2 appraisal fork, which scores them.
   probability `critique.sample_below_rate` (runtime-tunable per channel) one
   random offered lens runs instead, marked `sampled`: the standing
   false-negative bound (operator directive 3). The pool is every offered
-  lens, built-ins and plugin lenses alike. The pool includes retention, which
-  wakes, so retention can wake a turn through this path at frequency
-  `sample_below_rate` × 1/(offered lenses), the vector aside.
+  lens, built-ins and plugin lenses alike. The pool includes retention and
+  proactivity, which wake, so each can wake a turn through this path at
+  frequency `sample_below_rate` × 1/(offered lenses), the vector aside. The
+  proactivity brief says to object only to a permission question, so on a
+  reply that asks none it should return nothing.
 - **No appraisal plugin.** Without one (or with stage 2 not listening)
   there is no vector to read, so `on_agent_response` runs one random
   offered lens per exchange, built-ins and plugin lenses alike, as the
@@ -2103,8 +2114,7 @@ nothing, unless the lens declares `wakes=True` (PRD §3.7 Critique 4): a
 waking lens's objections re-enter at the turn its stub triggers, under the
 same silence default as provenance's, and still wake nothing on a
 critique-origin turn. Redaction doesn't reach
-`critique.<name>.detail` yet; redaction is on hold (#1005, and #1003 for
-the same gap in proactivity's detail).
+`critique.<name>.detail` yet; redaction is on hold (#1005).
 
 ### CritiquePlugin: lens context from other plugins (`transform_critique_prompt`)
 
@@ -2113,9 +2123,9 @@ lens needs the open goal list) adds it per fork through
 `transform_critique_prompt(channel, trace_id, lens_name, instruction) -> str`,
 which CritiquePlugin owns and declares in its `hookspecs` (#1067).
 
-It fires once per lens fork in `_fork_lens`: for the stylistic lenses,
-retention and every added lens, but not provenance or proactivity, which
-build their own forks. It runs after the instruction is assembled (the
+It fires once per lens fork in `_fork_lens`: for every built-in lens
+(proactivity included, #1126) and every added lens, but not provenance,
+which builds its own fork. It runs after the instruction is assembled (the
 brief with critique's JSON tail, the exchange quote, and retention's
 knowledge base root) and before the containment check, so a slow
 implementer can't let the exchange leave the window unnoticed.
@@ -2292,7 +2302,7 @@ A `NO_REPLY` that was actually sent (say another gate's veto raised and the send
 
 **Disabling it.** `plugins.disabled: [silence]` removes the instruction, the veto and the `end_turn` tool; `agent.minimal.yaml.example` does this. A restart rebuilds every conversation's system prompt, so disabling the plugin drops the instruction everywhere at once. The windows still hold earlier `NO_REPLY` rows, though, and with no veto the model may imitate them and send the literal text. If that matters, start those conversations fresh.
 
-**Appraisal and critique skip a decline** (#420). The same rule, exported as `is_decline(channel, response_text)` (with `decline_kind(text)` for the shape), gates `AppraisalPlugin`'s stage 2 and `CritiquePlugin`'s stylistic and proactivity checks, so a `NO_REPLY` is never scored or objected to. Both call it before their first await and fail toward running if it raises. A `NO_REPLY` that was sent is a response and is judged.
+**Appraisal and critique skip a decline** (#420). The same rule, exported as `is_decline(channel, response_text)` (with `decline_kind(text)` for the shape), gates `AppraisalPlugin`'s stage 2 and `CritiquePlugin`'s lenses, so a `NO_REPLY` is never scored or objected to. Both call it before their first await and fail toward running if it raises. A `NO_REPLY` that was sent is a response and is judged.
 
 **Known gaps.** The instruction is the same in DMs and group channels; a group-specific variant that names addressing isn't built.
 

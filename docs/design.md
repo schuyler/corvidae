@@ -2694,7 +2694,7 @@ The voice is a choice, not a measured result; #186's prompt-voice A/B will
 say whether it matters:
 `agent.compaction_fork_prompt`, `memory.consolidation_fork_prompt`,
 `appraisal.stage2_fork_prompt`, `critique.lens.<lens>.fork_prompt`,
-`critique.provenance.fork_prompt`, `critique.proactivity.fork_prompt` (documented
+`critique.provenance.fork_prompt` (documented
 copies in `prompts/*_fork.md`). They are read from static config with
 `tuning.config_value`, never `resolve_tunable`, so `set_settings` can't
 write them. Consolidation appends a sentence naming where the range

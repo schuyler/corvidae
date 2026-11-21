@@ -19,7 +19,8 @@ appended after the configured prompt whether it is this default or an
 `appraisal.stage2_fork_prompt` override, and the reply schema gains a
 required `lenses` object. Each offered lens is one `- <name>: <question>`
 line, in offer order (built-ins, then plugin lenses by name; retention only
-with a knowledge-base root):
+with a knowledge-base root, proactivity only while
+`critique.lens.proactivity.enabled`):
 
 ```
 [Critique selection] Which ONE of these self-checks is most worth running

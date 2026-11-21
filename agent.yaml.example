@@ -172,15 +172,14 @@ agent:
 # critique:
 #   provenance:
 #     fork_prompt: "..."              # prompts/critique_provenance_fork.md
-#   proactivity:
-#     fork_prompt: "..."              # prompts/critique_proactivity_fork.md
 #   sample_below_rate: 0.05           # chance a random lens runs when "none" wins the critique vector
 #   retention:                        # #742: defaults to markdown_recall's root
 #     root: values/                   # the knowledge base the lens files into; inert with neither
 #   lens:
 #     # Each lens (the built-ins predictive, constrained, adversarial,
-#     # retention, and those plugins add) has two static keys (#1078). The
-#     # stage-2 appraisal fork scores each lens's question; the top one runs.
+#     # retention, proactivity, and those plugins add) has two static keys
+#     # (#1078). The stage-2 appraisal fork scores each lens's question; the
+#     # top one runs.
 #     # predictive:
 #     #   appraisal_question: "..."     # one line the fork answers to score the lens
 #     #   fork_prompt: "..."            # prompts/critique_<lens>_fork.md
@@ -189,8 +188,11 @@ agent:
 #     # alignment:                    # the alignment extra's lens (#914)
 #     #   appraisal_question: "..."
 #     #   fork_prompt: "..."            # replaces a plugin-added lens's brief (#1033)
+#     # proactivity:
+#     #   enabled: true                 # static: offers the lens (#1126); the agent can't change it
 #     # Removed (they fail startup, naming the new key): critique.fork_prompt.<lens>,
-#     # critique.lens.<dimension>, critique.lens.<name>.<dimension>, critique.lens.<name>.sample_rate.
+#     # critique.lens.<dimension>, critique.lens.<name>.<dimension>, critique.lens.<name>.sample_rate,
+#     # critique.proactivity.* (now critique.lens.proactivity.*).
 
 # Engagement and decide gates (optional; cognition extra, see
 # docs/configuration.md "gate.*"). Runtime-tunable per channel via set_settings.

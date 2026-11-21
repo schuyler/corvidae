@@ -27,7 +27,9 @@ again:
 - `exchange_log.past_claims` wasn't reached until a scrubber was added (#160).
 - A message coalesced into a burst leaves its `past_claims` on the turn that
   answered it, which the scrubber doesn't find (#423).
-- Proactivity objection text in `exchange_log.outcomes` isn't scrubbed (#1003).
+- Proactivity objection text written before #1126, under
+  `outcomes.proactivity`, isn't scrubbed (#1003); since #1126 it is recorded
+  under `outcomes.critique`, which is.
 - Objection detail from critique lenses other plugins add
   (`critique.<name>.detail`) isn't scrubbed either (threat model, finding 23).
 - Goal text has no scrubber (threat model, finding 10).
@@ -76,7 +78,8 @@ does not reach and pointing here.
 - Restatements: later replies, memory records outside the covered range,
   goals, notes and critique objections that paraphrase the message.
 - `exchange_log` rows whose `message_rowid` is NULL.
-- Proactivity objection detail in `exchange_log.outcomes` (#1003).
+- Proactivity objection detail in `exchange_log.outcomes` written before
+  #1126 (#1003).
 - Objection detail of lenses other plugins add (`critique.<name>.detail`,
   threat model finding 23).
 - The `past_claims` of the turn that answered a coalesced burst, when an
