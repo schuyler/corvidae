@@ -38,6 +38,18 @@ class FakeRegistry:
 class FakeAgent:
     def __init__(self):
         self.tools = {}
+        self.delivered_errors: list[dict] = []
+
+    async def deliver_tool_error(self, channel, tool_call_id, text, annotations):
+        self.delivered_errors.append(
+            {
+                "channel": channel,
+                "tool_call_id": tool_call_id,
+                "text": text,
+                "annotations": annotations,
+            }
+        )
+        return True
 
 
 class FakeAHook:
@@ -60,9 +72,22 @@ class FakeAHook:
         )
 
 
+class RaisingAHook:
+    """`ahook_raise`: a sibling implementation raised, so the call propagates."""
+
+    def __init__(self, exc: BaseException | None = None):
+        self.exc = exc or RuntimeError("sibling on_notify raised")
+        self.calls: list[dict] = []
+
+    async def on_notify(self, channel, source, text, tool_call_id, annotations):
+        self.calls.append({"channel": channel, "tool_call_id": tool_call_id})
+        raise self.exc
+
+
 class FakePM:
     def __init__(self, channels: dict[str, FakeChannel] | None = None):
         self.ahook = FakeAHook()
+        self.ahook_raise = self.ahook  # delivery succeeds unless a test swaps it
         self._registry = FakeRegistry(channels)
         self._agent = FakeAgent()
         self._plugins = {
@@ -683,7 +708,11 @@ async def test_deliver_notices_end_to_end(tmp_path):
     agent.tools = {"some_tool": True}  # non-empty so _wait_until_ready passes
     pm.register(agent, name="agent")
 
-    pm.ahook.on_notify = AsyncMock()
+    # A notice carrying a tool_call_id is delivered through ahook_raise (#1102),
+    # so both paths answer to the same mock.
+    delivered = AsyncMock()
+    pm.ahook.on_notify = delivered
+    pm.ahook_raise.on_notify = delivered
 
     await plugin.on_init(pm=pm, config=config)
     plugin._booted_wall = 1005.0
@@ -706,7 +735,7 @@ async def test_deliver_notices_end_to_end(tmp_path):
     await plugin._deliver_notices()
 
     # Assert: on_notify was called with the right args
-    assert pm.ahook.on_notify.await_count == 1
+    assert delivered.await_count == 1
     call = pm.ahook.on_notify.await_args
     assert call.kwargs["source"] == "restart"
     assert call.kwargs["tool_call_id"] == "tc-deliver-1"
@@ -761,3 +790,50 @@ async def test_summary_has_no_swap_lines_without_a_report(tmp_path):
         line for line in plugin._summary_lines()
         if line.startswith(("Plugins replaced", "Plugin fallbacks"))
     ]
+
+
+async def test_a_failed_delivery_closes_the_tool_call(tmp_path):
+    """#1102: a restart result that fails to deliver must not leave its call open.
+
+    A sibling `on_notify` that raises used to be swallowed by `_deliver_notices`,
+    so nothing ever answered the originating channel's tool call.
+    """
+    plugin, pm, cfg = make_plugin(tmp_path)
+    await plugin.on_init(pm, cfg)
+    plugin._booted_wall = 1000.0
+    plugin._wall = lambda: 1005.0
+    pm.ahook_raise = RaisingAHook()
+
+    marker = {
+        "reason": "test restart",
+        "channel_id": "test:home",
+        "tool_call_id": "tc-123",
+        "requested_at": 995.0,
+    }
+    await plugin._notify_restart(marker)
+
+    assert pm.ahook.notifies == []  # the raise really did stop delivery
+    assert len(pm.ahook_raise.calls) == 1
+    [error] = pm._agent.delivered_errors
+    assert error["tool_call_id"] == "tc-123"
+    assert error["channel"].id == "test:home"
+    assert "Restart complete" in error["text"]
+
+
+async def test_a_delivered_notice_does_not_queue_an_error(tmp_path):
+    """The error path is only for a failed delivery (#1102 acceptance)."""
+    plugin, pm, cfg = make_plugin(tmp_path)
+    await plugin.on_init(pm, cfg)
+    plugin._booted_wall = 1000.0
+    plugin._wall = lambda: 1005.0
+
+    marker = {
+        "reason": "test restart",
+        "channel_id": "test:home",
+        "tool_call_id": "tc-123",
+        "requested_at": 995.0,
+    }
+    await plugin._notify_restart(marker)
+
+    assert len(pm.ahook.notifies) == 1
+    assert pm._agent.delivered_errors == []
