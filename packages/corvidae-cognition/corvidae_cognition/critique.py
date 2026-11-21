@@ -686,8 +686,10 @@ def _lens_problem(lens: object) -> str | None:
 def _question_override_ok(question: object) -> bool:
     """Whether an operator's ``appraisal_question`` override has the shape
     the appraisal fork's offer block needs: one non-blank line of text."""
+    # splitlines catches every line break (\r, \x85, \u2028, ...), and a
+    # trailing one too, since the split no longer round-trips.
     return (isinstance(question, str) and bool(question.strip())
-            and "\n" not in question and "\r" not in question)
+            and question.splitlines() == [question])
 
 
 class CritiqueSpec:
