@@ -196,6 +196,13 @@ async def test_idle_in_window_miss_skips(env, caplog, agent, reason):
               if r.levelno == logging.WARNING and "consolidation skipped for channel" in r.getMessage()]
     assert channel.id in text and f"{ids[0]}-{ids[-1]}" in text
     assert reason in text and "watermark stays at" in text
+    # An idle skip is never retried by the next idle firing (#342), so its line
+    # names what does -- including when the cause is forks being off, which
+    # rules out the turn trigger as well (#1002 review).
+    if "forks are not enabled" in reason:
+        assert "a new message or compaction retries" in text, text
+    else:
+        assert "a new message, the turn trigger or compaction retries" in text, text
 
 
 async def test_idle_skip_is_retried(env):
@@ -516,3 +523,98 @@ async def test_idle_fork_warns_with_the_real_range(env, caplog):
     assert channel.id in text
     assert f"{ids[0]}-{ids[-1]}" in text, text
     assert "unknown" not in text
+
+
+async def test_a_moved_watermark_makes_the_next_idle_firing_retry(
+    env_with_persistence, caplog,
+):
+    """#1002: the pair is (watermark, MAX(id)), and the watermark half is real.
+
+    A partial advance — a catch-up segment leaving the watermark short of the
+    last row — means work was done and the tail is still un-consolidated, so the
+    idle trigger must try again. Compare MAX(id) alone and this test fails,
+    because nothing about the row count changed.
+    """
+    memory, persistence, stub, channel, db, ids = env_with_persistence
+    agent = _use(memory, FakeForkAgent({"consolidation"}, error=RuntimeError("down")))
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await _idle_firing(memory, channel.id)
+        assert len(agent.calls) == 1
+
+        await db.execute(
+            "INSERT OR REPLACE INTO consolidation_watermark "
+            "(channel_id, last_message_id) VALUES (?, ?)",
+            (channel.id, ids[1]),
+        )
+        await db.commit()
+
+        await _idle_firing(memory, channel.id)
+
+    assert len(agent.calls) == 2, agent.calls
+    assert len(_skip_warnings(caplog)) == 2
+
+
+async def test_a_turn_skip_does_not_suppress_the_next_idle_firing(
+    env_with_persistence, caplog,
+):
+    """#1002: only an idle skip records the pair.
+
+    A turn skip's line promises that the idle trigger retries, so a turn skip
+    must not leave a record that makes the next idle firing return silently.
+    Drop the ``trigger == "idle"`` guard in ``_skip_consolidation`` and this
+    test fails.
+    """
+    memory, persistence, stub, channel, db, ids = env_with_persistence
+    agent = _use(memory, FakeForkAgent({"consolidation"}, error=RuntimeError("down")))
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await memory._consolidate_range(channel.id, ids[-1], "turn")
+        assert len(agent.calls) == 1
+
+        await _idle_firing(memory, channel.id)
+
+    assert len(agent.calls) == 2, agent.calls
+    assert len(_skip_warnings(caplog)) == 2
+
+
+@pytest.mark.parametrize("agent", [
+    FakeForkAgent(set(), text=FORK_JSON), None,  # no agent plugin
+])
+async def test_a_forks_off_turn_skip_names_idle_or_compaction(env, caplog, agent):
+    """#1002: forks off means the turn hook never fires, so a turn range's line
+    must name what does retry it — idle or compaction.
+
+    Moving this wording out of ``_skip_consolidation``'s shared branch and into
+    the call site took it out of every test's reach; nothing asserted it until
+    here (#1002 review).
+    """
+    memory, stub, channel, db, ids = env
+    if agent is not None:
+        _use(memory, agent)
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await memory._consolidate_range(channel.id, ids[-1], "turn")
+    [text] = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "consolidation skipped for channel" in r.getMessage()
+    ]
+    assert "the next idle or compaction trigger retries" in text, text
+
+
+async def test_a_forks_off_idle_skip_is_suppressed_too(env_with_persistence, caplog):
+    """#1002 review: #342's suppression holds when the cause is forks off.
+
+    Every other suppression test drives a *failing fork*, so the case #342 is
+    titled after — forks off, nothing will change until a message arrives or
+    someone enables forks — had no test. Two idle firings, one warning.
+    """
+    memory, persistence, stub, channel, db, ids = env_with_persistence
+    _use(memory, FakeForkAgent(set(), text=FORK_JSON))
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await _idle_firing(memory, channel.id)
+        await _idle_firing(memory, channel.id)
+
+    assert len(_skip_warnings(caplog)) == 1
+    assert "a new message or compaction retries" in _skip_warnings(caplog)[0].getMessage()

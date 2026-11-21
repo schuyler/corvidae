@@ -397,10 +397,18 @@ async def test_turn_range_outside_window_skips_at_debug(make_env, caplog):
     assert await fetch_watermark(env.db, env.channel.id) is None
 
 
-@pytest.mark.parametrize("trigger", ["turn", "idle"])
-async def test_skip_names_its_trigger(make_env, caplog, trigger):
-    """D9: a failing fork is one WARNING skip that names the trigger that
-    will retry; the watermark stays. ("idle" passes before the change: the text hardcodes it.)"""
+@pytest.mark.parametrize(
+    ("trigger", "tail"),
+    [
+        ("turn", "the next turn trigger retries"),
+        # An idle skip is not retried by the next idle firing (#342), so its
+        # line names what does retry instead (#1002).
+        ("idle", "a new message, the turn trigger or compaction retries"),
+    ],
+)
+async def test_skip_names_its_trigger(make_env, caplog, trigger, tail):
+    """D9: a failing fork is one WARNING skip that names what will retry; the
+    watermark stays."""
     agent = FakeForkAgent({"consolidation"}, error=RuntimeError("down"))
     env = await make_env(tokens_of(DIALOG), agent=agent)
     caplog.set_level(logging.DEBUG)
@@ -413,7 +421,7 @@ async def test_skip_names_its_trigger(make_env, caplog, trigger):
         if r.levelno == logging.WARNING and "consolidation skipped" in r.getMessage()
     ]
     assert len(skips) == 1, [r.getMessage() for r in caplog.records if r.name.startswith("corvidae")]
-    assert f"the next {trigger} trigger retries" in skips[0]
+    assert tail in skips[0]
     assert await fetch_watermark(env.db, env.channel.id) is None
 
 
