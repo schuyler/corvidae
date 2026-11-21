@@ -269,7 +269,7 @@ def test_wrapper_on_kernel_observe_hook_is_refused(option: str) -> None:
     assert "on_notify" in message
     assert "'wrapping'" in message
     assert f"{option}=True" in message
-    assert "Remove" in message  # the remedy
+    assert f"Remove {option}=True" in message  # the remedy, naming the marker
     assert "failed implementation" in message  # the reason (#1104)
 
 
@@ -441,17 +441,21 @@ async def test_registered_impl_is_still_a_coroutine_function() -> None:
 # --- #1114: a wrapper that slipped past the startup check ---------------------
 
 
-async def test_dispatch_refuses_a_wrapper_the_startup_check_never_saw() -> None:
+@pytest.mark.parametrize("option", ["wrapper", "hookwrapper"])
+async def test_dispatch_refuses_a_wrapper_the_startup_check_never_saw(option: str) -> None:
     """A manager that never ran `check_fail_soft_wrappers` can still dispatch.
 
-    The name snapshot includes the wrapper, apluggy returns one result per
-    non-wrapper, and `zip(strict=True)` then raised a bare ValueError naming
-    neither the hook nor the plugin. Dispatch now refuses with the same
-    PluginValidationError the startup check raises.
+    Left to pluggy, a wrapper makes apluggy take its wrapper path, whose
+    aggregate the wrapper's own return value replaces. This wrapper's bare
+    `yield` returns None, so the call dies with "TypeError: 'NoneType' object is
+    not iterable" naming neither the hook nor the plugin -- and a wrapper
+    returning a list of the right length would instead hand back its own values
+    with no error at all. Dispatch refuses with the same PluginValidationError
+    the startup check raises, for both marker spellings.
     """
 
     class Wrapping:
-        @hookimpl(wrapper=True)
+        @hookimpl(**{option: True})
         def on_web_thing(self, value: int):
             yield
 
@@ -464,8 +468,8 @@ async def test_dispatch_refuses_a_wrapper_the_startup_check_never_saw() -> None:
     message = str(excinfo.value)
     assert "on_web_thing" in message
     assert "'wrapping'" in message
-    assert "wrapper=True" in message
-    assert "Remove" in message
+    assert f"{option}=True" in message
+    assert f"Remove {option}=True" in message  # the remedy, naming the marker
 
 
 async def test_a_plain_fail_soft_hook_still_dispatches_after_the_refusal() -> None:
