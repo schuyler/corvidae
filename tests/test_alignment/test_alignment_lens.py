@@ -24,12 +24,9 @@ async def _contributed(plugin):
 class TestGriceLens:
     """The plugin contributes one valid lens."""
 
-    async def test_contributes_one_sample_rate_lens(self):
+    async def test_contributes_one_lens(self):
         [lens] = await _contributed(AlignmentLensPlugin())
         assert lens.name == "alignment"
-        assert lens.thresholds == ()
-        assert lens.reply_patterns == ()
-        assert lens.sample_rate == 0.1
 
     def test_critique_is_an_optional_dependency(self):
         """A config that disables critique must still boot (docs/cognition.md)."""
@@ -74,6 +71,15 @@ class TestGriceLens:
         """The prompt caps at one objection per violated maxim."""
         [lens] = await _contributed(AlignmentLensPlugin())
         assert "One objection per violated maxim" in lens.fork_prompt
+
+
+class TestAppraisalQuestion:
+    """#1078 T10: the lens declares the question the appraisal fork answers."""
+
+    async def test_lens_declares_a_one_line_question(self):
+        [lens] = await _contributed(AlignmentLensPlugin())
+        assert lens.appraisal_question.strip()
+        assert "\n" not in lens.appraisal_question
 
 
 class TestEntryPoint:

@@ -244,7 +244,8 @@ one is a bug even if its tests pass.
     not, and neither is a turn a note wakes on another channel (§3.5.10):
     a continuation can cross channels, and a chain of continuations is
     agency only if the exchange that started it was. Stylistic critique
-    objections start no turn at all. Agency is
+    objections start no turn at all; only a lens that declares it wakes
+    may (§3.7 Critique 4). Agency is
     optional. Without agency plugins the agent never initiates a turn and
     has no reminders or heartbeat, and its upkeep still runs. No plugin's
     documented behaviour may depend on traffic it does not control.
@@ -1209,17 +1210,20 @@ deciding only what to newly append and in what order.
 **Critique.**
 
 1. After an exchange ends, critique checks it with lenses, without delaying
-   the reply. Each lens checks for one kind of problem and runs on the
-   exchanges whose appraisal or reply text marks them as likely to have it.
-   An exchange appraised as ambiguous is checked for a misread request
-   (predictive); one dense with commitments, for commitments the agent
-   cannot keep (constrained); one negative in valence with disagreement,
-   for objections the agent dismissed (adversarial). A tunable share of
-   exchanges that select no lens is checked by a random built-in lens,
-   which bounds and measures what selection misses. A lens is added
-   without changing critique; it states which appraisals and reply text
-   select it and how often it runs regardless, and each is tunable per
-   channel. Every lens judges the exchange as the agent saw it (§3.8).
+   the reply. Each lens checks for one kind of problem and is offered to
+   the stage-2 appraisal fork with a one-line appraisal question. The
+   fork scores each offered lens's question, and "none", for the exchange:
+   the critique vector. The top share runs, and "none" wins ties. The
+   built-in lenses check for a misread request (predictive), commitments
+   the agent cannot keep (constrained) or objections the agent dismissed
+   (adversarial), each when its question wins. When "none" wins, or there is
+   no vector, a tunable share of exchanges (`critique.sample_below_rate`)
+   is checked by one random offered lens, built-ins and plugin lenses
+   alike, which bounds and measures what selection misses. With no
+   appraisal plugin, one random offered lens runs. A lens is added without
+   changing critique; it declares its appraisal question, and the
+   question is operator-configurable. Every lens judges the exchange as
+   the agent saw it (§3.8).
 2. The provenance check runs on any claim about the past, independent of
    the appraisal scores. Stage-2 appraisal (a model) lists the claims. The
    provenance critic (a model) judges whether any record supports each
@@ -1244,10 +1248,12 @@ deciding only what to newly append and in what order.
    is each check's own selection (items 1–2). A response a gate withheld
    is still judged; the agent's choice to stay silent is not a response,
    and is neither judged nor appraised.
-4. Empty objections are recorded and wake nothing. Stylistic objections,
-   and those of added lenses, re-enter as framed CONTEXT at the channel's
-   next turn and wake nothing, so a self-check never sends the user an
-   unsolicited message.
+4. Empty objections are recorded and wake nothing. A lens declares whether its
+   non-empty objections wake the channel. A lens that doesn't wake
+   re-enters its objections as framed CONTEXT at the channel's next turn, so
+   a self-check never sends the user an unsolicited message. A waking lens's
+   objections re-enter at the turn their stub triggers, under the same
+   silence default as provenance's.
    Provenance objections re-enter at the turn their stub triggers, and the
    agent may end that turn without sending anything. It is told that
    silence is the default, and to reply only when it judges its earlier
@@ -1881,7 +1887,7 @@ record that holds the reasoning.
 | Reminders and jobs the agent sets act on the calling channel only, with origin `reminder`; cross-channel reach is §3.5.9's alone, so the scheduler is not a second, unaudited path between channels or around the critique of reminders. Supersedes "a reminder may target any channel" | §3.9.7; #814; owner, 2026-11-17 |
 | A decline is signalled by a plugin-chosen mechanism (token, tool or both) and enforced by a veto that acts on the agent's signal, not a gate; a signal followed by sent text is not a decline | #791, #795, #797, #799, #806 |
 | Model endpoints may be remote; a profile's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each profile sends | #217 |
-| Critique is gated: stylistic lenses run on salience, the provenance check on every claim about the past, never unconditionally per reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
+| Critique is gated: a lens runs when the appraisal fork's critique vector selects it (or the sampled share draws it), the provenance check on every claim about the past, never unconditionally per reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
 | No inline refine step: the sent reply is the candidate, and correction arrives on a later turn | principle 3; §3.7 Critique 4; the Persyn spec's own deferred-deliberation default |
 | Operator-seeded goals allowed | §3.7 Goals; diverges from the Persyn spec |
 | Memory poisoning answered on the write side with trust tagging (trust plugin) | §3.7 Trust; an addition to the Persyn spec |

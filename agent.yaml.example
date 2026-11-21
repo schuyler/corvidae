@@ -170,23 +170,27 @@ agent:
 # appraisal:
 #   stage2_fork_prompt: "..."         # prompts/appraisal_fork.md
 # critique:
-#   fork_prompt:
-#     provenance: "..."               # prompts/critique_<lens>_fork.md
-#     # alignment: "..."              # replaces a plugin-added lens's brief (#1033)
+#   provenance:
+#     fork_prompt: "..."              # prompts/critique_provenance_fork.md
+#   proactivity:
+#     fork_prompt: "..."              # prompts/critique_proactivity_fork.md
+#   sample_below_rate: 0.05           # chance a random lens runs when "none" wins the critique vector
 #   retention:                        # #742: defaults to markdown_recall's root
 #     root: values/                   # the knowledge base the lens files into; inert with neither
 #   lens:
-#     novelty: 0.6                    # both thresholds must be crossed
-#     retention: 0.5
-#     # A lens another plugin adds (#1033) gets its own block, named after
-#     # it; defaults are what the plugin declared:
-#     # alignment:
-#     #   ambiguity: 0.6                # the limit on a declared threshold
-#     #   sample_rate: 0.05             # chance it runs when not selected
+#     # Each lens (the built-ins predictive, constrained, adversarial,
+#     # retention, and those plugins add) has two static keys (#1078). The
+#     # stage-2 appraisal fork scores each lens's question; the top one runs.
+#     # predictive:
+#     #   appraisal_question: "..."     # one line the fork answers to score the lens
+#     #   fork_prompt: "..."            # prompts/critique_<lens>_fork.md
 #     # planning:                     # the planning extra's lens (#1067)
-#     #   sample_rate: 0.1              # its only trigger; it has no thresholds
-#     # alignment:                   # the alignment extra's lens (#914)
-#     #   sample_rate: 0.1              # its only trigger; it has no thresholds
+#     #   appraisal_question: "..."
+#     # alignment:                    # the alignment extra's lens (#914)
+#     #   appraisal_question: "..."
+#     #   fork_prompt: "..."            # replaces a plugin-added lens's brief (#1033)
+#     # Removed (they fail startup, naming the new key): critique.fork_prompt.<lens>,
+#     # critique.lens.<dimension>, critique.lens.<name>.<dimension>, critique.lens.<name>.sample_rate.
 
 # Engagement and decide gates (optional; cognition extra, see
 # docs/configuration.md "gate.*"). Runtime-tunable per channel via set_settings.

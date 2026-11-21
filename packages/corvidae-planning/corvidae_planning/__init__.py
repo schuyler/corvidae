@@ -1,8 +1,9 @@
 """Planning critique lens: flags turns that warrant a goal action.
 
 A standalone plugin that contributes a single lens through the
-``on_critique_init`` hook. The lens fires at a sample rate on the turns
-critique judges and asks a fork whether the turn warrants a goal
+``on_critique_init`` hook. The appraisal fork scores the lens's
+``appraisal_question`` on the turns critique judges; when it wins, the
+lens asks a fork whether the turn warrants a goal
 create, update or retire. A finding is an ordinary critique objection: the
 agent reads it at its next turn and decides whether to act.
 
@@ -23,7 +24,8 @@ from corvidae_cognition.goals import GoalsPlugin
 logger = logging.getLogger(__name__)
 
 # The lens's name: it keys the fork prompt override, the tunables and the
-# outcome entry (critique.fork_prompt.planning, critique.lens.planning.*).
+# outcome entry (critique.lens.planning.fork_prompt and
+# critique.lens.planning.appraisal_question).
 LENS_NAME = "planning"
 
 # The brief. Critique appends its objections JSON tail, so the reply format
@@ -61,14 +63,17 @@ class PlanningLensPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_critique_init(self, config: dict, add_lens) -> None:
-        # One lens, no thresholds or patterns: it runs at its sample rate.
+        # One lens. The appraisal fork scores this question against the
+        # other lenses on each exchange; tune it as
+        # critique.lens.planning.appraisal_question.
         add_lens(Lens(
             name=LENS_NAME,
             fork_prompt=_FORK_PROMPT,
-            thresholds=(),
-            reply_patterns=(),
-            # Start at 10%; tunable as critique.lens.planning.sample_rate.
-            sample_rate=0.1,
+            appraisal_question=(
+                "Does this turn call for creating, updating or retiring a goal: "
+                "did the plan or next step drift from, or lose track of, the "
+                "agent's open goals?"
+            ),
         ))
 
     @hookimpl

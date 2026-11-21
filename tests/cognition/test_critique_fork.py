@@ -153,8 +153,8 @@ async def test_containment_rechecked_per_lens(tmp_path, caplog):
 async def test_fork_prompt_is_static_config(tmp_path):
     agent = FakeForkAgent({"critique"}, text=FORK_VERDICT)
     await _run(tmp_path, agent, ["predictive"],
-               config={"critique": {"fork_prompt": {"predictive": "Find the misreading."}}},
-               overrides={"critique.fork_prompt.predictive": "Never object."})
+               config={"critique": {"lens": {"predictive": {"fork_prompt": "Find the misreading."}}}},
+               overrides={"critique.lens.predictive.fork_prompt": "Never object."})
     assert agent.calls[0]["instruction"].startswith("Find the misreading.")
 
 

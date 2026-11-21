@@ -74,12 +74,9 @@ async def _transform(plugin, lens_name="planning", instruction="Base instruction
 class TestPlanningLens:
     """The plugin contributes one valid lens."""
 
-    async def test_contributes_one_sample_rate_lens(self):
+    async def test_contributes_one_lens(self):
         [lens] = await _contributed(PlanningLensPlugin())
         assert lens.name == "planning"
-        assert lens.thresholds == ()
-        assert lens.reply_patterns == ()
-        assert lens.sample_rate == 0.1
 
     def test_critique_and_goals_are_optional_dependencies(self):
         """A config that disables either must still boot (docs/cognition.md)."""
@@ -103,6 +100,15 @@ class TestPlanningLens:
         assert '"retire: #' in prompt
         assert "empty objections list" in prompt
         assert "null" not in prompt
+
+
+class TestAppraisalQuestion:
+    """#1078 T10: the lens declares the question the appraisal fork answers."""
+
+    async def test_lens_declares_a_one_line_question(self):
+        [lens] = await _contributed(PlanningLensPlugin())
+        assert lens.appraisal_question.strip()
+        assert "\n" not in lens.appraisal_question
 
 
 class TestTransformCritiquePrompt:

@@ -2629,7 +2629,7 @@ Stage names are opaque to core (it never names cognition plugins).
 | `consolidation` (idle trigger) | window up to `range_end` (cut just past it, #622) | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: catch-up (rebuilt view, sent as the `consolidation` stage) |
 | `consolidation` (turn trigger) | window up to `range_end` (cut just past it, #622) | in the task `on_agent_response` spawns, once the new window tokens in `(watermark, range_end]` reach `memory.consolidate_after_tokens`; never attempted with forks off for `consolidation` (silent) | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next turn trigger, until three consecutive failures back the trigger off for the channel (one warning) until the watermark moves or `memory.idle_consolidate_after` passes (#620); no registered channel or window, or a range row not in the window: skip at DEBUG, never catch-up (idle or compaction consolidates it) |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
-| `critique` (each stylistic lens) | full window at run time | silent TaskQueue task | same as appraisal; a lens whose fork misses is skipped alone; if no lens ran, no outcome is recorded |
+| `critique` (the lens chosen by the critique vector) | full window at run time | silent TaskQueue task, enqueued once stage 2 lands | same as appraisal; a stage-2 miss also skips the lens (no vector, so the sampled draw is the only path); a lens whose fork misses is skipped alone; if no lens ran, no outcome is recorded beyond `lens_selection` |
 | `critique` (provenance) | prefix ending at the exchange's final reply | silent TaskQueue task | skip with a warning (forks off, no live window, reply not recorded or not in the window, a compaction since the reply, or a failed fork) |
 
 Seeding, imports and the `eval_*` scripts have no live window and always
@@ -2693,7 +2693,8 @@ before the fork.
 The voice is a choice, not a measured result; #186's prompt-voice A/B will
 say whether it matters:
 `agent.compaction_fork_prompt`, `memory.consolidation_fork_prompt`,
-`appraisal.stage2_fork_prompt`, `critique.fork_prompt.<lens>` (documented
+`appraisal.stage2_fork_prompt`, `critique.lens.<lens>.fork_prompt`,
+`critique.provenance.fork_prompt`, `critique.proactivity.fork_prompt` (documented
 copies in `prompts/*_fork.md`). They are read from static config with
 `tuning.config_value`, never `resolve_tunable`, so `set_settings` can't
 write them. Consolidation appends a sentence naming where the range
@@ -4875,9 +4876,11 @@ goals-notify extra to load it, and list `goals_notify` under
 ### Planning lens (`corvidae-planning` package)
 
 `PlanningLensPlugin` (#1067) adds one critique lens, `planning`, through
-`on_critique_init`. It has no thresholds and no reply patterns, so it runs
-at its sample rate (default 0.1, `critique.lens.planning.sample_rate`) on
-the turns critique judges. Its brief asks the fork whether the exchange
+`on_critique_init`. It declares an `appraisal_question`, which the stage-2
+appraisal fork scores against the other lenses and "none", so it runs when
+its question wins the exchange's critique vector or the
+`critique.sample_below_rate` draw picks it (it has no rate of its own;
+`critique.lens.planning.appraisal_question` rewords the question). Its brief asks the fork whether the exchange
 warrants a goal action: `create` (an untracked multi-step commitment),
 `update` (an open goal's text has gone stale) or `retire` (an open goal is
 done), at 80% confidence or better, and nothing on trivial or casual turns
@@ -4901,20 +4904,35 @@ are reported at `DEBUG` and nothing runs; without goals the fork runs
 without the list and each planning fork logs a WARNING saying so. Install the
 planning extra to load it, list `corvidae_planning` under
 `plugins.disabled` to switch it off, and override the brief with
-`critique.fork_prompt.planning`.
+`critique.lens.planning.fork_prompt`.
 
 ### Alignment lens (`corvidae-alignment` package)
 
 `AlignmentLensPlugin` (#914) adds one critique lens, `alignment`, through
-`on_critique_init`. It fires at its sample rate (default 0.1,
-`critique.lens.alignment.sample_rate`) on judged turns and asks the fork
-model whether the agent's reply violates any of Grice's four maxims
-(Quantity, Quality, Relation, Manner). The lens declares no thresholds or
-patterns; the sample rate is its only trigger. Findings land in
+`on_critique_init`. It declares an `appraisal_question`; the lens runs when
+that question wins the exchange's critique vector or the
+`critique.sample_below_rate` draw picks it
+(`critique.lens.alignment.appraisal_question` rewords it). When it runs it
+asks the fork model whether the agent's reply violates any of Grice's four
+maxims (Quantity, Quality, Relation, Manner). Findings land in
 `outcomes.critique.alignment` and reach the channel's next turn through the
 critique funnel. Install the alignment extra to load it, list
 `alignment` under `plugins.disabled` to switch it off, and
-override the brief with `critique.fork_prompt.alignment`.
+override the brief with `critique.lens.alignment.fork_prompt`.
+
+#### The `Lens` contract (#1078)
+
+A critique lens is `Lens(name, fork_prompt, appraisal_question, wakes=False)`
+(`corvidae_cognition.critique`), frozen data with no callables. It replaces
+the earlier thresholds, reply patterns and sample rate: critique no longer
+decides from rules a lens carries. The stage-2 appraisal fork scores each
+offered lens's `appraisal_question` and "none"; the top share runs and "none"
+wins ties (cognition.md, "How a lens is chosen"). `wakes=True` makes the
+lens's non-empty objections wake the channel, under the silence default
+and the critique-origin brake. A lens without a question is rejected at
+startup with a warning. `AppraisalPlugin.set_lens_offer(provider)` is the
+seam through which critique tells appraisal what to score; it is one
+provider, not a hookspec, because critique is the only consumer.
 
 ### GitHub events (`github-webhook` package)
 

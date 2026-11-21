@@ -14,9 +14,29 @@ the response the user was sent, each quoted to its first 120 characters
 began «…»."), and the retrieval profile ("Memory retrieval for this
 exchange: …").
 
-The standalone prompt (`appraisal.stage2_prompt`) is still used when forks
-are off, the exchange's originating row has left the window, or the fork
-fails. Override this one with a literal string via
+When critique has lenses on offer (#1078), a third block follows,
+appended after the configured prompt whether it is this default or an
+`appraisal.stage2_fork_prompt` override, and the reply schema gains a
+required `lenses` object. Each offered lens is one `- <name>: <question>`
+line, in offer order (built-ins, then plugin lenses by name; retention only
+with a knowledge-base root):
+
+```
+[Critique selection] Which ONE of these self-checks is most worth running
+on this exchange, if any? Give each a percentage, plus "none", summing to 100.
+- <name>: <question>
+- <name>: <question>
+Include them in your JSON object as "lenses": {"<name>": 0, "<name>": 0, "none": 0}.
+```
+
+The block is on the fork instruction only, so an override doesn't need to
+mention it. With no lenses on offer it is omitted and the reply has no
+`lenses` field. Critique reads the normalized shares to choose the lens (see
+`docs/cognition.md`, "How a lens is chosen"). The questions are
+`critique.lens.<name>.appraisal_question`.
+
+A fork miss (forks off, the exchange left the window, the fork fails) skips
+stage 2 with a warning: no standalone call is made. Override this one with a literal string via
 `appraisal.stage2_fork_prompt`. Unlike `appraisal.stage2_prompt`, it's
 static config, not a runtime tunable, so `set_settings` can't change it.
 

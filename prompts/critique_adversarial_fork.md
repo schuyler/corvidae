@@ -7,8 +7,7 @@ of a separate critic call: the main turn's render of the whole window,
 followed by this text as a `user` turn (GitHub issue #51). It runs on
 the `critique` stage's profile with the objections `response_format` and `tool_choice: "none"`.
 
-Selected when valence is low and disagreement high
-(`critique.lens.neg_valence`, `critique.lens.disagreement`).
+Chosen when the appraisal fork's critique vector scores this lens's question highest, or by the `critique.sample_below_rate` draw (#1078); its question is `critique.lens.adversarial.appraisal_question`.
 
 `CritiquePlugin` appends the exchange's opening message and the response
 the user was sent, each quoted to its first 120 characters ("The exchange
@@ -17,7 +16,7 @@ standalone prompt (`critique.prompt.adversarial`,
 `prompts/critique_adversarial.md`) is still used when forks are off, the
 exchange's originating row has left the window, or this lens's fork fails.
 Override this one with a literal string via
-`critique.fork_prompt.adversarial`. Unlike `critique.prompt.adversarial`,
+`critique.lens.adversarial.fork_prompt`. Unlike `critique.prompt.adversarial`,
 it's static config, not a runtime tunable, so `set_settings` can't soften
 the critic.
 
