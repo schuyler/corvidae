@@ -436,3 +436,55 @@ async def test_registered_impl_is_still_a_coroutine_function() -> None:
     assert inspect.iscoroutinefunction(bad.on_notify)
     with pytest.raises(ValueError, match="boom"):
         await AsyncMock(wraps=bad.on_notify)(**_NOTIFY)
+
+
+# --- #1114: a wrapper that slipped past the startup check ---------------------
+
+
+async def test_dispatch_refuses_a_wrapper_the_startup_check_never_saw() -> None:
+    """A manager that never ran `check_fail_soft_wrappers` can still dispatch.
+
+    The name snapshot includes the wrapper, apluggy returns one result per
+    non-wrapper, and `zip(strict=True)` then raised a bare ValueError naming
+    neither the hook nor the plugin. Dispatch now refuses with the same
+    PluginValidationError the startup check raises.
+    """
+
+    class Wrapping:
+        @hookimpl(wrapper=True)
+        def on_web_thing(self, value: int):
+            yield
+
+    pm = _web_pm()  # no check_fail_soft_wrappers() here, by construction
+    pm.register(Wrapping(), name="wrapping")
+
+    with pytest.raises(pluggy.PluginValidationError) as excinfo:
+        await pm.ahook.on_web_thing(value=1)
+
+    message = str(excinfo.value)
+    assert "on_web_thing" in message
+    assert "'wrapping'" in message
+    assert "wrapper=True" in message
+    assert "Remove" in message
+
+
+async def test_a_plain_fail_soft_hook_still_dispatches_after_the_refusal() -> None:
+    """The refusal is per call, so nothing about the manager is left broken."""
+
+    class Wrapping:
+        @hookimpl(wrapper=True)
+        def on_web_thing(self, value: int):
+            yield
+
+    class Plain:
+        @hookimpl
+        async def on_web_other(self, value: int) -> int:
+            return value + 1
+
+    pm = _web_pm()
+    pm.register(Wrapping(), name="wrapping")
+    pm.register(Plain(), name="plain")
+
+    with pytest.raises(pluggy.PluginValidationError):
+        await pm.ahook.on_web_thing(value=1)
+    assert await pm.ahook.on_web_other(value=1) == [2]
