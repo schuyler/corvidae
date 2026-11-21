@@ -442,26 +442,22 @@ async def test_registered_impl_is_still_a_coroutine_function() -> None:
 
 
 @pytest.mark.parametrize("option", ["wrapper", "hookwrapper"])
-async def test_dispatch_refuses_a_wrapper_the_startup_check_never_saw(option) -> None:
+async def test_dispatch_refuses_a_wrapper_the_startup_check_never_saw(option: str) -> None:
     """A manager that never ran `check_fail_soft_wrappers` can still dispatch.
 
-    Left to pluggy, a `wrapper=True` implementation makes apluggy take its
-    wrapper path, whose aggregate the wrapper's own return value replaces, so
-    the pairing below compares names against something that is not a result list
-    and the call dies with a TypeError naming neither the hook nor the plugin.
-    Dispatch now refuses with the same PluginValidationError the startup check
-    raises, for both marker spellings.
+    Left to pluggy, a wrapper makes apluggy take its wrapper path, whose
+    aggregate the wrapper's own return value replaces. This wrapper's bare
+    `yield` returns None, so the call dies with "TypeError: 'NoneType' object is
+    not iterable" naming neither the hook nor the plugin -- and a wrapper
+    returning a list of the right length would instead hand back its own values
+    with no error at all. Dispatch refuses with the same PluginValidationError
+    the startup check raises, for both marker spellings.
     """
-    if option == "wrapper":
-        class Wrapping:
-            @hookimpl(wrapper=True)
-            def on_web_thing(self, value: int):
-                yield
-    else:
-        class Wrapping:
-            @hookimpl(hookwrapper=True)
-            def on_web_thing(self, value: int):
-                yield
+
+    class Wrapping:
+        @hookimpl(**{option: True})
+        def on_web_thing(self, value: int):
+            yield
 
     pm = _web_pm()  # no check_fail_soft_wrappers() here, by construction
     pm.register(Wrapping(), name="wrapping")
