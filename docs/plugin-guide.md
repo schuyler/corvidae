@@ -627,15 +627,24 @@ deviation** from **accidental mess**:
 
 A clean, reproducible state on a different branch is deliberate: the
 agent or operator chose to run this code. A dirty tree is not: a
-restart could lose work. The pattern generalizes beyond git branches:
-any pre-flight validation that compares current state to an expected
-state should ask "is this deviation deliberate and safe?" before
-refusing.
+restart could lose work.
 
-Precedent: `lex_restart` (an external plugin, not in this repo)'s
-corvidae checkout check moves the branch check from the problems list
-(refusal) to a WARNING log line; the dirty check remains a hard refusal.
+The question to ask of any pre-flight check that compares current state
+to an expected state: **is this deviation deliberate and safe?** Refuse
+only when the answer is no. The git-branch row above is the one example
+worked out in full here; the table is meant to be read as that question
+applied to a checkout, not as a rule already proven across cases.
 
+**Status of this pattern.** The mechanism it relies on is in-tree:
+`corvidae_restart.preflight` runs the daemon's startup through
+`on_init` in a subprocess and returns exit code 0 or 1, so anything
+`on_init` raises blocks the restart — that is the code a plugin author
+is writing against. The *policy* above (which conditions deserve refusal
+versus a WARNING) is proposed from outside this repo and is **not
+implemented by any bundled plugin**: as of this writing no plugin under
+`packages/` inspects a git checkout at all. Treat it as a recommendation
+to apply when your plugin has a state-vs-expectation check to make, not
+as existing behaviour to imitate.
 
 ### Messaging
 
