@@ -747,6 +747,44 @@ def check_fail_soft_wrappers(pm: pluggy.PluginManager) -> None:
             _refuse_fail_soft_wrapper(impl, hook_name)
 
 
+def check_async_hookimpls(pm: pluggy.PluginManager) -> None:
+    """Refuse a non-coroutine implementation of an async hook (#1096).
+
+    apluggy's broadcast path gathers implementation results; a plain ``def`` on
+    an ``async`` spec returns a value ``asyncio.gather`` rejects, which fails the
+    whole call and loses every sibling's result. One loud refusal at startup is
+    cheaper than that, and more honest than tolerating the slip.
+
+    Sync-spec hooks (``register_tools``, called through ``pm.hook``) are not
+    affected: only implementations of a spec whose function is a coroutine
+    function are checked. Known limit: the test is ``iscoroutinefunction``, so an
+    implementation behind a plain-``def`` decorator that returns a coroutine is
+    refused although it would work. No implementation in the tree is shaped that
+    way; the refusal names the plugin, so the author can see it.
+
+    Raises:
+        PluginValidationError: naming the hook, the plugin and the fix.
+    """
+    for hook_name, caller in list(vars(pm.hook).items()):
+        spec = getattr(caller, "spec", None)
+        if spec is None or not inspect.iscoroutinefunction(spec.function):
+            continue
+        for impl in caller.get_hookimpls():
+            # Wrappers are generators driven by apluggy, not awaited directly,
+            # and the fail-soft check already refuses them on observe hooks.
+            if impl.wrapper or impl.hookwrapper:
+                continue
+            if inspect.iscoroutinefunction(impl.function):
+                continue
+            raise pluggy.PluginValidationError(
+                impl.plugin,
+                f"{hook_name}: plugin {impl.plugin_name!r} implements this async "
+                f"hook with a plain def. Make it 'async def' (or 'async def' "
+                f"returning None if it only observes), or remove the "
+                f"implementation.",
+            )
+
+
 def create_plugin_manager() -> pluggy.PluginManager:
     """Create and configure the plugin manager with AgentSpec hooks.
 

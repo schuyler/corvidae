@@ -83,7 +83,13 @@ class _Raiser:
 
 
 class _SyncGate:
-    """Plugin with a non-async should_start_work that refuses."""
+    """Plugin with a non-async should_start_work that refuses.
+
+    Covers the *dispatcher's* tolerance only: startup now refuses a sync
+    implementation of an async hook (#1096), so this plugin cannot be loaded by
+    the daemon. The test that uses it registers it on a manager directly to show
+    the dispatch path still handles one it is handed.
+    """
 
     @hookimpl
     def should_start_work(self, channel, kind, source_channel, trace_id, annotations):

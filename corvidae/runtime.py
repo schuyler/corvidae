@@ -30,6 +30,7 @@ from corvidae.channel import ChannelRegistry, load_channel_config, validate_agen
 from corvidae.clock import Clock
 from corvidae.hooks import (
     _check_hook_arg_binding,
+    check_async_hookimpls,
     check_fail_soft_wrappers,
     create_plugin_manager,
     install_plugin_hookspecs,
@@ -329,6 +330,10 @@ class Runtime:
         #      receive a failed implementation as a value (#1104). After 8b
         #      so plugin-owned hooks have their specs.
         check_fail_soft_wrappers(self.pm)
+
+        # 8b''. Refuse a sync implementation of an async hook (#1096): its return
+        #      value fails asyncio.gather and every sibling's result is lost.
+        check_async_hookimpls(self.pm)
 
         # 8c. Guard the full, real plugin set against pluggy's silent-drop
         #     arg-binding bug class. create_plugin_manager() only checks the

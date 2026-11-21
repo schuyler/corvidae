@@ -5239,7 +5239,11 @@ declare ([Plugin-declared hookspecs](#plugin-declared-hookspecs)).
 `check_fail_soft_wrappers(pm)` then refuses a
 `wrapper=True`/`hookwrapper=True` impl on any fail-soft hook, naming the
 hook, the plugin and the fix, since a wrapper would receive a failed
-implementation as a value (a wrapper on `on_init` or `on_start` is allowed), and the hook
+implementation as a value (a wrapper on `on_init` or `on_start` is allowed).
+`check_async_hookimpls(pm)` then refuses a plain `def` implementation of an
+async hookspec for the same reason one step earlier: its return value fails
+`asyncio.gather` and every sibling's result is lost (#1096). Wrappers are
+exempt there, since apluggy drives them as generators. The hook
 arg-binding guard checks every impl against the full set of specs. Then `validate_dependencies(pm)` runs
 to verify every plugin's `depends_on` set names a registered plugin.
 Startup aborts with `RuntimeError` if any dependency is missing.

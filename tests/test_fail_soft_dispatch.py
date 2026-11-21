@@ -634,3 +634,89 @@ async def test_an_instance_attribute_keeps_pluggy_precedence() -> None:
     assert await pm2.ahook.on_notify(
         channel="irc:#test", source="t", text="x", tool_call_id=None, annotations={},
     ) == ["instance", "other"]
+
+
+# --- #1096: a sync implementation of an async hook ---------------------------
+
+
+def test_a_sync_implementation_of_an_async_hook_is_refused() -> None:
+    """Refused at startup, naming the hook, the plugin and the fix (#1096).
+
+    Left to run, its return value fails asyncio.gather and every sibling's
+    result is lost, so the check is cheaper and louder than the symptom.
+    """
+
+    class Sync:
+        @hookimpl
+        def on_notify(self, channel, source, text, tool_call_id, annotations):
+            return None
+
+    pm = create_plugin_manager()
+    pm.register(Sync(), name="sync")
+
+    with pytest.raises(pluggy.PluginValidationError) as excinfo:
+        hooks.check_async_hookimpls(pm)
+
+    message = str(excinfo.value)
+    assert "on_notify" in message
+    assert "'sync'" in message
+    assert "async def" in message
+    assert "remove the implementation" in message
+
+
+def test_a_sync_implementation_of_a_sync_hook_is_accepted() -> None:
+    """Sync-spec hooks go through pm.hook and are untouched by the check."""
+
+    class Sync:
+        @hookimpl
+        def register_tools(self, tool_registry):
+            return None
+
+    pm = create_plugin_manager()
+    pm.register(Sync(), name="sync")
+
+    hooks.check_async_hookimpls(pm)  # does not raise
+
+
+# --- #1096: the check runs at startup ----------------------------------------
+
+
+async def test_startup_refuses_a_sync_implementation_of_an_async_hook(
+    monkeypatch,
+) -> None:
+    """The refusal happens in load_plugins, not only in the check itself (#1096).
+
+    A check nothing calls is a comment. This pins the wiring: the plugin is
+    already registered on the manager `create_plugin_manager` hands back, so the
+    only thing that can refuse it is the startup step.
+    """
+
+    from corvidae import runtime as runtime_module
+
+    class Sync:
+        @hookimpl
+        def on_notify(self, channel, source, text, tool_call_id, annotations):
+            return None
+
+    def manager_with_the_sync_plugin():
+        pm = create_plugin_manager()
+        pm.register(Sync(), name="sync")
+        return pm
+
+    monkeypatch.setattr(
+        runtime_module, "create_plugin_manager", manager_with_the_sync_plugin
+    )
+
+    rt = runtime_module.Runtime()
+    config = {
+        "llm": {
+            "providers": {"main": {"base_url": "http://localhost:8080"}},
+            "profiles": {"main": {"model": "test-model"}},
+        },
+    }
+    with pytest.raises(pluggy.PluginValidationError) as excinfo:
+        await rt.load_plugins(config)
+
+    message = str(excinfo.value)
+    assert "on_notify" in message
+    assert "'sync'" in message
