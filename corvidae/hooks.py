@@ -658,14 +658,16 @@ class PolicyAHook:
             impls = caller.get_hookimpls() if caller is not None else []
             # Startup refuses a wrapper on a fail-soft hook (#1094), but a
             # manager that never ran that check -- a bare create_plugin_manager()
-            # in a test or a script -- can still hold one, and then dispatch is
-            # left to apluggy's wrapper path. What that does depends on what the
-            # wrapper returns: its value replaces the aggregate, so a wrapper
-            # returning None dies with "TypeError: 'NoneType' object is not
-            # iterable", one returning a shorter list trips zip(strict=True), and
-            # one returning a list of the right length hands back its own values
-            # with no error at all. Refuse it here instead, with the same message
-            # the startup check gives (#1114).
+            # in a test or a script -- can still hold one. For wrapper=True,
+            # dispatch then goes to apluggy's _async_multicall and what happens
+            # depends on what the wrapper returns: its value replaces the
+            # aggregate, so a wrapper returning None dies with "TypeError:
+            # 'NoneType' object is not iterable", one returning a shorter list
+            # trips zip(strict=True), and one returning a list of the right
+            # length hands back its own values with no error at all. For
+            # hookwrapper=True, _async_multicall refuses in its setup phase, so
+            # the call dies with NotImplementedError instead. Both are refused
+            # here first, with the same message the startup check gives (#1114).
             for impl in impls:
                 _refuse_fail_soft_wrapper(impl, name)
             names = [impl.plugin_name for impl in reversed(impls)]

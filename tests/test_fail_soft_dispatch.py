@@ -269,7 +269,7 @@ def test_wrapper_on_kernel_observe_hook_is_refused(option: str) -> None:
     assert "on_notify" in message
     assert "'wrapping'" in message
     assert f"{option}=True" in message
-    assert "Remove" in message  # the remedy
+    assert f"Remove {option}=True" in message  # the remedy, naming the marker
     assert "failed implementation" in message  # the reason (#1104)
 
 
@@ -469,7 +469,7 @@ async def test_dispatch_refuses_a_wrapper_the_startup_check_never_saw(option: st
     assert "on_web_thing" in message
     assert "'wrapping'" in message
     assert f"{option}=True" in message
-    assert "Remove" in message
+    assert f"Remove {option}=True" in message  # the remedy, naming the marker
 
 
 async def test_a_plain_fail_soft_hook_still_dispatches_after_the_refusal() -> None:
