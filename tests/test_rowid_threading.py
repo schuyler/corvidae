@@ -192,6 +192,8 @@ class TestCompactionCarriesCompactedIds:
         plugin = CompactionPlugin()
         plugin.pm = MagicMock()
         plugin.pm.ahook.on_compaction = AsyncMock()
+        # Both compaction hooks are awaited now that the guard is gone (#1097).
+        plugin.pm.ahook.before_compaction = AsyncMock()
         plugin._view_summary = AsyncMock(return_value="a summary")
         plugin._min_messages = 2
         plugin._compaction_threshold = 0.0  # always trigger
