@@ -1353,6 +1353,28 @@ class MyPlugin(CorvidaePlugin):
 - Stage names are opaque strings. List yours in `agent.forks.stages` (or
   leave it null for all stages).
 
+### Adding a critique lens
+
+A plugin adds a critique lens by implementing CritiquePlugin's
+`on_critique_init(config, add_lens)` and calling
+`add_lens(Lens(name, fork_prompt, appraisal_question, wakes=False))`.
+`fork_prompt` is the brief (critique appends the objections reply format);
+`appraisal_question` is one line the stage-2 appraisal fork answers to
+decide whether this lens is the one worth running on an exchange; `wakes`
+says whether its non-empty objections wake the channel (default no: they
+wait as CONTEXT for the next turn). There are no thresholds, reply
+patterns or sample rate (#1078); a lens without a question is rejected with
+a warning.
+
+A good question is one line, about the exchange the fork has just read, and
+answerable from the window: "Does the reply make concrete commitments,
+figures or promises that could be wrong or go unkept?" Questions compete
+with the other lenses' and with "none", so a vague one scores everywhere and
+a broad one steals exchanges from the others. Operators can reword it with
+`critique.lens.<name>.appraisal_question`. Declare
+`optional_depends_on = frozenset({"critique"})`. The full contract and
+rejections are in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init).
+
 ### The view call
 
 When the work is about a range that is no longer in the live window, send the

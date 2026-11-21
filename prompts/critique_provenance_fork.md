@@ -26,7 +26,7 @@ terms).
 `CritiquePlugin` appends the exchange's opening message and the response
 the user was sent, each quoted to its first 120 characters ("The exchange
 began with the message «…», and the response you sent began «…»."). Override
-this one with a literal string via `critique.fork_prompt.provenance`. It's
+this one with a literal string via `critique.provenance.fork_prompt`. It's
 static config, not a runtime tunable, so `set_settings` can't soften the
 critic.
 

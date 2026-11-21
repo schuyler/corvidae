@@ -236,7 +236,7 @@ operator allows, and finding 13 records the cost (#292).
 
 Every `resolve_tunable` key is writable per channel unless it appears in
 `agent.immutable_settings`. That includes `critique.provenance.enabled`,
-the sampling rate, and — worse — `critique.prompt.<lens>` and
+the sampling rate, and — worse — `critique.prompt.<lens>` (no live stage reads it now, below) and
 `appraisal.stage2_prompt`, which are the critic's and appraiser's system
 prompts. The configuration doc acknowledges self-tuning as a deliberate
 trade and recommends a blocklist. At the reviewed commit two of its four
@@ -260,7 +260,7 @@ the first one: the only runtime check on confabulation can be switched off
 by the thing being checked.
 
 The fork instructions added for #51 (`appraisal.stage2_fork_prompt`,
-`critique.fork_prompt.<lens>`, `memory.consolidation_fork_prompt`,
+`critique.lens.<lens>.fork_prompt`, `critique.provenance.fork_prompt`, `critique.proactivity.fork_prompt`, `memory.consolidation_fork_prompt`,
 `agent.compaction_fork_prompt`) and `agent.forks.*` are read from operator
 config only, so `set_settings` can't rewrite them. That covers only calls
 that actually fork. A fork miss (forks off for the stage, the exchange has
@@ -1098,9 +1098,9 @@ What each kind of unlock costs:
   cached prefix, and a forced `response_format` or grammar can stop the
   model emitting tool calls.
 - **Gate tunables and thresholds** (`gate.*`,
-  `critique.provenance.enabled`, `critique.sample_below_rate`, the
-  critique lens thresholds `critique.lens.*`, including each added lens's
-  `critique.lens.<name>.*` (finding 23); open by default today).
+  `critique.provenance.enabled`, `critique.sample_below_rate`; open by
+  default today). The lens appraisal questions `critique.lens.<name>.appraisal_question`
+  are static config, not tunables (finding 23).
   Covered in finding 2: an injection can silence the agent on a channel or
   switch off the provenance check. The recommended blocklist in
   [configuration.md](configuration.md) is the lock.
@@ -1896,35 +1896,47 @@ accepts besides `reminder`; no tool takes an origin, #814); if `heartbeat`
 is quiet, that mutes the job's own turns, which fails toward silence rather
 than toward noise.
 
-### 23. Plugin-added critique lenses: plugin text reaches critic forks, and lens tunables are agent-writable (#1033)
+### 23. Plugin-added critique lenses: plugin text reaches critic forks and the stage-2 fork, and a lens can wake a turn (#1033, #1078)
 
 A plugin can add critique lenses through `on_critique_init`
 ([cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init)).
-Three things are new.
+Four things are new.
 
 - **Plugin text reaches critic forks.** A lens's brief is appended as the
   instruction of a fork of the live window, after whatever untrusted text
   the window holds (finding 8). It comes from installed plugin code, which
   the operator chose to load (principle 9), so it is operator-trusted, not
   untrusted. A lens is still a new way to steer what the agent tells
-  itself: its objections re-enter as framed CONTEXT at the channel's next
-  turn. They wake nothing and send nothing (PRD §3.7 Critique 4), so a
-  lens can't start a turn or reach a channel by itself.
-- **Plugin regexes run on model output.** A lens's reply patterns are
-  searched against the sent reply on the event loop. A pattern with
-  catastrophic backtracking, matched against a long reply, stalls the
-  daemon for every channel while it runs. The patterns come from plugin
-  code, not from traffic, so this is a review item for lens authors (keep
-  patterns linear), not a mechanism.
-- **Each lens adds agent-writable tunables.** `critique.lens.<name>.<dimension>`
-  and `critique.lens.<name>.sample_rate` are runtime-tunable per channel,
-  so finding 2 extends to them: an injection can switch a lens off on a
-  channel (a limit no exchange reaches, rate 0) or make it run on every
-  turn, which spends a fork per turn (finding 14). Block them with
-  `immutable_settings` where that matters. A non-numeric value written
-  through `set_settings` makes that lens's decision raise for the turn;
-  the built-in checks are decided first, so it costs only the added lenses.
-  `critique.fork_prompt.<name>` is static config, like the built-ins'.
+  itself.
+- **A lens can wake a turn (#1078).** A lens declares `wakes`. With the
+  default `False`, its objections re-enter as framed CONTEXT at the
+  channel's next turn and wake nothing. With `wakes=True` they wake the
+  channel through the same stub as provenance's, so an installed plugin can
+  now start a turn. That is bounded three ways: the stub depends on
+  configuration only and carries the silence default (reply `NO_REPLY`
+  unless the earlier reply could lead the other party to take an incorrect
+  action); a critique-origin turn never wakes anything, so a lens can't
+  chain turns (PRD §3.7 Critique 4); and the lens is installed code the
+  operator chose to load. A lens's findings can't send the user a message
+  by themselves; only the woken agent can, and only by judging a reply
+  warranted.
+- **Plugin text reaches the stage-2 fork (#1078).** Each lens's
+  `appraisal_question` is appended to the stage-2 appraisal fork's
+  instruction and the fork's reply scores it. Operator-trusted like the
+  brief. The fork's output is the critique vector, which only chooses which
+  lens runs (or none); an injection in the window that skews a score can
+  make a different lens, or none, run on one exchange, but cannot change
+  what any lens asks, and the `critique.sample_below_rate` draw keeps
+  sampling what the vector misses.
+- **The questions are static config, not tunables.**
+  `critique.lens.<name>.appraisal_question` (and `fork_prompt`) are read
+  with `config_value`, so `set_settings` can't reword the critic it is
+  scored for. The per-lens thresholds and sample rates, which were
+  agent-writable (and could silence or flood a lens), are gone: a lens now
+  runs only through the vector or the shared `critique.sample_below_rate`
+  draw, which finding 2 covers. The old keys fail startup rather than
+  being silently ignored; a stale value in a channel's persisted
+  `runtime_overrides` is ignored, since nothing reads it.
 
 Accepted residuals. Redaction doesn't reach an added lens's recorded
 objection text (`outcomes.critique.<name>.detail`) while redaction is on
@@ -2032,7 +2044,7 @@ Mitigations and their limits:
 - The correction stub defaults to `NO_REPLY`, which critique's veto on
   critique-origin finals withholds.
 - Per channel, `critique.provenance.enabled`, `critique.proactivity.enabled`,
-  `critique.sample_below_rate` and the lens thresholds turn the checks down
+  `critique.sample_below_rate` turn the checks down
   or off (they are agent-writable unless listed in
   `agent.immutable_settings`, finding 23).
 - A decline (an unsent `NO_REPLY` or empty final) is not judged (#420), so a

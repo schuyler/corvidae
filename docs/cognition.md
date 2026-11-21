@@ -1761,7 +1761,7 @@ the finished exchange. A decline gets none (#420; PRD §3.7 Critique 3): when
 the final went unsent and its text carries `NO_REPLY` or is empty, the
 agent stayed silent and there is no response to appraise, so no task is
 enqueued and `get_last_stage2(channel)` keeps the channel's last answered
-exchange for the outbound gate and critique's lens selection. The test is
+exchange for the outbound gate. The test is
 `silence.is_decline`, the rule `SilencePlugin` records declines by; it
 doesn't need that plugin loaded. A final another gate withheld has content
 and still gets stage 2. If the test raises, stage 2 runs anyway and a
@@ -1770,13 +1770,16 @@ the fork failed or its reply was unusable) it is skipped with a warning
 naming the stage, channel, trace and reason: the exchange keeps stage 1 only
 and no standalone call is made. It produces: valence, stakes, ambiguity, commitment density, novelty,
 correction, and `past_claims`. The five numeric dimensions, by name, are a
-contract other plugins select on: `STAGE2_DIMENSIONS` in `appraisal.py`
-(`valence`, `stakes`, `ambiguity`, `commitment_density`, `novelty`), each a
-float in [0, 1], all five present in every vector stage 2 produces. `past_claims` is a list of `{claim,
+`valence`, `stakes`, `ambiguity`, `commitment_density` and `novelty`, each a
+float in [0, 1], all five present in every vector stage 2 produces (no
+other plugin selects on them any more: critique's lenses are chosen by the
+`lenses` field below, #1078). `past_claims` is a list of `{claim,
 queries}`: each statement in the reply that presents something as
 established before the exchange, with up to 3 short search phrases. A
 missing or malformed field reads as no claims; malformed entries are
-dropped with a warning; it's capped at 5 claims. The vector is merged into
+dropped with a warning; it's capped at 5 claims. When critique has lenses on
+offer, stage 2 also returns `lenses`, the critique vector (see "How a lens is
+chosen" under CritiquePlugin below). The vector is merged into
 the `appraisal` envelope's `stage2` key. Then every listener registered with
 `add_stage2_listener` is awaited with `channel, trace_id, response_text,
 annotations, stage2`, outside the appraisal attribution. Every enqueued stage
@@ -1862,7 +1865,18 @@ retention root (`critique.retention.root`, else markdown_recall's root), retenti
 every critique wake (provenance included) uses one stub that adds how to
 file them: read the named file under the root and append only what is
 missing. The funnel keeps one pending stub per channel and origin, so the
-first wake's text governs everything queued behind it.
+first wake's text governs everything queued behind it. That is why the stub
+depends on configuration only, never on which lens woke: it is the retention
+note when a root is set and the provenance note otherwise, and once a loaded
+plugin lens declares `wakes=True` one sentence follows it ("Findings from
+other self-check lenses may also be in the critique context: reply in the
+channel about one only if your earlier reply could lead the other party to
+take an incorrect action; otherwise send nothing, as above."), so the
+silence default holds for every waking lens however the stubs coalesce. A
+note's opening can therefore name a cause that didn't produce this wake
+(shortcut: the provenance note's first sentence can misstate the cause when
+only a plugin lens woke; rewrite both notes neutrally if a waking plugin lens
+ships in-tree).
 On a critique-origin turn (a correction, or a turn a note from one woke)
 nothing wakes: its provenance, proactivity and retention findings all wait
 for the channel's next turn, so a correction never starts another (PRD
@@ -1908,7 +1922,7 @@ failed attempt logs a warning naming the path and the reason; recovery logs
 one INFO line; `on_stop` closes the connection. Appraisal's `memory_fts`
 probe uses the same helper (`ReadOnlyProbe`).
 `critique.provenance.enabled` is the one switch. A
-`critique.fork_prompt.provenance` override must ask for the verdicts format
+`critique.provenance.fork_prompt` override must ask for the verdicts format
 above; one written for an objections list fails parsing, and every run
 skips.
 
@@ -1926,7 +1940,7 @@ restart. An implementer calls `add_lens(lens)` once per lens:
 
 ```python
 from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae_cognition.critique import Lens, Threshold
+from corvidae_cognition.critique import Lens
 
 class AlignmentLenses(CorvidaePlugin):
     optional_depends_on = frozenset({"critique"})
@@ -1937,9 +1951,9 @@ class AlignmentLenses(CorvidaePlugin):
             name="alignment",
             fork_prompt="[Self-critique: alignment] Pause the conversation "
                         "here. ...",
-            thresholds=(Threshold("ambiguity", "min", 0.6),),
-            reply_patterns=(r"(?i)\bI'll\b",),
-            sample_rate=0.05,
+            appraisal_question="Does the reply break a Gricean maxim: too "
+                               "much or too little, unfounded, off-topic, "
+                               "or unclear?",
         ))
 ```
 
@@ -1960,57 +1974,117 @@ and the lenses it added before the raise are kept.
 | Field | Meaning |
 |---|---|
 | `name` | Matches `^[a-z][a-z0-9_]*$`; it names the lens's config keys and its outcome entry |
-| `fork_prompt` | The brief. Critique appends the objections JSON schema, so the reply format is critique's, not the author's. `critique.fork_prompt.<name>` replaces the brief (static config, reloaded like the built-ins' prompts) |
-| `thresholds` | `Threshold(dimension, bound, value)`: `dimension` one of `STAGE2_DIMENSIONS`, `bound` `"min"` (holds at value ≥ limit) or `"max"` (≤), `value` the default limit in [0, 1]. At most one per dimension |
-| `reply_patterns` | Regex source strings searched against the sent reply |
-| `sample_rate` | In [0, 1]; default `0.0` |
+| `fork_prompt` | The brief. Critique appends the objections JSON schema, so the reply format is critique's, not the author's. `critique.lens.<name>.fork_prompt` replaces the brief (static config, reloaded like the built-ins' prompts) |
+| `appraisal_question` | One non-empty line the appraisal fork answers to score this lens against the others and "none" (see below). `critique.lens.<name>.appraisal_question` replaces it (static config) |
+| `wakes` | Default `False`. `True` makes the lens's non-empty objections wake the channel (PRD §3.7 Critique 4); `False` queues them as CONTEXT for the next turn |
 
 **Rejections never stop startup** (PRD principle 5, §3.1.17). A lens that
 fails validation is not loaded and a WARNING names the plugin, the lens,
 the rejected value, what was expected and the remedy; the other lenses
 load. Rejected: anything that isn't a `Lens`; a bad name; an empty or
-non-string prompt; a threshold that isn't a `Threshold`, a bad bound, or a
-value or rate outside [0, 1] (a `bool` isn't a number here); two thresholds
-on one dimension; a pattern that doesn't compile; an unknown dimension (the
-warning lists the accepted ones); and a reserved name. Reserved are the
-built-in lenses (`predictive`, `constrained`, `adversarial`, `retention`,
-`proactivity`, `provenance`), the existing scalar keys
-`critique.lens.{ambiguity,commitment,neg_valence,disagreement,novelty,retention}`
-(a lens named `novelty` would make `critique.lens.novelty` both a number
-and a block), and the stylistic run's outcome keys (`lenses`,
-`objections`, `sampled_below_threshold`, `detail`, which a lens's outcome
-entry would overwrite). A name accepted from more than one plugin loads
+non-string prompt; a missing, blank, non-string or multi-line
+`appraisal_question` (the warning says to declare a one-line question the
+appraisal fork answers to decide whether the lens runs); a `wakes` that
+isn't a bool; and a reserved name. A lens built with a removed selector
+(`thresholds`, `reply_patterns`, `sample_rate`) raises a `TypeError` in the
+plugin's `on_critique_init`, and the warning for that names
+`appraisal_question` as the replacement. Reserved are the built-in lenses
+(`predictive`, `constrained`, `adversarial`, `retention`, `proactivity`,
+`provenance`), `none` (the vector's no-lens option), and the stylistic
+run's outcome keys (`lenses`, `objections`, `sampled_below_threshold`,
+`detail`, which a lens's outcome entry would overwrite). A name accepted from more than one plugin loads
 from none of them, with one warning naming each contributor: entry-point
 order isn't deterministic, so "first wins" would load a different lens on
 different starts.
 
-**Selection.** A lens runs when every threshold holds and, if it declares
-patterns, at least one matches the reply. Otherwise it runs with
-probability `sample_rate`. A lens with neither runs at its rate alone, so
-`1.0` means every judged turn. Each limit and the rate are tunable per
-channel: `critique.lens.<name>.<dimension>` and
-`critique.lens.<name>.sample_rate`, through `resolve_tunable`. A declined
-turn logs one debug line with the reason (`critique lens alignment declined
-for trace … on …: ambiguity 0.3 < 0.6; sampled out`, `no pattern matched`).
+**Selection.** See the next section: the lens is chosen from the critique
+vector, not by a rule the lens carries.
 
-Thresholds are evaluated on **this** exchange's stage 2, not the previous
-exchange's, so each lens is decided at one of two points:
+### How a lens is chosen: the critique vector (#1078)
 
-- A lens with no thresholds is decided at `on_agent_response`, on the reply
-  text, without waiting for appraisal.
-- A lens with thresholds is decided when this trace's stage 2 reaches
-  critique's stage-2 listener. When stage 2 produced no vector
-  (`stage2=None`), or there is no appraisal plugin (then it's decided at
-  `on_agent_response`), it runs at its sample rate only, and a WARNING
-  names the lens, the trace and why there is no stage 2.
+At most one stylistic or plugin lens runs per exchange: the built-ins
+(`predictive`, `constrained`, `adversarial`, and `retention` while a
+knowledge base root is known) and every added lens are *offered* to the
+stage-2 appraisal fork, which scores them.
 
-Added lenses are decided after the built-in checks at both points, so a
-problem deciding them can't cost the stylistic lenses or the provenance
-check their turn. They run on the turns critique already judges: the same
-eligibility and decline skip as the stylistic lenses.
+- **The offer.** `CritiquePlugin` hands appraisal a provider with
+  `AppraisalPlugin.set_lens_offer(provider)` in `on_start`, next to
+  `add_stage2_listener` (an appraisal without the method just produces no
+  vector). The provider returns `(name, question)` pairs in a fixed order:
+  built-ins in table order, then added lenses by name. A question is the
+  lens's declared one unless `critique.lens.<name>.appraisal_question`
+  overrides it; it is read from static config, so `set_settings` can't
+  reword the critic it is scored for. Each stage-2 call asks the provider
+  afresh, so a reload takes effect on the next exchange; a provider that
+  raises costs the exchange its vector, not its dimensions (warning naming
+  the trace).
+- **The ask.** The stage-2 fork instruction (the configured
+  `appraisal.stage2_fork_prompt`, overrides included, then the exchange
+  quote and retrieval line) gets a `[Critique selection]` block appended,
+  listing each offered lens as `- <name>: <question>`, and asks for a
+  percentage per lens plus `none`, summing to 100, as
+  `lenses: {name: percent, ..., none: percent}`. The call's response schema
+  is a per-call copy with `lenses` required (the shared `STAGE2_SCHEMA` is
+  untouched). It is the same single fork call: the call count doesn't
+  change. With no lenses on offer the block and the schema addition are
+  omitted and stage 2 is as before. The block is documented in
+  `prompts/appraisal_fork.md`.
+- **Normalization.** `_lens_vector` turns the reply into shares of 1 over
+  the offered names and `none`. A name that wasn't offered, and a value
+  that isn't a finite, non-negative number (a bool isn't one), is dropped
+  with a warning naming the entry and the trace. The rest is renormalized;
+  an offered name the reply left out counts 0. A missing or non-object
+  field, or one with nothing usable left, gives no vector and a warning
+  naming the trace and the reason. A bad `lenses` field never costs the
+  dimensions: the rest of stage 2 still lands. A usable vector is stored
+  in the exchange's `appraisal.stage2.lenses` and reaches stage-2
+  listeners with the vector.
+- **The choice.** In its stage-2 listener, after the provenance check,
+  critique takes the highest share over the offered lenses and `none` from
+  *this* exchange's vector (never `get_last_stage2`, which is another
+  exchange's). `none` wins any tie it is part of; among lenses the earliest
+  in offer order wins. A winner no longer offered (a reload changed the
+  offer in between) counts as `none`, with a warning. No usable vector also
+  counts as `none`: when stage 2 produced nothing, a warning names the
+  trace; when stage 2 is present but its `lenses` field is unusable,
+  appraisal has already warned, so critique logs at debug.
+- **The sampled path.** When `none` wins, or there is no vector, with
+  probability `critique.sample_below_rate` (runtime-tunable per channel) one
+  random offered lens runs instead, marked `sampled`: the standing
+  false-negative bound (operator directive 3). The pool is every offered
+  lens, built-ins and plugin lenses alike. The pool includes retention, which
+  wakes, so retention can wake a turn through this path at frequency
+  `sample_below_rate` × 1/(offered lenses), the vector aside.
+- **No appraisal plugin.** Without one (or with stage 2 not listening)
+  there is no vector to read, so `on_agent_response` runs one random
+  offered lens per exchange, built-ins and plugin lenses alike, as the
+  degrade-to-spec path (PRD §3.2).
+- **Record.** The choice is written to `exchange_log.outcomes.lens_selection`
+  whether or not a lens runs, so a `none` is countable:
+  `{"lens": "<name>", "sampled": false, "basis": "vector"}`. `lens` is
+  omitted when nothing ran. `basis` is `"vector"` when a lens won the vector,
+  `"none"` when the vector was usable and `none` won (also after a sampled
+  draw), and `"no_vector"` when there was no usable vector.
 
-**Running and delivery.** Each decision point that selects a lens enqueues
-one silent `critique:lenses` task. Each lens is a fork of the live window
+Two consequences. The stylistic lenses now start after stage 2 lands, not
+at `on_agent_response`, so a stage-2 miss (forks off, the exchange left the
+window, an unusable reply) also costs the exchange its lens: fork misses
+are more likely to skip a lens than before. And planning and alignment no
+longer have a 10% rate of their own: they run when their question wins, plus
+their share of the `sample_below_rate` draw.
+
+**Writing a question.** One line, phrased about the exchange the fork just
+read, answerable yes/no from the window, and about what the lens would
+find rather than what it would say. Specific beats general: "Does the reply
+make concrete commitments, figures or promises that could be wrong or go
+unkept?" separates exchanges; "Is the reply good?" scores everything the
+same. Questions compete, so a lens whose question is broader than its brief
+steals exchanges from the others. Reword the question, not a threshold, to
+tune how often a lens runs.
+
+**Running and delivery.** When a plugin lens is chosen, critique enqueues
+one silent `critique:lenses` task (a built-in lens runs through its own
+`critique` task). Each lens is a fork of the live window
 with the containment check, exactly as a stylistic lens: forks off, or the
 exchange gone from the window, skips it with the stylistic lenses' warning
 and records nothing. A lens that ran records, in `exchange_log.outcomes`,
@@ -2022,7 +2096,10 @@ and records nothing. A lens that ran records, in `exchange_log.outcomes`,
 (`detail` only when there are objections), merged beside the stylistic
 run's keys. Its objections, tagged `[<name>]`, re-enter through
 `funnel.ingest` as framed CONTEXT at the channel's next turn and wake
-nothing, on every origin (PRD §3.7 Critique 4). Redaction doesn't reach
+nothing, unless the lens declares `wakes=True` (PRD §3.7 Critique 4): a
+waking lens's objections re-enter at the turn its stub triggers, under the
+same silence default as provenance's, and still wake nothing on a
+critique-origin turn. Redaction doesn't reach
 `critique.<name>.detail` yet; redaction is on hold (#1005, and #1003 for
 the same gap in proactivity's detail).
 

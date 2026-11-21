@@ -9,8 +9,9 @@ not part of this text — the knowledge base root: `critique.retention.root`,
 or markdown_recall's root when that key is unset (#742). It runs on the `critique` stage's profile
 with the objections `response_format` and `tool_choice: "none"`.
 
-Selected when the exchange's novelty crosses `critique.lens.novelty` **and**
-its commitment density crosses `critique.lens.retention`, and only when a
+Chosen like the other lenses (the appraisal fork's critique vector, or the
+`critique.sample_below_rate` draw; its question is
+`critique.lens.retention.appraisal_question`, #1078), and offered only when a
 root is known (`critique.retention.root`, else markdown_recall's): without a knowledge base there is nothing to
 check the exchange against and the lens never fires.
 
@@ -18,5 +19,5 @@ The lens flags; it does not file. Its objections name a file under the root and
 the content to append, and the agent files them in the critique turn, after
 reading the file and deciding whether the fact is really missing.
 
-`critique.fork_prompt.retention` overrides this text from static config, so
+`critique.lens.retention.fork_prompt` overrides this text from static config, so
 `set_settings` cannot soften the lens it is checked by.
