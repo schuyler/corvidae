@@ -661,14 +661,9 @@ class LLMPlugin(CorvidaePlugin):
         task.add_done_callback(self._emitting.discard)
 
     async def _send_metric(self, name: str, value: float, tags: dict[str, str]) -> None:
-        """Fire on_metrics, fail-soft: a consumer's failure is logged."""
-        try:
-            await self.pm.ahook.on_metrics(name=name, value=value, tags=tags)
-        except Exception:
-            logger.warning(
-                "on_metrics emission of %s for key %s on provider %s failed",
-                name, tags.get("lease_key"), tags.get("provider"), exc_info=True,
-            )
+        """Fire on_metrics. A consumer's failure is logged by PolicyAHook, which
+        is what fail-soft means here (#1094, #1097)."""
+        await self.pm.ahook.on_metrics(name=name, value=value, tags=tags)
 
     @hookimpl
     async def on_stop(self) -> None:
