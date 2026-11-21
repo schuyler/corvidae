@@ -1777,7 +1777,7 @@ If you write a transport with history replay, skip `message_type == "unsent"` ro
 
 ## Async considerations
 
-All broadcast hooks are `async`. Corvidae uses apluggy's `pm.ahook.*` for async dispatch; for observe hooks the kernel replaces that accessor with a fail-soft one (see [Hook exception safety](#hook-exception-safety)).
+All broadcast hooks are `async`, so every implementation of one must be `async def` too: startup refuses a plain `def` on an async hookspec, naming the hook, the plugin and the fix (#1096). A plain implementation returns a value `asyncio.gather` rejects, which fails the whole call and loses every sibling's result. Corvidae uses apluggy's `pm.ahook.*` for async dispatch; for observe hooks the kernel replaces that accessor with a fail-soft one (see [Hook exception safety](#hook-exception-safety)).
 
 For hooks with `firstresult=True` (`resolve_compaction`, `resolve_conversation`, `resolve_llm_error`), `pm.ahook.<hook>(...)` returns a single value (or None) directly:
 

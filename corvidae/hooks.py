@@ -757,7 +757,10 @@ def check_async_hookimpls(pm: pluggy.PluginManager) -> None:
 
     Sync-spec hooks (``register_tools``, called through ``pm.hook``) are not
     affected: only implementations of a spec whose function is a coroutine
-    function are checked.
+    function are checked. Known limit: the test is ``iscoroutinefunction``, so an
+    implementation behind a plain-``def`` decorator that returns a coroutine is
+    refused although it would work. No implementation in the tree is shaped that
+    way; the refusal names the plugin, so the author can see it.
 
     Raises:
         PluginValidationError: naming the hook, the plugin and the fix.
