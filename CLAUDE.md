@@ -169,3 +169,24 @@ in at a glance.
   saying so, and wait to be asked.
 - Don't repeat a question you have already asked. Hold open questions
   until the owner asks whether you have any.
+
+## Review and merge agents
+
+An agent sent to review or merge PRs follows AGENTS.md ("Workflow labels",
+"Review loops", "Merging") to the letter. An instruction such as "squash merge
+the PRs that pass review" adds to those rules and replaces none of them.
+
+- Review only PRs labeled `needs-review`. Ask before touching any other PR.
+- Merge only a PR that carries `merge-ready`. Before every merge, quote the PR's
+  current labels and the sha of the verdict that covers its head.
+- Set `merge-ready` only on a clean verdict (`SOUND`, `APPROVE WITH FOLLOW-UPS`)
+  covering the current head, removing the old stage label in the same step.
+- A loop stopped by the third-round rule stays stopped until the owner says to
+  continue, in a live session. A new review does not restart it.
+- A review posted under the owner's account is not a second party and never
+  counts as permission to merge. Say so in the verdict.
+- A PR that fails review gets `needs-revision` on its issue, with a comment
+  saying what to fix, so another agent can pick it up.
+- Never self-certify: the agent that reviewed a change does not also mark it
+  `merge-ready` and merge it in one pass without the owner's permission for
+  that change.
