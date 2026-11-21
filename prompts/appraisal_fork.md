@@ -38,8 +38,10 @@ mention it. With no lenses on offer it is omitted and the reply has no
 
 A fork miss (forks off, the exchange left the window, the fork fails) skips
 stage 2 with a warning: no standalone call is made. Override this one with a literal string via
-`appraisal.stage2_fork_prompt`. Unlike `appraisal.stage2_prompt`, it's
-static config, not a runtime tunable, so `set_settings` can't change it.
+`appraisal.stage2_fork_prompt`. That key is read from config on every call, so
+an `agent.yaml` change applies at the next reload; `set_settings` accepts a
+write to it but nothing reads the override. (The retired
+`appraisal.stage2_prompt` is neither read nor consulted, #1129.)
 
 ---
 

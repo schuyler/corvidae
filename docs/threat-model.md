@@ -236,9 +236,10 @@ operator allows, and finding 13 records the cost (#292).
 
 Every `resolve_tunable` key is writable per channel unless it appears in
 `agent.immutable_settings`. That includes `critique.provenance.enabled`,
-the sampling rate, and — worse — `critique.prompt.<lens>` (no live stage reads it now, below) and
-`appraisal.stage2_prompt`, which are the critic's and appraiser's system
-prompts. The configuration doc acknowledges self-tuning as a deliberate
+the sampling rate, and — worse — `critique.prompt.<lens>`, which is the
+critic's system prompts (no live stage reads it now, below).
+`appraisal.stage2_prompt` is not in that set and is not a `resolve_tunable`
+key at all: it is accepted and never read (#1129). The configuration doc acknowledges self-tuning as a deliberate
 trade and recommends a blocklist. At the reviewed commit two of its four
 recommended keys (`gate.engagement.enforce`, `gate.send.enforce`) did not
 exist anywhere in the code, and the prompt keys were not mentioned; the
@@ -267,8 +268,10 @@ that actually fork. A fork miss (forks off for the stage, the exchange has
 left the window, a refused or unparseable fork) skips stage-2 appraisal, the
 built-in critique lenses and the provenance check with a warning (#320, PRD
 §3.8.5), so the standalone prompts `appraisal.stage2_prompt` and
-`critique.prompt.<lens>` are no longer reachable from any live stage. They
-stay in the tunable list above, and no stage reads them. Compaction on a
+`critique.prompt.<lens>` are no longer reachable from any live stage.
+`critique.prompt.<lens>` stays in the tunable list above, and no stage reads it.
+`appraisal.stage2_prompt` is not in that list at all: it is accepted, written
+if `set_settings` is asked, and read by nothing (#1129). Compaction on a
 fork miss, and consolidation of a range that has left the window, don't use
 a standalone prompt either: they send the agent's rendered view (system
 prompt, window, fork instruction) on the stage's profile with no tools (PRD

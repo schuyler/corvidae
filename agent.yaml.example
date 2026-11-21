@@ -110,7 +110,6 @@ agent:
   #   # - critique.prompt.adversarial   # the critic's own system prompts
   #   # - critique.prompt.constrained
   #   # - critique.prompt.predictive
-  #   # - appraisal.stage2_prompt
   #   # - gate.engagement.enforce        # can silence or un-silence the agent
   #   # - gate.engagement.threshold
   #   # - gate.send.enforce
