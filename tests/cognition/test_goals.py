@@ -976,3 +976,86 @@ async def test_g4_seed_between_add_goal_read_and_write_keeps_positions_distinct(
     assert sorted(t for t, _ in data) == ["existing", "racer", "seeded"]
     positions = [p for _, p in data]
     assert len(set(positions)) == len(positions), f"tied positions: {data}"
+
+
+async def test_g3_retirement_sets_status_retired(env):
+    """#1119: the row a retirement leaves behind says it is retired.
+
+    The UPDATE that writes `retired_at` wrote no status, so every retired row kept
+    whatever it had while open and the column lied. Drop `status = ?` from that
+    statement and this test fails.
+    """
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "kestrel nest evidence")
+    await env.tools["add_goal"]("Find the kestrel nest", _ctx=ctx)
+    await env.tools["set_goal_status"](1, "in-progress", _ctx=ctx)
+
+    await env.tools["retire_goal"](
+        1, "I concluded the nest is on Brannan Street, because twigs were carried.",
+        _ctx=ctx,
+    )
+
+    (status,) = (await rows(env, "SELECT status FROM goals WHERE id = 1"))[0]
+    assert status == "retired"
+    # And the status column no longer lists it as live work.
+    live = await rows(env, "SELECT id FROM goals WHERE status != 'retired'")
+    assert live == []
+
+
+async def test_g3_retired_status_is_not_settable(env):
+    """#1119: "retired" is what retirement writes, not a status a caller picks.
+
+    Offering it in `set_goal_status` would validate, then answer "no open goal"
+    for the goal the caller just asked to retire by hand.
+    """
+    ctx = ctx_for(env.channel)
+    await env.tools["add_goal"]("Find the kestrel nest", _ctx=ctx)
+
+    answer = await env.tools["set_goal_status"](1, "retired", _ctx=ctx)
+
+    assert "status must be one of" in answer
+    (status,) = (await rows(env, "SELECT status FROM goals WHERE id = 1"))[0]
+    assert status == "open"
+
+
+async def test_a_row_retired_before_the_fix_is_still_off_the_board(env):
+    """#1119: the deferral rests on this — liveness is `retired_at`, not `status`.
+
+    A row retired before the fix carries `retired_at` set and `status='open'`.
+    Every guard and every list must still treat it as retired, or the repair
+    command becomes load-bearing for correctness instead of cosmetic. Mutating
+    `_check_open` or the beat's filter to read `status` fails this test.
+    """
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "older history")
+    await env.tools["add_goal"]("An old goal retired before the fix", _ctx=ctx)
+    await env.db.execute(
+        "UPDATE goals SET retired_at = ?, status = 'open' WHERE id = 1",
+        (env.clock.now(),),
+    )
+    await env.db.commit()
+
+    listing = await env.tools["list_goals"](_ctx=ctx)
+    assert "An old goal retired before the fix" not in listing
+    refused = await env.tools["retire_goal"](
+        1, "I concluded nothing; it was already retired.", _ctx=ctx,
+    )
+    assert "already retired" in refused
+    # And it refused before writing a conclusion record. Under the mutation
+    # (_check_open reading status) this comes back refused *after* write_record
+    # ran, which is the damage the deferral must not allow; the memory table only
+    # exists once something has written to it.
+    (tables,) = (await rows(
+        env,
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'memory'",
+    ))[0]
+    assert tables == 0, "a refused retirement wrote a conclusion record"
+    summary = await env.tools["list_goals"](include_retired=True, _ctx=ctx)
+    assert "An old goal retired before the fix" in summary
+    # open_goals() is the planning lens's reader; it keys on retired_at too.
+    assert await env.goals.open_goals() == []
+    updated = await env.tools["update_goal"](1, "new text", _ctx=ctx)
+    assert "already retired" in updated
+    (text,) = (await rows(env, "SELECT text FROM goals WHERE id = 1"))[0]
+    assert text == "An old goal retired before the fix"

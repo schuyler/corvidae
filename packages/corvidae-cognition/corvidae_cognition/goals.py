@@ -55,6 +55,10 @@ CREATE TABLE IF NOT EXISTS goals (
 
 #: Valid status values for an open goal.
 VALID_STATUSES = ("open", "in-progress", "blocked", "waiting")
+#: The status a retired goal's row carries. Not in ``VALID_STATUSES``: it is not
+#: something ``set_goal_status`` sets, and offering it there would only produce
+#: "no open goal #N" after the call had validated (#1119).
+RETIRED_STATUS = "retired"
 
 
 @dataclass(frozen=True)
@@ -437,9 +441,13 @@ class GoalsPlugin(CorvidaePlugin):
                 # write_record released the lock; take it for the state change only.
                 async with plugin._memory()._db_lock:
                     cursor = await db.execute(
-                        "UPDATE goals SET retired_at = ?, updated_at = ?, memory_id = ? "
-                        "WHERE id = ? AND retired_at IS NULL",
-                        (now, now, memory_id, id),
+                        # status in the same statement as retired_at: a row that
+                        # says retired_at IS NOT NULL while status reads "open" is
+                        # the trap #1119 names -- any future query on status
+                        # picks it up as live work.
+                        "UPDATE goals SET retired_at = ?, updated_at = ?, memory_id = ?, "
+                        "status = ? WHERE id = ? AND retired_at IS NULL",
+                        (now, now, memory_id, RETIRED_STATUS, id),
                     )
                     await db.commit()
                 if cursor.rowcount == 0:
@@ -450,7 +458,7 @@ class GoalsPlugin(CorvidaePlugin):
                 goal_id=id,
                 kind="retired",
                 old_status=checked.status,
-                new_status="retired",
+                new_status=RETIRED_STATUS,
                 origin_channel=checked.origin_channel,
                 actor_channel=channel_id,
                 conclusion=conclusion,
