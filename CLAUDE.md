@@ -172,9 +172,11 @@ in at a glance.
 
 ## Review and merge agents
 
-An agent sent to review or merge PRs follows AGENTS.md ("Workflow labels",
-"Review loops", "Merging") to the letter. An instruction such as "squash merge
-the PRs that pass review" adds to those rules and replaces none of them.
+These rules apply only when you (Claude) are tasked with reviewing other
+agents' work. They do not change how you work on your own PRs. When reviewing,
+follow AGENTS.md ("Workflow labels", "Review loops", "Merging") to the letter.
+An instruction such as "squash merge the PRs that pass review" adds to those
+rules and replaces none of them.
 
 - Review only PRs labeled `needs-review`. Ask before touching any other PR.
 - Merge only a PR that carries `merge-ready`. Before every merge, quote the PR's
