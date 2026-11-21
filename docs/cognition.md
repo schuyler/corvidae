@@ -1650,12 +1650,15 @@ returned id is the surviving record's. The record is stamped mode `direct`
 with no prompt hash and no model, since no consolidation call produced it
 (see [Record stamps](#record-stamps)).
 
-**Operator CLI:** `corvidae goals --db PATH seed TEXT` inserts an open goal
-from a second process, registered under the `corvidae.commands` entry-point
-group. `PATH` must be an existing `sessions.db` in WAL mode (the daemon sets
-it on startup); the command refuses a missing file or another journal mode,
-and an empty `TEXT`. The daemon reads the table each beat, so the goal
-reaches the heartbeat at its next beat.
+**Operator CLI:** the `corvidae goals` group runs from a second process,
+registered under the `corvidae.commands` entry-point group, and every command
+needs `--db`: `corvidae goals --db PATH seed TEXT` inserts an open goal, and
+`corvidae goals --db PATH repair-statuses [--apply]` reconciles a row's `status`
+with its `retired_at` (#205; reports and changes nothing without `--apply`).
+`PATH` must be an existing `sessions.db` in WAL mode (the daemon sets it on
+startup); both commands refuse a missing file or another journal mode, and
+`seed` refuses an empty `TEXT`. The daemon reads the table each beat, so a
+seeded goal reaches the heartbeat at its next beat.
 
 **Heartbeat contribution (#1084).** This plugin implements
 `on_heartbeat_collect_prompts` (`trylast`, so its sections end the beat, just before the prompt) and
@@ -1678,7 +1681,8 @@ every query and this plugin's list filter on `retired_at`. Retirement writes
 both, in one statement (#1119), so the column agrees with the timestamp. Rows
 retired before that fix kept the status they had while open; they are harmless
 to every reader above, which keys on `retired_at`, and are reconciled by
-`corvidae goals repair-statuses --apply` (dry-run without the flag, #1112).
+`corvidae goals --db PATH repair-statuses --apply` (see the Operator CLI note
+above; dry-run without the flag).
 
 **Without this plugin:** the goal tools, the beat's goals list and the `goals`
 table are absent. Goals already in an existing database stay there unread.

@@ -1041,6 +1041,20 @@ async def test_a_row_retired_before_the_fix_is_still_off_the_board(env):
         1, "I concluded nothing; it was already retired.", _ctx=ctx,
     )
     assert "already retired" in refused
+    # And it refused before writing a conclusion record. Under the mutation
+    # (_check_open reading status) this comes back refused *after* write_record
+    # ran, which is the damage the deferral must not allow; the memory table only
+    # exists once something has written to it.
+    (tables,) = (await rows(
+        env,
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'memory'",
+    ))[0]
+    assert tables == 0, "a refused retirement wrote a conclusion record"
+    summary = await env.tools["list_goals"](include_retired=True, _ctx=ctx)
+    assert "An old goal retired before the fix" in summary
+    # open_goals() is the planning lens's reader; it keys on retired_at too.
+    assert await env.goals.open_goals() == []
     updated = await env.tools["update_goal"](1, "new text", _ctx=ctx)
     assert "already retired" in updated
     (text,) = (await rows(env, "SELECT text FROM goals WHERE id = 1"))[0]
