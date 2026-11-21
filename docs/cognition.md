@@ -2034,7 +2034,7 @@ wake the channel; the other built-ins wait.
   raises costs the exchange its vector, not its dimensions (warning naming
   the trace).
 - **The ask.** The stage-2 fork instruction (the configured
-  `appraisal.stage2_fork_prompt`, overrides included, then the exchange
+  `appraisal.stage2_fork_prompt` as of the last reload, then the exchange
   quote and retrieval line) gets a `[Critique selection]` block appended,
   listing each offered lens as `- <name>: <question>`, and asks for a
   percentage per lens plus `none`, summing to 100, as

@@ -60,7 +60,7 @@ channels:
 
 Each layer replaces the ones below it; to keep a shipped default and add a line, copy its text into your own file. An explicit `""` or `[]` means no register. A register file that can't be read logs a WARNING and the conversation starts on the identity alone. See [configuration.md](configuration.md#registers) for the key forms and reload behaviour.
 
-Runtime overrides (via the `set_settings` tool) can change sampling parameters, `max_turns`, `max_context_tokens`, `reasoning_history` and dotted plugin tunables. The `system_prompt` key is always blocked, `register_prompt` is refused, and any other undotted key, such as `messages`, is refused, so the model can't replace the conversation through the request body. Plugin prompt tunables (`critique.prompt.*`, `appraisal.stage2_prompt`) are still writable unless listed in `agent.immutable_settings`, but no live stage reads them any more: stage 2 and the lenses run only as forks, and skip on a miss (#320); see [threat-model.md](threat-model.md), findings 1 and 2.
+Runtime overrides (via the `set_settings` tool) can change sampling parameters, `max_turns`, `max_context_tokens`, `reasoning_history` and dotted plugin tunables. The `system_prompt` key is always blocked, `register_prompt` is refused, and any other undotted key, such as `messages`, is refused, so the model can't replace the conversation through the request body. The plugin prompt keys (`critique.prompt.*`, `appraisal.stage2_prompt`) are writable but are not `resolve_tunable` keys, and no live stage reads either: stage 2 and the lenses run only as forks, and skip on a miss (#320); see [threat-model.md](threat-model.md), findings 1 and 2.
 
 ### When it is resolved
 
