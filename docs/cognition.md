@@ -2014,7 +2014,10 @@ stage-2 appraisal fork, which scores them.
   built-ins in table order, then added lenses by name. A question is the
   lens's declared one unless `critique.lens.<name>.appraisal_question`
   overrides it; it is read from static config, so `set_settings` can't
-  reword the critic it is scored for. Each stage-2 call asks the provider
+  reword the critic it is scored for. An override that is not one
+  non-blank line of text fails startup naming the key; at reload it logs a
+  warning and the lens offers its own question until the config is fixed
+  (#1127). Each stage-2 call asks the provider
   afresh, so a reload takes effect on the next exchange; a provider that
   raises costs the exchange its vector, not its dimensions (warning naming
   the trace).

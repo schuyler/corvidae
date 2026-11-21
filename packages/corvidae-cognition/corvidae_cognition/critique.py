@@ -683,6 +683,15 @@ def _lens_problem(lens: object) -> str | None:
     return None
 
 
+def _question_override_ok(question: object) -> bool:
+    """Whether an operator's ``appraisal_question`` override has the shape
+    the appraisal fork's offer block needs: one non-blank line of text."""
+    # splitlines catches every line break (\r, \x85, \u2028, ...), and a
+    # trailing one too, since the split no longer round-trips.
+    return (isinstance(question, str) and bool(question.strip())
+            and question.splitlines() == [question])
+
+
 class CritiqueSpec:
     """Hooks the critique plugin owns."""
 
@@ -779,7 +788,9 @@ class CritiquePlugin(CorvidaePlugin):
         await super().on_init(pm, config)
         self.config = config
         # A key #1078 removed fails startup, naming the key that replaces it.
-        problems = self._removed_key_problems(config)
+        # So does a question override the offer block can't hold (#1127).
+        problems = (self._removed_key_problems(config)
+                    + self._question_problems(config))
         if problems:
             raise ValueError(
                 "Config error: " + "; ".join(problems)
@@ -877,6 +888,13 @@ class CritiquePlugin(CorvidaePlugin):
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
         self.config = config
+        # A malformed question can't fail a running daemon either: warn,
+        # and _question offers the lens's own question until it is fixed.
+        question_problems = self._question_problems(config)
+        if question_problems:
+            logger.warning(
+                "critique: config reload: %s - those lenses use their own "
+                "question until agent.yaml is fixed", "; ".join(question_problems))
         # A removed key can't fail a running daemon: warn and keep the
         # previous prompts until the config is fixed.
         problems = self._removed_key_problems(config)
@@ -927,13 +945,38 @@ class CritiquePlugin(CorvidaePlugin):
             problems.append(f"critique.lens {remedy}")
         elif isinstance(lens_block, dict):
             for name, value in lens_block.items():
+                # An empty block (YAML null) sets nothing (#1127).
+                if value is None:
+                    continue
                 if not isinstance(value, dict):
                     problems.append(f"critique.lens.{name} {remedy}")
                     continue
                 for key in value:
                     if key not in ("appraisal_question", "fork_prompt"):
                         problems.append(f"critique.lens.{name}.{key} {remedy}")
+                    # Provenance and proactivity briefs live outside
+                    # critique.lens; nothing reads them here (#1127).
+                    elif key == "fork_prompt" and name in ("provenance", "proactivity"):
+                        problems.append(
+                            f"critique.lens.{name}.fork_prompt is not read: "
+                            f"set {CritiquePlugin._fork_prompt_key(name)} instead")
         return problems
+
+    @staticmethod
+    def _question_problems(config: dict) -> list[str]:
+        """One message per ``critique.lens.<name>.appraisal_question``
+        override that is not one non-blank line of text (#1127)."""
+        lens_block = config_value(config, "critique.lens", None)
+        if not isinstance(lens_block, dict):
+            return []
+        return [
+            f"critique.lens.{name}.appraisal_question {value['appraisal_question']!r} "
+            "must be one line, non-empty: it is one line of the block the "
+            "appraisal fork reads"
+            for name, value in lens_block.items()
+            if isinstance(value, dict) and "appraisal_question" in value
+            and not _question_override_ok(value["appraisal_question"])
+        ]
 
     def _resolve_fork_prompts(self, config: dict) -> dict[str, str]:
         """Resolve all lens fork prompts at startup/reload."""
@@ -972,9 +1015,14 @@ class CritiquePlugin(CorvidaePlugin):
         return offers
 
     def _question(self, name: str, default: str) -> str:
-        """A lens's question: the operator's override, else ``default``."""
-        return config_value(
+        """A lens's question: the operator's override, else ``default``.
+
+        A malformed override (warned about at reload) falls back to
+        ``default`` so it never reaches the appraisal fork's offer block.
+        """
+        question = config_value(
             self.config, f"critique.lens.{name}.appraisal_question", default)
+        return question if _question_override_ok(question) else default
 
     @hookimpl
     async def on_start(self, config: dict) -> None:

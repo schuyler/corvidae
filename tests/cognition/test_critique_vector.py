@@ -338,8 +338,14 @@ class TestConfigKeys:
          "critique.lens.ambiguity", "appraisal_question"),
         ({"critique": {"lens": {"predictive": {"sample_rate": 0.5}}}},
          "critique.lens.predictive.sample_rate", "appraisal_question"),
+        # #1127: provenance and proactivity briefs live outside critique.lens.
+        ({"critique": {"lens": {"provenance": {"fork_prompt": "p"}}}},
+         "critique.lens.provenance.fork_prompt", "critique.provenance.fork_prompt"),
+        ({"critique": {"lens": {"proactivity": {"fork_prompt": "p"}}}},
+         "critique.lens.proactivity.fork_prompt", "critique.proactivity.fork_prompt"),
     ], ids=["fork-prompt", "provenance-prompt", "proactivity-prompt",
-            "threshold", "sample-rate"])
+            "threshold", "sample-rate", "lens-provenance-prompt",
+            "lens-proactivity-prompt"])
     async def test_removed_key_fails_startup_naming_key_and_remedy(
         self, tmp_path, old_config, key, remedy,
     ):
@@ -349,6 +355,50 @@ class TestConfigKeys:
             await _env(tmp_path, config=old_config)
         assert key in str(raised.value)
         assert remedy in str(raised.value)
+
+    @pytest.mark.parametrize("question", ["", "   ", "line one\nline two", 42, None],
+                             ids=["blank", "whitespace", "multi-line", "int", "null"])
+    async def test_malformed_question_override_fails_startup(self, tmp_path, question):
+        """#1127 criterion 1: a blank, multi-line or non-string
+        appraisal_question override fails on_init, naming the key and
+        the shape it must have."""
+        with pytest.raises(ValueError) as raised:
+            await _env(tmp_path, config={"critique": {"lens": {
+                "predictive": {"appraisal_question": question}}}})
+        assert "critique.lens.predictive.appraisal_question" in str(raised.value)
+        assert "one line, non-empty" in str(raised.value)
+
+    async def test_malformed_question_at_reload_warns_and_falls_back(
+        self, tmp_path, caplog,
+    ):
+        """#1127 criterion 1: at reload a malformed question warns, naming
+        the key; the lens offers its own question and the fork prompts still
+        reload."""
+        caplog.set_level("WARNING")
+        env = await _env(tmp_path, _lens("mine"))
+        try:
+            config = {**env.plugin.config, "critique": {"lens": {"mine": {
+                "appraisal_question": "two\nlines",
+                "fork_prompt": "RELOADED-BRIEF-9q"}}}}
+            await env.plugin.on_config_reload(config)
+            assert _warnings(
+                caplog, "critique.lens.mine.appraisal_question",
+                "one line, non-empty"), caplog.text
+            assert dict(env.appraisal.offer())["mine"] == QUESTION.format("mine")
+            assert env.plugin._fork_prompts["mine"].startswith("RELOADED-BRIEF-9q")
+        finally:
+            await _teardown(env)
+
+    async def test_empty_lens_block_is_not_reported_removed(self, tmp_path):
+        """#1127 criterion 2: ``critique.lens.predictive:`` with no keys
+        (YAML null) starts, and the lens keeps its own question."""
+        from corvidae_cognition.critique import BUILTIN_LENSES
+
+        env = await _env(tmp_path, config={"critique": {"lens": {"predictive": None}}})
+        try:
+            assert dict(env.appraisal.offer())["predictive"] == BUILTIN_LENSES["predictive"][0]
+        finally:
+            await _teardown(env)
 
     async def test_provenance_fork_prompt_key_is_read(self, tmp_path):
         """T4b: critique.provenance.fork_prompt is the provenance brief."""
