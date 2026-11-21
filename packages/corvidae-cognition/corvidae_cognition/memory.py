@@ -143,6 +143,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("corvidae.memory")
 
+#: What retries an idle skip. The next idle firing does not (#342), so the one
+#: line an operator reads names what does (#1002). One copy: the wording is the
+#: same whichever cause produced the skip.
+_IDLE_RETRY = "a new message, the turn trigger or compaction retries"
+#: Forks off: the turn hook never fires, so an idle range waits for a message or
+#: compaction and a turn range for idle or compaction (#1002).
+_FORKS_OFF_IDLE_RETRY = "a new message or compaction retries"
+_FORKS_OFF_TURN_RETRY = "the next idle or compaction trigger retries"
+
 # Seconds a channel must be inactive before the idle trigger consolidates
 # its un-consolidated tail.
 DEFAULT_IDLE_CONSOLIDATE_AFTER = 1800.0
@@ -3354,24 +3363,19 @@ class MemoryPlugin(CorvidaePlugin):
 
     def _skip_consolidation(
         self, channel_id: str, rows: list[tuple], watermark: int, reason: str,
-        trigger: str, retry: str | None = None, **kwargs,
+        trigger: str, retry: str, **kwargs,
     ) -> None:
         """Log that an in-window range was skipped: channel, message range and
         what was missing (consolidation has no trace id). The watermark is
         untouched. The line names what retries, and that depends on *why* the
         range was skipped, not only on which trigger skipped it: a caller whose
-        cause changes the retrying set passes ``retry`` (#1002). Without one, a
-        turn skip is retried by the next turn and an idle skip by a new message,
-        the turn trigger or compaction."""
+        cause knows what retries passes ``retry`` (#1002). There is no default:
+        a caller that does not say would be guessing, and the skip's cause is
+        the only thing that knows."""
         if trigger == "idle":
             # Nothing has changed for a reason to try again; the next idle
             # firing sees this and returns without a fork or a warning (#342).
             self._idle_skips[channel_id] = (watermark, rows[-1][0])
-            # An idle skip is not retried by the next idle firing, so this line
-            # must not promise one. Name what does retry (#1002).
-            retry = retry or "a new message, the turn trigger or compaction retries"
-        else:
-            retry = retry or f"the next {trigger} trigger retries"
         logger.warning(
             "consolidation skipped for channel %s, messages %d-%d: %s; "
             "the watermark stays at %d and %s",
@@ -3455,9 +3459,9 @@ class MemoryPlugin(CorvidaePlugin):
                         # turn range for idle or compaction (#1002).
                         trigger,
                         retry=(
-                            "a new message or compaction retries"
+                            _FORKS_OFF_IDLE_RETRY
                             if trigger == "idle"
-                            else "the next idle or compaction trigger retries"
+                            else _FORKS_OFF_TURN_RETRY
                         ),
                     )
                     return "skip", None
@@ -3472,20 +3476,28 @@ class MemoryPlugin(CorvidaePlugin):
                     # by idle or compaction, or by the turn trigger only once
                     # the backoff ends: say so.
                     retried_by = trigger
+                    backoff_retry = None
                     if trigger == "turn" and self._note_turn_fork_failure(
                         channel_id, rows, watermark
                     ):
-                        retried_by = "idle or compaction (or, after the backoff, turn)"
+                        # The turn trigger returns once the backoff ends.
+                        backoff_retry = (
+                            "idle or compaction retries, and turn again once "
+                            "the backoff ends"
+                        )
                     self._skip_consolidation(
                         channel_id, rows, watermark,
                         f"the fork failed or its reply was unusable ({type(exc).__name__})",
                         trigger,
-                        # An idle skip is not retried by the next idle firing:
-                        # name what does (#1002). Every other retrying trigger
-                        # is itself.
+                        # An idle skip is not retried by the next idle firing,
+                        # so it names what does (#1002); a backoff line says
+                        # when the turn trigger comes back rather than putting
+                        # a clause between "the next" and "trigger".
                         retry=(
-                            "a new message, the turn trigger or compaction retries"
+                            _IDLE_RETRY
                             if retried_by == "idle"
+                            else backoff_retry
+                            if backoff_retry
                             else f"the next {retried_by} trigger retries"
                         ),
                         exc_info=True,

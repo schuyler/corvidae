@@ -600,3 +600,21 @@ async def test_a_forks_off_turn_skip_names_idle_or_compaction(env, caplog, agent
         and "consolidation skipped for channel" in r.getMessage()
     ]
     assert "the next idle or compaction trigger retries" in text, text
+
+
+async def test_a_forks_off_idle_skip_is_suppressed_too(env_with_persistence, caplog):
+    """#1002 review: #342's suppression holds when the cause is forks off.
+
+    Every other suppression test drives a *failing fork*, so the case #342 is
+    titled after — forks off, nothing will change until a message arrives or
+    someone enables forks — had no test. Two idle firings, one warning.
+    """
+    memory, persistence, stub, channel, db, ids = env_with_persistence
+    _use(memory, FakeForkAgent(set(), text=FORK_JSON))
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await _idle_firing(memory, channel.id)
+        await _idle_firing(memory, channel.id)
+
+    assert len(_skip_warnings(caplog)) == 1
+    assert "a new message or compaction retries" in _skip_warnings(caplog)[0].getMessage()

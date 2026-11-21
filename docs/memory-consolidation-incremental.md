@@ -224,8 +224,8 @@ rebuilt view; that only happens when the watermark lags behind the window
 (a compaction consolidation failed), and compaction or idle owns that
 case. That skip logs at debug, not warning, since it would otherwise
 repeat every turn until idle or compaction catches up.
-`_skip_consolidation`'s log text, which says "the next idle trigger
-retries", names the trigger instead.
+`_skip_consolidation`'s log text, which names what retries the range,
+says so instead -- for a turn range, the next idle or compaction trigger.
 
 N defaults to **4000**, is read at startup like `idle_consolidate_after`,
 must be a positive integer, and is rejected naming the key otherwise.
