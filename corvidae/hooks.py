@@ -616,9 +616,18 @@ class CorvidaePluginManager(pluggy.PluginManager):
         # Already wrapped: the plugin was registered before (here or elsewhere).
         if getattr(original, "_corvidae_fail_soft", False):
             return opts
+        wrapper = _fail_soft_wrapper(original)
+        # @hookimpl stacked above @staticmethod or @classmethod: the marker sits
+        # on the descriptor, which `getattr` unwraps to the plain function, so
+        # functools.wraps in _fail_soft_wrapper copies a __dict__ without it.
+        # Re-registering the same plugin would then find no marker and pluggy
+        # would drop the implementation silently (#1113). `opts` is exactly the
+        # dict pluggy read from that holder, so setting it on the wrapper is the
+        # whole fix -- no private pluggy name, no copy of its lookup logic.
+        setattr(wrapper, self.project_name + "_impl", dict(opts))
         # A plugin that refuses the attribute (__slots__, a guarded
         # __setattr__) fails registration here rather than running unwrapped.
-        setattr(plugin, name, _fail_soft_wrapper(original))
+        setattr(plugin, name, wrapper)
         return opts
 
 
