@@ -10,8 +10,8 @@ deferred registration, at the turn its stub triggers.
 Two independent paths:
 
   * At most one lens runs per exchange: the built-ins (predictive /
-    constrained / adversarial / retention) and plugin lenses are offered to
-    the stage-2 appraisal fork, which scores them in a critique vector, and
+    constrained / adversarial / retention / proactivity) and plugin lenses
+    are offered to the stage-2 appraisal fork, which scores them in a critique vector, and
     the top one runs (#1078). When "none" tops it, critique still fires a
     random offered lens with probability ``critique.sample_below_rate`` — the
     standing experiment's false-negative bound (operator directive 3). The
@@ -39,7 +39,7 @@ Two independent paths:
 Every main-loop turn that has a trace is judged, whatever started it
 (#1031; PRD §3.7 Critique 3): user, reminder, heartbeat, notification,
 note-woken and subagent-result turns, and corrections (``critique``-origin
-turns, which a provenance or proactivity finding woke). Stage forks never
+turns, which a waking finding woke). Stage forks never
 reach ``on_agent_response``, so they are never judged. The recursion brake is
 delivery, not eligibility (Critique 4): non-empty findings on a
 ``critique``-origin turn never wake a turn; they wait as CONTEXT for the
@@ -49,7 +49,7 @@ response another gate withheld stays eligible — the agent thought it, so
 critique may still object. A decline (an unsent ``NO_REPLY`` or empty final,
 ``silence.is_decline``) is not a response and is never judged (#420).
 
-The stylistic and plugin lenses are chosen per exchange from the critique
+The built-in and plugin lenses are chosen per exchange from the critique
 vector stage-2 appraisal returns: each lens's one-line appraisal question is
 scored, and the top share runs unless "none" wins (#1078).
 ``critique.sample_below_rate`` resolves through ``resolve_tunable`` at
@@ -95,7 +95,9 @@ logger = logging.getLogger("corvidae.critique")
 # --------------------------------------------------------------------------
 SAMPLE_BELOW_RATE_DEFAULT = 0.05    # critique.sample_below_rate (false-negative bound)
 PROVENANCE_ENABLED_DEFAULT = True   # critique.provenance.enabled
-PROACTIVITY_ENABLED_DEFAULT = True  # critique.proactivity.enabled
+# critique.lens.proactivity.enabled: static config, not a tunable, so the
+# agent can't switch off the critic that checks it (#1126).
+PROACTIVITY_ENABLED_DEFAULT = True
 
 # Evidence bounds for the provenance critic (#155). Constants, not
 # tunables: a lever that hid evidence would make the critic object to every
@@ -140,6 +142,15 @@ PROVENANCE_NOTE = (
     "the other party to take an incorrect action; then correct it briefly."
 )
 
+# Appended to whichever wake note applies while the proactivity lens is
+# offered (#1126): its finding means the agent asked permission for
+# something it owns, so the remedy is to act, still without a message.
+PROACTIVITY_WAKE_SENTENCE = (
+    "For each [proactivity] finding, do the thing you asked permission for: "
+    "it is yours to do. Then send nothing unless the other party would "
+    "otherwise act on a wrong belief."
+)
+
 # Appended to whichever wake note applies once a loaded plugin lens has
 # wakes=True. The funnel keeps one stub per drain, so the note can't name
 # what woke; this keeps the silence default true for every waking lens.
@@ -152,8 +163,9 @@ WAKE_LENSES_SENTENCE = (
 
 # The built-in lenses the appraisal fork scores, in offer order:
 # name -> (the question the fork answers, whether its findings wake the
-# channel). Retention wakes only while a knowledge-base root exists
-# (_waking_lenses). critique.lens.<name>.appraisal_question overrides the
+# channel). Retention is offered (and wakes) only while a knowledge-base
+# root exists, proactivity only while critique.lens.proactivity.enabled
+# (_builtin_offered). critique.lens.<name>.appraisal_question overrides the
 # question from static config.
 BUILTIN_LENSES: dict[str, tuple[str, bool]] = {
     "predictive": (
@@ -168,17 +180,10 @@ BUILTIN_LENSES: dict[str, tuple[str, bool]] = {
     "retention": (
         "Did this exchange establish a durable fact worth filing in the "
         "knowledge base?", True),
+    "proactivity": (
+        "Did the reply ask permission for something the agent owns and could "
+        "simply have done?", True),
 }
-
-# Patterns that indicate a permission question about an action.
-# Matched against the agent's response text; a hit triggers the proactivity
-# check (fork) to determine whether the subject is owned by the agent.
-PERMISSION_QUESTION_PATTERNS = re.compile(
-    r"(?:want me to|should i|do you want me to|shall i|would you like me to|"
-    r"do you want|would you want me to|let me know if you want)"
-    r"\s+\w+",
-    re.IGNORECASE,
-)
 
 # Bound on the per-trace maps CritiquePlugin keeps (_originating_rowid,
 # _reply): old traces fall off the front.
@@ -330,14 +335,14 @@ DEFAULT_PROMPTS = {
 }
 
 
-# Fork instructions (GitHub issue #51). With agent.forks on, a stylistic lens
+# Fork instructions (GitHub issue #51). With agent.forks on, a built-in lens
 # runs as a fork of the live window, and the provenance check runs only as
 # one (#164): the agent reviews its own response with the lens's adversarial
 # brief, the instruction appended as a user turn and followed by a quote of
 # the exchange's opening message (and, for provenance, the claims' evidence
 # inline). Documented copies live in
 # prompts/critique_*_fork.md; critique.lens.<lens>.fork_prompt (and
-# critique.provenance / critique.proactivity.fork_prompt) override them
+# critique.provenance.fork_prompt) override them
 # from static config only (not runtime tunables), so set_settings can't
 # soften the critic it is checked by.
 _JSON_TAIL = (
@@ -429,9 +434,9 @@ _FORK_PROMPT_PROVENANCE = (
 _FORK_PROMPT_PROACTIVITY = (
     "[Self-critique: proactivity] Pause the conversation here. Review the "
     "response you gave in the exchange that began with the message quoted "
-    "below. Your response contains a permission question — you are asking "
-    "the user whether to do something. Your job is to check whether the "
-    "subject of that question is something you own or are responsible for. "
+    "below. If your response asks the user's permission to do something, "
+    "check whether the subject of that question is something you own or are "
+    "responsible for; if it asks no permission, return no objections. "
     "Your system prompt (SOUL.md) contains an 'Ownership Boundary' section "
     "that lists what is 'Mine' (you act without asking) versus 'the user's' (you "
     "ask or route to the user).\n\n"
@@ -787,10 +792,11 @@ class CritiquePlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         self.config = config
-        # A key #1078 removed fails startup, naming the key that replaces it.
-        # So does a question override the offer block can't hold (#1127).
+        # A key #1078 or #1126 removed fails startup, naming the key that
+        # replaces it. So does a value critique can't use: a question the
+        # offer block can't hold (#1127), a non-bool enabled (#1126).
         problems = (self._removed_key_problems(config)
-                    + self._question_problems(config))
+                    + self._value_problems(config))
         if problems:
             raise ValueError(
                 "Config error: " + "; ".join(problems)
@@ -888,13 +894,14 @@ class CritiquePlugin(CorvidaePlugin):
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
         self.config = config
-        # A malformed question can't fail a running daemon either: warn,
-        # and _question offers the lens's own question until it is fixed.
-        question_problems = self._question_problems(config)
-        if question_problems:
+        # A malformed value can't fail a running daemon either: warn, and
+        # the lens uses its default (its own question; proactivity enabled)
+        # until it is fixed.
+        value_problems = self._value_problems(config)
+        if value_problems:
             logger.warning(
-                "critique: config reload: %s - those lenses use their own "
-                "question until agent.yaml is fixed", "; ".join(question_problems))
+                "critique: config reload: %s - those settings fall back to "
+                "their defaults until agent.yaml is fixed", "; ".join(value_problems))
         # A removed key can't fail a running daemon: warn and keep the
         # previous prompts until the config is fixed.
         problems = self._removed_key_problems(config)
@@ -913,19 +920,21 @@ class CritiquePlugin(CorvidaePlugin):
 
     @staticmethod
     def _fork_prompt_key(name: str) -> str:
-        """The config key holding ``name``'s fork prompt."""
-        if name in ("provenance", "proactivity"):
-            return f"critique.{name}.fork_prompt"
+        """The config key holding ``name``'s fork prompt; provenance, not a
+        lens, keeps its own block."""
+        if name == "provenance":
+            return "critique.provenance.fork_prompt"
         return f"critique.lens.{name}.fork_prompt"
 
     @staticmethod
     def _removed_key_problems(config: dict) -> list[str]:
-        """One message per config key #1078 removed that is still set.
+        """One message per config key #1078 or #1126 removed that is still set.
 
         The old fork-prompt keys moved under ``critique.lens.<name>.`` (or
-        ``critique.provenance`` / ``critique.proactivity``); the thresholds
-        and sample rates are gone because the appraisal fork's critique
-        vector now chooses the lens.
+        ``critique.provenance``), and ``critique.proactivity.*`` under
+        ``critique.lens.proactivity.`` once proactivity became a lens; the
+        thresholds and sample rates are gone because the appraisal fork's
+        critique vector now chooses the lens.
         """
         problems: list[str] = []
         # critique.fork_prompt.<x> moved next to the lens it configures.
@@ -935,8 +944,25 @@ class CritiquePlugin(CorvidaePlugin):
                 problems.append(
                     f"critique.fork_prompt.{name} was moved to "
                     f"{CritiquePlugin._fork_prompt_key(name)}")
+        # critique.proactivity.* moved under critique.lens.proactivity (#1126);
+        # an empty block (YAML null) sets nothing.
+        old_proactivity = config_value(config, "critique.proactivity", None)
+        if old_proactivity is not None and not isinstance(old_proactivity, dict):
+            problems.append(
+                "critique.proactivity was moved to critique.lens.proactivity")
+        elif isinstance(old_proactivity, dict):
+            for key in old_proactivity:
+                if key in ("enabled", "fork_prompt"):
+                    problems.append(
+                        f"critique.proactivity.{key} was moved to "
+                        f"critique.lens.proactivity.{key}")
+                else:
+                    problems.append(
+                        f"critique.proactivity.{key} was removed: proactivity "
+                        "is a lens, configured under critique.lens.proactivity")
         # Under critique.lens only <name>.appraisal_question and
-        # <name>.fork_prompt remain; any other key was a selector.
+        # <name>.fork_prompt remain, plus proactivity.enabled (#1126); any
+        # other key was a selector.
         remedy = (
             "was removed: lenses are chosen by the appraisal fork's critique "
             "vector; reword critique.lens.<lens>.appraisal_question instead")
@@ -951,25 +977,28 @@ class CritiquePlugin(CorvidaePlugin):
                 if not isinstance(value, dict):
                     problems.append(f"critique.lens.{name} {remedy}")
                     continue
+                allowed = ("appraisal_question", "fork_prompt") + (
+                    ("enabled",) if name == "proactivity" else ())
                 for key in value:
-                    if key not in ("appraisal_question", "fork_prompt"):
+                    if key not in allowed:
                         problems.append(f"critique.lens.{name}.{key} {remedy}")
-                    # Provenance and proactivity briefs live outside
-                    # critique.lens; nothing reads them here (#1127).
-                    elif key == "fork_prompt" and name in ("provenance", "proactivity"):
+                    # The provenance brief lives outside critique.lens;
+                    # nothing reads it here (#1127).
+                    elif key == "fork_prompt" and name == "provenance":
                         problems.append(
                             f"critique.lens.{name}.fork_prompt is not read: "
                             f"set {CritiquePlugin._fork_prompt_key(name)} instead")
         return problems
 
     @staticmethod
-    def _question_problems(config: dict) -> list[str]:
+    def _value_problems(config: dict) -> list[str]:
         """One message per ``critique.lens.<name>.appraisal_question``
-        override that is not one non-blank line of text (#1127)."""
+        override that is not one non-blank line of text (#1127), and for a
+        ``critique.lens.proactivity.enabled`` that is not a bool (#1126)."""
         lens_block = config_value(config, "critique.lens", None)
         if not isinstance(lens_block, dict):
             return []
-        return [
+        problems = [
             f"critique.lens.{name}.appraisal_question {value['appraisal_question']!r} "
             "must be one line, non-empty: it is one line of the block the "
             "appraisal fork reads"
@@ -977,6 +1006,14 @@ class CritiquePlugin(CorvidaePlugin):
             if isinstance(value, dict) and "appraisal_question" in value
             and not _question_override_ok(value["appraisal_question"])
         ]
+        # A string "false" would read as on; refuse anything but a bool.
+        proactivity = lens_block.get("proactivity")
+        if (isinstance(proactivity, dict) and "enabled" in proactivity
+                and not isinstance(proactivity["enabled"], bool)):
+            problems.append(
+                f"critique.lens.proactivity.enabled {proactivity['enabled']!r} "
+                "must be true or false")
+        return problems
 
     def _resolve_fork_prompts(self, config: dict) -> dict[str, str]:
         """Resolve all lens fork prompts at startup/reload."""
@@ -1000,19 +1037,38 @@ class CritiquePlugin(CorvidaePlugin):
         """The lenses the appraisal fork scores: ``(name, question)``, in
         fixed order (built-ins in table order, then added lenses by name).
 
-        Retention is offered only with a knowledge-base root. The question
+        A built-in is offered while ``_builtin_offered`` says so. The question
         is read from static config (``critique.lens.<name>.appraisal_question``)
         so ``set_settings`` can't reword the critic it is scored for.
         """
         offers: list[tuple[str, str]] = []
         for name, (question, _wakes) in BUILTIN_LENSES.items():
-            if name == "retention" and self._retention_root() is None:
+            if not self._builtin_offered(name):
                 continue
             offers.append((name, self._question(name, question)))
         for name in sorted(self._lenses):
             offers.append(
                 (name, self._question(name, self._lenses[name].lens.appraisal_question)))
         return offers
+
+    def _builtin_offered(self, name: str) -> bool:
+        """Whether built-in lens ``name`` is offered, and so may wake:
+        retention needs a knowledge-base root, proactivity its static
+        ``enabled`` switch, and every other built-in always is."""
+        if name == "retention":
+            return self._retention_root() is not None
+        if name == "proactivity":
+            return self._proactivity_enabled()
+        return True
+
+    def _proactivity_enabled(self) -> bool:
+        """``critique.lens.proactivity.enabled`` from static config (never
+        ``resolve_tunable``); a non-bool, warned about at load, is the
+        default."""
+        enabled = config_value(
+            self.config, "critique.lens.proactivity.enabled",
+            PROACTIVITY_ENABLED_DEFAULT)
+        return enabled if isinstance(enabled, bool) else PROACTIVITY_ENABLED_DEFAULT
 
     def _question(self, name: str, default: str) -> str:
         """A lens's question: the operator's override, else ``default``.
@@ -1157,8 +1213,8 @@ class CritiquePlugin(CorvidaePlugin):
     async def on_agent_response(
         self, channel, request_text, response_text, trace_id, annotations, logprobs,
     ) -> None:
-        """Start the proactivity check and record the reply; with no stage 2
-        to choose a lens, run one random lens.
+        """Record the reply; with no stage 2 to choose a lens, run one
+        random offered lens.
 
         Eligibility: see _eligible. The lens for an exchange is chosen from
         its critique vector when stage 2 lands (handle_stage2), and so is the
@@ -1181,34 +1237,6 @@ class CritiquePlugin(CorvidaePlugin):
             return
 
         self._record_reply(channel, trace_id)
-
-        # Proactivity check: independent of the stylistic lenses. Runs when
-        # the response contains a permission-question pattern. The fork
-        # determines whether the subject is in the agent's ownership
-        # boundary (SOUL.md 'Mine' list) — if so, the question is the
-        # failure and the action is the default.
-        # The turn's origin travels with each check to delivery, where a
-        # correction's findings are kept from waking (_record_and_register).
-        origin = (annotations or {}).get("origin")
-        if (
-            resolve_tunable(
-                channel, self.config, "critique.proactivity.enabled",
-                PROACTIVITY_ENABLED_DEFAULT,
-            )
-            and PERMISSION_QUESTION_PATTERNS.search(response_text)
-        ):
-            text_in_p = self._originating_text(trace_id, request_text)
-
-            async def _work_proactivity() -> str:
-                await self._run_proactivity(
-                    channel, trace_id, text_in_p, response_text, origin=origin,
-                )
-                return ""
-
-            await self._enqueue(
-                channel, trace_id, annotations, "critique:proactivity",
-                _work_proactivity,
-            )
 
         # Without stage 2 to choose, degrade TO spec (§3.2 contract): one
         # random offered lens per exchange. With it, handle_stage2 chooses.
@@ -1573,68 +1601,6 @@ class CritiquePlugin(CorvidaePlugin):
         finally:
             reset_attribution(token)
 
-    # ------------------------------------------------------------------
-    # The proactivity check (ownership-boundary enforcement)
-    # ------------------------------------------------------------------
-
-    async def _run_proactivity(
-        self, channel, trace_id, originating_text, response_text, *,
-        origin: str | None,
-    ) -> None:
-        """Fork the window and check whether a permission question in the
-        response is about something the agent owns.
-
-        The fork prompt instructs the forked agent to read its system
-        prompt's Ownership Boundary section and determine whether the
-        subject of the permission question falls under 'Mine' (act) or
-        'His' (ask). If 'Mine', the objection is: you own this, act.
-        """
-        prompt = self._fork_prompts.get("proactivity")
-        if prompt is None:
-            return
-        instruction = (
-            f"{prompt}\n\nThe exchange began with the message "
-            f"«{quote(originating_text)}», and the response you sent began "
-            f"«{quote(response_text)}»."
-        )
-        target = self._provenance_fork(channel, trace_id)
-        if isinstance(target, str):
-            logger.debug(
-                "proactivity check skipped for trace %s on channel %s: %s",
-                trace_id, channel.id, target,
-            )
-            return
-        agent, cut = target
-        token = set_attribution(
-            stage="critique", channel_id=channel.id, trace_id=trace_id
-        )
-        try:
-            result = await agent.fork(
-                channel, instruction, stage="critique", cut=cut,
-            )
-            parsed = _parse_json_block(result.text)
-            objections = parsed.get("objections") or []
-            # Filter: only keep objections with severity >= 0.5
-            objections = [o for o in objections if o.get("severity", 0) >= 0.5]
-            outcome = {
-                "proactivity": {
-                    "objections": len(objections),
-                }
-            }
-            if objections:
-                outcome["proactivity"]["detail"] = objections
-            await self._record_and_register(
-                channel, trace_id, outcome, objections,
-                wake=bool(objections), origin=origin,
-            )
-        except Exception:
-            logger.debug(
-                "proactivity fork failed for trace %s on channel %s",
-                trace_id, channel.id, exc_info=True,
-            )
-        finally:
-            reset_attribution(token)
-
     async def _gather_evidence(self, channel, trace_id, claims) -> list[dict] | None:
         """The closest earlier messages for each claim, or None.
 
@@ -1747,7 +1713,7 @@ class CritiquePlugin(CorvidaePlugin):
         self, channel, trace_id, originating_text, response_text, lenses, sampled,
         *, origin: str | None,
     ) -> None:
-        """Run each selected stylistic lens, record the outcome (nothing
+        """Run each selected built-in lens, record the outcome (nothing
         when no lens ran), register
         non-empty verdicts.
 
@@ -1816,13 +1782,16 @@ class CritiquePlugin(CorvidaePlugin):
         lens is on, then one note that also says how to file (#742).
 
         It depends on configuration only, never on what woke: the funnel
-        keeps the first pending stub of a drain. With a waking plugin lens
-        loaded, WAKE_LENSES_SENTENCE follows the note.
+        keeps the first pending stub of a drain. While proactivity is
+        offered PROACTIVITY_WAKE_SENTENCE follows the note, and with a waking
+        plugin lens loaded WAKE_LENSES_SENTENCE comes last.
         """
         root = self._retention_root()
         note = (
             PROVENANCE_NOTE if root is None
             else RETENTION_WAKE_NOTE.format(root=quote(root), marker=NO_REPLY_MARKER))
+        if self._builtin_offered("proactivity"):
+            note += " " + PROACTIVITY_WAKE_SENTENCE
         if any(a.lens.wakes for a in self._lenses.values()):
             note += " " + WAKE_LENSES_SENTENCE
         return note
@@ -1830,16 +1799,16 @@ class CritiquePlugin(CorvidaePlugin):
     def _waking_lenses(self) -> frozenset[str]:
         """The lenses whose findings wake the channel by themselves.
 
-        Retention does (``BUILTIN_LENSES``), but only while a knowledge base
-        is configured, which is also the only condition under which the lens
-        is offered. Tied to ``_wake_stub``'s condition rather than remembered
-        separately: a retention finding that woke with no root would get the
-        provenance stub, which says nothing about filing, and the wake would
-        spend a turn to do nothing. Plugin lenses with ``wakes=True`` wake
-        too. Every other finding waits for the channel's next turn.
+        Retention and proactivity do (``BUILTIN_LENSES``), but only while
+        they are offered (``_builtin_offered``). Tied to ``_wake_stub``'s
+        conditions rather than remembered separately: a retention finding
+        that woke with no root would get the provenance stub, which says
+        nothing about filing, and the wake would spend a turn to do nothing.
+        Plugin lenses with ``wakes=True`` wake too. Every other finding waits
+        for the channel's next turn.
         """
         waking = {name for name, (_q, wakes) in BUILTIN_LENSES.items()
-                  if wakes and self._retention_root() is not None}
+                  if wakes and self._builtin_offered(name)}
         waking.update(name for name, a in self._lenses.items() if a.lens.wakes)
         return frozenset(waking)
 
@@ -1854,11 +1823,12 @@ class CritiquePlugin(CorvidaePlugin):
         {"gate":"rejected"} merge on the same row. Provenance records under
         its own key, so it never overwrites the stylistic run's ``critique``.
         Non-empty objections re-enter via the funnel as budgeted CONTEXT.
-        With ``wake`` (provenance, proactivity) they register under
+        With ``wake`` (provenance) they register under
         origin="critique" and fire the critique wake stub; without it
         (stylistic) they queue for the channel's next turn and wake nothing
         (#202), except the lenses ``_waking_lenses`` names, whose
-        findings wake the channel so the fact is filed now.
+        findings wake the channel (retention, to file the fact now;
+        proactivity, to take the action it asked permission for).
 
         ``origin`` is the judged turn's. On a ``critique``-origin turn (a
         correction) nothing wakes, whatever ``wake`` or the lens says: every
@@ -1945,7 +1915,7 @@ class CritiquePlugin(CorvidaePlugin):
     async def _fork_lens(
         self, channel, lens, trace_id, originating_text, response_text,
     ) -> list[dict] | None:
-        """One stylistic lens as a fork of the full window; None (a logged
+        """One built-in or plugin lens as a fork of the full window; None (a logged
         skip) on any miss.
 
         The exchange is named by its opening message and the response the

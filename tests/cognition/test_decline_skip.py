@@ -30,8 +30,8 @@ DECLINE_MATRIX = [
     pytest.param("NO_REPLY", MessageType.UNSENT, False, id="unsent-no-reply"),
     pytest.param("  NO_REPLY\n", MessageType.UNSENT, False, id="unsent-padded-no-reply"),
     pytest.param("quiet: NO_REPLY", MessageType.UNSENT, False, id="unsent-embedded-no-reply"),
-    # A decline whose text asks permission: the proactivity check would fire
-    # on it if the skip came after that check.
+    # A decline whose text asks permission: the shape the old proactivity
+    # regex fired on (#1126 made proactivity an ordinary lens).
     pytest.param(
         "Should I restart it? NO_REPLY", MessageType.UNSENT, False,
         id="unsent-permission-question-no-reply",
@@ -164,7 +164,7 @@ async def _critique_env(tmp_path):
 
 class TestCritiqueSkipsDeclines:
     @pytest.mark.parametrize("text, final_type, judged", DECLINE_MATRIX)
-    async def test_lens_and_proactivity_only_for_a_response(
+    async def test_a_lens_only_for_a_response(
         self, tmp_path, text, final_type, judged
     ):
         env = await _critique_env(tmp_path)
@@ -177,12 +177,9 @@ class TestCritiqueSkipsDeclines:
             trace_id="t-decline", annotations={}, logprobs=None,
         )
 
-        # A judged text that asks permission also gets the proactivity
-        # check; the stylistic task (the predictive lens) comes from the
-        # stage-2 ambiguity.
-        expected = []
-        if judged:
-            expected = (["critique:proactivity"] if "Should I" in text else []) + ["critique"]
+        # With no stage-2 listener a judged turn gets one random lens task;
+        # proactivity is a lens (#1126), so a permission question adds nothing.
+        expected = ["critique"] if judged else []
         assert env.spy.descriptions == expected
 
     async def test_check_failure_logs_and_judges(self, tmp_path, monkeypatch, caplog):
@@ -275,9 +272,7 @@ async def _user_turn(env, reply: str) -> None:
 
 
 class TestDeclineAtAgentLevel:
-    # The permission-question decline makes the critique half deterministic:
-    # without the skip it would queue the proactivity check, where the plain
-    # token could only be caught by the critique.sample_below_rate draw.
+    # A declined turn queues neither stage 2 nor a critique task.
     @pytest.mark.parametrize("reply", ["NO_REPLY", "", "Should I restart it? NO_REPLY"])
     async def test_declined_turn_is_neither_appraised_nor_judged(self, turn_env, reply):
         await _user_turn(turn_env, reply)
@@ -291,6 +286,5 @@ class TestDeclineAtAgentLevel:
         await _user_turn(turn_env, "Should I restart it?")
         finals = [m for m in turn_env.channel.conversation.messages if m.get("role") == "assistant"]
         assert finals[-1]["_message_type"] == MessageType.UNSENT
-        # Stage 2 runs, and the permission question draws the proactivity check.
+        # Stage 2 runs; it is what chooses the critique lens.
         assert "appraisal:stage2" in turn_env.enqueued
-        assert "critique:proactivity" in turn_env.enqueued
