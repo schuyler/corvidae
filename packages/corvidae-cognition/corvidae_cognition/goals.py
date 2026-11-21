@@ -293,20 +293,24 @@ class GoalsPlugin(CorvidaePlugin):
     ) -> None:
         """Fire the on_goals_state_changed hook after a state change commits.
 
-        Never raises: observe hooks are fail-soft, so PolicyAHook logs a
-        subscriber's exception with the plugin that raised it and this call
-        returns normally (#1094, #1097). A subscriber cannot undo the state
-        change, which is committed before this runs.
+        Never raises: a subscriber's exception must not undo the state change.
         """
-        await self.pm.ahook.on_goals_state_changed(
-            goal_id=goal_id,
-            kind=kind,
-            old_status=old_status,
-            new_status=new_status,
-            origin_channel=origin_channel,
-            actor_channel=actor_channel,
-            conclusion=conclusion,
-        )
+        try:
+            await self.pm.ahook.on_goals_state_changed(
+                goal_id=goal_id,
+                kind=kind,
+                old_status=old_status,
+                new_status=new_status,
+                origin_channel=origin_channel,
+                actor_channel=actor_channel,
+                conclusion=conclusion,
+            )
+        except Exception:
+            logger.warning(
+                "goals: on_goals_state_changed subscriber failed for goal %d",
+                goal_id,
+                exc_info=True,
+            )
 
     async def open_goals(self) -> list[dict]:
         """Open goals (not retired), front of the queue first. For the heartbeat's review.

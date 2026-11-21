@@ -95,10 +95,11 @@ class MetricsPlugin(CorvidaePlugin):
             self.pm = pm
 
     async def _emit(self, name: str, value: float, tags: dict[str, str]) -> None:
-        """Fire one on_metrics event. Observe hooks fail soft (#1094) and
-        PolicyAHook logs each failing implementation itself, so this needs no
-        try/except of its own (#1097)."""
-        await self.pm.ahook.on_metrics(name=name, value=value, tags=tags)
+        """Fire one on_metrics event, fail-soft."""
+        try:
+            await self.pm.ahook.on_metrics(name=name, value=value, tags=tags)
+        except Exception:
+            logger.warning("on_metrics emission failed for %s", name, exc_info=True)
 
     @hookimpl
     async def on_llm_response(
