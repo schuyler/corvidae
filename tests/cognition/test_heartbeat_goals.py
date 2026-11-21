@@ -602,3 +602,26 @@ async def test_later_beat_sends_only_the_new_memory_not_a_retired_block(make_env
     # Joined by blank lines: pins the separator on the real path. Both goals
     # are retired by beat two, so the replacement line is the none-open one.
     assert "\n\nNo open goals as of" in second
+
+
+async def test_beat_omits_a_goal_retired_before_the_status_fix(make_env):
+    """#1119: the beat keys on `retired_at`, so an unrepaired row stays off it.
+
+    A row retired before the fix has `retired_at` set and `status='open'`. If the
+    beat's filter read `status` instead, that row would come back as live work
+    and the repair command would be load-bearing for correctness.
+    """
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    await add_message(env, "irc:#test", "talking about the wiki backup")
+    await env.tools["add_goal"]("An old goal retired before the fix", _ctx=ctx)
+    await env.db.execute(
+        "UPDATE goals SET retired_at = ?, status = 'open' WHERE id = 1",
+        (env.clock.now(),),
+    )
+    await env.db.commit()
+
+    await env.clock.advance(AFTER)
+    assert len(env.agent.calls) == 1
+    text = env.agent.calls[0]["text"]
+    assert "An old goal retired before the fix" not in text

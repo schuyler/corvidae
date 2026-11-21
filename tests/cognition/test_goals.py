@@ -1016,3 +1016,32 @@ async def test_g3_retired_status_is_not_settable(env):
     assert "status must be one of" in answer
     (status,) = (await rows(env, "SELECT status FROM goals WHERE id = 1"))[0]
     assert status == "open"
+
+
+async def test_a_row_retired_before_the_fix_is_still_off_the_board(env):
+    """#1119: the deferral rests on this — liveness is `retired_at`, not `status`.
+
+    A row retired before the fix carries `retired_at` set and `status='open'`.
+    Every guard and every list must still treat it as retired, or the repair
+    command becomes load-bearing for correctness instead of cosmetic. Mutating
+    `_check_open` or the beat's filter to read `status` fails this test.
+    """
+    ctx = ctx_for(env.channel)
+    await add_message(env, env.channel.id, "older history")
+    await env.tools["add_goal"]("An old goal retired before the fix", _ctx=ctx)
+    await env.db.execute(
+        "UPDATE goals SET retired_at = ?, status = 'open' WHERE id = 1",
+        (env.clock.now(),),
+    )
+    await env.db.commit()
+
+    listing = await env.tools["list_goals"](_ctx=ctx)
+    assert "An old goal retired before the fix" not in listing
+    refused = await env.tools["retire_goal"](
+        1, "I concluded nothing; it was already retired.", _ctx=ctx,
+    )
+    assert "already retired" in refused
+    updated = await env.tools["update_goal"](1, "new text", _ctx=ctx)
+    assert "already retired" in updated
+    (text,) = (await rows(env, "SELECT text FROM goals WHERE id = 1"))[0]
+    assert text == "An old goal retired before the fix"

@@ -458,7 +458,7 @@ class GoalsPlugin(CorvidaePlugin):
                 goal_id=id,
                 kind="retired",
                 old_status=checked.status,
-                new_status="retired",
+                new_status=RETIRED_STATUS,
                 origin_channel=checked.origin_channel,
                 actor_channel=channel_id,
                 conclusion=conclusion,

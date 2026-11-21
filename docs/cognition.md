@@ -1536,7 +1536,7 @@ order.
 |------|------------|--------------|
 | `add_goal` | `text: str`, `position: str = "append"` | Inserts an open goal and returns `Goal #N added.` `position` is `prepend` (front of the queue) or `append` (back); anything else returns an error string. The goal records the channel whose turn created it as its origin. Whitespace runs in `text`, newlines included, collapse to one space; empty text returns an error string. |
 | `update_goal` | `id: int`, `text: str` | Replaces the text of an open goal and bumps its `updated_at`, returning `Goal #N updated.` An unknown or retired id, or empty text, returns an error string. |
-| `retire_goal` | `id: int`, `conclusion: str` | Writes a memory record of the conclusion, then marks the goal retired, returning `Goal #N retired; conclusion recorded as memory #M.` An unknown or retired id, or an empty conclusion, returns an error string, as does a missing channel context. |
+| `retire_goal` | `id: int`, `conclusion: str` | Writes a memory record of the conclusion, then marks the goal retired (`retired_at` and `status='retired'`, one statement), returning `Goal #N retired; conclusion recorded as memory #M.` An unknown or retired id, or an empty conclusion, returns an error string, as does a missing channel context. |
 | `set_goal_status` | `id: int`, `status: str` | Sets an open goal's status to one of `open`, `in-progress`, `blocked`, `waiting`, returning `Goal #N status set to '<status>'`. An unknown or retired id, or any other status, returns an error string. Setting the status a goal already has changes nothing and fires no hook. |
 | `list_goals` | `include_retired: bool = False` | Lists goals in queue order with their ids and statuses; retired ones only when asked. |
 
@@ -1548,7 +1548,7 @@ still works: the row is inserted without a position, with a warning, and
 the daemon's migration then orders it by id.) A goal's status is
 `open`, `in-progress` (being worked, so a restart resumes it rather than
 re-picking), `blocked` (waiting on something external) or `waiting` (done,
-awaiting review); retiring sets `retired_at`. The beat's goals list lists open goals
+awaiting review); retiring sets `retired_at` and `status='retired'`. The beat's goals list lists open goals
 front of the queue first and marks every goal that is not plain `open` with its
 status, and the goals instruction the beat carries tells the model to resume an
 in-progress goal, otherwise take the first goal that is neither blocked nor
@@ -1674,10 +1674,11 @@ release, logs a WARNING naming the new key, and fails startup when set beside
 it. `goals.heartbeat_limit` never had a `heartbeat.*` spelling.
 
 A goal's `retired_at`, not its `status`, is what marks it off the board:
-every query and this plugin's list filter on `retired_at`. (`retire_goal`
-does not yet set `status='retired'` on the row it retires - a known drift,
-tracked separately; the beat is immune because it filters on `retired_at`
-before `status`.)
+every query and this plugin's list filter on `retired_at`. Retirement writes
+both, in one statement (#1119), so the column agrees with the timestamp. Rows
+retired before that fix kept the status they had while open; they are harmless
+to every reader above, which keys on `retired_at`, and are reconciled by
+`corvidae goals repair-statuses --apply` (dry-run without the flag, #1112).
 
 **Without this plugin:** the goal tools, the beat's goals list and the `goals`
 table are absent. Goals already in an existing database stay there unread.
