@@ -656,6 +656,13 @@ class PolicyAHook:
             # its coroutines, so results line up with these names.
             caller = getattr(self._pm.hook, name, None)
             impls = caller.get_hookimpls() if caller is not None else []
+            # Startup refuses a wrapper on a fail-soft hook (#1094), but a
+            # manager that never ran that check -- a bare create_plugin_manager()
+            # in a test or a script -- can still hold one. Refuse it here with
+            # the same message rather than let zip(strict=True) below fail with a
+            # ValueError naming neither the hook nor the plugin (#1114).
+            for impl in impls:
+                _refuse_fail_soft_wrapper(impl, name)
             names = [impl.plugin_name for impl in reversed(impls)]
 
             # Dispatch with the flag set; reset it even if dispatch raises, so
@@ -694,6 +701,25 @@ class PolicyAHook:
         return call
 
 
+def _refuse_fail_soft_wrapper(impl: "pluggy.HookImpl", hook_name: str) -> None:
+    """Raise the startup refusal for one wrapper implementation (#1114).
+
+    Split out so dispatch and the startup check say the same thing, word for
+    word, whichever one the caller hits first.
+    """
+    option = "wrapper" if impl.wrapper else "hookwrapper" if impl.hookwrapper else None
+    if option is None:
+        return
+    raise pluggy.PluginValidationError(
+        impl.plugin,
+        f"Plugin {impl.plugin_name!r} implements {hook_name!r} with "
+        f"{option}=True, but observe hooks fail soft, so a wrapper "
+        f"would receive a failed implementation as a value. Remove "
+        f"{option}=True and implement {hook_name} as a plain async "
+        f"hookimpl.",
+    )
+
+
 def check_fail_soft_wrappers(pm: pluggy.PluginManager) -> None:
     """Refuse a wrapper implementation on a fail-soft hook (#1094).
 
@@ -709,17 +735,7 @@ def check_fail_soft_wrappers(pm: pluggy.PluginManager) -> None:
         if getattr(caller, "spec", None) is None or not is_fail_soft(hook_name):
             continue
         for impl in caller.get_hookimpls():
-            option = "wrapper" if impl.wrapper else "hookwrapper" if impl.hookwrapper else None
-            if option is None:
-                continue
-            raise pluggy.PluginValidationError(
-                impl.plugin,
-                f"Plugin {impl.plugin_name!r} implements {hook_name!r} with "
-                f"{option}=True, but observe hooks fail soft, so a wrapper "
-                f"would receive a failed implementation as a value. Remove "
-                f"{option}=True and implement {hook_name} as a plain async "
-                f"hookimpl.",
-            )
+            _refuse_fail_soft_wrapper(impl, hook_name)
 
 
 def create_plugin_manager() -> pluggy.PluginManager:
