@@ -68,7 +68,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from inspect import isawaitable
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
@@ -1310,7 +1310,7 @@ class CritiquePlugin(CorvidaePlugin):
         return self._rng.choice(offered)
 
     def _choose_lens(
-        self, trace_id: str, channel: object, vector: dict | None, offered: list[str],
+        self, trace_id: str, channel: Any, vector: dict | None, offered: list[str],
         reason: str, warn: bool,
     ) -> tuple[str | None, bool, str]:
         """``(lens, sampled, basis)`` for one exchange.

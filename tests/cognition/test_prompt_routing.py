@@ -8,7 +8,7 @@ wiring config -> resolve_prompt -> the prompt that goes out for:
 - goals.heartbeat_instruction        -> GoalsPlugin._instruction
 - memory.consolidation_fork_prompt   -> resolve_consolidation_fork_prompt()
 - appraisal.stage2_fork_prompt       -> AppraisalPlugin._fork_prompt
-- critique.fork_prompt.<lens>        -> CritiquePlugin._fork_prompts
+- critique.lens.<lens>.fork_prompt   -> CritiquePlugin._fork_prompts
 """
 
 from __future__ import annotations

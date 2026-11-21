@@ -21,8 +21,8 @@ from corvidae_cognition.critique import Lens
 
 logger = logging.getLogger(__name__)
 
-# The lens's name: it keys the fork prompt override, the tunables and the
-# outcome entry (critique.lens.alignment.*).
+# The lens's name: it keys the outcome entry and the static overrides
+# critique.lens.alignment.fork_prompt and critique.lens.alignment.appraisal_question.
 LENS_NAME = "alignment"
 
 _FORK_PROMPT = """\
