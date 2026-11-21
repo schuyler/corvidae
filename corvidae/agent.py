@@ -591,7 +591,13 @@ class Agent(CorvidaePlugin):
             self._queued_tool_results.add((channel.id, tool_call_id))
 
     async def deliver_tool_error(
-        self, channel, tool_call_id: str, text: str, annotations: dict | None
+        self,
+        channel,
+        tool_call_id: str,
+        text: str,
+        annotations: dict | None,
+        *,
+        known_pending: bool = False,
     ) -> bool:
         """Queue an error tool result when on_notify failed to deliver one (#173).
 
@@ -600,10 +606,17 @@ class Agent(CorvidaePlugin):
         ``tool_call_id`` is already queued (another plugin's hookimpl raised
         after this Agent's succeeded) or the id is no longer pending, so the
         model never sees two results for one call. Returns True if it queued.
+
+        ``known_pending`` is for a caller answering a call the process before
+        this one dispatched, which is the restart plugin's case (#1102): a
+        fresh channel has an empty ``pending_tool_call_ids`` by construction,
+        so the pending check would drop exactly the result that caller came to
+        deliver. Only the already-queued check still applies, and it is the one
+        that stops a second result.
         """
         if (channel.id, tool_call_id) in self._queued_tool_results:
             return False
-        if tool_call_id not in channel.pending_tool_call_ids:
+        if not known_pending and tool_call_id not in channel.pending_tool_call_ids:
             return False
         item = QueueItem(
             role=QueueItemRole.NOTIFICATION,

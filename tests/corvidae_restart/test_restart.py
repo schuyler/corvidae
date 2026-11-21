@@ -40,13 +40,16 @@ class FakeAgent:
         self.tools = {}
         self.delivered_errors: list[dict] = []
 
-    async def deliver_tool_error(self, channel, tool_call_id, text, annotations):
+    async def deliver_tool_error(
+        self, channel, tool_call_id, text, annotations, *, known_pending=False
+    ):
         self.delivered_errors.append(
             {
                 "channel": channel,
                 "tool_call_id": tool_call_id,
                 "text": text,
                 "annotations": annotations,
+                "known_pending": known_pending,
             }
         )
         return True
@@ -815,6 +818,9 @@ async def test_a_failed_delivery_closes_the_tool_call(tmp_path):
     assert pm.ahook.notifies == []  # the raise really did stop delivery
     assert len(pm.ahook_raise.calls) == 1
     [error] = pm._agent.delivered_errors
+    # known_pending is what makes the result reachable at all after a restart:
+    # a fresh channel has an empty pending set (#1102 review).
+    assert error["known_pending"] is True
     assert error["tool_call_id"] == "tc-123"
     assert error["channel"].id == "test:home"
     assert "Restart complete" in error["text"]
@@ -837,3 +843,37 @@ async def test_a_delivered_notice_does_not_queue_an_error(tmp_path):
 
     assert len(pm.ahook.notifies) == 1
     assert pm._agent.delivered_errors == []
+
+
+async def test_the_error_result_reaches_a_fresh_channel(tmp_path):
+    """#1102: a fresh channel has no pending ids, so the result must bypass that guard.
+
+    This is the real Agent, not the recorder: after a restart the process that
+    dispatched the call is gone and ``pending_tool_call_ids`` starts empty, so
+    ``deliver_tool_error``'s pending check would drop the very result the
+    restart plugin exists to deliver.
+    """
+    from helpers import build_plugin_and_channel
+
+    agent, channel, db = await build_plugin_and_channel()
+    try:
+        assert channel.pending_tool_call_ids == set()
+
+        queued = await agent.deliver_tool_error(
+            channel, "tc-after-restart", "Restart complete.", None
+        )
+        assert queued is False  # the default path still refuses
+
+        queued = await agent.deliver_tool_error(
+            channel, "tc-after-restart", "Restart complete.", None, known_pending=True
+        )
+        assert queued is True
+        assert (channel.id, "tc-after-restart") in agent._queued_tool_results
+
+        # And a second attempt is a no-op, so one call never gets two results.
+        again = await agent.deliver_tool_error(
+            channel, "tc-after-restart", "Restart complete.", None, known_pending=True
+        )
+        assert again is False
+    finally:
+        await db.close()
