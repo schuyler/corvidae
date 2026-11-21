@@ -32,6 +32,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 import apluggy as pluggy
+from pluggy._manager import _static_hook_attr  # pluggy's own marker lookup
 
 from corvidae.context import MessageType
 from corvidae.outbound import (
@@ -552,41 +553,30 @@ class _Failed:
         self.exc = exc
 
 
-def _marker_holder(plugin: object, name: str) -> object | None:
-    """The object pluggy read the hookimpl marker from, if it is not the bound
-    attribute itself.
+def _carry_hookimpl_marker(plugin: object, name: str, wrapper: Callable[..., object]) -> None:
+    """Give the wrapper the hookimpl marker pluggy read from ``plugin.name`` (#1113).
 
-    A plain ``@hookimpl async def`` keeps its marker on the function, which is
-    what ``getattr`` returns. ``@hookimpl`` above ``@staticmethod`` or
-    ``@classmethod`` puts the marker on the descriptor in the class ``__dict__``,
-    which ``getattr`` unwraps (#1113).
+    ``@hookimpl`` above ``@staticmethod`` or ``@classmethod`` puts the marker on
+    the descriptor, and ``getattr`` unwraps that to the plain function, so
+    ``functools.wraps`` in ``_fail_soft_wrapper`` copies a ``__dict__`` without
+    it: re-registering the plugin would find no marker and pluggy would drop the
+    implementation silently.
+
+    The lookup is pluggy's own, not a copy of it. It already handles the cases a
+    hand-written version got wrong -- an MRO-inherited impl, a ``__slots__``
+    plugin, and an instance attribute shadowing a marked class attribute -- and
+    a copy would drift from the version in use.
     """
-    held = vars(type(plugin)).get(name)
-    if held is None:
-        held = vars(plugin).get(name)
-    if held is None or held is getattr(plugin, name, None):
-        return None
-    return held
-
-
-def _copy_hookimpl_marker(holder: object | None, wrapper: Callable[..., object]) -> None:
-    """Copy pluggy's marker attributes from ``holder`` onto ``wrapper`` (#1113).
-
-    The marker lands on whichever object the decorator received: a plain
-    function, or the ``staticmethod`` object that ``@hookimpl`` was applied
-    above. Both are read here; the function behind a descriptor is the fallback.
-    """
-    if holder is None:
+    found = _static_hook_attr(plugin, name)
+    if found is None:
         return
-    for source in (holder, getattr(holder, "__func__", None)):
-        if source is None:
+    holder, _function = found
+    for key, value in vars(holder).items():
+        # Only the marker's own attributes: a dunder must not overwrite what
+        # functools.wraps set on the wrapper.
+        if key.startswith("__"):
             continue
-        for key, value in vars(source).items():
-            # Only the marker's own attributes: a dunder must not overwrite what
-            # functools.wraps set on the wrapper.
-            if key.startswith("__"):
-                continue
-            setattr(wrapper, key, value)
+        setattr(wrapper, key, value)
 
 
 def _fail_soft_wrapper(original: Callable[..., object]) -> Callable[..., object]:
@@ -660,7 +650,7 @@ class CorvidaePluginManager(pluggy.PluginManager):
         # Re-registering the same plugin would then find no marker and pluggy
         # would drop the implementation silently (#1113). Carry the options
         # across from whichever holder has them.
-        _copy_hookimpl_marker(_marker_holder(plugin, name), wrapper)
+        _carry_hookimpl_marker(plugin, name, wrapper)
         # A plugin that refuses the attribute (__slots__, a guarded
         # __setattr__) fails registration here rather than running unwrapped.
         setattr(plugin, name, wrapper)

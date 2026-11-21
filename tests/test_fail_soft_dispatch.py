@@ -540,3 +540,78 @@ async def test_a_static_hookimpl_survives_unregister_and_register() -> None:
     pm.register(plugin, name="static")
 
     assert len(pm.hook.on_notify.get_hookimpls()) == 1
+
+
+async def test_a_slots_plugin_with_a_hookimpl_slot_registers() -> None:
+    """pluggy reads a hookimpl out of a `__slots__` slot; so must the wrapping.
+
+    A hand-written marker lookup raised `TypeError: vars() argument must have
+    __dict__ attribute` here, for a shape pluggy supports (#1142 review).
+    """
+
+    async def on_notify(channel, source, text, tool_call_id, annotations):
+        return "slot"
+
+    class SlotPlugin:
+        __slots__ = ("on_notify",)
+
+    plugin = SlotPlugin()
+    plugin.on_notify = hookimpl(on_notify)
+
+    pm1 = create_plugin_manager()
+    pm1.register(plugin, name="slot")
+    assert len(pm1.hook.on_notify.get_hookimpls()) == 1
+
+    pm2 = create_plugin_manager()
+    pm2.register(plugin, name="slot")
+    assert len(pm2.hook.on_notify.get_hookimpls()) == 1
+
+
+async def test_an_inherited_static_hookimpl_survives_re_registration() -> None:
+    """The impl lives on a base class; pluggy's lookup walks the MRO, so ours must."""
+
+    class Base:
+        @hookimpl
+        @staticmethod
+        async def on_notify(channel, source, text, tool_call_id, annotations):
+            return "inherited"
+
+    class Sub(Base):
+        pass
+
+    plugin = Sub()
+    pm1 = create_plugin_manager()
+    pm1.register(plugin, name="sub")
+    assert len(pm1.hook.on_notify.get_hookimpls()) == 1
+
+    pm2 = create_plugin_manager()
+    pm2.register(plugin, name="sub")
+    assert len(pm2.hook.on_notify.get_hookimpls()) == 1
+
+
+async def test_an_instance_attribute_keeps_pluggy_precedence() -> None:
+    """An instance value shadows a marked class attribute for pluggy; it must here too.
+
+    Checking the class `__dict__` first gave the wrapper the class's options for
+    an impl pluggy took from the instance (#1142 review).
+    """
+
+    class Marked:
+        @hookimpl
+        @staticmethod
+        async def on_notify(channel, source, text, tool_call_id, annotations):
+            return "class"
+
+    async def from_instance(channel, source, text, tool_call_id, annotations):
+        return "instance"
+
+    plugin = Marked()
+    plugin.on_notify = hookimpl(from_instance)
+
+    pm = create_plugin_manager()
+    pm.register(plugin, name="shadow")
+
+    assert len(pm.hook.on_notify.get_hookimpls()) == 1
+    assert await pm.ahook.on_notify(
+        channel="irc:#test", source="t", text="x", tool_call_id=None, annotations={},
+    ) == ["instance"]
