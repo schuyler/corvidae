@@ -341,7 +341,8 @@ def _funnel_entries(env):
     from corvidae_cognition.critique import PROVENANCE_NOTE
 
     env.funnel.ingest_and_wake.assert_awaited_once()
-    assert env.funnel.ingest_and_wake.await_args.kwargs["stub_text"] == PROVENANCE_NOTE
+    # Other waking lenses' sentences (proactivity's, #1126) follow the note.
+    assert env.funnel.ingest_and_wake.await_args.kwargs["stub_text"].startswith(PROVENANCE_NOTE)
     return env.funnel.ingest_and_wake.await_args.kwargs["entries"]
 
 

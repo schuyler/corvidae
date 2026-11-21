@@ -333,19 +333,20 @@ class TestConfigKeys:
         ({"critique": {"fork_prompt": {"provenance": "p"}}},
          "critique.fork_prompt.provenance", "critique.provenance.fork_prompt"),
         ({"critique": {"fork_prompt": {"proactivity": "p"}}},
-         "critique.fork_prompt.proactivity", "critique.proactivity.fork_prompt"),
+         "critique.fork_prompt.proactivity", "critique.lens.proactivity.fork_prompt"),
         ({"critique": {"lens": {"ambiguity": 0.5}}},
          "critique.lens.ambiguity", "appraisal_question"),
         ({"critique": {"lens": {"predictive": {"sample_rate": 0.5}}}},
          "critique.lens.predictive.sample_rate", "appraisal_question"),
-        # #1127: provenance and proactivity briefs live outside critique.lens.
+        # #1127: the provenance brief lives outside critique.lens.
         ({"critique": {"lens": {"provenance": {"fork_prompt": "p"}}}},
          "critique.lens.provenance.fork_prompt", "critique.provenance.fork_prompt"),
-        ({"critique": {"lens": {"proactivity": {"fork_prompt": "p"}}}},
-         "critique.lens.proactivity.fork_prompt", "critique.proactivity.fork_prompt"),
+        # #1126: only proactivity takes an enabled switch.
+        ({"critique": {"lens": {"predictive": {"enabled": False}}}},
+         "critique.lens.predictive.enabled", "appraisal_question"),
     ], ids=["fork-prompt", "provenance-prompt", "proactivity-prompt",
             "threshold", "sample-rate", "lens-provenance-prompt",
-            "lens-proactivity-prompt"])
+            "enabled-on-another-lens"])
     async def test_removed_key_fails_startup_naming_key_and_remedy(
         self, tmp_path, old_config, key, remedy,
     ):
@@ -413,23 +414,6 @@ class TestConfigKeys:
             await _run_provenance(env)
             [call] = agent.calls
             assert call["instruction"].startswith("OPERATOR-PROVENANCE-7m")
-        finally:
-            await _teardown(env)
-
-    async def test_proactivity_fork_prompt_key_is_read(self, tmp_path):
-        """T4b: critique.proactivity.fork_prompt is the proactivity brief."""
-        env = await build_critique(
-            tmp_path, OfferAppraisal(), config={"critique": {
-                "sample_below_rate": 0.0,
-                "proactivity": {"fork_prompt": "OPERATOR-PROACTIVITY-3v"}}},
-            fork=False)
-        agent = RenderingForkAgent({"critique"}, text=json.dumps({"objections": []}))
-        try:
-            ex = await _provenance_exchange(env, agent)
-            await env.plugin._run_proactivity(
-                env.channel, ex.trace_id, "when is it due?", "Want me to do it?", origin=None)
-            [call] = agent.calls
-            assert call["instruction"].startswith("OPERATOR-PROACTIVITY-3v")
         finally:
             await _teardown(env)
 
@@ -513,11 +497,13 @@ class TestWake:
     async def test_with_no_waking_plugin_lens_the_retention_stub_is_unchanged(
         self, tmp_path,
     ):
-        """T5: with only a non-waking plugin lens loaded, retention (selected
-        by the vector) wakes with today's note, byte for byte."""
+        """T5: with only a non-waking plugin lens loaded (and proactivity,
+        which wakes, switched off), retention (selected by the vector) wakes
+        with today's note, byte for byte."""
         env = await _env(
             tmp_path, _lens("mine"), with_funnel=True, chat_text=RETENTION_VERDICT,
-            config={"critique": {"retention": {"root": ROOT}}})
+            config={"critique": {"retention": {"root": ROOT},
+                                 "lens": {"proactivity": {"enabled": False}}}})
         try:
             _watch_funnel(env)
             await _judged_turn(env, "kt5f", {"retention": 1.0})
@@ -722,13 +708,14 @@ class TestSampling:
 
 class TestOffers:
     async def test_every_built_in_lens_offers_a_one_line_question(self, tmp_path):
-        """T10: predictive, constrained, adversarial and (with a root)
-        retention each offer a non-empty single-line question, in that order."""
+        """T10: predictive, constrained, adversarial, (with a root)
+        retention and proactivity each offer a non-empty single-line
+        question, in that order."""
         env = await _env(tmp_path, config={"critique": {"retention": {"root": ROOT}}})
         try:
             offer = env.appraisal.offer()
             assert [name for name, _ in offer] == [
-                "predictive", "constrained", "adversarial", "retention"]
+                "predictive", "constrained", "adversarial", "retention", "proactivity"]
             for name, question in offer:
                 assert question.strip() and "\n" not in question, name
         finally:
