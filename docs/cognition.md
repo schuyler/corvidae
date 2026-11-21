@@ -158,8 +158,9 @@ range "the next turn trigger retries", an idle range "a new message, the turn
 trigger or compaction retries" (the next idle firing does not, #342), and a
 range skipped because forks were reloaded off names only the triggers that can
 still run — "a new message or compaction" for an idle range, "idle or
-compaction" for a turn range. The watermark stays put. An idle range reaches catch-up once it has left the
-window; a turn range is left to idle or compaction, as above. Both
+compaction" for a turn range. The watermark stays put. An idle range reaches
+catch-up once it has left the window; a turn range is left to idle or
+compaction, as above. Both
 calls are constrained by a
 `response_format` JSON schema, like appraisal and critique, so a model can't
 answer the transcript instead of writing a reply. The reply is one object:

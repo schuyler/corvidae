@@ -576,3 +576,27 @@ async def test_a_turn_skip_does_not_suppress_the_next_idle_firing(
 
     assert len(agent.calls) == 2, agent.calls
     assert len(_skip_warnings(caplog)) == 2
+
+
+@pytest.mark.parametrize("agent", [
+    FakeForkAgent(set(), text=FORK_JSON), None,  # no agent plugin
+])
+async def test_a_forks_off_turn_skip_names_idle_or_compaction(env, caplog, agent):
+    """#1002: forks off means the turn hook never fires, so a turn range's line
+    must name what does retry it — idle or compaction.
+
+    Moving this wording out of ``_skip_consolidation``'s shared branch and into
+    the call site took it out of every test's reach; nothing asserted it until
+    here (#1002 review).
+    """
+    memory, stub, channel, db, ids = env
+    if agent is not None:
+        _use(memory, agent)
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await memory._consolidate_range(channel.id, ids[-1], "turn")
+    [text] = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "consolidation skipped for channel" in r.getMessage()
+    ]
+    assert "the next idle or compaction trigger retries" in text, text
