@@ -244,7 +244,8 @@ one is a bug even if its tests pass.
     not, and neither is a turn a note wakes on another channel (§3.5.10):
     a continuation can cross channels, and a chain of continuations is
     agency only if the exchange that started it was. Stylistic critique
-    objections start no turn at all. Agency is
+    objections start no turn at all; only a lens that declares it wakes
+    may (§3.7 Critique 4). Agency is
     optional. Without agency plugins the agent never initiates a turn and
     has no reminders or heartbeat, and its upkeep still runs. No plugin's
     documented behaviour may depend on traffic it does not control.
@@ -1212,10 +1213,10 @@ deciding only what to newly append and in what order.
    the reply. Each lens checks for one kind of problem and is offered to
    the stage-2 appraisal fork with a one-line appraisal question. The
    fork scores each offered lens's question, and "none", for the exchange:
-   the critique vector. The top share runs, and "none" wins ties. A lens
-   whose question wins a misread request (predictive), commitments the
-   agent cannot keep (constrained) or objections the agent dismissed
-   (adversarial) is checked for that problem. When "none" wins, or there is
+   the critique vector. The top share runs, and "none" wins ties. The
+   built-in lenses check for a misread request (predictive), commitments
+   the agent cannot keep (constrained) or objections the agent dismissed
+   (adversarial), each when its question wins. When "none" wins, or there is
    no vector, a tunable share of exchanges (`critique.sample_below_rate`)
    is checked by one random offered lens, built-ins and plugin lenses
    alike, which bounds and measures what selection misses. With no
