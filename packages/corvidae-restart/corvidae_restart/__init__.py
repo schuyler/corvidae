@@ -547,13 +547,65 @@ class RestartPlugin(CorvidaePlugin):
     async def _notify(
         self, channel, text: str, tool_call_id: str | None, annotations: dict | None = None
     ) -> None:
-        await self.pm.ahook.on_notify(
-            channel=channel,
-            source="restart",
-            text=text,
-            tool_call_id=tool_call_id,
-            annotations=annotations,
-        )
+        """Deliver one notice, closing the tool call if the delivery fails.
+
+        A notice carrying a ``tool_call_id`` is answering a tool call, so its
+        delivery goes through ``ahook_raise``: a sibling implementation that
+        raises would otherwise be swallowed by the fail-soft broadcast and leave
+        that channel's tool cycle waiting forever (#1102). The failure then
+        queues an error result for the id, as ``agent.py`` and ``task.py`` do.
+        """
+        if not tool_call_id:
+            # Nothing to close: the fail-soft broadcast is what this wants.
+            await self.pm.ahook.on_notify(
+                channel=channel,
+                source="restart",
+                text=text,
+                tool_call_id=None,
+                annotations=annotations,
+            )
+            return
+        try:
+            # ahook_raise, not the fail-soft ahook: the except below queues the
+            # error directly (#1102).
+            await self.pm.ahook_raise.on_notify(
+                channel=channel,
+                source="restart",
+                text=text,
+                tool_call_id=tool_call_id,
+                annotations=annotations,
+            )
+        except Exception:
+            logger.warning(
+                "on_notify failed delivering the restart result for tool call %s "
+                "on %s; queueing an error result",
+                tool_call_id, getattr(channel, "id", channel),
+                exc_info=True,
+                extra={"channel": getattr(channel, "id", None), "tool_call_id": tool_call_id},
+            )
+            # known_pending: a fresh channel has no pending ids at all, so the
+            # call this marker answers could never be closed without it.
+            # deliver_tool_error still refuses an id that already has a result
+            # queued after a partial broadcast, so the model never sees two
+            # results for one call (#1102).
+            try:
+                agent = self.pm.get_plugin("agent")
+                queued = await agent.deliver_tool_error(
+                    channel, tool_call_id, text, annotations, known_pending=True
+                )
+            except Exception:
+                logger.exception(
+                    "queueing the restart error result for tool call %s on %s failed; "
+                    "if no result was queued the channel waits on it until the next restart",
+                    tool_call_id, getattr(channel, "id", channel),
+                )
+                return
+            if not queued:
+                logger.info(
+                    "restart result for tool call %s on %s was already answered; "
+                    "no error result queued",
+                    tool_call_id, getattr(channel, "id", channel),
+                )
 
     def _summary_lines(self, marker: dict | None = None) -> list[str]:
         """What this boot is running: plugins and safe mode."""
