@@ -441,19 +441,27 @@ async def test_registered_impl_is_still_a_coroutine_function() -> None:
 # --- #1114: a wrapper that slipped past the startup check ---------------------
 
 
-async def test_dispatch_refuses_a_wrapper_the_startup_check_never_saw() -> None:
+@pytest.mark.parametrize("option", ["wrapper", "hookwrapper"])
+async def test_dispatch_refuses_a_wrapper_the_startup_check_never_saw(option) -> None:
     """A manager that never ran `check_fail_soft_wrappers` can still dispatch.
 
-    The name snapshot includes the wrapper, apluggy returns one result per
-    non-wrapper, and `zip(strict=True)` then raised a bare ValueError naming
-    neither the hook nor the plugin. Dispatch now refuses with the same
-    PluginValidationError the startup check raises.
+    Left to pluggy, a `wrapper=True` implementation makes apluggy take its
+    wrapper path, whose aggregate the wrapper's own return value replaces, so
+    the pairing below compares names against something that is not a result list
+    and the call dies with a TypeError naming neither the hook nor the plugin.
+    Dispatch now refuses with the same PluginValidationError the startup check
+    raises, for both marker spellings.
     """
-
-    class Wrapping:
-        @hookimpl(wrapper=True)
-        def on_web_thing(self, value: int):
-            yield
+    if option == "wrapper":
+        class Wrapping:
+            @hookimpl(wrapper=True)
+            def on_web_thing(self, value: int):
+                yield
+    else:
+        class Wrapping:
+            @hookimpl(hookwrapper=True)
+            def on_web_thing(self, value: int):
+                yield
 
     pm = _web_pm()  # no check_fail_soft_wrappers() here, by construction
     pm.register(Wrapping(), name="wrapping")
@@ -464,7 +472,7 @@ async def test_dispatch_refuses_a_wrapper_the_startup_check_never_saw() -> None:
     message = str(excinfo.value)
     assert "on_web_thing" in message
     assert "'wrapping'" in message
-    assert "wrapper=True" in message
+    assert f"{option}=True" in message
     assert "Remove" in message
 
 
