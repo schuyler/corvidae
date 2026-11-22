@@ -293,10 +293,13 @@ class GoalsPlugin(CorvidaePlugin):
     ) -> None:
         """Fire the on_goals_state_changed hook after a state change commits.
 
-        Never raises: observe hooks are fail-soft, so PolicyAHook logs a
-        subscriber's exception with the plugin that raised it and this call
-        returns normally (#1094, #1097). A subscriber cannot undo the state
-        change, which is committed before this runs.
+        Never raises because a subscriber's Exception failed: observe hooks are
+        fail-soft, so PolicyAHook logs it with the plugin that raised and this
+        call returns normally (#1094, #1097). Still possible here, and not a
+        subscriber's Exception: a non-Exception such as CancelledError, which
+        PolicyAHook re-raises once the others finish, and the caller's own bug if
+        the goal hookspecs were never installed (AttributeError). A subscriber
+        cannot undo the state change either way; it is committed before this runs.
         """
         await self.pm.ahook.on_goals_state_changed(
             goal_id=goal_id,
