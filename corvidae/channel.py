@@ -117,6 +117,7 @@ def validate_agent_config(agent: dict) -> None:
     """
     _check_reasoning_keys(agent, "agent")
     _check_register_prompt(agent.get("register_prompt"), "agent.register_prompt")
+    _check_seconds(agent.get("check_allowance_min"), "agent.check_allowance_min")
     parse_forks_config(agent)
 
 
@@ -124,6 +125,7 @@ def validate_agent_config(agent: dict) -> None:
 #: key is rejected (#205). Keep in step with the ChannelConfig fields below.
 CHANNEL_ENTRY_KEYS: tuple[str, ...] = (
     "register_prompt", "max_context_tokens", "max_turns", "reasoning_history", "tools",
+    "check_allowance",
 )
 
 #: Channel key replaced by ``register_prompt`` (#316): the identity is
@@ -142,6 +144,22 @@ def _check_register_prompt(value: object, where: str) -> None:
         f"{where} must be a string (the register text) or a list of file paths "
         f"(strings), got {_short_repr(value)} ({type(value).__name__})"
     )
+
+def _check_seconds(value: object, where: str) -> None:
+    """Raise ValueError unless value is None or a positive number of seconds.
+
+    For the check allowance keys (#1162): an int or a float above zero; bools
+    are rejected (``int`` subclass), as are zero and negatives, since the
+    allowance is never zero.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError(
+            f"{where} must be a positive number of seconds (e.g. 10 or 2.5), got "
+            f"{_short_repr(value)} ({type(value).__name__})"
+        )
+
 
 #: Longest repr of a rejected value printed in an error message.
 _MAX_VALUE_REPR = 60
@@ -162,6 +180,10 @@ class ChannelConfig:
     max_context_tokens: int | None = None
     reasoning_history: str | None = None
     max_turns: int | None = None
+    # Seconds a veto check may delay a reply (#1162). Not merged by
+    # resolve(): corvidae.checks.resolve_check_allowance reads it, then the
+    # wide entries, then the transport's default, then the minimum.
+    check_allowance: float | None = None
     # channels.<id>.tools.disabled, layered on the global tools.disabled
     # (issue #149). Unlike the fields above it is not merged by resolve():
     # the Agent snapshots it per conversation (corvidae/tool_policy.py),
@@ -604,11 +626,15 @@ def parse_channel_config(config: dict) -> ParsedChannels:
         # Fail now, not at turn time, on a scalar of the wrong type.
         for int_key in ("max_turns", "max_context_tokens"):
             _check_int_key(overrides.get(int_key), f"channels.{channel_id}.{int_key}")
+        _check_seconds(
+            overrides.get("check_allowance"), f"channels.{channel_id}.check_allowance"
+        )
         channel_config = ChannelConfig(
             register_prompt=overrides.get("register_prompt"),
             max_context_tokens=overrides.get("max_context_tokens"),
             reasoning_history=overrides.get("reasoning_history"),
             max_turns=overrides.get("max_turns"),
+            check_allowance=overrides.get("check_allowance"),
             disabled_tools=parse_channel_tools(
                 overrides.get("tools"), f"channels.{channel_id}"
             ),

@@ -216,6 +216,32 @@ class TestFinalUnderAllowance:
             }),
         ]
 
+    async def test_wrapper_sees_the_in_time_verdicts(self, env):
+        """A wrapper=True implementation still wraps the final firing, as
+        outbound-cap's counter does: it sees the verdicts that arrived in
+        time, and what it returns is what the Agent resolves."""
+        plugin, channel, db, clock, metrics = env
+        seen: list[list] = []
+
+        class Wrapper:
+            @hookimpl(wrapper=True, specname="should_send_response")
+            def wrap(self, emission):
+                results = yield
+                seen.append(list(results))
+                # Turn a pass into a veto, so the Agent visibly uses the
+                # wrapper's list.
+                return [*results, False]
+
+        plugin.pm.register(Wrapper(), name="wrapper")
+        plugin.pm.register(ClockGate(clock, [(0, True)]), name="accepting_gate")
+        _script(plugin, _make_text_response("the reply"))
+
+        drained = await _start_turn(plugin, channel)
+        await asyncio.wait_for(drained, 5)
+
+        assert seen == [[True]]
+        assert sent_texts(plugin.pm, OutboundMessage) == []
+
     async def test_raising_implementation_leaves_siblings_intact(self, env, caplog):
         """One implementation raising does not discard another's veto."""
         plugin, channel, db, clock, metrics = env

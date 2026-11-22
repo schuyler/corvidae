@@ -66,6 +66,7 @@ from corvidae.context import (
     UNSENT_MARKER_LABEL,  # noqa: F401 (re-exported for tests and plugins)
     ContextWindow,
     count_tokens,
+    late_check_text,
     message_tokens,
     MessageType,
     unsent_marker_text,
@@ -89,8 +90,10 @@ from corvidae.fork import (
 )
 from corvidae.idle import IdleTracker
 from corvidae.thinking import apply_reasoning_history
+from corvidae.checks import resolve_check_allowance, run_checks
 from corvidae.hooks import (
     CorvidaePlugin,
+    Refusal,
     get_dependency,
     hookimpl,
     resolve_reject_wins,
@@ -327,6 +330,11 @@ class Agent(CorvidaePlugin):
         # (channel id, call id) -> (tool name, declared untrusted), recorded at
         # dispatch so a registry change before the result cannot unfence it.
         self._dispatched_calls: dict[tuple[str, str], tuple[str, bool]] = {}
+        # Channel id -> late-check rows waiting for the channel's next turn
+        # with no call outstanding (#1162). In memory only; see _drain_late_checks.
+        self._late_checks: dict[str, list[str]] = {}
+        # Set once the no-clock fallback in _check_clock has warned.
+        self._warned_no_clock = False
         self._registry: ChannelRegistry | None = None
         self._max_tool_result_chars: int = 100_000
         # Per-call tool time bounds, copied from ToolCollectionPlugin at start.
@@ -1123,6 +1131,9 @@ class Agent(CorvidaePlugin):
         """
         trace_id = item.trace_id if item is not None else None
         annotations = item.annotations if item is not None else {}
+        # The final firing runs under the channel's check allowance (#1162).
+        if emission == "final":
+            return await self._gate_final(channel, text, trace_id, annotations)
         try:
             results = await self.pm.ahook.should_send_response(
                 channel=channel, text=text, emission=emission,
@@ -1139,6 +1150,78 @@ class Agent(CorvidaePlugin):
             )
             return True
         return verdict is not False
+
+    def _check_clock(self) -> Clock:
+        """The kernel clock the check allowance runs on.
+
+        shortcut: hand-built plugin managers (tests) register no clock; they
+        get a real Clock, whose timers Clock.close never reaches. Runtime
+        always registers one.
+        """
+        clock = self.pm.get_plugin("clock")
+        if isinstance(clock, Clock):
+            return clock
+        if not self._warned_no_clock:
+            self._warned_no_clock = True
+            logger.warning(
+                "no kernel clock registered (name 'clock'); veto checks run on a "
+                "private real-time clock that shutdown does not stop. Runtime "
+                "registers one",
+            )
+        return Clock()
+
+    async def _gate_final(
+        self, channel: Channel, text: str, trace_id: str | None, annotations: dict
+    ) -> bool:
+        """The final firing of should_send_response, under the check allowance.
+
+        Returns True when ``text`` may be sent. Verdicts that arrive in time
+        resolve reject-wins; a Refusal that arrives later is held for the
+        channel's next turn (_drain_late_checks).
+        """
+        assert self._registry is not None
+
+        async def on_late(plugin_name: str, verdict: object) -> None:
+            # Only a refusal has anything to say; the miss is already counted.
+            if isinstance(verdict, Refusal):
+                self._late_checks.setdefault(channel.id, []).append(
+                    late_check_text(text, plugin_name, verdict.reason)
+                )
+
+        results = await run_checks(
+            self.pm, "should_send_response",
+            channel=channel,
+            kwargs={
+                "channel": channel, "text": text, "emission": "final",
+                "trace_id": trace_id, "annotations": annotations,
+            },
+            allowance=resolve_check_allowance(self.pm, self._registry, channel),
+            clock=self._check_clock(),
+            on_late=on_late,
+        )
+        return resolve_reject_wins(results) is not False
+
+    def _drain_late_checks(self, channel: Channel, conv: ContextWindow) -> None:
+        """Append the channel's held late-check rows to its window.
+
+        Runs at step 6, before before_agent_turn, so the rows persist with
+        that hook's injections. Only when no call on the channel is waiting
+        for its result: then nothing appended now can fall between a tool
+        call and its result. Otherwise the rows wait for a later turn. ACP's
+        cancel_prompt clears the pending set while tools keep running, so the
+        dispatched-call record is checked too.
+
+        shortcut: held in memory, so a restart before delivery loses them;
+        persist them if that loss shows up in practice.
+        """
+        if channel.id not in self._late_checks:
+            return
+        if channel.pending_tool_call_ids or any(
+            cid == channel.id for cid, _ in self._dispatched_calls
+        ):
+            return
+        for content in self._late_checks.pop(channel.id):
+            conv.append({"role": "system", "content": content}, MessageType.CONTEXT)
 
     async def _append_unsent_marker(
         self, channel: Channel, emission: str, text: str
@@ -1640,6 +1723,9 @@ class Agent(CorvidaePlugin):
                 # 6. Let plugins inject context before the LLM call
                 _t_before_turn_start = time.monotonic()
                 msg_count_before = len(conv.messages)
+                # Late-check rows held for this turn (#1162); the loop below
+                # persists them with the hook's injections.
+                self._drain_late_checks(channel, conv)
                 # Observe hook, as above (#1094, #1097).
                 await self.pm.ahook.before_agent_turn(
                     channel=channel, trace_id=item.trace_id, annotations=item.annotations,

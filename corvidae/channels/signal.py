@@ -264,6 +264,8 @@ class SignalPlugin(TransportPlugin):
     """Transport plugin for a Signal DM conversation via signal-cli's daemon."""
 
     transport = "signal"
+    # Veto checks may delay a reply this long (#1162): a person texting does not expect an instant reply.
+    check_allowance = 90
     # A chat transport: a person is on the other end who may end the exchange.
     conversational = True
 
