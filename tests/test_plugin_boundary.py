@@ -1,4 +1,4 @@
-"""The plugin boundary ratchet (#1178, PRD principle 1).
+"""The plugin boundary ratchet (#1178; the PRD §4 decision under principle 1).
 
 A plugin holds a reference to another plugin only when the target is a
 kernel plugin, named in its ``depends_on`` and resolved with

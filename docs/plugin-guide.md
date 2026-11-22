@@ -1272,7 +1272,9 @@ MCP tools are declared by the client for every server, with no setting. See
 
 ## Plugin boundaries
 
-How one plugin may reach another (PRD principle 1, #1178). The short form:
+How one plugin may reach another (#1178): the mechanism the PRD's §4
+decision log records for principle 1, which asks that no plugin depend on
+another without declaring it. The short form:
 **depend downward by type, sideways by hook.**
 
 ### Hold a reference only to a kernel plugin

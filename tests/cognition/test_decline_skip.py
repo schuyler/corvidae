@@ -206,7 +206,7 @@ class TestCritiqueSkipsDeclines:
 
 
 class _WithholdAll(CorvidaePlugin):
-    """Another gate: vetoes every final, as an enforcing engagement gate would."""
+    """Another gate: vetoes every final, as a quiet-origin veto would."""
 
     depends_on = frozenset()
 

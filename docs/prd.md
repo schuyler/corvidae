@@ -78,8 +78,9 @@ one is a bug even if its tests pass.
    from an entry point, can be disabled by name in `plugins.disabled` or
    replaced by an installed subclass in `plugins.replace` (#1107),
    declares its dependencies in `depends_on` (or `optional_depends_on`
-   for one it works without), reaches a non-kernel plugin only through
-   hooks (#1178), and documents what the system
+   for one it works without), has no dependency on another plugin that
+   it does not declare, so no plugin's behaviour changes silently when
+   another is absent, and documents what the system
    does without it. The cognition plugins (memory, retention, funnel,
    appraisal, critique, outcome log, memory tools, goals, trust,
    sensitivity) are
@@ -1211,16 +1212,14 @@ deciding only what to newly append and in what order.
 
 **Appraisal.**
 
-1. There is no stage-1 appraisal: appraisal does not run at the inbound
-   or the outbound gate (#1185).
-2. Stage 2 runs post-acceptance, off the response path, in a silent task
+1. Stage 2 runs post-acceptance, off the response path, in a silent task
    that judges the exchange as the agent saw it (§3.8): the fuller vector
    (valence, stakes, ambiguity, commitment density, novelty), the
    importance prior, the memory record's valence tag. A tier-2 readout
    head over the embedding replaces the model call where a trained head
    matches it (#141).
-3. Vectors are keyed by trace id and persisted to `exchange_log`.
-4. Every parameter is a commented best-guess constant resolved at
+2. Vectors are keyed by trace id and persisted to `exchange_log`.
+3. Every parameter is a commented best-guess constant resolved at
    decision time through both tuning surfaces.
 
 **Critique.**
@@ -1893,6 +1892,7 @@ record that holds the reasoning.
 | Decision | Where |
 |---|---|
 | apluggy entry points, not a hand-written registration order; `depends_on` validated at startup | principle 1; §3.1.13 |
+| Depend downward by type, sideways by hook: a plugin holds a reference only to a kernel plugin, named in its `depends_on` and resolved with `get_dependency`, and reaches any other plugin through hooks; it fires only hooks in `AgentSpec` or hooks whose owner it names in `depends_on` | principle 1; `docs/plugin-guide.md` "Plugin boundaries"; #1178; owner, 2026-11-22 |
 | A bundled plugin is replaced by naming an installed entry point that subclasses it in `plugins.replace`, never by an import path; a replacement that fails to load falls back loudly to the bundled plugin | principle 1; §3.1.14; #1107, operator, 2026-11-20 |
 | Single-turn dispatch; multi-turn reasoning emerges from notifications | principle 3; §3.1.2 |
 | Only startup is fatal, on named paths; after start, no channel content can fail its turns repeatedly. Enforced by a prompt build that cannot fail plus a wedge breaker, not by cataloguing per-turn call sites: catching exceptions doesn't stop a deterministic failure from recurring every turn | principle 5; §3.1.17–18; #352, #353 |
@@ -1906,8 +1906,8 @@ record that holds the reasoning.
 | Operator-only `redact` is the one deletion path; it stays in the kernel | principle 4; §3.7 Memory 8 |
 | Knowledge graph not part of the shipped memory: extraction is noisy, n-hop context is expensive, and at personal scale a graph duplicates facts plus vector and FTS retrieval; a graph plugin isn't precluded | diverges from Persyn §4.3 |
 | Emotion classifier replaced by appraisal valence | §3.7 Appraisal; diverges from Persyn §4.9 |
-| No stage-1 appraisal: no gate scores text with language-specific heuristics | §3.7 Appraisal 1; §3.7 Output gate 4; #1185; owner, 2026-11-22 |
-| Core mints the exchange key | §3.7 Appraisal 2–3 |
+| The agent behaves the same whatever language a message is written in: nothing decides by matching one language's words or assuming one script's conventions | #1185; #1186; owner, 2026-11-22 |
+| Core mints the exchange key | §3.7 Appraisal 1–2 |
 | Origin is stamped and propagated, never inferred. Critique eligibility does not depend on origin: every main-loop turn is judged, and the recursion brake is delivery (objections on a `critique`-origin turn wake nothing) | §3.1.4; §3.7 Critique 3–4; #1031; owner, 2026-11-17 |
 | Two grades on a queue item: kernel-certified `metadata`, never a hook argument, and plugin-owned `annotations`; non-human items (and a person's message whose transport supplies a name or addressing) get a code-built header, and outside payloads a fence derived from the stored row; foreign-origin items are framed, never withheld (no silence default) | §3.1.4; §3.3.11; #555 |
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
