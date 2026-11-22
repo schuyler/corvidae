@@ -56,6 +56,9 @@ LEAK_CHILD = Path(__file__).parent.parent / "preflight_leak_child.py"
 # The child that records whether the pre-flight closed what it built (#563).
 CLEANUP_CHILD = Path(__file__).parent.parent / "preflight_cleanup_child.py"
 
+# The child that watches the failed-load cleanup (#984).
+FAILED_LOAD_CHILD = Path(__file__).parent.parent / "preflight_failed_load_child.py"
+
 
 def test_a_leak_in_the_preflight_is_bounded_and_named(tmp_path: Path) -> None:
     """#757: a plugin that leaks a thread during the pre-flight cannot hold it.
@@ -274,3 +277,37 @@ def test_preflight_passes_when_the_load_report_is_clean(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "pre-flight OK" in result.stderr, result.stderr
+
+def test_the_preflight_closes_what_it_built_when_the_load_fails(tmp_path: Path) -> None:
+    """A failed plugin load still closes what was built (#984).
+
+    The #959 review found cleanup covered only on the path where the plugins
+    load. That is the path a broken config does not take, and closing what a
+    failed boot built is what the pre-flight exists for. ``persistence``
+    disabled while another plugin depends on it fails inside
+    ``load_plugins`` after the manager exists.
+    """
+    repo = FAILED_LOAD_CHILD.parent.parent
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [str(repo)] + [str(p) for p in sorted((repo / "packages").glob("*"))]
+        ),
+    }
+    path = write_config(tmp_path, "plugins:\n  disabled: [persistence]\n")
+
+    result = subprocess.run(
+        [sys.executable, "-P", str(FAILED_LOAD_CHILD), str(path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    assert "exit 1" in result.stdout, (result.stdout, result.stderr)
+    assert "cleanup ran" in result.stdout, (
+        "the failed load did not reach the cleanup: " + result.stdout
+    )
+    assert "on_stop broadcast" in result.stdout, (
+        "the failed load closed nothing: " + result.stdout
+    )
