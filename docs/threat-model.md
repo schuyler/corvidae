@@ -930,9 +930,9 @@ in the loop to notice. This is finding 3 and finding 7 again with the
 human removed. What bounds it:
 
 - **Reach.** No transport owns `internal:heartbeat`, so the beat's replies
-  go to `sessions.db` and the logs only. There is no cross-channel send yet
-  (PRD §3.5.9, #234), so a beat can't message anyone. When there is, a beat
-  can message any contact, with no allowlist (finding 15). Its tools are
+  go to `sessions.db` and the logs only. The cross-channel send tool exists
+  (PRD §3.5.9, #234): `notify_other_channel` resolves any well-formed channel
+  id and has no allowlist, so a beat can message any contact (finding 15). Its tools are
   another matter: `shell`, `web_fetch` and `write_file` are as available to
   a beat as to any turn (finding 4). Drop them for the beat with
   `channels.internal:heartbeat.tools.disabled`. A reloaded list is
@@ -1402,8 +1402,11 @@ database.
 Where the tree stands: memory spans every channel (#168), so the first
 bullet's gap is live today wherever the agent speaks in a room people you
 haven't allowed can read, and so is the poisoned-memory bullet; goals
-already cross channels (finding 10). There is no send, note or read tool
-yet (#234, #235), so the other costs above arrive with those. The identity
+already cross channels (finding 10). The note tool exists (#234:
+`notify_other_channel` queues a system notification on the target channel and,
+since #938, resolves any well-formed channel id), so the note and loop costs
+above are live; the plain send (PRD §3.5.9, #234, still open) and the read tool
+(#235) do not, so their costs are not. The identity
 and register layers are built (#316), but not their runtime overrides and
 separate locks.
 

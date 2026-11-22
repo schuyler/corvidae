@@ -198,10 +198,15 @@ For an in-repo plugin (step 2) the same code goes in
 4. **No-argument constructors.** `pm` and config arrive in `on_init`. Never
    resolve another plugin in `__init__`; entry-point load order is not
    deterministic.
-5. **Dependencies.** `depends_on = frozenset({"name"})` for a hard dependency;
-   resolve it at runtime with `get_dependency(self.pm, "name", Type)` in
-   `on_start`. For one you can work without, `optional_depends_on` and
-   `self.pm.get_plugin("name")`, treating `None` as absent.
+5. **Dependencies.** Hold a reference only to a kernel plugin: name it in
+   `depends_on = frozenset({"name"})` and resolve it with
+   `get_dependency(self.pm, "name", Type)` in `on_init` or `on_start`. Reach
+   every other plugin through hooks, and name in `depends_on` the owner of
+   any plugin-owned hook you fire. For a plugin whose hooks you implement but
+   can work without, `optional_depends_on`. Never `self.pm.get_plugin(...)`,
+   and never add an entry to the allowlist in
+   `tests/test_plugin_boundary.py`, which fails on a new call (plugin-guide,
+   "Plugin boundaries").
 6. **Tools** are `async def` with type-annotated parameters; the first docstring
    line is the description the LLM sees. Parameters named `_something` are
    injected, not supplied by the LLM (`_ctx: ToolContext` gives the channel and
@@ -236,7 +241,10 @@ For an in-repo plugin (step 2) the same code goes in
 
 ## 5. Conventions (AGENTS.md; reviewers check these)
 
-- Red/green TDD: write the failing test first and watch it fail.
+- Red/green TDD: write the failing test first and watch it fail. A **guard**
+  test is the other shape: it pins behaviour the change must not break, so it
+  passes on the parent commit and goes red only under a mutation of the
+  change. Say which kind a test is; see AGENTS.md, "Process instructions".
 - Every pytest run is under a timeout (the repo sets `timeout = 15`; do not
   raise or disable it; mark the one slow test).
 - Never `except Exception: pass`. Log with the traceback, pass through, or

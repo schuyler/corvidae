@@ -224,7 +224,9 @@ transform), when it is an observation or a contribution point
 observability hook that pairs with an
 existing one (`on_llm_request` with `on_llm_response`). A single-consumer
 observation does not get a hookspec; it gets an entry in `annotations`, a return
-value on an existing hook, or waits for its second consumer. Pick the name
+value on an existing hook, or waits for its second consumer. An `annotations`
+entry is written by the producer when it creates the item, never added later
+([`annotations` is stamped at creation](#annotations-is-stamped-at-creation)). Pick the name
 from the table above. The test checks the prefix against the pluggy
 options; whether the core reads a hook's return value is not something
 pluggy exposes, so that half is checked in review.
@@ -268,7 +270,9 @@ declaration breaks one of these rules:
   `firstresult=True`; the others must not have it).
 - **One owner per hook.** A name declared by two plugins, or by a plugin
   and `AgentSpec`, is an error in either registration order. To share a
-  hook, depend on its owner and call it; any plugin can call any hook.
+  hook, name its owner in `depends_on` and call it; a plugin fires only
+  hooks whose owner it depends on, or the kernel's
+  ([Firing a hook depends on its owner](#firing-a-hook-depends-on-its-owner)).
 - **Transform seeds come from the owner.** A `transform_` hook needs an
   `@hookimpl(trylast=True)` on the owner itself that returns its input
   unchanged, which is what `_SeedHooksPlugin` provides for kernel transforms.
@@ -291,7 +295,9 @@ A plugin hook still has to earn its name under the admission rule in
 lives, not whether it should exist.
 
 Implementing a plugin's hook is the same as implementing a kernel hook:
-write a `@hookimpl` with the same name, and declare the dependency (see
+write a `@hookimpl` with the same name, and list the owner in
+`optional_depends_on`, or in `depends_on` if your plugin also fires the hook
+or cannot work without the owner (see
 [Plugin dependencies](#plugin-dependencies)). The hook's contract is
 documented by its owner, not in [Available hooks](#available-hooks).
 
@@ -307,7 +313,10 @@ The funnel (cognition extra) owns `on_funnel_ingest`, the hook a source uses
 to hand it entries ahead of a turn. Use it when your entries are not ready
 when the funnel asks: you submit a promise, and the entries are admitted
 once it resolves, through the same dedupe, budget and framing as `admit()`.
-If you have the entries now, call `admit()` or `ingest()` instead. The funnel's `ponder` tool waits for
+If you have the entries now, submit a future you have already resolved; it is
+admitted that same turn (below). Do not call `admit()` or `ingest()` on the
+funnel object: only two calls that predate the rule do
+([The funnel](#the-funnel-two-existing-calls)). The funnel's `ponder` tool waits for
 the channel's in-flight promises, up to 5 s, so a slow recall can land before
 the model answers; a promise that resolves to `None` or no entries counts as
 finished with nothing. The full
@@ -649,6 +658,43 @@ class MyPlugin(CorvidaePlugin):
 
 The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwards only the arguments declared in the hookimpl signature, so a hookimpl that omits `config` is called with no arguments.
 
+#### Pre-flight checks: deliberate deviation vs. accidental mess
+
+`on_init` runs in the restart pre-flight (a second process alongside the
+live daemon), so it is the right place for validation that must pass
+before a restart is allowed. When a pre-flight check compares current
+state to an expected state, it should distinguish **deliberate
+deviation** from **accidental mess**:
+
+| Condition | Action |
+|-----------|--------|
+| Dirty tree (uncommitted changes) | **Refuse** — genuine risk of lost work |
+| Clean tree, expected state | **Pass** |
+| Clean tree, unexpected state (e.g., non-main branch) | **Pass** with a WARNING log line — deliberate and reproducible |
+| Missing checkout / not a repo | **Refuse** — genuine problem |
+
+A clean, reproducible state on a different branch is deliberate: the
+agent or operator chose to run this code. A dirty tree is not: a
+restart could lose work.
+
+The question to ask of any pre-flight check that compares current state
+to an expected state: **is this deviation deliberate and safe?** Refuse
+only when the answer is no. The git-branch row above is the one example
+worked out in full here; the table is meant to be read as that question
+applied to a checkout, not as a rule already proven across cases.
+
+**Status of this pattern.** The mechanism it relies on is in-tree:
+`corvidae_restart.preflight` runs the daemon's startup through
+`on_init` in a subprocess and returns exit code 0 or 1, so anything
+`on_init` raises blocks the restart — that is the code a plugin author
+is writing against. The *policy* above (which conditions deserve refusal
+versus a WARNING) is proposed from outside this repo and is **not
+implemented by any bundled plugin**: verified against `packages/` on
+2026-11-21, no plugin there inspects a git checkout at all. Treat it as a
+recommendation to apply when your plugin has a state-vs-expectation check to
+make, not
+as existing behaviour to imitate.
+
 ### Messaging
 
 | Hook | Type | When |
@@ -739,7 +785,7 @@ await self.pm.ahook.on_notify(
 
 and core carries `annotations` untouched to `on_message_persisted`, `before_agent_turn`, `on_agent_response`, every tool Task in the cycle, and the usage-log attribution. A notification like this, with no inherited `annotations["trace_id"]`, originates its own trace, so it also gets a fresh `max_turns` budget (reset only when no tool cycle is in flight).
 
-Producers that start a background task in `on_start` and inject notifications should wait for `pm.get_plugin("agent").started` before calling `on_notify`: `on_start` is broadcast to every plugin concurrently, and `Agent` starts after the broadcast.
+Producers that start a background task in `on_start` and inject notifications should wait until the Agent's `started` property is true before calling `on_notify`: `on_start` is broadcast to every plugin concurrently, and `Agent` starts after the broadcast. The Agent is a kernel plugin, so name it in `depends_on` and resolve it typed ([Plugin boundaries](#plugin-boundaries)): `get_dependency(self.pm, "agent", Agent).started`, with `Agent` from `corvidae.agent`.
 
 ### Observability
 
@@ -1091,8 +1137,9 @@ plugin has no special standing (#1026).
 | `corvidae.runtime` | `Runtime`: `load_config`, `setup_logging` and `load_plugins`, the startup steps the daemon and the restart pre-flight share, plus `arm_exit_bound()` — the exit watchdog with the configured `daemon.exit_timeout`, for a process whose exit is not `run()`'s to bound (the restart pre-flight, #757). For tools that check a config the way the daemon boots, not for ordinary plugins |
 | `corvidae.outbound` | `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus`, `OutboundProgress` (for senders and transports) |
 
-The kernel never imports a plugin outside it. A plugin that needs another
-plugin resolves it at runtime with `get_dependency(self.pm, "<name>", Type)`.
+The kernel never imports a plugin outside it. A plugin that needs a kernel
+plugin resolves it at runtime with `get_dependency(self.pm, "<name>", Type)`;
+it reaches any other plugin through hooks ([Plugin boundaries](#plugin-boundaries)).
 
 ## Acting on time and quiet
 
@@ -1223,6 +1270,170 @@ tool unregistered while it runs stays fenced. It is strict: only `True` counts
 MCP tools are declared by the client for every server, with no setting. See
 [design.md](design.md#untrusted-tool-results).
 
+## Plugin boundaries
+
+How one plugin may reach another (PRD principle 1, #1178). The short form:
+**depend downward by type, sideways by hook.**
+
+### Hold a reference only to a kernel plugin
+
+A plugin may hold a reference to another plugin only when all three hold:
+
+1. the target is a kernel plugin (one under `corvidae/`: `agent`,
+   `registry`, `persistence`, `clock`, `idle`, `task`, `llm`, `tools`,
+   `spill` and the rest);
+2. it is named in the holder's `depends_on`;
+3. it is resolved with `get_dependency(self.pm, name, Type)`.
+
+Everything else goes through a hook, so a bare `pm.get_plugin(name)` has no
+use in a plugin. The two cases differ for a reason. A call such as
+`clock.now()` needs a typed answer at once from a layer that is always
+loaded, and a hook would add broadcast semantics to something with one
+provider. A peer plugin may be absent, and which way a dependency between
+two peers points is a design choice that a string lookup hides.
+
+`tests/test_plugin_boundary.py` enforces the lookup half. It fails on a
+`get_plugin` call under `packages/` (tests excluded) that its `ALLOWED`
+list does not cover, and on an entry that covers more calls than remain.
+The list holds the calls that predate the rule, each with the issue that
+removes it: `outcome_log` (#1179), `appraisal` (#1169, #1175), `memory`
+(#1175), `goals` (#1181), the funnel (#1176, below) and the kernel plugins,
+which still need `depends_on` and `get_dependency` (#1180). When you remove
+a call, lower its count or delete its entry in the same change. New work
+never adds an entry: the list only shrinks.
+
+### Firing a hook depends on its owner
+
+A hook does not remove a dependency; it points it. Firing a hook depends on
+its spec, and implementing one does not: with no spec and no implementation
+loaded, `pm.ahook.<name>` raises `AttributeError`; a spec with no
+implementation returns `[]` (observe) or `None` (`resolve_`); an
+implementation with no spec runs if something fires the hook, and is
+harmless because nothing does while its owner is absent.
+
+So **a plugin fires only hooks in `AgentSpec` or hooks whose owner it names
+in `depends_on`.** Startup validation then reports a missing owner by name
+instead of the first call failing. Implementing a plugin's hook needs no
+dependency; list the owner in `optional_depends_on` so a missing owner is
+logged at DEBUG (see [Plugin dependencies](#plugin-dependencies)).
+
+Who owns a spec follows from that:
+
+- **One caller, any number of implementers:** the caller owns it
+  ([Declaring hooks in a plugin](#declaring-hooks-in-a-plugin)).
+- **A plugin asking others for a value, with its own fallback:** the asker
+  owns a `resolve_` hook.
+- **Many callers:** a *protocol plugin* can own the hook. It declares the
+  spec and has no behaviour of its own, so depending on it costs a caller
+  nothing. It needs no implementation of its own hook, except that a
+  `transform_` hook still needs the owner's `trylast` seed (above). A
+  protocol plugin must live in a distribution every caller can depend on.
+  None exists yet; #1179 introduces the first.
+- **The kernel takes a hook when its callers span distributions that should
+  not depend on one another**, not because there are many of them.
+
+### Events and services
+
+Something one plugin wants from another has one of two shapes:
+
+- **An event** is an `on_` hook. The caller tells whoever listens and does
+  not care who that is.
+- **A service** is a `resolve_` hook. The caller needs one answer and
+  supplies its own fallback when the answer is `None`.
+
+A protocol plugin that declares both is a service interface written as
+hooks.
+
+**No plugin reads another plugin's tables.** Table and column names are not
+a contract; raw SQL on a peer's table is a service call with no interface.
+Prefer pushing the data on an event, so no read is needed; otherwise ask
+through a `resolve_` hook the reader owns or depends on. The tree does not
+comply yet: gates reads `origin` from outcome_log's `exchange_log`
+(#1169, #1179), and appraisal reads `exchange_log` (#1175, #1179).
+
+**Hint the types on both sides.** The spec carries the return annotation, as
+the kernel's do (`resolve_channel(...) -> "Channel | None"` in
+`corvidae/hooks.py`). A shared return type lives in the owner's module, and
+implementations annotate the same type. `pm.ahook` is untyped, so the caller
+annotates the variable it assigns the result to, and the checker covers
+everything after that line. Nothing verifies that an implementation's
+annotation matches its spec; that is accepted, and no check is planned.
+
+### When nobody answers
+
+A caller whose optional provider is not loaded falls back, and principle 1
+already asks a plugin to document what the system does without the other.
+Two cases, two log levels:
+
+- **No provider loaded:** say so once, at startup, at INFO, naming the
+  plugin and the fallback, in the form `critique: no appraisal loaded,
+  lenses are chosen at random`. An absent optional plugin is a configuration
+  the operator chose, not a fault, and a warning on every call teaches the
+  operator to ignore warnings.
+- **A loaded provider that failed:** WARNING, each time. That is a rescue in
+  the sense of AGENTS.md "Error handling and messages".
+
+A `None` guard that changes behaviour without either line is a bug. Today's
+funnel fallbacks predate this: memory logs a missing funnel at WARNING on
+each retrieval, and critique logs it at DEBUG on each undelivered verdict.
+
+### `annotations` is stamped at creation
+
+A producer writes `annotations` when it creates an item, and nothing writes
+to it afterwards. The dict is copied at each hop, into tool tasks and
+notifications, so a key added later in a hook reaches some readers and not
+others. This is narrower than "never mutate what you are handed": a
+`transform_` hook still enriches before a handoff, and a contribution point
+such as `on_web_console_init(panels)` still has implementers append. If a
+plugin ever needs to enrich `annotations`, the form is a transform at item
+creation, before the first copy; none exists, and none is to be built
+without a second use.
+
+### Say which phase a plugin acts in
+
+A cognitive process meets a turn in one of three phases (#1176). A plugin's
+docs say which phase each of its activities runs in; one plugin may span
+phases.
+
+Any plugin that acts on a message turn may append CONTEXT, in whichever
+phase it acts. The phase decides when that CONTEXT reaches the model, what
+else the plugin may do, and what it owes.
+
+| Phase | Hook today | Its CONTEXT reaches the model | It may also | It must |
+|---|---|---|---|---|
+| Before composition | `before_agent_turn` | in the turn being composed, or a later turn if it is late | nothing more; there is no output yet to judge | not delay the turn |
+| Before effect | `should_send_response` (a tool call's twin, `should_execute_tool`, is #148 and not built) | with what is sent back to the model (a held reply's objections arrive as CONTEXT), or at the next turn if the verdict is late | refuse | answer within the channel's check allowance ([Output gating](#output-gating)) |
+| Idle | idle watchers, background work | at the channel's next turn, or in a turn it wakes | nothing more; nothing is pending to stop | yield when a message arrives |
+
+Admission gating (`should_process_message`) comes before any of these: no
+exchange exists yet, so it is outside the model and is not a phase. An idle
+or timer callback that is upkeep never wakes a channel
+([Acting on time and quiet](#acting-on-time-and-quiet)); only an agency
+producer, such as the scheduler or the heartbeat, starts a turn. The two
+gathering phases are built twice today, in the kernel's `run_checks` and in
+the funnel's promises; #1176 proposes making them one kernel primitive
+(not built), and the
+"must" for the first phase describes the funnel's behaviour today.
+
+### The funnel: two existing calls
+
+Admitting CONTEXT through the funnel (cognition extra) has no hook for a
+push. Two calls that predate the rule look the funnel up with
+`pm.get_plugin("funnel")`: memory calls `admit_detailed()` on it, and
+critique calls `ingest()` or `ingest_and_wake()`. They stay on the
+allowlist with #1176 as the reason, because #1176 proposes moving holding
+and admitting CONTEXT into the kernel behind a kernel-owned hook. Nothing
+there is decided or built yet. The exception covers those two calls and no
+others.
+
+New work does not call the funnel object. A source that contributes
+entries to a turn implements the funnel's own hook, `on_funnel_ingest`, or
+uses `RecallSourceMixin` ([Implementing `on_funnel_ingest`](#implementing-on_funnel_ingest),
+[Writing a recall source](#writing-a-recall-source)); implementing a hook
+needs no reference to its owner. A plugin that must push CONTEXT into the
+funnel outside a turn, as critique's verdicts do, has no compliant route
+today. Wait for #1176, or raise the need with the owner on an issue.
+
 ## Plugin dependencies
 
 Declare `depends_on` as a class attribute (a set of plugin names). `validate_dependencies()` raises `RuntimeError` at startup if any declared dependency is not registered, or if the dependency graph contains a cycle. The error message includes the full cycle path, e.g. `Dependency cycle detected: a -> b -> a`.
@@ -1244,11 +1455,18 @@ registry = tools_plugin.get_registry()
 
 `get_dependency` raises `RuntimeError` if the plugin is not found and `TypeError` if it is the wrong type.
 
-A plugin that uses another plugin when it's there and works without it
-declares `optional_depends_on` instead. A missing optional dependency is
-not an error, and optional dependencies aren't part of cycle detection.
-Look the plugin up with `pm.get_plugin(name)` and treat `None` as absent
-(it's `None` whether the plugin is disabled or not installed). The declaration is documentary: it only changes the log level of a hookimpl with no spec (above) and doesn't order loading, so look the plugin up when you use it, not in `__init__`:
+Only a kernel plugin is resolved this way ([Plugin boundaries](#plugin-boundaries)).
+A plugin reaches a non-kernel plugin through hooks, and lists in `depends_on`
+the owner of every plugin-owned hook it fires.
+
+A plugin that works with another plugin when it's there and without it
+otherwise declares `optional_depends_on` instead. A missing optional
+dependency is not an error, and optional dependencies aren't part of cycle
+detection. The declaration is documentary: it only changes the log level of
+a hookimpl with no spec (above) and doesn't order loading. Its use is to
+implement the optional plugin's hooks, not to look the plugin up.
+Say once at startup what your plugin does without it
+([When nobody answers](#when-nobody-answers)).
 
 ```python
 class ProfilerPanel(CorvidaePlugin):
@@ -1283,7 +1501,7 @@ class MemoryPlugin(CorvidaePlugin):
 
 Compaction summarizes only `MESSAGE` entries, but a `MessageType.CONTEXT` row in the range it drops leaves the window with it; CONTEXT in the retained tail stays.
 
-Prefer routing CONTEXT through the admission funnel instead of appending directly: `pm.get_plugin("funnel").admit(channel, conv, "<source>", entries)` gives you window dedupe, per-source token budgets (`admit_detailed(...)` takes the same arguments and also reports which entries were dropped as duplicates), and the mandatory data-not-instructions framing for free (see [FunnelPlugin](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy) in cognition.md; the funnel is part of the cognition extra, so check that `pm.get_plugin("funnel")` is not None). Direct appends bypass all three. Dedupe matches each entry's whole text against every CONTEXT row by default; if your lines carry something that changes from turn to turn (an age, a score), pass `keys=[...]`, one stable string per entry, and an entry is a duplicate when its key appears in a CONTEXT row framed for your source. Memory passes `memory <id>)`. Choose keys that can't occur inside one another, which is why memory's ends in a paren, and pass exactly one per entry: a length mismatch raises `ValueError`. Operators can also cap what your source holds in a window with `funnel.window_budgets.<source>` (see [configuration.md](configuration.md#funnel--context-admission-funnel)); entries the cap drops come back like budget drops, in neither `admitted` nor `duplicate`.
+Prefer routing CONTEXT through the admission funnel instead of appending directly: it gives you window dedupe, per-source token budgets, and the mandatory data-not-instructions framing for free (see [FunnelPlugin](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy) in cognition.md). Direct appends bypass all three. Reach it through its hook: implement `on_funnel_ingest`, or use `RecallSourceMixin` ([Implementing `on_funnel_ingest`](#implementing-on_funnel_ingest), [Writing a recall source](#writing-a-recall-source)). The funnel is part of the cognition extra; without it nothing calls the hook. Memory's existing call to `admit_detailed(...)` on the funnel object (it also reports which entries were dropped as duplicates) predates the rule; new work does not call the funnel object ([The funnel](#the-funnel-two-existing-calls)). The dedupe keys and window budgets below apply to a hook source as to that call, except that a promise with a bad key list is logged rather than raised (see the hook's contract). Dedupe matches each entry's whole text against every CONTEXT row by default; if your lines carry something that changes from turn to turn (an age, a score), pass `keys=[...]`, one stable string per entry, and an entry is a duplicate when its key appears in a CONTEXT row framed for your source. Memory passes `memory <id>)`. Choose keys that can't occur inside one another, which is why memory's ends in a paren, and pass exactly one per entry: a length mismatch raises `ValueError`. Operators can also cap what your source holds in a window with `funnel.window_budgets.<source>` (see [configuration.md](configuration.md#funnel--context-admission-funnel)); entries the cap drops come back like budget drops, in neither `admitted` nor `duplicate`.
 
 ## Forking the window
 

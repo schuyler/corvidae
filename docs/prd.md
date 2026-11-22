@@ -78,7 +78,8 @@ one is a bug even if its tests pass.
    from an entry point, can be disabled by name in `plugins.disabled` or
    replaced by an installed subclass in `plugins.replace` (#1107),
    declares its dependencies in `depends_on` (or `optional_depends_on`
-   for one it works without), and documents what the system
+   for one it works without), reaches a non-kernel plugin only through
+   hooks (#1178), and documents what the system
    does without it. The cognition plugins (memory, retention, funnel,
    appraisal, critique, outcome log, memory tools, goals, trust,
    sensitivity) are
