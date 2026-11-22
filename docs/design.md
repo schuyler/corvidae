@@ -1451,9 +1451,10 @@ the Agent's `on_late` stores `late_check_text(reply, plugin, reason)` (a
 `Agent._late_checks[channel.id]`. Step 6 of the channel's next turn appends
 those rows as CONTEXT, after the turn's incoming rows and before
 `before_agent_turn`, and the loop that persists that hook's injections
-persists them. It does so only when the channel has no call outstanding: an
-empty `pending_tool_call_ids` and no `_dispatched_calls` entry (ACP's
-`cancel_prompt` clears the first while tools keep running). Then nothing
+persists them. It does so only when the channel has no call outstanding: no
+`_dispatched_calls` entry for it. Every pending call is there until its result
+is processed, and ACP's `cancel_prompt` clears `pending_tool_call_ids` while
+tools keep running, so the pending set alone would not do. Then nothing
 appended can fall between a tool call and its result. Otherwise the rows wait
 for the first such turn. They are held in memory, so a restart before
 delivery loses them.

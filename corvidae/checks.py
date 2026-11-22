@@ -59,12 +59,13 @@ def resolve_check_allowance(pm, registry: "ChannelRegistry", channel: "Channel")
             if entry.config.check_allowance is not None:
                 value = entry.config.check_allowance
                 break
-    # Transport: the first loaded transport that owns the channel.
+    # Transport: the default of a loaded transport that owns the channel.
     if value is None:
         for plugin in pm.get_plugins():
             if isinstance(plugin, TransportPlugin) and plugin.owns(channel):
                 value = plugin.check_allowance
                 break
+    # Nothing declared: the minimum; otherwise never below it.
     if value is None:
         return minimum
     return max(value, minimum)
@@ -147,11 +148,13 @@ async def run_checks(
                     exc_info=True, extra={"channel": channel.id},
                 )
                 verdict = None
-                late = False
+                raised = True
             else:
-                late = expired
-            # In time: record it for the caller. Late: hand it on.
-            if not expired:
+                raised = False
+            late = expired and not raised
+            # In time: record it for the caller (a raiser has no verdict).
+            # Late: hand it on.
+            if not expired and not raised:
                 verdicts[index] = verdict
             done.add(index)
             if len(done) == len(voters):
@@ -174,7 +177,9 @@ async def run_checks(
         return run
 
     async def _expire() -> None:
-        # The deadline timer only wakes the waiter; the waiter does the rest.
+        # From here on anything that finishes is late, even in this loop step.
+        nonlocal expired
+        expired = True
         deadline_hit.set()
 
     timer = clock.call_later(
@@ -224,7 +229,8 @@ async def run_checks(
                 exc_info=True, extra={"channel": channel.id},
             )
 
-    results: list[object] = [verdicts[i] for i in sorted(verdicts) if verdicts[i] is not None]
+    # Every in-time verdict, None included, as apluggy hands wrappers.
+    results: list[object] = [verdicts[i] for i in sorted(verdicts)]
     # Wrappers see the in-time list, innermost first, as apluggy tears down.
     for impl, gen in reversed(wrappers):
         try:

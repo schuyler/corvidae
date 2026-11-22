@@ -1209,18 +1209,17 @@ class Agent(CorvidaePlugin):
         Runs at step 6, before before_agent_turn, so the rows persist with
         that hook's injections. Only when no call on the channel is waiting
         for its result: then nothing appended now can fall between a tool
-        call and its result. Otherwise the rows wait for a later turn. ACP's
-        cancel_prompt clears the pending set while tools keep running, so the
-        dispatched-call record is checked too.
+        call and its result. Otherwise the rows wait for a later turn. The
+        dispatched-call record is what is checked, not the pending set: every
+        pending call is in it until its result is processed, and ACP's
+        cancel_prompt clears the pending set while tools keep running.
 
         shortcut: held in memory, so a restart before delivery loses them;
         persist them if that loss shows up in practice.
         """
         if channel.id not in self._late_checks:
             return
-        if channel.pending_tool_call_ids or any(
-            cid == channel.id for cid, _ in self._dispatched_calls
-        ):
+        if any(cid == channel.id for cid, _ in self._dispatched_calls):
             return
         for content in self._late_checks.pop(channel.id):
             conv.append({"role": "system", "content": content}, MessageType.CONTEXT)
