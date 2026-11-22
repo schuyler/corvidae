@@ -1065,9 +1065,9 @@ The allowance is, in order: the channel's own `check_allowance` (its exact entry
 
 | Transport | Default allowance |
 |---|---|
-| Signal, Discord, IRC | 90 s |
+| Signal, Discord, IRC, Zulip | 90 s |
 | Web, ACP, CLI | 10 s |
-| Zulip and any other transport | `agent.check_allowance_min` (5 s) |
+| Any other transport | `agent.check_allowance_min` (5 s) |
 
 An exact entry's `check_allowance` is fixed when the channel registers (restart to change it), like `max_turns`; a transport-wide entry's reloads.
 
