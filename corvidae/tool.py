@@ -358,7 +358,8 @@ def _rejected(exc: ValidationError, args: dict) -> tuple[str, object]:
     if exc.validator == "additionalProperties":
         # "Additional properties are not allowed ('qury' was unexpected)"
         name = exc.message.split("'")[1] if "'" in exc.message else "(unknown key)"
-        return name, args.get(name)
+        sent = exc.instance if isinstance(exc.instance, dict) else args
+        return name, sent.get(name)
     path = list(exc.absolute_path)
     return ".".join(str(p) for p in path) or "(arguments)", exc.instance
 
@@ -376,7 +377,17 @@ def _resolve(node: object, schema: dict) -> object:
 def _accepted(schema: dict, exc: ValidationError) -> str:
     """What the rejected key accepts, read from its own schema node."""
     root = _resolve(schema, schema)
-    props = root.get("properties") or {} if isinstance(root, dict) else {}
+    # The error may be on a nested object, not the root: walk to where it is.
+    where = root
+    for part in exc.absolute_path:
+        where = _resolve(where, schema)
+        if not isinstance(where, dict):
+            break
+        if isinstance(part, int):
+            where = where.get("items", where)
+        else:
+            where = (where.get("properties") or {}).get(str(part), where)
+    props = where.get("properties") or {} if isinstance(where, dict) else {}
 
     if exc.validator == "additionalProperties":
         # The headline case: say which keys the tool does take.
@@ -392,7 +403,7 @@ def _accepted(schema: dict, exc: ValidationError) -> str:
             node = _resolve(node, schema)
             if not isinstance(node, dict):
                 break
-            if part == "items" or isinstance(part, int):
+            if isinstance(part, int):
                 node = node.get("items", node)
                 continue
             node = (node.get("properties") or {}).get(str(part), node)

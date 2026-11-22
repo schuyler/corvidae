@@ -6,7 +6,11 @@ from corvidae.tool import check_tool_args
 
 SCHEMA = {
     "type": "object",
-    "properties": {"query": {"type": "string"}},
+    "properties": {
+        "query": {"type": "string"},
+        "limit": {"type": "integer"},
+        "offset": {"type": "integer"},
+    },
     "required": ["query"],
     "additionalProperties": False,
 }
@@ -153,7 +157,7 @@ def test_the_message_names_the_key_and_the_value_it_got():
     message = check_tool_args(SCHEMA, {"query": "x", "qury": "y"})
     assert message is not None
     assert "qury = 'y'" in message
-    assert "accepted: query" in message  # the keys the tool does take
+    assert "accepted: limit, offset, query" in message  # every key it takes
 
 
 def test_the_message_names_a_missing_required_key_by_name():
@@ -196,3 +200,37 @@ def test_a_nested_choice_reports_the_choice_not_the_parent_type():
 
     assert message is not None
     assert "accepted: one of 'fast', 'slow'" in message
+
+
+def test_a_property_named_items_is_a_property_not_an_array_step():
+    """A string path part is never an array index (#1170 round 4)."""
+    schema = {
+        "type": "object",
+        "properties": {"items": {"type": "string"}},
+        "required": ["items"],
+    }
+
+    message = check_tool_args(schema, {"items": 5})
+
+    assert message is not None
+    assert "accepted: string" in message
+
+
+def test_a_nested_unknown_key_names_its_value_and_that_objects_keys():
+    schema = {
+        "type": "object",
+        "properties": {
+            "opts": {
+                "type": "object",
+                "properties": {"mode": {"type": "string"}},
+                "additionalProperties": False,
+            }
+        },
+        "required": ["opts"],
+    }
+
+    message = check_tool_args(schema, {"opts": {"mdoe": "fast"}})
+
+    assert message is not None
+    assert "mdoe = 'fast'" in message
+    assert "accepted: mode" in message
