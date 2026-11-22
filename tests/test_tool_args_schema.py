@@ -94,3 +94,41 @@ async def test_a_good_call_still_reaches_the_tool():
 
     assert calls == ["x"]
     assert result.error is False
+
+
+def test_a_generated_schema_rejects_an_unknown_key():
+    """The schema this code generates must reject it, not just a hand-written one."""
+    from corvidae.tool import tool_to_schema
+
+    async def search(query: str, limit: int = 10) -> str:
+        return "ok"
+
+    schema = tool_to_schema(search)["function"]["parameters"]
+    message = check_tool_args(schema, {"query": "x", "qury": "y"})
+
+    assert message is not None
+    assert "qury" in message
+
+
+def test_a_generated_schema_does_not_require_an_optional_parameter():
+    from corvidae.tool import tool_to_schema
+
+    async def search(query: str, limit: int = 10) -> str:
+        return "ok"
+
+    params = tool_to_schema(search)["function"]["parameters"]
+    assert params["required"] == ["query"]
+    assert check_tool_args(params, {"query": "x"}) is None
+
+
+def test_the_agent_maps_its_schemas_by_tool_name():
+    """The map the Agent hands the dispatcher is name -> parameters (#1161)."""
+    from corvidae.agent import Agent
+
+    agent = object.__new__(Agent)
+    agent._tool_schemas = [
+        {"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}},
+        {"type": "function", "function": {"name": "broken"}},  # no parameters
+    ]
+
+    assert agent._tool_arg_schemas() == {"search": {"type": "object"}}

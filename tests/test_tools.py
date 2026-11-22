@@ -154,6 +154,10 @@ class TestReadFileRange:
         nullable_int = {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": None}
         assert props["offset"] == nullable_int
         assert props["length"] == nullable_int
+        # And optional in the sense that matters: absent from `required` (#1161).
+        params = tool.schema["function"]["parameters"]
+        assert "offset" not in params.get("required", [])
+        assert "length" not in params.get("required", [])
 
     async def test_header_states_range_and_total_in_characters(self, tmp_path):
         """R1, R2: the header names the half-open range and the character total."""

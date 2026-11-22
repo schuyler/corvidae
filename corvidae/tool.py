@@ -196,6 +196,14 @@ def tool_to_schema(fn: Callable) -> dict:
     for prop in schema.get("properties", {}).values():
         prop.pop("title", None)
 
+    # Reject keys the tool does not take, so a wrong name is named back to the
+    # model instead of reaching the call as a TypeError (#1161). A tool with
+    # **kwargs accepts anything, so it keeps the default (permissive).
+    if not any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    ):
+        schema["additionalProperties"] = False
+
     description = ""
     if fn.__doc__:
         description = fn.__doc__.strip().splitlines()[0]
@@ -304,41 +312,69 @@ def check_tool_args(schema: dict | None, args: dict) -> str | None:
     """Return a correction message when ``args`` do not fit ``schema``, else None.
 
     PRD §3.5.1: a tool call's arguments are validated against the generated
-    schema before the call. The message names the tool, the key, the rejected
-    value and what is accepted, so the model can correct it in one turn
-    (AGENTS.md, "On rejected input").
+    schema before the call. The message names the key, the rejected value and
+    what is accepted, so the model can correct it in one turn (AGENTS.md, "On
+    rejected input").
 
-    The value is the caller's own, from this same turn, and goes back to the
-    caller; it is not logged (see #1161's security note).
+    The rejected value goes in the tool result, back to the caller that sent it
+    in this same turn. It is not added to this call's log record -- the tool
+    result itself is persisted like any other, and the arguments are already
+    logged at DEBUG by the dispatch.
     """
     if not schema:
         return None
     try:
         validate(instance=args, schema=schema)
     except ValidationError as exc:
-        path = ".".join(str(p) for p in exc.absolute_path)
-        key = path or "(whole arguments)"
-        accepted = _accepted(schema, path)
+        key, value = _rejected(exc, args)
+        accepted = _accepted(schema, exc)
         return (
-            f"Error: tool call rejected — {key} = {exc.instance!r} is not valid "
+            f"Error: tool call rejected — {key} = {value!r} is not valid "
             f"({exc.message}); accepted: {accepted}. Correct the arguments and "
             f"call again"
         )
     return None
 
 
-def _accepted(schema: dict, path: str) -> str:
-    """A short description of what the named property accepts."""
-    node: object = schema
-    for part in path.split(".") if path else []:
-        if not isinstance(node, dict):
-            break
-        props = node.get("properties") or {}
-        node = props.get(part, node)
-    if isinstance(node, dict) and "type" in node:
-        return str(node["type"])
-    if isinstance(node, dict) and "enum" in node:
+def _rejected(exc: ValidationError, args: dict) -> tuple[str, object]:
+    """The key the model got wrong and the value it sent for it."""
+    if exc.validator == "required":
+        # "'query' is a required property" — the key is absent, so the value
+        # is the arguments it did send.
+        name = exc.message.split("'")[1] if "'" in exc.message else ""
+        return name, args
+    if exc.validator == "additionalProperties":
+        # "Additional properties are not allowed ('qury' was unexpected)"
+        name = exc.message.split("'")[1] if "'" in exc.message else "(unknown key)"
+        return name, args.get(name)
+    path = list(exc.absolute_path)
+    return ".".join(str(p) for p in path) or "(arguments)", exc.instance
+
+
+def _accepted(schema: dict, exc: ValidationError) -> str:
+    """A short description of what the rejected key accepts."""
+    if exc.validator == "required":
+        node = (schema.get("properties") or {}).get(
+            _rejected(exc, {})[0], {}
+        )
+    else:
+        node = schema
+        for part in list(exc.absolute_path)[:-1] if exc.absolute_path else []:
+            node = (node.get("properties") or {}).get(str(part), node)
+        node = (node.get("properties") or {}).get(
+            str(exc.absolute_path[-1]), node
+        ) if exc.absolute_path else node
+    if not isinstance(node, dict):
+        return "the schema's declared shape"
+    if "$ref" in node:
+        name = node["$ref"].rsplit("/", 1)[-1]
+        node = (schema.get("$defs") or {}).get(name, node)
+    if "enum" in node:
         return "one of " + ", ".join(repr(v) for v in node["enum"])
+    if "const" in node:
+        return repr(node["const"])
+    if "type" in node:
+        return str(node["type"])
     return "the schema's declared shape"
 
 
@@ -522,7 +558,9 @@ async def dispatch_tool_call(
 
     # Step 3: Check the tool exists, then that its arguments fit its schema.
     # Validating before the call is PRD §3.5.1: a wrong key used to reach the
-    # tool and surface as TypeError inside "tool failed" (#1161).
+    # tool and surface as TypeError inside "tool failed" (#1161). An unknown key
+    # is only caught when the schema forbids extras, which tool_to_schema now
+    # does for every tool that does not take **kwargs.
     if fn_name not in tools:
         logger.warning(
             "unknown tool called: %s",
