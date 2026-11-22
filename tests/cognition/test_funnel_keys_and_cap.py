@@ -18,7 +18,7 @@ from corvidae_cognition.funnel import FRAME_HEADER, FunnelPlugin
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType, count_tokens
-from corvidae.hooks import create_plugin_manager
+from corvidae.hooks import create_plugin_manager, install_plugin_hookspecs
 from corvidae.persistence import PersistencePlugin, init_db
 
 
@@ -37,6 +37,8 @@ async def build_funnel(config: dict | None = None):
 
     funnel = FunnelPlugin()
     pm.register(funnel, name="funnel")
+    # Runtime installs plugin-declared hookspecs after registration (#1097).
+    install_plugin_hookspecs(pm)
     await funnel.on_init(pm=pm, config=config or {})
 
     channel = Channel(transport="test", scope="keys")
