@@ -445,7 +445,9 @@ record is hidden on its own channel until the window moves past it.
 Scores are `cosine_similarity × exp(-age_days / memory.half_life_days)`, where
 `age_days` runs from `created_at`, or from `max(created_at,
 last_retrieved_at)` under `memory.retrieval.recency_from: last_used`.
-Candidates rank by score (by fused rank on the hybrid path, above) and are
+On the hybrid path candidates rank measured-first: every measured candidate ahead
+of every unmeasured one, each group in its own fused order (#856, #892). Off it,
+by score. They are
 banded strong, moderate or weak. Weak records are dropped, with no fallback:
 a query with nothing above weak admits nothing (#409). What the bands compare
 is `memory.retrieval.band_on`:
@@ -520,7 +522,7 @@ and numbers, never text:
 | `similarity` | cosine similarity, or the fixed FTS proxy when it can't be measured (a degraded retrieval, or an FTS hit with no vector) |
 | `score` | the recency-decayed score (`similarity × decay`); the rank key on the vector-only and degraded paths, the tie-break under fusion |
 | `band` | `strong`, `moderate` or `weak` (above; a hit with no measured cosine is `weak`, and every degraded hit `moderate`) |
-| `rank` | 1-based position among the not-excluded candidates, by fused rank on the hybrid path and by score otherwise (excluded rows: see below) |
+| `rank` | 1-based position among the not-excluded candidates: measured-first on the hybrid path, fused order within each group (#856, #892), score otherwise (excluded rows: see below) |
 | `outcome` | one of the values below |
 | `source` | `vec` (KNN only), `fts` (FTS only, or any degraded candidate) or `both` (#666); NULL on rows from before it |
 | `z` | under `band_on: relative`, the z-score the band came from (#409); NULL when none was computed (other modes, a small memory, no spread, a failed spread scan, a hit with no vector, degraded retrieval, rows from before it) |
