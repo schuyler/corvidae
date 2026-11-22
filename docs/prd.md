@@ -117,6 +117,10 @@ one is a bug even if its tests pass.
    the operator leaves without one (§3.13.5) that guarantee does not
    hold. Background work does not hold back
    its own channel's next main turn, and its results shape a later turn.
+   The exception is a check that runs before a reply is sent or before a
+   tool call runs (§3.7 Output gate 7; §3.5.12), which may delay that
+   reply or call for no longer than the channel's check allowance
+   (§3.13.5).
    What a fork costs on a given backend is measured, not assumed (§3.8.6).
    Other background work (upkeep) waits its turn for a head when every
    head is leased, and upkeep past its latency bound
@@ -240,8 +244,8 @@ one is a bug even if its tests pass.
     whatever agency plugins are loaded. Agency is a turn started on time or
     on the agent's own initiative rather than as a continuation of an
     exchange: reminders and the heartbeat are agency;
-    provenance objections and task results continue an exchange and are
-    not, and neither is a turn a note wakes on another channel (§3.5.10):
+    provenance objections, task results and the revision of a held-back
+    draft (§3.7 Output gate 7) continue an exchange and are not, and neither is a turn a note wakes on another channel (§3.5.10):
     a continuation can cross channels, and a chain of continuations is
     agency only if the exchange that started it was. Stylistic critique
     objections start no turn at all; only a lens that declares it wakes
@@ -1019,6 +1023,23 @@ Per transport:
     (principle 1); without it, a turn speaks only on its own channel and
     learns of other channels only through memory.
 
+12. A plugin can refuse a tool call before it runs, deciding from the
+    calling channel, the tool and the call's validated arguments. Any
+    refusal wins. A refused call does not run, and its result to the
+    model is the refusal, naming the tool, the reason and what to do
+    next, so the turn continues (§3.1.9). Every dispatched call is
+    offered, a subagent's included. An implementation that raises is
+    logged at warning and counts as no refusal, since one component's
+    failure must not stop the agent acting (principle 5); a plugin that must refuse
+    when it fails catches its own failure and refuses. A check may delay
+    the call for no longer than the channel's check allowance (§3.13.5),
+    counted from when the check starts; when the allowance runs out the
+    call runs unchecked and the miss is recorded. So a refusal that must
+    hold on every channel decides within the minimum allowance. A refusal bounds what the
+    calling channel's participants can make the agent do and is never a
+    wall between channels (principle 14; §3.5.9). With no such plugin
+    loaded, this item refuses no call.
+
 ### 3.6 LLM client
 
 1. OpenAI-compatible chat completions over aiohttp. The client applies a
@@ -1210,7 +1231,9 @@ deciding only what to newly append and in what order.
 **Critique.**
 
 1. After an exchange ends, critique checks it with lenses, without delaying
-   the reply. Each lens checks for one kind of problem and is offered to
+   the reply. A check that runs before a reply is sent is the pre-send
+   check (Output gate 7), which may delay it. Critique does not start
+   while a message waits on its channel (principle 3). Each lens checks for one kind of problem and is offered to
    the stage-2 appraisal fork with a one-line appraisal question. The
    fork scores each offered lens's question, and "none", for the exchange:
    the critique vector. The top share runs, and "none" wins ties. The
@@ -1246,7 +1269,8 @@ deciding only what to newly append and in what order.
    It does not judge the task's own claims, which are records to the
    critic, or the task's tool actions. Which checks run on a judged turn
    is each check's own selection (items 1–2). A response a gate withheld
-   is still judged; the agent's choice to stay silent is not a response,
+   is still judged, except a draft the pre-send check held back for
+   revision (Output gate 7), whose revision is judged instead; the agent's choice to stay silent is not a response,
    and is neither judged nor appraised.
 4. Empty objections are recorded and wake nothing. A lens declares whether its
    non-empty objections wake the channel. A lens that doesn't wake
@@ -1286,8 +1310,9 @@ deciding only what to newly append and in what order.
    to follow offline calibration against logged traffic. Whether the agent
    may enforce it, or fit it live (the closed-loop capability of principle
    7), is a lock the operator sets (principle 15). The decide gate
-   withholds a task-origin final that adds nothing; no gate withholds a
-   direct user reply by default.
+   withholds a task-origin final that adds nothing; apart from the
+   pre-send check (item 7), no gate withholds a direct user reply by
+   default.
 5. The agent itself may decline any turn, a direct user turn included,
    when it judges it has nothing true, relevant and substantial to add
    (Grice's maxims). The channel's register (§3.3.10) sets the norm:
@@ -1309,6 +1334,21 @@ deciding only what to newly append and in what order.
    an LLM error, with an `error` emission naming the channel and a warning
    in the log (principle 5). No text in the window, whoever wrote it, can
    leave a channel unable to answer (principle 9).
+7. A reply may be checked before it is sent. The check ends one of three
+   ways: the reply is sent as written; it is held back for a revision; or
+   it is withheld. A held-back draft is not sent: it stays in the window
+   as a vetoed final does (item 2), and the check's objections reach the
+   turn that revises it as framed CONTEXT. That turn is expected to
+   reply, so Critique 4's silence default does not apply to it, though
+   the agent may still decline (item 5). For now a revision is not held
+   back again; if it is checked, it has its own allowance. A held-back draft and a withheld reply are each recorded
+   in the outcome log with the reason. The check may delay a reply for
+   no longer than the channel's check allowance (§3.13.5), counted from
+   when the check starts. When the
+   allowance runs out the reply is sent unchecked and the miss is
+   recorded; critique still judges it after it is sent (Critique 1). What
+   the check looks for, and how it chooses among the three, is the
+   plugin's choice.
 
 **Outcome log.** One `exchange_log` row per trace (origin, originating
 rowid, retrieval profile, probe score, both appraisal stages, outcomes),
@@ -1773,6 +1813,13 @@ from warm heads, whether the agent sees its provider's state) are tracked in
    UI expects an immediate reply; someone texting doesn't), and the
    operator can assign a channel another class or none. The operator
    config defines which classes exist and what each one's bound is.
+   A channel also has a check allowance: how long a check may delay a
+   reply before it is sent (§3.7 Output gate 7) or a tool call before it
+   runs (§3.5.12). It is the channel's bound, or a minimum the operator
+   sets, small but not zero, where the bound is smaller or the channel
+   has none, so the least patient channel still gives a fast check time
+   to decide. The allowance is not a latency bound: a channel with no
+   bound still has none.
    Upkeep and agency take the latency bounds §3.1.16 gives idle work, on
    whichever queue they wait, and the heartbeat always has one (§3.7
    Heartbeat). A plugin whose documented behaviour must hold under
@@ -1883,7 +1930,7 @@ record that holds the reasoning.
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
 | Every heartbeat beat reviews extant goals and any other information that might be relevant to taking action; recent memory is no longer a required input, since the newest memories across every channel are mostly unrelated to what the beat is deciding | §3.7 Heartbeat; owner, 2026-11-18 |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
-| The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
+| The agent may decline any turn when it has nothing to add (Grice's maxims, by register); apart from the pre-send check (§3.7 Output gate 7), gates still never withhold a direct reply by default | #215 |
 | Reminders and jobs the agent sets act on the calling channel only, with origin `reminder`; cross-channel reach is §3.5.9's alone, so the scheduler is not a second, unaudited path between channels or around the critique of reminders. Supersedes "a reminder may target any channel" | §3.9.7; #814; owner, 2026-11-17 |
 | A decline is signalled by a plugin-chosen mechanism (token, tool or both) and enforced by a veto that acts on the agent's signal, not a gate; a signal followed by sent text is not a decline | #791, #795, #797, #799, #806 |
 | Model endpoints may be remote; a profile's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each profile sends | #217 |
@@ -1918,7 +1965,7 @@ record that holds the reasoning.
 | No runtime plugin loading; changing the plugin set is a restart, which the agent may request (rate-limited) | #28; principle 15 |
 | A container image exists, built when a second deployment needed one; it installs every extra by default (`EXTRAS` narrows it, empty is the bare kernel), the daemon runs non-root, and the image is not a tool sandbox | §3.11.12; #37; #532; operator, 2026-11-10 |
 | Topic structure is the `topic` subject's job, not a retrieval dimension | §3.7 Memory 7 |
-| Per-turn tool filtering and per-turn system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). A per-call tool veto and per-channel tool sets, fixed per conversation, are tracked with the trust plugin (#138); a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |
+| Per-turn tool filtering and per-turn system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). Per-channel tool sets, fixed per conversation, landed with #149, and a per-call tool veto is its own decision (row below); a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |
 | The kernel owns the clock; idle keeps firing through quiet, and no plugin needs another's queues to learn of it; idle reaches plugins by push | #167; #165 |
 | Upkeep runs on time regardless of agency plugins; the scheduler is agency and optional | #167 |
 | Transports deliver every emission on their own channels regardless of origin | #167 |
@@ -1932,4 +1979,7 @@ record that holds the reasoning.
 | Identity is agent-wide and heads every prompt written in the agent's voice; channel register is appended after it and never replaces it; the subagent's prompt is persona-neutral (§3.5.7) | operator directive, 2026-11-01; #380; #388 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
+| Checks before a reply is sent and before a tool call runs share one per-channel allowance: the channel's latency bound, never below an operator-set minimum that is small but not zero, which a channel with no bound gets; the allowance counts from when a check starts, so time a call or reply spends waiting for anything else never spends it; a refusal that must hold on every channel decides within the minimum | principle 3; §3.5.12; §3.7 Output gate 7; §3.13.5; #1075, #1149; operator, 2026-11-22 |
+| A plugin can refuse a tool call before it runs: any refusal wins, the refusal is the call's result so the turn continues, and an implementation that raises counts as no refusal; admitted ahead of the trust plugin (#138), with the pre-tool-use check (#1075) as its first consumer | principle 5; §3.5.12; §3.1.11; #148 (#1076 closed as its duplicate); operator, 2026-11-22 |
+| A reply may be checked before it is sent, ending in send, held back for a revision, or withheld; a revision is not held back again, a present limit and not a principle; a held-back draft is not judged after the fact, its revision is; the check delays a reply only within its channel's check allowance, and the reply sends unchecked when it runs out | principle 3; §3.7 Critique 1 and 3, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
 | Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; the channel queue never coalesces notification items | §3.1.19; #398, #296; owner, 2026-11-03 |
