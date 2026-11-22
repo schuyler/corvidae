@@ -903,6 +903,12 @@ naming the bounded ones.
 (StatsD/OpenTelemetry common denominator; dotted names like
 `llm.tokens.prompt`, `llm.latency_ms`). Emit metrics from any hook or tool
 with `await self.pm.ahook.on_metrics(name=..., value=..., tags=...)`.
+
+The kernel emits two names a plugin can rely on: `agent.turn_failed`, once per
+failed turn (a failed retry included), with the tags `channel` and `exception`
+(the exception type's name) — both the name and the tags are the contract,
+because core counts errors from them (#1060) — and whatever `MetricsPlugin`
+derives from `on_llm_response`.
 **Reentrancy constraint:** never emit from inside an `on_metrics`
 implementation — pluggy dispatches back into the same implementation and
 recurses forever.
