@@ -181,8 +181,8 @@ rules and replaces none of them.
 - Review only PRs labeled `needs-review`. Ask before touching any other PR.
 - Merge only a PR that carries `merge-ready`. Before every merge, quote the PR's
   current labels and the sha of the verdict that covers its head.
-- Labels follow AGENTS.md "Workflow labels": they go on the issue, not the PR
-  (line 53), and the author normally sets them. A reviewer sets `needs-revision`
+- Labels follow AGENTS.md "Workflow labels": `ready` and `claimed` go on the
+  issue, the review stages on the PR (line 53), and the author normally sets them. A reviewer sets `needs-revision`
   or `merge-ready` only when the owner has told it to; otherwise it posts the
   verdict and stops, and the author moves the label.
 - When the owner has told you to set labels: set `merge-ready` only on a clean
