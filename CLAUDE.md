@@ -189,6 +189,10 @@ rules and replaces none of them.
   counts as permission to merge. Say so in the verdict.
 - A PR that fails review gets `needs-revision` on its issue, with a comment
   saying what to fix, so another agent can pick it up.
+- Record every review and label change on GitHub as soon as it is decided:
+  post the verdict comment, set `needs-revision` or `merge-ready`, and move the
+  stage label in the same step. Do not wait to be asked, and do not leave a
+  verdict only in the session. A review that is not on the PR did not happen.
 - Never self-certify: the agent that reviewed a change does not also mark it
   `merge-ready` and merge it in one pass without the owner's permission for
   that change.
