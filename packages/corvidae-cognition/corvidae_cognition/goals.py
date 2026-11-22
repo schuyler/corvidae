@@ -295,11 +295,12 @@ class GoalsPlugin(CorvidaePlugin):
 
         Never raises because a subscriber's Exception failed: observe hooks are
         fail-soft, so PolicyAHook logs it with the plugin that raised and this
-        call returns normally (#1094, #1097). Still possible here, and not a
-        subscriber's Exception: a non-Exception such as CancelledError, which
-        PolicyAHook re-raises once the others finish, and the caller's own bug if
-        the goal hookspecs were never installed (AttributeError). A subscriber
-        cannot undo the state change either way; it is committed before this runs.
+        call returns normally (#1094, #1097). Still possible, for example: a
+        subscriber's non-Exception such as CancelledError, which is re-raised
+        once the others finish; a wrapper registered on this observe hook, which
+        dispatch refuses; and the caller's own bug, such as hookspecs that were
+        never installed. A subscriber cannot undo the state change either way; it
+        is committed before this runs.
         """
         await self.pm.ahook.on_goals_state_changed(
             goal_id=goal_id,

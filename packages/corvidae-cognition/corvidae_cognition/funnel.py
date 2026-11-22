@@ -626,16 +626,16 @@ class FunnelPlugin(CorvidaePlugin):
                         self._carried_payload(cid, source, result, entry.created))
 
         # Ask every implementer to submit. on_funnel_ingest is an observe hook,
-        # so an implementation's Exception is logged by PolicyAHook against the
-        # plugin and the others' submissions stand (#1094, #1097).
+        # so an implementation's Exception is logged against its plugin and the
+        # others' submissions stand (#1094, #1097).
         #
-        # Still able to raise here, and not because an implementation failed:
-        # a missing hookspec (AttributeError), a wrapper refused at dispatch
-        # (PluginValidationError), a missing argument (HookCallError); and a
-        # non-Exception from an implementation, such as CancelledError, which
-        # PolicyAHook re-raises after the siblings finish. On any of those,
-        # promises still pending stay pending for the next turn; a promise
-        # already submitted and finished is admitted by _drain below.
+        # This call can still raise: before any implementation runs (a missing
+        # hookspec, a wrapper refused at dispatch, a missing argument), and from
+        # an implementation's non-Exception, which PolicyAHook re-raises after
+        # the siblings finish. If it raises, promises still running stay in
+        # _pending and are swept next turn; a result `submit` already carried
+        # out of _pending is dropped with this frame, because _drain below never
+        # runs.
         await self.pm.ahook.on_funnel_ingest(
             channel=channel, trace_id=trace_id, annotations=annotations, submit=submit,
         )
