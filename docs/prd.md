@@ -118,7 +118,7 @@ one is a bug even if its tests pass.
    hold. Background work does not hold back
    its own channel's next main turn, and its results shape a later turn.
    The one exception is a check of a reply before it is sent (§3.7 Output
-   gate 7), which may hold that reply, only on a channel whose latency
+   gate 7), which may delay that reply, only on a channel whose latency
    class has a bound and never past it.
    What a fork costs on a given backend is measured, not assumed (§3.8.6).
    Other background work (upkeep) waits its turn for a head when every
@@ -1214,7 +1214,7 @@ deciding only what to newly append and in what order.
 
 1. After an exchange ends, critique checks it with lenses, without delaying
    the reply. A check that runs before a reply is sent is the pre-send
-   check (Output gate 7), which may hold it. Each lens checks for one kind of problem and is offered to
+   check (Output gate 7), which may delay it. Each lens checks for one kind of problem and is offered to
    the stage-2 appraisal fork with a one-line appraisal question. The
    fork scores each offered lens's question, and "none", for the exchange:
    the critique vector. The top share runs, and "none" wins ties. The
@@ -1250,7 +1250,8 @@ deciding only what to newly append and in what order.
    It does not judge the task's own claims, which are records to the
    critic, or the task's tool actions. Which checks run on a judged turn
    is each check's own selection (items 1–2). A response a gate withheld
-   is still judged; the agent's choice to stay silent is not a response,
+   is still judged, except a draft the pre-send check held back for
+   revision (Output gate 7), whose revision is judged instead; the agent's choice to stay silent is not a response,
    and is neither judged nor appraised.
 4. Empty objections are recorded and wake nothing. A lens declares whether its
    non-empty objections wake the channel. A lens that doesn't wake
@@ -1315,16 +1316,21 @@ deciding only what to newly append and in what order.
    in the log (principle 5). No text in the window, whoever wrote it, can
    leave a channel unable to answer (principle 9).
 7. A reply may be checked before it is sent. The check ends one of three
-   ways: the reply is sent as written; it is sent back to the agent once,
-   with the check's objections, for a revision; or it is withheld. A
-   withheld reply is withheld as a vetoed final is (item 2) and recorded
-   in the outcome log with the reason. The check may hold a reply only on
-   a channel whose latency class has a bound (§3.13.5), and for no longer
-   than that bound, counted from when the reply was composed. At the
-   bound the reply is sent unchecked and the miss is recorded. On a
-   channel with no bound a reply is never held, and critique judges it
-   after it is sent (Critique 1). What the check looks for, and how it
-   chooses among the three, is the plugin's choice.
+   ways: the reply is sent as written; it is held back for a revision; or
+   it is withheld. A held-back draft is not sent: it stays in the window
+   as a vetoed final does (item 2), and the check's objections reach the
+   turn that revises it as framed CONTEXT. That turn is expected to
+   reply, so Critique 4's silence default does not apply to it, though
+   the agent may still decline (item 5). For now a revision is not held
+   back again. A held-back draft and a withheld reply are each recorded
+   in the outcome log with the reason. The check may delay a reply only
+   on a channel whose latency class has a bound (§3.13.5), and for no
+   longer than that bound, counted from when the reply, or the draft it
+   revises, was composed. At the bound the reply is sent unchecked and
+   the miss is recorded. On a channel with no bound a reply is never
+   delayed, and critique judges it after it is sent (Critique 1). What
+   the check looks for, and how it chooses among the three, is the
+   plugin's choice.
 
 **Outcome log.** One `exchange_log` row per trace (origin, originating
 rowid, retrieval profile, probe score, both appraisal stages, outcomes),
@@ -1789,7 +1795,7 @@ from warm heads, whether the agent sees its provider's state) are tracked in
    UI expects an immediate reply; someone texting doesn't), and the
    operator can assign a channel another class or none. The operator
    config defines which classes exist and what each one's bound is.
-   A channel's bound also limits how long a pre-send check may hold a
+   A channel's bound also limits how long a pre-send check may delay a
    reply there (§3.7 Output gate 7).
    Upkeep and agency take the latency bounds §3.1.16 gives idle work, on
    whichever queue they wait, and the heartbeat always has one (§3.7
@@ -1950,5 +1956,5 @@ record that holds the reasoning.
 | Identity is agent-wide and heads every prompt written in the agent's voice; channel register is appended after it and never replaces it; the subagent's prompt is persona-neutral (§3.5.7) | operator directive, 2026-11-01; #380; #388 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
-| A reply may be checked before it is sent, ending in send, one revision or withhold; the check holds a reply only within its channel's latency bound and the reply sends unchecked at the bound; a channel with no bound keeps after-the-fact critique only | principle 3; §3.7 Critique 1, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
+| A reply may be checked before it is sent, ending in send, held back for a revision, or withheld; a revision is not held back again, a present limit and not a principle; a held-back draft is not judged after the fact, its revision is; the check delays a reply only within its channel's latency bound, counted from the first draft, and the reply sends unchecked at the bound; a channel with no bound keeps after-the-fact critique only | principle 3; §3.7 Critique 1 and 3, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
 | Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; the channel queue never coalesces notification items | §3.1.19; #398, #296; owner, 2026-11-03 |
