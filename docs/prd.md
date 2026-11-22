@@ -117,9 +117,9 @@ one is a bug even if its tests pass.
    the operator leaves without one (§3.13.5) that guarantee does not
    hold. Background work does not hold back
    its own channel's next main turn, and its results shape a later turn.
-   The one exception is a check of a reply before it is sent (§3.7 Output
-   gate 7), which may delay that reply, only on a channel whose latency
-   class has a bound and never past it.
+   The exception is a check that runs before a reply is sent or before a
+   tool call runs (§3.7 Output gate 7; §3.5.12), which may delay it for
+   no longer than the channel's check allowance (§3.13.5).
    What a fork costs on a given backend is measured, not assumed (§3.8.6).
    Other background work (upkeep) waits its turn for a head when every
    head is leased, and upkeep past its latency bound
@@ -1029,8 +1029,11 @@ Per transport:
     next, so the turn continues (§3.1.9). Every dispatched call is
     offered, a subagent's included. An implementation that raises is
     logged at warning and counts as no refusal; a plugin that must refuse
-    when it fails catches its own failure and refuses. A check that never
-    returns cannot wedge a channel (§3.1.8). A refusal bounds what the
+    when it fails catches its own failure and refuses. A check may delay
+    the call for no longer than the channel's check allowance (§3.13.5),
+    counted from when the call was made; when the allowance runs out the
+    call runs unchecked and the miss is recorded. So a refusal that must
+    hold on every channel decides within the minimum allowance. A refusal bounds what the
     calling channel's participants can make the agent do and is never a
     wall between channels (principle 14; §3.5.9). With no such plugin
     loaded, no call is refused beyond the tool sets of item 2.
@@ -1337,12 +1340,11 @@ deciding only what to newly append and in what order.
    reply, so Critique 4's silence default does not apply to it, though
    the agent may still decline (item 5). For now a revision is not held
    back again. A held-back draft and a withheld reply are each recorded
-   in the outcome log with the reason. The check may delay a reply only
-   on a channel whose latency class has a bound (§3.13.5), and for no
-   longer than that bound, counted from when the reply, or the draft it
-   revises, was composed. At the bound the reply is sent unchecked and
-   the miss is recorded. On a channel with no bound a reply is never
-   delayed, and critique judges it after it is sent (Critique 1). What
+   in the outcome log with the reason. The check may delay a reply for
+   no longer than the channel's check allowance (§3.13.5), counted from
+   when the reply, or the draft it revises, was composed. When the
+   allowance runs out the reply is sent unchecked and the miss is
+   recorded; critique still judges it after it is sent (Critique 1). What
    the check looks for, and how it chooses among the three, is the
    plugin's choice.
 
@@ -1809,8 +1811,12 @@ from warm heads, whether the agent sees its provider's state) are tracked in
    UI expects an immediate reply; someone texting doesn't), and the
    operator can assign a channel another class or none. The operator
    config defines which classes exist and what each one's bound is.
-   A channel's bound also limits how long a pre-send check may delay a
-   reply there (§3.7 Output gate 7).
+   A channel's bound is also its check allowance: how long a check may
+   delay a reply before it is sent (§3.7 Output gate 7) or a tool call
+   before it runs (§3.5.12). The allowance is never less than a minimum
+   the operator sets, small but not zero, and a channel with no bound has
+   the minimum, so the least patient channel still gives a fast check
+   time to decide.
    Upkeep and agency take the latency bounds §3.1.16 gives idle work, on
    whichever queue they wait, and the heartbeat always has one (§3.7
    Heartbeat). A plugin whose documented behaviour must hold under
@@ -1970,6 +1976,7 @@ record that holds the reasoning.
 | Identity is agent-wide and heads every prompt written in the agent's voice; channel register is appended after it and never replaces it; the subagent's prompt is persona-neutral (§3.5.7) | operator directive, 2026-11-01; #380; #388 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
+| Checks before a reply is sent and before a tool call runs share one per-channel allowance: the channel's latency bound, never below an operator-set minimum that is small but not zero, which a channel with no bound gets; a refusal that must hold on every channel decides within the minimum | principle 3; §3.5.12; §3.7 Output gate 7; §3.13.5; #1075, #1149; operator, 2026-11-22 |
 | A plugin can refuse a tool call before it runs: any refusal wins, the refusal is the call's result so the turn continues, and an implementation that raises counts as no refusal; admitted ahead of the trust plugin (#138), with the pre-tool-use check (#1075) as its first consumer | §3.5.12; §3.1.11; #148 (#1076 closed as its duplicate); operator, 2026-11-22 |
-| A reply may be checked before it is sent, ending in send, held back for a revision, or withheld; a revision is not held back again, a present limit and not a principle; a held-back draft is not judged after the fact, its revision is; the check delays a reply only within its channel's latency bound, counted from the first draft, and the reply sends unchecked at the bound; a channel with no bound keeps after-the-fact critique only | principle 3; §3.7 Critique 1 and 3, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
+| A reply may be checked before it is sent, ending in send, held back for a revision, or withheld; a revision is not held back again, a present limit and not a principle; a held-back draft is not judged after the fact, its revision is; the check delays a reply only within its channel's check allowance, counted from the first draft, and the reply sends unchecked when it runs out | principle 3; §3.7 Critique 1 and 3, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
 | Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; the channel queue never coalesces notification items | §3.1.19; #398, #296; owner, 2026-11-03 |
