@@ -1214,7 +1214,8 @@ deciding only what to newly append and in what order.
 
 1. After an exchange ends, critique checks it with lenses, without delaying
    the reply. A check that runs before a reply is sent is the pre-send
-   check (Output gate 7), which may delay it. Each lens checks for one kind of problem and is offered to
+   check (Output gate 7), which may delay it. Critique does not start
+   while a message waits on its channel (principle 3). Each lens checks for one kind of problem and is offered to
    the stage-2 appraisal fork with a one-line appraisal question. The
    fork scores each offered lens's question, and "none", for the exchange:
    the critique vector. The top share runs, and "none" wins ties. The
