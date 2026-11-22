@@ -1028,7 +1028,8 @@ Per transport:
     model is the refusal, naming the tool, the reason and what to do
     next, so the turn continues (§3.1.9). Every dispatched call is
     offered, a subagent's included. An implementation that raises is
-    logged at warning and counts as no refusal; a plugin that must refuse
+    logged at warning and counts as no refusal, since one component's
+    failure must not stop the agent acting (principle 5); a plugin that must refuse
     when it fails catches its own failure and refuses. A check may delay
     the call for no longer than the channel's check allowance (§3.13.5),
     counted from when the call was made; when the allowance runs out the
@@ -1977,6 +1978,6 @@ record that holds the reasoning.
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
 | Checks before a reply is sent and before a tool call runs share one per-channel allowance: the channel's latency bound, never below an operator-set minimum that is small but not zero, which a channel with no bound gets; a refusal that must hold on every channel decides within the minimum | principle 3; §3.5.12; §3.7 Output gate 7; §3.13.5; #1075, #1149; operator, 2026-11-22 |
-| A plugin can refuse a tool call before it runs: any refusal wins, the refusal is the call's result so the turn continues, and an implementation that raises counts as no refusal; admitted ahead of the trust plugin (#138), with the pre-tool-use check (#1075) as its first consumer | §3.5.12; §3.1.11; #148 (#1076 closed as its duplicate); operator, 2026-11-22 |
+| A plugin can refuse a tool call before it runs: any refusal wins, the refusal is the call's result so the turn continues, and an implementation that raises counts as no refusal; admitted ahead of the trust plugin (#138), with the pre-tool-use check (#1075) as its first consumer | principle 5; §3.5.12; §3.1.11; #148 (#1076 closed as its duplicate); operator, 2026-11-22 |
 | A reply may be checked before it is sent, ending in send, held back for a revision, or withheld; a revision is not held back again, a present limit and not a principle; a held-back draft is not judged after the fact, its revision is; the check delays a reply only within its channel's check allowance, counted from the first draft, and the reply sends unchecked when it runs out | principle 3; §3.7 Critique 1 and 3, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
 | Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; the channel queue never coalesces notification items | §3.1.19; #398, #296; owner, 2026-11-03 |
