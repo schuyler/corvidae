@@ -28,7 +28,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from jsonschema import Draft202012Validator, ValidationError
+from jsonschema import Draft202012Validator
 from pydantic import create_model
 
 # Maximum characters in a tool result before truncation. Override via agent.max_tool_result_chars in agent.yaml.
@@ -320,9 +320,15 @@ def check_tool_args(schema: dict | None, args: dict) -> str | None:
     """Return a correction message when ``args`` do not fit ``schema``, else None.
 
     PRD §3.5.1: a tool call's arguments are validated against the generated
-    schema before the call. The message names the key, the rejected value and
-    what is accepted, so the model can correct it in one turn (AGENTS.md, "On
-    rejected input").
+    schema before the call. The message names the key, the value that was sent
+    and what the schema says about it, so the model can correct it in one turn
+    (AGENTS.md, "On rejected input").
+
+    The wording of what is accepted is ``jsonschema``'s own: it already says
+    "not one of ['fast', 'slow']" or "is not of type 'string'", and re-deriving
+    that from the schema by hand was where five review rounds of wrong "accepted"
+    answers came from (#1170). The one thing it does not say is which keys the
+    tool takes, so that is added for an unknown key.
 
     The rejected value goes in the tool result, back to the caller that sent it
     in this same turn. It is not added to this call's log record -- the tool
@@ -331,42 +337,29 @@ def check_tool_args(schema: dict | None, args: dict) -> str | None:
     """
     if not schema:
         return None
+    validator = Draft202012Validator(schema)
     errors = sorted(
-        Draft202012Validator(schema).iter_errors(args),
+        validator.iter_errors(args),
         # An unknown key is the more useful correction when both are wrong:
         # it is usually a misspelling of a required one.
         key=lambda e: 0 if e.validator == "additionalProperties" else 1,
     )
-    if errors:
-        exc = errors[0]
-        key, value = _rejected(exc, args)
-        accepted = _accepted(schema, exc)
-        what = (
-            f"{key} is missing"
-            if exc.validator == "required"
-            else f"{key} = {value!r} is not valid"
-        )
-        return (
-            f"Error: tool call rejected — {what} ({exc.message}); accepted: "
-            f"{accepted}. Correct the arguments and call again"
-        )
-    return None
+    if not errors:
+        return None
 
-
-def _rejected(exc: ValidationError, args: dict) -> tuple[str, object]:
-    """The key the model got wrong and the value it sent for it."""
-    if exc.validator == "required":
-        # "'query' is a required property" — the key is absent, so the value
-        # is the arguments it did send.
-        name = exc.message.split("'")[1] if "'" in exc.message else ""
-        return name, args
+    exc = errors[0]
+    where = ".".join(str(p) for p in exc.absolute_path)
+    subject = f"{where}: " if where else ""
+    takes = ""
     if exc.validator == "additionalProperties":
-        # "Additional properties are not allowed ('qury' was unexpected)"
-        name = exc.message.split("'")[1] if "'" in exc.message else "(unknown key)"
-        sent = exc.instance if isinstance(exc.instance, dict) else args
-        return name, sent.get(name)
-    path = list(exc.absolute_path)
-    return ".".join(str(p) for p in path) or "(arguments)", exc.instance
+        root = _resolve(schema, schema)
+        keys = sorted(str(k) for k in (root.get("properties") or {}))
+        if keys:
+            takes = f"; the tool takes: {', '.join(keys)}"
+    return (
+        f"Error: tool call rejected — {subject}{exc.message}{takes}. Correct the "
+        f"arguments and call again"
+    )
 
 
 def _resolve(node: object, schema: dict) -> object:
@@ -377,57 +370,6 @@ def _resolve(node: object, schema: dict) -> object:
         name = str(node["$ref"]).rsplit("/", 1)[-1]
         node = (schema.get("$defs") or {}).get(name, node)
     return node
-
-
-def _accepted(schema: dict, exc: ValidationError) -> str:
-    """What the rejected key accepts, read from its own schema node."""
-    root = _resolve(schema, schema)
-    # The error may be on a nested object, not the root: walk to where it is.
-    where = root
-    for part in exc.absolute_path:
-        where = _resolve(where, schema)
-        if not isinstance(where, dict):
-            break
-        if isinstance(part, int):
-            where = where.get("items", where)
-        else:
-            where = (where.get("properties") or {}).get(str(part), where)
-    # Resolve after the last step too: a level spelled as $ref has no
-    # properties of its own (#1170 round 5).
-    where = _resolve(where, schema)
-    props = where.get("properties") or {} if isinstance(where, dict) else {}
-
-    if exc.validator == "additionalProperties":
-        # The headline case: say which keys the tool does take.
-        if props:
-            return ", ".join(sorted(str(k) for k in props))
-        return "no arguments"
-    if exc.validator == "required":
-        name = exc.message.split("'")[1] if "'" in exc.message else ""
-        node = _resolve(props.get(name, {}), schema)
-        if not node:
-            node = where
-    else:
-        node = root
-        for part in exc.absolute_path:
-            node = _resolve(node, schema)
-            if not isinstance(node, dict):
-                break
-            if isinstance(part, int):
-                node = node.get("items", node)
-                continue
-            node = (node.get("properties") or {}).get(str(part), node)
-        node = _resolve(node, schema)
-
-    if not isinstance(node, dict):
-        return "the schema's declared shape"
-    if "enum" in node:
-        return "one of " + ", ".join(repr(v) for v in node["enum"])
-    if "const" in node:
-        return repr(node["const"])
-    if "type" in node:
-        return str(node["type"])
-    return "the schema's declared shape"
 
 
 async def execute_tool_call(
