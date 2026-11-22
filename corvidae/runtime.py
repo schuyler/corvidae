@@ -249,7 +249,7 @@ class Runtime:
             # failure here still cleans up under the configured bound.
             self.shutdown_timeouts = parse_shutdown_timeouts(config.get("daemon"))
             validate_agent_config(config.get("agent", {}))
-            validate_daemon_config(config.get("daemon") or {})
+            validate_daemon_config(config.get("daemon"))
             # The llm profiles, defaults and stage map: a bad block exits
             # here, before any plugin loads.
             parse_llm_config(config.get("llm"))

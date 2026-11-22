@@ -12,7 +12,6 @@ import asyncio
 
 import pytest
 import pytest_asyncio
-
 from fake_clock import DEFAULT_START, install_kernel_clock
 
 
@@ -549,3 +548,35 @@ async def test_watch_cancel_before_step_stops_zero_period_run(kernel_clock):
     await clock.settle()
 
     assert rec.calls == []
+
+
+def test_a_scalar_daemon_section_is_refused_by_name():
+    """#850: `daemon: 5` must not reach the `in` below as a TypeError."""
+    from corvidae.idle import validate_daemon_config
+
+    with pytest.raises(ValueError) as exc:
+        validate_daemon_config(5)
+    assert "daemon must be a mapping" in str(exc.value)
+
+
+def test_channel_max_turns_must_be_positive():
+    """#850: the agent.yaml path refuses 0 and negatives, as set_settings does."""
+    from corvidae.channel import parse_channel_config
+
+    for bad in (0, -3):
+        with pytest.raises(ValueError) as exc:
+            parse_channel_config(
+                {"channels": {"discord:1": {"max_turns": bad}}}
+            )
+        assert "channels.discord:1.max_turns" in str(exc.value)
+        assert "positive integer" in str(exc.value)
+
+
+def test_channel_max_context_tokens_must_be_positive():
+    from corvidae.channel import parse_channel_config
+
+    with pytest.raises(ValueError) as exc:
+        parse_channel_config(
+            {"channels": {"discord:1": {"max_context_tokens": 0}}}
+        )
+    assert "max_context_tokens" in str(exc.value)

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from corvidae.fork import parse_forks_config
 from corvidae.prompts import read_prompt_files
 from corvidae.tool_policy import parse_channel_tools
+
 # Transport/session metadata parked on Channel.runtime_overrides — never
 # merge into resolved ChannelConfig or forward to the LLM request body.
 RUNTIME_META_KEYS = frozenset({"cwd", "tool_backend"})
@@ -520,11 +521,23 @@ def parse_positive_int(value: object, key: str) -> int:
 
 
 def _check_int_key(value: object, where: str) -> None:
-    """Raise ValueError unless value is None or an integer (bool excluded)."""
-    if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+    """Raise ValueError unless value is None or a positive integer (bool excluded).
+
+    Zero and negative values are refused for the same reason set_settings refuses
+    them (#850): a channel with no turns or no context cannot answer, so the
+    limit would fail at turn time with nothing naming the key.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(
             f"{where} must be an integer, got {_short_repr(value)} "
             f"({type(value).__name__}); use a whole number or remove the key"
+        )
+    if value <= 0:
+        raise ValueError(
+            f"{where} must be a positive integer, got {value}; use a whole "
+            f"number of at least 1 or remove the key"
         )
 
 
