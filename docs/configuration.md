@@ -428,7 +428,7 @@ A built-in lens that checks whether the reply asked permission ("want me to…",
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `critique.lens.proactivity.enabled` | bool | `true` | Offers the lens. Static config, not runtime-tunable, so the agent can't switch off the critic that checks it; reloaded on the next stage-2 call. A non-bool value fails startup naming the key; at reload it logs a warning and the lens stays on. Set it to `false` for an agent whose system prompt has no Ownership Boundary. |
-| `critique.lens.proactivity.appraisal_question`, `critique.lens.proactivity.fork_prompt` | string | built in | As for any lens (below), except that there is no `prompts/critique_proactivity_fork.md`: the lens contributes a wake sentence (above) rather than a fork brief, so the `<lens>` rows that name a documented copy exclude it (#1135). |
+| `critique.lens.proactivity.appraisal_question`, `critique.lens.proactivity.fork_prompt` | string | built in | As for any lens (below); the documented copy of the fork brief is `prompts/critique_proactivity_fork.md`. The wake sentence above is a second constant, appended to the wake note, not a replacement for the brief (#1135). |
 
 `critique.proactivity.enabled` and `critique.proactivity.fork_prompt` were moved under `critique.lens.proactivity` (#1126); any key still set under `critique.proactivity` fails startup naming the key that replaced it, and at reload logs a warning and keeps the previous fork prompts (the old `enabled` value is ignored).
 

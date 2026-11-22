@@ -395,8 +395,9 @@ of two lists:
 The sum orders the pool, with the decayed score breaking ties. An FTS hit
 the KNN didn't return gets its real cosine from its stored vector (one
 `vec_distance_cosine` point lookup), so it is ranked in the first list as
-well. A hit with no vector (a record not yet embedded) carries the 0.6 proxy
-and is ranked by FTS alone. A query with no lexical match ranks exactly as
+well. A hit with no vector (a record not yet embedded) carries the 0.6 proxy,
+earns its key from the FTS list alone, and ranks among the unmeasured only —
+behind every measured candidate — with the weak band. A query with no lexical match ranks exactly as
 the KNN alone would. If the FTS side fails, a warning is logged and the
 KNN rows are ranked alone. `memory.retrieval.candidates: vector` turns
 fusion off. The FTS-degraded path below is unchanged: it has no cosine to

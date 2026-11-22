@@ -3838,7 +3838,7 @@ class MemoryPlugin(CorvidaePlugin):
             (candidates best first: measured-first on the hybrid path -- every
             measured candidate ahead of every unmeasured one, fused order within
             each group (#856, #892) -- by score otherwise; degraded_to_fts). Each candidate: {id, summary,
-            created_at, similarity, score, band, z, age_seconds, source}
+            created_at, similarity, score, band, z, age_seconds, source, measured}
             (``z`` is the band_on: relative z-score, or None).
         """
         pool = await self._retrieve_pool(text, k, exclude)

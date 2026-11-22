@@ -1407,10 +1407,11 @@ database.
 Where the tree stands: memory spans every channel (#168), so the first
 bullet's gap is live today wherever the agent speaks in a room people you
 haven't allowed can read, and so is the poisoned-memory bullet; goals
-already cross channels (finding 10). The send tool exists (#234:
-`notify_other_channel`, which since #938 resolves any well-formed channel id),
-so that cost is live; the note and read tools do not (#235), so their costs are
-not. The identity
+already cross channels (finding 10). The note tool exists (#234:
+`notify_other_channel` queues a system notification on the target channel and,
+since #938, resolves any well-formed channel id), so the note and loop costs
+above are live; the plain send (PRD §3.5.9, #234, still open) and the read tool
+(#235) do not, so their costs are not. The identity
 and register layers are built (#316), but not their runtime overrides and
 separate locks.
 
