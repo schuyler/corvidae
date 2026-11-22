@@ -234,3 +234,46 @@ def test_a_nested_unknown_key_names_its_value_and_that_objects_keys():
     assert message is not None
     assert "mdoe = 'fast'" in message
     assert "accepted: mode" in message
+
+
+def test_a_required_key_nested_under_a_ref_names_its_type():
+    """A level spelled as $ref has no properties until it is resolved."""
+    schema = {
+        "type": "object",
+        "properties": {"opts": {"$ref": "#/$defs/Opts"}},
+        "required": ["opts"],
+        "$defs": {
+            "Opts": {
+                "type": "object",
+                "properties": {"mode": {"type": "string"}},
+                "required": ["mode"],
+            }
+        },
+    }
+
+    message = check_tool_args(schema, {"opts": {}})
+
+    assert message is not None
+    assert "mode is missing" in message
+    assert "accepted: string" in message
+
+
+def test_a_misspelled_required_key_is_reported_as_unknown_not_missing():
+    schema = {
+        "type": "object",
+        "properties": {
+            "opts": {
+                "type": "object",
+                "properties": {"mode": {"type": "string"}},
+                "required": ["mode"],
+                "additionalProperties": False,
+            }
+        },
+        "required": ["opts"],
+    }
+
+    message = check_tool_args(schema, {"opts": {"mdoe": "x"}})
+
+    assert message is not None
+    assert "mdoe = 'x'" in message
+    assert "accepted: mode" in message

@@ -28,7 +28,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from jsonschema import ValidationError, validate
+from jsonschema import Draft202012Validator, ValidationError
 from pydantic import create_model
 
 # Maximum characters in a tool result before truncation. Override via agent.max_tool_result_chars in agent.yaml.
@@ -331,9 +331,14 @@ def check_tool_args(schema: dict | None, args: dict) -> str | None:
     """
     if not schema:
         return None
-    try:
-        validate(instance=args, schema=schema)
-    except ValidationError as exc:
+    errors = sorted(
+        Draft202012Validator(schema).iter_errors(args),
+        # An unknown key is the more useful correction when both are wrong:
+        # it is usually a misspelling of a required one.
+        key=lambda e: 0 if e.validator == "additionalProperties" else 1,
+    )
+    if errors:
+        exc = errors[0]
         key, value = _rejected(exc, args)
         accepted = _accepted(schema, exc)
         what = (
@@ -387,6 +392,9 @@ def _accepted(schema: dict, exc: ValidationError) -> str:
             where = where.get("items", where)
         else:
             where = (where.get("properties") or {}).get(str(part), where)
+    # Resolve after the last step too: a level spelled as $ref has no
+    # properties of its own (#1170 round 5).
+    where = _resolve(where, schema)
     props = where.get("properties") or {} if isinstance(where, dict) else {}
 
     if exc.validator == "additionalProperties":
@@ -397,6 +405,8 @@ def _accepted(schema: dict, exc: ValidationError) -> str:
     if exc.validator == "required":
         name = exc.message.split("'")[1] if "'" in exc.message else ""
         node = _resolve(props.get(name, {}), schema)
+        if not node:
+            node = where
     else:
         node = root
         for part in exc.absolute_path:
