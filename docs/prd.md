@@ -243,8 +243,8 @@ one is a bug even if its tests pass.
     whatever agency plugins are loaded. Agency is a turn started on time or
     on the agent's own initiative rather than as a continuation of an
     exchange: reminders and the heartbeat are agency;
-    provenance objections and task results continue an exchange and are
-    not, and neither is a turn a note wakes on another channel (§3.5.10):
+    provenance objections, task results and the revision of a held-back
+    draft (§3.7 Output gate 7) continue an exchange and are not, and neither is a turn a note wakes on another channel (§3.5.10):
     a continuation can cross channels, and a chain of continuations is
     agency only if the exchange that started it was. Stylistic critique
     objections start no turn at all; only a lens that declares it wakes
@@ -1928,7 +1928,7 @@ record that holds the reasoning.
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
 | Every heartbeat beat reviews extant goals and any other information that might be relevant to taking action; recent memory is no longer a required input, since the newest memories across every channel are mostly unrelated to what the beat is deciding | §3.7 Heartbeat; owner, 2026-11-18 |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
-| The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
+| The agent may decline any turn when it has nothing to add (Grice's maxims, by register); apart from the pre-send check (§3.7 Output gate 7), gates still never withhold a direct reply by default | #215 |
 | Reminders and jobs the agent sets act on the calling channel only, with origin `reminder`; cross-channel reach is §3.5.9's alone, so the scheduler is not a second, unaudited path between channels or around the critique of reminders. Supersedes "a reminder may target any channel" | §3.9.7; #814; owner, 2026-11-17 |
 | A decline is signalled by a plugin-chosen mechanism (token, tool or both) and enforced by a veto that acts on the agent's signal, not a gate; a signal followed by sent text is not a decline | #791, #795, #797, #799, #806 |
 | Model endpoints may be remote; a profile's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each profile sends | #217 |
