@@ -1460,6 +1460,16 @@ class CritiquePlugin(CorvidaePlugin):
             return
         # The provenance check: on when enabled and stage 2 listed claims.
         claims = (stage2 or {}).get("past_claims") or []
+        if not claims:
+            # Say so rather than skipping silently: "why did provenance not
+            # run" is otherwise unanswerable from the log (#377).
+            logger.debug(
+                "critique provenance skipped for trace %s on %s: %s",
+                trace_id, channel.id,
+                "stage 2 listed no past claims" if stage2 is not None
+                else "stage 2 produced no vector",
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
         if claims and resolve_tunable(
             channel, self.config, "critique.provenance.enabled", PROVENANCE_ENABLED_DEFAULT
         ):
@@ -1483,6 +1493,16 @@ class CritiquePlugin(CorvidaePlugin):
             "stage 2 produced no vector" if stage2 is None
             else "stage 2 has no usable lenses field",
             warn=stage2 is None,
+        )
+        # Say what happened on the exchange's own line: a "none" used to be
+        # countable only through exchange_log, never in the log an operator
+        # reads when asking why a lens did not run (#377).
+        logger.info(
+            "critique lens selection for trace %s on %s: %s",
+            trace_id, channel.id,
+            f"lens={lens}" if lens is not None
+            else f"none (offered: {', '.join(offered) or 'nothing'}; basis: {basis})",
+            extra={"channel": channel.id, "trace_id": trace_id},
         )
         # Record the choice even when nothing runs, so a "none" is countable.
         selection: dict = {"sampled": sampled, "basis": basis}

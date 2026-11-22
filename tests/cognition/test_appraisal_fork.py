@@ -64,6 +64,9 @@ async def test_fork_used_when_exchange_is_in_window(tmp_path):
     (FakeForkAgent(set(), text=FORK_JSON), (41, 42), 41, "forks are not enabled for appraisal"),
     (None, (41, 42), 41, "forks are not enabled for appraisal"),  # no agent plugin
     (FakeForkAgent({"appraisal"}, error=ForkRefused("tool call")), (41, 42), 41, "ForkRefused"),
+    # A plain backend error, not a fork refusal: the HTTP 400 in #360 (#377).
+    (FakeForkAgent({"appraisal"}, error=RuntimeError("400 model is not loaded")),
+     (41, 42), 41, "RuntimeError"),
     (FakeForkAgent({"appraisal"}, text=""), (41, 42), 41, "ValueError"),  # empty reply
     (FakeForkAgent({"appraisal"}, text="no json here"), (41, 42), 41, "ValueError"),
     (FakeForkAgent({"appraisal"}, text=json.dumps({"valence": 0.5})), (41, 42), 41, "KeyError"),

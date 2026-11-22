@@ -86,6 +86,9 @@ def _warnings(caplog) -> list[str]:
     (FakeForkAgent(set(), text=FORK_VERDICT), (7, 8), 7, "forks are not enabled for critique"),
     (FakeForkAgent({"critique"}, text=""), (7, 8), 7, "ValueError"),  # empty reply
     (FakeForkAgent({"critique"}, text="I think it's fine."), (7, 8), 7, "ValueError"),
+    # A plain backend error, not a fork refusal: the HTTP 400 in #360 (#377).
+    (FakeForkAgent({"critique"}, error=RuntimeError("400 model is not loaded")),
+     (7, 8), 7, "RuntimeError"),
 ])
 async def test_fork_miss_skips(tmp_path, caplog, agent, window_rowids, rowid, reason):
     """#320: a miss makes no background-role call, records no outcome, and
