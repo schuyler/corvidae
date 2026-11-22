@@ -9,7 +9,7 @@ import threading
 
 import click
 
-from corvidae.channel import ChannelRegistry
+from corvidae.channel import Channel, ChannelRegistry
 from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.outbound import (
     OutboundMessage,
@@ -46,6 +46,9 @@ class CLIPlugin(TransportPlugin):
         self._interactive = False
         # Lines from stdin, filled by a daemon reader thread (#759).
         self._lines: asyncio.Queue[str] | None = None
+        # The channel stdin is attached to, when the CLI is attached to one
+        # (#1059). None means the default cli:local.
+        self._attached: Channel | None = None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -102,17 +105,38 @@ class CLIPlugin(TransportPlugin):
 
         threading.Thread(target=_read, name="cli-stdin-reader", daemon=True).start()
 
+    def attach(self, channel: Channel) -> None:
+        """Attach stdin to ``channel`` and claim it for display (#1059).
+
+        The CLI then reads for that channel instead of ``cli:local`` and writes
+        every outbound event for it, so a person at the terminal sees the core's
+        conversation. The channel keeps its own id; attaching changes nothing on
+        it.
+        """
+        self._attached = channel
+
+    def owns(self, channel: Channel) -> bool:
+        """Also true for the attached channel (#1059).
+
+        Guard: without attach this is exactly the transport match, so the CLI
+        never takes an outbound event it did not before.
+        """
+        if self._attached is not None and channel is self._attached:
+            return True
+        return super().owns(channel)
+
     async def _read_loop(self) -> None:
         """Read lines from stdin and dispatch as on_message events.
 
-        Always routes to the cli:local channel. CLI is single-user/single-scope
-        by design — only cli:local receives stdin input.
+        Routes to the attached channel when one is set (#1059), otherwise to
+        cli:local. CLI is single-user/single-scope by design — only one channel
+        receives stdin input.
         """
         # on_start starts the reader; a direct caller (a test driving the
         # loop) gets it here, so the queue is never read from unstarted.
         if self._lines is None:
             self._start_reader()
-        channel = self._registry.get_or_create("cli", "local")
+        channel = self._attached or self._registry.get_or_create("cli", "local")
         self._interactive = sys.stdin.isatty()
         if self._interactive:
             print("Agent ready. Type a message, or Ctrl-D to quit.\n")

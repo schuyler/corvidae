@@ -3603,8 +3603,12 @@ with their own ownership check.
 
 ### CLI (`channels/cli.py`)
 
-`CLIPlugin` — stdin/stdout transport. Routes to `cli:local` channel.
-Reads stdin line-by-line in a background task. Prints responses to
+`CLIPlugin` — stdin/stdout transport. Routes to the `cli:local` channel,
+or to another channel when `attach(ch)` was called (#1059): stdin then reads
+for `ch` and the plugin also owns `ch` for display, so a person at the terminal
+sees that channel's conversation. Attaching changes nothing on the channel —
+not its id, not its transport — and a CLI that never attaches behaves exactly
+as before. Reads stdin line-by-line in a background task. Prints responses to
 stdout with latency timing.
 
 The blocking read runs in a **daemon** thread that hands each line to an
