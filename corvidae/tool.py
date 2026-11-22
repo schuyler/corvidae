@@ -28,6 +28,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from jsonschema import ValidationError, validate
 from pydantic import create_model
 
 # Maximum characters in a tool result before truncation. Override via agent.max_tool_result_chars in agent.yaml.
@@ -290,6 +291,48 @@ class ToolRegistry:
 
     def __len__(self) -> int:
         return len(self._tools)
+
+
+def check_tool_args(schema: dict | None, args: dict) -> str | None:
+    """Return a correction message when ``args`` do not fit ``schema``, else None.
+
+    PRD §3.5.1: a tool call's arguments are validated against the generated
+    schema before the call. The message names the tool, the key, the rejected
+    value and what is accepted, so the model can correct it in one turn
+    (AGENTS.md, "On rejected input").
+
+    The value is the caller's own, from this same turn, and goes back to the
+    caller; it is not logged (see #1161's security note).
+    """
+    if not schema:
+        return None
+    try:
+        validate(instance=args, schema=schema)
+    except ValidationError as exc:
+        path = ".".join(str(p) for p in exc.absolute_path)
+        key = path or "(whole arguments)"
+        accepted = _accepted(schema, path)
+        return (
+            f"Error: tool call rejected — {key} = {exc.instance!r} is not valid "
+            f"({exc.message}); accepted: {accepted}. Correct the arguments and "
+            f"call again"
+        )
+    return None
+
+
+def _accepted(schema: dict, path: str) -> str:
+    """A short description of what the named property accepts."""
+    node: object = schema
+    for part in path.split(".") if path else []:
+        if not isinstance(node, dict):
+            break
+        props = node.get("properties") or {}
+        node = props.get(part, node)
+    if isinstance(node, dict) and "type" in node:
+        return str(node["type"])
+    if isinstance(node, dict) and "enum" in node:
+        return "one of " + ", ".join(repr(v) for v in node["enum"])
+    return "the schema's declared shape"
 
 
 async def execute_tool_call(
