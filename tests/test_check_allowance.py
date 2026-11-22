@@ -533,7 +533,8 @@ class TestTransportDefaults:
         "module, name",
         [("corvidae.channels.irc", "IRCPlugin"),
          ("corvidae.channels.signal", "SignalPlugin"),
-         ("corvidae.channels.discord", "DiscordPlugin")],
+         ("corvidae.channels.discord", "DiscordPlugin"),
+         ("corvidae.channels.zulip", "ZulipPlugin")],
     )
     def test_messaging_transports(self, module, name):
         cls = getattr(pytest.importorskip(module), name)
