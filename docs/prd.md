@@ -1022,6 +1022,19 @@ Per transport:
     (principle 1); without it, a turn speaks only on its own channel and
     learns of other channels only through memory.
 
+12. A plugin can refuse a tool call before it runs, deciding from the
+    calling channel, the tool and the call's validated arguments. Any
+    refusal wins. A refused call does not run, and its result to the
+    model is the refusal, naming the tool, the reason and what to do
+    next, so the turn continues (§3.1.9). Every dispatched call is
+    offered, a subagent's included. An implementation that raises is
+    logged at warning and counts as no refusal; a plugin that must refuse
+    when it fails catches its own failure and refuses. A check that never
+    returns cannot wedge a channel (§3.1.8). A refusal bounds what the
+    calling channel's participants can make the agent do and is never a
+    wall between channels (principle 14; §3.5.9). With no such plugin
+    loaded, no call is refused beyond the tool sets of item 2.
+
 ### 3.6 LLM client
 
 1. OpenAI-compatible chat completions over aiohttp. The client applies a
@@ -1943,7 +1956,7 @@ record that holds the reasoning.
 | No runtime plugin loading; changing the plugin set is a restart, which the agent may request (rate-limited) | #28; principle 15 |
 | A container image exists, built when a second deployment needed one; it installs every extra by default (`EXTRAS` narrows it, empty is the bare kernel), the daemon runs non-root, and the image is not a tool sandbox | §3.11.12; #37; #532; operator, 2026-11-10 |
 | Topic structure is the `topic` subject's job, not a retrieval dimension | §3.7 Memory 7 |
-| Per-turn tool filtering and per-turn system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). A per-call tool veto and per-channel tool sets, fixed per conversation, are tracked with the trust plugin (#138); a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |
+| Per-turn tool filtering and per-turn system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). Per-channel tool sets, fixed per conversation, landed with #149, and a per-call tool veto is its own decision (row below); a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |
 | The kernel owns the clock; idle keeps firing through quiet, and no plugin needs another's queues to learn of it; idle reaches plugins by push | #167; #165 |
 | Upkeep runs on time regardless of agency plugins; the scheduler is agency and optional | #167 |
 | Transports deliver every emission on their own channels regardless of origin | #167 |
@@ -1957,5 +1970,6 @@ record that holds the reasoning.
 | Identity is agent-wide and heads every prompt written in the agent's voice; channel register is appended after it and never replaces it; the subagent's prompt is persona-neutral (§3.5.7) | operator directive, 2026-11-01; #380; #388 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
+| A plugin can refuse a tool call before it runs: any refusal wins, the refusal is the call's result so the turn continues, and an implementation that raises counts as no refusal; admitted ahead of the trust plugin (#138), with the pre-tool-use check (#1075) as its first consumer | §3.5.12; §3.1.11; #148 (#1076 closed as its duplicate); operator, 2026-11-22 |
 | A reply may be checked before it is sent, ending in send, held back for a revision, or withheld; a revision is not held back again, a present limit and not a principle; a held-back draft is not judged after the fact, its revision is; the check delays a reply only within its channel's latency bound, counted from the first draft, and the reply sends unchecked at the bound; a channel with no bound keeps after-the-fact critique only | principle 3; §3.7 Critique 1 and 3, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
 | Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; the channel queue never coalesces notification items | §3.1.19; #398, #296; owner, 2026-11-03 |
