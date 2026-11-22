@@ -95,9 +95,15 @@ def test_parse_out_of_range_month():
         parse_cron("* * * 13 *")
 
 
+def test_parse_sunday_as_seven():
+    """7 is Sunday, as in every other cron (#813)."""
+    assert parse_cron("0 9 * * 7")[4] == {0}
+    assert parse_cron("0 9 * * 0")[4] == {0}
+
+
 def test_parse_out_of_range_dow():
     with pytest.raises(CronParseError, match="out of range"):
-        parse_cron("* * * * 7")
+        parse_cron("* * * * 8")
 
 
 def test_parse_non_numeric():
@@ -285,3 +291,25 @@ class TestDST:
         # is on the following day (2026-03-09).
         assert result.day == 9, f"expected day 9, got {result.day}"
         assert result.hour == 2, f"expected hour 2, got {result.hour}"
+
+
+def test_fall_back_searches_from_the_real_time_not_an_hour_earlier():
+    """#813: the start of the search must be after `after` in UTC, folds included."""
+    tz = ZoneInfo("America/New_York")
+    utc = ZoneInfo("UTC")
+    # 01:10 EST, the second 01:10 (fold=1), is 06:10Z.
+    after = datetime(2026, 11, 1, 1, 10, tzinfo=tz, fold=1)
+
+    for expr in ("* * * * *", "*/15 * * * *", "30 1 * * *"):
+        fire = next_fire(parse_cron(expr), after, tz)
+        assert fire.astimezone(utc) > after.astimezone(utc), expr
+
+
+def test_spring_forward_skips_the_hour_that_does_not_exist():
+    """#813: 02:30 does not exist that day, so the job waits a day."""
+    tz = ZoneInfo("America/New_York")
+    after = datetime(2026, 3, 8, 1, 0, tzinfo=tz)
+
+    fire = next_fire(parse_cron("30 2 * * *"), after, tz)
+
+    assert (fire.year, fire.month, fire.day, fire.hour, fire.minute) == (2026, 3, 9, 2, 30)

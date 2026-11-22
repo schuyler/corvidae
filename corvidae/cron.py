@@ -96,7 +96,12 @@ def parse_cron(expr: str) -> tuple[set[int], set[int], set[int], set[int], set[i
     sets = []
     for i, field in enumerate(fields):
         lo, hi = _FIELD_BOUNDS[i]
-        sets.append(_parse_field(field, lo, hi, _FIELD_NAMES[i]))
+        # Day-of-week takes 0-7 as cron does everywhere: 7 is Sunday, so it
+        # folds to 0 (#813).
+        values = _parse_field(field, lo, 7 if i == 4 else hi, _FIELD_NAMES[i])
+        if i == 4:
+            values = {0 if v == 7 else v for v in values}
+        sets.append(values)
 
     return tuple(sets)  # type: ignore[return-value]
 
@@ -112,15 +117,24 @@ def next_fire(
     datetime in `tz`.
 
     Stepping is done in UTC to avoid the `fold` reset that wall-clock
-    `timedelta` arithmetic causes during DST transitions. Each candidate
+    `timedelta` arithmetic causes during DST transitions.
+
+    A wall-clock time that does not exist is skipped, not moved: `30 2 * * *`
+    on a spring-forward day returns the next day's 02:30, because 02:30 is not a
+    real local time that day. A job set for that hour therefore does not run
+    that day, which is the behaviour to state when someone reports it.
+
+    Each candidate
     is converted back to `tz` for field checks.
 
     Search bounded to 4 years ahead (covers Feb 29 edge cases).
     """
     minutes, hours, doms, months, dows = cron
 
-    # Start from the next minute, in UTC.
-    t_utc = (after + timedelta(minutes=1)).replace(second=0, microsecond=0).astimezone(UTC)
+    # Start from the next minute, in UTC. The addition happens after the
+    # conversion: adding wall-clock minutes first resets `fold`, so across a
+    # fall-back the search started an hour in the past (#813).
+    t_utc = (after.astimezone(UTC) + timedelta(minutes=1)).replace(second=0, microsecond=0)
 
     # Bounded search: 4 years * 366 days * 24 hours * 60 minutes ≈ 2.1M iterations
     # In practice we skip whole days/hours that don't match, so this is fast.
