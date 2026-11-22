@@ -573,7 +573,10 @@ is restored on exit. Keys are the channel id (turn, forks, appraisal,
 critique, the consolidation fork at compaction, the `fork` tool),
 `subagent:<task_id>`, and `<plugin>:<process tag>:<UID>` (one id per run, so a
 scheduler can tell runs apart; the work's trace id when it has one, a minted
-id when it doesn't — catch-up consolidation is `memory:consolidation:<id>`, #985).
+id when it doesn't — catch-up consolidation is
+`memory:consolidation:<channel id>:<id>`, #985, #1016). The channel is in
+the key rather than assumed unique per trace: two runs sharing a trace id would
+otherwise share a queue, and nothing in the code makes that impossible.
 Five sites open a scope: the channel turn in
 `_process_queue_item`, `Agent.fork`, the subagent `work()`, the `fork` tool's
 `work()` and `MemoryPlugin._consolidate_range`; everything else inherits.

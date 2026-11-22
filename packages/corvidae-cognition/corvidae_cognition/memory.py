@@ -2802,7 +2802,10 @@ class MemoryPlugin(CorvidaePlugin):
         # channel as before (#363).
         _trace = get_attribution().get("trace_id")
         _run_id = _trace if _trace else uuid.uuid4().hex
-        lease = lease_scope(f"memory:consolidation:{_run_id}")
+        # The channel is in the key, not assumed unique per trace: two runs that
+        # shared a trace_id would otherwise share a queue, and a shared trace is
+        # one refactor away even though no path produces one today (#1016).
+        lease = lease_scope(f"memory:consolidation:{channel_id}:{_run_id}")
         lease.__enter__()
         # The message-id range and what is already stored, for the failure log.
         range_desc = f"up to {range_end}"

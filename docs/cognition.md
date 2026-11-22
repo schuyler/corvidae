@@ -338,7 +338,7 @@ on the start and timing records, so `trace_id` is what ties a line to the pair
 no stage.
 `_consolidate_range` also opens a lease scope (#363, #985): its catch-up views
 and every rubric call (after a fork record too) run under a per-run key,
-`memory:consolidation:<id>` (the run's trace id when attribution holds one,
+`memory:consolidation:<channel id>:<id>` (the run's trace id when attribution holds one,
 otherwise an id minted once per run), so concurrent runs are distinct queues
 in the lease table, snapshot and `lease.*` metrics, while the consolidation
 forks run under the channel id. The key lands in `usage_log.lease_key`.
