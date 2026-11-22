@@ -437,7 +437,6 @@ class _ChannelOnly:
         return "channel-only"
 
 
-@pytest.mark.filterwarnings("ignore:Argument.*cannot be found:UserWarning")
 async def test_missing_argument_leaves_no_unawaited_coroutine() -> None:
     """#1116: a broadcast that omits an argument raises with no coroutine built.
 
