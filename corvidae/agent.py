@@ -333,7 +333,7 @@ class Agent(CorvidaePlugin):
         # Channel id -> late-check rows waiting for the channel's next turn
         # with no call outstanding (#1162). In memory only; see _drain_late_checks.
         self._late_checks: dict[str, list[str]] = {}
-        # Set once the no-clock fallback in _check_clock has warned.
+        # Set once the no-clock fallback in _check_clock has logged.
         self._warned_no_clock = False
         self._registry: ChannelRegistry | None = None
         self._max_tool_result_chars: int = 100_000
@@ -1156,14 +1156,16 @@ class Agent(CorvidaePlugin):
 
         shortcut: hand-built plugin managers (tests) register no clock; they
         get a real Clock, whose timers Clock.close never reaches. Runtime
-        always registers one.
+        always registers one, so this is logged at debug, once, rather than
+        warning on every test that builds its own manager; make the clock a
+        strict dependency if a non-Runtime entry point appears.
         """
         clock = self.pm.get_plugin("clock")
         if isinstance(clock, Clock):
             return clock
         if not self._warned_no_clock:
             self._warned_no_clock = True
-            logger.warning(
+            logger.debug(
                 "no kernel clock registered (name 'clock'); veto checks run on a "
                 "private real-time clock that shutdown does not stop. Runtime "
                 "registers one",

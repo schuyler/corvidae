@@ -162,9 +162,9 @@ class TestFinalUnderAllowance:
         _script(plugin, _make_text_response("the reply"))
 
         drained = await _start_turn(plugin, channel)
-        await gate.started.wait()
+        await asyncio.wait_for(gate.started.wait(), 1)
         await clock.advance(3)
-        await asyncio.wait_for(drained, 5)
+        await asyncio.wait_for(drained, 1)
 
         assert sent_texts(plugin.pm, OutboundMessage) == []
         rows = await _rows(db, channel.id)
@@ -180,13 +180,15 @@ class TestFinalUnderAllowance:
         _script(plugin, _make_text_response("the reply"))
 
         drained = await _start_turn(plugin, channel)
-        await gate.started.wait()
+        await asyncio.wait_for(gate.started.wait(), 1)
         await clock.advance(DEFAULT_MINIMUM - 0.5)
-        assert not drained.done()
+        # Not before: given real time to finish, the turn still waits.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(drained), 0.2)
         assert sent_texts(plugin.pm, OutboundMessage) == []
 
         await clock.advance(0.5)
-        await asyncio.wait_for(drained, 5)
+        await asyncio.wait_for(drained, 1)
         assert sent_texts(plugin.pm, OutboundMessage) == ["the reply"]
         rows = await _rows(db, channel.id)
         assert [t for m, t in rows if m.get("role") == "assistant"] == ["message"]
@@ -204,9 +206,9 @@ class TestFinalUnderAllowance:
         _script(plugin, _make_text_response("the reply"))
 
         drained = await _start_turn(plugin, channel)
-        await gate.started.wait()
+        await asyncio.wait_for(gate.started.wait(), 1)
         await clock.advance(DEFAULT_MINIMUM)
-        await asyncio.wait_for(drained, 5)
+        await asyncio.wait_for(drained, 1)
 
         assert metrics.named(CHECK_MISSED_METRIC) == [
             (CHECK_MISSED_METRIC, 1, {
@@ -237,7 +239,7 @@ class TestFinalUnderAllowance:
         _script(plugin, _make_text_response("the reply"))
 
         drained = await _start_turn(plugin, channel)
-        await asyncio.wait_for(drained, 5)
+        await asyncio.wait_for(drained, 1)
 
         assert seen == [[True]]
         assert sent_texts(plugin.pm, OutboundMessage) == []
@@ -251,7 +253,7 @@ class TestFinalUnderAllowance:
 
         with caplog.at_level(logging.WARNING):
             drained = await _start_turn(plugin, channel)
-            await asyncio.wait_for(drained, 5)
+            await asyncio.wait_for(drained, 1)
 
         assert sent_texts(plugin.pm, OutboundMessage) == []
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -271,9 +273,9 @@ class TestLateRefusal:
         _script(plugin, _make_text_response("the reply"), _make_text_response("second reply"))
 
         drained = await _start_turn(plugin, channel)
-        await gate.started.wait()
+        await asyncio.wait_for(gate.started.wait(), 1)
         await clock.advance(DEFAULT_MINIMUM)
-        await asyncio.wait_for(drained, 5)
+        await asyncio.wait_for(drained, 1)
         assert sent_texts(plugin.pm, OutboundMessage) == ["the reply"]
 
         # The check returns late: no turn runs, nothing is queued, and the
@@ -288,7 +290,7 @@ class TestLateRefusal:
 
         # The next turn carries it, after that turn's incoming message.
         drained = await _start_turn(plugin, channel, text="next message")
-        await asyncio.wait_for(drained, 5)
+        await asyncio.wait_for(drained, 1)
         late = _late_rows(channel.conversation.messages)
         assert len(late) == 1
         assert "the date in that reply is wrong" in late[0]["content"]
@@ -314,20 +316,22 @@ class TestLateRefusal:
         _script(plugin, _make_text_response("the reply"), _make_text_response("second reply"))
 
         drained = await _start_turn(plugin, channel)
-        await gate.started.wait()
+        await asyncio.wait_for(gate.started.wait(), 1)
         await clock.advance(DEFAULT_MINIMUM)
-        await asyncio.wait_for(drained, 5)
+        await asyncio.wait_for(drained, 1)
         await clock.advance(60)
         drained = await _start_turn(plugin, channel, text="next message")
-        await asyncio.wait_for(drained, 5)
+        await asyncio.wait_for(drained, 1)
 
         assert _late_rows(channel.conversation.messages) == []
         assert len(metrics.named(CHECK_MISSED_METRIC)) == 1
 
-    async def test_late_row_never_lands_between_a_call_and_its_result(self, env):
+    @pytest.mark.parametrize("cancelled", [False, True], ids=["pending", "pending-cleared"])
+    async def test_late_row_never_lands_between_a_call_and_its_result(self, env, cancelled):
         """A late refusal that returns while a tool runs waits out the tool:
-        an interleaved user turn does not deliver it, even with the pending
-        set cleared (ACP's cancel_prompt); the turn after the result does."""
+        an interleaved user turn does not deliver it, whether the call is
+        still pending or the pending set was cleared (ACP's cancel_prompt);
+        the turn after the result does."""
         plugin, channel, db, clock, metrics = env
         gate = ClockGate(clock, [(60, Refusal("late finding"))])
         plugin.pm.register(gate, name="clock_gate")
@@ -349,20 +353,21 @@ class TestLateRefusal:
 
         # Turn 1: the reply goes out; the check misses.
         drained = await _start_turn(plugin, channel)
-        await gate.started.wait()
+        await asyncio.wait_for(gate.started.wait(), 1)
         await clock.advance(DEFAULT_MINIMUM)
-        await asyncio.wait_for(drained, 5)
+        await asyncio.wait_for(drained, 1)
 
         # Turn 2 dispatches the slow tool; the check returns late meanwhile.
         drained = await _start_turn(plugin, channel, text="use the tool")
-        await asyncio.wait_for(drained, 5)
+        await asyncio.wait_for(drained, 1)
         await clock.advance(60)
         assert gate.finished == 1
 
-        # Turn 3 interleaves while the call is outstanding, pending set cleared.
-        channel.pending_tool_call_ids.clear()
+        # Turn 3 interleaves while the call is outstanding.
+        if cancelled:
+            channel.pending_tool_call_ids.clear()
         drained = await _start_turn(plugin, channel, text="are you there")
-        await asyncio.wait_for(drained, 5)
+        await asyncio.wait_for(drained, 1)
         assert _late_rows(channel.conversation.messages) == []
 
         # The result arrives; its turn delivers the late row after it.
@@ -375,8 +380,7 @@ class TestLateRefusal:
         result_idx = next(i for i, m in enumerate(messages) if m.get("tool_call_id") == "call-1")
         call_idx = next(i for i, m in enumerate(messages) if m.get("tool_calls"))
         late_idx = messages.index(late[0])
-        assert not (call_idx < late_idx < result_idx)
-        assert late_idx > result_idx
+        assert call_idx < result_idx < late_idx
 
 
 # ---------------------------------------------------------------------------
