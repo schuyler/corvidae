@@ -61,9 +61,9 @@ from __future__ import annotations
 
 import collections
 import json
-import re
 import logging
 import random
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from inspect import isawaitable
@@ -74,8 +74,8 @@ from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, hookimpl, hookspec
 from corvidae.persistence import decode_message_row
-from corvidae.task import Task
 from corvidae.prompts import resolve_prompt
+from corvidae.task import Task
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.probe import ReadOnlyProbe
 from corvidae_cognition.silence import is_decline
@@ -124,8 +124,8 @@ RETENTION_WAKE_NOTE = (
     "context. For each [retention] finding, file it before you finish: read "
     "the named file under the knowledge base root «{root}», and append the "
     "content as a new section only if the file does not already hold it - "
-    "never rewrite the file. For claims the provenance check found that no "
-    "record supports, reply in the channel only if your earlier reply could "
+    "never rewrite the file. For a claim the critique found no record behind, "
+    "reply in the channel only if your earlier reply could "
     "lead the other party to take an incorrect action; then correct it "
     "briefly. Otherwise send nothing: reply with exactly {marker} and "
     "nothing reaches the channel."
@@ -135,11 +135,15 @@ RETENTION_WAKE_NOTE = (
 # CONTEXT entry: the funnel frames CONTEXT as data, and this is an
 # instruction written by us.
 PROVENANCE_NOTE = (
-    "Background self-check: the provenance check found claims in your last "
-    "reply that no record supports (see the critique context). By default, "
-    f"send nothing: reply with exactly {NO_REPLY_MARKER} and nothing reaches "
-    "the channel. Reply in the channel only if your earlier reply could lead "
-    "the other party to take an incorrect action; then correct it briefly."
+    # Neutral about which lens woke the turn: the funnel keeps one stub per
+    # drain, so it cannot know (#1134). Naming the provenance check told a
+    # proactivity-only wake that a finding existed when none did.
+    "Background self-check: your critique left findings in the critique "
+    "context. If one says a claim in your last reply has no record behind it, "
+    "by default send nothing: reply with exactly "
+    f"{NO_REPLY_MARKER} and nothing reaches the channel. Reply in the channel "
+    "only if your earlier reply could lead the other party to take an "
+    "incorrect action; then correct it briefly."
 )
 
 # Appended to whichever wake note applies while the proactivity lens is

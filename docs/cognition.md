@@ -1890,11 +1890,9 @@ other self-check lenses may also be in the critique context: reply in the
 channel about one only if your earlier reply could lead the other party to
 take an incorrect action; otherwise send nothing, as above."), so the
 silence default holds for every waking lens however the stubs coalesce. A
-note's opening can therefore name a cause that didn't produce this wake
-(shortcut: the provenance note's first sentence misstates the cause when
-only proactivity or a plugin lens woke, which under the default config is
-the common case for proactivity; rewrite both notes neutrally when that
-confusion shows up in the harness).
+funnel keeps one stub per drain, so a note cannot say which lens woke the
+turn: both notes open on "your critique left findings in the critique
+context" and describe each remedy conditionally (#1134).
 On a critique-origin turn (a correction, or a turn a note from one woke)
 nothing wakes: its provenance, proactivity, retention and other waking findings all wait
 for the channel's next turn, so a correction never starts another (PRD

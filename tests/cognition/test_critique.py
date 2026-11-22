@@ -1709,3 +1709,13 @@ class TestCorrectionFindingsWait:
             assert any(e.startswith("[retention]") for e in entries), entries
         finally:
             await _teardown(env)
+
+
+def test_the_wake_stub_does_not_name_a_cause_it_cannot_know():
+    """#1134: one stub per drain, so it must not claim provenance found anything."""
+    from corvidae_cognition.critique import PROVENANCE_NOTE, RETENTION_WAKE_NOTE
+
+    for note in (PROVENANCE_NOTE, RETENTION_WAKE_NOTE):
+        opening = note.split(".")[0].lower()
+        assert "provenance check found" not in opening
+        assert "left findings in the critique context" in note
