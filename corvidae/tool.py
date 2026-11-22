@@ -177,7 +177,14 @@ def tool_to_schema(fn: Callable) -> dict:
         if param_name.startswith("_"):
             continue
         annotation = param.annotation if param.annotation is not inspect.Parameter.empty else str
-        fields[param_name] = (annotation, ...)
+        # A parameter with a default is optional; marking it required (as this
+        # did) told the model to send values it did not need, and now that
+        # arguments are validated (#1161) it also refused calls the tool would
+        # have accepted.
+        if param.default is inspect.Parameter.empty:
+            fields[param_name] = (annotation, ...)
+        else:
+            fields[param_name] = (annotation, param.default)
 
     model = create_model(fn.__name__, **fields)
     schema = model.model_json_schema()

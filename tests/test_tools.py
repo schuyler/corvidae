@@ -150,7 +150,8 @@ class TestReadFileRange:
         FileToolsPlugin(None).register_tools(tool_registry=registry)
         tool = next(t for t in registry if isinstance(t, Tool) and t.name == "read_file")
         props = tool.schema["function"]["parameters"]["properties"]
-        nullable_int = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+        # A parameter with a default is optional, so the schema says so (#1161).
+        nullable_int = {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": None}
         assert props["offset"] == nullable_int
         assert props["length"] == nullable_int
 
@@ -260,7 +261,8 @@ class TestReadFileLines:
         FileToolsPlugin(None).register_tools(tool_registry=registry)
         tool = next(t for t in registry if isinstance(t, Tool) and t.name == "read_file")
         props = tool.schema["function"]["parameters"]["properties"]
-        nullable_int = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+        # A parameter with a default is optional, so the schema says so (#1161).
+        nullable_int = {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": None}
         assert props["start_line"] == props["end_line"] == nullable_int
 
     async def test_ranges_are_one_based_inclusive_and_name_lines_total_and_next(self, tmp_path):
