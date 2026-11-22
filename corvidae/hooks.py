@@ -880,7 +880,10 @@ class TransportPlugin(CorvidaePlugin):
         """The broadcast filter: True if this transport delivers to ``channel``.
 
         Override to narrow it (WebPlugin also requires that it is
-        enabled); never to widen it past ``transport``.
+        enabled). Widening past ``transport`` is reserved for one case, the
+        CLI's ``attach`` (#1059), which refuses a channel another transport
+        already owns; anything else that widens makes the extras reading this
+        filter see two owners of one channel.
         """
         return channel.matches_transport(self.transport)
 

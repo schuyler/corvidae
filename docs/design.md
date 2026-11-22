@@ -3603,8 +3603,23 @@ with their own ownership check.
 
 ### CLI (`channels/cli.py`)
 
-`CLIPlugin` — stdin/stdout transport. Routes to `cli:local` channel.
-Reads stdin line-by-line in a background task. Prints responses to
+`CLIPlugin` — stdin/stdout transport. Routes to the `cli:local` channel,
+or to another channel when `attach(ch)` was called (#1059): stdin then reads
+for `ch` (the channel is resolved when a line is dispatched, so an attach applies
+from the next dispatch on: a line the loop has not yet dispatched, even one
+already queued, goes to `ch`, while a line already in flight keeps the channel
+it went out on) and the plugin also owns `ch` for display, so a person at the
+terminal sees that channel's conversation. `detach()` gives the terminal back,
+and `on_stop` clears the attachment so display does not outlive the transport.
+Attaching leaves the channel object untouched — not its id, not its transport —
+but it does change what the daemon does with that channel: stdin lines arrive on
+it as `sender="user"`, and its outbound events now also reach stdout, which is
+journald or the log file under `corvidae serve`, not just a terminal. For that
+reason attaching is refused when another transport already owns the channel: two
+owners make the extras that read `owns` see the wrong one, and the terminal
+would print a chat channel's thinking and tool-status events, which that
+channel's own transport deliberately does not implement. A CLI that never
+attaches behaves exactly as before. Reads stdin line-by-line in a background task. Prints responses to
 stdout with latency timing.
 
 The blocking read runs in a **daemon** thread that hands each line to an

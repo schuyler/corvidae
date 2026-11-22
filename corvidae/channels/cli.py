@@ -9,7 +9,7 @@ import threading
 
 import click
 
-from corvidae.channel import ChannelRegistry
+from corvidae.channel import Channel, ChannelRegistry
 from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.outbound import (
     OutboundMessage,
@@ -46,6 +46,9 @@ class CLIPlugin(TransportPlugin):
         self._interactive = False
         # Lines from stdin, filled by a daemon reader thread (#759).
         self._lines: asyncio.Queue[str] | None = None
+        # The channel stdin is attached to, when the CLI is attached to one
+        # (#1059). None means the default cli:local.
+        self._attached: Channel | None = None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -102,17 +105,61 @@ class CLIPlugin(TransportPlugin):
 
         threading.Thread(target=_read, name="cli-stdin-reader", daemon=True).start()
 
+    def attach(self, channel: Channel) -> None:
+        """Attach stdin to ``channel`` and claim it for display (#1059).
+
+        The CLI then reads for that channel instead of ``cli:local`` and writes
+        every outbound event for it, so a person at the terminal sees the core's
+        conversation. Attaching a second channel replaces the first, and
+        ``detach()`` gives the terminal back.
+
+        Refused when another transport already owns ``channel``: ``owns`` is the
+        broadcast filter, and two owners make the extras that read it (silence's
+        conversational test, outbound-cap's transport check) see the wrong one.
+        A channel no transport owns — the core's — is what this is for.
+
+        Raises:
+            ValueError: naming the transport that already delivers there.
+        """
+        for plugin in self.pm.get_plugins():
+            if plugin is self or not isinstance(plugin, TransportPlugin):
+                continue
+            if plugin.owns(channel):
+                raise ValueError(
+                    f"cannot attach the CLI to {channel.id!r}: the "
+                    f"{plugin.transport!r} transport already delivers there, and "
+                    f"two transports owning one channel makes the plugin "
+                    f"extras read the wrong one"
+                )
+        self._attached = channel
+        logger.info("CLI attached to %s (#1059)", channel.id)
+
+    def detach(self) -> None:
+        """Stop reading for, and displaying, the attached channel (#1059)."""
+        self._attached = None
+
+    def owns(self, channel: Channel) -> bool:
+        """Also true for the attached channel (#1059).
+
+        Guard: without attach this is exactly the transport match, so the CLI
+        never takes an outbound event it did not before.
+        """
+        if self._attached is not None and channel.id == self._attached.id:
+            return True
+        return super().owns(channel)
+
     async def _read_loop(self) -> None:
         """Read lines from stdin and dispatch as on_message events.
 
-        Always routes to the cli:local channel. CLI is single-user/single-scope
-        by design — only cli:local receives stdin input.
+        Routes to the attached channel when one is set (#1059), otherwise to
+        cli:local. CLI is single-user/single-scope by design — only one channel
+        receives stdin input.
         """
         # on_start starts the reader; a direct caller (a test driving the
         # loop) gets it here, so the queue is never read from unstarted.
         if self._lines is None:
             self._start_reader()
-        channel = self._registry.get_or_create("cli", "local")
+        default_channel = self._registry.get_or_create("cli", "local")
         self._interactive = sys.stdin.isatty()
         if self._interactive:
             print("Agent ready. Type a message, or Ctrl-D to quit.\n")
@@ -146,6 +193,12 @@ class CLIPlugin(TransportPlugin):
             if not text:
                 self._prompt()
                 continue
+            # Resolve after the line arrives, not once at start: an attach that
+            # lands while the loop is waiting must move stdin too, not only
+            # display (#1059).
+            channel = (
+                self._attached if self._attached is not None else default_channel
+            )
             await self.pm.ahook.on_message(
                 channel=channel,
                 sender="user",
@@ -244,6 +297,10 @@ class CLIPlugin(TransportPlugin):
     @hookimpl
     async def on_stop(self) -> None:
         """Cancel the read loop and await its cancellation."""
+        # Cleared before the early return below: the loop may never have
+        # started (acp mode, no cli channel configured), and display rights
+        # still must not outlive the transport (#1059).
+        self._attached = None
         if self._task is None:
             return
         self._task.cancel()
