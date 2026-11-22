@@ -145,7 +145,10 @@ class SilencePlugin(CorvidaePlugin):
         # Traces that called end_turn, so the echoed NO_REPLY final does not
         # overwrite the tool's outcome under the same key. A trace leaves the
         # set when its final reaches on_agent_response.
-        self._ended: set[str] = set()
+        # trace_id -> the reason end_turn was given. The row is written from
+        # on_agent_response, which is the first place that knows whether the
+        # turn's final was sent (#901).
+        self._ended: dict[str, str] = {}
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -208,11 +211,7 @@ class SilencePlugin(CorvidaePlugin):
                     "recorded", channel.id, extra={"channel": channel.id},
                 )
             else:
-                plugin._ended.add(trace_id)
-                plugin._record(
-                    trace_id, channel.id,
-                    {"silence": "tool", "silence_reason": str(reason)[:200]},
-                )
+                plugin._ended[trace_id] = str(reason)[:200]
             return END_TURN_RESULT
 
         tool_registry.append(Tool(name="end_turn", fn=end_turn, schema=tool_to_schema(end_turn)))
@@ -306,13 +305,19 @@ class SilencePlugin(CorvidaePlugin):
                 extra={"channel": channel.id, "trace_id": trace_id},
             )
             return
-        # A turn that called end_turn already has its outcome; its final,
-        # echoed or not, must not replace it under the same key. Leave the
-        # set whether or not the final was withheld.
-        ended = trace_id is not None and trace_id in self._ended
-        if ended:
-            self._ended.discard(trace_id)
-        if not unsent or ended:
+        # A turn that called end_turn records its outcome here, not when the
+        # tool ran: the loop calls the model again and it may still reply, and a
+        # signal followed by text that is sent is not a decline (PRD §3.7 item
+        # 5, #806, #901). Written only when the final was withheld.
+        reason = self._ended.pop(trace_id, None) if trace_id is not None else None
+        if reason is not None:
+            if unsent:
+                self._record(
+                    trace_id, channel.id,
+                    {"silence": "tool", "silence_reason": reason},
+                )
+            return
+        if not unsent:
             return
         # Only the two decline shapes count; another gate's veto is not ours.
         kind = decline_kind(response_text)
