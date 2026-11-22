@@ -106,6 +106,16 @@ def parse_cron(expr: str) -> tuple[set[int], set[int], set[int], set[int], set[i
     return tuple(sets)  # type: ignore[return-value]
 
 
+def _search_start(after: datetime) -> datetime:
+    """The first minute to consider, in UTC.
+
+    The minute is added after the conversion to UTC: adding wall-clock minutes
+    first resets `fold`, so across a fall-back the search started an hour in the
+    past and only the guard below kept the answer right (#813).
+    """
+    return (after.astimezone(UTC) + timedelta(minutes=1)).replace(second=0, microsecond=0)
+
+
 def next_fire(
     cron: tuple[set[int], set[int], set[int], set[int], set[int]],
     after: datetime,
@@ -131,10 +141,7 @@ def next_fire(
     """
     minutes, hours, doms, months, dows = cron
 
-    # Start from the next minute, in UTC. The addition happens after the
-    # conversion: adding wall-clock minutes first resets `fold`, so across a
-    # fall-back the search started an hour in the past (#813).
-    t_utc = (after.astimezone(UTC) + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    t_utc = _search_start(after)
 
     # Bounded search: 4 years * 366 days * 24 hours * 60 minutes ≈ 2.1M iterations
     # In practice we skip whole days/hours that don't match, so this is fast.

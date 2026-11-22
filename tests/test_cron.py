@@ -313,3 +313,16 @@ def test_spring_forward_skips_the_hour_that_does_not_exist():
     fire = next_fire(parse_cron("30 2 * * *"), after, tz)
 
     assert (fire.year, fire.month, fire.day, fire.hour, fire.minute) == (2026, 3, 9, 2, 30)
+
+
+def test_the_search_starts_a_minute_after_the_real_time_across_a_fall_back():
+    """#813: the start must not be an hour early, which the guard would hide."""
+    from corvidae.cron import _search_start
+
+    tz = ZoneInfo("America/New_York")
+    # 01:10 EST, the second 01:10 (fold=1), is 06:10Z.
+    after = datetime(2026, 11, 1, 1, 10, tzinfo=tz, fold=1)
+
+    start = _search_start(after)
+
+    assert start == datetime(2026, 11, 1, 6, 11, tzinfo=UTC)
