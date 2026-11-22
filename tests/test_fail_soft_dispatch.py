@@ -445,13 +445,11 @@ async def test_registered_impl_is_still_a_coroutine_function() -> None:
 async def test_dispatch_refuses_a_wrapper_the_startup_check_never_saw(option: str) -> None:
     """A manager that never ran `check_fail_soft_wrappers` can still dispatch.
 
-    Left to pluggy, a wrapper makes apluggy take its wrapper path, whose
-    aggregate the wrapper's own return value replaces. This wrapper's bare
-    `yield` returns None, so the call dies with "TypeError: 'NoneType' object is
-    not iterable" naming neither the hook nor the plugin -- and a wrapper
-    returning a list of the right length would instead hand back its own values
-    with no error at all. Dispatch refuses with the same PluginValidationError
-    the startup check raises, for both marker spellings.
+    Dispatch refuses with the same PluginValidationError the startup check
+    raises, for both marker spellings, naming the hook, the plugin and the
+    marker to remove. How apluggy fails without the refusal differs by marker
+    and by what the wrapper returns; `corvidae/hooks.py` records that, and this
+    test deliberately asserts only the refusal.
     """
 
     class Wrapping:
