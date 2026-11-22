@@ -1034,7 +1034,10 @@ Per transport:
     when it fails catches its own failure and refuses. A check may delay
     the call for no longer than the channel's check allowance (§3.13.5),
     counted from when the check starts; when the allowance runs out the
-    call runs unchecked and the miss is recorded. So a refusal that must
+    call runs unchecked and the miss is recorded. A refusal that arrives
+    after its call ran refuses nothing, but still reaches the agent, on
+    its next model call, as framed CONTEXT saying the call already ran;
+    it wakes no turn. So a refusal that must
     hold on every channel decides within the minimum allowance. A refusal bounds what the
     calling channel's participants can make the agent do and is never a
     wall between channels (principle 14; §3.5.9). With no such plugin
@@ -1346,7 +1349,10 @@ deciding only what to newly append and in what order.
    no longer than the channel's check allowance (§3.13.5), counted from
    when the check starts. When the
    allowance runs out the reply is sent unchecked and the miss is
-   recorded; critique still judges it after it is sent (Critique 1). What
+   recorded; critique still judges it after it is sent (Critique 1). A
+   check that finishes after its reply was sent holds nothing back, but
+   what it found still reaches the agent, on its next model call, as
+   framed CONTEXT; it wakes no turn. What
    the check looks for, and how it chooses among the three, is the
    plugin's choice.
 
@@ -1815,11 +1821,12 @@ from warm heads, whether the agent sees its provider's state) are tracked in
    config defines which classes exist and what each one's bound is.
    A channel also has a check allowance: how long a check may delay a
    reply before it is sent (§3.7 Output gate 7) or a tool call before it
-   runs (§3.5.12). It is the channel's bound, or a minimum the operator
-   sets, small but not zero, where the bound is smaller or the channel
-   has none, so the least patient channel still gives a fast check time
-   to decide. The allowance is not a latency bound: a channel with no
-   bound still has none.
+   runs (§3.5.12). It is a setting of its own and not the latency bound:
+   a transport may declare the allowance its channels default to, and
+   the operator can set a channel another. It is never below a minimum
+   the operator can set, small but not zero, which a channel whose
+   transport declares none gets, so the least patient channel still
+   gives a fast check time to decide.
    Upkeep and agency take the latency bounds §3.1.16 gives idle work, on
    whichever queue they wait, and the heartbeat always has one (§3.7
    Heartbeat). A plugin whose documented behaviour must hold under
@@ -1979,7 +1986,8 @@ record that holds the reasoning.
 | Identity is agent-wide and heads every prompt written in the agent's voice; channel register is appended after it and never replaces it; the subagent's prompt is persona-neutral (§3.5.7) | operator directive, 2026-11-01; #380; #388 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
-| Checks before a reply is sent and before a tool call runs share one per-channel allowance: the channel's latency bound, never below an operator-set minimum that is small but not zero, which a channel with no bound gets; the allowance counts from when a check starts, so time a call or reply spends waiting for anything else never spends it; a refusal that must hold on every channel decides within the minimum | principle 3; §3.5.12; §3.7 Output gate 7; §3.13.5; #1075, #1149; operator, 2026-11-22 |
+| Checks before a reply is sent and before a tool call runs share one per-channel allowance, a setting of its own with no tie to latency bounds: a transport's default, which the operator can override, never below an operator-set minimum that is small but not zero, which a channel whose transport declares none gets; the allowance counts from when a check starts, so time a call or reply spends waiting for anything else never spends it; a refusal that must hold on every channel decides within the minimum | principle 3; §3.5.12; §3.7 Output gate 7; §3.13.5; #1075, #1149; operator, 2026-11-22 |
+| A check that misses its allowance is not cancelled or discarded: what it returns late reaches the agent on its next model call and wakes no turn, because the work is done and the result may still be useful in the main window, as critique after the fact already is; the agent decides whether to correct course | §3.5.12; §3.7 Output gate 7; #148, #1149; operator, 2026-11-22 |
 | A plugin can refuse a tool call before it runs: any refusal wins, the refusal is the call's result so the turn continues, and an implementation that raises counts as no refusal; admitted ahead of the trust plugin (#138), with the pre-tool-use check (#1075) as its first consumer | principle 5; §3.5.12; §3.1.11; #148 (#1076 closed as its duplicate); operator, 2026-11-22 |
 | A reply may be checked before it is sent, ending in send, held back for a revision, or withheld; a revision is not held back again, a present limit and not a principle; a held-back draft is not judged after the fact, its revision is; the check delays a reply only within its channel's check allowance, and the reply sends unchecked when it runs out | principle 3; §3.7 Critique 1 and 3, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
 | Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; the channel queue never coalesces notification items | §3.1.19; #398, #296; owner, 2026-11-03 |
