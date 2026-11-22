@@ -830,7 +830,9 @@ Three key formats:
 - `subagent:<task_id>` for a subagent run;
 - `<plugin>:<process tag>:<UID>` for work a plugin owns, such as
   `memory:consolidation:<channel id>:<id>` for catch-up consolidation
-  (#985, #1016). The `<UID>`
+  (#985, #1016); a channel id contains a colon (`irc:#lex`), so the UID is not
+  colon-free and a reader must match the stable prefix, not split on `:`. The
+  `<UID>`
   is one id per run, so a scheduler can stop or resume one run without the
   others: use the work's trace id when it has one, and mint one (a uuid)
   when it doesn't. A subscriber that wants all runs for a given plugin process tag

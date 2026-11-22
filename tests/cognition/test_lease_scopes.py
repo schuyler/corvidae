@@ -34,9 +34,10 @@ from corvidae.metrics import UsageLogPlugin
 from .test_appraisal_stage2 import VALID_STAGE2_JSON
 from .test_memory_consolidation import CONSOLIDATION_JSON, EMBED_CONFIG, seed_dialog
 
-# The per-run consolidation lease key (#985): memory:consolidation:<id>, where
-# <id> is the run's trace_id or a minted id (never None/empty). Two concurrent
-# runs get distinct ids, so the key is a per-run queue, not one shared upkeep.
+# The per-run consolidation lease key (#985, #1016):
+# memory:consolidation:<channel id>:<id>, where <id> is the run's trace_id or a
+# minted id (never None/empty). Two concurrent runs get distinct keys — by run,
+# and by channel, so a trace shared across channels cannot merge two queues.
 CONSOLIDATION_KEY_PREFIX = "memory:consolidation:"
 
 
@@ -238,8 +239,8 @@ async def test_catchup_consolidation_view_is_keyed_by_upkeep(
     env: Env, caplog: pytest.LogCaptureFixture, via_idle_watch: bool
 ) -> None:
     """The catch-up view (a range out of the window) carries a per-run
-    memory:consolidation:<id> key, also when the idle watch triggers it from an
-    empty context."""
+    memory:consolidation:<channel id>:<id> key, also when the idle watch triggers
+    it from an empty context."""
     caplog.set_level(logging.WARNING)
     persistence = env.plugin.pm.get_plugin("persistence")
     ids = await seed_dialog(persistence, env.channel, DIALOG)
@@ -263,7 +264,7 @@ async def test_rubric_score_during_catchup_commit_is_keyed_by_upkeep(
     env: Env, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The rubric score call made while a catch-up commit runs carries the
-    run's memory:consolidation:<id> key — and the same key as the view that
+    run's memory:consolidation:<channel id>:<id> key — and the same key as the view that
     run produced (the id is minted once per run, not per call)."""
     caplog.set_level(logging.WARNING)
     persistence = env.plugin.pm.get_plugin("persistence")
@@ -316,6 +317,40 @@ async def test_rubric_after_fork_uses_the_per_run_key(
     # the per-run key (the fork's lease scope restored the outer key).
     assert fork_keys[0] != rubric_keys[0], (fork_keys, rubric_keys)
     assert loud_unleased_records(caplog) == []
+
+
+async def test_two_channels_sharing_a_trace_get_distinct_consolidation_keys(
+    env: Env,
+) -> None:
+    """The reason the key carries the channel (#1016).
+
+    Two runs that share a trace_id used to land on one queue. Nothing produces
+    that today, but the key no longer depends on it not happening.
+    """
+    from corvidae.attribution import reset_attribution, set_attribution
+
+    persistence = env.plugin.pm.get_plugin("persistence")
+    ids = await seed_dialog(persistence, env.channel, DIALOG)
+    env.channel.conversation = None
+    registry = env.plugin.pm.get_plugin("registry")
+    other = registry.get_or_create(env.channel.transport, "other-scope")
+
+    other_ids = await seed_dialog(persistence, other, DIALOG)
+    other.conversation = None
+    token = set_attribution(trace_id="shared-trace-42")
+    try:
+        await env.memory._consolidate_range(env.channel.id, ids[-1], "compaction")
+        await env.memory._consolidate_range(other.id, other_ids[-1], "compaction")
+    finally:
+        reset_attribution(token)
+    await env.memory.wait_for_background_tasks()
+
+    keys = [key for kind, key in await keyed_posts(env) if kind == "view"]
+    assert keys == [
+        f"memory:consolidation:{env.channel.id}:shared-trace-42",
+        f"memory:consolidation:{other.id}:shared-trace-42",
+    ], keys
+    assert len(set(keys)) == 2
 
 
 async def test_consolidation_with_trace_id_uses_it_as_the_key(
