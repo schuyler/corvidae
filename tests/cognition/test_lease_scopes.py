@@ -322,7 +322,8 @@ async def test_consolidation_with_trace_id_uses_it_as_the_key(
     env: Env, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The run's trace_id, when attribution holds one, is the key suffix
-    (#985): the key is exactly memory:consolidation:<that-trace-id>. The
+    (#985, #1016): the key is exactly
+    memory:consolidation:<channel-id>:<that-trace-id>. The
     trace_id is an attribution field independent of the trigger; a compaction
     range that has left the window is rebuilt as a view, so the per-run key is
     observable."""
@@ -341,7 +342,9 @@ async def test_consolidation_with_trace_id_uses_it_as_the_key(
 
     pairs = await keyed_posts(env)
     view_keys = [key for kind, key in pairs if kind == "view"]
-    assert view_keys == ["memory:consolidation:known-trace-123"], view_keys
+    assert view_keys == [
+        f"memory:consolidation:{env.channel.id}:known-trace-123"
+    ], view_keys
     assert loud_unleased_records(caplog) == []
 
 
