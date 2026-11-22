@@ -22,19 +22,19 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
-
-import corvidae.persistence as persistence_module
-from corvidae.context import MessageType, count_tokens, message_tokens
 from corvidae_cognition.memory import (
     CONSOLIDATION_EXTRA_BODY,
     DEFAULT_CONSOLIDATION_FORK_PROMPT,
     DEFAULT_ENTRY_TARGET_TOKENS,
-    consolidation_instruction,
     _fork_range_sentence,
+    consolidation_instruction,
 )
 from helpers import FakeForkAgent, RecordingClient
 from test_compaction_user_query import _as_server_renders
 from test_mid_conversation_system_role import render_swift
+
+import corvidae.persistence as persistence_module
+from corvidae.context import MessageType, count_tokens, message_tokens
 
 from .test_memory_consolidation import (
     CONSOLIDATION_JSON,

@@ -29,21 +29,19 @@ instructions (no edits to shared conftest/other test files).
 
 import asyncio
 import re
-from unittest.mock import ANY, AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from corvidae.trace import mint_trace_id
-from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
-
-from corvidae.outbound import OutboundMessage
-from helpers import build_plugin_and_channel, drain, drain_task_queue, sent
+from helpers import build_plugin_and_channel, drain, sent
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call,
     _make_tool_call_response,
 )
 
+from corvidae.hooks import hookimpl
+from corvidae.outbound import OutboundMessage
+from corvidae.trace import mint_trace_id
 
 # ---------------------------------------------------------------------------
 # Local helpers (do not import shared fixtures beyond tests/helpers.py)
@@ -775,7 +773,7 @@ class TestUsageLogAttributionWiring:
         """End-to-end: firing on_llm_response with the real attribution
         snapshot writes a usage_log row whose trace_id column is set
         (renamed from trace_id via the lazy ALTER TABLE migration)."""
-        from corvidae.attribution import get_attribution, reset_attribution, set_attribution
+        from corvidae.attribution import get_attribution
 
         plugin, channel, db = await build_plugin_and_channel()
         usage_log = await _setup_usage_log(plugin.pm)

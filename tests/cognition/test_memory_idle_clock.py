@@ -14,6 +14,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
+from corvidae_cognition import memory as memory_module
+from corvidae_cognition import retention as retention_module
+from corvidae_cognition.memory import MemoryPlugin
+from fake_clock import FakeClock, install_kernel_clock
+from helpers import FakeForkAgent, stub_llm_config, with_chat_llm
 
 from corvidae.attribution import get_attribution
 from corvidae.channel import Channel
@@ -21,11 +26,6 @@ from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.persistence import PersistencePlugin, init_db
-from corvidae_cognition import retention as retention_module
-from corvidae_cognition import memory as memory_module
-from corvidae_cognition.memory import MemoryPlugin
-from fake_clock import FakeClock, install_kernel_clock
-from helpers import FakeForkAgent, stub_llm_config, with_chat_llm
 
 CONSOLIDATION_JSON = json.dumps({
     "summary": "I helped kestrel debug the weather station's wifi dropouts.",

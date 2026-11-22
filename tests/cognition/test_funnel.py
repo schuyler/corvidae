@@ -9,11 +9,10 @@ import json
 import logging
 
 import aiosqlite
-import pytest
+from corvidae_cognition.funnel import FunnelPlugin
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
-from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.persistence import PersistencePlugin, init_db
 

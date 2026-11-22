@@ -9,12 +9,20 @@ named in injected text.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from helpers import (
+    KERNEL_LLM_STAGES,
+    build_plugin_and_channel,
+    drain,
+    drain_task_queue,
+    recording_llm_plugin,
+    stub_llm_config,
+)
+from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
 
 from corvidae.agent import mint_trace_id
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, load_channel_config
@@ -22,13 +30,6 @@ from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.tool import Tool, ToolContext, ToolRegistry, tool_to_schema
 from corvidae.tool_collection import ToolCollectionPlugin
 from corvidae.tool_policy import disabled_on, expand_disabled
-
-from helpers import (
-    KERNEL_LLM_STAGES, build_plugin_and_channel, drain, drain_task_queue,
-    recording_llm_plugin, stub_llm_config,
-)
-from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
-
 
 # ---------------------------------------------------------------------------
 # Fixtures: three fake tools standing in for the built-ins

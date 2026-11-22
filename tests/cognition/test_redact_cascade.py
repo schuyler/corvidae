@@ -24,21 +24,19 @@ import time
 
 import aiosqlite
 import pytest
+from corvidae_cognition.memory import MemoryPlugin
+from helpers import CORRUPT_MESSAGES, insert_raw_message
 
 # The redact module's functions, called directly.
 from corvidae.commands.redact import (
-    redact_command,
-    redact_messages,   # async: (db, message_ids, dry_run=False, notices: list | None = None) -> dict
-    redact_memory_id,  # async: (db, memory_id, dry_run=False) -> dict
     _verify_fts_clean,
+    redact_command,
+    redact_memory_id,  # async: (db, memory_id, dry_run=False) -> dict
+    redact_messages,  # async: (db, message_ids, dry_run=False, notices: list | None = None) -> dict
 )
-
-from corvidae_cognition.memory import MemoryPlugin
-from corvidae.persistence import PersistencePlugin, init_db
-from helpers import CORRUPT_MESSAGES, insert_raw_message
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-
+from corvidae.persistence import PersistencePlugin, init_db
 
 # ---------------------------------------------------------------------------
 # DB setup helpers
@@ -425,10 +423,11 @@ class TestRedactMemoryForm:
 
         # Manually add a vec row (as if embedding succeeded)
         try:
-            import sqlite_vec
-            import math
             import hashlib
+            import math
             import re
+
+            import sqlite_vec
             dims = 32
             vec = [0.0] * dims
             for token in re.findall(r"\w+", "vec test memory".lower()):

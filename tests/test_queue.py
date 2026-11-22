@@ -7,12 +7,12 @@ Design requirements covered:
 """
 
 import asyncio
+
 import pytest
 
-from corvidae.trace import mint_trace_id
 from corvidae.channel import Channel, ChannelConfig
-from corvidae.queue import SerialQueue, QueueItem
-
+from corvidae.queue import QueueItem, SerialQueue
+from corvidae.trace import mint_trace_id
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -257,14 +257,15 @@ class TestQueueItemRole:
     def test_queue_item_role_is_enum(self):
         """QueueItemRole must be an enum (not just a class with attributes)."""
         import enum
+
         from corvidae.agent import QueueItemRole
         assert issubclass(QueueItemRole, enum.Enum)
 
     async def test_on_message_creates_item_with_user_role(self):
         """QueueItem created via on_message must use QueueItemRole.USER."""
         from corvidae.agent import Agent, QueueItemRole
+        from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
         from corvidae.hooks import create_plugin_manager
-        from corvidae.channel import ChannelRegistry, Channel, ChannelConfig
         from corvidae.queue import SerialQueue
 
         pm = create_plugin_manager()
@@ -297,8 +298,8 @@ class TestQueueItemRole:
     async def test_on_notify_creates_item_with_notification_role(self):
         """QueueItem created via on_notify must use QueueItemRole.NOTIFICATION."""
         from corvidae.agent import Agent, QueueItemRole
+        from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
         from corvidae.hooks import create_plugin_manager
-        from corvidae.channel import ChannelRegistry, Channel, ChannelConfig
         from corvidae.queue import SerialQueue
 
         pm = create_plugin_manager()

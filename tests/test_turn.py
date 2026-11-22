@@ -4,18 +4,16 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from corvidae.turn import AgentTurnResult, run_agent_turn
-from corvidae.tool import tool_to_schema
-
 from llm_response_fixtures import (
-    _make_text_response,
-    _make_tool_call_response,
-    _make_tool_call,
     _make_mixed_response,
     _make_null_content_tool_call_response,
+    _make_text_response,
+    _make_tool_call,
+    _make_tool_call_response,
 )
 
+from corvidae.tool import tool_to_schema
+from corvidae.turn import AgentTurnResult, run_agent_turn
 
 # ---------------------------------------------------------------------------
 # tool_to_schema tests

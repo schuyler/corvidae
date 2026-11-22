@@ -17,31 +17,33 @@ Covers:
   rerun completes without uniqueness error.
 """
 
-import asyncio
+import hashlib
 import json
 import logging
 import math
-import hashlib
 import re
 import time
-from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
+from corvidae_cognition.funnel import FunnelPlugin
+from corvidae_cognition.memory import MemoryPlugin
 
 # PRIMARY IMPORT FAILURE — all tests below fail at collection time with
 # ModuleNotFoundError: No module named 'corvidae.tools.memory_tools'
 from corvidae_cognition.memory_tools import MemoryToolsPlugin
+from helpers import (
+    CORRUPT_MESSAGES,
+    insert_raw_message,
+    skip_warnings,
+    stub_llm_config,
+    with_chat_llm,
+)
 
 from corvidae.channel import Channel
-from corvidae.context import ContextWindow, MessageType
-from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
-from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings, stub_llm_config, with_chat_llm
-
 
 DIMS = 32
 

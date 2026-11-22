@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, Mock
 
 import aiosqlite
 import pytest
-
 from corvidae_cognition.goals import GOALS_DDL, GoalsPlugin
 from corvidae_planning import PlanningLensPlugin
 

@@ -14,14 +14,13 @@ import time
 
 import aiosqlite
 import pytest
-
 from corvidae_cognition.memory import (
     DEFAULT_ENTRY_TARGET_TOKENS,
     MemoryPlugin,
     consolidation_instruction,
 )
-
 from helpers import FakeForkAgent, window_of
+
 from .test_goals import add_message, ctx_for, env  # noqa: F401  (fixture reused)
 from .test_goals import rows as goals_rows
 from .test_memory_consolidation import (

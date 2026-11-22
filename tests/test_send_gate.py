@@ -20,13 +20,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pluggy
 import pytest
-
-from corvidae.agent import MAX_TURNS_FALLBACK_MESSAGE
-from corvidae.channel import ChannelConfig
-from corvidae.context import MessageType, unsent_marker_emission, unsent_marker_text
-from corvidae.hooks import _check_hook_arg_binding, create_plugin_manager, hookimpl
-from corvidae.outbound import OutboundMessage, OutboundProgress, OutboundThinking
-from corvidae.trace import mint_trace_id
 from helpers import acp_agent_env, build_plugin_and_channel, drain, drain_task_queue, sent_texts
 from llm_response_fixtures import (
     _make_mixed_response,
@@ -35,6 +28,12 @@ from llm_response_fixtures import (
     _make_tool_call_response,
 )
 
+from corvidae.agent import MAX_TURNS_FALLBACK_MESSAGE
+from corvidae.channel import ChannelConfig
+from corvidae.context import MessageType, unsent_marker_emission, unsent_marker_text
+from corvidae.hooks import _check_hook_arg_binding, create_plugin_manager, hookimpl
+from corvidae.outbound import OutboundMessage, OutboundProgress, OutboundThinking
+from corvidae.trace import mint_trace_id
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers

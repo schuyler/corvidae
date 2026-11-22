@@ -11,19 +11,17 @@ scripts/eval_memory.py --live.
 import json
 
 import aiosqlite
-import pytest
+from corvidae_cognition.funnel import FunnelPlugin
+from corvidae_cognition.memory import MemoryPlugin
+from helpers import FakeForkAgent, stub_llm_config
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
-from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 
-from helpers import FakeForkAgent, stub_llm_config
-from .test_memory_retrieval import DIMS, StubEmbedClient, bow_embed, gate_open
-
+from .test_memory_retrieval import DIMS, StubEmbedClient, gate_open
 
 CONSOLIDATION_JSON = json.dumps({
     "summary": "Schuyler told me the observatory dome motor jams when the "

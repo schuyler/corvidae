@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from corvidae_restart import (
     RestartPlugin,
     _is_number,
@@ -17,7 +14,6 @@ from corvidae_restart import (
     read_jsonl,
     truncate_stderr,
 )
-
 
 # --- fakes -------------------------------------------------------------------
 
@@ -450,14 +446,12 @@ def test_coerce_int_valid():
 
 def test_coerce_int_raises_on_bool():
     from corvidae_restart import _coerce_int
-    import pytest
     with pytest.raises(ValueError, match="must be an integer"):
         _coerce_int(True, "test")
 
 
 def test_coerce_int_raises_on_string():
     from corvidae_restart import _coerce_int
-    import pytest
     with pytest.raises(ValueError, match="must be an integer"):
         _coerce_int("fast", "min_uptime_seconds")
 
@@ -470,7 +464,6 @@ def test_coerce_float_valid():
 
 def test_coerce_float_raises_on_string():
     from corvidae_restart import _coerce_float
-    import pytest
     with pytest.raises(ValueError, match="must be a number"):
         _coerce_float("fast", "notify_delay_seconds")
 
@@ -558,9 +551,11 @@ async def test_restart_end_to_end_plugin_manager(tmp_path):
     """
     import signal as signal_mod
     from unittest.mock import AsyncMock
-    from corvidae.hooks import create_plugin_manager
-    from corvidae.channel import ChannelRegistry, ChannelConfig
+
     from corvidae_restart import RestartPlugin
+
+    from corvidae.channel import ChannelConfig, ChannelRegistry
+    from corvidae.hooks import create_plugin_manager
 
     pm = create_plugin_manager()
     registry = ChannelRegistry()
@@ -680,9 +675,11 @@ async def test_restart_end_to_end_plugin_manager(tmp_path):
 async def test_deliver_notices_end_to_end(tmp_path):
     """_deliver_notices reads the marker and notifies the channel."""
     from unittest.mock import AsyncMock, MagicMock
-    from corvidae.hooks import create_plugin_manager
-    from corvidae.channel import ChannelRegistry, ChannelConfig
+
     from corvidae_restart import RestartPlugin
+
+    from corvidae.channel import ChannelConfig, ChannelRegistry
+    from corvidae.hooks import create_plugin_manager
 
     pm = create_plugin_manager()
     registry = ChannelRegistry()

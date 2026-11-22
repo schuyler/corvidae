@@ -29,7 +29,22 @@ from corvidae.runtime import Runtime
 
 async def _run(config_path: str) -> int:
     """Run the daemon's startup through on_init; return the exit code."""
+    return (await _run_with_bound(config_path))[0]
+
+
+async def _run_with_bound(config_path: str) -> tuple[int, float | None]:
+    """The pre-flight's exit code, and the exit bound it armed (#854).
+
+    The survivor line has to say whether the process has a bound at all, so the
+    bound comes back with the code rather than leaking through module state.
+    """
     runtime = Runtime(config_path=config_path)
+    code = await _preflight_body(runtime, config_path)
+    return code, runtime.shutdown_timeouts.exit
+
+
+async def _preflight_body(runtime: Runtime, config_path: str) -> int:
+    """The pre-flight's work, once the runtime and its bound are known."""
     try:
         config = runtime.load_config()
         runtime.setup_logging(config)
@@ -80,10 +95,6 @@ async def _run(config_path: str) -> int:
         # threads. shutdown_timeouts holds the defaults until load_plugins
         # parses the config, so an early failure is bounded too.
         runtime.arm_exit_bound()
-        # Read by main() for the survivor line: with the bound disabled the
-        # old sentence claimed the process would exit "within
-        # daemon.exit_timeout", which is false (#854).
-        _run.exit_bound = runtime.shutdown_timeouts.exit
 
 
 def check_corvidae_location(expected: str | None) -> str | None:
@@ -148,8 +159,7 @@ def main() -> int:
     warnings.simplefilter("ignore")
     logging.disable(logging.CRITICAL)
 
-    code = asyncio.run(_run(args.config))
-    exit_bound = getattr(_run, "exit_bound", None)
+    code, exit_bound = asyncio.run(_run_with_bound(args.config))
     # Any non-daemon thread still running now is a plugin's: asyncio has
     # joined its own executor, which is what a check inside the coroutine
     # would have caught instead. Name it directly — kernel logging is off

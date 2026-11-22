@@ -7,9 +7,7 @@ Verifies that the AlignmentLensPlugin:
 - has critique as an optional dependency only
 """
 
-from unittest.mock import Mock
 
-import pytest
 
 from corvidae_alignment import AlignmentLensPlugin
 

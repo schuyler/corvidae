@@ -23,9 +23,8 @@ import pytest
 from helpers import build_plugin_and_channel, drain, sent_texts
 from llm_response_fixtures import _make_text_response
 
-from corvidae.channel import Channel
+from corvidae.channel import Channel, resolve_system_prompt
 from corvidae.channels._registers import shipped_register
-from corvidae.channel import resolve_system_prompt
 from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.outbound import OutboundMessage

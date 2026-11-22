@@ -26,17 +26,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
+from corvidae_cognition.outcome_log import OutcomeLogPlugin
+from helpers import FakeForkAgent, stub_llm_config, window_of, with_chat_llm
 
 from corvidae.attribution import get_attribution
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin
-
-from helpers import FakeForkAgent, stub_llm_config, window_of, with_chat_llm
-
 
 VALID_STAGE2_JSON = json.dumps({
     "valence": 0.8, "stakes": 0.9, "ambiguity": 0.2,
@@ -457,7 +455,10 @@ class TestPastClaims:
 
     def test_capped(self):
         from corvidae_cognition.appraisal import (
-            MAX_PAST_CLAIMS, MAX_QUERIES_PER_CLAIM, MAX_QUERY_CHARS, _stage2_from_text,
+            MAX_PAST_CLAIMS,
+            MAX_QUERIES_PER_CLAIM,
+            MAX_QUERY_CHARS,
+            _stage2_from_text,
         )
         reply = {**json.loads(VALID_STAGE2_JSON), "past_claims": [
             {"claim": f"c{i}", "queries": [f"q{j}" + "x" * MAX_QUERY_CHARS for j in range(9)]}
@@ -470,7 +471,9 @@ class TestPastClaims:
 
     def test_schema_and_prompts_ask_for_it(self):
         from corvidae_cognition.appraisal import (
-            DEFAULT_STAGE2_FORK_PROMPT, DEFAULT_STAGE2_PROMPT, STAGE2_SCHEMA,
+            DEFAULT_STAGE2_FORK_PROMPT,
+            DEFAULT_STAGE2_PROMPT,
+            STAGE2_SCHEMA,
         )
         assert "past_claims" in STAGE2_SCHEMA["required"]
         assert STAGE2_SCHEMA["properties"]["past_claims"]["type"] == "array"
@@ -861,9 +864,10 @@ class TestAppraisalPrior:
     # even though a channel B exchange sits inside A's message-id range.
     async def test_consolidation_valence_ignores_interleaved_channel(self, tmp_path):
         from corvidae_cognition.appraisal import AppraisalPlugin
+        from corvidae_cognition.memory import MemoryPlugin
+
         from corvidae.channel import Channel, ChannelConfig
         from corvidae.context import MessageType
-        from corvidae_cognition.memory import MemoryPlugin
 
         consolidation_json = json.dumps({
             "summary": "I discussed the plan with the user.",
@@ -983,9 +987,10 @@ class TestAppraisalPrior:
         """End-to-end: consolidation writes mean stage-2 valence into the
         memory record and uses the appraisal-driven importance prior."""
         from corvidae_cognition.appraisal import AppraisalPlugin
+        from corvidae_cognition.memory import MemoryPlugin
+
         from corvidae.channel import Channel, ChannelConfig
         from corvidae.context import MessageType
-        from corvidae_cognition.memory import MemoryPlugin
 
         consolidation_json = json.dumps({
             "summary": "I discussed the plan with the user.",

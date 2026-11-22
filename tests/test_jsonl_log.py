@@ -7,11 +7,9 @@ persistence hooks, writing JSONL logs alongside SQLite persistence.
 import json
 import logging
 import time
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -33,8 +31,8 @@ def _make_channel(channel_id: str) -> object:
 class TestJsonlPluginNoOp:
     async def test_jsonl_plugin_noop_without_config(self, tmp_path):
         """Plugin with no jsonl_log_dir in config is inert — no errors."""
-        from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
+        from corvidae.jsonl_log import JsonlLogPlugin
 
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {}}
@@ -112,8 +110,8 @@ class TestPersistMessage:
 
     async def test_persist_message_writes_jsonl_record(self, tmp_path):
         """persist_message writes a JSONL record to the channel's log file."""
-        from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
+        from corvidae.jsonl_log import JsonlLogPlugin
 
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
@@ -144,8 +142,8 @@ class TestPersistMessage:
 
     async def test_persist_message_context_type(self, tmp_path):
         """persist_message with CONTEXT type writes type='context' in record."""
-        from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
+        from corvidae.jsonl_log import JsonlLogPlugin
 
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
@@ -167,8 +165,8 @@ class TestPersistMessage:
 
     async def test_persist_message_multiple_messages(self, tmp_path):
         """Multiple persist_message calls append lines in order."""
-        from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
+        from corvidae.jsonl_log import JsonlLogPlugin
 
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
@@ -198,8 +196,8 @@ class TestPersistMessage:
 
     async def test_persist_message_noop_when_disabled(self, tmp_path):
         """persist_message must be a no-op when log_dir is not configured."""
-        from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
+        from corvidae.jsonl_log import JsonlLogPlugin
 
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {}}  # no jsonl_log_dir
@@ -219,8 +217,8 @@ class TestPersistMessage:
 
     async def test_persist_message_strips_message_type_tag(self, tmp_path):
         """persist_message must not write _message_type into the JSONL record's message."""
-        from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
+        from corvidae.jsonl_log import JsonlLogPlugin
 
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
@@ -257,7 +255,6 @@ class TestOnCompaction:
     async def test_on_compaction_writes_summary_record(self, tmp_path):
         """on_compaction writes a JSONL record with type='summary'."""
         from corvidae.jsonl_log import JsonlLogPlugin
-        from corvidae.context import MessageType
 
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
@@ -316,8 +313,8 @@ class TestOnCompaction:
 class TestJsonlPluginSanitizesChannelId:
     async def test_sanitizes_colon(self, tmp_path):
         """Colon in channel ID is replaced with underscore in filename."""
-        from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
+        from corvidae.jsonl_log import JsonlLogPlugin
 
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
@@ -337,8 +334,8 @@ class TestJsonlPluginSanitizesChannelId:
 
     async def test_sanitizes_slash_and_colon(self, tmp_path):
         """Channel IDs with '/' and ':' produce filenames with '_'."""
-        from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
+        from corvidae.jsonl_log import JsonlLogPlugin
 
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
@@ -367,8 +364,8 @@ class TestJsonlPluginSanitizesChannelId:
 class TestJsonlPluginStop:
     async def test_on_stop_flushes_and_closes(self, tmp_path):
         """on_stop must flush and close all open file handles without raising."""
-        from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
+        from corvidae.jsonl_log import JsonlLogPlugin
 
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
@@ -398,8 +395,8 @@ class TestJsonlPluginStop:
 class TestJsonlPluginValidJson:
     async def test_all_lines_valid_json(self, tmp_path):
         """Every line in the JSONL file must be valid JSON."""
-        from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
+        from corvidae.jsonl_log import JsonlLogPlugin
 
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
@@ -430,8 +427,8 @@ class TestJsonlPluginValidJson:
 
     async def test_record_has_required_fields(self, tmp_path):
         """Each JSONL record must have ts, channel, type, and message fields."""
-        from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
+        from corvidae.jsonl_log import JsonlLogPlugin
 
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
@@ -462,8 +459,8 @@ class TestWriteFailure:
         self, tmp_path, monkeypatch, caplog
     ):
         """Disk/permission errors are logged with channel and file, not raised."""
-        from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
+        from corvidae.jsonl_log import JsonlLogPlugin
 
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)

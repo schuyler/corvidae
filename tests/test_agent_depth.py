@@ -10,6 +10,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from helpers import KERNEL_LLM_STAGES, stub_llm_config
 
 from corvidae.agent import Agent
 from corvidae.attribution import (
@@ -32,8 +33,6 @@ from corvidae.tool_collection import (
 from corvidae.tools import fork_tool, subagent
 from corvidae.tools.fork_tool import ForkToolPlugin
 from corvidae.tools.subagent import SubagentPlugin
-
-from helpers import KERNEL_LLM_STAGES, stub_llm_config
 
 CONFIG = {"llm": {
     "providers": {"main": {"base_url": "http://localhost:8080"}},

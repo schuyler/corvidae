@@ -61,6 +61,18 @@ _KERNEL_ENTRY_POINT_NAMES = frozenset({"registry", "clock", "idle", "spill"})
 _PLUGIN_INSTANCE_ATTRIBUTES = frozenset({"pm", "config"})
 
 
+def _installed_entry_point_names() -> frozenset[str]:
+    """Kernel object names plus every ``corvidae`` entry point installed here."""
+    import importlib.metadata
+
+    names = set(_KERNEL_ENTRY_POINT_NAMES)
+    try:
+        names.update(ep.name for ep in importlib.metadata.entry_points(group="corvidae"))
+    except Exception:  # pragma: no cover - metadata trouble must not block scaffold
+        pass
+    return frozenset(names)
+
+
 def validate_plugin_name(plugin_name: str) -> None:
     """Refuse a name that cannot produce a loadable plugin, naming it (#849).
 
@@ -95,11 +107,12 @@ def validate_plugin_name(plugin_name: str) -> None:
             f"{package_name!r}, which is an attribute of CorvidaePlugin and "
             f"would shadow it; choose another name"
         )
-    if _to_entry_point_name(package_name) in _KERNEL_ENTRY_POINT_NAMES:
+    entry_point_name = _to_entry_point_name(package_name)
+    if entry_point_name in _installed_entry_point_names():
         raise ValueError(
             f"plugin name {plugin_name!r} produces the entry point name "
-            f"{_to_entry_point_name(package_name)!r}, which the kernel already "
-            f"registers; choose another name"
+            f"{entry_point_name!r}, which is already taken (a kernel object or "
+            f"an installed plugin); choose another name"
         )
 
 

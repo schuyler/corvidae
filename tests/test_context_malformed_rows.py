@@ -15,6 +15,8 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from helpers import build_plugin_and_channel, drain, sent_texts
+from llm_response_fixtures import _make_text_response
 
 from corvidae.channel import Channel  # noqa: F401 (fixture type hint)
 from corvidae.context import (
@@ -26,9 +28,6 @@ from corvidae.context import (
 from corvidae.fork import snap_cut_forward, snap_cut_to_tool_boundary
 from corvidae.outbound import OutboundMessage
 from corvidae.trace import mint_trace_id
-
-from helpers import build_plugin_and_channel, drain, sent_texts
-from llm_response_fixtures import _make_text_response
 
 pytestmark = pytest.mark.timeout(15)
 

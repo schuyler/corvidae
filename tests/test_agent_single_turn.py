@@ -7,30 +7,26 @@ These tests specify behavior that doesn't exist yet (Red TDD). They fail because
 - ChannelConfig doesn't have max_turns
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
-
-from corvidae.trace import mint_trace_id
-from corvidae.agent import Agent
-from corvidae.turn import AgentTurnResult, run_agent_turn  # noqa: F401 (used in comments/type checking)
-from corvidae.channel import ChannelConfig, ChannelRegistry
-from corvidae.persistence import init_db
-from corvidae.hooks import create_plugin_manager, hookimpl
-from corvidae.persistence import PersistencePlugin
-from corvidae.task import Task, TaskPlugin, TaskQueue
-from corvidae.tool import ToolContext
-
-from corvidae.outbound import OutboundMessage
 from helpers import build_plugin_and_channel, drain, drain_task_queue, sent, sent_texts
 from llm_response_fixtures import (
     _make_text_response,
-    _make_tool_call_response,
     _make_tool_call,
+    _make_tool_call_response,
 )
 
+from corvidae.agent import Agent
+from corvidae.channel import ChannelConfig, ChannelRegistry
+from corvidae.hooks import create_plugin_manager, hookimpl
+from corvidae.outbound import OutboundMessage
+from corvidae.persistence import PersistencePlugin, init_db
+from corvidae.task import Task
+from corvidae.tool import ToolContext
+from corvidae.trace import mint_trace_id
+from corvidae.turn import AgentTurnResult, run_agent_turn  # noqa: F401 (used in comments/type checking)
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -1003,6 +999,7 @@ class TestCompactionFailureResilience:
         WARNING, and continue.
         """
         import logging
+
         from corvidae.hooks import hookimpl
 
         plugin, channel, db = plugin_and_channel

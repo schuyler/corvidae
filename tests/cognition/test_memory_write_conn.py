@@ -13,9 +13,6 @@ import sqlite3
 
 import aiosqlite
 import pytest
-
-from corvidae.channel import Channel
-from corvidae.context import MessageType
 from corvidae_cognition import memory as memory_module
 
 from .test_memory_consolidation import (

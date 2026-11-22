@@ -10,7 +10,6 @@ every POST (helpers.start_llm_plugin).
 import logging
 
 import pytest
-
 from helpers import LLMResponseRecorder, start_llm_plugin
 
 MAIN = {"model": "main-m"}

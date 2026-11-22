@@ -10,21 +10,26 @@ watermark advance in one atomic step.
 import asyncio
 import json
 import logging
-import time
 from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
+from corvidae_cognition.memory import MemoryPlugin, RubricPrior
+from helpers import (
+    CORRUPT_MESSAGES,
+    FakeForkAgent,
+    insert_raw_message,
+    skip_warnings,
+    stub_llm_config,
+    with_chat_llm,
+)
 
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel
 from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from corvidae_cognition.memory import MemoryPlugin, RubricPrior
 from corvidae.persistence import PersistencePlugin, init_db
-from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, stub_llm_config, with_chat_llm
-
 
 CONSOLIDATION_JSON = json.dumps({
     "summary": "I helped kestrel debug the weather station's wifi dropouts.",
@@ -1079,7 +1084,9 @@ class TestEntriesCommit:
         """C6: a commit whose compare-and-set is lost (watermark moved by
         another task) stores none of its 3 entries and returns False."""
         from corvidae_cognition.memory import (
-            Consolidation, ConsolidationEntry, RecordStamp,
+            Consolidation,
+            ConsolidationEntry,
+            RecordStamp,
         )
 
         memory, persistence, stub, channel, db = await build_consolidation_env()

@@ -13,25 +13,22 @@ implemented (Item 2 of corvidae-cleanup.md).
 """
 
 import logging
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from helpers import build_plugin_and_channel, drain, sent, sent_texts
+from llm_response_fixtures import _make_text_response
 
-from corvidae.clock import Clock
-from corvidae.trace import mint_trace_id
 from corvidae.agent import (
-    Agent,
     MAX_TURNS_FALLBACK_MESSAGE,
     QueueItem,
     QueueItemRole,
 )
-from corvidae.turn import AgentTurnResult
-
+from corvidae.clock import Clock
 from corvidae.outbound import OutboundMessage
-from helpers import build_plugin_and_channel, drain, sent, sent_texts
-from llm_response_fixtures import _make_text_response
-
+from corvidae.trace import mint_trace_id
+from corvidae.turn import AgentTurnResult
 
 # ---------------------------------------------------------------------------
 # Shared fixtures

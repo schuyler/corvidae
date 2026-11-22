@@ -16,9 +16,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from helpers import build_plugin_and_channel, drain
 from llm_response_fixtures import _make_text_response
+
 from corvidae.trace import mint_trace_id
 
 CORVIDAE_ROOT = Path(__file__).resolve().parent.parent / "corvidae"

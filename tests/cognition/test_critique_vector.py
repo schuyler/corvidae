@@ -28,27 +28,29 @@ import json
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-
-from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae.fork import quote
 from corvidae_cognition.critique import (
     NO_REPLY_MARKER,
     PROVENANCE_NOTE,
     RETENTION_WAKE_NOTE,
 )
-
 from helpers import FakeForkAgent, window_of
+
+from corvidae.fork import quote
+from corvidae.hooks import CorvidaePlugin, hookimpl
 from tests.cognition.test_appraisal_stage2 import (
     _read_appraisal,
+)
+from tests.cognition.test_appraisal_stage2 import (
     _teardown as _teardown_appraisal,
+)
+from tests.cognition.test_appraisal_stage2 import (
     build_env as build_appraisal_env,
 )
 from tests.cognition.test_critique import (
-    CLAIM,
+    UNSUPPORTED_VERDICT,
     FakeAppraisal,
     FixedRng,
     RenderingForkAgent,
-    UNSUPPORTED_VERDICT,
     _fire,
     _provenance_exchange,
     _read_outcomes,

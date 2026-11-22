@@ -119,6 +119,10 @@ def validate_agent_config(agent: dict) -> None:
     _check_reasoning_keys(agent, "agent")
     _check_register_prompt(agent.get("register_prompt"), "agent.register_prompt")
     _check_seconds(agent.get("check_allowance_min"), "agent.check_allowance_min")
+    # Agent-level defaults reach every channel that sets no value of its own
+    # (#850), so the same positivity rule applies here.
+    for int_key in ("max_turns", "max_context_tokens"):
+        _check_int_key(agent.get(int_key), f"agent.{int_key}")
     parse_forks_config(agent)
 
 

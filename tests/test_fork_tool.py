@@ -8,18 +8,15 @@ subagent machinery (registration, launch, tool exclusion, LLM stage).
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
-from corvidae.channel import Channel, ChannelConfig
-from corvidae.hooks import create_plugin_manager
-from corvidae.task import Task, TaskQueue
-from corvidae.tool import Tool, ToolContext, ToolRegistry
-
-from corvidae.agent import Agent
-from corvidae.llm_plugin import LLMPlugin
-from corvidae.tools.fork_tool import ForkToolPlugin
 from helpers import KERNEL_LLM_STAGES, collect_llm_stages, stub_llm_config
 
+from corvidae.agent import Agent
+from corvidae.channel import Channel, ChannelConfig
+from corvidae.hooks import create_plugin_manager
+from corvidae.llm_plugin import LLMPlugin
+from corvidae.task import Task, TaskQueue
+from corvidae.tool import Tool, ToolContext, ToolRegistry
+from corvidae.tools.fork_tool import ForkToolPlugin
 
 MY_PROMPT = "I am Lex. Researcher, software engineer, and collaborator on both."
 

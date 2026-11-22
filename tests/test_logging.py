@@ -11,20 +11,21 @@ import logging
 import logging.config
 import os
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
-
-from corvidae.trace import mint_trace_id
-from corvidae.channel import ChannelConfig, ChannelRegistry, load_channel_config
-from corvidae.context import ContextWindow
-from corvidae.persistence import init_db
-from corvidae.channel import resolve_system_prompt
 from helpers import stub_llm_config
 
+from corvidae.channel import (
+    ChannelConfig,
+    ChannelRegistry,
+    load_channel_config,
+    resolve_system_prompt,
+)
+from corvidae.context import ContextWindow
+from corvidae.trace import mint_trace_id
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -129,6 +130,7 @@ class TestConfigureLogging:
     def test_file_creates_rotating_handler(self, tmp_path):
         """configure_logging(file=...) installs a RotatingFileHandler."""
         import logging.handlers
+
         from corvidae.logging import configure_logging
 
         log_file = str(tmp_path / "test.log")
@@ -159,7 +161,7 @@ class TestConfigureLogging:
 
     def test_structured_formatter_used(self):
         """The handler installed by configure_logging uses StructuredFormatter."""
-        from corvidae.logging import configure_logging, StructuredFormatter
+        from corvidae.logging import StructuredFormatter, configure_logging
 
         configure_logging()
         corvidae_logger = logging.getLogger("corvidae")
@@ -321,8 +323,6 @@ class TestMainLoggingConfiguration:
 
     async def test_main_logs_startup_info(self, tmp_path, caplog):
         """Runtime.start() must emit an INFO log for 'logging configured' (startup message)."""
-        import asyncio
-        import signal
 
         from corvidae.runtime import Runtime
 
@@ -412,7 +412,6 @@ class TestLLMLogging:
     async def test_llm_chat_logs_info_with_token_usage(self, caplog):
         """LLMClient.chat() must emit an INFO log after success including
         model, latency_ms, and token usage fields."""
-        from aiohttp import ClientResponseError
         from corvidae.llm import LLMClient
 
         mock_completion = {
@@ -455,6 +454,7 @@ class TestLLMLogging:
     async def test_llm_chat_logs_error_on_http_failure(self, caplog):
         """LLMClient.chat() must emit an ERROR log when the HTTP call fails."""
         from aiohttp import ClientResponseError
+
         from corvidae.llm import LLMClient
 
         mock_response = AsyncMock()
@@ -736,7 +736,7 @@ class TestChannelLogging:
 
     def test_resolve_config_logs_debug(self, caplog):
         """ChannelRegistry.resolve_config must emit a DEBUG log."""
-        from corvidae.channel import ChannelConfig, ChannelRegistry
+        from corvidae.channel import ChannelRegistry
 
         registry = ChannelRegistry({"system_prompt": "Agent.", "max_context_tokens": 8000})
         channel = registry.get_or_create("irc", "#lex", config=ChannelConfig())
@@ -840,8 +840,8 @@ class TestAgentLogging:
         pm.ahook.on_agent_response = AsyncMock()
 
         from corvidae.llm_plugin import LLMPlugin
-        from corvidae.tool_collection import ToolCollectionPlugin
         from corvidae.tool import ToolRegistry
+        from corvidae.tool_collection import ToolCollectionPlugin
         mock_llm = LLMPlugin(pm)
         mock_llm._clients["main"] = MagicMock()
         stub_llm_config(mock_llm)
@@ -942,6 +942,7 @@ class TestAgentLogging:
         an existing conversation for a channel."""
         import json
         import time
+
         from corvidae.hooks import create_plugin_manager
         from corvidae.persistence import PersistencePlugin
 

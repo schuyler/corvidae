@@ -7,12 +7,11 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from helpers import acp_agent_env
 
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import create_plugin_manager
 from corvidae.outbound import OutboundMessage
-from helpers import acp_agent_env
-
 
 AGENT_DEFAULTS = {
     "system_prompt": "You are a test assistant.",
@@ -30,6 +29,7 @@ async def test_gate_b_initialize_session_prompt_cancel(tmp_path) -> None:
     second in-flight prompt.
     """
     from acp import PROTOCOL_VERSION, text_block
+
     from corvidae.channels.acp import AcpPlugin, CorvidaeAcpAgent
 
     pm = create_plugin_manager()

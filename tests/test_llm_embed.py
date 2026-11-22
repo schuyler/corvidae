@@ -10,12 +10,10 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from helpers import stub_llm_config
 
 from corvidae.llm import LLMClient
 from corvidae.llm_plugin import LLMPlugin
-
-from helpers import stub_llm_config
-
 
 BASE_URL = "http://localhost:8080"
 MODEL = "embed-model"

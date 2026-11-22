@@ -18,7 +18,6 @@ import aiosqlite
 from corvidae.hooks import hookimpl
 from corvidae.runtime import Runtime
 
-
 # Strong references to leaked connections, alive until interpreter exit.
 _LEAKED: list[aiosqlite.Connection] = []
 

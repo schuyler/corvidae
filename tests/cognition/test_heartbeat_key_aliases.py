@@ -12,12 +12,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-
-from corvidae.hooks import create_plugin_manager
-from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.goals import GoalsPlugin
 from corvidae_cognition.memory import MemoryPlugin
 from helpers import with_chat_llm
+
+from corvidae.hooks import create_plugin_manager
+from corvidae.llm_plugin import LLMPlugin
 
 
 async def _observe(kind: str, config: dict):

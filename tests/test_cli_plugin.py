@@ -1,17 +1,12 @@
 """Tests for corvidae.channels.cli.CLIPlugin."""
 
 import asyncio
-import sys
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
-import pytest
-
-from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
+from corvidae.channel import ChannelRegistry
+from corvidae.channels.cli import CLIPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.outbound import OutboundMessage
-
-from corvidae.channels.cli import CLIPlugin
-
 
 # ---------------------------------------------------------------------------
 # Helpers / constants

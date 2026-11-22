@@ -354,7 +354,7 @@ class TestGeneratedProjectContents:
 
 @pytest.mark.parametrize(
     "name",
-    ["config", "pm", "registry", "class", "2fa"],
+    ["config", "pm", "registry", "class", "2fa", "memory"],
 )
 def test_scaffold_refuses_a_name_that_cannot_load(tmp_path, monkeypatch, name):
     """#849: a name that generates an unloadable project fails up front, named."""
@@ -366,7 +366,8 @@ def test_scaffold_refuses_a_name_that_cannot_load(tmp_path, monkeypatch, name):
     result = CliRunner().invoke(scaffold_command, [name])
 
     assert result.exit_code != 0
-    assert name in result.output
+    assert f"plugin name {name!r}" in result.output
+    assert "choose another name" in result.output or "start it with a letter" in result.output
     assert not (tmp_path / name).exists()
 
 

@@ -9,7 +9,6 @@ caution about tests that could hang once the implementation lands.
 """
 from harness.driver import IRCMessage, ts_fmt
 
-
 # ---------------------------------------------------------------------------
 # Inbox protocol: sequence numbers, ordering, stop priority
 # ---------------------------------------------------------------------------

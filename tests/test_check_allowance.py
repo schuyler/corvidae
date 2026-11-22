@@ -19,6 +19,13 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fake_clock import install_kernel_clock
+from helpers import build_plugin_and_channel, drain, drain_task_queue, sent_texts
+from llm_response_fixtures import (
+    _make_text_response,
+    _make_tool_call,
+    _make_tool_call_response,
+)
 
 from corvidae.channel import (
     ChannelConfig,
@@ -32,13 +39,6 @@ from corvidae.context import LATE_CHECK_LABEL, MessageType
 from corvidae.hooks import Refusal, TransportPlugin, create_plugin_manager, hookimpl
 from corvidae.outbound import OutboundMessage
 from corvidae.trace import mint_trace_id
-from fake_clock import install_kernel_clock
-from helpers import build_plugin_and_channel, drain, drain_task_queue, sent_texts
-from llm_response_fixtures import (
-    _make_text_response,
-    _make_tool_call,
-    _make_tool_call_response,
-)
 
 #: The minimum allowance a channel gets when nothing else sets one (seconds).
 DEFAULT_MINIMUM = 5.0

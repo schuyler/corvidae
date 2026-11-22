@@ -24,7 +24,6 @@ import yaml
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import create_plugin_manager
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

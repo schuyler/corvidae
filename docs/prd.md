@@ -1066,7 +1066,7 @@ Per transport:
    what (principle 9).
 2. Retries transient status codes and connection errors with capped
    exponential backoff, honours `Retry-After`, and waits out a router's
-   "model is not loaded" for `model_not_loaded_wait` seconds. A terminal
+   "model is not loaded" for a fixed 60 s. A terminal
    non-2xx raises a typed error carrying the provider body and the model;
    a malformed envelope raises naming the endpoint and the keys received.
 3. `resolve_llm_error` turns a failure into a reply that names the status,

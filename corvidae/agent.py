@@ -29,24 +29,24 @@ import asyncio
 import dataclasses
 import itertools
 import json
-import os
 import logging
+import os
 import time
-from typing import TYPE_CHECKING, Any
-
-import aiohttp
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields as dc_fields, replace
+from dataclasses import dataclass, field, replace
+from dataclasses import fields as dc_fields
 from enum import Enum
 from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import aiohttp
 
 from corvidae.clock import Clock, Timer
 from corvidae.llm import LLMHTTPError, is_backend_unreachable
 
 if TYPE_CHECKING:
     from corvidae.tool_collection import ToolCollectionPlugin
-from corvidae.turn import AgentTurnResult, run_agent_turn
 from corvidae.attribution import (
     get_attribution,
     lease_scope,
@@ -54,28 +54,25 @@ from corvidae.attribution import (
     set_attribution,
 )
 from corvidae.channel import (
+    INFERENCE_KEYS,
     Channel,
     ChannelConfig,
     ChannelRegistry,
-    INFERENCE_KEYS,
     resolve_persisted_channel,
     resolve_system_prompt,
 )
+from corvidae.checks import resolve_check_allowance, run_checks
 from corvidae.context import (
     DEFAULT_CHARS_PER_TOKEN,
     UNSENT_MARKER_LABEL,  # noqa: F401 (re-exported for tests and plugins)
     ContextWindow,
+    MessageType,
     count_tokens,
     late_check_text,
     message_tokens,
-    MessageType,
     unsent_marker_text,
     well_formed_calls,
 )
-from corvidae.provenance import PROVENANCE_KEY, ItemMetadata, encode, load_fence_key
-# Re-exported: mint_trace_id lives in a leaf module so transports can
-# import it without this module; existing imports from here keep working.
-from corvidae.trace import mint_trace_id  # noqa: F401
 from corvidae.fork import (
     ForkRefused,
     ForkResult,
@@ -88,9 +85,6 @@ from corvidae.fork import (
     looks_like_tool_call,
     parse_forks_config,
 )
-from corvidae.idle import IdleTracker
-from corvidae.thinking import apply_reasoning_history
-from corvidae.checks import resolve_check_allowance, run_checks
 from corvidae.hooks import (
     CorvidaePlugin,
     Refusal,
@@ -99,15 +93,18 @@ from corvidae.hooks import (
     resolve_reject_wins,
     resolve_single_result,
 )
+from corvidae.idle import IdleTracker
 from corvidae.outbound import (
     OutboundMessage,
     OutboundProgress,
     OutboundThinking,
     OutboundToolStatus,
 )
+from corvidae.provenance import PROVENANCE_KEY, ItemMetadata, encode, load_fence_key
 from corvidae.queue import SerialQueue
 from corvidae.spill import SPILL_NAME, Cut, NotificationSpill, current_cut
 from corvidae.task import Task
+from corvidae.thinking import apply_reasoning_history
 from corvidae.tool import (
     DEFAULT_TOOL_TIMEOUTS,
     ToolTimeouts,
@@ -122,6 +119,11 @@ from corvidae.tool_policy import (
     disabling_keys,
     refusal_message,
 )
+
+# Re-exported: mint_trace_id lives in a leaf module so transports can
+# import it without this module; existing imports from here keep working.
+from corvidae.trace import mint_trace_id  # noqa: F401
+from corvidae.turn import AgentTurnResult, run_agent_turn
 
 logger = logging.getLogger("corvidae.agent")
 
@@ -2436,6 +2438,7 @@ class Agent(CorvidaePlugin):
     async def _start_plugin(self, config: dict) -> None:
         """Initialize LLM client and tools."""
         from pathlib import Path
+
         from corvidae.llm_plugin import LLMPlugin
         from corvidae.tool_collection import ToolCollectionPlugin
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)

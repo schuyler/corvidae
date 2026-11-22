@@ -23,9 +23,9 @@ from typing import TYPE_CHECKING
 
 from corvidae.admission import offer_work
 from corvidae.attribution import (
+    agent_depth_refusal,
     get_attribution,
     lease_scope,
-    agent_depth_refusal,
     next_agent_depth,
     reset_attribution,
     set_attribution,
@@ -34,19 +34,16 @@ from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.task import Task
 from corvidae.thinking import strip_thinking
 from corvidae.tool import (
-    DEFAULT_TOOL_TIMEOUTS,
-    MAX_TOOL_RESULT_CHARS,
     ToolContext,
 )
+from corvidae.tool_collection import DEFAULT_MAX_AGENT_DEPTH
 from corvidae.tools.subagent import (
     parse_subagent_max_turns,
     run_agent_loop,
 )
-from corvidae.tool_collection import DEFAULT_MAX_AGENT_DEPTH
 
 if TYPE_CHECKING:
-    from corvidae.channel import Channel
-    from corvidae.task import TaskQueue
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -127,9 +124,9 @@ class ForkToolPlugin(CorvidaePlugin):
 
         # The full tool set, minus the fork tool itself (nesting is bounded by depth) and
         # minus any the calling channel has disabled.
-        from corvidae.tool_policy import disabled_on
-        from corvidae.tool_collection import ToolCollectionPlugin
         from corvidae.llm_plugin import LLMPlugin
+        from corvidae.tool_collection import ToolCollectionPlugin
+        from corvidae.tool_policy import disabled_on
 
         tools_plugin = get_dependency(self.pm, "tools", ToolCollectionPlugin)
         registry = tools_plugin.get_registry().exclude("fork", *disabled_on(channel))

@@ -237,7 +237,8 @@ class TestDST:
 
     def test_fallback_hour_no_past_result(self):
         from zoneinfo import ZoneInfo
-        from corvidae.cron import parse_cron, next_fire
+
+        from corvidae.cron import next_fire, parse_cron
 
         tz = ZoneInfo("America/Los_Angeles")
         # 2026-11-01 is the fall-back day. 01:10 PST is the second pass
@@ -257,7 +258,8 @@ class TestDST:
 
     def test_fallback_hour_every_20min(self):
         from zoneinfo import ZoneInfo
-        from corvidae.cron import parse_cron, next_fire
+
+        from corvidae.cron import next_fire, parse_cron
 
         tz = ZoneInfo("America/Los_Angeles")
         after = datetime(2026, 11, 1, 1, 10, tzinfo=tz).replace(fold=1)
@@ -271,7 +273,8 @@ class TestDST:
 
     def test_spring_forward_still_works(self):
         from zoneinfo import ZoneInfo
-        from corvidae.cron import parse_cron, next_fire
+
+        from corvidae.cron import next_fire, parse_cron
 
         tz = ZoneInfo("America/Los_Angeles")
         # 2026-03-08 is the spring-forward day. 01:30 PST.

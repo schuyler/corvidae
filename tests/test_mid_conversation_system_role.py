@@ -12,13 +12,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import jinja2
 import pytest
-
-from corvidae.trace import mint_trace_id
-from corvidae.context import ContextWindow, MessageType
-from corvidae.hooks import hookimpl
-
 from helpers import build_plugin_and_channel, drain
 from llm_response_fixtures import _make_text_response
+
+from corvidae.context import ContextWindow, MessageType
+from corvidae.hooks import hookimpl
+from corvidae.trace import mint_trace_id
 
 TEMPLATE_PATH = Path(__file__).parent / "fixtures" / "chat_templates" / "swift-1.5.jinja"
 

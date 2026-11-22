@@ -21,7 +21,6 @@ import aiosqlite
 import pytest
 
 
-
 def _view_inputs(max_tokens: int = 100_000):
     """The replay's ViewInputs: a fixed identity + register prompt, a budget
     well above the test ranges, the system mid role and a no-op policy."""
@@ -288,6 +287,7 @@ async def test_replay_builds_the_daemons_catchup_request(tmp_path):
         DEFAULT_ENTRY_TARGET_TOKENS,
         consolidation_instruction,
     )
+
     from harness.consolidate_replay import run_replay
 
     from .test_memory_consolidation import build_consolidation_env, seed_dialog
@@ -334,6 +334,7 @@ async def test_replay_sends_the_record_schema_extra_body(tmp_path):
     daemon's catch-up sends, or prompt-variant comparisons measure
     unconstrained output the daemon never produces."""
     from corvidae_cognition.memory import CONSOLIDATION_EXTRA_BODY
+
     from harness.consolidate_replay import run_replay
 
     db_path = tmp_path / "t.db"

@@ -13,17 +13,20 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import aiosqlite
-import pytest
-
 import corvidae_cognition.funnel as funnel_mod
+import pytest
+from corvidae_cognition.funnel import Admission, FunnelPlugin
+
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import (
-    CorvidaePlugin, create_plugin_manager, hookimpl,
-    install_plugin_hookspecs, report_orphan_hookimpls,
+    CorvidaePlugin,
+    create_plugin_manager,
+    hookimpl,
+    install_plugin_hookspecs,
+    report_orphan_hookimpls,
 )
 from corvidae.persistence import PersistencePlugin, init_db
-from corvidae_cognition.funnel import Admission, FunnelPlugin
 
 # ALPHA and BRAVO are 10 tokens each (count_tokens): under a 12-token budget only one fits per drain.
 ALPHA = ("alpha " * 10).strip()

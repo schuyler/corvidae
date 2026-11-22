@@ -120,13 +120,7 @@ class _HookObserver:
         )
 
 
-def _wait_after_removal_check(cfg: dict, provider: str) -> float:
-    """Refuse the removed key, then return the fixed wait."""
-    _reject_removed_model_not_loaded_wait(cfg, provider)
-    return MODEL_NOT_LOADED_WAIT
-
-
-def _reject_removed_model_not_loaded_wait(cfg: dict, provider: str) -> None:
+def _refuse_removed_wait_key(cfg: dict, provider: str) -> None:
     """Refuse llm.providers.<provider>.model_not_loaded_wait, removed in #956.
 
     The key only decided how long the user waits before being told the model is
@@ -818,6 +812,9 @@ class LLMPlugin(CorvidaePlugin):
                     f"the daemon's environment; set {exc.var} in the "
                     "environment corvidae runs in and restart."
                 ) from None
+        # The wait is a constant now; a config that still sets the old key
+        # fails startup here rather than being ignored (#956).
+        _refuse_removed_wait_key(cfg, cfg.get("provider", profile))
         client = LLMClient(
             base_url=cfg["base_url"],
             model=cfg["model"],
@@ -829,7 +826,7 @@ class LLMPlugin(CorvidaePlugin):
             timeout=cfg.get("timeout"),
             document_prefix=cfg.get("document_prefix", ""),
             query_prefix=cfg.get("query_prefix", ""),
-            model_not_loaded_wait=_wait_after_removal_check(cfg, cfg.get("provider", profile)),
+            model_not_loaded_wait=MODEL_NOT_LOADED_WAIT,
             raw_reasoning=_raw_reasoning(cfg, profile),
             reasoning_reopened=_reasoning_reopened(cfg, profile),
         )

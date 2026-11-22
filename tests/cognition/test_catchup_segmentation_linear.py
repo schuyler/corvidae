@@ -18,15 +18,12 @@ import aiosqlite
 import corvidae_cognition.memory as memory_module
 import pytest
 from corvidae_cognition.memory import (
-    DEFAULT_CONSOLIDATION_FORK_PROMPT,
-    DEFAULT_ENTRY_TARGET_TOKENS,
     CatchupSegment,
     _dialog_ids,
     _fork_range_sentence,
     _measured_size,
     _merge_overlapping_segments,
     build_catchup_segments,
-    consolidation_instruction,
     logger,
 )
 

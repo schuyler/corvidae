@@ -12,17 +12,20 @@ from types import SimpleNamespace
 from typing import Any
 
 import aiosqlite
-import pytest
-
 import corvidae_cognition.funnel as funnel_mod
+import pytest
+from corvidae_cognition.funnel import FunnelPlugin
+
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import (
-    CorvidaePlugin, create_plugin_manager, hookimpl,
-    install_plugin_hookspecs, report_orphan_hookimpls,
+    CorvidaePlugin,
+    create_plugin_manager,
+    hookimpl,
+    install_plugin_hookspecs,
+    report_orphan_hookimpls,
 )
 from corvidae.persistence import PersistencePlugin, init_db
-from corvidae_cognition.funnel import FunnelPlugin
 
 
 def recall_mod():

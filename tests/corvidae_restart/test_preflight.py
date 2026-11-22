@@ -332,9 +332,9 @@ def test_the_survivor_sentence_names_the_bound_when_there_is_one():
 
 def test_a_mismatched_corvidae_location_is_refused():
     """#1008: a venv whose corvidae resolves elsewhere must not boot."""
-    import corvidae
-
     from corvidae_restart.preflight import check_corvidae_location
+
+    import corvidae
 
     here = str(__import__("pathlib").Path(corvidae.__file__).resolve().parent)
 

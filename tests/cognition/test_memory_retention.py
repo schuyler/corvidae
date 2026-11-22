@@ -10,38 +10,35 @@ Test naming follows the plan's acceptance criteria (bootstrap-mapping §3.1,
 phase-1b.md WP1b.1). Clock-frozen via unittest.mock.patch('time.time').
 """
 
-import asyncio
-import json
 import logging
 import math
 import time
-from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import aiosqlite
 import pytest
-
-# PRIMARY IMPORT FAILURE — all tests below fail at collection time with
-# ModuleNotFoundError: No module named 'corvidae.retention'
-from corvidae_cognition.retention import (
-    retention_score,
-    run_retention_job,
-    RETRIEVAL_BOOST,
-)
-
-from corvidae.channel import Channel
-from corvidae.context import ContextWindow, MessageType
 from corvidae_cognition.funnel import FunnelPlugin
-from corvidae.hooks import create_plugin_manager
-from corvidae.llm_plugin import LLMPlugin
-from helpers import stub_llm_config, with_chat_llm
 from corvidae_cognition.memory import MemoryPlugin
-from corvidae.persistence import PersistencePlugin, init_db
+
 # Cross-WP dependency: MemoryToolsPlugin lives in WP1b.3. Tests in this file
 # (WP1b.1) will not collect until WP1b.3's module exists — the collection error
 # shifts from corvidae.retention to corvidae.tools.memory_tools if only WP1b.1
 # is implemented. Implement WP1b.1 and WP1b.3 together to unlock these tests.
 from corvidae_cognition.memory_tools import MemoryToolsPlugin
 
+# PRIMARY IMPORT FAILURE — all tests below fail at collection time with
+# ModuleNotFoundError: No module named 'corvidae.retention'
+from corvidae_cognition.retention import (
+    RETRIEVAL_BOOST,
+    retention_score,
+    run_retention_job,
+)
+from helpers import stub_llm_config, with_chat_llm
+
+from corvidae.channel import Channel
+from corvidae.context import ContextWindow, MessageType
+from corvidae.hooks import create_plugin_manager
+from corvidae.llm_plugin import LLMPlugin
+from corvidae.persistence import PersistencePlugin, init_db
 
 # ---------------------------------------------------------------------------
 # Constants mirrored from plan (§6-tunable; verified against plan body)
@@ -532,7 +529,6 @@ class TestDemotionRetrievalIntegration:
 
     async def test_demoted_excluded_from_before_agent_turn(self):
         """Passive retrieval (before_agent_turn) must skip demoted records."""
-        from corvidae.context import MessageType
         memory, embedder, channel, db = await build_retention_env()
         channel.conversation = ContextWindow(channel.id)
 
@@ -554,7 +550,6 @@ class TestDemotionRetrievalIntegration:
         channel.conversation.append({"role": "user", "content": "ESP32 wifi issue"})
         await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
 
-        from corvidae.context import MessageType
         context_msgs = [
             m for m in channel.conversation.messages
             if m.get("_message_type") == MessageType.CONTEXT

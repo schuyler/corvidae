@@ -2004,7 +2004,7 @@ async def test_a_scalar_daemon_section_refuses_the_reload_naming_it(tmp_path, ca
         },
     )
 
-    config_file.write_text(base + "daemon: 5\n")
+    config_file.write_text(base + "daemon: 0\n")
 
     dispatched: list[dict] = []
 
@@ -2018,3 +2018,4 @@ async def test_a_scalar_daemon_section_refuses_the_reload_naming_it(tmp_path, ca
 
     assert dispatched == [], "a rejected reload must dispatch nothing"
     assert "daemon must be a mapping" in caplog.text
+    assert "got 0 (int)" in caplog.text

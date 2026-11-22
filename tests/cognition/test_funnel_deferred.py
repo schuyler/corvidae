@@ -22,12 +22,11 @@ from unittest.mock import AsyncMock
 
 import aiosqlite
 import pytest
+from corvidae_cognition.funnel import FunnelPlugin
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
-from corvidae_cognition.funnel import FunnelPlugin
-from corvidae.hooks import create_plugin_manager, hookimpl
-from corvidae.hooks import install_plugin_hookspecs
+from corvidae.hooks import create_plugin_manager, hookimpl, install_plugin_hookspecs
 from corvidae.persistence import PersistencePlugin, init_db
 
 

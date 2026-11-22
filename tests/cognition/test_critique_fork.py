@@ -6,20 +6,30 @@ fork misses skips alone with a warning and no standalone call (#320, PRD
 
 import json
 import logging
-
-import pytest
 from unittest.mock import AsyncMock
 
+import pytest
 from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, OBJECTION_EXTRA_BODY
-from corvidae.fork import ForkRefused
+from helpers import FakeForkAgent, window_of
 
 from corvidae.context import MessageType
-from helpers import FakeForkAgent, window_of
+from corvidae.fork import ForkRefused
+
 from .test_critique import (
-    CLAIM, EMPTY_VERDICT, SUPPORTED_VERDICT, SYSTEM_PROMPT, TOOL_TEXT, UNSUPPORTED_VERDICT,
-    RenderingForkAgent, verdicts_text,
-    _provenance_env, _provenance_exchange, _provenance_instructions, _read_outcomes,
-    _run_provenance, _teardown, build_critique,
+    EMPTY_VERDICT,
+    SUPPORTED_VERDICT,
+    SYSTEM_PROMPT,
+    TOOL_TEXT,
+    UNSUPPORTED_VERDICT,
+    RenderingForkAgent,
+    _provenance_env,
+    _provenance_exchange,
+    _provenance_instructions,
+    _read_outcomes,
+    _run_provenance,
+    _teardown,
+    build_critique,
+    verdicts_text,
 )
 
 FORK_VERDICT = json.dumps({"objections": [{"claim": "it was Tuesday", "objection": "you said Monday"}]})

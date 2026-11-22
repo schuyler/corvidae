@@ -47,22 +47,21 @@ import pytest
 # installs no extras and skips the file.
 pytest.importorskip("emoji")
 
+from signal_fake import FakeSignalServer, frame_contains
+
 from corvidae.channel import ChannelRegistry, load_channel_config
-from corvidae.hooks import (
-    create_plugin_manager,
-    hookimpl,
-    resolve_reject_wins,
-    _check_hook_arg_binding,
-)
-from corvidae.outbound import OutboundMessage
 
 # The transport under test does not exist yet -- this import is expected to
 # fail until the green phase creates corvidae/channels/signal.py. That
 # failure is the point of this file.
 from corvidae.channels.signal import SignalPlugin
-
-from signal_fake import FakeSignalServer, frame_contains
-
+from corvidae.hooks import (
+    _check_hook_arg_binding,
+    create_plugin_manager,
+    hookimpl,
+    resolve_reject_wins,
+)
+from corvidae.outbound import OutboundMessage
 
 # ---------------------------------------------------------------------------
 # Constants and envelope builders

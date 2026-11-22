@@ -9,16 +9,14 @@ when the extension is unavailable, and refuses to mix encoders silently.
 
 import logging
 import time
-from unittest.mock import AsyncMock
 
 import aiosqlite
 import pytest
+from corvidae_cognition.memory import MemoryPlugin
 
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
-
 
 EMBED_CONFIG = {
     "llm": {

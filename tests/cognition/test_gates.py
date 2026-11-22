@@ -33,11 +33,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
-
-from corvidae.channel import Channel, ChannelConfig
-from corvidae.hooks import hookimpl, resolve_reject_wins
-from corvidae.outbound import OutboundMessage, OutboundProgress
-from corvidae.trace import mint_trace_id
 from helpers import build_plugin_and_channel, drain, drain_task_queue, sent_texts
 from llm_response_fixtures import (
     _make_mixed_response,
@@ -45,6 +40,10 @@ from llm_response_fixtures import (
     _make_tool_call,
 )
 
+from corvidae.channel import Channel, ChannelConfig
+from corvidae.hooks import hookimpl, resolve_reject_wins
+from corvidae.outbound import OutboundMessage, OutboundProgress
+from corvidae.trace import mint_trace_id
 
 # ---------------------------------------------------------------------------
 # Environment

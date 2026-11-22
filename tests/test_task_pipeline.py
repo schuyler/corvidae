@@ -11,7 +11,6 @@ from corvidae.tools.task_pipeline import (
     _topological_sort,
 )
 
-
 # --- YAML parsing tests ---
 
 

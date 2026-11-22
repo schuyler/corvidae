@@ -46,8 +46,6 @@ from aiohttp import WSMsgType, web
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.context import MessageType, unsent_marker_emission
-from corvidae.persistence import decode_message_row, parse_message_type
-from corvidae.trace import mint_trace_id
 from corvidae.hooks import TransportPlugin, get_dependency, hookimpl, hookspec
 from corvidae.outbound import (
     OutboundMessage,
@@ -55,12 +53,14 @@ from corvidae.outbound import (
     OutboundThinking,
     OutboundToolStatus,
 )
+from corvidae.persistence import decode_message_row, parse_message_type
 from corvidae.shutdown import (
     DEFAULT_STOP_BOUND_SECONDS,
     parse_shutdown_timeouts,
     stop_bound_seconds,
 )
 from corvidae.thinking import strip_thinking
+from corvidae.trace import mint_trace_id
 
 logger = logging.getLogger(__name__)
 

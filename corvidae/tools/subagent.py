@@ -12,24 +12,22 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Callable
 
-from corvidae.prompts import resolve_prompt
-from corvidae.turn import run_agent_turn
 from corvidae.admission import offer_work
 from corvidae.attribution import (
+    agent_depth_refusal,
     get_attribution,
     lease_scope,
-    agent_depth_refusal,
     next_agent_depth,
     reset_attribution,
     set_attribution,
 )
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm import LLMClient
+from corvidae.prompts import resolve_prompt
 from corvidae.provenance import cut_text
 from corvidae.spill import Cut, NotificationSpill
 from corvidae.task import Task
 from corvidae.thinking import strip_thinking
-from corvidae.tool_collection import DEFAULT_MAX_AGENT_DEPTH
 from corvidae.tool import (
     DEFAULT_TOOL_TIMEOUTS,
     MAX_TOOL_RESULT_CHARS,
@@ -37,6 +35,8 @@ from corvidae.tool import (
     ToolTimeouts,
     dispatch_tool_call,
 )
+from corvidae.tool_collection import DEFAULT_MAX_AGENT_DEPTH
+from corvidae.turn import run_agent_turn
 
 if TYPE_CHECKING:
     from corvidae.channel import Channel
@@ -288,9 +288,9 @@ class SubagentPlugin(CorvidaePlugin):
 
         # Get tools, excluding subagent itself (a subagent never lists itself;
         # nesting through other tools is bounded by depth below)
-        from corvidae.tool_policy import disabled_on
-        from corvidae.tool_collection import ToolCollectionPlugin
         from corvidae.llm_plugin import LLMPlugin
+        from corvidae.tool_collection import ToolCollectionPlugin
+        from corvidae.tool_policy import disabled_on
         tools_plugin = get_dependency(self.pm, "tools", ToolCollectionPlugin)
         # A subagent never gets a tool its calling channel cannot use
         # (channels.<id>.tools.disabled, issue #149); otherwise a channel

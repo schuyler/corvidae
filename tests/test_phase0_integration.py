@@ -11,14 +11,10 @@ live llama-server:
 """
 
 import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
-from corvidae.agent import Agent, QueueItem, QueueItemRole
+from corvidae.agent import QueueItem, QueueItemRole
 from corvidae.channel import ChannelConfig
-from corvidae.context import MessageType
 
 MOCK_COMPLETION = {
     "choices": [

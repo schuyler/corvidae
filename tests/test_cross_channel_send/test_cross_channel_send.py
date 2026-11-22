@@ -565,8 +565,9 @@ class TestSameChannelGuard:
 
         ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
 
-        from corvidae.attribution import _attribution
         from unittest.mock import patch
+
+        from corvidae.attribution import _attribution
 
         _attribution.set(
             {

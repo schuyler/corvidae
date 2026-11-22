@@ -417,7 +417,7 @@ class LLMClient:
         retry_base_delay: float = 2.0,
         retry_max_delay: float = 60.0,
         timeout: float | None = None,
-        model_not_loaded_wait: float = 60.0,
+        model_not_loaded_wait: float = MODEL_NOT_LOADED_WAIT,
     )
     async def start(self)
     async def stop(self)
@@ -515,7 +515,7 @@ request in seconds; `None` sets no timeout at all.
 A llama-server router started with `--no-models-autoload` answers a request
 for an unloaded model with HTTP 400 `"model is not loaded"` (#55). That
 response is retried with the same backoff until a total of
-`model_not_loaded_wait` seconds has been slept (the last sleep is clamped to
+`MODEL_NOT_LOADED_WAIT` seconds has been slept (the last sleep is clamped to
 fit), independently of `max_retries`; `0` disables it. Any terminal non-2xx
 response raises `LLMHTTPError`, a `ClientResponseError` subclass carrying the
 response `body` (truncated to 2000 characters) and the client's `model`;
@@ -1310,7 +1310,7 @@ that trace.
    on every other error, so the generic message still applies.
    **Retry when the backend is unreachable (#281).** When the failure
    satisfies `is_backend_unreachable` (the client has already spent its own
-   `max_retries` and `model_not_loaded_wait`), the Agent also schedules a
+   `max_retries` and the unloaded-model wait), the Agent also schedules a
    retry on the kernel clock, before the error gate so a vetoed fallback
    cannot cancel it. The fallback goes out once, on the first failure. The
    retry is a copy of the failed `QueueItem` (`retry=True`,

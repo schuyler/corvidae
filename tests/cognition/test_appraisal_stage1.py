@@ -13,7 +13,6 @@ Per plans/implementation/phase-2.md WP2.4:
 
 import asyncio
 import json
-from unittest.mock import AsyncMock
 
 import aiosqlite
 import pytest
@@ -21,7 +20,6 @@ import pytest
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.hooks import create_plugin_manager
 from corvidae.persistence import PersistencePlugin, init_db
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -303,6 +301,7 @@ class TestPullApi:
         observes the SAME vector whether registered before or after
         AppraisalPlugin, including under one concurrent gather broadcast."""
         from corvidae_cognition.appraisal import AppraisalPlugin
+
         from corvidae.hooks import CorvidaePlugin, hookimpl
 
         observed = {}

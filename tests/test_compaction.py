@@ -302,6 +302,7 @@ class TestResolveCompactionSignature:
         actual method signature.
         """
         import inspect
+
         from corvidae.compaction import CompactionPlugin
 
         method = CompactionPlugin.resolve_compaction

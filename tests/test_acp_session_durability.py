@@ -13,7 +13,6 @@ from corvidae.hooks import create_plugin_manager
 from corvidae.outbound import OutboundMessage
 from corvidae.persistence import PersistencePlugin, init_db
 
-
 AGENT_DEFAULTS = {
     "system_prompt": "You are a test assistant.",
     "max_context_tokens": 8000,
@@ -81,6 +80,7 @@ class TestLoadSessionCapability:
     async def test_initialize_advertises_load_session(self):
         """initialize must set agentCapabilities.loadSession true (A16)."""
         from acp import PROTOCOL_VERSION
+
         from corvidae.channels.acp import CorvidaeAcpAgent
 
         agent = CorvidaeAcpAgent(
@@ -178,6 +178,7 @@ class TestResumeAndClose:
     async def test_initialize_advertises_resume_and_close(self):
         """initialize must advertise sessionCapabilities.resume and close."""
         from acp import PROTOCOL_VERSION
+
         from corvidae.channels.acp import CorvidaeAcpAgent
 
         agent = CorvidaeAcpAgent(
@@ -221,8 +222,9 @@ class TestResumeAndClose:
         self, acp_durable
     ):
         """session/close cancels in-flight prompt and frees the registry entry."""
-        from acp import text_block
         import asyncio
+
+        from acp import text_block
 
         plugin, registry, agent, _persistence, _db, cwd = acp_durable
         created = await agent.new_session(cwd=cwd)
@@ -275,6 +277,7 @@ class TestListSessions:
     async def test_initialize_advertises_list(self):
         """initialize must advertise sessionCapabilities.list."""
         from acp import PROTOCOL_VERSION
+
         from corvidae.channels.acp import CorvidaeAcpAgent
 
         agent = CorvidaeAcpAgent(

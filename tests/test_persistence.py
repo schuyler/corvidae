@@ -5,17 +5,15 @@ import logging
 import re
 import sqlite3
 import time
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
 
-from corvidae.trace import mint_trace_id
-from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
-from corvidae.persistence import init_db
+from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.hooks import create_plugin_manager
-
+from corvidae.persistence import init_db
+from corvidae.trace import mint_trace_id
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -444,7 +442,6 @@ class TestOnCompaction:
 
     async def test_on_compaction_inserts_summary_row(self, db):
         """on_compaction must insert a summary row into message_log."""
-        from corvidae.context import MessageType
 
         plugin, registry, _ = await _make_plugin_with_db(db)
         channel = _make_channel(registry)
@@ -516,7 +513,6 @@ class TestOnCompaction:
 
     async def test_on_compaction_zero_retain_uses_current_time(self, db):
         """on_compaction with retain_count=0 sets summary_ts to approximately now."""
-        from corvidae.context import MessageType
 
         plugin, registry, _ = await _make_plugin_with_db(db)
         channel = _make_channel(registry)
@@ -539,7 +535,6 @@ class TestOnCompaction:
 
     async def test_on_compaction_commits(self, db):
         """on_compaction must commit the summary row."""
-        from corvidae.context import MessageType
 
         plugin, registry, _ = await _make_plugin_with_db(db)
         channel = _make_channel(registry)

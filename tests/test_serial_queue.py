@@ -1,10 +1,8 @@
 """Tests for SerialQueue.is_empty property (red phase)."""
 
 import asyncio
-import pytest
 
 from corvidae.queue import SerialQueue
-
 
 # ---------------------------------------------------------------------------
 # SerialQueue.is_empty (red phase)

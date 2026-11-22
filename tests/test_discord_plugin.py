@@ -48,24 +48,27 @@ import pytest
 # (tests/test_discord_sdk_optional.py covers the SDK-absent behaviour).
 discord = pytest.importorskip("discord")
 
-from corvidae.channel import ChannelRegistry, load_channel_config
-from corvidae.hooks import (
-    _check_hook_arg_binding,
-    TransportPlugin,
-    create_plugin_manager,
-    resolve_reject_wins,
-)
-from corvidae.outbound import OutboundMessage, OutboundProgress, OutboundThinking, OutboundToolStatus
-
 # Expected to fail at import until corvidae/channels/discord.py exists.
 import corvidae.channels.discord as dmod
+from corvidae.channel import ChannelRegistry, load_channel_config
 from corvidae.channels.discord import (
-    DiscordPlugin,
     _FENCE_RESERVE,
+    DiscordPlugin,
     _split_discord_segments,
     split_discord_message,
 )
-
+from corvidae.hooks import (
+    TransportPlugin,
+    _check_hook_arg_binding,
+    create_plugin_manager,
+    resolve_reject_wins,
+)
+from corvidae.outbound import (
+    OutboundMessage,
+    OutboundProgress,
+    OutboundThinking,
+    OutboundToolStatus,
+)
 
 # ---------------------------------------------------------------------------
 # Constants

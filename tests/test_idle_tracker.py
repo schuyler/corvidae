@@ -579,4 +579,16 @@ def test_channel_max_context_tokens_must_be_positive():
         parse_channel_config(
             {"channels": {"discord:1": {"max_context_tokens": 0}}}
         )
-    assert "max_context_tokens" in str(exc.value)
+    assert "channels.discord:1.max_context_tokens" in str(exc.value)
+    assert "positive integer" in str(exc.value)
+
+
+def test_agent_defaults_are_validated_too():
+    """#850: agent.max_turns reaches every channel that sets none of its own."""
+    from corvidae.channel import validate_agent_config
+
+    for key, bad in (("max_turns", 0), ("max_context_tokens", -5)):
+        with pytest.raises(ValueError) as exc:
+            validate_agent_config({key: bad})
+        assert f"agent.{key}" in str(exc.value)
+        assert "positive integer" in str(exc.value)

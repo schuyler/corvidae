@@ -22,7 +22,6 @@ from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.scheduler import SchedulerPlugin, frame_firing, parse_job
-
 from harness import driver
 from harness.driver import (
     HEARTBEAT_CHANNEL,

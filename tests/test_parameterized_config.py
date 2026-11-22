@@ -8,7 +8,6 @@ literal fails here.
 """
 
 import asyncio
-import collections
 import inspect
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -316,6 +315,7 @@ class TestContextWindowCharsPerToken:
         """ContextWindow(chars_per_token=4.0) stores the value but token_estimate
         delegates to count_tokens, not chars_per_token arithmetic."""
         from unittest.mock import patch
+
         from corvidae.context import ContextWindow
 
         conv = ContextWindow("chan1", chars_per_token=4.0)
@@ -422,8 +422,8 @@ class TestIRCMessageChunkSizeFromConfig:
         # Import IRCPlugin here so corvidae.channels.irc is cached in sys.modules
         # before any patching; this ensures patch("corvidae.channels.irc.get_dependency")
         # targets the same module instance that IRCPlugin closes over.
-        from corvidae.channels.irc import IRCPlugin
         from corvidae.channel import ChannelRegistry
+        from corvidae.channels.irc import IRCPlugin
 
         pm_mock = MagicMock()
         registry_mock = MagicMock(spec=ChannelRegistry)
@@ -460,8 +460,8 @@ class TestAgentMaxToolResultChars:
         from corvidae.agent import Agent
         from corvidae.channel import ChannelRegistry
         from corvidae.hooks import create_plugin_manager
-        from corvidae.tool_collection import ToolCollectionPlugin
         from corvidae.tool import ToolRegistry
+        from corvidae.tool_collection import ToolCollectionPlugin
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({
@@ -572,8 +572,8 @@ class TestAgentConstants:
 class TestAgentLoopConstants:
     def test_agent_loop_constants(self):
         """LOG_TRUNCATION_LENGTH lives in turn; MAX_ROUNDS_REACHED_MESSAGE lives in tools.subagent."""
-        import corvidae.turn as turn_mod
         import corvidae.tools.subagent as subagent_mod
+        import corvidae.turn as turn_mod
 
         assert hasattr(turn_mod, "LOG_TRUNCATION_LENGTH"), (
             "corvidae.turn must define LOG_TRUNCATION_LENGTH"

@@ -16,21 +16,19 @@ back the whole batch on every run.
 import json
 import logging
 import time
+from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
+from corvidae_cognition.memory import MemoryPlugin
+from corvidae_cognition.retention import run_retention_job
+from helpers import FakeForkAgent, stub_llm_config, with_chat_llm
 
 from corvidae.channel import Channel
 from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from corvidae_cognition.memory import MemoryPlugin
-from corvidae_cognition.retention import run_retention_job
 from corvidae.persistence import PersistencePlugin, init_db
-
-from unittest.mock import AsyncMock, MagicMock
-
-from helpers import FakeForkAgent, stub_llm_config, with_chat_llm
 
 DIMS = 4  # small for speed; the width is what matters, not the value
 

@@ -4,28 +4,25 @@ import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from helpers import KERNEL_LLM_STAGES, collect_llm_stages, stub_llm_config
+from llm_response_fixtures import (
+    _make_mixed_response,
+    _make_text_response,
+    _make_tool_call,
+    _make_tool_call_malformed_args,
+    _make_tool_call_response,
+)
 
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.hooks import create_plugin_manager
+from corvidae.llm_plugin import LLMPlugin
 from corvidae.task import Task, TaskQueue
 from corvidae.tool import Tool, ToolContext, ToolRegistry
-
-from corvidae.llm_plugin import LLMPlugin
 from corvidae.tools.subagent import (
     SubagentPlugin,
     parse_subagent_max_turns,
     run_agent_loop,
 )
-
-from helpers import KERNEL_LLM_STAGES, collect_llm_stages, stub_llm_config
-from llm_response_fixtures import (
-    _make_text_response,
-    _make_tool_call_response,
-    _make_tool_call,
-    _make_tool_call_malformed_args,
-    _make_mixed_response,
-)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -623,7 +620,6 @@ class TestMaxToolResultCharsConsolidation:
         await plugin.on_start(config=BASE_CONFIG)
 
         # Override ToolCollectionPlugin's authoritative value directly.
-        from corvidae.tool_collection import ToolCollectionPlugin
         tools_plugin = pm.get_plugin("tools")
         tools_plugin.max_result_chars = tools_max_result_chars
 
@@ -1699,9 +1695,10 @@ _LONG = "".join(chr(ord("a") + i % 26) for i in range(50))
 
 async def _spill_pm(tmp_path):
     """A plugin manager with the spill service writing into tmp_path/spill."""
+    from fake_clock import install_kernel_clock
+
     from corvidae.hooks import create_plugin_manager
     from corvidae.spill import NotificationSpill
-    from fake_clock import install_kernel_clock
 
     pm = create_plugin_manager()
     clock, _ = install_kernel_clock(pm, started=False)

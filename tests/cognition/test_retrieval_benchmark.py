@@ -9,25 +9,22 @@ The contradiction fixture tests are marked xfail with a pointer to the
 bootstrap-mapping §3.1 contradiction-annotation feature (Phase 2+).
 """
 
+import hashlib
 import json
 import math
 import re
-import hashlib
 from pathlib import Path
 
 import aiosqlite
 import pytest
-
-from corvidae.channel import Channel
-from corvidae.context import ContextWindow
 from corvidae_cognition.funnel import FunnelPlugin
+from corvidae_cognition.memory import MemoryPlugin
+from evals.metrics import mrr, recall_at_k
+from helpers import stub_llm_config, with_chat_llm
+
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from helpers import stub_llm_config, with_chat_llm
-from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
-
-from evals.metrics import mrr, recall_at_k
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -102,8 +99,9 @@ async def build_benchmark_env(config=None):
 
 async def seed_fixture_memories(db, memories: list[dict]) -> dict[int, str]:
     """Seed memory rows from fixture records; return {rowid: fixture_id}."""
-    import sqlite_vec
     import time
+
+    import sqlite_vec
     id_map: dict[int, str] = {}
     for record in memories:
         vec = bow_embed(record["summary"])

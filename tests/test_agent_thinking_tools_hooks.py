@@ -1,25 +1,16 @@
 """Tests for the agent sending OutboundThinking and OutboundToolStatus events."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-import aiosqlite
-import pytest
-
-from corvidae.trace import mint_trace_id
-from corvidae.turn import AgentTurnResult
-from corvidae.channel import ChannelConfig, ChannelRegistry
-from corvidae.persistence import PersistencePlugin, init_db
-from corvidae.hooks import create_plugin_manager
-from corvidae.task import TaskPlugin
-
-from corvidae.outbound import OutboundMessage, OutboundThinking, OutboundToolStatus
 from helpers import build_plugin_and_channel, drain, drain_task_queue, sent
 from llm_response_fixtures import (
     _make_text_response,
-    _make_tool_call_response,
     _make_tool_call,
+    _make_tool_call_response,
 )
+
+from corvidae.outbound import OutboundMessage, OutboundThinking, OutboundToolStatus
+from corvidae.trace import mint_trace_id
 
 
 def _raise_for(kind: type, recorded: list) -> "AsyncMock":

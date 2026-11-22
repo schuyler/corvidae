@@ -11,13 +11,13 @@ mocks.
 import asyncio
 import logging
 import socket
-from fake_clock import clock_pm
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fake_clock import clock_pm
+from mcp_http_server import TOKEN
 
 from corvidae.mcp_client import McpClientPlugin
-from mcp_http_server import TOKEN
 
 
 async def _start(servers: dict) -> McpClientPlugin:

@@ -2,31 +2,25 @@
 
 import json
 from pathlib import Path
-import unittest.mock
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import aiosqlite
 import pytest
-
-from corvidae.trace import mint_trace_id
-from corvidae.channel import ChannelConfig, ChannelRegistry
-from corvidae.context import ContextWindow, MessageType as ContextMessageType
-from corvidae.persistence import init_db
-from corvidae.hooks import create_plugin_manager
-from corvidae.persistence import init_db as persistence_init_db
-
-from corvidae.agent import Agent
-from corvidae.persistence import PersistencePlugin
-from corvidae.tool import ToolRegistry
-
-from corvidae.outbound import OutboundMessage
 from helpers import build_plugin_and_channel, drain, sent, sent_texts, stub_llm_config
 from llm_response_fixtures import (
     _make_text_response,
-    _make_tool_call_response,
     _make_tool_call,
+    _make_tool_call_response,
 )
 
+from corvidae.agent import Agent
+from corvidae.channel import ChannelConfig, ChannelRegistry
+from corvidae.context import ContextWindow
+from corvidae.hooks import create_plugin_manager
+from corvidae.outbound import OutboundMessage
+from corvidae.persistence import PersistencePlugin, init_db
+from corvidae.tool import ToolRegistry
+from corvidae.trace import mint_trace_id
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -67,10 +61,10 @@ class TestOnStart:
     async def test_on_start_creates_client(self):
         """on_start borrows the LLM client from LLMPlugin and stores it as _client."""
         import aiosqlite
-        from corvidae.persistence import init_db
+
         from corvidae.llm_plugin import LLMPlugin
+        from corvidae.persistence import init_db
         from corvidae.tool_collection import ToolCollectionPlugin
-        from corvidae.tool import ToolRegistry
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -159,10 +153,10 @@ class TestOnStart:
     async def test_on_start_stores_base_dir_from_config(self):
         """on_start reads config["_base_dir"] and stores it as Agent._base_dir."""
         import aiosqlite
-        from corvidae.persistence import init_db
+
         from corvidae.llm_plugin import LLMPlugin
+        from corvidae.persistence import init_db
         from corvidae.tool_collection import ToolCollectionPlugin
-        from corvidae.tool import ToolRegistry
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -200,10 +194,10 @@ class TestOnStart:
     async def test_on_start_defaults_base_dir_to_cwd(self):
         """on_start sets Agent._base_dir to Path(".") when _base_dir is absent."""
         import aiosqlite
-        from corvidae.persistence import init_db
+
         from corvidae.llm_plugin import LLMPlugin
+        from corvidae.persistence import init_db
         from corvidae.tool_collection import ToolCollectionPlugin
-        from corvidae.tool import ToolRegistry
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -257,7 +251,6 @@ class TestOnStart:
         """on_start borrows self._client from LLMPlugin.get_client()."""
         from corvidae.llm_plugin import LLMPlugin
         from corvidae.tool_collection import ToolCollectionPlugin
-        from corvidae.tool import ToolRegistry
 
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
@@ -907,7 +900,7 @@ class TestOnStop:
         plugin._mark_started()
 
         # Create a couple of channel queues on the plugin so we can verify they are stopped.
-        from corvidae.queue import SerialQueue, QueueItem
+        from corvidae.queue import SerialQueue
 
         async def noop(item):
             pass
@@ -1579,6 +1572,7 @@ class TestResolveCompaction:
         """An exception in resolve_compaction is caught and logged as WARNING.
         The agent turn still runs after the compaction block fails."""
         import logging
+
         from corvidae.hooks import hookimpl
         from corvidae.turn import AgentTurnResult
 
@@ -1716,8 +1710,8 @@ class TestTransformToolResult:
 
     async def test_hook_returns_none_keeps_original_result(self):
         """When transform_tool_result returns None, the original tool result is kept."""
-        from corvidae.tools.subagent import run_agent_loop
         from corvidae.hooks import hookimpl
+        from corvidae.tools.subagent import run_agent_loop
 
         tool_fn = AsyncMock(return_value="original output")
         client = MagicMock()
@@ -1790,8 +1784,8 @@ class TestTransformToolResult:
 
     async def test_hook_receives_correct_tool_name_and_result(self):
         """transform_tool_result receives the correct tool_name and result args."""
-        from corvidae.tools.subagent import run_agent_loop
         from corvidae.hooks import hookimpl
+        from corvidae.tools.subagent import run_agent_loop
 
         tool_fn = AsyncMock(return_value="raw output")
         client = MagicMock()
@@ -1852,7 +1846,6 @@ class TestBeforeAgentTurn:
         This fails until the hookspec exists and _process_queue_item calls it.
         """
         from corvidae.hooks import hookimpl
-        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1892,8 +1885,8 @@ class TestBeforeAgentTurn:
         This fails until the hookspec exists and the call site is between
         compaction and build_prompt.
         """
-        from corvidae.hooks import hookimpl
         from corvidae.context import MessageType
+        from corvidae.hooks import hookimpl
 
         plugin, channel, db = await build_plugin_and_channel()
 

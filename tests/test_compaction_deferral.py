@@ -17,12 +17,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
+from helpers import FakeForkAgent
+from test_compaction_fork import _compact, _straddling_window
 
 from corvidae.compaction import CompactionPlugin
 from corvidae.hooks import create_plugin_manager
-
-from helpers import FakeForkAgent
-from test_compaction_fork import _compact, _straddling_window
 
 pytestmark = pytest.mark.timeout(15)
 

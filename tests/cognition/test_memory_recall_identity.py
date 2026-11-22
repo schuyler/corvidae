@@ -15,7 +15,6 @@ import math
 import time
 
 import pytest
-
 from corvidae_cognition.memory import FTS_SIMILARITY_PROXY
 
 from .test_memory_consolidation import build_consolidation_env, seed_dialog

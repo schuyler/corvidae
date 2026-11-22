@@ -31,11 +31,10 @@ import json
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from corvidae_cognition.critique import _JSON_TAIL, FORKS_OFF_REASON
+from helpers import window_of
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae_cognition.critique import FORKS_OFF_REASON, _JSON_TAIL
-
-from helpers import FakeForkAgent, window_of
 from tests.cognition.test_critique import (
     FakeAppraisal,
     FixedRng,

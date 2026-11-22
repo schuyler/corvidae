@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import sys
-import pytest
-
 import asyncio
 import os
 import struct
 
 import pytest
-
 from corvidae_inotify import (
     IN_CLOSE_WRITE,
     IN_DELETE,
@@ -24,6 +20,7 @@ from corvidae_inotify import (
     parse_events,
     watch_target,
 )
+
 from corvidae.channel import ChannelRegistry
 
 # --- fakes -------------------------------------------------------------------

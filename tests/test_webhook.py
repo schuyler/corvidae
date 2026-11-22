@@ -23,11 +23,11 @@ from aiohttp import web
 
 from corvidae.agent import Agent, QueueItemRole
 from corvidae.channel import Channel
-from corvidae.hooks import create_plugin_manager, hookimpl, install_plugin_hookspecs
 
 # Absent until the green phase; this import failing is the red failure.
 from corvidae.channels import webhook as webhook_mod
 from corvidae.channels.webhook import WebhookPlugin
+from corvidae.hooks import create_plugin_manager, hookimpl, install_plugin_hookspecs
 
 SECRET = "gh-secret"
 TOKEN = "siri-token"

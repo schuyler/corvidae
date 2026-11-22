@@ -16,14 +16,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from corvidae_cognition.appraisal import AppraisalPlugin
 from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, CritiquePlugin
+from corvidae_cognition.goals import GOALS_INSTRUCTION, GoalsPlugin
 from corvidae_cognition.heartbeat import (
     DEFAULT_HEARTBEAT_PROMPT,
     HeartbeatPlugin,
 )
-from corvidae_cognition.goals import GOALS_INSTRUCTION, GoalsPlugin
 from corvidae_cognition.memory import (
     DEFAULT_CONSOLIDATION_FORK_PROMPT,
     RUBRIC_PROMPT,
