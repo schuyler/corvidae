@@ -40,3 +40,57 @@ def test_a_wrong_type_names_the_value_and_what_is_accepted():
     assert "query" in message
     assert "['a', 'b']" in message
     assert "string" in message
+
+
+async def test_a_bad_call_never_reaches_the_tool():
+    """The tool function is not called when the arguments are rejected (#1161)."""
+    from corvidae.tool import dispatch_tool_call
+
+    called: list[dict] = []
+
+    async def search(query: str) -> str:
+        called.append({"query": query})
+        return "ok"
+
+    schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    }
+
+    result = await dispatch_tool_call(
+        {"id": "c1", "function": {"name": "search", "arguments": '{"qury": "x"}'}},
+        {"search": search},
+        schemas={"search": schema},
+        call_timeouts=__import__("corvidae.tool", fromlist=["ToolTimeouts"]).DEFAULT_TOOL_TIMEOUTS,
+    )
+
+    assert called == []
+    assert result.error is True
+    assert "qury" in result.content
+
+
+async def test_a_good_call_still_reaches_the_tool():
+    from corvidae.tool import DEFAULT_TOOL_TIMEOUTS, dispatch_tool_call
+
+    calls: list[str] = []
+
+    async def search(query: str) -> str:
+        calls.append(query)
+        return "ok"
+
+    schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    }
+
+    result = await dispatch_tool_call(
+        {"id": "c2", "function": {"name": "search", "arguments": '{"query": "x"}'}},
+        {"search": search},
+        schemas={"search": schema},
+        call_timeouts=DEFAULT_TOOL_TIMEOUTS,
+    )
+
+    assert calls == ["x"]
+    assert result.error is False

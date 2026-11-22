@@ -449,6 +449,7 @@ async def dispatch_tool_call(
     call: dict,
     tools: dict[str, Callable],
     *,
+    schemas: dict[str, dict] | None = None,
     channel: "Channel | None" = None,
     task_queue: "TaskQueue | None" = None,
     pm=None,
@@ -467,6 +468,9 @@ async def dispatch_tool_call(
     Args:
         call: A tool call dict from the LLM response with keys 'id' and 'function'.
         tools: Dict mapping tool names to async callable functions.
+        schemas: Dict mapping tool names to their generated JSON schemas; when
+            given, the parsed arguments are validated against the call's schema
+            before the call (PRD §3.5.1, #1161).
         channel: Channel for ToolContext injection. None when unavailable.
         task_queue: TaskQueue for ToolContext injection. None when unavailable.
         pm: pluggy PluginManager for firing transform_tool_result. None to skip.
@@ -509,7 +513,9 @@ async def dispatch_tool_call(
         extra=_attributed(channel, tool=fn_name, arguments=_truncate(json.dumps(args))),
     )
 
-    # Step 3: Check tool exists
+    # Step 3: Check the tool exists, then that its arguments fit its schema.
+    # Validating before the call is PRD §3.5.1: a wrong key used to reach the
+    # tool and surface as TypeError inside "tool failed" (#1161).
     if fn_name not in tools:
         logger.warning(
             "unknown tool called: %s",
@@ -521,6 +527,20 @@ async def dispatch_tool_call(
             tool_call_id=call_id,
             tool_name=fn_name,
             content=content,
+            latency_ms=None,
+            error=True,
+        )
+
+    rejection = check_tool_args((schemas or {}).get(fn_name), args)
+    if rejection is not None:
+        logger.warning(
+            "tool call arguments rejected",
+            extra=_attributed(channel, tool=fn_name, arg_keys=list(args.keys())),
+        )
+        return ToolCallResult(
+            tool_call_id=call_id,
+            tool_name=fn_name,
+            content=rejection,
             latency_ms=None,
             error=True,
         )
