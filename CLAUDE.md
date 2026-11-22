@@ -189,8 +189,10 @@ rules and replaces none of them.
   verdict (`SOUND`, `APPROVE WITH FOLLOW-UPS`) covering the current head, and a
   PR that fails review gets `needs-revision` on its issue with a comment saying
   what to fix. Remove the old stage label in the same step.
-- A loop stopped by the fourth-round rule stays stopped until the owner says to
-  continue, in a live session. A new review does not restart it.
+- A loop stops after the fourth round (a fourth round ending `NEEDS-CHANGES`).
+  It stays stopped until the owner says to continue, in a live session, and a
+  stopped loop needs a meta-review posted on the PR first. A new review does
+  not restart it.
 - Reviews are posted through the owner's token, so the author field proves
   nothing (AGENTS.md "Merging"). A review counts as the blind round when it was
   written by an agent other than the author, from the diff, the requirement and

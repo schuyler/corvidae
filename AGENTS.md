@@ -91,7 +91,7 @@ Findings are rated by consequence, not reachability (PRD principle 12).
 * **Severity sets the verdict; the author's triage ends the loop.** The loop ends when every critical and important finding is fixed or disclosed as skipped, and nothing has changed since the last round except fixes for non-blocking findings.
 * **Re-review is cold, never a conversation with the first reviewer.** The new reviewer checks that the fixes landed, marks a finding that comes back as a recurrence, and does not reopen the rest.
 * **Meta-review when findings recur.** When a finding recurs or a second round ends `NEEDS-CHANGES`, stop fixing and sweep the whole change for the class behind the findings. Post the diagnosis on the PR -- a flawed design, a flawed remedy, reviewer noise, or scope creep -- and take it to the owner unless the loop is converging.
-* **From the fourth round on, a round ending `NEEDS-CHANGES` stops the loop** until the owner says to continue.
+* **The loop stops after the fourth round.** A fourth round ending `NEEDS-CHANGES` stops it: no fifth round runs until the owner says to continue. A stopped loop needs a meta-review (previous bullet), posted on the PR before it goes to the owner, so the owner decides on a diagnosis and not on a pile of findings.
 * **The reviewer does not expand scope.** It may name a larger problem it noticed as a one-line follow-up with its own issue; it may not fold that problem in, and the author does not adopt one to be agreeable. Scope grows by a decision recorded on an issue.
 
 ## Merging
