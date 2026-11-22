@@ -311,3 +311,20 @@ def test_the_preflight_closes_what_it_built_when_the_load_fails(tmp_path: Path) 
     assert "on_stop broadcast" in result.stdout, (
         "the failed load closed nothing: " + result.stdout
     )
+
+
+def test_the_survivor_sentence_says_the_bound_is_disabled():
+    """#854: with exit_timeout off, the line must not claim the process exits."""
+    from corvidae_restart.preflight import _exit_sentence
+
+    for disabled in (None, 0):
+        line = _exit_sentence(disabled)
+        assert "no exit bound" in line
+        assert "preflight timeout" in line
+        assert "exits within" not in line
+
+
+def test_the_survivor_sentence_names_the_bound_when_there_is_one():
+    from corvidae_restart.preflight import _exit_sentence
+
+    assert "exits within daemon.exit_timeout (2.5 s)" in _exit_sentence(2.5)

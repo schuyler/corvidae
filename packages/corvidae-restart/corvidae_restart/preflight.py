@@ -79,6 +79,25 @@ async def _run(config_path: str) -> int:
         # threads. shutdown_timeouts holds the defaults until load_plugins
         # parses the config, so an early failure is bounded too.
         runtime.arm_exit_bound()
+        # Read by main() for the survivor line: with the bound disabled the
+        # old sentence claimed the process would exit "within
+        # daemon.exit_timeout", which is false (#854).
+        _run.exit_bound = runtime.shutdown_timeouts.exit
+
+
+def _exit_sentence(bound: float | None) -> str:
+    """What happens to this process next, said truthfully (#854)."""
+    if bound is None:
+        return (
+            "this process has no exit bound (daemon.exit_timeout is disabled), "
+            "so the restart tool will kill it at its own preflight timeout."
+        )
+    if bound <= 0:
+        return (
+            "this process has no exit bound (daemon.exit_timeout is 0), so the "
+            "restart tool will kill it at its own preflight timeout."
+        )
+    return f"this process exits within daemon.exit_timeout ({bound:g} s)."
 
 
 def main() -> int:
@@ -94,6 +113,7 @@ def main() -> int:
     logging.disable(logging.CRITICAL)
 
     code = asyncio.run(_run(args.config))
+    exit_bound = getattr(_run, "exit_bound", None)
     # Any non-daemon thread still running now is a plugin's: asyncio has
     # joined its own executor, which is what a check inside the coroutine
     # would have caught instead. Name it directly — kernel logging is off
@@ -110,8 +130,8 @@ def main() -> int:
         print(
             f"pre-flight: {', '.join(survivors)} still running after the "
             f"plugins were stopped; a plugin opened something in on_init and "
-            f"did not close it in on_stop. Refusing the restart; this process "
-            f"exits within daemon.exit_timeout.",
+            f"did not close it in on_stop. Refusing the restart; "
+            f"{_exit_sentence(exit_bound)}",
             file=sys.stderr,
         )
         return 1

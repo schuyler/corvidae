@@ -560,7 +560,9 @@ class Runtime:
             # thread before raising would still hold interpreter exit open,
             # so arm the same bound as the shutdown path (#757).
             if exit_watchdog:
-                arm_exit_watchdog(self.shutdown_timeouts.exit)
+                arm_exit_watchdog(
+                    self.shutdown_timeouts.exit, phase="the failed startup"
+                )
             raise
         _starting = False
         loop.add_signal_handler(signal.SIGTERM, _handle_stop_signal)
