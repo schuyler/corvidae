@@ -169,3 +169,39 @@ in at a glance.
   saying so, and wait to be asked.
 - Don't repeat a question you have already asked. Hold open questions
   until the owner asks whether you have any.
+
+## Review and merge agents
+
+These rules apply only when you (Claude) are tasked with reviewing other
+agents' work. They do not change how you work on your own PRs. When reviewing,
+follow AGENTS.md ("Workflow labels", "Review loops", "Merging") to the letter.
+An instruction such as "squash merge the PRs that pass review" adds to those
+rules and replaces none of them.
+
+- Review only PRs labeled `needs-review`. Ask before touching any other PR.
+- Merge only a PR that carries `merge-ready`. Before every merge, quote the PR's
+  current labels and the sha of the verdict that covers its head.
+- Labels follow AGENTS.md "Workflow labels": they go on the issue, not the PR
+  (line 53), and the author normally sets them. A reviewer sets `needs-revision`
+  or `merge-ready` only when the owner has told it to; otherwise it posts the
+  verdict and stops, and the author moves the label.
+- When the owner has told you to set labels: set `merge-ready` only on a clean
+  verdict (`SOUND`, `APPROVE WITH FOLLOW-UPS`) covering the current head, and a
+  PR that fails review gets `needs-revision` on its issue with a comment saying
+  what to fix. Remove the old stage label in the same step.
+- A loop stops after the fourth round (a fourth round ending `NEEDS-CHANGES`).
+  It stays stopped until the owner says to continue, in a live session, and a
+  stopped loop needs a meta-review posted on the PR first. A new review does
+  not restart it.
+- Reviews are posted through the owner's token, so the author field proves
+  nothing (AGENTS.md "Merging"). A review counts as the blind round when it was
+  written by an agent other than the author, from the diff, the requirement and
+  the severity rules only. It never counts as the owner's permission to merge;
+  that is the owner's words in a live session. Say so in the verdict.
+- Record every review and label change on GitHub as soon as it is decided:
+  post the verdict comment and, where you were told to set labels, set them in
+  the same step. Do not wait to be asked, and do not leave a verdict only in
+  the session. A review that is not on the PR did not happen.
+- Never self-certify: the agent that reviewed a change does not also mark it
+  `merge-ready` and merge it in one pass without the owner's permission for
+  that change.
