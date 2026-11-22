@@ -3605,8 +3605,9 @@ with their own ownership check.
 
 `CLIPlugin` — stdin/stdout transport. Routes to the `cli:local` channel,
 or to another channel when `attach(ch)` was called (#1059): stdin then reads
-for `ch` (a line typed before the attach goes to `cli:local`, one typed after
-goes to `ch`) and the plugin also owns `ch` for display, so a person at the
+for `ch` (a line already queued when the attach lands still goes to `cli:local`,
+because the channel is resolved at dispatch; one that arrives after goes to `ch`)
+and the plugin also owns `ch` for display, so a person at the
 terminal sees that channel's conversation. `detach()` gives the terminal back,
 and `on_stop` clears the attachment so display does not outlive the transport.
 Attaching leaves the channel object untouched — not its id, not its transport —

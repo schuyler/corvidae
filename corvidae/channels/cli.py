@@ -297,6 +297,10 @@ class CLIPlugin(TransportPlugin):
     @hookimpl
     async def on_stop(self) -> None:
         """Cancel the read loop and await its cancellation."""
+        # Cleared before the early return below: the loop may never have
+        # started (acp mode, no cli channel configured), and display rights
+        # still must not outlive the transport (#1059).
+        self._attached = None
         if self._task is None:
             return
         self._task.cancel()
@@ -306,9 +310,6 @@ class CLIPlugin(TransportPlugin):
             pass
         except Exception:
             logger.exception("CLIPlugin read loop raised unexpected exception")
-        finally:
-            # Display rights do not outlive the transport (#1059).
-            self._attached = None
         self._task = None
 
 

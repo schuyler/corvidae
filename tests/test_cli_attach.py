@@ -164,3 +164,39 @@ async def test_display_rights_do_not_outlive_on_stop():
     plugin._task = asyncio.create_task(asyncio.sleep(3600))
     await plugin.on_stop()
     assert plugin.owns(core) is False
+
+
+async def test_owns_matches_by_id_not_by_object():
+    """A second Channel object with the same id is the same channel (#1059).
+
+    Discord and IRC hand out an unregistered Channel for a gated scope, so
+    identity would filter the terminal's own display out.
+    """
+    from corvidae.channel import Channel
+
+    _, plugin, registry = _plugin()
+    attached = registry.get_or_create("core", "inbox")
+    plugin.attach(attached)
+
+    same_id = Channel(transport="core", scope="inbox")
+    assert same_id is not attached
+    assert same_id.id == attached.id
+    assert plugin.owns(same_id) is True
+
+
+async def test_attach_to_the_cli_channel_is_a_no_op_not_a_refusal():
+    """The self-skip: attaching where the CLI already delivers must not raise."""
+    _, plugin, registry = _plugin()
+    local = registry.get_or_create("cli", "local")
+    plugin.attach(local)  # does not raise
+    assert plugin.owns(local) is True
+
+
+async def test_on_stop_clears_the_attachment_even_when_the_loop_never_started():
+    """Acp mode and `no cli channel` both return before the loop starts (#1059)."""
+    _, plugin, registry = _plugin()
+    core = registry.get_or_create("core", "inbox")
+    plugin.attach(core)
+    assert plugin._task is None
+    await plugin.on_stop()
+    assert plugin.owns(core) is False
