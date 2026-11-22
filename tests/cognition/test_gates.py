@@ -503,6 +503,8 @@ class TestQuietOrigins:
         assert await _final(gate, channel, _GITHUB, trace_id="t1") is None
         send = _merged_outcomes(log)["send"]
         assert send["surfaced"] is True
+        assert send["vetoed"] is False
+        assert send["reason"] == "surfaced"
         # Another trace from the same origin stays quiet.
         assert await _final(gate, channel, _GITHUB, trace_id="t2") is False
 
@@ -700,10 +702,15 @@ class TestRemovedGateKeys:
         # A key that still works is not reported as removed.
         assert not any("gate.send.quiet_origins was removed" in m for m in messages)
 
-    async def test_a_config_without_removed_keys_warns_nothing(self, caplog):
+    @pytest.mark.parametrize("config", [
+        {"gate": {"send": {"quiet_origins": []}}},
+        # A removed key set to null is absent, at either level.
+        {"gate": {"engagement": {"enforce": None}, "send": {"min_salience": None}}},
+    ], ids=["no_removed_key", "null_removed_key"])
+    async def test_a_config_without_removed_keys_warns_nothing(self, config, caplog):
         from corvidae_cognition.gates import GatePlugin
 
         gate = GatePlugin(pm=_FakePM())
         with caplog.at_level("WARNING", logger="corvidae"):
-            await gate.on_init(pm=gate.pm, config={"gate": {"send": {"quiet_origins": []}}})
+            await gate.on_init(pm=gate.pm, config=config)
         assert [r for r in caplog.records if r.levelname == "WARNING"] == []

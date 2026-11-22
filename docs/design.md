@@ -4915,8 +4915,8 @@ resolved the way every `notify_other_channel` target is
 The text is `Goal #<id> changed status: <old> → <new>.` for a status change
 and `Goal #<id> retired (was <old>). Conclusion: <conclusion>` for a
 retirement; the goal's own text is not included (`list_goals` has it). Every
-change wakes the origin channel; that turn and the decide gate choose whether
-anything is said to the people there.
+change wakes the origin channel; that turn chooses whether anything is said
+to the people there.
 
 Skipped before any send: a goal whose `origin_channel` is `None` (seeded with
 `corvidae goals seed`) and a change whose `actor_channel` is the origin (so a

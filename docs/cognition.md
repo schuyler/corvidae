@@ -1758,8 +1758,8 @@ Stage-1 appraisal is gone (#1185). It scored every inbound message and
 every final at the gates from English word lists and a word-match probe of
 memory's `memory_fts`, with no model call, and fed the engagement gate and
 the decide gate's salience floor, both removed with it. `AppraisalPlugin`
-now implements neither `should_process_message` nor `should_send_response`:
-nothing is computed while a message or a reply waits. A config that still
+now implements neither `should_process_message` nor `should_send_response`.
+A config that still
 sets `appraisal.probe.*`, `appraisal.weights.*` or `appraisal.novelty.*`
 gets one WARNING per key at startup and at reload, naming it and saying to
 delete it; the key is otherwise ignored.
@@ -1768,8 +1768,7 @@ delete it; the key is otherwise ignored.
 the finished exchange. A decline gets none (#420; PRD §3.7 Critique 3): when
 the final went unsent and its text carries `NO_REPLY` or is empty, the
 agent stayed silent and there is no response to appraise, so no task is
-enqueued and `get_last_stage2(channel)` keeps the channel's last answered
-exchange. The test is
+enqueued. The test is
 `silence.is_decline`, the rule `SilencePlugin` records declines by; it
 doesn't need that plugin loaded. A final another gate withheld has content
 and still gets stage 2. If the test raises, stage 2 runs anyway and a
@@ -1807,7 +1806,7 @@ model makes both language judgments; the code only fetches evidence:
 
 1. **Detection.** Stage-2 appraisal lists the reply's claims about the past
    in `past_claims`, with a few search phrases for each (see
-   [AppraisalPlugin](#appraisalplugin-the-outbound-vector-packagescorvidae-cognitioncorvidae_cognitionappraisalpy)).
+   [AppraisalPlugin](#appraisalplugin-packagescorvidae-cognitioncorvidae_cognitionappraisalpy)).
    That works in any language and any phrasing, and it costs no extra model
    call because stage 2 already runs on every answered exchange. A decline
    gets no stage 2, so it gets no provenance check either.
@@ -2059,8 +2058,7 @@ wake the channel; the other built-ins wait.
   listeners with the vector.
 - **The choice.** In its stage-2 listener, after the provenance check,
   critique takes the highest share over the offered lenses and `none` from
-  *this* exchange's vector (never `get_last_stage2`, which is another
-  exchange's). `none` wins any tie it is part of; among lenses the earliest
+  *this* exchange's vector, never another exchange's. `none` wins any tie it is part of; among lenses the earliest
   in offer order wins. A winner no longer offered (a reload changed the
   offer in between) counts as `none`, with a warning. No usable vector also
   counts as `none`: when stage 2 produced nothing, a warning names the
@@ -2156,10 +2154,9 @@ untransformed instruction.
 The decide gate (PRD §3.7 Output gate). Entry point name: `"gates"`;
 `depends_on` is empty, and it reads `outcome_log` and `persistence`
 fail-soft. It withholds an emission on its origin and the operator's
-switches, never on a score of the text. The engagement gate and the decide
-gate's salience floor were removed with stage-1 appraisal (#1185): no gate
-rejects an inbound message on its content, and a final from an origin that
-is not quiet is sent.
+switches. The engagement gate and the decide gate's salience floor were
+removed with stage-1 appraisal (#1185), so this plugin has no inbound hook
+and withholds no final from an origin that is not quiet.
 
 **Origin.** Read from propagated state, never inferred: `annotations["origin"]`
 when a producer stamped one (the scheduler stamps `reminder`,
@@ -2331,7 +2328,7 @@ runs, so a beat that the quiet re-check then skips doesn't resend its items.
 `prompts/heartbeat.md` shows a full beat. The turn then runs the
 ordinary notification pipeline with the agent's normal tools. The `heartbeat`
 origin follows the general conventions: critique judges it like any other
-turn (#1031), the decide gate treats it as non-user, and `exchange_log`
+turn (#1031), `gate.send.quiet_origins` can make it quiet, and `exchange_log`
 records it.
 
 **Its window.** The window grows beat by beat and is bounded by ordinary

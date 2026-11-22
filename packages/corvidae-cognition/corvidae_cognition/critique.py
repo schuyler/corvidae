@@ -1449,8 +1449,7 @@ class CritiquePlugin(CorvidaePlugin):
         past. An eligible exchange with at least one claim gets one silent
         provenance task; the task gathers the evidence and forks the window
         to judge it. The same stage-2 reply scored the offered lenses: the
-        top one (never ``get_last_stage2``, which is another exchange's)
-        runs as a second silent task, and the choice is recorded.
+        top one (never another exchange's) runs as a second silent task, and the choice is recorded.
         """
         if not self._eligible(trace_id):
             return

@@ -130,15 +130,10 @@ class TestAppraisalSkipsDeclines:
 
 
 class _LensAppraisal(CorvidaePlugin):
-    """An appraisal store whose stage 2 always selects the predictive lens."""
+    """An appraisal store with no stage-2 listener calls, so a judged turn
+    gets one random lens."""
 
     depends_on = frozenset()
-
-    async def get_appraisal(self, trace_id):
-        return None
-
-    def get_last_stage2(self, channel_id):
-        return {"ambiguity": 0.9}
 
     def get_originating_text(self, trace_id):
         return "q"

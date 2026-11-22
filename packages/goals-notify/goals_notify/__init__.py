@@ -8,7 +8,7 @@ call to the goal's ``origin_channel``. Delivery, the notification fields
 and the ``hop_count`` loop guard all come from cross_channel_send, which
 reads them from the changing turn's attribution: the goals plugin fires the
 hook inside the tool call that made the change. Every change wakes the origin
-channel; its turn and the decide gate decide whether anything is said.
+channel; its turn decides whether anything is said.
 
 Skipped: a goal with no origin (seeded with ``corvidae goals seed``) and a
 change made on the origin channel itself (which includes heartbeat-created

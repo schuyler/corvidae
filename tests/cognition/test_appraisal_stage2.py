@@ -8,7 +8,7 @@ Per plans/implementation/phase-2.md WP2.5:
   one tier-3 call (appraisal → background → main fallback), and MERGE-persists
   {"stage2": ..., "entropy": ...} into the appraisal envelope — never a full
   overwrite (stage1/stage1_out survive);
-- malformed model output is logged and the row keeps stage 1 only; no exception
+- malformed model output is logged and the row gets no stage 2; no exception
   escapes;
 - a stage-2 task for origin="critique" exchanges too (#1031);
 - AppraisalPrior scores a covered msg-id range from stored appraisals and falls
@@ -348,8 +348,6 @@ class TestStage2Persist:
         assert env_appraisal["stage2"]["valence"] == 0.8
         assert env_appraisal["stage2"]["stakes"] == 0.9
         assert env_appraisal["stage2"]["correction"] is True
-        # Advisory synchronous reader populated.
-        assert env.appraisal.get_last_stage2(env.channel.id)["valence"] == 0.8
         await _teardown(env)
 
     async def test_merge_not_overwrite_keeps_stage1_and_stage1_out(self, tmp_path):
@@ -388,7 +386,6 @@ class TestStage2Persist:
         await _run_next_task(env.task)
         envelope = await _read_appraisal(env.db, "kbad")
         assert envelope == {"stage1": {"salience": 0.5}}  # stage2 absent
-        assert env.appraisal.get_last_stage2(env.channel.id) is None
         await _teardown(env)
 
     async def test_entropy_persisted_when_logprobs_present(self, tmp_path):
@@ -650,7 +647,6 @@ class TestAppraisalPrior:
                     channel_id=None):
         # channel_id defaults to env.channel so existing tests are unchanged.
         channel_id = channel_id if channel_id is not None else env.channel.id
-        cols = {}
         env_appraisal = {}
         if stage1 is not None:
             env_appraisal["stage1"] = stage1

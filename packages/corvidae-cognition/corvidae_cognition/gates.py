@@ -1,8 +1,7 @@
 """GatePlugin — the decide gate's quiet veto and emission switches (PRD §3.7).
 
-What reaches the channel, decided from origin and operator switches, never
-from a score of the text (stage-1 appraisal and its salience floor were
-removed, #1185):
+What reaches the channel, decided from origin and operator switches
+(stage-1 appraisal and the salience floor it fed were removed, #1185):
 
   * ``gate.send.allow_progress`` / ``allow_thinking`` suppress those
     emissions wholesale.
@@ -20,7 +19,7 @@ removed, #1185):
     it marks the trace surfaced, which lifts the quiet veto for the trace's
     later emissions. With no quiet origin it lifts nothing.
 
-A final from any origin that is not quiet is sent: no gate here withholds it.
+This plugin withholds no final from an origin that is not quiet.
 
 Origin is a plugin-side convention (R1): ``annotations["origin"]`` when a
 producer stamped it, else ``user`` for a trace admitted through
@@ -57,13 +56,15 @@ SEND_ALLOW_THINKING_DEFAULT = True     # gate.send.allow_thinking
 # Keys #1185 removed with stage-1 appraisal: each is warned by name at startup
 # and reload, and otherwise ignored.
 _REMOVED_KEYS = {
-    "gate.engagement": "the engagement gate was removed with stage-1 appraisal",
+    "gate.engagement": "the engagement gate was removed with stage-1 appraisal (#1185)",
     "gate.send.min_salience": (
-        "the decide gate's salience floor was removed with stage-1 appraisal; "
+        "the decide gate's salience floor was removed with stage-1 appraisal "
+        "(#1185); "
         "gate.send.quiet_origins still withholds a source's replies"
     ),
     "gate.send.enforce": (
-        "the decide gate's salience floor was removed with stage-1 appraisal; "
+        "the decide gate's salience floor was removed with stage-1 appraisal "
+        "(#1185); "
         "gate.send.quiet_origins still withholds a source's replies"
     ),
 }

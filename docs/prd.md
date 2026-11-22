@@ -160,9 +160,8 @@ one is a bug even if its tests pass.
    against operator-authored fixtures run in CI; LLM-judged suites run out
    of band and are tracked as benchmarks, never as gates.
 
-7. **Cheap, always-on perception gates expensive cognition.** One appraisal
-   signal has two consumers: critique's lens selection and consolidation
-   strength.
+7. **Cheap, always-on perception gates expensive cognition.** The appraisal
+   signal feeds consolidation strength.
    Epistemic checks stay independent of the appraisal scores: the
    provenance check fires on any claim about the past and is judged against
    records, never on generator confidence. Thresholds ship as commented
@@ -1211,8 +1210,8 @@ deciding only what to newly append and in what order.
 
 **Appraisal.**
 
-1. Nothing is appraised before a reply is sent: there is no stage-1
-   appraisal at the inbound or the outbound gate (#1185).
+1. There is no stage-1 appraisal: appraisal does not run at the inbound
+   or the outbound gate (#1185).
 2. Stage 2 runs post-acceptance, off the response path, in a silent task
    that judges the exchange as the agent saw it (§3.8): the fuller vector
    (valence, stakes, ambiguity, commitment density, novelty), the
@@ -1906,8 +1905,8 @@ record that holds the reasoning.
 | Operator-only `redact` is the one deletion path; it stays in the kernel | principle 4; §3.7 Memory 8 |
 | Knowledge graph not part of the shipped memory: extraction is noisy, n-hop context is expensive, and at personal scale a graph duplicates facts plus vector and FTS retrieval; a graph plugin isn't precluded | diverges from Persyn §4.3 |
 | Emotion classifier replaced by appraisal valence | §3.7 Appraisal; diverges from Persyn §4.9 |
-| No stage-1 appraisal: nothing scores a message or a reply before the reply is sent, so no gate judges text with language-specific heuristics; the agent declines a turn itself | §3.7 Appraisal 1; §3.7 Output gate 4–5; #1185; owner, 2026-11-22 |
-| Appraisal runs after the exchange, off the response path; core mints the exchange key | §3.7 Appraisal 1–3 |
+| No stage-1 appraisal: no gate scores text with language-specific heuristics | §3.7 Appraisal 1; §3.7 Output gate 4; #1185; owner, 2026-11-22 |
+| Core mints the exchange key | §3.7 Appraisal 2–3 |
 | Origin is stamped and propagated, never inferred. Critique eligibility does not depend on origin: every main-loop turn is judged, and the recursion brake is delivery (objections on a `critique`-origin turn wake nothing) | §3.1.4; §3.7 Critique 3–4; #1031; owner, 2026-11-17 |
 | Two grades on a queue item: kernel-certified `metadata`, never a hook argument, and plugin-owned `annotations`; non-human items (and a person's message whose transport supplies a name or addressing) get a code-built header, and outside payloads a fence derived from the stored row; foreign-origin items are framed, never withheld (no silence default) | §3.1.4; §3.3.11; #555 |
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |

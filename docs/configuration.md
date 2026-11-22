@@ -469,7 +469,7 @@ gate:
     quiet_origins: []  # e.g. [webhook:github]
 ```
 
-The engagement gate and the decide gate's salience floor were removed with stage-1 appraisal (#1185), and their keys with them: `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.enforce` and `gate.send.min_salience`. No gate withholds a background final on a score any more; `gate.send.quiet_origins` withholds a source's replies outright. A config that still sets a removed key logs one WARNING per key at startup and at reload, naming the key and saying to delete it from `agent.yaml`; the key is otherwise ignored.
+The engagement gate and the decide gate's salience floor were removed with stage-1 appraisal (#1185), and their keys with them: `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.enforce` and `gate.send.min_salience`. `gate.send.quiet_origins` still withholds a source's replies outright. A config that still sets a removed key logs one WARNING per key at startup and at reload, naming the key and saying to delete it from `agent.yaml`; the key is otherwise ignored.
 
 ### `agent.context_compact` — removed
 

@@ -5,9 +5,9 @@ agent to score the exchange (valence, stakes, ambiguity, commitment density,
 novelty), to list the claims about the past its reply made, and to score the
 critique lenses on offer (plans/implementation/phase-2.md WP2.5). The vector
 feeds memory's importance prior and valence tag, critique's lens selection
-and its provenance check. Nothing is computed while a message or a reply
-waits: stage-1 appraisal, which scored text at the gates from English word
-lists and a probe of memory's full-text index, was removed (#1185).
+and its provenance check. Stage-1 appraisal, which scored text at the gates
+from English word lists and a probe of memory's full-text index, was
+removed (#1185).
 
 Every parameter here is a commented best-guess constant, runtime-tunable
 through both surfaces via ``corvidae.tuning.resolve_tunable`` (operator
@@ -38,9 +38,9 @@ logger = logging.getLogger("corvidae.appraisal")
 # Stage-1 keys #1185 removed: each is warned by name at startup and reload,
 # and otherwise ignored.
 _REMOVED_KEYS = {
-    "appraisal.probe": "stage-1 appraisal and its memory probe were removed",
-    "appraisal.weights": "stage-1 appraisal and its salience score were removed",
-    "appraisal.novelty": "stage-1 appraisal and its memory probe were removed",
+    "appraisal.probe": "stage-1 appraisal and its memory probe were removed (#1185)",
+    "appraisal.weights": "stage-1 appraisal and its salience score were removed (#1185)",
+    "appraisal.novelty": "stage-1 appraisal and its memory probe were removed (#1185)",
 }
 
 # Bound on the originating-text LRU (AppraisalPlugin._originating_text).
@@ -463,10 +463,6 @@ class AppraisalPlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self.config: dict = {}
-        # Last-completed stage-2 vector per channel — the synchronous
-        # advisory reader (get_last_stage2). Consumers never wait for the
-        # CURRENT exchange's stage-2 (WP2.5 point 2).
-        self._last_stage2: dict[str, dict] = {}
         # Callbacks awaited after each stage 2 lands (add_stage2_listener):
         # how CritiquePlugin hears past_claims without waiting on a task.
         self._stage2_listeners: list[Callable[..., Awaitable[None]]] = []
@@ -563,15 +559,6 @@ class AppraisalPlugin(CorvidaePlugin):
         """Pure reader for the stage-2 vector (WP2.5 writes it)."""
         return await self._read_vector(trace_id, "stage2")
 
-    def get_last_stage2(self, channel_id: str) -> dict | None:
-        """Synchronous advisory reader for the LAST completed stage-2 vector.
-
-        Advisory context only (WP2.5 point 2): a consumer must never wait for the CURRENT
-        exchange's stage-2 to complete — it runs as a silent task that
-        finishes after the turn. Returns None until one stage-2 lands.
-        """
-        return self._last_stage2.get(channel_id)
-
     def add_stage2_listener(self, callback: Callable[..., Awaitable[None]]) -> None:
         """Register a coroutine function to hear each completed stage 2.
 
@@ -625,9 +612,7 @@ class AppraisalPlugin(CorvidaePlugin):
         Fires once per exchange-ending turn, whatever its origin: a correction
         (``critique`` origin) is judged too, and its provenance check needs
         the claims stage 2 lists (#1031). Never for a decline (#420): the
-        agent's choice to stay silent is not a response, so
-        ``get_last_stage2`` keeps the channel's last answered exchange. The
-        task is silent (``deliver=False``): its empty result triggers no
+        agent's choice to stay silent is not a response. The task is silent (``deliver=False``): its empty result triggers no
         on_notify and therefore no main-model turn (trap #10).
         """
         if trace_id is None:
@@ -727,8 +712,6 @@ class AppraisalPlugin(CorvidaePlugin):
                         "stage-2 appraisal persist failed", exc_info=True,
                         extra={"trace_id": trace_id},
                     )
-            # Advisory synchronous reader for the last completed stage-2.
-            self._last_stage2[channel.id] = stage2
             return stage2
         finally:
             reset_attribution(token)

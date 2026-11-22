@@ -144,7 +144,7 @@ async def _env(
     if contributors is None:
         contributors = {"kb": Contributor(*lenses)}
     env = await build_critique(
-        tmp_path, appraisal or OfferAppraisal(stage2={"past_claims": []}),
+        tmp_path, appraisal or OfferAppraisal(),
         chat_text, with_funnel=with_funnel, config=config,
         extra_plugins=contributors,
     )
@@ -203,20 +203,15 @@ class TestSelection:
         ("mine", "LENSBRIEF-mine:"),                      # a plugin lens
         ("constrained", "[Self-critique: constrained]"),  # a built-in lens
     ])
-    async def test_top_of_the_vector_runs_alone_and_the_last_stage2_is_ignored(
+    async def test_top_of_the_vector_runs_alone(
         self, tmp_path, winner, marker,
     ):
-        """T1: the lens with the highest share runs, and only it, although
-        get_last_stage2 holds a vector the old selectors would act on."""
-        stale = OfferAppraisal(
-            stage1={"commitment_density": 0.9, "disagreement": 0.9},
-            stage2={"ambiguity": 0.95, "novelty": 0.9, "valence": 0.0, "past_claims": []},
-        )
-        env = await _env(tmp_path, _lens("mine"), appraisal=stale)
+        """T1: the lens with the highest share runs, and only it."""
+        env = await _env(tmp_path, _lens("mine"))
         try:
             await _judged_turn(env, "kt1", {winner: 0.6, "predictive": 0.3, "none": 0.1})
-            # Exactly one lens forked and it is the winner; the stale
-            # vector's predictive lens did not run.
+            # Exactly one lens forked and it is the winner; the runner-up
+            # predictive lens did not run.
             assert [marker in c["instruction"] for c in env.fork_agent.calls] == [True]
             assert _marker_runs(env, "[Self-critique: predictive]") == 0
         finally:

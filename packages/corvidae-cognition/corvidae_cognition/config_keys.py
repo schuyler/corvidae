@@ -75,10 +75,11 @@ def read_count(
 def warn_removed_keys(config: dict, removed: dict[str, str]) -> list[str]:
     """Log one WARNING per removed key that ``config`` still sets; return them.
 
-    ``removed`` maps a dotted path to why it configures nothing now. A path
-    whose value is a mapping (a whole removed block, such as
-    ``appraisal.probe``) is reported key by key; a key set to ``null`` is
-    absent. The daemon keeps running: a key that configures nothing is
+    ``removed`` maps a dotted path to why it configures nothing now (the
+    caller names its issue there). A path whose value is a mapping (a whole
+    removed block, such as ``appraisal.probe``) is reported key by key. A key
+    set to ``null``, at either level, is absent and not reported, as in the
+    rules above. The daemon keeps running: a key that configures nothing is
     ignored, and the warning says to delete it.
     """
     found: list[str] = []
@@ -87,11 +88,15 @@ def warn_removed_keys(config: dict, removed: dict[str, str]) -> list[str]:
         # Absent, or set to null: nothing to report.
         if value is None:
             continue
-        # A removed block names each key the operator set inside it.
-        keys = [f"{path}.{key}" for key in value] if isinstance(value, dict) else [path]
+        # A removed block names each key the operator set inside it; a
+        # null inside it is absent too.
+        if isinstance(value, dict):
+            keys = [f"{path}.{key}" for key, sub in value.items() if sub is not None]
+        else:
+            keys = [path]
         for key in keys:
             logger.warning(
-                "agent.yaml: %s was removed (#1185): %s, so it does nothing; "
+                "agent.yaml: %s was removed: %s, so it does nothing; "
                 "delete it from agent.yaml",
                 key,
                 reason,

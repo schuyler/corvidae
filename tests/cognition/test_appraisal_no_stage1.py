@@ -1,6 +1,6 @@
 """#1185: stage-1 appraisal is removed.
 
-AppraisalPlugin scores nothing at the inbound or outbound gate any more, and
+AppraisalPlugin no longer runs at the inbound or outbound gate, and
 a config that still sets one of stage 1's keys is told so by key name.
 """
 
@@ -20,8 +20,8 @@ def _appraisal():
 
 
 def test_appraisal_implements_no_gate_hook():
-    """No inbound or outbound gate hook: stage 2 runs from on_agent_response,
-    and nothing is computed while a message or a reply waits."""
+    """No inbound or outbound gate hook: stage 1 is gone, and stage 2 runs
+    from on_agent_response."""
     from corvidae_cognition.appraisal import AppraisalPlugin
 
     assert not hasattr(AppraisalPlugin, "should_process_message")
