@@ -354,15 +354,22 @@ class TestGeneratedProjectContents:
 
 @pytest.mark.parametrize(
     "name",
-    ["config", "pm", "registry", "class", "2fa", "memory"],
+    ["config", "pm", "registry", "class", "2fa", "installed_plugin"],
 )
 def test_scaffold_refuses_a_name_that_cannot_load(tmp_path, monkeypatch, name):
     """#849: a name that generates an unloadable project fails up front, named."""
     from click.testing import CliRunner
 
+    from corvidae import scaffold
     from corvidae.scaffold import scaffold_command
 
     monkeypatch.chdir(tmp_path)
+    # Which plugins are installed depends on the extras this environment has,
+    # so the "taken by an installed plugin" case is supplied rather than found.
+    monkeypatch.setattr(
+        scaffold, "_installed_entry_point_names",
+        lambda: frozenset({"registry", "installed_plugin"}),
+    )
     result = CliRunner().invoke(scaffold_command, [name])
 
     assert result.exit_code != 0

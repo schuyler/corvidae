@@ -1982,7 +1982,13 @@ class TestReloadableKeyRegistry:
 
 
 async def test_a_scalar_daemon_section_refuses_the_reload_naming_it(tmp_path, caplog):
-    """#850: `daemon: 5` reloads nothing and says what is wrong, not a TypeError."""
+    """#850: `daemon: 5` reloads nothing and says what is wrong, not a TypeError.
+
+    The scalar is truthy on purpose: a falsy one (`daemon: 0`) is also refused by
+    the next step's `parse_shutdown_timeouts`, so it would pass with this step
+    broken. On the pre-fix `validate_daemon_config` the truthy scalar raises
+    TypeError, which the watcher does not catch, and nothing is logged.
+    """
     from corvidae.config_watcher import ConfigWatcherPlugin
 
     config_file = tmp_path / "agent.yaml"
@@ -2004,7 +2010,7 @@ async def test_a_scalar_daemon_section_refuses_the_reload_naming_it(tmp_path, ca
         },
     )
 
-    config_file.write_text(base + "daemon: 0\n")
+    config_file.write_text(base + "daemon: 5\n")
 
     dispatched: list[dict] = []
 
@@ -2018,4 +2024,4 @@ async def test_a_scalar_daemon_section_refuses_the_reload_naming_it(tmp_path, ca
 
     assert dispatched == [], "a rejected reload must dispatch nothing"
     assert "daemon must be a mapping" in caplog.text
-    assert "got 0 (int)" in caplog.text
+    assert "got 5 (int)" in caplog.text

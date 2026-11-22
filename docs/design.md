@@ -417,7 +417,7 @@ class LLMClient:
         retry_base_delay: float = 2.0,
         retry_max_delay: float = 60.0,
         timeout: float | None = None,
-        model_not_loaded_wait: float = MODEL_NOT_LOADED_WAIT,
+        model_not_loaded_wait: float = MODEL_NOT_LOADED_WAIT,  # not an operator key (#956)
     )
     async def start(self)
     async def stop(self)

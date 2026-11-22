@@ -11,6 +11,7 @@ The generated plugin module and its test are the skeleton in
 from __future__ import annotations
 
 import keyword
+import logging
 import os
 import re
 import string
@@ -18,6 +19,8 @@ import string
 import click
 
 from corvidae.hooks import CorvidaePlugin
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Name conversion helpers
@@ -68,8 +71,14 @@ def _installed_entry_point_names() -> frozenset[str]:
     names = set(_KERNEL_ENTRY_POINT_NAMES)
     try:
         names.update(ep.name for ep in importlib.metadata.entry_points(group="corvidae"))
-    except Exception:  # pragma: no cover - metadata trouble must not block scaffold
-        pass
+    except Exception:
+        # Skipping the installed names is the cheap rescue: a scaffold is not
+        # the place to fail on a broken dist-info, but the operator should know
+        # the collision check is weaker than this run.
+        logger.warning(
+            "scaffold: could not read installed corvidae entry points; only "
+            "kernel object names are treated as taken", exc_info=True,
+        )
     return frozenset(names)
 
 
