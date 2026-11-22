@@ -10,11 +10,14 @@ The generated plugin module and its test are the skeleton in
 
 from __future__ import annotations
 
+import keyword
 import os
 import re
 import string
 
 import click
+
+from corvidae.hooks import CorvidaePlugin
 
 # ---------------------------------------------------------------------------
 # Name conversion helpers
@@ -47,6 +50,57 @@ def _to_entry_point_name(package_name: str) -> str:
     Strips the 'corvidae_' prefix if present.
     """
     return package_name.removeprefix("corvidae_")
+
+
+# Names the kernel registers itself: a plugin entry point with one of these is
+# shadowed or refused at load (#849). Keep in step with Runtime.start().
+_KERNEL_ENTRY_POINT_NAMES = frozenset({"registry", "clock", "idle", "spill"})
+
+# CorvidaePlugin sets these on every plugin in on_init; a plugin method or
+# attribute with one of them shadows the kernel's (#849).
+_PLUGIN_INSTANCE_ATTRIBUTES = frozenset({"pm", "config"})
+
+
+def validate_plugin_name(plugin_name: str) -> None:
+    """Refuse a name that cannot produce a loadable plugin, naming it (#849).
+
+    A scaffold is the first thing a plugin author sees, so a name that generates
+    a project which cannot import or load must fail here, with the reason and the
+    accepted form, rather than at their first run.
+    """
+    package_name = _to_package_name(plugin_name)
+    if not package_name:
+        raise ValueError(
+            f"plugin name {plugin_name!r} produces an empty package name; use "
+            f"letters or digits, e.g. 'weather-report'"
+        )
+    if package_name[0].isdigit():
+        raise ValueError(
+            f"plugin name {plugin_name!r} produces the package name "
+            f"{package_name!r}, which starts with a digit and cannot be "
+            f"imported; start it with a letter, e.g. 'weather-{plugin_name}'"
+        )
+    if keyword.iskeyword(package_name):
+        raise ValueError(
+            f"plugin name {plugin_name!r} produces the package name "
+            f"{package_name!r}, which is a Python keyword; choose another name"
+        )
+    # Instance attributes CorvidaePlugin sets on every plugin; a method or
+    # attribute with one of these names shadows it (#849).
+    if package_name in _PLUGIN_INSTANCE_ATTRIBUTES or hasattr(
+        CorvidaePlugin, package_name
+    ):
+        raise ValueError(
+            f"plugin name {plugin_name!r} produces the package name "
+            f"{package_name!r}, which is an attribute of CorvidaePlugin and "
+            f"would shadow it; choose another name"
+        )
+    if _to_entry_point_name(package_name) in _KERNEL_ENTRY_POINT_NAMES:
+        raise ValueError(
+            f"plugin name {plugin_name!r} produces the entry point name "
+            f"{_to_entry_point_name(package_name)!r}, which the kernel already "
+            f"registers; choose another name"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +283,7 @@ def scaffold(plugin_name: str, output_dir: str = ".") -> str:
 
     Returns the path to the created project directory.
     """
+    validate_plugin_name(plugin_name)
     package_name = _to_package_name(plugin_name)
     class_name = _to_class_name(package_name)
     entry_point_name = _to_entry_point_name(package_name)
@@ -285,7 +340,7 @@ def scaffold_command(plugin_name: str, output_dir: str) -> None:
     """Generate a new corvidae plugin project."""
     try:
         project_dir = scaffold(plugin_name, output_dir=output_dir)
-    except FileExistsError as e:
+    except (FileExistsError, ValueError) as e:
         raise click.ClickException(str(e))
     click.echo(f"Created plugin project: {project_dir}")
     click.echo(
