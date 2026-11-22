@@ -625,10 +625,16 @@ class FunnelPlugin(CorvidaePlugin):
                     carried.append(
                         self._carried_payload(cid, source, result, entry.created))
 
-        # Ask every implementer to submit. on_funnel_ingest is an observe hook, so
-        # a raising one is logged by PolicyAHook against the plugin that raised,
-        # and the others' submissions stand; the guard this replaces could not
-        # fire (#1094, #1097).
+        # Ask every implementer to submit. on_funnel_ingest is an observe hook,
+        # so an implementation that raises is logged by PolicyAHook against the
+        # plugin and the others' submissions stand -- an implementation cannot
+        # make this call raise (#1094, #1097).
+        #
+        # Dispatch itself still can, before any implementation runs: a missing
+        # hookspec (AttributeError), a wrapper refused at dispatch
+        # (PluginValidationError), or a bad argument (HookCallError). Those
+        # propagate, and a finished promise carried above is admitted after this
+        # point only if the call returns.
         await self.pm.ahook.on_funnel_ingest(
             channel=channel, trace_id=trace_id, annotations=annotations, submit=submit,
         )
