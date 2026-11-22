@@ -14,7 +14,9 @@ on an entry that lists more calls than remain, so the list only shrinks.
 It reads source text and imports nothing from the packages, so it runs in
 the kernel-only CI job, like tests/test_kernel_boundary.py. It is the one
 static check #1178 accepted: it does not look at ``get_plugins()``, table
-reads, fired hooks or annotations.
+reads, fired hooks or annotations. It does not catch an indirect call either,
+such as ``getattr(pm, "get_plugin")`` or the bound method under another
+name.
 """
 
 import ast
@@ -109,7 +111,7 @@ def _get_plugin_calls(path: Path) -> list[tuple[int, str]]:
     quotes ``get_plugin('clock')``) is not a call. Both ``x.get_plugin(...)``
     and a bare ``get_plugin(...)`` count; ``get_plugins()`` does not.
     """
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     found: list[tuple[int, str]] = []
     # Walk every node so calls inside functions and methods are reached.
     for node in ast.walk(tree):

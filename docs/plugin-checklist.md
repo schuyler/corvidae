@@ -203,9 +203,9 @@ For an in-repo plugin (step 2) the same code goes in
    `get_dependency(self.pm, "name", Type)` in `on_init` or `on_start`. Reach
    every other plugin through hooks, and name in `depends_on` the owner of
    any plugin-owned hook you fire. For a plugin whose hooks you implement but
-   can work without, `optional_depends_on`. Never `self.pm.get_plugin(...)`
-   (the funnel is the one exception until #1176):
-   `tests/test_plugin_boundary.py` fails on a new call (plugin-guide,
+   can work without, `optional_depends_on`. Never `self.pm.get_plugin(...)`,
+   and never add an entry to the allowlist in
+   `tests/test_plugin_boundary.py`, which fails on a new call (plugin-guide,
    "Plugin boundaries").
 6. **Tools** are `async def` with type-annotated parameters; the first docstring
    line is the description the LLM sees. Parameters named `_something` are

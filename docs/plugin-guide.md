@@ -314,9 +314,9 @@ to hand it entries ahead of a turn. Use it when your entries are not ready
 when the funnel asks: you submit a promise, and the entries are admitted
 once it resolves, through the same dedupe, budget and framing as `admit()`.
 If you have the entries now, submit a future you have already resolved; it is
-admitted that same turn (below). Calling `admit()` or `ingest()` on the funnel
-directly is the standing exception in
-[The funnel](#the-funnel-the-one-standing-exception). The funnel's `ponder` tool waits for
+admitted that same turn (below). Do not call `admit()` or `ingest()` on the
+funnel object: only two calls that predate the rule do
+([The funnel](#the-funnel-two-existing-calls)). The funnel's `ponder` tool waits for
 the channel's in-flight promises, up to 5 s, so a slow recall can land before
 the model answers; a promise that resolves to `None` or no entries counts as
 finished with nothing. The full
@@ -1262,8 +1262,8 @@ The list holds the calls that predate the rule, each with the issue that
 removes it: `outcome_log` (#1179), `appraisal` (#1169, #1175), `memory`
 (#1175), `goals` (#1181), the funnel (#1176, below) and the kernel plugins,
 which still need `depends_on` and `get_dependency` (#1180). When you remove
-a call, lower its count or delete its entry in the same change. Do not add
-an entry for new work except as the funnel exception below allows.
+a call, lower its count or delete its entry in the same change. New work
+never adds an entry: the list only shrinks.
 
 ### Firing a hook depends on its owner
 
@@ -1271,7 +1271,8 @@ A hook does not remove a dependency; it points it. Firing a hook depends on
 its spec, and implementing one does not: with no spec and no implementation
 loaded, `pm.ahook.<name>` raises `AttributeError`; a spec with no
 implementation returns `[]` (observe) or `None` (`resolve_`); an
-implementation with no spec is harmless and never called.
+implementation with no spec runs if something fires the hook, and is
+harmless because nothing does while its owner is absent.
 
 So **a plugin fires only hooks in `AgentSpec` or hooks whose owner it names
 in `depends_on`.** Startup validation then reports a missing owner by name
@@ -1374,27 +1375,28 @@ or timer callback that is upkeep never wakes a channel
 ([Acting on time and quiet](#acting-on-time-and-quiet)); only an agency
 producer, such as the scheduler or the heartbeat, starts a turn. The two
 gathering phases are built twice today, in the kernel's `run_checks` and in
-the funnel's promises; #1176 makes them one kernel primitive, and the
+the funnel's promises; #1176 proposes making them one kernel primitive
+(not built), and the
 "must" for the first phase describes the funnel's behaviour today.
 
-### The funnel: the one standing exception
+### The funnel: two existing calls
 
 Admitting CONTEXT through the funnel (cognition extra) has no hook for a
-push yet. Until #1176 moves holding and admitting CONTEXT into the kernel
-behind a kernel-owned hook, memory and critique look the funnel up with
-`pm.get_plugin("funnel")` and call `admit_detailed()`, `ingest()` or
-`ingest_and_wake()` on it. Those two calls are on the allowlist under
-#1176.
+push. Two calls that predate the rule look the funnel up with
+`pm.get_plugin("funnel")`: memory calls `admit_detailed()` on it, and
+critique calls `ingest()` or `ingest_and_wake()`. They stay on the
+allowlist with #1176 as the reason, because #1176 proposes moving holding
+and admitting CONTEXT into the kernel behind a kernel-owned hook. Nothing
+there is decided or built yet. The exception covers those two calls and no
+others.
 
-New work should not add a third. A source that contributes entries to a
-turn implements the funnel's own hook, `on_funnel_ingest`, or uses
-`RecallSourceMixin` ([Implementing `on_funnel_ingest`](#implementing-on_funnel_ingest),
+New work does not call the funnel object. A source that contributes
+entries to a turn implements the funnel's own hook, `on_funnel_ingest`, or
+uses `RecallSourceMixin` ([Implementing `on_funnel_ingest`](#implementing-on_funnel_ingest),
 [Writing a recall source](#writing-a-recall-source)); implementing a hook
-needs no reference to its owner. Only a plugin that must push outside a
-turn, as critique's verdicts do, has a reason to call the funnel directly.
-It declares `funnel` in `optional_depends_on`, treats `None` as absent and
-logs that once at startup (above), and adds its call to the test's
-allowlist under #1176, where review sees it.
+needs no reference to its owner. A plugin that must push CONTEXT into the
+funnel outside a turn, as critique's verdicts do, has no compliant route
+today. Wait for #1176, or raise the need with the owner on an issue.
 
 ## Plugin dependencies
 
@@ -1426,8 +1428,7 @@ otherwise declares `optional_depends_on` instead. A missing optional
 dependency is not an error, and optional dependencies aren't part of cycle
 detection. The declaration is documentary: it only changes the log level of
 a hookimpl with no spec (above) and doesn't order loading. Its use is to
-implement the optional plugin's hooks, not to look the plugin up; the one
-exception is the funnel, until #1176 ([The funnel](#the-funnel-the-one-standing-exception)).
+implement the optional plugin's hooks, not to look the plugin up.
 Say once at startup what your plugin does without it
 ([When nobody answers](#when-nobody-answers)).
 
@@ -1464,7 +1465,7 @@ class MemoryPlugin(CorvidaePlugin):
 
 Compaction summarizes only `MESSAGE` entries, but a `MessageType.CONTEXT` row in the range it drops leaves the window with it; CONTEXT in the retained tail stays.
 
-Prefer routing CONTEXT through the admission funnel instead of appending directly: it gives you window dedupe, per-source token budgets, and the mandatory data-not-instructions framing for free (see [FunnelPlugin](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy) in cognition.md). Direct appends bypass all three. Reach it through its hook: implement `on_funnel_ingest`, or use `RecallSourceMixin` ([Implementing `on_funnel_ingest`](#implementing-on_funnel_ingest), [Writing a recall source](#writing-a-recall-source)). The funnel is part of the cognition extra; without it nothing calls the hook. Calling methods on the funnel object, such as `admit(channel, conv, "<source>", entries)` or `admit_detailed(...)` (the same arguments, and it also reports which entries were dropped as duplicates), is the standing exception described under [The funnel](#the-funnel-the-one-standing-exception); memory does it today. The dedupe keys and window budgets below apply to both routes, except that a promise with a bad key list is logged rather than raised (see the hook's contract). Dedupe matches each entry's whole text against every CONTEXT row by default; if your lines carry something that changes from turn to turn (an age, a score), pass `keys=[...]`, one stable string per entry, and an entry is a duplicate when its key appears in a CONTEXT row framed for your source. Memory passes `memory <id>)`. Choose keys that can't occur inside one another, which is why memory's ends in a paren, and pass exactly one per entry: a length mismatch raises `ValueError`. Operators can also cap what your source holds in a window with `funnel.window_budgets.<source>` (see [configuration.md](configuration.md#funnel--context-admission-funnel)); entries the cap drops come back like budget drops, in neither `admitted` nor `duplicate`.
+Prefer routing CONTEXT through the admission funnel instead of appending directly: it gives you window dedupe, per-source token budgets, and the mandatory data-not-instructions framing for free (see [FunnelPlugin](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy) in cognition.md). Direct appends bypass all three. Reach it through its hook: implement `on_funnel_ingest`, or use `RecallSourceMixin` ([Implementing `on_funnel_ingest`](#implementing-on_funnel_ingest), [Writing a recall source](#writing-a-recall-source)). The funnel is part of the cognition extra; without it nothing calls the hook. Memory's existing call to `admit_detailed(...)` on the funnel object (it also reports which entries were dropped as duplicates) predates the rule; new work does not call the funnel object ([The funnel](#the-funnel-two-existing-calls)). The dedupe keys and window budgets below apply to a hook source as to that call, except that a promise with a bad key list is logged rather than raised (see the hook's contract). Dedupe matches each entry's whole text against every CONTEXT row by default; if your lines carry something that changes from turn to turn (an age, a score), pass `keys=[...]`, one stable string per entry, and an entry is a duplicate when its key appears in a CONTEXT row framed for your source. Memory passes `memory <id>)`. Choose keys that can't occur inside one another, which is why memory's ends in a paren, and pass exactly one per entry: a length mismatch raises `ValueError`. Operators can also cap what your source holds in a window with `funnel.window_budgets.<source>` (see [configuration.md](configuration.md#funnel--context-admission-funnel)); entries the cap drops come back like budget drops, in neither `admitted` nor `duplicate`.
 
 ## Forking the window
 
