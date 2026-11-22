@@ -187,7 +187,7 @@ rules and replaces none of them.
   verdict and stops, and the author moves the label.
 - When the owner has told you to set labels: set `merge-ready` only on a clean
   verdict (`SOUND`, `APPROVE WITH FOLLOW-UPS`) covering the current head, and a
-  PR that fails review gets `needs-revision` on its issue with a comment saying
+  PR that fails review gets `needs-revision` on the PR with a comment saying
   what to fix. Remove the old stage label in the same step.
 - A loop stops after the fourth round (a fourth round ending `NEEDS-CHANGES`).
   It stays stopped until the owner says to continue, in a live session, and a
