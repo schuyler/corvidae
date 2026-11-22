@@ -1435,14 +1435,16 @@ other firings use. The helper names no hook, emission or tool, so the tool veto
   `agent.check_allowance_min` (default 5 s), and never below that minimum.
 - An implementation that raises before the deadline is logged at WARNING and
   counts as no opinion; its siblings' verdicts stand.
-- At the deadline each implementation still running is a miss: one DEBUG line
+- At the deadline each implementation that has neither answered nor raised is
+  a miss: one DEBUG line
   and `on_metrics("check.missed", 1, {channel, hook, plugin})`. It is not
   cancelled. If it returns later the verdict goes to the caller's `on_late`; a
   later raise is logged at WARNING.
 - `wrapper=True` implementations (outbound-cap's counter is one) are driven as
   apluggy drives them: advanced to their `yield` before the checks start, then
-  sent the in-time verdicts, innermost first; what each returns replaces the
-  list. The caller resolves the result with `resolve_reject_wins`.
+  sent the in-time verdicts (`None` included, a raiser's left out rather than
+  thrown into them as apluggy would), innermost first; what each returns
+  replaces the list. The caller resolves the result with `resolve_reject_wins`.
 
 A veto may return `corvidae.hooks.Refusal(reason)` instead of `False`. In time
 the two are the same. Late, a bare `False` has nothing to say; for a `Refusal`

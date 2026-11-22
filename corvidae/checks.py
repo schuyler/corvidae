@@ -127,6 +127,9 @@ async def run_checks(
     # Shared state between the deadline and the per-implementation tasks.
     verdicts: dict[int, object] = {}
     done: set[int] = set()
+    # Implementations that finished (answered or raised) before the deadline;
+    # every other one is a miss, however soon after the deadline it returns.
+    in_time: set[int] = set()
     expired = False
     all_done = asyncio.Event()
     deadline_hit = asyncio.Event()
@@ -154,8 +157,10 @@ async def run_checks(
             late = expired and not raised
             # In time: record it for the caller (a raiser has no verdict).
             # Late: hand it on.
-            if not expired and not raised:
-                verdicts[index] = verdict
+            if not expired:
+                in_time.add(index)
+                if not raised:
+                    verdicts[index] = verdict
             done.add(index)
             if len(done) == len(voters):
                 all_done.set()
@@ -211,7 +216,7 @@ async def run_checks(
 
     # Record each implementation still running at the deadline.
     for index, impl in enumerate(voters):
-        if index in done:
+        if index in in_time:
             continue
         logger.debug(
             "%s implementation %s on %s missed its %ss allowance; going ahead without it",

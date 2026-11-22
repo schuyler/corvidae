@@ -492,12 +492,16 @@ class OutboundCapPlugin(CorvidaePlugin):
         """Count an emission only once the combined verdict lets it through.
 
         A wrapper sees the result list of every gate after they ran (apluggy
-        drives it from ``_async_multicall``), so a veto from any other gate
-        keeps the emission out of the count. The results pass through
+        drives it from ``_async_multicall``; for the ``final`` firing the
+        kernel's ``corvidae.checks.run_checks`` drives it the same way with
+        the verdicts that arrived inside the check allowance), so a veto from
+        any other gate keeps the emission out of the count. The results pass through
         unchanged; a failure here logs and never changes the verdict.
         """
-        # Let every gate vote; an exception from a gate propagates untouched
-        # so the kernel's own fail-open handling in _gate_send applies.
+        # Let every gate vote. On the progress, thinking and error firings an
+        # exception from a gate propagates untouched so the kernel's own
+        # fail-open handling in _gate_send applies; on the final firing a
+        # raising gate is simply absent from the list.
         results = yield
         try:
             if resolve_reject_wins(results) is not False:

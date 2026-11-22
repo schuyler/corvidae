@@ -7,8 +7,8 @@ reply is sent, the miss is recorded (a debug line and an ``on_metrics``
 counter), and a refusal that arrives late reaches the channel's window as a
 framed CONTEXT row at its next turn without waking one.
 
-No test sleeps real time: the checks below sleep on a FakeClock, and each test
-moves time with ``advance``.
+The checks below sleep on a FakeClock, and each test moves time with
+``advance``; the one deadline-instant test needs the real clock (50 ms).
 """
 
 from __future__ import annotations
@@ -258,6 +258,65 @@ class TestFinalUnderAllowance:
         assert sent_texts(plugin.pm, OutboundMessage) == []
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert any("raising_gate" in r.getMessage() for r in warnings)
+
+
+class TestDeadlineInstant:
+    async def test_check_finishing_with_the_deadline_is_a_counted_miss(self):
+        """Regression: a check that finishes in the same loop step as the
+        deadline, after the deadline fires, decides nothing and is still
+        counted as a miss. The fake clock separates two releases with a
+        settle, so this drives run_checks on the real clock with a releaser
+        timer due at the deadline's own instant (50 ms)."""
+        from types import SimpleNamespace
+
+        from corvidae.checks import run_checks
+        from corvidae.clock import Clock
+
+        release = asyncio.Event()
+
+        class Slow:
+            @hookimpl
+            async def should_send_response(self, channel, text, emission, trace_id, annotations):
+                await release.wait()
+                return Refusal("on the line")
+
+        pm = create_plugin_manager()
+        metrics = MetricsSpy()
+        pm.register(Slow(), name="slow")
+        pm.register(metrics, name="metrics_spy")
+        clock = Clock()
+        late: list = []
+
+        async def on_late(plugin_name, verdict):
+            late.append((plugin_name, verdict))
+
+        async def releaser():
+            release.set()
+
+        # Schedule the releaser right after the deadline timer, same delay.
+        real_call_later = clock.call_later
+
+        def call_later(delay, callback, *, name):
+            timer = real_call_later(delay, callback, name=name)
+            real_call_later(delay, releaser, name="releaser")
+            return timer
+
+        clock.call_later = call_later
+        channel = SimpleNamespace(id="x:y")
+        try:
+            results = await run_checks(
+                pm, "should_send_response", channel=channel,
+                kwargs={"channel": channel, "text": "hi", "emission": "final",
+                        "trace_id": None, "annotations": {}},
+                allowance=0.05, clock=clock, on_late=on_late,
+            )
+            await asyncio.sleep(0.05)
+        finally:
+            await clock.close()
+
+        assert results == []
+        assert late == [("slow", Refusal("on the line"))]
+        assert len(metrics.named(CHECK_MISSED_METRIC)) == 1
 
 
 # ---------------------------------------------------------------------------
