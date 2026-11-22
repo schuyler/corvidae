@@ -641,9 +641,10 @@ applied to a checkout, not as a rule already proven across cases.
 `on_init` raises blocks the restart — that is the code a plugin author
 is writing against. The *policy* above (which conditions deserve refusal
 versus a WARNING) is proposed from outside this repo and is **not
-implemented by any bundled plugin**: as of this writing no plugin under
-`packages/` inspects a git checkout at all. Treat it as a recommendation
-to apply when your plugin has a state-vs-expectation check to make, not
+implemented by any bundled plugin**: verified against `packages/` on
+2026-11-21, no plugin there inspects a git checkout at all. Treat it as a
+recommendation to apply when your plugin has a state-vs-expectation check to
+make, not
 as existing behaviour to imitate.
 
 ### Messaging
