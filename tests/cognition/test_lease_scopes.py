@@ -158,7 +158,6 @@ async def env(tmp_path, monkeypatch: pytest.MonkeyPatch):
     session.respond = respond
     yield Env(plugin, channel, db, session, memory, appraisal, critique, outcome, llm)
     await memory.wait_for_background_tasks()
-    await appraisal.on_stop()
     await critique.on_stop()
     await plugin.pm.get_plugin("task").on_stop()
     await llm.on_stop()

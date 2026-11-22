@@ -124,7 +124,6 @@ async def build_env(tmp_path, chat_text=VALID_STAGE2_JSON, start_worker=False):
 
 
 async def _teardown(env):
-    await env.appraisal.on_stop()
     worker = getattr(env.task, "_worker_task", None)
     if worker is not None:
         worker.cancel()
@@ -664,23 +663,41 @@ class TestAppraisalPrior:
 
     async def test_covered_range_returns_composite(self, tmp_path):
         env = await build_env(tmp_path)
-        await self._seed(env, "e1", 10, stage1={"salience": 0.2},
-                         stage2={"stakes": 1.0, "valence": 1.0, "novelty": 1.0})
+        await self._seed(env, "e1", 10, stage2={"stakes": 1.0, "valence": 1.0, "novelty": 1.0})
         score = await env.appraisal.importance_over_range(env.channel, (5, 15))
-        # composite = 0.4*1 + 0.3*|1-0.5|*2 + 0.3*1 = 1.0; max(0.2, 1.0) = 1.0
+        # composite = 0.4*1 + 0.3*|1-0.5|*2 + 0.3*1 = 1.0
         assert score == pytest.approx(1.0)
         await _teardown(env)
 
-    async def test_stage1_only_uses_salience(self, tmp_path):
+    async def test_a_stored_stage1_score_is_ignored(self, tmp_path):
+        """#1185: a row written before stage 1 was removed still carries a
+        stage1 salience; the prior is the stage-2 composite alone."""
+        env = await build_env(tmp_path)
+        await self._seed(env, "e1", 10, stage1={"salience": 0.9},
+                         stage2={"stakes": 0.5, "valence": 0.5, "novelty": 0.0})
+        score = await env.appraisal.importance_over_range(env.channel, (5, 15))
+        # composite = 0.4*0.5 + 0 + 0 = 0.2, not the stored 0.9
+        assert score == pytest.approx(0.2)
+        await _teardown(env)
+
+    async def test_prior_falls_back_on_a_stage1_only_row(self, tmp_path):
+        """#1185: a range whose only appraisal is an old stage-1 score is
+        not covered, so memory's own rubric scores it."""
+        from corvidae_cognition.appraisal import AppraisalPrior
         env = await build_env(tmp_path)
         await self._seed(env, "e2", 20, stage1={"salience": 0.42})
-        score = await env.appraisal.importance_over_range(env.channel, (15, 25))
-        assert score == pytest.approx(0.42)
+        fallback = MagicMock()
+        fallback.score = AsyncMock(return_value=0.33)
+        prior = AppraisalPrior(appraisal=env.appraisal, fallback=fallback)
+        result = await prior.score([{"role": "user", "content": "x"}],
+                                   msg_id_range=(15, 25), channel=env.channel)
+        assert result == pytest.approx(0.33)
+        fallback.score.assert_awaited_once()
         await _teardown(env)
 
     async def test_uncovered_range_returns_none(self, tmp_path):
         env = await build_env(tmp_path)
-        await self._seed(env, "e3", 100, stage1={"salience": 0.9})
+        await self._seed(env, "e3", 100, stage2={"stakes": 1.0, "valence": 0.5, "novelty": 0.0})
         assert await env.appraisal.importance_over_range(env.channel, (1, 10)) is None
         await _teardown(env)
 
@@ -699,7 +716,8 @@ class TestAppraisalPrior:
     async def test_prior_uses_appraisal_when_covered(self, tmp_path):
         from corvidae_cognition.appraisal import AppraisalPrior
         env = await build_env(tmp_path)
-        await self._seed(env, "e4", 30, stage1={"salience": 0.55})
+        # composite = 0.4*1.0 + 0 + 0.3*0.5 = 0.55
+        await self._seed(env, "e4", 30, stage2={"stakes": 1.0, "valence": 0.5, "novelty": 0.5})
         fallback = MagicMock()
         fallback.score = AsyncMock(return_value=0.1)
         prior = AppraisalPrior(appraisal=env.appraisal, fallback=fallback)
@@ -713,7 +731,7 @@ class TestAppraisalPrior:
         env = await build_env(tmp_path)
         await self._seed(env, "v1", 40, stage2={"valence": 0.2})
         await self._seed(env, "v2", 41, stage2={"valence": 0.8})
-        await self._seed(env, "v3", 42, stage1={"salience": 0.5})  # no stage2
+        await self._seed(env, "v3", 42, stage1={"salience": 0.5})  # an old row: no stage2
         mean = await env.appraisal.mean_valence(env.channel.id, (35, 45))
         assert mean == pytest.approx(0.5)
         # No stage-2 anywhere → None.
@@ -724,12 +742,13 @@ class TestAppraisalPrior:
     # exchanges, whose message_log rowids interleave inside A's range.
     async def test_importance_over_range_ignores_other_channels(self, tmp_path):
         env = await build_env(tmp_path)
-        await self._seed(env, "a1", 40, stage1={"salience": 0.2})
-        await self._seed(env, "b1", 41, stage1={"salience": 0.95},
+        # Composites: a1 = 0.4*0.5 = 0.2; b1 = 0.4*1 + 0.3*1 = 0.7; a2 = 0.4*0.75 = 0.3.
+        await self._seed(env, "a1", 40, stage2={"stakes": 0.5, "valence": 0.5, "novelty": 0.0})
+        await self._seed(env, "b1", 41, stage2={"stakes": 1.0, "valence": 0.5, "novelty": 1.0},
                          channel_id="irc:#b")
-        await self._seed(env, "a2", 42, stage1={"salience": 0.3})
+        await self._seed(env, "a2", 42, stage2={"stakes": 0.75, "valence": 0.5, "novelty": 0.0})
         score = await env.appraisal.importance_over_range(env.channel, (40, 42))
-        # Only A's exchanges count: max(0.2, 0.3), not B's 0.95.
+        # Only A's exchanges count: max(0.2, 0.3), not B's 0.7.
         assert score == pytest.approx(0.3)
         await _teardown(env)
 
@@ -783,12 +802,11 @@ class TestAppraisalPrior:
         env = await build_env(tmp_path)
         try:
             # The range maximum sits AFTER the corrupt row, so a reader that
-            # stopped at it (break) would score 0.2 and find no stage 2.
-            await self._seed(env, "k1", 50, stage1={"salience": 0.2})
-            await self._seed(env, "k2", 51, stage1={"salience": 0.42})
+            # stopped at it (break) would score 0.08 and find no valence.
+            await self._seed(env, "k1", 50, stage2={"stakes": 0.2, "valence": 0.5, "novelty": 0.0})
+            await self._seed(env, "k2", 51, stage2={"stakes": 0.5, "valence": 0.5, "novelty": 0.0})
             await self._corrupt_appraisal(env, "k2", "'not json{'")
-            await self._seed(env, "k3", 52, stage1={"salience": 0.3},
-                             stage2={"stakes": 1.0, "valence": 1.0,
+            await self._seed(env, "k3", 52, stage2={"stakes": 1.0, "valence": 1.0,
                                      "novelty": 1.0})
             with caplog.at_level(logging.WARNING,
                                  logger="corvidae.appraisal"):
@@ -796,9 +814,10 @@ class TestAppraisalPrior:
                     env.channel, (45, 55))
                 mean = await env.appraisal.mean_valence(
                     env.channel.id, (45, 55))
-            # Both valid envelopes count, including the one after the corrupt row.
+            # Both valid envelopes count, including the one after the corrupt
+            # row: the max composite is k3's, the mean valence is (0.5 + 1.0) / 2.
             assert score == pytest.approx(1.0)
-            assert mean == pytest.approx(1.0)
+            assert mean == pytest.approx(0.75)
             # One WARNING per corrupt row per reader call: importance_over_range
             # and mean_valence each read the range.
             warnings = self._corrupt_warnings(caplog)
@@ -814,18 +833,18 @@ class TestAppraisalPrior:
     ):
         env = await build_env(tmp_path)
         try:
-            await self._seed(env, "n1", 50, stage1={"salience": 0.42})
-            await self._seed(env, "n2", 51, stage1={"salience": 0.2})
+            await self._seed(env, "n1", 50, stage2={"stakes": 0.5, "valence": 0.5, "novelty": 0.0})
+            await self._seed(env, "n2", 51, stage2={"stakes": 0.25, "valence": 0.5, "novelty": 0.0})
             # '[]' decodes as JSON but is not an appraisal envelope.
             await self._corrupt_appraisal(env, "n2", "'[]'")
             # A valid row after the corrupt one, so a reader that stopped at
-            # it (break) would score 0.42 instead of 0.9.
-            await self._seed(env, "n3", 52, stage1={"salience": 0.9})
+            # it (break) would score 0.2 instead of 0.4.
+            await self._seed(env, "n3", 52, stage2={"stakes": 1.0, "valence": 0.5, "novelty": 0.0})
             with caplog.at_level(logging.WARNING,
                                  logger="corvidae.appraisal"):
                 score = await env.appraisal.importance_over_range(
                     env.channel, (45, 55))
-            assert score == pytest.approx(0.9)
+            assert score == pytest.approx(0.4)
             warnings = self._corrupt_warnings(caplog)
             assert len(warnings) == 1, warnings
             assert "n2" in warnings[0], warnings[0]
@@ -839,17 +858,17 @@ class TestAppraisalPrior:
     ):
         env = await build_env(tmp_path)
         try:
-            await self._seed(env, "u1", 50, stage1={"salience": 0.2})
-            await self._seed(env, "u2", 51, stage1={"salience": 0.42})
+            await self._seed(env, "u1", 50, stage2={"stakes": 0.25, "valence": 0.5, "novelty": 0.0})
+            await self._seed(env, "u2", 51, stage2={"stakes": 0.5, "valence": 0.5, "novelty": 0.0})
             await self._invalid_utf8_appraisal(env, "u2")
-            await self._seed(env, "u3", 52, stage1={"salience": 0.6})
+            await self._seed(env, "u3", 52, stage2={"stakes": 0.75, "valence": 0.5, "novelty": 0.0})
             with caplog.at_level(logging.WARNING,
                                  logger="corvidae.appraisal"):
                 score = await env.appraisal.importance_over_range(
                     env.channel, (45, 55))
             # Without CAST(... AS BLOB) the fetch itself raises and the whole
             # range is lost, so this asserts the row is skipped, not the range.
-            assert score == pytest.approx(0.6)
+            assert score == pytest.approx(0.3)
             warnings = self._corrupt_warnings(caplog)
             assert len(warnings) == 1, warnings
             assert "u2" in warnings[0], warnings[0]
@@ -939,7 +958,6 @@ class TestAppraisalPrior:
             assert row[0] == pytest.approx(0.3)
 
         finally:
-            await appraisal.on_stop()
             await db.close()
 
     # R3 (#195): a failing exchange_log query is logged as one WARNING naming
@@ -1064,7 +1082,6 @@ class TestAppraisalPrior:
         # rubric fallback: max composite over the two exchanges.
         assert 0.0 <= importance <= 1.0
 
-        await appraisal.on_stop()
         await db.close()
 
     async def test_prior_installed_on_memory_at_start(self, tmp_path):
@@ -1097,7 +1114,6 @@ class TestAppraisalPrior:
 
         assert isinstance(memory.importance_prior, AppraisalPrior)
         assert memory.importance_prior._fallback is original_prior
-        await appraisal.on_stop()
         await db.close()
 
 
@@ -1125,9 +1141,11 @@ class TestAppraisalPriorHint:
         from corvidae_cognition.appraisal import AppraisalPrior
         env = await build_env(tmp_path)
         if covered:
-            # An exchange inside (25, 35) with stage-1 salience 0.55.
+            # An exchange inside (25, 35) with a stage-2 composite of 0.55
+            # (0.4 * 1.0 + 0.3 * 0.5).
             await env.outcome.upsert_exchange(
-                "h1", env.channel.id, "user", appraisal={"stage1": {"salience": 0.55}},
+                "h1", env.channel.id, "user",
+                appraisal={"stage2": {"stakes": 1.0, "valence": 0.5, "novelty": 0.5}},
             )
             await env.outcome.update_exchange("h1", message_rowid=30)
         fallback = MagicMock()

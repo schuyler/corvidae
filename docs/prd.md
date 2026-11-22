@@ -161,7 +161,8 @@ one is a bug even if its tests pass.
    of band and are tracked as benchmarks, never as gates.
 
 7. **Cheap, always-on perception gates expensive cognition.** One appraisal
-   signal has two consumers: engagement and consolidation strength.
+   signal has two consumers: critique's lens selection and consolidation
+   strength.
    Epistemic checks stay independent of the appraisal scores: the
    provenance check fires on any claim about the past and is judged against
    records, never on generator confidence. Thresholds ship as commented
@@ -173,7 +174,7 @@ one is a bug even if its tests pass.
 8. **Local-first: one process, one machine, one SQLite file.** No message
    broker, no worker pool, no workflow engine. The database runs in WAL
    mode as a requirement, because a second process (the redact CLI) and a
-   second connection (the appraisal probe) read it concurrently. This is
+   second connection (critique's provenance probe) read it concurrently. This is
    about the agent's process and state; model endpoints are wherever the
    operator points them (§3.6).
 
@@ -1210,26 +1211,17 @@ deciding only what to newly append and in what order.
 
 **Appraisal.**
 
-1. Stage 1 runs at the inbound gate: surface heuristics (question,
-   disagreement, commitment, imperative density) plus an FTS5 familiarity
-   probe over memory summaries on a dedicated read-only connection under
-   `appraisal.probe.budget_ms`, failing open to heuristics alone. It never
-   calls a model. Novelty is specified as surprise, composed from the
-   probe and the heuristics; input-side perplexity is future-if-provider-
-   supports.
+1. Nothing is appraised before a reply is sent: there is no stage-1
+   appraisal at the inbound or the outbound gate (#1185).
 2. Stage 2 runs post-acceptance, off the response path, in a silent task
    that judges the exchange as the agent saw it (§3.8): the fuller vector
    (valence, stakes, ambiguity, commitment density, novelty), the
    importance prior, the memory record's valence tag. A tier-2 readout
    head over the embedding replaces the model call where a trained head
    matches it (#141).
-3. Vectors are keyed by trace id and direction in a bounded store and
-   persisted to `exchange_log`; the compute is pull-based because
-   broadcast hooks dispatch concurrently.
+3. Vectors are keyed by trace id and persisted to `exchange_log`.
 4. Every parameter is a commented best-guess constant resolved at
    decision time through both tuning surfaces.
-5. The outbound gate reads the current exchange's stage 1 and the previous
-   exchange's stage 2.
 
 **Critique.**
 
@@ -1308,14 +1300,8 @@ deciding only what to newly append and in what order.
 3. Per-emission firings at the progress, thinking, and error-fallback
    sites suppress that emission only, with a window annotation for
    suppressed text.
-4. The engagement gate runs in shadow mode (compute, record, pass
-   everything) unless `gate.engagement.enforce` is set. Enforcing is meant
-   to follow offline calibration against logged traffic. Whether the agent
-   may enforce it, or fit it live (the closed-loop capability of principle
-   7), is a lock the operator sets (principle 15). The decide gate
-   withholds a task-origin final that adds nothing; apart from the
-   pre-send check (item 7), no gate withholds a direct user reply by
-   default.
+4. Apart from the pre-send check (item 7), no gate withholds a direct
+   user reply by default.
 5. The agent itself may decline any turn, a direct user turn included,
    when it judges it has nothing true, relevant and substantial to add
    (Grice's maxims). The channel's register (§3.3.10) sets the norm:
@@ -1357,7 +1343,7 @@ deciding only what to newly append and in what order.
    plugin's choice.
 
 **Outcome log.** One `exchange_log` row per trace (origin, originating
-rowid, retrieval profile, probe score, both appraisal stages, outcomes),
+rowid, retrieval profile, appraisal, outcomes),
 written at admission or rejection and merged in place by every writer
 with a single-statement atomic merge. Rejected messages keep their row
 with a null rowid.
@@ -1920,8 +1906,8 @@ record that holds the reasoning.
 | Operator-only `redact` is the one deletion path; it stays in the kernel | principle 4; §3.7 Memory 8 |
 | Knowledge graph not part of the shipped memory: extraction is noisy, n-hop context is expensive, and at personal scale a graph duplicates facts plus vector and FTS retrieval; a graph plugin isn't precluded | diverges from Persyn §4.3 |
 | Emotion classifier replaced by appraisal valence | §3.7 Appraisal; diverges from Persyn §4.9 |
-| Engagement decision inverted: cheap gate first, generate only past threshold | principle 7; §3.7 Appraisal; diverges from the Persyn spec |
-| Two-stage appraisal; stage 1 never calls a model; core mints the exchange key; pull-based compute | §3.7 Appraisal 1–3 |
+| No stage-1 appraisal: nothing scores a message or a reply before the reply is sent, so no gate judges text with language-specific heuristics; the agent declines a turn itself | §3.7 Appraisal 1; §3.7 Output gate 4–5; #1185; owner, 2026-11-22 |
+| Appraisal runs after the exchange, off the response path; core mints the exchange key | §3.7 Appraisal 1–3 |
 | Origin is stamped and propagated, never inferred. Critique eligibility does not depend on origin: every main-loop turn is judged, and the recursion brake is delivery (objections on a `critique`-origin turn wake nothing) | §3.1.4; §3.7 Critique 3–4; #1031; owner, 2026-11-17 |
 | Two grades on a queue item: kernel-certified `metadata`, never a hook argument, and plugin-owned `annotations`; non-human items (and a person's message whose transport supplies a name or addressing) get a code-built header, and outside payloads a fence derived from the stored row; foreign-origin items are framed, never withheld (no silence default) | §3.1.4; §3.3.11; #555 |
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
@@ -1932,7 +1918,6 @@ record that holds the reasoning.
 | Core/periphery: one deliberative core context and a peripheral per channel, as a plugin strategy beside the base topology. Whether a fork blocks names only whether its parent's next turn waits for its result; every fork shares its parent's lease, and leases are the scheduler's handle for paging context heads. The strategy's pauses are the base's stop and its ordering a replacement lease order, so it amends nothing in §3.13. Trust passes through the core. Accepted as the target; its TRD was accepted on 2026-11-17, and conformance is checked from then | supplement; TRD; #16, #296, #527; operator, 2026-11-07, 2026-11-15 and 2026-11-17 |
 | A latency bound is optional for any queue: work with none never preempts and is never overdue, and a replacement order may delay it indefinitely. Where a bound matters, the requirement says so (§3.1.16's idle-work bounds, the heartbeat's, and any plugin whose documented behaviour must hold under traffic, principle 13), and on a channel with no class its exchange's forks lose principle 3's starvation guarantee. Supersedes "every queue has a latency bound" | principle 3; §3.13.5, 7; #989; operator, 2026-11-15 |
 | Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
-| Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
 | Hedging vocabulary is persona, not architecture | §3.11.5; diverges from the Persyn spec |
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
 | Every heartbeat beat reviews extant goals and any other information that might be relevant to taking action; recent memory is no longer a required input, since the newest memories across every channel are mostly unrelated to what the beat is deciding | §3.7 Heartbeat; owner, 2026-11-18 |

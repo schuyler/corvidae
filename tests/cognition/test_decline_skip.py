@@ -248,7 +248,7 @@ async def turn_env(tmp_path):
 
     task_plugin.task_queue.enqueue = _record
     yield SimpleNamespace(plugin=plugin, channel=channel, enqueued=enqueued)
-    for p in (critique, appraisal, silence):
+    for p in (critique, silence):
         await p.on_stop()
     await task_plugin.on_stop()
     await db.close()

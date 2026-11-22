@@ -1363,7 +1363,9 @@ async def _real_path_env(tmp_path, replies, past_claims):
 
 async def _real_path_teardown(env):
     for p in reversed(env.plugins):
-        await p.on_stop()
+        # Appraisal has nothing to stop since stage 1 went (#1185).
+        if hasattr(p, "on_stop"):
+            await p.on_stop()
     await env.agent.pm.get_plugin("task").on_stop()
     await env.db.close()
 

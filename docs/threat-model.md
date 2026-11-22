@@ -244,16 +244,14 @@ recommended keys (`gate.engagement.enforce`, `gate.send.enforce`) did not
 exist anywhere in the code, and the prompt keys were not mentioned; the
 doc now lists the real set.
 
-The output gate (`GatePlugin`, #131) added four more keys of the same kind.
-`gate.engagement.enforce` with a high `gate.engagement.threshold` makes the
-agent ignore every message on the channel; `gate.send.enforce: false` or
-`gate.send.min_salience: 0` turns off the decide gate; `gate.send.allow_progress`
-and `allow_thinking` hide intermediate output. All are writable through
-`set_settings` by default. A prompt-injected "just stop answering" now has a
-mechanism, so on channels with untrusted participants put the `enforce` and
-threshold keys in `agent.immutable_settings` with the others. The defaults
-can't silence a reply to a person: the decide gate never withholds a
-user-origin final, and the engagement gate ships in shadow mode.
+The output gate (`GatePlugin`, #131) added more keys of the same kind.
+`gate.send.allow_progress` and `allow_thinking` hide intermediate output, and
+`gate.send.quiet_origins` withholds a source's replies (finding 22). All are
+writable through `set_settings` by default. None of them can silence a reply
+to a person: the decide gate never withholds a user-origin final. The
+engagement gate and the decide gate's salience floor, whose keys could make
+the agent ignore every message on a channel or withhold every background
+reply, were removed with stage-1 appraisal (#1185).
 
 For a poisoned-model scenario this is the finding that matters most after
 the first one: the only runtime check on confabulation can be switched off
@@ -1152,12 +1150,9 @@ What each kind of unlock costs:
   wholesale at the next restart. A scheduled job's prompt comes back
   framed as the operator's. A setting not named in this ledger falls under
   this entry unless another entry fits better by what it controls.
-- **Other plugin tunables** (`appraisal.weights.*`, `appraisal.prior.*`,
-  `appraisal.probe.*`; open by default today). The weights and priors
-  move what the agent attends to and how strongly it remembers it.
-  Raising the probe budget delays stage-1 appraisal of each inbound
-  message on the channel by up to that budget; it doesn't hold the
-  model's slot. Retrieval breadth (`memory.retrieval.k`) is static config
+- **Other plugin tunables** (`appraisal.prior.*`; open by default today).
+  The priors move how strongly the agent remembers an exchange.
+  Retrieval breadth (`memory.retrieval.k`) is static config
   today; unlocked, raising it pulls more stored memory, including text
   distilled on other channels (PRD principle 14), into every prompt on
   the channel and fills the window toward compaction. A plugin tunable
@@ -1857,7 +1852,7 @@ which also makes it writable by anything else running as the daemon's user.
 
 `gate.send.quiet_origins` lists origins (for example `webhook:github`) whose
 turns send nothing to the human: the decide gate withholds their `final`,
-`progress`, `thinking` and `error` emissions whatever their salience (the error
+`progress`, `thinking` and `error` emissions (the error
 fallback too, since a model outage during such a burst is the same flood in
 error text, #936; the kernel logs the failure at ERROR regardless). It exists because
 the 2026-11-12 flood (finding 19) was the agent answering CI notifications one
@@ -1874,9 +1869,8 @@ What changes for untrusted text:
   the agent to call it. Called in a turn
   that isn't quiet, it lifts nothing but still records `outcomes.speak_up`.
   `tools.disabled: [speak_up]` removes it, leaving a veto with no hatch.
-  The hatch lifts only this veto: the surfaced final still goes through the
-  salience floor (`gate.send.min_salience`), every other `should_send_response`
-  implementation (silence, critique, `outbound_cap`) and the normal not-sent
+  The hatch lifts only this veto: the surfaced final still goes through
+  every other `should_send_response` implementation (silence, critique, `outbound_cap`) and the normal not-sent
   marker. A flood of hatch calls is therefore bounded by `outbound_cap`
   (finding 19) when that plugin is loaded and configured, not by this plugin. The call is recorded as
   `outcomes.speak_up` with its reason, so an operator can see which turns

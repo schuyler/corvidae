@@ -114,8 +114,8 @@ HEARTBEAT_JOB_CHANNEL = "internal:heartbeat"
 HEARTBEAT_TIMEOUT_S = 240
 
 # withheld_restart probe (buster-gate profile, #131): a heartbeat job on an
-# IRC channel whose finals the decide gate withholds (gate.send.min_salience
-# 1.0). The planted token proves the withheld row reloads into the window.
+# IRC channel whose finals the decide gate withholds (gate.send.quiet_origins:
+# [heartbeat]). The planted token proves the withheld row reloads into the window.
 WITHHELD_CHANNEL = "#p-withheld"
 WITHHELD_JOB_CHANNEL = "irc:#p-withheld"
 WITHHELD_TOKEN = "PELICAN-7731"

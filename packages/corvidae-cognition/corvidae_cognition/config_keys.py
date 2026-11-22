@@ -1,8 +1,10 @@
-"""Readers for a setting that moved from a ``heartbeat.*`` key to its owner (#1079).
+"""Readers for a setting that moved from a ``heartbeat.*`` key to its owner (#1079),
+and the warning for a key that was removed outright (#1185).
 
 Memory and goals each read their beat settings through these, so the
 validation and the old-key rules are one implementation, not three that could
-drift apart. Neither plugin imports the other's config code.
+drift apart. Neither plugin imports the other's config code. Appraisal and
+gates report the stage-1 keys #1185 removed through ``warn_removed_keys``.
 
 Rules, for a setting with a ``new_key`` and a retired ``old_key``:
     - a key set to ``null``, or whose parent block is not a mapping, is absent;
@@ -68,6 +70,35 @@ def read_count(
             f"or remove the key for the default of {default}"
         )
     return value
+
+
+def warn_removed_keys(config: dict, removed: dict[str, str]) -> list[str]:
+    """Log one WARNING per removed key that ``config`` still sets; return them.
+
+    ``removed`` maps a dotted path to why it configures nothing now. A path
+    whose value is a mapping (a whole removed block, such as
+    ``appraisal.probe``) is reported key by key; a key set to ``null`` is
+    absent. The daemon keeps running: a key that configures nothing is
+    ignored, and the warning says to delete it.
+    """
+    found: list[str] = []
+    for path, reason in removed.items():
+        value = _dotted_get(config, path)
+        # Absent, or set to null: nothing to report.
+        if value is None:
+            continue
+        # A removed block names each key the operator set inside it.
+        keys = [f"{path}.{key}" for key in value] if isinstance(value, dict) else [path]
+        for key in keys:
+            logger.warning(
+                "agent.yaml: %s was removed (#1185): %s, so it does nothing; "
+                "delete it from agent.yaml",
+                key,
+                reason,
+                extra={"key": key},
+            )
+            found.append(key)
+    return found
 
 
 def read_prompt(config: dict, new_key: str, old_key: str, default: str) -> str:

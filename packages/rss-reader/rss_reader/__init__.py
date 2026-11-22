@@ -26,7 +26,7 @@ Origin ``rss:<feed-url>`` in the cognition plugins:
 
 - appraisal: runs stage 2, as on every origin.
 - outcome_log: records the origin verbatim in ``exchange_log.origin``.
-- gates: non-``user``, so the decide gate may withhold a low-salience final.
+- gates: non-``user``, so ``gate.send.quiet_origins`` can make it quiet.
 - critique: judged like every main-loop turn (#1031).
 - funnel: keys stubs on its own origins only; unaffected.
 """
