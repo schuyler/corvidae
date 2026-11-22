@@ -132,3 +132,47 @@ def test_the_agent_maps_its_schemas_by_tool_name():
     ]
 
     assert agent._tool_arg_schemas() == {"search": {"type": "object"}}
+
+
+def test_a_kwargs_tool_keeps_an_open_schema_and_accepts_extras():
+    """A variadic parameter is not a required property (#1161 round 2)."""
+    from typing import Any
+
+    from corvidae.tool import tool_to_schema
+
+    async def k(alpha: str, **kwargs: Any) -> str:
+        return "ok"
+
+    params = tool_to_schema(k)["function"]["parameters"]
+    assert "kwargs" not in params["properties"]
+    assert params["required"] == ["alpha"]
+    assert check_tool_args(params, {"alpha": "a", "extra": 1}) is None
+
+
+def test_the_message_names_the_key_and_the_value_it_got():
+    message = check_tool_args(SCHEMA, {"query": "x", "qury": "y"})
+    assert message is not None
+    assert "qury = 'y'" in message
+    assert "accepted: " in message
+
+
+def test_the_message_names_a_missing_required_key_by_name():
+    message = check_tool_args(SCHEMA, {})
+    assert message is not None
+    assert "query = " in message
+    assert "is a required property" in message
+
+
+def test_the_message_reports_a_choice_parameters_allowed_values():
+    """A $ref property's allowed values are named, not just "the declared shape"."""
+    schema = {
+        "type": "object",
+        "properties": {"mode": {"$ref": "#/$defs/Speed"}},
+        "required": ["mode"],
+        "$defs": {"Speed": {"enum": ["fast", "slow"]}},
+    }
+
+    message = check_tool_args(schema, {"mode": "medium"})
+
+    assert message is not None
+    assert "accepted: one of 'fast', 'slow'" in message

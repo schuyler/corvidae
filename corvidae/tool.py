@@ -176,6 +176,14 @@ def tool_to_schema(fn: Callable) -> dict:
         # call time by dispatch_tool_call, not supplied by the LLM.
         if param_name.startswith("_"):
             continue
+        # Variadic parameters are not arguments the model supplies: a **kwargs
+        # became a required string property and made every call to such a tool
+        # refuse (#1161 round 2).
+        if param.kind in (
+            inspect.Parameter.VAR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        ):
+            continue
         annotation = param.annotation if param.annotation is not inspect.Parameter.empty else str
         # A parameter with a default is optional; marking it required (as this
         # did) told the model to send values it did not need, and now that
