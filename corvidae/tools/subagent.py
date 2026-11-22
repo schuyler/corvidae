@@ -141,6 +141,11 @@ async def run_agent_loop(
         for call in turn.tool_calls:
             tool_result = await dispatch_tool_call(
                 call, tools,
+                schemas={
+                    fn["name"]: fn["parameters"]
+                    for schema in tool_schemas
+                    if (fn := schema.get("function")) and fn.get("parameters")
+                },
                 channel=channel,
                 task_queue=task_queue,
                 pm=pm,

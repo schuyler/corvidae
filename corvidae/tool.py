@@ -28,6 +28,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from jsonschema import Draft202012Validator
 from pydantic import create_model
 
 # Maximum characters in a tool result before truncation. Override via agent.max_tool_result_chars in agent.yaml.
@@ -175,8 +176,23 @@ def tool_to_schema(fn: Callable) -> dict:
         # call time by dispatch_tool_call, not supplied by the LLM.
         if param_name.startswith("_"):
             continue
+        # Variadic parameters are not arguments the model supplies: a **kwargs
+        # became a required string property and made every call to such a tool
+        # refuse (#1161 round 2).
+        if param.kind in (
+            inspect.Parameter.VAR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        ):
+            continue
         annotation = param.annotation if param.annotation is not inspect.Parameter.empty else str
-        fields[param_name] = (annotation, ...)
+        # A parameter with a default is optional; marking it required (as this
+        # did) told the model to send values it did not need, and now that
+        # arguments are validated (#1161) it also refused calls the tool would
+        # have accepted.
+        if param.default is inspect.Parameter.empty:
+            fields[param_name] = (annotation, ...)
+        else:
+            fields[param_name] = (annotation, param.default)
 
     model = create_model(fn.__name__, **fields)
     schema = model.model_json_schema()
@@ -187,6 +203,14 @@ def tool_to_schema(fn: Callable) -> dict:
     # Strip title from each property
     for prop in schema.get("properties", {}).values():
         prop.pop("title", None)
+
+    # Reject keys the tool does not take, so a wrong name is named back to the
+    # model instead of reaching the call as a TypeError (#1161). A tool with
+    # **kwargs accepts anything, so it keeps the default (permissive).
+    if not any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    ):
+        schema["additionalProperties"] = False
 
     description = ""
     if fn.__doc__:
@@ -290,6 +314,85 @@ class ToolRegistry:
 
     def __len__(self) -> int:
         return len(self._tools)
+
+
+def check_tool_args(schema: dict | None, args: dict) -> str | None:
+    """Return a correction message when ``args`` do not fit ``schema``, else None.
+
+    PRD §3.5.1: a tool call's arguments are validated against the generated
+    schema before the call. The message names the key, the value that was sent
+    and what the schema says about it, so the model can correct it in one turn
+    (AGENTS.md, "On rejected input").
+
+    The wording of what is accepted is ``jsonschema``'s own: it already says
+    "not one of ['fast', 'slow']" or "is not of type 'string'", and re-deriving
+    that from the schema by hand was where five review rounds of wrong "accepted"
+    answers came from (#1170). The one thing it does not say is which keys the
+    tool takes, so that is added for an unknown key.
+
+    The rejected value goes in the tool result, back to the caller that sent it
+    in this same turn. It is not added to this call's log record -- the tool
+    result itself is persisted like any other, and the arguments are already
+    logged at DEBUG by the dispatch.
+    """
+    if not schema:
+        return None
+    validator = Draft202012Validator(schema)
+    errors = sorted(
+        validator.iter_errors(args),
+        # An unknown key is the more useful correction when both are wrong:
+        # it is usually a misspelling of a required one.
+        key=lambda e: 0 if e.validator == "additionalProperties" else 1,
+    )
+    if not errors:
+        return None
+
+    exc = errors[0]
+    where = ".".join(str(p) for p in exc.absolute_path)
+    subject = f"{where}: " if where else ""
+    takes = ""
+    if exc.validator == "additionalProperties":
+        # The object the error is on, not the root: the path just printed names
+        # that level, so the key list has to belong to it (#1170 round 6).
+        node = _at(schema, exc.absolute_path, schema)
+        keys = sorted(str(k) for k in (node.get("properties") or {}))
+        if keys:
+            takes = f"; it takes: {', '.join(keys)}"
+    detail = exc.message
+    if exc.validator == "anyOf" and exc.context:
+        # pydantic's shape for every optional parameter: say what each arm said
+        # rather than "is not valid under any of the given schemas".
+        arms = "; ".join(e.message for e in exc.context)
+        detail = f"{detail} ({arms})"
+    return (
+        f"Error: tool call rejected — {subject}{detail}{takes}. Correct the "
+        f"arguments and call again"
+    )
+
+
+def _at(schema: dict, path, start: object | None = None) -> dict:
+    """The schema node at ``path``, following ``$ref`` at every step."""
+    node: object = _resolve(schema, schema) if start is None else start
+    for part in path:
+        node = _resolve(node, schema)
+        if not isinstance(node, dict):
+            return {}
+        if isinstance(part, int):
+            node = node.get("items", node)
+        else:
+            node = (node.get("properties") or {}).get(str(part), node)
+    node = _resolve(node, schema)
+    return node if isinstance(node, dict) else {}
+
+
+def _resolve(node: object, schema: dict) -> object:
+    """Follow a chain of ``$ref`` into ``$defs``, a bounded number of steps."""
+    for _ in range(8):
+        if not isinstance(node, dict) or "$ref" not in node:
+            return node
+        name = str(node["$ref"]).rsplit("/", 1)[-1]
+        node = (schema.get("$defs") or {}).get(name, node)
+    return node
 
 
 async def execute_tool_call(
@@ -406,6 +509,7 @@ async def dispatch_tool_call(
     call: dict,
     tools: dict[str, Callable],
     *,
+    schemas: dict[str, dict] | None = None,
     channel: "Channel | None" = None,
     task_queue: "TaskQueue | None" = None,
     pm=None,
@@ -424,6 +528,9 @@ async def dispatch_tool_call(
     Args:
         call: A tool call dict from the LLM response with keys 'id' and 'function'.
         tools: Dict mapping tool names to async callable functions.
+        schemas: Dict mapping tool names to their generated JSON schemas; when
+            given, the parsed arguments are validated against the call's schema
+            before the call (PRD §3.5.1, #1161).
         channel: Channel for ToolContext injection. None when unavailable.
         task_queue: TaskQueue for ToolContext injection. None when unavailable.
         pm: pluggy PluginManager for firing transform_tool_result. None to skip.
@@ -466,7 +573,11 @@ async def dispatch_tool_call(
         extra=_attributed(channel, tool=fn_name, arguments=_truncate(json.dumps(args))),
     )
 
-    # Step 3: Check tool exists
+    # Step 3: Check the tool exists, then that its arguments fit its schema.
+    # Validating before the call is PRD §3.5.1: a wrong key used to reach the
+    # tool and surface as TypeError inside "tool failed" (#1161). An unknown key
+    # is only caught when the schema forbids extras, which tool_to_schema now
+    # does for every tool that does not take **kwargs.
     if fn_name not in tools:
         logger.warning(
             "unknown tool called: %s",
@@ -478,6 +589,20 @@ async def dispatch_tool_call(
             tool_call_id=call_id,
             tool_name=fn_name,
             content=content,
+            latency_ms=None,
+            error=True,
+        )
+
+    rejection = check_tool_args((schemas or {}).get(fn_name), args)
+    if rejection is not None:
+        logger.warning(
+            "tool call arguments rejected",
+            extra=_attributed(channel, tool=fn_name, arg_keys=list(args.keys())),
+        )
+        return ToolCallResult(
+            tool_call_id=call_id,
+            tool_name=fn_name,
+            content=rejection,
             latency_ms=None,
             error=True,
         )

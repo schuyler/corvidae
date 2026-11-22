@@ -389,6 +389,17 @@ class Agent(CorvidaePlugin):
         """Public read-only access to the tool dict."""
         return self._tools
 
+    def _tool_arg_schemas(self) -> dict[str, dict]:
+        """Tool name -> its JSON schema, for argument validation (#1161)."""
+        out: dict[str, dict] = {}
+        for schema in self._tool_schemas:
+            fn = schema.get("function") or {}
+            name = fn.get("name")
+            params = fn.get("parameters")
+            if name and params:
+                out[name] = params
+        return out
+
     @property
     def tool_schemas(self) -> list[dict]:
         """Public read-only access to tool schemas."""
@@ -2358,6 +2369,7 @@ class Agent(CorvidaePlugin):
                     return refusal_message(name, channel)
                 result = await dispatch_tool_call(
                     call, self._tools,
+                    schemas=self._tool_arg_schemas(),
                     channel=channel,
                     task_queue=task_queue,
                     pm=self.pm,
