@@ -22,6 +22,7 @@ import logging
 import sys
 import threading
 import warnings
+from pathlib import Path
 
 from corvidae.runtime import Runtime
 
@@ -85,6 +86,28 @@ async def _run(config_path: str) -> int:
         _run.exit_bound = runtime.shutdown_timeouts.exit
 
 
+def check_corvidae_location(expected: str | None) -> str | None:
+    """Return a refusal when this process's corvidae is not the expected one.
+
+    An editable install of a single workspace package repoints ``corvidae`` at
+    that worktree, because every package declares the workspace source, so a
+    restart would boot code nobody reviewed (#1008).
+    """
+    import corvidae
+
+    if not expected:
+        return None
+    here = Path(corvidae.__file__).resolve().parent
+    want = Path(expected).resolve()
+    if here == want:
+        return None
+    return (
+        f"this venv resolves corvidae to {here}, not to {want}. An editable "
+        f"install of a workspace package from elsewhere repoints it; re-run the "
+        f"deployment's requirements install before restarting (#1008)"
+    )
+
+
 def _exit_sentence(bound: float | None) -> str:
     """What happens to this process next, said truthfully (#854)."""
     if bound is None:
@@ -105,7 +128,20 @@ def main() -> int:
     parser.add_argument(
         "--config", required=True, help="Path to the agent config file"
     )
+    parser.add_argument(
+        "--expect-corvidae",
+        default=None,
+        help=(
+            "Directory the running process imports corvidae from; the "
+            "pre-flight refuses when this one resolves elsewhere (#1008)"
+        ),
+    )
     args = parser.parse_args()
+
+    mismatch = check_corvidae_location(args.expect_corvidae)
+    if mismatch is not None:
+        print(f"pre-flight failed: {mismatch}", file=sys.stderr)
+        return 1
 
     # Keep kernel logs and plugin import warnings out of stderr; kernel
     # problems are reported by direct stderr writes, which these do not touch.

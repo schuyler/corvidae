@@ -328,3 +328,21 @@ def test_the_survivor_sentence_names_the_bound_when_there_is_one():
     from corvidae_restart.preflight import _exit_sentence
 
     assert "exits within daemon.exit_timeout (2.5 s)" in _exit_sentence(2.5)
+
+
+def test_a_mismatched_corvidae_location_is_refused():
+    """#1008: a venv whose corvidae resolves elsewhere must not boot."""
+    import corvidae
+
+    from corvidae_restart.preflight import check_corvidae_location
+
+    here = str(__import__("pathlib").Path(corvidae.__file__).resolve().parent)
+
+    assert check_corvidae_location(here) is None
+    refusal = check_corvidae_location("/somewhere/else/deployed")
+    assert refusal is not None
+    assert here in refusal
+    assert "/somewhere/else/deployed" in refusal
+    assert "#1008" in refusal
+    # No expectation given: nothing to compare, which is the old behaviour.
+    assert check_corvidae_location(None) is None
