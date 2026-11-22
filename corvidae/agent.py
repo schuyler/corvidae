@@ -275,7 +275,7 @@ def _resolve_mid_conversation_system_role(agent_config: dict) -> str:
 
 #: The metric every failed turn emits, with ``channel`` and ``exception`` tags.
 #: Both the name and the tag keys are the contract core reads (#1060).
-AGENT_TURN_FAILED_METRIC = "agent.turn_failed"
+AGENT_TURN_FAILED_METRIC = "agent.turn.failed"
 
 
 class Agent(CorvidaePlugin):
@@ -971,6 +971,15 @@ class Agent(CorvidaePlugin):
                 if result.reasoning_unfinished and not result.tool_calls:
                     raise GenerationCutOff(channel.id)
         except Exception as exc:
+            # One event per failed turn, a failed retry included -- emitted first,
+            # so neither the retry branch below nor the error gate can suppress
+            # it (#1060). Fail-soft comes from the dispatch: a raising consumer is
+            # logged against its plugin and the turn's error handling continues.
+            await self.pm.ahook.on_metrics(
+                name=AGENT_TURN_FAILED_METRIC,
+                value=1.0,
+                tags={"channel": channel.id, "exception": type(exc).__name__},
+            )
             unreachable = is_backend_unreachable(exc)
             if item is not None and item.retry:
                 # A failed retry sends nothing (the fallback went out on the
@@ -991,16 +1000,6 @@ class Agent(CorvidaePlugin):
                     self._turn_retries.pop(channel.id, None)
                 return None
             logger.exception("run_agent_turn failed for channel %s", channel.id)
-            # One event per failed turn (retry included), before the error gate:
-            # core's "errors in the last hour" reads this, and a raise in the
-            # error path must not be able to suppress it (#1060). Fail-soft, so
-            # a raising consumer is logged by the dispatch and the user's error
-            # message still goes out.
-            await self.pm.ahook.on_metrics(
-                name=AGENT_TURN_FAILED_METRIC,
-                value=1.0,
-                tags={"channel": channel.id, "exception": type(exc).__name__},
-            )
             # Schedule the retry before the error gate: a vetoed fallback
             # returns early below and must not cancel the retry.
             retry_armed = False
