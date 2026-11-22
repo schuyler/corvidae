@@ -110,10 +110,33 @@ class CLIPlugin(TransportPlugin):
 
         The CLI then reads for that channel instead of ``cli:local`` and writes
         every outbound event for it, so a person at the terminal sees the core's
-        conversation. The channel keeps its own id; attaching changes nothing on
-        it.
+        conversation. Attaching a second channel replaces the first, and
+        ``detach()`` gives the terminal back.
+
+        Refused when another transport already owns ``channel``: ``owns`` is the
+        broadcast filter, and two owners make the extras that read it (silence's
+        conversational test, outbound-cap's transport check) see the wrong one.
+        A channel no transport owns — the core's — is what this is for.
+
+        Raises:
+            ValueError: naming the transport that already delivers there.
         """
+        for plugin in self.pm.get_plugins():
+            if plugin is self or not isinstance(plugin, TransportPlugin):
+                continue
+            if plugin.owns(channel):
+                raise ValueError(
+                    f"cannot attach the CLI to {channel.id!r}: the "
+                    f"{plugin.transport!r} transport already delivers there, and "
+                    f"two transports owning one channel makes the plugin "
+                    f"extras read the wrong one"
+                )
         self._attached = channel
+        logger.info("CLI attached to %s (#1059)", channel.id)
+
+    def detach(self) -> None:
+        """Stop reading for, and displaying, the attached channel (#1059)."""
+        self._attached = None
 
     def owns(self, channel: Channel) -> bool:
         """Also true for the attached channel (#1059).
@@ -121,7 +144,7 @@ class CLIPlugin(TransportPlugin):
         Guard: without attach this is exactly the transport match, so the CLI
         never takes an outbound event it did not before.
         """
-        if self._attached is not None and channel is self._attached:
+        if self._attached is not None and channel.id == self._attached.id:
             return True
         return super().owns(channel)
 
@@ -136,7 +159,7 @@ class CLIPlugin(TransportPlugin):
         # loop) gets it here, so the queue is never read from unstarted.
         if self._lines is None:
             self._start_reader()
-        channel = self._attached or self._registry.get_or_create("cli", "local")
+        default_channel = self._registry.get_or_create("cli", "local")
         self._interactive = sys.stdin.isatty()
         if self._interactive:
             print("Agent ready. Type a message, or Ctrl-D to quit.\n")
@@ -170,6 +193,12 @@ class CLIPlugin(TransportPlugin):
             if not text:
                 self._prompt()
                 continue
+            # Resolve after the line arrives, not once at start: an attach that
+            # lands while the loop is waiting must move stdin too, not only
+            # display (#1059).
+            channel = (
+                self._attached if self._attached is not None else default_channel
+            )
             await self.pm.ahook.on_message(
                 channel=channel,
                 sender="user",
@@ -277,6 +306,9 @@ class CLIPlugin(TransportPlugin):
             pass
         except Exception:
             logger.exception("CLIPlugin read loop raised unexpected exception")
+        finally:
+            # Display rights do not outlive the transport (#1059).
+            self._attached = None
         self._task = None
 
 

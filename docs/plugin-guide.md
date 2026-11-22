@@ -1579,7 +1579,7 @@ class MyTransport(TransportPlugin):
 
 `conversational` is a plain fact about the transport, default `False`. Plugins that tailor the system prompt to chats read it: with the `silence` plugin loaded, a conversational transport's channels get the silence instruction, and a transport left at `False`, third-party ones included, never does. IRC, Discord, Signal and Zulip set it; ACP, web and the CLI don't.
 
-The filter is `owns(channel)`, which by default is `channel.matches_transport(self.transport)`. Override it only to narrow it: `WebPlugin` also requires that it is enabled. Inbound hooks are not filtered for you; open each inbound hookimpl with `if not self.owns(channel): return`.
+The filter is `owns(channel)`, which by default is `channel.matches_transport(self.transport)`. Override it to narrow it: `WebPlugin` also requires that it is enabled. Widening is reserved for one case, the CLI's `attach()` (#1059), which claims a channel no other transport owns and refuses one that another does — anything else that widens gives one channel two owners, and the extras that read this filter (`silence`'s conversational test, `outbound-cap`'s transport check) then treat it as whichever owner they happen to see first. Inbound hooks are not filtered for you; open each inbound hookimpl with `if not self.owns(channel): return`.
 
 ### Transports with per-turn state
 

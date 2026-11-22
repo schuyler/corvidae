@@ -10,6 +10,8 @@ import asyncio
 import io
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from corvidae.channel import ChannelRegistry
 from corvidae.channels.cli import CLIPlugin
 from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
@@ -93,3 +95,72 @@ async def test_without_attach_the_cli_ignores_a_foreign_channel():
         await plugin.send(core, OutboundMessage(text="hi there"))
 
     assert "hi there" not in fake_stdout.getvalue()
+
+
+async def test_attach_is_refused_for_a_channel_another_transport_delivers_to():
+    """Two owners make the extras that read owns() pick the wrong one (#1059)."""
+    from corvidae.hooks import TransportPlugin
+
+    pm, plugin, registry = _plugin()
+
+    class Other(TransportPlugin):
+        transport = "discord"
+
+    pm.register(Other(), name="other")
+    room = registry.get_or_create("discord", "room")
+
+    with pytest.raises(ValueError) as excinfo:
+        plugin.attach(room)
+
+    assert "discord" in str(excinfo.value)
+    assert plugin.owns(room) is False  # refused means no display either
+
+
+async def test_attach_after_the_loop_started_moves_stdin_too():
+    """A late attach must move input as well as display (#1059)."""
+    pm, plugin, registry = _plugin()
+    recorder = Recorder()
+    pm.register(recorder, name="recorder")
+    core = registry.get_or_create("core", "inbox")
+    plugin._lines = asyncio.Queue()
+
+    fake_stdin = MagicMock()
+    fake_stdin.isatty.return_value = False
+    task = asyncio.create_task(plugin._read_loop())
+    await asyncio.sleep(0)  # the loop binds cli:local for its first line
+    plugin.attach(core)
+    plugin._lines.put_nowait("late hello\n")
+    plugin._lines.put_nowait("")
+
+    with patch("sys.stdin", fake_stdin), patch("sys.stdout"), \
+         patch("corvidae.channels.cli.os.kill"):
+        await task
+
+    assert [c["channel"] for c in recorder.calls] == [core]
+
+
+async def test_detach_gives_the_terminal_back():
+    _, plugin, registry = _plugin()
+    core = registry.get_or_create("core", "inbox")
+    plugin.attach(core)
+    plugin.detach()
+    assert plugin.owns(core) is False
+
+
+async def test_attach_twice_keeps_only_the_second_channel():
+    _, plugin, registry = _plugin()
+    one = registry.get_or_create("core", "one")
+    two = registry.get_or_create("core", "two")
+    plugin.attach(one)
+    plugin.attach(two)
+    assert plugin.owns(one) is False
+    assert plugin.owns(two) is True
+
+
+async def test_display_rights_do_not_outlive_on_stop():
+    _, plugin, registry = _plugin()
+    core = registry.get_or_create("core", "inbox")
+    plugin.attach(core)
+    plugin._task = asyncio.create_task(asyncio.sleep(3600))
+    await plugin.on_stop()
+    assert plugin.owns(core) is False
