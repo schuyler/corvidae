@@ -352,14 +352,37 @@ def check_tool_args(schema: dict | None, args: dict) -> str | None:
     subject = f"{where}: " if where else ""
     takes = ""
     if exc.validator == "additionalProperties":
-        root = _resolve(schema, schema)
-        keys = sorted(str(k) for k in (root.get("properties") or {}))
+        # The object the error is on, not the root: the path just printed names
+        # that level, so the key list has to belong to it (#1170 round 6).
+        node = _at(schema, exc.absolute_path, schema)
+        keys = sorted(str(k) for k in (node.get("properties") or {}))
         if keys:
-            takes = f"; the tool takes: {', '.join(keys)}"
+            takes = f"; it takes: {', '.join(keys)}"
+    detail = exc.message
+    if exc.validator == "anyOf" and exc.context:
+        # pydantic's shape for every optional parameter: say what each arm said
+        # rather than "is not valid under any of the given schemas".
+        arms = "; ".join(e.message for e in exc.context)
+        detail = f"{detail} ({arms})"
     return (
-        f"Error: tool call rejected — {subject}{exc.message}{takes}. Correct the "
+        f"Error: tool call rejected — {subject}{detail}{takes}. Correct the "
         f"arguments and call again"
     )
+
+
+def _at(schema: dict, path, start: object | None = None) -> dict:
+    """The schema node at ``path``, following ``$ref`` at every step."""
+    node: object = _resolve(schema, schema) if start is None else start
+    for part in path:
+        node = _resolve(node, schema)
+        if not isinstance(node, dict):
+            return {}
+        if isinstance(part, int):
+            node = node.get("items", node)
+        else:
+            node = (node.get("properties") or {}).get(str(part), node)
+    node = _resolve(node, schema)
+    return node if isinstance(node, dict) else {}
 
 
 def _resolve(node: object, schema: dict) -> object:

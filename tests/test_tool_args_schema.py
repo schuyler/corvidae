@@ -38,7 +38,7 @@ def test_an_unknown_key_lists_the_keys_the_tool_takes():
 
     assert message is not None
     assert "'qury' was unexpected" in message
-    assert "the tool takes: limit, offset, query" in message
+    assert "it takes: limit, offset, query" in message
 
 
 def test_a_missing_required_key_is_named():
@@ -192,3 +192,63 @@ async def test_a_good_call_still_reaches_the_tool():
 
     assert calls == ["x"]
     assert result.error is False
+
+
+def test_a_nested_unknown_key_lists_that_objects_keys():
+    """The key list must belong to the level the path names (#1170 round 6)."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "opts": {
+                "type": "object",
+                "properties": {"mode": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    }
+
+    message = check_tool_args(schema, {"query": "x", "opts": {"mdoe": "fast"}})
+
+    assert message is not None
+    assert "opts: " in message
+    assert "it takes: mode" in message
+
+
+def test_two_levels_down_lists_that_levels_keys():
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {
+                "type": "object",
+                "properties": {
+                    "b": {
+                        "type": "object",
+                        "properties": {"c": {"type": "string"}},
+                        "additionalProperties": False,
+                    }
+                },
+            }
+        },
+    }
+
+    message = check_tool_args(schema, {"a": {"b": {"z": 1}}})
+
+    assert message is not None
+    assert "a.b: " in message
+    assert "it takes: c" in message
+
+
+def test_an_anyof_names_what_each_arm_said():
+    """The shape pydantic generates for an optional parameter still says something."""
+    schema = {
+        "type": "object",
+        "properties": {"mode": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+    }
+
+    message = check_tool_args(schema, {"mode": 5})
+
+    assert message is not None
+    assert "5 is not of type 'string'" in message
