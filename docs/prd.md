@@ -77,10 +77,9 @@ one is a bug even if its tests pass.
    client, the task queue, the clock, and persistence. Everything else loads
    from an entry point, can be disabled by name in `plugins.disabled` or
    replaced by an installed subclass in `plugins.replace` (#1107),
-   declares its dependencies in `depends_on` (or `optional_depends_on`
-   for one it works without), has no dependency on another plugin that
-   it does not declare, so no plugin's behaviour changes silently when
-   another is absent, and documents what the system
+   declares every dependency on another plugin in `depends_on` (or
+   `optional_depends_on` for one it works without), so no plugin's
+   behaviour changes silently when another is absent, and documents what the system
    does without it. The cognition plugins (memory, retention, funnel,
    appraisal, critique, outcome log, memory tools, goals, trust,
    sensitivity) are
