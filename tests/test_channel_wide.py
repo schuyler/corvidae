@@ -150,7 +150,11 @@ class TestPrecedence:
             "reasoning_history": "keep",
             "max_turns": 2,
         }
-        scalar_fields = {f.name for f in fields(ChannelConfig)} - {"disabled_tools"}
+        # check_allowance is not merged by resolve(); its wide-entry path is
+        # tested with resolve_check_allowance (tests/test_check_allowance.py).
+        scalar_fields = {f.name for f in fields(ChannelConfig)} - {
+            "disabled_tools", "check_allowance",
+        }
         assert scalar_fields == set(values), "a new ChannelConfig field needs a case here"
         registry = _registry({"channels": {"signal:*": values}})
         resolved = _resolved(registry, "signal", "aci-15")

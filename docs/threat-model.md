@@ -285,7 +285,7 @@ design goal (PRD principle 15). This finding records its cost, and finding
 
 ### 3. Untrusted text is promoted to the `system` role
 
-Five places:
+Six places:
 
 - Funnel-admitted CONTEXT (memories distilled from channel participants,
   critique objections) is appended as `role: system` (`funnel.py`).
@@ -301,6 +301,16 @@ Five places:
   progress text (the final and thinking markers quote nothing). If that
   text echoed an injection, those 40 characters are promoted to the system
   role. `mid_conversation_system_role: user` covers it like the others.
+- A late check row (#1162): when a `should_send_response` check returns a
+  `Refusal` after the channel's check allowance ran out, the Agent appends
+  `[late check: <plugin>]` with the refusal's reason as a `role: system`
+  CONTEXT row at the channel's next turn. The reason is plugin text, and a
+  check that asks a model about the reply can echo what the window held,
+  injections included. It reaches no new audience: a plugin could already
+  put any text in the window through `before_agent_turn`. It is one more
+  core-written system row, though, so a check that quotes untrusted text
+  should fence it itself. The row also quotes the first 40 characters of the
+  agent's own reply. `mid_conversation_system_role: user` covers it.
 - A tool result whose call compaction dropped (#79) is rendered by
   `ContextWindow.build_prompt` as a framed `role: system` message, since a
   `tool` message with no call breaks strict chat templates. The result can

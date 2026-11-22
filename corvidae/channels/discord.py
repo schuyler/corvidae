@@ -379,6 +379,8 @@ class DiscordPlugin(TransportPlugin):
     """Transport plugin for Discord DMs, server channels, and threads."""
 
     transport = "discord"
+    # Veto checks may delay a reply this long (#1162): a person texting does not expect an instant reply.
+    check_allowance = 90
     # A chat transport: a person is on the other end who may end the exchange.
     conversational = True
 

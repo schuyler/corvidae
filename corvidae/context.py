@@ -150,6 +150,30 @@ def unsent_marker_text(emission: str, text: str) -> str:
     )
 
 
+#: Label a late-check row opens with (#1162). The Agent appends one, as a
+#: CONTEXT system row, at the channel's next turn after a veto check on a reply
+#: returned a refusal once its check allowance had run out.
+LATE_CHECK_LABEL = "late check"
+
+
+def late_check_text(text: str, plugin: str, reason: str) -> str:
+    """The late-check row content for a refusal of the reply ``text``.
+
+    Quotes the reply's opening, as the progress marker does, because the row
+    lands after the next turn's incoming message, not beside the reply.
+    """
+    excerpt = " ".join(text.split())
+    if len(excerpt) > _UNSENT_MARKER_EXCERPT_CHARS:
+        excerpt = excerpt[:_UNSENT_MARKER_EXCERPT_CHARS].rstrip() + "…"
+    return (
+        f"[{LATE_CHECK_LABEL}: {plugin}]\n\n"
+        f"A check on your reply beginning «{excerpt}» finished after its "
+        "allowance ran out, so it did not affect whether that reply was sent. "
+        f"It found: {reason}\n"
+        "Decide whether to correct or follow up on that reply."
+    )
+
+
 def unsent_marker_emission(content: object) -> str | None:
     """The emission a not-sent marker's ``content`` names, or None when the
     content is not a marker. History replay uses it to hold back what a

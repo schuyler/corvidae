@@ -29,6 +29,7 @@ import logging
 import warnings
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 import apluggy as pluggy
@@ -278,20 +279,37 @@ def report_orphan_hookimpls(pm: pluggy.PluginManager) -> None:
                 )
 
 
+@dataclass(frozen=True)
+class Refusal:
+    """A veto that says why (#1162).
+
+    A veto implementation may return one in place of a bare ``False``; both
+    veto. The reason is what a refusal that arrives after its check allowance
+    ran out carries to the channel's window, where a bare ``False`` has
+    nothing to say.
+
+    Attributes:
+        reason: Plain-language text naming what the check found.
+    """
+
+    reason: str
+
+
 def resolve_reject_wins(results: list) -> bool | None:
     """Resolve a list of broadcast gate-hook results with reject-wins semantics.
 
-    Any False vetoes; else any True accepts; else None (no opinion).
+    Any False or ``Refusal`` vetoes, in every gate hook that resolves through
+    here; else any True accepts; else None (no opinion).
 
     Args:
         results: The list returned by ``await pm.ahook.<hook_name>(...)``.
 
     Returns:
-        False if any result is False, True if any result is True (and none
-        is False), else None.
+        False if any result is False or a Refusal, True if any result is
+        True (and none vetoes), else None.
     """
     non_none = [r for r in results if r is not None]
-    if any(r is False for r in non_none):
+    if any(r is False or isinstance(r, Refusal) for r in non_none):
         return False
     if any(r is True for r in non_none):
         return True
@@ -870,10 +888,15 @@ class TransportPlugin(CorvidaePlugin):
             transport opts in.
         depends_on: Every transport resolves channels through the
             registry.
+        check_allowance: Seconds a veto check may delay a reply on this
+            transport's channels (#1162), unless the operator sets the
+            channel another; never below ``agent.check_allowance_min``.
+            None declares nothing, so the channels get the minimum.
     """
 
     transport: ClassVar[str]
     conversational: ClassVar[bool] = False
+    check_allowance: ClassVar[float | None] = None
     depends_on: frozenset[str] = frozenset({"registry"})
 
     def owns(self, channel: Channel) -> bool:
@@ -1184,16 +1207,26 @@ class AgentSpec:
         emission: str,
         trace_id: str | None,
         annotations: dict,
-    ) -> bool | None:
+    ) -> bool | Refusal | None:
         """Gate hook: decide whether an outbound emission reaches the channel.
 
         Grammar class: veto (broadcast; resolved with resolve_reject_wins).
 
-        The outbound mirror of ``should_process_message``. Any False vetoes;
-        None is no opinion. An exception from any implementation fails open
-        (the Agent logs it and sends), so an implementation that can fail
-        should catch and log its own errors rather than discard its
-        siblings' verdicts.
+        The outbound mirror of ``should_process_message``. Any False or
+        ``Refusal`` vetoes; None is no opinion. An exception from any
+        implementation fails open (the Agent logs it and sends), so an
+        implementation that can fail should catch and log its own errors.
+
+        The ``final`` firing runs under the channel's check allowance
+        (``corvidae.checks.run_checks``, #1162): every implementation runs
+        concurrently, an implementation that raises is logged and counts as
+        no opinion while its siblings' verdicts stand, and the reply waits
+        for verdicts no longer than the allowance. A verdict that arrives
+        later decides nothing; a ``Refusal`` among them reaches the
+        channel's window as a framed CONTEXT row at its next turn, and wakes
+        no turn. The other firings are dispatched as before, with no
+        allowance, and one raising implementation there still discards
+        every verdict.
 
         Four firing sites, two modes:
 

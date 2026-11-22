@@ -523,8 +523,12 @@ class TestFailOpen:
             assert sent_texts(plugin.pm, kind) == texts
         assert _markers(channel.conversation.messages) == []
         assert "unsent" not in [t for m, t in await _rows(db, channel.id)]
+        # The final firing runs each implementation under the check allowance
+        # (#1162), and its generic runner names the plugin rather than the
+        # emission; the other firings still name the emission.
+        named = "spy_gate" if emission == "final" else emission
         assert any(
-            "should_send_response" in r.getMessage() and emission in r.getMessage() and r.exc_info
+            "should_send_response" in r.getMessage() and named in r.getMessage() and r.exc_info
             for r in caplog.records
         )
 

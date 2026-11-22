@@ -79,7 +79,7 @@ class AgentSpec:
     async def on_agent_response(self, channel: Channel, request_text: str, response_text: str, trace_id: str | None, annotations: dict, logprobs: dict | None) -> None
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, annotations: dict | None) -> None
     async def should_process_message(self, channel: Channel, sender: str, text: str, trace_id: str | None) -> bool | None
-    async def should_send_response(self, channel: Channel, text: str, emission: str, trace_id: str | None, annotations: dict) -> bool | None
+    async def should_send_response(self, channel: Channel, text: str, emission: str, trace_id: str | None, annotations: dict) -> bool | Refusal | None
     async def should_start_work(self, channel: Channel, kind: str, source_channel: str | None, trace_id: str | None, annotations: dict) -> WorkRefusal | None  # corvidae/admission.py
     async def on_message_admitted(self, channel: Channel, trace_id: str, sender: str, text: str) -> None
     async def on_message_rejected(self, channel: Channel, trace_id: str, sender: str, text: str) -> None
@@ -235,7 +235,7 @@ owner's plugin name after the prefix.
 | `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, Zulip, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines; `MemoryPlugin` runs its turn consolidation trigger from it, awaiting nothing, since the send waits on the hook |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no kernel implementation (`LimitsPlugin`, `core-periphery` extra, rejects at `limits.inbound_per_channel`); None from empty broadcast allows all messages |
-| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes any `final` of any origin that contains `NO_REPLY` (a containment check, not an exact match) (cognition extra); a raising implementation fails open (logged, sent); `OutboundCapPlugin` vetoes every emission on a channel once the agent has sent `outbound_cap.max_messages` there since the last admitted human message, and likewise once it has sent `outbound_cap.max_messages_per_window` in the last `outbound_cap.window_seconds` — a sliding window a human message does not reset, shipped unset (`outbound-cap` extra, #791, #821, threat-model finding 19); no kernel implementation, so with none registered everything is sent |
+| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `annotations`; a veto of `final` stores the row as `UNSENT`; the `final` firing runs under the channel's [check allowance](#the-check-allowance), so a raising implementation there is no opinion and its siblings' verdicts stand; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes any `final` of any origin that contains `NO_REPLY` (a containment check, not an exact match) (cognition extra); a raising implementation fails open (logged, sent); `OutboundCapPlugin` vetoes every emission on a channel once the agent has sent `outbound_cap.max_messages` there since the last admitted human message, and likewise once it has sent `outbound_cap.max_messages_per_window` in the last `outbound_cap.window_seconds` — a sliding window a human message does not reset, shipped unset (`outbound-cap` extra, #791, #821, threat-model finding 19); no kernel implementation, so with none registered everything is sent |
 | `should_start_work` | veto, called by hand / first `WorkRefusal` wins | the [admission seam](#the-admission-seam-should_start_work) (K1, #1050): `subagent` (kind `task`), `fork` (kind `fork`) and `notify_other_channel` (kind `note`) call `offer_work` before they enqueue anything; `channel` is the queue the work would land on, `source_channel` the channel it comes from; a raising implementation is logged and treated as no opinion; `LimitsPlugin` refuses past `limits.max_waiting` (`core-periphery` extra); no kernel implementation, so with none registered everything starts |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
@@ -1398,7 +1398,7 @@ is returned.
 
 `should_send_response(channel, text, emission, trace_id, annotations)` is the
 outbound mirror of `should_process_message`: reject-wins over every
-implementation, any `False` vetoes. It fires at four sites, in two modes.
+implementation, any `False` or `Refusal` vetoes. It fires at four sites, in two modes.
 
 **The persistence-controlling firing** (`emission="final"`, step 8b) runs
 between generation and persistence, and only for results whose tool calls
@@ -1416,6 +1416,50 @@ veto:
 An empty or whitespace-only final with no tool calls takes the same path
 without the gate firing: the model declined to speak, and there is nothing to
 ask a gate about.
+
+#### The check allowance
+
+The `final` firing goes through `corvidae.checks.run_checks` (#1162; PRD
+principle 3, §3.7 Output gate 7, §3.13.5), not the plain `pm.ahook` gather the
+other firings use. The helper names no hook, emission or tool, so the tool veto
+(#148) can call it too.
+
+- Each non-wrapper implementation runs as its own kernel-clock task
+  (`clock.call_soon`), concurrently. The helper waits on plain asyncio events
+  until every one has finished or a `clock.call_later` deadline fires, never on
+  `clock.sleep`: it runs in the channel's queue consumer, which the fake clock
+  must not track.
+- The deadline is `resolve_check_allowance(pm, registry, channel)`: the
+  channel's `check_allowance` (exact entry, else the most specific wide entry),
+  else the owning `TransportPlugin.check_allowance`, else
+  `agent.check_allowance_min` (default 5 s), and never below that minimum.
+- An implementation that raises before the deadline is logged at WARNING and
+  counts as no opinion; its siblings' verdicts stand.
+- At the deadline each implementation that has neither answered nor raised is
+  a miss: one DEBUG line
+  and `on_metrics("check.missed", 1, {channel, hook, plugin})`. It is not
+  cancelled. If it returns later the verdict goes to the caller's `on_late`; a
+  later raise is logged at WARNING.
+- `wrapper=True` implementations (outbound-cap's counter is one) are driven as
+  apluggy drives them: advanced to their `yield` before the checks start, then
+  sent the in-time verdicts (`None` included, a raiser's left out rather than
+  thrown into them as apluggy would), innermost first; what each returns
+  replaces the list. The caller resolves the result with `resolve_reject_wins`.
+
+A veto may return `corvidae.hooks.Refusal(reason)` instead of `False`. In time
+the two are the same. Late, a bare `False` has nothing to say; for a `Refusal`
+the Agent's `on_late` stores `late_check_text(reply, plugin, reason)` (a
+`[late check: <plugin>]` row quoting the reply's first 40 characters) in
+`Agent._late_checks[channel.id]`. Step 6 of the channel's next turn appends
+those rows as CONTEXT, after the turn's incoming rows and before
+`before_agent_turn`, and the loop that persists that hook's injections
+persists them. It does so only when the channel has no call outstanding: no
+`_dispatched_calls` entry for it. Every pending call is there until its result
+is processed, and ACP's `cancel_prompt` clears `pending_tool_call_ids` while
+tools keep running, so the pending set alone would not do. Then nothing
+appended can fall between a tool call and its result. Otherwise the rows wait
+for the first such turn. They are held in memory, so a restart before
+delivery loses them.
 
 **An unsent final releases transport state.** An unsent final never
 reaches `send_message`, where transports end the turn (Discord and Signal

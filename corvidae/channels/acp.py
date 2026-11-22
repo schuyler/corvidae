@@ -457,6 +457,8 @@ class AcpPlugin(TransportPlugin):
     """Transport plugin for Agent Client Protocol sessions (``acp:<sessionId>``)."""
 
     transport = "acp"
+    # Veto checks may delay a reply this long (#1162): a person at an interactive client expects a quick reply.
+    check_allowance = 10
 
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None

@@ -31,6 +31,8 @@ class CLIPlugin(TransportPlugin):
     """
 
     transport = "cli"
+    # Veto checks may delay a reply this long (#1162): a person at an interactive client expects a quick reply.
+    check_allowance = 10
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
