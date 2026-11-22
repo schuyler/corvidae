@@ -16,7 +16,6 @@ Config:
           max_retries: 3      # optional
           retry_base_delay: 2.0
           retry_max_delay: 60.0
-          model_not_loaded_wait: 60.0  # seconds to wait out an unloaded model
           heads: 2            # optional positive integer; absent = unbounded
       profiles:       # what to ask a provider for
         main:         # the default chat profile unless defaults.chat says otherwise
@@ -45,7 +44,6 @@ the running clients.
 import asyncio
 import copy
 import logging
-import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -56,7 +54,12 @@ from corvidae import lease
 from corvidae.attribution import get_attribution
 from corvidae.envref import EnvRefError, expand_env_refs
 from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae.llm import LLMClient, LLMHTTPError, is_model_not_loaded
+from corvidae.llm import (
+    MODEL_NOT_LOADED_WAIT,
+    LLMClient,
+    LLMHTTPError,
+    is_model_not_loaded,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,22 +120,26 @@ class _HookObserver:
         )
 
 
-def _model_not_loaded_wait(cfg: dict, provider: str) -> float:
-    """Validate llm.providers.<provider>.model_not_loaded_wait: a finite, non-negative number of seconds."""
-    value = cfg.get("model_not_loaded_wait", 60.0)
-    # bool is an int subclass; reject it along with None and strings. inf
-    # would wait forever and nan would silently disable the wait.
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-    ):
-        raise ValueError(
-            f"llm.providers.{provider}.model_not_loaded_wait must be a finite, non-negative number "
-            f"of seconds, got {value!r}"
-        )
-    return float(value)
+def _wait_after_removal_check(cfg: dict, provider: str) -> float:
+    """Refuse the removed key, then return the fixed wait."""
+    _reject_removed_model_not_loaded_wait(cfg, provider)
+    return MODEL_NOT_LOADED_WAIT
+
+
+def _reject_removed_model_not_loaded_wait(cfg: dict, provider: str) -> None:
+    """Refuse llm.providers.<provider>.model_not_loaded_wait, removed in #956.
+
+    The key only decided how long the user waits before being told the model is
+    unloaded: once the wait runs out the turn retries itself anyway. It is a
+    fixed MODEL_NOT_LOADED_WAIT now, and a config that still sets it says so
+    rather than being silently ignored.
+    """
+    if "model_not_loaded_wait" not in cfg:
+        return
+    raise ValueError(
+        f"llm.providers.{provider}.model_not_loaded_wait was removed (#956); "
+        f"the wait is now a fixed {MODEL_NOT_LOADED_WAIT:g} s. Delete the key."
+    )
 
 
 def _raw_reasoning(cfg: dict, profile: str) -> bool:
@@ -822,7 +829,7 @@ class LLMPlugin(CorvidaePlugin):
             timeout=cfg.get("timeout"),
             document_prefix=cfg.get("document_prefix", ""),
             query_prefix=cfg.get("query_prefix", ""),
-            model_not_loaded_wait=_model_not_loaded_wait(cfg, cfg.get("provider", profile)),
+            model_not_loaded_wait=_wait_after_removal_check(cfg, cfg.get("provider", profile)),
             raw_reasoning=_raw_reasoning(cfg, profile),
             reasoning_reopened=_reasoning_reopened(cfg, profile),
         )

@@ -126,7 +126,6 @@ A provider key written on a profile, a profile key written on a provider, a key 
 | `llm.providers.<name>.max_retries` | integer | `3` | Maximum retry attempts on transient HTTP errors (429, 500, 502, 503, 504) and connection failures. Set to 0 to disable retries. After they run out, the turn sends the error reply and then retries itself (5 s doubling to 60 s) until the backend answers. |
 | `llm.providers.<name>.retry_base_delay` | float | `2.0` | Base delay in seconds for exponential backoff between retry attempts. |
 | `llm.providers.<name>.retry_max_delay` | float | `60.0` | Maximum delay cap in seconds for exponential backoff. |
-| `llm.providers.<name>.model_not_loaded_wait` | float | `60.0` | Total seconds to keep retrying when the server answers HTTP 400 "model is not loaded" (a llama-server router running `--no-models-autoload` with another model swapped in). Separate from `max_retries`; uses the same backoff, with at least 1 s between attempts (the last sleep is cut short to fit the remaining wait). Must be a finite, non-negative number, or startup fails. The turn waits for this long before replying, so set it a little longer than a model swap takes. `0` disables. When it runs out, the reply names the unloaded model instead of the generic error, and the turn then retries itself (5 s doubling to 60 s) until the model is loaded. |
 | `llm.providers.<name>.timeout` | float | `null` | Total HTTP timeout in seconds per LLM request. `null` means no timeout: the request waits as long as the server takes, and a connect to a host that drops packets waits until the OS gives up. |
 
 ### Profile keys (`llm.profiles.<name>`)
@@ -419,6 +418,12 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 | `appraisal.weights.imperative` | `0.10` | Salience weight for imperative markers (feeds salience only, not the vector). |
 
 `critique.provenance.enabled` (default `true`) switches the provenance check. It has no other tunables; its instruction is the static `critique.provenance.fork_prompt`. Stage-2 appraisal detects the past claims and a fork of the window judges them, so the check needs the `appraisal` plugin and `agent.forks` covering `critique`. See [cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy).
+
+The wait for an unloaded router model (`llama-server` answering 400 "model is
+not loaded") is fixed at 60 s. `llm.providers.<name>.model_not_loaded_wait` was
+an operator key until #956: it decided only how long the reply waited before
+naming the unloaded model, and the turn retries itself afterwards anyway. A
+config that still sets it now fails startup, naming the key.
 
 ### The proactivity lens (#1126)
 

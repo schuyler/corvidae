@@ -31,6 +31,11 @@ TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 ERROR_BODY_CHARS = 2000
 # Minimum sleep between "model is not loaded" retries, so a zero backoff
 # config cannot spin without spending the wait budget.
+# The wait for an unloaded router model is fixed: the key that set it decided
+# only how long the user waited before being told, and the turn retries anyway
+# (#956).
+MODEL_NOT_LOADED_WAIT = 60.0
+
 MODEL_NOT_LOADED_MIN_DELAY = 1.0
 # llama-server router's 400 body when the requested model is unloaded and
 # --no-models-autoload is set (tools/server/server-models.cpp,
@@ -193,7 +198,7 @@ class LLMClient:
         timeout: float | None = None,
         document_prefix: str = "",
         query_prefix: str = "",
-        model_not_loaded_wait: float = 60.0,
+        model_not_loaded_wait: float = MODEL_NOT_LOADED_WAIT,
         raw_reasoning: bool = False,
         reasoning_reopened: str = "truncate",
     ) -> None:

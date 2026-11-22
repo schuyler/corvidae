@@ -2995,7 +2995,6 @@ llm:
       max_retries: 3
       retry_base_delay: 2.0
       retry_max_delay: 60.0
-      model_not_loaded_wait: 60.0
       timeout: null           # optional; no timeout if absent
       heads: 2                # optional positive integer; absent means unbounded
     embedding:
@@ -5098,7 +5097,6 @@ llm:
       max_retries: 3              # retry attempts on transient errors (default 3)
       retry_base_delay: 2.0       # base exponential backoff delay in seconds
       retry_max_delay: 60.0       # maximum retry delay cap in seconds
-      model_not_loaded_wait: 60.0 # seconds to wait out an unloaded router model
       timeout: null               # HTTP timeout per request; null = no timeout
       # heads: 2                  # warm context heads; chat calls lease one; absent = unbounded
     embedding:                    # optional: a separate embedding endpoint
