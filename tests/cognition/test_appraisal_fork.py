@@ -54,7 +54,7 @@ async def test_fork_used_when_exchange_is_in_window(tmp_path):
         assert part in call["instruction"]
     assert (call["attribution"]["stage"], call["attribution"]["trace_id"]) == ("appraisal", "k")
     assert stored["valence"] == 0.1
-    assert env.appraisal.get_last_stage2(env.channel.id)["novelty"] == 0.6
+    assert stored["novelty"] == 0.6
 
 
 @pytest.mark.parametrize("agent,window_rowids,rowid,reason", [
@@ -76,7 +76,6 @@ async def test_fork_miss_skips(tmp_path, caplog, agent, window_rowids, rowid, re
     # No standalone call on any role, nothing persisted, nothing readable.
     assert env.stub.chat_calls == []
     assert stored is None
-    assert env.appraisal.get_last_stage2(env.channel.id) is None
     # Exactly one skip warning, with identifier and reason.
     skips = [r for r in caplog.records
              if r.levelno == logging.WARNING and "stage-2 appraisal skipped" in r.getMessage()]

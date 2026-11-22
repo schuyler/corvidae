@@ -411,7 +411,6 @@ class TestUnregisteredChannelRefusals:
         # Let fire-and-forget persistence tasks finish.
         for _ in range(20):
             await asyncio.sleep(0.01)
-        await appraisal.on_stop()
 
         async with db.execute("SELECT channel_id FROM exchange_log") as cursor:
             rows = await cursor.fetchall()

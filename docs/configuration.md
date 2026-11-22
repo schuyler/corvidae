@@ -365,7 +365,7 @@ after it, #346.)
 
 ### Runtime-tunable gate parameters
 
-The appraisal/critique parameters use dotted keys (e.g. `critique.sample_below_rate`, `appraisal.probe.budget_ms`) and are adjustable at runtime **without a daemon restart**, through two surfaces resolved per-decision by `corvidae.tuning.resolve_tunable` (operator directive 2, 2026-07-06):
+The appraisal/critique parameters use dotted keys (e.g. `critique.sample_below_rate`, `appraisal.prior.w_stakes`) and are adjustable at runtime **without a daemon restart**, through two surfaces resolved per-decision by `corvidae.tuning.resolve_tunable` (operator directive 2, 2026-07-06):
 
 1. **`set_settings` tool** (agent-facing, per-channel) — writes `channel.runtime_overrides`; highest precedence.
 2. **Hot config reload** (operator, global) — edit `agent.yaml`; `ConfigWatcherPlugin` dispatches `on_config_reload` and plugins re-read the dotted path on the next decision.
@@ -382,41 +382,25 @@ The persona is allowed to tune its own gates by default — a deliberate operato
 |-----|--------------|
 | `critique.provenance.enabled` | The correctness gate — a prompt-injected "stop second-guessing yourself" must not be able to disable the confabulation check. |
 | `critique.sample_below_rate` | The standing experiment's integrity — an agent tuning its own sampling to zero blinds the critique false-negative bound. |
-| `gate.engagement.enforce`, `gate.send.enforce` | An injected message should not be able to silence the agent wholesale (enforce engagement with a threshold of 1.0) or un-silence it (turn the decide gate off). |
 | `outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`, `outbound_cap.window_seconds`, `outbound_cap.count_progress` | The runaway-send caps (#791, #821). An agent that can raise or clear its own limit has no limit; an invalid override fails open, so it also lifts the cap. |
-| `gate.send.quiet_origins` | A flood guardrail, not a security boundary (#928). A quiet turn's own payload (a webhook body, a PR title) can tell the agent to un-quiet its source on that channel, which brings back the reply-per-notification flood this key prevents (bounded by the decide gate's normal policy and by `outbound_cap` if configured); a message can also quiet a source the operator wants heard. Block it where either is unacceptable. |
-| `gate.engagement.threshold`, `gate.send.min_salience` | The same lever by other means: a threshold above 1.0 rejects or withholds everything the gate covers once enforcement is on; 0 turns the gate off. |
+| `gate.send.quiet_origins` | A flood guardrail, not a security boundary (#928). A quiet turn's own payload (a webhook body, a PR title) can tell the agent to un-quiet its source on that channel, which brings back the reply-per-notification flood this key prevents (bounded by `outbound_cap` if configured); a message can also quiet a source the operator wants heard. Block it where either is unacceptable. |
 
 These are recommendations, not hardcoded blocks: `set_settings` writes are channel-influenceable, which is exactly the persistence-of-influence shape the design polices elsewhere — but two-process discipline (agent tunes, operator audits via the outcome log) is the accepted trade-off, with the blocklist as the per-key valve.
 
 The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) as of this writing:
 
-- `appraisal.novelty.no_probe_default`, `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`, `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.weights.commitment`, `appraisal.weights.disagreement`, `appraisal.weights.imperative`, `appraisal.weights.novelty`, `appraisal.weights.question`
+- `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`
 - `critique.provenance.enabled`, `critique.sample_below_rate`
-- `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.enforce`, `gate.send.min_salience`, `gate.send.quiet_origins`
+- `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.quiet_origins`
 - `outbound_cap.count_progress`, `outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`, `outbound_cap.window_seconds`
 
 The fork instruction keys (`appraisal.stage2_fork_prompt`, `critique.lens.<lens>.fork_prompt`, `critique.provenance.fork_prompt`), the lens appraisal questions (`critique.lens.<lens>.appraisal_question`) and `critique.lens.proactivity.enabled` are deliberately not on that list: they are read from config only, so they need no `immutable_settings` entry.
 
 Any *dotted* key not on that list is operator-only: it is read once at init or reload, and while `set_settings` can write it into `runtime_overrides`, nothing reads the override. Two dotted keys are read at neither: `appraisal.stage2_prompt` and `critique.prompt.<lens>`, because the stages that owned them run only as forks (#320, #1129). Setting either in `agent.yaml` neither fails nor warns, and a `set_settings` write to either succeeds and changes nothing. Undotted keys are allowlisted in code: `set_settings` accepts only the inference parameters `temperature`, `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `max_tokens` and `seed`, which go into the LLM request body, and the framework keys `max_turns`, `max_context_tokens` and `reasoning_history`. `max_turns` and `max_context_tokens` must be positive integers (a string, a float, a boolean, zero or a negative number rejects the whole call, naming the key and the value). Any other undotted key (`messages`, `model`, `tools`, `tool_choice`, …) rejects the whole call; see [threat-model.md](threat-model.md), finding 1. If you don't need agent self-tuning, `tools.disabled: [set_settings]` removes the surface altogether.
 
-#### `appraisal.*` — stage-1 appraisal
+#### `appraisal.*` — stage-1 keys removed
 
-Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.
-
-`AppraisalPlugin` scores every inbound message at the gate: surface heuristics plus an FTS5 familiarity probe on a dedicated read-only connection, under a hard latency budget, failing open. The probe connection opens lazily on first use; if `memory_fts` doesn't exist yet, novelty uses `appraisal.novelty.no_probe_default` and the open is retried at most every 30 s (a warning per failed attempt naming the path and reason, one INFO on recovery), so no restart is needed. All keys resolve per-decision.
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `appraisal.probe.budget_ms` | `50` | Hard latency budget for the FTS5 probe query (not the once-per-interval connection open). Timeout ⇒ no probe result ⇒ the vector is built from surface heuristics alone (never blocks the gate). |
-| `appraisal.probe.max_tokens` | `12` | Cap on sanitized tokens in the FTS5 MATCH query. |
-| `appraisal.probe.rank_scale` | `10.0` | bm25 rank normalization: familiarity scales with `min(1, −rank/rank_scale)` (bm25 ranks are negative; more-negative = stronger match). |
-| `appraisal.novelty.no_probe_default` | `0.5` | Novelty when no probe result arrived in budget — a value, never a null. |
-| `appraisal.weights.novelty` | `0.35` | Salience weight for novelty (1 − familiarity). |
-| `appraisal.weights.question` | `0.15` | Salience weight for question density. |
-| `appraisal.weights.disagreement` | `0.20` | Salience weight for max(disagreement markers, negation density). |
-| `appraisal.weights.commitment` | `0.20` | Salience weight for numbers/commitment density. |
-| `appraisal.weights.imperative` | `0.10` | Salience weight for imperative markers (feeds salience only, not the vector). |
+Stage-1 appraisal, which scored every inbound message and every final from English word lists and a word-match probe of memory's full-text index, was removed (#1185), and its keys with it: `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.novelty.no_probe_default` and `appraisal.weights.*` (`novelty`, `question`, `disagreement`, `commitment`, `imperative`). A config that still sets one logs one WARNING per key at startup and at reload, naming the key and saying to delete it from `agent.yaml`; the key is otherwise ignored. Stage 2 keeps `appraisal.stage2_fork_prompt` (above) and the importance-prior weights `appraisal.prior.w_stakes`, `appraisal.prior.w_valence` and `appraisal.prior.w_novelty`.
 
 `critique.provenance.enabled` (default `true`) switches the provenance check. It has no other tunables; its instruction is the static `critique.provenance.fork_prompt`. Stage-2 appraisal detects the past claims and a fork of the window judges them, so the check needs the `appraisal` plugin and `agent.forks` covering `critique`. See [cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy).
 
@@ -468,30 +452,23 @@ The alignment extra's lens (`corvidae-alignment`, #914) is named `alignment`. It
 
 A malformed lens, including one with no `appraisal_question`, is rejected at startup with a warning naming the plugin, the lens and the fix, and the other lenses load; nothing a lens declares stops the daemon.
 
-#### `gate.*` — engagement and decide gates
+#### `gate.*` — the decide gate
 
-Requires the cognition extra. `GatePlugin` (entry point `gates`) reads these per decision; see [cognition.md](cognition.md#gateplugin) for what each gate does and what it records in `exchange_log.outcomes`. Both gates fail open: without `AppraisalPlugin`, or when the appraisal compute fails, nothing is rejected or withheld.
+Requires the cognition extra. `GatePlugin` (entry point `gates`) reads these per decision; see [cognition.md](cognition.md#gateplugin) for what it does and what it records in `exchange_log.outcomes`. It fails open: an error inside it withholds nothing.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `gate.engagement.enforce` | `false` | Shadow mode while false: the engagement gate computes and records `would_reject` but admits every message. Set it only after calibrating the threshold offline against the recorded verdicts. |
-| `gate.engagement.threshold` | `0.2` | Inbound salience below this would reject (and does once `enforce` is true). |
-| `gate.send.enforce` | `true` | When false, the decide gate records `would_veto` but withholds nothing. |
-| `gate.send.min_salience` | `0.15` | A final from a non-user origin (reminder, heartbeat, task, critique) whose outbound salience is below this is withheld: stored as `unsent`, never sent. A reply to a user is never withheld by this key. |
 | `gate.send.allow_progress` | `true` | False suppresses the intermediate text sent alongside tool calls. |
 | `gate.send.allow_thinking` | `true` | False suppresses reasoning (`OutboundThinking`). |
-| `gate.send.quiet_origins` | `[]` | Origins whose turns send nothing to the human, e.g. `[webhook:github]`: their final, progress, thinking and error fallback are withheld whatever their salience, and the agent's `speak_up` tool lets one turn's final through the normal policy (#790, #936). The error fallback is the second half of the flood guard: an outage while a burst of notifications arrives used to send one "model call failed" per turn, and the failure is still logged at ERROR with its traceback whatever this veto does. `speak_up` is offered whenever the gates plugin is loaded, whatever this list holds, so a reload that adds an origin has its hatch at once (#925). Origins are matched exactly (`webhook:<endpoint>`, `heartbeat`, `inotify`, …). A `notify_other_channel` note carries its sender's origin to the turn it wakes (#1034), so a quiet origin stays quiet on the channel it sends to. `user` and `reminder` are ignored with a warning; a value that is not a list of strings fails open with a warning. Runtime-tunable per channel through `set_settings` (#928): an override replaces this list on that channel (`[]` un-quiets every origin there) and outlasts a hot reload that edits this list, until `set_settings` clears it with `null` or the daemon restarts. On channels without an override, hot reload changes the veto on the next decision. Adding the key to `agent.immutable_settings` blocks new writes, `null` included, but does not clear an override already set: restart, or unlock, clear and lock again. See the recommended blocklist below. |
+| `gate.send.quiet_origins` | `[]` | Origins whose turns send nothing to the human, e.g. `[webhook:github]`: their final, progress, thinking and error fallback are withheld, and the agent's `speak_up` tool lets one turn's final through (#790, #936). The error fallback is the second half of the flood guard: an outage while a burst of notifications arrives used to send one "model call failed" per turn, and the failure is still logged at ERROR with its traceback whatever this veto does. `speak_up` is offered whenever the gates plugin is loaded, whatever this list holds, so a reload that adds an origin has its hatch at once (#925). Origins are matched exactly (`webhook:<endpoint>`, `heartbeat`, `inotify`, …). A `notify_other_channel` note carries its sender's origin to the turn it wakes (#1034), so a quiet origin stays quiet on the channel it sends to. `user` and `reminder` are ignored with a warning; a value that is not a list of strings fails open with a warning. Runtime-tunable per channel through `set_settings` (#928): an override replaces this list on that channel (`[]` un-quiets every origin there) and outlasts a hot reload that edits this list, until `set_settings` clears it with `null` or the daemon restarts. On channels without an override, hot reload changes the veto on the next decision. Adding the key to `agent.immutable_settings` blocks new writes, `null` included, but does not clear an override already set: restart, or unlock, clear and lock again. See the recommended blocklist below. |
 
 ```yaml
 gate:
-  engagement:
-    enforce: false     # shadow mode
-    threshold: 0.2
   send:
-    enforce: true
-    min_salience: 0.15
     quiet_origins: []  # e.g. [webhook:github]
 ```
+
+The engagement gate and the decide gate's salience floor were removed with stage-1 appraisal (#1185), and their keys with them: `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.enforce` and `gate.send.min_salience`. `gate.send.quiet_origins` still withholds a source's replies outright. A config that still sets a removed key logs one WARNING per key at startup and at reload, naming the key and saying to delete it from `agent.yaml`; the key is otherwise ignored.
 
 ### `agent.context_compact` — removed
 

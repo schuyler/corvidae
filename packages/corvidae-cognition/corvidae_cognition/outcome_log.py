@@ -7,7 +7,7 @@ provenance/outcomes columns are filled in by ``MemoryPlugin``,
 ``AppraisalPlugin``, and ``CritiquePlugin`` through the writer API below.
 
 The table accumulates one row per exchange so retrieval quality,
-appraisal, and critique/engagement outcomes can be correlated — the
+appraisal, and critique and gate outcomes can be correlated — the
 calibration data for the memory system's evals.
 """
 
@@ -31,6 +31,8 @@ logger = logging.getLogger("corvidae.outcome_log")
 # lost to a lost update.
 MERGE_COLUMNS = frozenset({"outcomes", "appraisal"})
 
+# probe_score is no longer written: stage-1 appraisal was removed (#1185). The
+# column stays, with old rows' values, until schema migrations exist (#14).
 EXCHANGE_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS exchange_log (
     trace_id TEXT PRIMARY KEY,

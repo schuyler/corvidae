@@ -109,10 +109,6 @@ agent:
   #   # participants (see docs/configuration.md "Runtime-tunable gate parameters"):
   #   # - critique.provenance.enabled
   #   # - critique.sample_below_rate
-  #   # - gate.engagement.enforce        # can silence or un-silence the agent
-  #   # - gate.engagement.threshold
-  #   # - gate.send.enforce
-  #   # - gate.send.min_salience
 
 # Autobiographical memory (optional; see docs/configuration.md)
 # memory:
@@ -192,16 +188,14 @@ agent:
 #     # critique.lens.<dimension>, critique.lens.<name>.<dimension>, critique.lens.<name>.sample_rate,
 #     # critique.proactivity.* (now critique.lens.proactivity.*).
 
-# Engagement and decide gates (optional; cognition extra, see
-# docs/configuration.md "gate.*"). Runtime-tunable per channel via set_settings.
+# The decide gate (optional; cognition extra, see docs/configuration.md
+# "gate.*"). Runtime-tunable per channel via set_settings. The engagement
+# gate and the salience floor were removed (#1185): gate.engagement.*,
+# gate.send.enforce and gate.send.min_salience log a startup warning and
+# are ignored.
 # gate:
-#   engagement:
-#     enforce: false                  # shadow mode: record would_reject, admit everything
-#     threshold: 0.2                  # inbound salience below this would reject
 #   send:
-#     enforce: true                   # withhold non-user finals below min_salience
-#     min_salience: 0.15              # a reply to a user is never withheld
-#     allow_progress: true            # false suppresses text sent alongside tool calls
+#     allow_progress: true           # false suppresses text sent alongside tool calls
 #     allow_thinking: true            # false suppresses reasoning
 #     quiet_origins: []               # origins whose turns never reply, e.g. [webhook:github];
 #                                     # speak_up lets one turn through; set_settings can

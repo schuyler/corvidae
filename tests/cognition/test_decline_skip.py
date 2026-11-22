@@ -130,15 +130,10 @@ class TestAppraisalSkipsDeclines:
 
 
 class _LensAppraisal(CorvidaePlugin):
-    """An appraisal store whose stage 2 always selects the predictive lens."""
+    """An appraisal store with no stage-2 listener calls, so a judged turn
+    gets one random lens."""
 
     depends_on = frozenset()
-
-    async def get_appraisal(self, trace_id):
-        return None
-
-    def get_last_stage2(self, channel_id):
-        return {"ambiguity": 0.9}
 
     def get_originating_text(self, trace_id):
         return "q"
@@ -211,7 +206,7 @@ class TestCritiqueSkipsDeclines:
 
 
 class _WithholdAll(CorvidaePlugin):
-    """Another gate: vetoes every final, as an enforcing engagement gate would."""
+    """Another gate: vetoes every final, as a quiet-origin veto would."""
 
     depends_on = frozenset()
 
@@ -248,7 +243,7 @@ async def turn_env(tmp_path):
 
     task_plugin.task_queue.enqueue = _record
     yield SimpleNamespace(plugin=plugin, channel=channel, enqueued=enqueued)
-    for p in (critique, appraisal, silence):
+    for p in (critique, silence):
         await p.on_stop()
     await task_plugin.on_stop()
     await db.close()

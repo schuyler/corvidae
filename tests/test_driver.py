@@ -280,7 +280,7 @@ def test_buster_gate_profile_is_registered():
     assert probes == [probe_withheld_restart]
     assert channels == [WITHHELD_CHANNEL]
     template = Path(__file__).resolve().parent.parent / "harness" / "buster-gate.yaml.in"
-    assert "min_salience: 1.0" in template.read_text()
+    assert "quiet_origins: [heartbeat]" in template.read_text()
 
 
 # ---------------------------------------------------------------------------

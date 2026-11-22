@@ -1,4 +1,4 @@
-"""The plugin boundary ratchet (#1178, PRD principle 1).
+"""The plugin boundary ratchet (#1178; the PRD §4 decision under principle 1).
 
 A plugin holds a reference to another plugin only when the target is a
 kernel plugin, named in its ``depends_on`` and resolved with
@@ -41,8 +41,8 @@ ALLOWED: dict[str, dict[str, tuple[int, str]]] = {
     },
     "packages/corvidae-cognition/corvidae_cognition/appraisal.py": {
         "memory": (1, "#1175"),
-        "outcome_log": (2, "#1179"),
-        "persistence": (2, "#1180"),
+        "outcome_log": (1, "#1179"),
+        "persistence": (1, "#1180"),
         "task": (1, "#1180"),
     },
     "packages/corvidae-cognition/corvidae_cognition/critique.py": {
@@ -52,7 +52,6 @@ ALLOWED: dict[str, dict[str, tuple[int, str]]] = {
         "task": (1, "#1180"),
     },
     "packages/corvidae-cognition/corvidae_cognition/gates.py": {
-        "appraisal": (2, "#1169"),
         "outcome_log": (2, "#1179"),
         "persistence": (1, "#1180"),
     },

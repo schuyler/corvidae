@@ -28,10 +28,9 @@ against their source on 2026-11-17:
   origin "critique", so the woken turn's findings never wake another turn.
 - funnel: origin keys the deferred-registration queue as (channel.id,
   origin); a woken turn with no origin drains only the next-turn queue.
-- gates: no origin reads as "task", so the decide gate's salience
-  withholding applies to a user chain's woken turn; a reminder chain's is
-  never withheld; a ``gate.send.quiet_origins`` origin stays quiet on the
-  channel it sends to.
+- gates: no origin reads as "task", so a user chain's woken turn is withheld
+  only if "task" is quiet; a reminder chain's is never withheld; a
+  ``gate.send.quiet_origins`` origin stays quiet on the channel it sends to.
 - appraisal: stage 2 runs on every origin (#1031).
 - outcome_log: the exchange row's origin column records the carried origin,
   or "task" when there is none.

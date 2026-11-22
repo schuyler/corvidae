@@ -80,8 +80,8 @@ turns `outcome_log` on. The probe passes when `exchange_log` has a
 channel, while the bot has said nothing in `#p-heartbeat`.
 
 `withheld_restart` sends nothing until the restart. The profile turns on
-`appraisal`, `outcome_log` and `gates`, sets `gate.send.min_salience: 1.0`
-so the decide gate withholds every non-user final, and runs a `heartbeat`
+`appraisal`, `outcome_log` and `gates`, sets `gate.send.quiet_origins:
+[heartbeat]` so the decide gate withholds every heartbeat final, and runs a `heartbeat`
 job every 30 seconds on `irc:#p-withheld` whose prompt asks for the planted
 code `PELICAN-7731`. Before the restart the probe needs an `unsent` row on
 that channel, a `[not sent: final]` CONTEXT row right after it, an

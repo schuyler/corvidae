@@ -106,7 +106,7 @@ async def lens_env(
     first; tears down on exit. ``appraisal=...`` is a quiet FakeAppraisal and
     ``None`` is no appraisal plugin. ``rng`` is every random draw."""
     if appraisal is ...:
-        appraisal = FakeAppraisal(stage2=QUIET)
+        appraisal = FakeAppraisal()
     if contributors is None:
         contributors = {"kb": Contributor(*lenses)}
     env = await build_critique(

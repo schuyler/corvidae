@@ -1272,7 +1272,9 @@ MCP tools are declared by the client for every server, with no setting. See
 
 ## Plugin boundaries
 
-How one plugin may reach another (PRD principle 1, #1178). The short form:
+How one plugin may reach another (#1178): the mechanism the PRD's §4
+decision log records for principle 1, which asks that no plugin depend on
+another without declaring it. The short form:
 **depend downward by type, sideways by hook.**
 
 ### Hold a reference only to a kernel plugin
@@ -1349,8 +1351,7 @@ a contract; raw SQL on a peer's table is a service call with no interface.
 Prefer pushing the data on an event, so no read is needed; otherwise ask
 through a `resolve_` hook the reader owns or depends on. The tree does not
 comply yet: gates reads `origin` from outcome_log's `exchange_log`
-(#1169, #1179), and appraisal reads `exchange_log` (#1175, #1179) and
-memory's `memory_fts` (#1175).
+(#1169, #1179), and appraisal reads `exchange_log` (#1175, #1179).
 
 **Hint the types on both sides.** The spec carries the return annotation, as
 the kernel's do (`resolve_channel(...) -> "Channel | None"` in
@@ -1394,7 +1395,7 @@ without a second use.
 
 A cognitive process meets a turn in one of three phases (#1176). A plugin's
 docs say which phase each of its activities runs in; one plugin may span
-phases, as appraisal does.
+phases.
 
 Any plugin that acts on a message turn may append CONTEXT, in whichever
 phase it acts. The phase decides when that CONTEXT reaches the model, what

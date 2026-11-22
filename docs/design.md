@@ -745,8 +745,8 @@ CREATE TABLE exchange_log (
     retrieval_top_score REAL,       -- written by MemoryPlugin retrieval (decayed score)
     retrieval_top_similarity REAL,  -- written by MemoryPlugin retrieval (raw similarity, same candidate)
     retrieval_hit_count INTEGER,    -- written by MemoryPlugin retrieval
-    probe_score REAL,               -- written by AppraisalPlugin stage 1
-    appraisal TEXT,                 -- JSON; written by AppraisalPlugin stage 2
+    probe_score REAL,               -- no longer written: stage-1 appraisal was removed (#1185); old rows keep it
+    appraisal TEXT,                 -- JSON; written by AppraisalPlugin stage 2 (old rows also hold stage1/stage1_out)
     outcomes TEXT                   -- JSON; merged by multiple writers
 );
 ```
@@ -1102,7 +1102,7 @@ persistence connection (`PersistencePlugin.db`). The others:
 |---|---|---|
 | persistence (`PersistencePlugin.db`) | persistence `on_start` | `message_log`, and every other plugin's tables (scheduler, usage_log, retrieval_log, retrieval_candidate, goals, ...) |
 | memory write (`MemoryPlugin._write_db`) | memory `on_start`, after its schema exists | memory records only: consolidation (`memory`, `memory_vec`, `memory_fts` via trigger, `memory_prompt`, `consolidation_watermark`) and `write_record`, each one `BEGIN IMMEDIATE` transaction |
-| appraisal probe, critique probe | each plugin's `on_start` | read only (`message_fts` probes) |
+| critique probe | critique's `on_start` | read only (`message_fts` probes) |
 
 Only the memory write connection is isolated for atomicity: a commit on
 the persistence connection can't land inside a memory transaction, and a
@@ -4919,8 +4919,8 @@ resolved the way every `notify_other_channel` target is
 The text is `Goal #<id> changed status: <old> → <new>.` for a status change
 and `Goal #<id> retired (was <old>). Conclusion: <conclusion>` for a
 retirement; the goal's own text is not included (`list_goals` has it). Every
-change wakes the origin channel; that turn and the decide gate choose whether
-anything is said to the people there.
+change wakes the origin channel; that turn chooses whether anything is said
+to the people there.
 
 Skipped before any send: a goal whose `origin_channel` is `None` (seeded with
 `corvidae goals seed`) and a change whose `actor_channel` is the origin (so a

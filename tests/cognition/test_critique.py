@@ -80,20 +80,12 @@ class FakeAppraisal(CorvidaePlugin):
 
     depends_on = frozenset()
 
-    def __init__(self, stage1=None, stage2=None):
-        self._stage1 = stage1
-        self._stage2 = stage2
+    def __init__(self):
         # trace_id -> originating text, standing in for the LRU
         # AppraisalPlugin owns (§1.4); CritiquePlugin reads it via
         # get_originating_text with a request_text fallback.
         self._originating_text: dict[str, str] = {}
         self.stage2_listeners: list = []
-
-    async def get_appraisal(self, trace_id):
-        return self._stage1
-
-    def get_last_stage2(self, channel_id):
-        return self._stage2
 
     def get_originating_text(self, trace_id):
         return self._originating_text.get(trace_id)
@@ -335,7 +327,7 @@ class TestEligibility:
         await _teardown(env)
 
     async def test_a_turn_without_a_trace_is_not_judged(self, tmp_path):
-        appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
+        appraisal = FakeAppraisal()
         env = await build_critique(tmp_path, appraisal=appraisal)
         await env.plugin.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
@@ -401,9 +393,7 @@ class TestLensSelection:
 
     async def test_retention_root_not_indexed_by_recall_warns(self, tmp_path, caplog):
         """A root recall does not index is a silent data-loss path, so say it."""
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.0}, stage2={"novelty": 0.0},
-        )
+        appraisal = FakeAppraisal()
         env = await build_critique(
             tmp_path, appraisal=appraisal,
             config={
@@ -419,9 +409,7 @@ class TestLensSelection:
 
     async def test_retention_root_matching_recall_is_quiet(self, tmp_path, caplog):
         """No warning when the two agree, or when recall is not configured."""
-        appraisal = FakeAppraisal(
-            stage1={"commitment_density": 0.0}, stage2={"novelty": 0.0},
-        )
+        appraisal = FakeAppraisal()
         env = await build_critique(
             tmp_path, appraisal=appraisal,
             config={
@@ -672,7 +660,7 @@ def test_objection_schema_allows_file_and_content():
 async def test_retention_root_warns_against_recalls_default_root(tmp_path, caplog):
     """AC6: a markdown_recall block with neither roots nor root indexes
     state/markdown_recall, so a different retention root is drift too."""
-    appraisal = FakeAppraisal(stage1={"commitment_density": 0.0}, stage2={"novelty": 0.0})
+    appraisal = FakeAppraisal()
     env = await build_critique(
         tmp_path, appraisal=appraisal,
         config={"critique": {"retention": {"root": "values/"}}, "markdown_recall": {}},
@@ -1363,7 +1351,9 @@ async def _real_path_env(tmp_path, replies, past_claims):
 
 async def _real_path_teardown(env):
     for p in reversed(env.plugins):
-        await p.on_stop()
+        # Appraisal has nothing to stop since stage 1 went (#1185).
+        if hasattr(p, "on_stop"):
+            await p.on_stop()
     await env.agent.pm.get_plugin("task").on_stop()
     await env.db.close()
 
@@ -1655,7 +1645,7 @@ class TestRetentionWakeNeedsARoot:
         )
 
     async def test_with_a_root_the_finding_wakes_the_channel(self, tmp_path):
-        appraisal = FakeAppraisal(stage1={}, stage2={})
+        appraisal = FakeAppraisal()
         env = await build_critique(tmp_path, appraisal=appraisal, with_funnel=True)
         try:
             await self._register(env, root="values/")
@@ -1666,7 +1656,7 @@ class TestRetentionWakeNeedsARoot:
             await _teardown(env)
 
     async def test_without_a_root_the_finding_waits_for_the_next_turn(self, tmp_path):
-        appraisal = FakeAppraisal(stage1={}, stage2={})
+        appraisal = FakeAppraisal()
         env = await build_critique(tmp_path, appraisal=appraisal, with_funnel=True)
         try:
             await self._register(env, root=None)
