@@ -109,9 +109,6 @@ agent:
   #   # participants (see docs/configuration.md "Runtime-tunable gate parameters"):
   #   # - critique.provenance.enabled
   #   # - critique.sample_below_rate
-  #   # - critique.prompt.adversarial   # the critic's own system prompts
-  #   # - critique.prompt.constrained
-  #   # - critique.prompt.predictive
   #   # - gate.engagement.enforce        # can silence or un-silence the agent
   #   # - gate.engagement.threshold
   #   # - gate.send.enforce

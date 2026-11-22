@@ -382,7 +382,6 @@ The persona is allowed to tune its own gates by default — a deliberate operato
 |-----|--------------|
 | `critique.provenance.enabled` | The correctness gate — a prompt-injected "stop second-guessing yourself" must not be able to disable the confabulation check. |
 | `critique.sample_below_rate` | The standing experiment's integrity — an agent tuning its own sampling to zero blinds the critique false-negative bound. |
-| `critique.prompt.adversarial`, `critique.prompt.constrained`, `critique.prompt.predictive` | These are the critic's *system prompts*. An agent that can rewrite its own critic's instructions has no critic. |
 | `gate.engagement.enforce`, `gate.send.enforce` | An injected message should not be able to silence the agent wholesale (enforce engagement with a threshold of 1.0) or un-silence it (turn the decide gate off). |
 | `outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`, `outbound_cap.window_seconds`, `outbound_cap.count_progress` | The runaway-send caps (#791, #821). An agent that can raise or clear its own limit has no limit; an invalid override fails open, so it also lifts the cap. |
 | `gate.send.quiet_origins` | A flood guardrail, not a security boundary (#928). A quiet turn's own payload (a webhook body, a PR title) can tell the agent to un-quiet its source on that channel, which brings back the reply-per-notification flood this key prevents (bounded by the decide gate's normal policy and by `outbound_cap` if configured); a message can also quiet a source the operator wants heard. Block it where either is unacceptable. |
@@ -428,7 +427,7 @@ A built-in lens that checks whether the reply asked permission ("want me to…",
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `critique.lens.proactivity.enabled` | bool | `true` | Offers the lens. Static config, not runtime-tunable, so the agent can't switch off the critic that checks it; reloaded on the next stage-2 call. A non-bool value fails startup naming the key; at reload it logs a warning and the lens stays on. Set it to `false` for an agent whose system prompt has no Ownership Boundary. |
-| `critique.lens.proactivity.appraisal_question`, `critique.lens.proactivity.fork_prompt` | string | built in | As for any lens (below). |
+| `critique.lens.proactivity.appraisal_question`, `critique.lens.proactivity.fork_prompt` | string | built in | As for any lens (below); the documented copy of the fork brief is `prompts/critique_proactivity_fork.md`. The wake sentence above is a second constant, appended to the wake note, not a replacement for the brief (#1135). |
 
 `critique.proactivity.enabled` and `critique.proactivity.fork_prompt` were moved under `critique.lens.proactivity` (#1126); any key still set under `critique.proactivity` fails startup naming the key that replaced it, and at reload logs a warning and keeps the previous fork prompts (the old `enabled` value is ignored).
 

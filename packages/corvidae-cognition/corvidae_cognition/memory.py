@@ -3713,7 +3713,7 @@ class MemoryPlugin(CorvidaePlugin):
                 )
 
             # Persist the retrieval profile (§3.7's day-one raw stream).
-            # Both values describe the top-ranked candidate (by fused rank
+            # Both values describe the top-ranked candidate (measured-first
             # on the hybrid path, by score otherwise): its decayed score,
             # and the raw similarity that band_on: similarity compares
             # against the band thresholds.
@@ -3835,9 +3835,10 @@ class MemoryPlugin(CorvidaePlugin):
         scope.
 
         Returns:
-            (candidates best first: by fused rank on the hybrid path, by
-            score otherwise; degraded_to_fts). Each candidate: {id, summary,
-            created_at, similarity, score, band, z, age_seconds, source}
+            (candidates best first: measured-first on the hybrid path -- every
+            measured candidate ahead of every unmeasured one, fused order within
+            each group (#856, #892) -- by score otherwise; degraded_to_fts). Each candidate: {id, summary,
+            created_at, similarity, score, band, z, age_seconds, source, measured}
             (``z`` is the band_on: relative z-score, or None).
         """
         pool = await self._retrieve_pool(text, k, exclude)

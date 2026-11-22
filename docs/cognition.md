@@ -395,8 +395,9 @@ of two lists:
 The sum orders the pool, with the decayed score breaking ties. An FTS hit
 the KNN didn't return gets its real cosine from its stored vector (one
 `vec_distance_cosine` point lookup), so it is ranked in the first list as
-well. A hit with no vector (a record not yet embedded) carries the 0.6 proxy
-and is ranked by FTS alone. A query with no lexical match ranks exactly as
+well. A hit with no vector (a record not yet embedded) carries the 0.6 proxy,
+earns its key from the FTS list alone, and ranks among the unmeasured only —
+behind every measured candidate — with the weak band. A query with no lexical match ranks exactly as
 the KNN alone would. If the FTS side fails, a warning is logged and the
 KNN rows are ranked alone. `memory.retrieval.candidates: vector` turns
 fusion off. The FTS-degraded path below is unchanged: it has no cosine to
@@ -445,7 +446,9 @@ record is hidden on its own channel until the window moves past it.
 Scores are `cosine_similarity × exp(-age_days / memory.half_life_days)`, where
 `age_days` runs from `created_at`, or from `max(created_at,
 last_retrieved_at)` under `memory.retrieval.recency_from: last_used`.
-Candidates rank by score (by fused rank on the hybrid path, above) and are
+On the hybrid path candidates rank measured-first: every measured candidate ahead
+of every unmeasured one, each group in its own fused order (#856, #892). Off it,
+by score. They are
 banded strong, moderate or weak. Weak records are dropped, with no fallback:
 a query with nothing above weak admits nothing (#409). What the bands compare
 is `memory.retrieval.band_on`:
@@ -520,7 +523,7 @@ and numbers, never text:
 | `similarity` | cosine similarity, or the fixed FTS proxy when it can't be measured (a degraded retrieval, or an FTS hit with no vector) |
 | `score` | the recency-decayed score (`similarity × decay`); the rank key on the vector-only and degraded paths, the tie-break under fusion |
 | `band` | `strong`, `moderate` or `weak` (above; a hit with no measured cosine is `weak`, and every degraded hit `moderate`) |
-| `rank` | 1-based position among the not-excluded candidates, by fused rank on the hybrid path and by score otherwise (excluded rows: see below) |
+| `rank` | 1-based position among the not-excluded candidates: measured-first on the hybrid path, fused order within each group (#856, #892), score otherwise (excluded rows: see below) |
 | `outcome` | one of the values below |
 | `source` | `vec` (KNN only), `fts` (FTS only, or any degraded candidate) or `both` (#666); NULL on rows from before it |
 | `z` | under `band_on: relative`, the z-score the band came from (#409); NULL when none was computed (other modes, a small memory, no spread, a failed spread scan, a hit with no vector, degraded retrieval, rows from before it) |

@@ -236,7 +236,10 @@ For an in-repo plugin (step 2) the same code goes in
 
 ## 5. Conventions (AGENTS.md; reviewers check these)
 
-- Red/green TDD: write the failing test first and watch it fail.
+- Red/green TDD: write the failing test first and watch it fail. A **guard**
+  test is the other shape: it pins behaviour the change must not break, so it
+  passes on the parent commit and goes red only under a mutation of the
+  change. Say which kind a test is; see AGENTS.md, "Process instructions".
 - Every pytest run is under a timeout (the repo sets `timeout = 15`; do not
   raise or disable it; mark the one slow test).
 - Never `except Exception: pass`. Log with the traceback, pass through, or
