@@ -336,10 +336,14 @@ def check_tool_args(schema: dict | None, args: dict) -> str | None:
     except ValidationError as exc:
         key, value = _rejected(exc, args)
         accepted = _accepted(schema, exc)
+        what = (
+            f"{key} is missing"
+            if exc.validator == "required"
+            else f"{key} = {value!r} is not valid"
+        )
         return (
-            f"Error: tool call rejected — {key} = {value!r} is not valid "
-            f"({exc.message}); accepted: {accepted}. Correct the arguments and "
-            f"call again"
+            f"Error: tool call rejected — {what} ({exc.message}); accepted: "
+            f"{accepted}. Correct the arguments and call again"
         )
     return None
 
@@ -359,24 +363,43 @@ def _rejected(exc: ValidationError, args: dict) -> tuple[str, object]:
     return ".".join(str(p) for p in path) or "(arguments)", exc.instance
 
 
+def _resolve(node: object, schema: dict) -> object:
+    """Follow a chain of ``$ref`` into ``$defs``, a bounded number of steps."""
+    for _ in range(8):
+        if not isinstance(node, dict) or "$ref" not in node:
+            return node
+        name = str(node["$ref"]).rsplit("/", 1)[-1]
+        node = (schema.get("$defs") or {}).get(name, node)
+    return node
+
+
 def _accepted(schema: dict, exc: ValidationError) -> str:
-    """A short description of what the rejected key accepts."""
+    """What the rejected key accepts, read from its own schema node."""
+    root = _resolve(schema, schema)
+    props = root.get("properties") or {} if isinstance(root, dict) else {}
+
+    if exc.validator == "additionalProperties":
+        # The headline case: say which keys the tool does take.
+        if props:
+            return ", ".join(sorted(str(k) for k in props))
+        return "no arguments"
     if exc.validator == "required":
-        node = (schema.get("properties") or {}).get(
-            _rejected(exc, {})[0], {}
-        )
+        name = exc.message.split("'")[1] if "'" in exc.message else ""
+        node = _resolve(props.get(name, {}), schema)
     else:
-        node = schema
-        for part in list(exc.absolute_path)[:-1] if exc.absolute_path else []:
+        node = root
+        for part in exc.absolute_path:
+            node = _resolve(node, schema)
+            if not isinstance(node, dict):
+                break
+            if part == "items" or isinstance(part, int):
+                node = node.get("items", node)
+                continue
             node = (node.get("properties") or {}).get(str(part), node)
-        node = (node.get("properties") or {}).get(
-            str(exc.absolute_path[-1]), node
-        ) if exc.absolute_path else node
+        node = _resolve(node, schema)
+
     if not isinstance(node, dict):
         return "the schema's declared shape"
-    if "$ref" in node:
-        name = node["$ref"].rsplit("/", 1)[-1]
-        node = (schema.get("$defs") or {}).get(name, node)
     if "enum" in node:
         return "one of " + ", ".join(repr(v) for v in node["enum"])
     if "const" in node:

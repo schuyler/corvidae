@@ -67,7 +67,7 @@ async def test_a_bad_call_never_reaches_the_tool():
 
     assert called == []
     assert result.error is True
-    assert "qury" in result.content
+    assert "tool call rejected" in result.content
 
 
 async def test_a_good_call_still_reaches_the_tool():
@@ -153,14 +153,14 @@ def test_the_message_names_the_key_and_the_value_it_got():
     message = check_tool_args(SCHEMA, {"query": "x", "qury": "y"})
     assert message is not None
     assert "qury = 'y'" in message
-    assert "accepted: " in message
+    assert "accepted: query" in message  # the keys the tool does take
 
 
 def test_the_message_names_a_missing_required_key_by_name():
     message = check_tool_args(SCHEMA, {})
     assert message is not None
-    assert "query = " in message
-    assert "is a required property" in message
+    assert "query is missing" in message
+    assert "accepted: string" in message
 
 
 def test_the_message_reports_a_choice_parameters_allowed_values():
@@ -173,6 +173,26 @@ def test_the_message_reports_a_choice_parameters_allowed_values():
     }
 
     message = check_tool_args(schema, {"mode": "medium"})
+
+    assert message is not None
+    assert "accepted: one of 'fast', 'slow'" in message
+
+
+def test_a_nested_choice_reports_the_choice_not_the_parent_type():
+    """A $ref inside a property resolves to the leaf (#1170 B1)."""
+    schema = {
+        "type": "object",
+        "properties": {"opts": {"$ref": "#/$defs/Opts"}},
+        "required": ["opts"],
+        "$defs": {
+            "Opts": {
+                "type": "object",
+                "properties": {"mode": {"enum": ["fast", "slow"]}},
+            }
+        },
+    }
+
+    message = check_tool_args(schema, {"opts": {"mode": "medium"}})
 
     assert message is not None
     assert "accepted: one of 'fast', 'slow'" in message
