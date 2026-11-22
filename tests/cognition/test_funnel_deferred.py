@@ -27,6 +27,7 @@ from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
 from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager, hookimpl
+from corvidae.hooks import install_plugin_hookspecs
 from corvidae.persistence import PersistencePlugin, init_db
 
 
@@ -46,6 +47,10 @@ async def build_funnel(config: dict | None = None, *, stub_notify: bool = True):
 
     funnel = FunnelPlugin()
     pm.register(funnel, name="funnel")
+    # Runtime installs plugin-declared hookspecs after registration; without
+    # them pm.ahook has no on_funnel_ingest attribute at all, and the call site
+    # no longer swallows that AttributeError (#1097).
+    install_plugin_hookspecs(pm)
     await funnel.on_init(pm=pm, config=config or {})
 
     # stub_notify=False leaves the real dispatcher in place for tests that

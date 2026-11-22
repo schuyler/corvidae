@@ -73,6 +73,9 @@ class TestOnCompactionHookFired:
         mock_pm = MagicMock()
         mock_pm.ahook = MagicMock()
         mock_pm.ahook.on_compaction = AsyncMock()
+        # The mock has to model the hook, not lean on the guard that used to
+        # swallow the TypeError a bare MagicMock raises when awaited (#1097).
+        mock_pm.ahook.before_compaction = AsyncMock()
 
         plugin = CompactionPlugin(pm=mock_pm)
         channel = _make_channel()
@@ -103,6 +106,9 @@ class TestOnCompactionHookFired:
         mock_pm = MagicMock()
         mock_pm.ahook = MagicMock()
         mock_pm.ahook.on_compaction = AsyncMock()
+        # The mock has to model the hook, not lean on the guard that used to
+        # swallow the TypeError a bare MagicMock raises when awaited (#1097).
+        mock_pm.ahook.before_compaction = AsyncMock()
 
         plugin = CompactionPlugin(pm=mock_pm)
         channel = _make_channel()
@@ -396,3 +402,44 @@ class TestCooldownWithoutPriorFailure:
             )
 
         assert result is True
+
+
+class TestARaisingSiblingDoesNotStopCompaction:
+    """#1097: the hooks are observe hooks, so a sibling that raises is logged by
+    PolicyAHook and compaction carries on — the guard this replaced only logged."""
+
+    async def test_before_compaction_raise_does_not_abort_compaction(self, caplog):
+        import logging
+
+        from corvidae.compaction import CompactionPlugin
+        from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
+
+        class Raising(CorvidaePlugin):
+            @hookimpl
+            async def before_compaction(self, channel, compacted_ids, cut):
+                raise RuntimeError("sibling boom")
+
+            @hookimpl
+            async def on_compaction(self, channel, summary_msg, retain_count, compacted_ids):
+                raise RuntimeError("sibling boom again")
+
+        pm = create_plugin_manager()
+        pm.register(Raising(), name="raising")
+        plugin = CompactionPlugin(pm=pm)
+        channel = _make_channel()
+        conv = ContextWindow("chan1")
+        conv.system_prompt = ""
+        conv.messages = [{"role": "user", "content": "a" * 35} for _ in range(10)]
+
+        with caplog.at_level(logging.WARNING, logger="corvidae"):
+            with patch.object(
+                plugin, "_view_summary", AsyncMock(return_value="still compacted")
+            ):
+                compacted = await plugin.resolve_compaction(
+                    channel=channel, conversation=conv, max_tokens=50
+                )
+
+        assert compacted is True
+        summary = [m for m in conv.messages if "still compacted" in (m.get("content") or "")]
+        assert summary, conv.messages
+        assert "raising" in caplog.text

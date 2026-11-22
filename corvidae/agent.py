@@ -507,20 +507,16 @@ class Agent(CorvidaePlugin):
                 "message rejected by should_process_message hook",
                 extra={"channel": channel.id, "sender": sender},
             )
-            try:
-                await self.pm.ahook.on_message_rejected(
-                    channel=channel, trace_id=trace_id, sender=sender, text=text,
-                )
-            except Exception:
-                logger.warning("on_message_rejected hook failed", exc_info=True, extra={"channel": channel.id})
-            return
-
-        try:
-            await self.pm.ahook.on_message_admitted(
+            # Observe hook: fail-soft, logged with the plugin that raised (#1094, #1097).
+            await self.pm.ahook.on_message_rejected(
                 channel=channel, trace_id=trace_id, sender=sender, text=text,
             )
-        except Exception:
-            logger.warning("on_message_admitted hook failed", exc_info=True, extra={"channel": channel.id})
+            return
+
+        # Observe hook, as above (#1094, #1097).
+        await self.pm.ahook.on_message_admitted(
+            channel=channel, trace_id=trace_id, sender=sender, text=text,
+        )
 
         item = QueueItem(
             role=QueueItemRole.USER,
@@ -1272,21 +1268,15 @@ class Agent(CorvidaePlugin):
 
         trace_id = item.trace_id if item is not None else None
         annotations = item.annotations if item is not None else {}
-        try:
-            await self.pm.ahook.on_agent_response(
-                channel=channel,
-                request_text=request_text,
-                response_text=display_response,
-                trace_id=trace_id,
-                annotations=annotations,
-                logprobs=result.logprobs,
-            )
-        except Exception:
-            logger.warning(
-                "on_agent_response hook failed",
-                exc_info=True,
-                extra={"channel": channel.id},
-            )
+        # Observe hook: fail-soft, logged with the plugin that raised (#1094, #1097).
+        await self.pm.ahook.on_agent_response(
+            channel=channel,
+            request_text=request_text,
+            response_text=display_response,
+            trace_id=trace_id,
+            annotations=annotations,
+            logprobs=result.logprobs,
+        )
         # A vetoed final never reaches a transport; the row is UNSENT and the
         # window already carries its marker.
         if unsent:
@@ -1442,13 +1432,11 @@ class Agent(CorvidaePlugin):
         # one id would overwrite the rowid with each successive row. Fires
         # regardless of persistence outcome (rowid may be None).
         if item.originating and item.trace_id is not None:
-            try:
-                await self.pm.ahook.on_message_persisted(
-                    channel=channel, trace_id=item.trace_id,
-                    rowid=rowid, text=request_text, annotations=item.annotations,
-                )
-            except Exception:
-                logger.warning("on_message_persisted hook failed", exc_info=True, extra={"channel": channel.id})
+            # Observe hook, as above (#1094, #1097).
+            await self.pm.ahook.on_message_persisted(
+                channel=channel, trace_id=item.trace_id,
+                rowid=rowid, text=request_text, annotations=item.annotations,
+            )
         return persist_seconds
 
     async def _process_queue_item_attributed(
@@ -1638,14 +1626,10 @@ class Agent(CorvidaePlugin):
                 # 6. Let plugins inject context before the LLM call
                 _t_before_turn_start = time.monotonic()
                 msg_count_before = len(conv.messages)
-                try:
-                    await self.pm.ahook.before_agent_turn(
-                        channel=channel, trace_id=item.trace_id, annotations=item.annotations,
-                    )
-                except Exception:
-                    logger.warning(
-                        "before_agent_turn hook failed, skipping", exc_info=True
-                    )
+                # Observe hook, as above (#1094, #1097).
+                await self.pm.ahook.before_agent_turn(
+                    channel=channel, trace_id=item.trace_id, annotations=item.annotations,
+                )
                 # Fire persist_message for any messages injected by
                 # before_agent_turn. Messages already carrying a _db_id were
                 # persisted by their producer — firing again would double-store
@@ -1757,14 +1741,8 @@ class Agent(CorvidaePlugin):
                     unsent_markers.append(("thinking", reasoning_text))
 
             # 9. Let plugins post-process the in-memory assistant message (e.g., strip reasoning_content)
-            try:
-                await self.pm.ahook.after_persist_assistant(channel=channel, message=assistant_in_window)
-            except Exception:
-                logger.warning(
-                    "after_persist_assistant hook failed",
-                    exc_info=True,
-                    extra={"channel": channel.id},
-                )
+            # Observe hook, as above (#1094, #1097).
+            await self.pm.ahook.after_persist_assistant(channel=channel, message=assistant_in_window)
 
             # 9b. Mark each vetoed emission in the window (persisted, so the
             # marker reloads beside the row it describes).

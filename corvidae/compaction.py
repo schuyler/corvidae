@@ -336,12 +336,11 @@ class CompactionPlugin(CorvidaePlugin):
         # The window still holds everything about to be dropped, and the
         # server still holds its prefix: last chance for a fork over it.
         if self.pm is not None:
-            try:
-                await self.pm.ahook.before_compaction(
-                    channel=channel, compacted_ids=compacted_ids, cut=cut,
-                )
-            except Exception:
-                logger.warning("before_compaction hook failed", exc_info=True)
+            # Observe hook: fail-soft, and PolicyAHook logs the failure with the
+            # plugin that raised it (#1094), so no guard of our own (#1097).
+            await self.pm.ahook.before_compaction(
+                channel=channel, compacted_ids=compacted_ids, cut=cut,
+            )
 
         conversation.replace_with_summary(summary_msg, retain_count)
 
@@ -351,15 +350,13 @@ class CompactionPlugin(CorvidaePlugin):
         self._last_failed_compaction.pop(channel_id, None)
 
         if self.pm is not None:
-            try:
-                await self.pm.ahook.on_compaction(
-                    channel=channel,
-                    summary_msg=summary_msg,
-                    retain_count=retain_count,
-                    compacted_ids=compacted_ids,
-                )
-            except Exception:
-                logger.warning("on_compaction hook failed", exc_info=True)
+            # Observe hook, as above (#1094, #1097).
+            await self.pm.ahook.on_compaction(
+                channel=channel,
+                summary_msg=summary_msg,
+                retain_count=retain_count,
+                compacted_ids=compacted_ids,
+            )
 
         return True
 

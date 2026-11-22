@@ -625,18 +625,20 @@ class FunnelPlugin(CorvidaePlugin):
                     carried.append(
                         self._carried_payload(cid, source, result, entry.created))
 
-        # Ask every implementer to submit; a raising one is logged, and the others' submissions stand.
-        try:
-            await self.pm.ahook.on_funnel_ingest(
-                channel=channel, trace_id=trace_id, annotations=annotations, submit=submit,
-            )
-        except Exception:
-            logger.warning(
-                "on_funnel_ingest raised for channel %s; promises already submitted "
-                "are kept; fix the on_funnel_ingest implementation named in the traceback",
-                cid, exc_info=True,
-                extra={"channel_id": cid, "trace_id": trace_id},
-            )
+        # Ask every implementer to submit. on_funnel_ingest is an observe hook,
+        # so an implementation's Exception is logged against its plugin and the
+        # others' submissions stand (#1094, #1097).
+        #
+        # This call can still raise: before any implementation runs (a missing
+        # hookspec, a wrapper refused at dispatch, a missing argument), and from
+        # an implementation's non-Exception, which PolicyAHook re-raises after
+        # the siblings finish. If it raises, promises still running stay in
+        # _pending and are swept next turn; a result `submit` already carried
+        # out of _pending is dropped with this frame, because _drain below never
+        # runs.
+        await self.pm.ahook.on_funnel_ingest(
+            channel=channel, trace_id=trace_id, annotations=annotations, submit=submit,
+        )
         # Admit the carried results now: collection is the last step of
         # before_agent_turn, so this is still before the turn's model call.
         if carried:

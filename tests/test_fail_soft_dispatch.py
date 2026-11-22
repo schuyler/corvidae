@@ -720,3 +720,62 @@ async def test_startup_refuses_a_sync_implementation_of_an_async_hook(
     message = str(excinfo.value)
     assert "on_notify" in message
     assert "'sync'" in message
+
+
+# --- #1097: a raising implementation never stops the others -------------------
+
+
+async def test_one_raising_on_stop_does_not_stop_the_others(caplog) -> None:
+    """A plugin whose on_stop raises must not prevent the rest (#1097).
+
+    `on_stop` is an observe hook, so the kernel's dispatch logs the failure and
+    keeps going; runtime._run_shutdown calls it unguarded for exactly that
+    reason.
+    """
+    import logging
+
+    from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
+
+    ran: list[str] = []
+
+    class Raising(CorvidaePlugin):
+        @hookimpl
+        async def on_stop(self) -> None:
+            raise RuntimeError("shutdown boom")
+
+    class Recording(CorvidaePlugin):
+        @hookimpl
+        async def on_stop(self) -> None:
+            ran.append("recording")
+
+    pm = create_plugin_manager()
+    pm.register(Raising(), name="raising")
+    pm.register(Recording(), name="recording")
+
+    with caplog.at_level(logging.WARNING, logger="corvidae"):
+        await pm.ahook.on_stop()
+
+    assert ran == ["recording"]
+    assert "raising" in caplog.text  # logged against the plugin, not a bare hook name
+
+
+async def test_a_raising_metrics_subscriber_does_not_reach_the_emitter(caplog) -> None:
+    """The kernel's own metric emitter needs no guard of its own (#1097)."""
+    import logging
+
+    from corvidae.hooks import CorvidaePlugin, hookimpl
+    from corvidae.metrics import MetricsPlugin
+
+    class Raising(CorvidaePlugin):
+        @hookimpl
+        async def on_metrics(self, name, value, tags):
+            raise RuntimeError("subscriber boom")
+
+    pm = create_plugin_manager()
+    pm.register(Raising(), name="raising")
+    emitter = MetricsPlugin(pm=pm)
+
+    with caplog.at_level(logging.WARNING, logger="corvidae"):
+        await emitter._emit("some.metric", 1.0, {"k": "v"})  # does not raise
+
+    assert "raising" in caplog.text
