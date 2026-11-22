@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, Mock
 
 import aiosqlite
 import pytest
-
 from corvidae_cognition.goals import GOALS_DDL, GoalsPlugin
 from corvidae_planning import PlanningLensPlugin
 
@@ -156,3 +155,18 @@ class TestTransformCritiquePrompt:
         assert "goals plugin is not loaded" in warning
         assert "t1" in warning and "irc:#test" in warning
         assert "plugins.disabled" in warning
+
+
+def test_entry_point_exists():
+    """The lens registers by its short role name, like every other plugin (#1110)."""
+    from importlib.metadata import entry_points
+
+    eps = entry_points(group="corvidae")
+    names = [ep.name for ep in eps]
+    assert "planning" in names, f"planning entry point missing; found: {names}"
+    assert "corvidae_planning" not in names, (
+        "the long name is what #1110 replaced; an operator's disable list matches "
+        f"the entry-point name; found: {names}"
+    )
+    ep = next(ep for ep in eps if ep.name == "planning")
+    assert ep.value == "corvidae_planning:PlanningLensPlugin"

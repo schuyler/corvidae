@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import logging
 
-from corvidae.fork import quote
-from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae_cognition.critique import Lens
 from corvidae_cognition.goals import GoalsPlugin
+
+from corvidae.fork import quote
+from corvidae.hooks import CorvidaePlugin, hookimpl
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ class PlanningLensPlugin(CorvidaePlugin):
             logger.warning(
                 "planning lens: the goals plugin is not loaded, so the fork "
                 "for trace %s on channel %s runs without the goal list; "
-                "enable goals or list corvidae_planning under plugins.disabled",
+                "enable goals or list planning under plugins.disabled",
                 trace_id, getattr(channel, "id", channel),
             )
             return None

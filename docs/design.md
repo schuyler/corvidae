@@ -4968,7 +4968,7 @@ The plugin declares `optional_depends_on = {"critique", "goals"}`, so a
 config that disables either still starts: without critique its hookimpls
 are reported at `DEBUG` and nothing runs; without goals the fork runs
 without the list and each planning fork logs a WARNING saying so. Install the
-planning extra to load it, list `corvidae_planning` under
+planning extra to load it, list `planning` under
 `plugins.disabled` to switch it off, and override the brief with
 `critique.lens.planning.fork_prompt`.
 

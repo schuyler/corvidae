@@ -2117,7 +2117,7 @@ Two things are new.
   (finding 23): its objections re-enter as framed CONTEXT at the next turn
   and wake nothing, and the lens changes no goal. An injected goal can at
   most steer the planning lens's suggestions, which the agent then judges.
-  To switch it off, list `corvidae_planning` under `plugins.disabled`.
+  To switch it off, list `planning` under `plugins.disabled`.
 - **Plugins can rewrite lens instructions.** `transform_critique_prompt`
   ([cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt))
   hands every implementer the instruction for each built-in lens fork
