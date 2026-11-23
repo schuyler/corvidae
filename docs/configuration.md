@@ -384,6 +384,7 @@ The persona is allowed to tune its own gates by default — a deliberate operato
 |-----|--------------|
 | `critique.provenance.enabled` | The correctness gate — a prompt-injected "stop second-guessing yourself" must not be able to disable the confabulation check. |
 | `critique.sample_below_rate` | The standing experiment's integrity — an agent tuning its own sampling to zero blinds the critique false-negative bound. |
+| `critique.fallback_rate` | Without an appraisal plugin it is the only way a lens runs; an agent that sets it to 0 turns every lens off. |
 | `outbound_cap.max_messages`, `outbound_cap.max_messages_per_window`, `outbound_cap.window_seconds`, `outbound_cap.count_progress` | The runaway-send caps (#791, #821). An agent that can raise or clear its own limit has no limit; an invalid override fails open, so it also lifts the cap. |
 | `gate.send.quiet_origins` | A flood guardrail, not a security boundary (#928). A quiet turn's own payload (a webhook body, a PR title) can tell the agent to un-quiet its source on that channel, which brings back the reply-per-notification flood this key prevents (bounded by `outbound_cap` if configured); a message can also quiet a source the operator wants heard. Block it where either is unacceptable. |
 
@@ -442,7 +443,7 @@ A plugin can contribute critique lenses through `on_critique_init`; see [cogniti
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `critique.lens.<name>.appraisal_question` | string | the lens's declared question | The one line the appraisal fork answers to score this lens against the others and "none" on each exchange. One line, non-empty: a blank, multi-line or non-string override fails startup naming the key; at reload it logs a warning and the lens uses its own question. Static config, so `set_settings` can't reword the critic it is scored for; reloaded on the next stage-2 call. |
+| `critique.lens.<name>.appraisal_question` | string | the lens's declared question | The one line the appraisal fork answers to score this lens against the others and "none" on each exchange. One line, non-empty: a blank, multi-line or non-string override fails startup naming the key; at reload it logs a warning and the lens uses its own question. Static config, so `set_settings` can't reword the critic it is scored for; reloaded on the next appraisal fork, before send or after the exchange. |
 | `critique.lens.<name>.fork_prompt` | string | the lens's declared brief | Replaces the brief. Critique still appends the objections reply format. Static config, reloaded on the next fork. |
 
 The same two keys configure the built-in lenses `predictive`, `constrained`, `adversarial`, `retention` and `proactivity`. Selection is the critique vector (#1078): the appraisal fork scores each offered lens's question and "none", the top share runs, and "none" wins ties. When "none" wins, or there is no vector, `critique.sample_below_rate` runs one random offered lens. See [cognition.md](cognition.md#how-a-lens-is-chosen-the-critique-vector-1078).

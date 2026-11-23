@@ -109,6 +109,7 @@ agent:
   #   # participants (see docs/configuration.md "Runtime-tunable gate parameters"):
   #   # - critique.provenance.enabled
   #   # - critique.sample_below_rate
+  #   # - critique.fallback_rate
 
 # Autobiographical memory (optional; see docs/configuration.md)
 # memory:

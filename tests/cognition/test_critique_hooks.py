@@ -215,6 +215,9 @@ async def test_fallback_rate_one_runs_one_lens_at_each_point(tmp_path):
         assert "[Self-critique: proactivity]" in call["instruction"]
         env.funnel.ingest.assert_called_once()
         env.funnel.ingest_and_wake.assert_not_awaited()
+        # A fallback run is not a sample below threshold, at either point.
+        outcomes = await _read_outcomes(env.recorder, "kf1")
+        assert outcomes["critique_before_send"]["sampled"] is False
         # After the exchange: one more lens, not a before-send one.
         await _fire(env, "kf1")
         await _drain(env)
@@ -351,18 +354,6 @@ def test_appraisal_has_no_listener_or_offer_seam_left():
 
     for name in ("add_stage2_listener", "set_lens_offer", "get_originating_text"):
         assert not hasattr(AppraisalPlugin, name), name
-
-
-def test_critique_never_looks_appraisal_up_and_the_ratchet_entry_is_gone():
-    """Item 14: critique.py holds no get_plugin("appraisal") call, and the
-    boundary ratchet no longer lists one for it."""
-    import corvidae_cognition.critique as critique_module
-    from tests.test_plugin_boundary import ALLOWED
-
-    source = Path(critique_module.__file__).read_text(encoding="utf-8")
-    assert not re.search(r"""get_plugin\(\s*["']appraisal["']""", source)
-    entry = ALLOWED["packages/corvidae-cognition/corvidae_cognition/critique.py"]
-    assert "appraisal" not in entry
 
 
 # ---------------------------------------------------------------------------

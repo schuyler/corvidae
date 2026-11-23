@@ -1244,9 +1244,11 @@ class CritiquePlugin(CorvidaePlugin):
             ):
                 offered = [name for name, _ in self._offers("before_send")]
                 if offered:
+                    # sampled=False, as at idle: a fallback run is not a
+                    # "none won" sample below threshold.
                     await self._run_before_send(
                         channel, trace_id, text, annotations,
-                        self._random_lens(offered), True)
+                        self._random_lens(offered), False)
             return None
         except Exception:
             logger.warning(
