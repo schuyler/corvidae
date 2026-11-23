@@ -701,6 +701,8 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 
 The source admits under `funnel.budgets.markdown_recall` (falling back to `funnel.default_budget`), so a per-source token cap is available like any other source's.
 
+Other plugins can search the same folders through the hook `resolve_markdown_recall_search(query)` (#1190), which markdown_recall declares and answers. It returns the top `max_hits` hits, one `<path>: <text>` line each (`""` for none). It returns `None` when the plugin has no index or the index has not been built yet, and in that case it creates nothing. It only reads the index (plus the embedding call for the query), so a caller may offer it to a fork as a read-only tool. A call made while a reconcile is rebuilding the index waits for the rebuild.
+
 ---
 
 ## `tools` — built-in tool settings

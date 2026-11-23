@@ -2633,7 +2633,7 @@ body is built to give this order, later entries winning:
 3. The channel's runtime overrides, minus every key the stage profile's
    `extra_body` also sets.
 4. The stage's `extra_body` argument (`response_format`).
-5. `tool_choice: "none"`.
+5. `tool_choice: "none"` (`"auto"` while a fork with `max_tool_calls` still has calls left).
 
 So the profile beats `set_settings`: a channel's runtime `max_tokens: 200`
 against a stage profile with `extra_body.max_tokens: 4096` sends 4096. The
@@ -2652,10 +2652,48 @@ resolves to the default chat profile, so an override of a key in that
 profile's `extra_body` is dropped for its forks while still applying to the
 channel's main turns.
 
-**Invariants.** A fork mutates nothing, persists nothing, fires no hooks,
-and never dispatches tools: a reply carrying `tool_calls`, or a tool call
-written out as text (`<tool_call>`, a `<function…>` tag, a bare
-`{"name", "arguments"}` object), raises `ForkRefused`. No live window or
+**Invariants.** A fork mutates nothing, persists nothing and fires no
+hooks. With `max_tool_calls=0` (the default) it never dispatches tools: a
+reply carrying `tool_calls`, or a tool call written out as text
+(`<tool_call>`, a `<function…>` tag, a bare `{"name", "arguments"}`
+object), raises `ForkRefused`.
+
+**Read-only tool calls (#1190).** With `max_tool_calls=N` above 0, a fork
+may call tools whose function declares `reads_only = True`
+(`corvidae.tool.declares_read_only`). It sends the channel's tool schemas
+as before, so the prefix still matches, with `tool_choice: "auto"` while
+calls remain. On a reply with tool calls:
+
+1. The whole reply is checked first. A call that is not a dict, whose `id`
+   is not a non-empty string or repeats an id seen earlier in the fork, or
+   whose `function` lacks a string `name` and `arguments`, raises
+   `ForkRefused`.
+2. Each call, in order, is looked up in the channel's tool view and checked
+   against the live `disabled_on` list, as the main loop does.
+   - A tool that is missing, disabled, or not declared read-only is not run;
+     its result is a refusal naming it.
+   - Otherwise the call goes through `dispatch_tool_call` with `pm=None`
+     and no task queue, so no hook fires: no `transform_tool_result`, and no
+     pre-tool-use check.
+   - Every call counts against N, and a call past the cap gets a "limit
+     reached" result.
+3. Each result, refusal or not, becomes a tool row carrying a provenance
+   record `ItemMetadata(tool=name, untrusted=True)` and is rendered through
+   `provenance.frame` with the window's fence key. So it reaches the model
+   in the main loop's untrusted fence whatever the tool declares (PRD §3.8
+   item 1).
+4. The assistant message and the framed results are appended to the fork's
+   private message list, and the loop repeats. Nothing is persisted, and
+   the window is untouched.
+
+The request after the Nth call sends `tool_choice: "none"`, and reaching
+the cap logs WARNING `fork tool-call limit reached`. Each call logs INFO
+`fork tool call` with `stage`, `channel`, `trace_id`, `tool` and
+`dispatched`. The loop runs inside the fork's `set_attribution(mode="fork")`
+scope, so every request, and any embedding call a tool makes, is metered
+under the caller's stage. `lease_scope` wraps each request only. The
+`stage start`/`stage done` pair stays one pair per fork, and
+`ForkResult.usage` is the last request's. No live window or
 no client for its stage raises `ForkUnavailable`.
 Every caller treats any fork exception, or an empty or unparseable reply,
 as a miss: it logs at WARNING and the live-window stage skips, with no

@@ -1228,6 +1228,15 @@ outside content, because replayed rows carry whatever the original senders
 wrote. Both `recall_raw` forms are fenced. `search_memory` is not: it
 returns the agent's own record summaries.
 
+**Read-only (#1190).** `search_memory` and `search_transcripts` declare
+`reads_only = True`, so a fork whose caller allows tool calls may run them
+(design.md, "Read-only tool calls"). Inside a fork every result is fenced,
+`search_memory`'s included. `recall_raw` does not declare it: its
+by-record form bumps access statistics. One known limit: both tools wait
+for, and if need be create, memory's schema before their first query, so
+before memory's schema is ready they are not strictly read-only. In
+practice that window is startup.
+
 **Search by meaning (#667).** With the vector path up, `search_memory`
 embeds the query (`kind="query"`) and ranks two lists over the same filters
 by reciprocal rank fusion, as passive retrieval does (#666):
