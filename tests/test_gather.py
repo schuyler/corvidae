@@ -158,11 +158,13 @@ async def env(tmp_path):
     from corvidae.held import HeldContext
     from corvidae.spill import NotificationSpill
 
-    spill = NotificationSpill()
-    plugin.pm.register(spill, name="spill")
-    await spill.on_init(
-        pm=plugin.pm, config={"daemon": {"notification_spill_dir": str(tmp_path / "spill")}}
-    )
+    # Guarded like held, so a shared helper that registers spill does not collide.
+    if plugin.pm.get_plugin("spill") is None:
+        spill = NotificationSpill()
+        plugin.pm.register(spill, name="spill")
+        await spill.on_init(
+            pm=plugin.pm, config={"daemon": {"notification_spill_dir": str(tmp_path / "spill")}}
+        )
     if plugin.pm.get_plugin("held") is None:
         held = HeldContext()
         plugin.pm.register(held, name="held")
@@ -215,6 +217,9 @@ class TestOnePrimitive:
 
         async def spy(pm, hook_name, **kwargs):
             seen.append((hook_name, kwargs["phase"]))
+            # Before effect must ask for the early exit on a refusal (G2's seam).
+            if kwargs["phase"] == "before_effect":
+                assert kwargs.get("stop_on") is not None, hook_name
             return await real(pm, hook_name, **kwargs)
 
         monkeypatch.setattr(checks_mod, "gather", spy)

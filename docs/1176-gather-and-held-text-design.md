@@ -806,3 +806,16 @@ Round 1 (cold reviewer, at `1609e35`): FAIL, 2 critical and 3 important.
 | Cosmetics: `_drain_late_checks` assertion; strict funnel-string ban; H13 re-asserting the metric; H3 origin equal to source; G4 blind to real-time sleeps | kept: non-blocking |
 | Edge: the store fixture has no `tools` plugin | deferred to Green: stub `_can_read` if the implementation calls it on every hold |
 | Upstream: no per-channel allowance test at before compose; wrapper vs plain policy | noted |
+
+Round 2 (fresh cold reviewer, at `d9aa874`): **PASS**. All round-1 fixes
+landed, with no recurrence. Non-blocking follow-ups:
+
+- **Fixed:** `test_gather.py`'s spill registration is guarded; G1's spy
+  asserts `stop_on` at the before-effect point.
+- **For Green:** the funnel resolves `held` lazily, because the F tests
+  register their fake `held` after `on_init`. H5's mid-call test should
+  drain its last turn (`settle_all`). The F7 timeout branch is untested.
+- **Kept:** F6's `FunnelSpec` check (same claim as `on_funnel_ingest`). The
+  substring matches in H12/H14.
+
+The Red gate passed.
