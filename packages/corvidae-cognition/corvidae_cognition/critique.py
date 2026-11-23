@@ -1245,7 +1245,6 @@ class CritiquePlugin(CorvidaePlugin):
             "the provenance check stays off until message_fts exists",
         )
 
-    @hookimpl
     async def _record_fork(self, **kwargs) -> None:
         """Record one critique fork for #1204; never affects the verdict."""
         log = getattr(self, "_fork_log", None)

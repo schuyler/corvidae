@@ -2207,7 +2207,6 @@ class MemoryPlugin(CorvidaePlugin):
         # Arm even if the schema was not ready; the arm retries its read.
         await self._arm_retention()
 
-    @hookimpl
     async def _record_fork(self, **kwargs) -> None:
         """Record one consolidation fork for #1204; never affects the result."""
         log = getattr(self, "_fork_log", None)
