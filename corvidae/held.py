@@ -254,6 +254,25 @@ class HeldContext(CorvidaePlugin):
         self._stub_pending.discard(pair)
         self._rearm.add(pair)
 
+    def stub_dropped(self, channel: Channel, origin: str) -> None:
+        """A stub's turn ended before admission (it raised): mark the pair for a re-fire.
+
+        Without this the pair stays pending with no item left to spend it, and
+        every later ``hold_and_wake`` for it only queues (#1237). Nothing
+        happens when the pair is no longer pending.
+        """
+        pair = (channel.id, origin)
+        # Already spent, deferred or failed: those paths cleared the flag.
+        if pair not in self._stub_pending:
+            return
+        self._stub_pending.discard(pair)
+        self._rearm.add(pair)
+        logger.warning(
+            "held: the %s stub on channel %s ended before its batches were admitted; "
+            "it is re-fired when the channel's next turn ends",
+            origin, channel.id, extra={"channel": channel.id},
+        )
+
     async def turn_ended(self, channel: Channel) -> None:
         """Re-fire the stub of each marked pair, at the end of a tool cycle.
 

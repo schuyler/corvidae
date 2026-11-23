@@ -1907,7 +1907,10 @@ held back for one revision. Nothing is withheld on a lens's say-so.
   is checked, the revision's own included. The hold ends at the revision's
   final, or at the channel's first final after the offer with no tool call
   outstanding (a revision whose tools are still running, or whose turn
-  failed, ends at the next such final). Finals from other turns in that span
+  failed, ends at the next such final). The span is bounded by the timeouts of
+  the channel's outstanding calls (`tools.call_timeout`, `tools.timeouts`, and
+  a tool's own); a call the operator unbounds can hold it open until restart
+  (#1225). Finals from other turns in that span
   go out unchecked.
 - **A late refusal holds nothing.** When the check misses the channel's
   allowance, the reply has already gone: nothing is held and no turn is

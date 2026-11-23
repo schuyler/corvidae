@@ -1735,6 +1735,10 @@ class Agent(CorvidaePlugin):
         # return (which sets its own outcome) or an exception (#469 review).
         _outcome = "failed"
         _closed = False
+        # A held stub whose turn ends before _compose_held (an exception) has
+        # not been spent; the finally hands it back to the store (#1237). A
+        # retry's first attempt already composed.
+        _stub_settled = item.retry
         # Bound before the try: the close in the finally reads it, and an early
         # return (no conversation message) leaves before step 1 assigns it.
         conv: ContextWindow | None = None
@@ -1903,6 +1907,8 @@ class Agent(CorvidaePlugin):
                 # Before compose: gather contributions under the check
                 # allowance, then admit held text and the in-time answers.
                 await self._compose_held(channel, conv, item)
+                # The held store has spent or deferred this item's stub (#1237).
+                _stub_settled = True
                 _phases["before_turn"] = time.monotonic() - _t_before_turn_start
 
             # 7. Build prompt and call run_agent_turn (single LLM invocation)
@@ -2044,6 +2050,18 @@ class Agent(CorvidaePlugin):
                         "is retried at the end of the next tool cycle",
                         channel.id, exc_info=True, extra={"channel": channel.id},
                     )
+            # A stub this turn never admitted goes back for a re-fire. After
+            # turn_ended, so a stub that raises every time re-fires once per
+            # later turn rather than in a loop of its own (#1237).
+            _stub_origin = item.annotations.get("origin")
+            if (
+                not _stub_settled
+                and item.role == QueueItemRole.NOTIFICATION
+                and not item.tool_call_id
+                and STUB_ANNOTATION in item.annotations
+                and _stub_origin is not None
+            ):
+                get_dependency(self.pm, "held", HeldContext).stub_dropped(channel, _stub_origin)
             # Every item that starts closes: an early return (an absorbed
             # tool result, a turn that produced no result, no conversation
             # message) or an exception would otherwise leave the start
