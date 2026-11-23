@@ -2,7 +2,7 @@
 
 A recall source (``corvidae_cognition.recall.RecallSourceMixin``) that searches
 a folder of markdown files for the turn the agent is about to take and hands
-the hits to the funnel as framed CONTEXT. The index is a cheap-to-rebuild cache
+the hits to the turn's prompt as framed CONTEXT. The index is a cheap-to-rebuild cache
 over the folder; the files are the source of truth. Startup and idle reconcile
 keep it current (the inotify directory watcher is a follow-up — it needs the
 #723 constant fix, extraction from the ping plugin, and recursion).
@@ -51,15 +51,13 @@ class MarkdownRecallSpec:
 class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
     """Recalls from a folder of markdown files on every plain user turn.
 
-    The folder is untrusted text under the funnel's framing (PRD principle 9);
-    the funnel is the only route its content reaches the window.
+    The folder is untrusted text under the held-text store's framing (PRD
+    principle 9); the store is the only route its content reaches the window.
     """
 
-    # Hard deps: the embedding client (llm) and the idle tracker (idle). The
-    # funnel is an optional dep declared by the mixin (a source without it does
-    # nothing, logged at DEBUG, not a stray hook).
+    # Hard deps: the embedding client (llm) and the idle tracker (idle).
     depends_on = frozenset({"llm", "idle"})
-    # The funnel's frame label and the funnel.budgets key.
+    # The store's frame label and the funnel.budgets key.
     source_name = "markdown_recall"
     # The agent.yaml block: root, db_path, max_hits, and the mixin's
     # cooldown/timeout.
@@ -79,7 +77,7 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
         await super().on_init(pm, config)  # stores self.pm and self.config
         self._pm = pm
         # The recall gate (cooldown/timeout) is always initialized, even
-        # when the plugin is inert: the mixin's on_funnel_ingest runs on
+        # when the plugin is inert: the mixin's before_compose runs on
         # every user turn and raises if _recall_gate is None (#739). An
         # inert source's search() returns None, so the gate is never
         # exercised.
@@ -188,11 +186,11 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
         return await self._index.search(query, k=self._max_hits)
 
     def render(self, hit: Hit) -> str:
-        """Render one hit as the line the funnel admits.
+        """Render one hit as the line the store admits.
 
         ``hit.text`` already carries the chunker's ``[section_path]`` prefix, so
         it is the line as-is (adding the prefix again would double it). Stable
-        for a given chunk's content: the funnel dedupes on whole text, so a line
+        for a given chunk's content: the funnel's policy dedupes on whole text, so a line
         that changes between turns would defeat it. An edit changes the text and
         so the line — the new content re-surfaces.
         """

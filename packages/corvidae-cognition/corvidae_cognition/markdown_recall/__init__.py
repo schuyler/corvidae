@@ -2,7 +2,7 @@
 
 A recall source for a folder of markdown files: the chunker (vendored from
 otterwiki-semantic-search), the SQLite index (vec0 + FTS5 + reconcile), and the
-plugin that wires them to the recall mixin and the funnel.
+plugin that wires them to the recall mixin.
 """
 
 import logging

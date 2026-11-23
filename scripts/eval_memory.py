@@ -140,7 +140,6 @@ async def run_live_evaluation(args) -> None:
     """
 
     import aiosqlite
-    from corvidae_cognition.funnel import FunnelPlugin
     from corvidae_cognition.memory import MemoryPlugin
 
     from corvidae.hooks import create_plugin_manager
@@ -207,10 +206,6 @@ async def run_live_evaluation(args) -> None:
     usage = UsageLogPlugin()
     pm.register(usage, name="usage_log")
     await usage.on_init(pm=pm, config=config)
-
-    funnel = FunnelPlugin()
-    pm.register(funnel, name="funnel")
-    await funnel.on_init(pm=pm, config=config)
 
     await memory_plugin.on_start(config=config)
 
@@ -568,7 +563,7 @@ def probe_query(query: LabelQuery, query_context: str) -> str:
 
     The probe becomes a two-row window (its context as the previous reply,
     then its text as the unanswered user message) and goes through
-    ``retrieval_query``, so the eval cannot drift from ``before_agent_turn``.
+    ``retrieval_query``, so the eval cannot drift from ``before_compose``.
     """
     from corvidae_cognition.memory import retrieval_query
 
@@ -808,7 +803,7 @@ async def run_snapshot_evaluation(
             top = pool.ranked[: pool.k]
             top_ids = [c["id"] for c in top]
             # The gate is the daemon's (#802), so a threshold fitted here is
-            # the one before_agent_turn applies.
+            # the one before_compose applies.
             admitted = admitted_candidates(top, pool.degraded)
             admitted_ids = {c["id"] for c in admitted}
             # False admits are measured only where the gate ran: a degraded

@@ -3,7 +3,7 @@
 Compaction becomes memory formation: dialog leaving the active window is
 consolidated into first-person memory records (SQLite + sqlite-vec + FTS5),
 and inbound messages trigger retrieval whose results enter the window
-through the context-admission funnel (bootstrap-mapping §3.1).
+through the held-text store (before_compose) (bootstrap-mapping §3.1).
 
 This module owns the memory schema:
   - ``memory``: one row per consolidated first-person record, linked back
@@ -125,10 +125,10 @@ from corvidae.fork import (
     view_call,
     window_db_ids,
 )
+from corvidae.held import Contribution
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm_plugin import parse_llm_config
 from corvidae_cognition.config_keys import read_count
-from corvidae_cognition.funnel import DEFAULT_BUDGET_TOKENS, Admission
 from corvidae.persistence import (
     add_column_if_missing,
     decode_message_row,
@@ -1285,7 +1285,7 @@ def _memory_line(candidate: dict) -> str:
 
 
 def _memory_key(candidate: dict) -> str:
-    """The funnel dedupe key for a memory line: ``memory <id>)`` (#624).
+    """The policy dedupe key for a memory line: ``memory <id>)`` (#624).
 
     It is the part of the line that names the record and never changes, so a
     record already in the window dedupes whatever its age or band reads now.
@@ -1328,17 +1328,55 @@ def _previous_reply(messages: list[dict]) -> str | None:
 
 
 def admitted_candidates(candidates: list[dict], degraded: bool) -> list[dict]:
-    """The candidates passive retrieval admits, before the funnel (#703, #802).
+    """The candidates passive retrieval admits, before the policy (#703, #802).
 
     The FTS5-degraded path has no relevance to gate on, so it admits what it
     found; otherwise a candidate banded ``weak`` is dropped with no fallback
     (#409), so a query with nothing above weak admits nothing. Shared by
-    ``before_agent_turn`` and ``scripts/eval_memory.py``, so the eval measures
+    ``before_compose`` and ``scripts/eval_memory.py``, so the eval measures
     what the daemon admits and the two cannot drift.
     """
     if degraded:
         return list(candidates)
     return [c for c in candidates if c["band"] != "weak"]
+
+
+def tail_is_plain_user_message(messages: list[dict]) -> bool:
+    """True when the window's last non-CONTEXT row is a plain user MESSAGE with text.
+
+    CONTEXT rows at the tail are looked through: before compose runs after every
+    ``before_agent_turn``, and a stamp (timepiece) or a pending row (signal)
+    appended there leaves CONTEXT below the user's message, which is still a
+    user turn. Retrieval is skipped on turns that a tool result, a notification
+    or an agent reply ends. Shared by memory and the recall sources.
+    """
+    # Walk back past trailing CONTEXT rows to the last row that is not one.
+    for tail in reversed(messages):
+        if tail.get("_message_type") == MessageType.CONTEXT:
+            continue
+        return (
+            tail.get("role") == "user"
+            and tail.get("_message_type", MessageType.MESSAGE) == MessageType.MESSAGE
+            and isinstance(tail.get("content"), str)
+            and bool(tail["content"].strip())
+        )
+    # An empty window (or one of CONTEXT only) has no user message.
+    return False
+
+
+@dataclass(frozen=True)
+class _Retrieval:
+    """What one passive retrieval decided, kept until the store announces its outcome."""
+
+    # The scored pool (ranked candidates, exclusions, banding path).
+    pool: RetrievalPool
+    # The candidates offered to the store, and one dedupe key per candidate.
+    selected: list[dict]
+    keys: list[str]
+    # The retrieval profile of the top-ranked candidate, and the candidate count.
+    top_score: float | None
+    top_similarity: float | None
+    hit_count: int
 
 
 def retrieval_query(messages: list[dict], query_context: str) -> str:
@@ -1348,7 +1386,7 @@ def retrieval_query(messages: list[dict], query_context: str) -> str:
     ``query_context: previous_reply`` by the agent's previous reply when the
     window holds one. Parts are joined by blank lines, so the FTS query's
     per-paragraph token cap gives each its own budget and a long reply cannot
-    crowd out the user's words. Shared by ``before_agent_turn`` and
+    crowd out the user's words. Shared by ``before_compose`` and
     ``scripts/eval_memory.py`` so the eval scores the query the daemon runs.
     shortcut: the reply is used whole, however long; trim or cap it if the
     labelled self-contained probes show it diluting short questions.
@@ -1701,8 +1739,7 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
 
 # One row per logged candidate of a passive retrieval (#407). Holds ids and
 # numbers only, never text. outcome is one of: admitted, dropped_weak,
-# dropped_budget, dropped_dup, cut, excluded_in_window, not_admitted (no
-# funnel registered, #654).
+# dropped_budget, dropped_dup, cut, excluded_in_window.
 RETRIEVAL_CANDIDATE_DDL = """
 CREATE TABLE IF NOT EXISTS retrieval_candidate (
     retrieval_id INTEGER NOT NULL,   -- retrieval_log.id
@@ -1929,9 +1966,9 @@ class MemoryPlugin(CorvidaePlugin):
         self._recency_from: str = RECENCY_FROM_CHOICES[0]
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold: float = 0.95
-        # Memory admission budget for raw-fallback pieces (#626; on_init sets).
-        self._memory_budget: int = DEFAULT_BUDGET_TOKENS
-        self._memory_budget_key: str = "funnel.budgets.memory"
+        # What each passive retrieval decided, until the store announces its
+        # outcome: (channel id, trace id) -> the selection and the pool's profile.
+        self._retrievals: dict[tuple[str, str | None], _Retrieval] = {}
         # Tracked background tasks (consolidation) — plugin-owned
         # asyncio.create_task, never the TaskQueue: every TaskQueue
         # completion triggers a full main-model turn (§2.3, trap #5).
@@ -2130,20 +2167,6 @@ class MemoryPlugin(CorvidaePlugin):
         )
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold = float(self._memory_cfg.get("dup_threshold", 0.95))
-        # The memory admission budget, which raw-fallback pieces must fit
-        # (#626): the funnel's memory budget, else its default, else the
-        # funnel's built-in default. The key is kept for the warning.
-        funnel_cfg = config.get("funnel", {}) or {}
-        funnel_budgets = funnel_cfg.get("budgets", {}) or {}
-        if "memory" in funnel_budgets:
-            self._memory_budget = funnel_budgets["memory"]
-            self._memory_budget_key = "funnel.budgets.memory"
-        elif "default_budget" in funnel_cfg:
-            self._memory_budget = funnel_cfg["default_budget"]
-            self._memory_budget_key = "funnel.default_budget"
-        else:
-            self._memory_budget = DEFAULT_BUDGET_TOKENS
-            self._memory_budget_key = "funnel.budgets.memory (unset; the funnel default)"
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -3559,7 +3582,7 @@ class MemoryPlugin(CorvidaePlugin):
         # stamped raw: no call wrote this text (#626).
         raw_stamp = dataclasses.replace(stamp, mode="raw")
         max_tokens = (
-            self._memory_budget - count_tokens(WORST_MEMORY_LINE_PREFIX) - 1
+            self._entry_target_tokens - count_tokens(WORST_MEMORY_LINE_PREFIX) - 1
         )
         if max_tokens < 1:
             # No memory line can fit this budget: splitting would only make
@@ -3567,9 +3590,9 @@ class MemoryPlugin(CorvidaePlugin):
             logger.warning(
                 "consolidation of channel %s, message ids %s: both replies "
                 "unusable; storing the raw transcript as one record, since "
-                "the memory budget (%s = %s tokens) is too small for any "
+                "memory.entry_target_tokens (%s tokens) is too small for any "
                 "memory line; raise it to make raw records admissible",
-                channel_id, span, self._memory_budget_key, self._memory_budget,
+                channel_id, span, self._entry_target_tokens,
             )
             pieces = [_dialog_transcript(seg_dialog)]
         else:
@@ -3577,9 +3600,8 @@ class MemoryPlugin(CorvidaePlugin):
             logger.warning(
                 "consolidation of channel %s, message ids %s: both replies "
                 "unusable; storing the raw transcript as %d record(s) sized "
-                "to the memory budget (%s = %s tokens)",
-                channel_id, span, len(pieces),
-                self._memory_budget_key, self._memory_budget,
+                "to memory.entry_target_tokens (%s tokens)",
+                channel_id, span, len(pieces), self._entry_target_tokens,
             )
         return Consolidation(
             entries=tuple(ConsolidationEntry(p, ()) for p in pieces),
@@ -3593,34 +3615,27 @@ class MemoryPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def before_agent_turn(self, channel, trace_id, annotations) -> None:
-        """Retrieve memories for the inbound user text and admit them.
+    async def before_compose(self, channel, trace_id, annotations) -> Contribution | None:
+        """Retrieve memories for the inbound user text and contribute them.
 
-        Runs only when the window tail is a plain user MESSAGE — retrieval
-        is skipped entirely on notification-triggered turns. Everything
-        here is fail-soft: retrieval trouble must never break the turn.
+        Runs only when the window's last non-CONTEXT row is a plain user
+        MESSAGE; retrieval is skipped entirely on notification-triggered
+        turns. Everything here is fail-soft: retrieval trouble must never break
+        the turn. The selection is stashed under ``(channel, trace_id)``;
+        ``on_held_admitted`` writes the records once the store has said what it
+        admitted.
 
-        ``trace_id``: when present, the retrieval profile is written
-        into retrieval_log.trace_id and reported on the trace through
-        on_trace_record, source "memory" (retrieval_top_score,
-        retrieval_top_similarity, retrieval_hit_count).
+        An empty ``Contribution`` is returned when every candidate is weak, so
+        the store still announces the outcome and the records close.
         """
         try:
             conv = getattr(channel, "conversation", None)
-            if conv is None or not conv.messages:
-                return
-            tail = conv.messages[-1]
-            if (
-                tail.get("role") != "user"
-                or tail.get("_message_type", MessageType.MESSAGE) != MessageType.MESSAGE
-                or not isinstance(tail.get("content"), str)
-                or not tail["content"].strip()
-            ):
-                return
+            if conv is None or not tail_is_plain_user_message(conv.messages):
+                return None
 
             db = await self._ensure_schema()
             if db is None:
-                return
+                return None
 
             # Query with every unanswered user message (a coalesced burst),
             # preceded by the agent's previous reply unless configured off
@@ -3632,7 +3647,6 @@ class MemoryPlugin(CorvidaePlugin):
             window_ids = window_db_ids(conv.messages)
             exclude = (channel.id, min(window_ids)) if window_ids else None
             pool = await self._retrieve_pool(query, exclude=exclude)
-            degraded = pool.degraded
             candidates = pool.ranked[: pool.k]
 
             # Drop weak-banded candidates, with no fallback (#409): a query
@@ -3640,42 +3654,68 @@ class MemoryPlugin(CorvidaePlugin):
             # has no relevance to gate on, so it admits its top k (flagged in
             # retrieval_log and marked marginal). The rule is shared with the
             # eval, which measures false admits against it (#802).
-            selected = admitted_candidates(candidates, degraded)
+            selected = admitted_candidates(candidates, pool.degraded)
 
             # One line per memory: "(age, memory <id>) summary", marked
             # "[marginal]" when the record banded moderate; each keyed on its
-            # record id for the funnel's dedupe.
+            # record id for the policy's dedupe.
             lines = [_memory_line(c) for c in selected]
             keys = [_memory_key(c) for c in selected]
 
-            # Admit through the funnel — never append CONTEXT directly
-            # (trap #8); the funnel dedupes against the window and budgets.
-            admitted_ids: list[int] = []
-            admission = Admission(admitted=[], duplicate=[])
-            # No funnel means nothing could be admitted (#654: logged as
-            # not_admitted, not as a budget drop).
-            no_funnel = False
-            if lines:
-                funnel = self.pm.get_plugin("funnel")
-                no_funnel = funnel is None
-                if funnel is None:
-                    logger.warning(
-                        "funnel plugin not registered; memory retrieval "
-                        "cannot admit context"
-                    )
-                else:
-                    admission = await funnel.admit_detailed(
-                        channel, conv, "memory", lines, keys=keys
-                    )
-                    admitted_lines = admission.admitted
-                    if admitted_lines:
-                        admitted_ids = [
-                            c["id"] for c, line in zip(selected, lines)
-                            if line in admitted_lines
-                        ]
+            # Keep what the event needs to write the records: the pool, the
+            # selection with its keys, and the top candidate's profile. Both
+            # profile values describe the top-ranked candidate (measured-first
+            # on the hybrid path, by score otherwise): its decayed score, and
+            # the raw similarity that band_on: similarity compares against the
+            # band thresholds.
+            self._retrievals[(channel.id, trace_id)] = _Retrieval(
+                pool=pool, selected=selected, keys=keys,
+                top_score=candidates[0]["score"] if candidates else None,
+                top_similarity=candidates[0]["similarity"] if candidates else None,
+                hit_count=len(candidates),
+            )
+            return Contribution("memory", lines, keys)
+        except Exception:
+            logger.warning(
+                "memory retrieval failed on channel %s (trace %s); turn proceeds "
+                "without it",
+                channel.id, trace_id,
+                exc_info=True, extra={"channel_id": channel.id},
+            )
+            return None
 
-            # Access stats — the write half of reconsolidation — move only
-            # for memories that actually entered the window.
+    @hookimpl
+    async def on_held_admitted(
+        self, channel, source: str, trace_id, admitted_keys: list[str],
+        duplicate_keys: list[str],
+    ) -> None:
+        """Write the retrieval's records once the store has said what it admitted.
+
+        Acts only on ``source == "memory"`` for a trace this plugin stashed a
+        selection for; any other event is another source's or trace's. Writes
+        access stats (the write half of reconsolidation, only for memories that
+        entered the window), the ``retrieval_log`` row, one
+        ``retrieval_candidate`` row per pool candidate, and reports the
+        retrieval profile on the trace through ``on_trace_record``. A key in
+        neither list was dropped (budget, a superseded batch, or the TTL).
+        """
+        # Only memory's own batch closes memory's records.
+        if source != "memory":
+            return
+        stash = self._retrievals.pop((channel.id, trace_id), None)
+        # No stash: this batch was not produced by a retrieval this process made.
+        if stash is None:
+            return
+        try:
+            db = await self._ensure_schema()
+            if db is None:
+                return
+            pool, selected, keys = stash.pool, stash.selected, stash.keys
+            admitted = set(admitted_keys)
+            duplicate = set(duplicate_keys)
+            admitted_ids = [c["id"] for c, key in zip(selected, keys) if key in admitted]
+
+            # Access stats move only for memories that actually entered the window.
             if admitted_ids:
                 now = time.time()
                 placeholders = ",".join("?" for _ in admitted_ids)
@@ -3686,13 +3726,6 @@ class MemoryPlugin(CorvidaePlugin):
                 )
 
             # Persist the retrieval profile (§3.7's day-one raw stream).
-            # Both values describe the top-ranked candidate (measured-first
-            # on the hybrid path, by score otherwise): its decayed score,
-            # and the raw similarity that band_on: similarity compares
-            # against the band thresholds.
-            top_score = candidates[0]["score"] if candidates else None
-            top_similarity = candidates[0]["similarity"] if candidates else None
-            hit_count = len(candidates)
             log_cursor = await db.execute(
                 "INSERT INTO retrieval_log (ts, channel_id, trace_id, top_score, "
                 "top_similarity, hit_count, admitted_count, degraded_to_fts, "
@@ -3701,11 +3734,11 @@ class MemoryPlugin(CorvidaePlugin):
                     time.time(),
                     channel.id,
                     trace_id,
-                    top_score,
-                    top_similarity,
-                    hit_count,
+                    stash.top_score,
+                    stash.top_similarity,
+                    stash.hit_count,
                     len(admitted_ids),
-                    1 if degraded else 0,
+                    1 if pool.degraded else 0,
                     pool.excluded_in_window,
                     pool.banding_path,
                 ),
@@ -3717,22 +3750,18 @@ class MemoryPlugin(CorvidaePlugin):
             # profile, so it is caught and warned about on its own.
             try:
                 rows = []
-                selected_ids = {c["id"] for c in selected}
+                key_of = {c["id"]: key for c, key in zip(selected, keys)}
                 for i, c in enumerate(pool.ranked):
                     if i >= pool.k:
                         outcome = "cut"
-                    elif c["id"] not in selected_ids:
+                    elif c["id"] not in key_of:
                         outcome = "dropped_weak"
+                    elif key_of[c["id"]] in admitted:
+                        outcome = "admitted"
+                    elif key_of[c["id"]] in duplicate:
+                        outcome = "dropped_dup"
                     else:
-                        line = lines[selected.index(c)]
-                        if line in admission.admitted:
-                            outcome = "admitted"
-                        elif line in admission.duplicate:
-                            outcome = "dropped_dup"
-                        elif no_funnel:
-                            outcome = "not_admitted"
-                        else:
-                            outcome = "dropped_budget"
+                        outcome = "dropped_budget"
                     rows.append((retrieval_id, c["id"], c["similarity"],
                                  c["score"], c["band"], i + 1, outcome,
                                  c["source"], c["z"],
@@ -3772,14 +3801,16 @@ class MemoryPlugin(CorvidaePlugin):
                 await self.pm.ahook.on_trace_record(
                     trace_id=trace_id, channel_id=channel.id, source="memory",
                     origin=None, record={
-                        "retrieval_top_score": top_score,
-                        "retrieval_top_similarity": top_similarity,
-                        "retrieval_hit_count": hit_count,
+                        "retrieval_top_score": stash.top_score,
+                        "retrieval_top_similarity": stash.top_similarity,
+                        "retrieval_hit_count": stash.hit_count,
                     },
                 )
         except Exception:
             logger.warning(
-                "memory retrieval failed; turn proceeds without it",
+                "memory retrieval records failed for channel %s (trace %s); the "
+                "turn is unaffected but this retrieval is not logged",
+                channel.id, trace_id,
                 exc_info=True, extra={"channel_id": channel.id},
             )
 
