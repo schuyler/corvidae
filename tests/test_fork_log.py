@@ -70,7 +70,7 @@ async def test_the_question_is_stored_with_its_hash(log):
     )
     row = await _row(log, fork_id)
     assert row["question_text"] == "does this draft commit us to a date?"
-    assert row["question_sha256"] == question_sha256(
+    assert bytes(row["question_sha256"]) == question_sha256(
         "does this draft commit us to a date?"
     )
 
