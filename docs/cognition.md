@@ -1288,7 +1288,7 @@ another task.
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
-| `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | Search by meaning and keywords (above). Returns a list `id. score (age)[flags] summary`, led by each memory id (for `recall_raw`), best match first, capped at approximately `max_tokens`. The score is the cosine similarity to the query (two decimals), or `kw` for a keyword hit with no vector. In keyword-only fallback the first line says so, results are in FTS order, and the score is the negated bm25 rank. `channel` narrows to one channel's records by exact id; a channel with no records matches nothing. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
+| `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | Search by meaning and keywords (above). Returns a list `id. score (age)[flags] summary`, led by each memory id (for `recall_raw`), best match first, capped at approximately `max_tokens`. The score is the cosine similarity to the query (two decimals), or `kw` for a keyword hit with no vector. In keyword-only fallback the first line says so, results are in FTS order, and the score is the negated bm25 rank; a query with no term of 3+ characters (`LIKE` path) comes back newest first with score `-0.0000`. `channel` narrows to one channel's records by exact id; a channel with no records matches nothing. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
 | `search_transcripts` | `query: str`, `channel: str\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `max_tokens: int` (default `2000`) | Keyword search over every channel's `message_log` content (above). Returns up to 50 lines `id. [timestamp] channel role: snippet`, best bm25 match first, the match wrapped in `**`, capped at approximately `max_tokens`. `channel` narrows by exact id; `after`/`before` parse as for `search_memory` and compare against the row's `timestamp`. A query with no word tokens, no hits (naming the channel filter when set) and a failing FTS query (logged at WARNING; retry with a simpler query) each return a plain message. **Does not update access stats.** Fenced. |
 | `recall_raw` | `memory_id: int\|None`, `channel: str\|None`, `start_id: int\|None`, `end_id: int\|None` (all default `None`), `max_tokens: int` (default `1000`) | Two forms; exactly one per call, or an error naming both forms and what was passed. **By range** (`channel`, `start_id`, `end_id`): replays that channel's rows with `start_id ≤ id ≤ end_id` under a `[channel C: messages S–E]` header; says so when the range holds none; bumps nothing. **By record** (`memory_id`): replays the raw `message_log` dialog for the record's `[msg_id_start, msg_id_end]` range using `WHERE channel_id = record.channel_id AND id BETWEEN ...` — the channel predicate is load-bearing because the `message_log` id sequence is global across all channels. Returns a participants header (`[memory N: messages S–E, participants: {...}]`) followed by verbatim `role: content` lines, truncated at `max_tokens` with an explicit marker. Works on demoted, superseded, and tombstoned records. Reaches any channel's record. **Bumps `retrieval_count` and `last_retrieved_at`** on the record — the bump is what makes the record eligible for re-promotion by the next retention job run. |
 
@@ -1324,7 +1324,8 @@ script, spaced or not.
 **How a query is built.**
 
 1. The text is split into terms: runs of letters, combining marks and numbers
-   (Unicode categories L, M, N). Punctuation, symbols and whitespace separate
+   (Unicode categories L, M, N), plus the zero-width joiners U+200C/U+200D
+   that sit inside Persian, Indic and emoji words. Punctuation, symbols and whitespace separate
    terms, so a term never carries FTS syntax. The per-paragraph cap (the first
    20 terms of each blank-line-separated paragraph) is kept where it was.
 2. A term of 3 or more characters is searched as its overlapping 3-character
@@ -1336,7 +1337,8 @@ script, spaced or not.
    spaced: `你还记得我喜欢吃什么吗` finds `我喜欢吃苹果`.
 3. A `LIKE '%term%'` scan runs only when the query has no term of 3 or more
    characters (a bare `苹果`), because trigram matches nothing shorter. Its
-   results come newest first, since `LIKE` has no rank.
+   results come newest first, since `LIKE` has no rank (markdown recall:
+   index order).
 
 **What this costs, and its limits.**
 
