@@ -528,7 +528,11 @@ async def test_reconcile_does_not_hold_write_lock_across_embedding(tmp_path):
         get_identity=lambda: identity,
     )
     await index.reconcile()
-    assert embed.calls >= 2, f"expected a rebuild to re-embed, calls={embed.calls}"
+    # Exactly one embed per file: the rebuild used to run its per-file loop
+    # twice, so every file was embedded twice (#1211 review round 1). The
+    # count is what catches that, not the row counts -- the second loop
+    # rewrote the same rows.
+    assert embed.calls == 4, f"expected one embed per file (4), calls={embed.calls}"
     assert probe and all(p == "acquired" for p in probe), (
         f"embedding held the write lock (rebuild path) in "
         f"{sum(1 for p in probe if p == 'locked')} of {len(probe)} calls: {probe}"

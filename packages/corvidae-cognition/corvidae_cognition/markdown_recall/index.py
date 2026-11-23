@@ -585,9 +585,6 @@ class MarkdownIndex:
         await db.execute(f"DELETE FROM chunks WHERE path NOT IN ({marks})", kept)
         await db.execute(f"DELETE FROM manifest WHERE path NOT IN ({marks})", kept)
         await db.commit()
-        for path, (size, mtime_ns) in files.items():
-            await self._reconcile_file(db, path, size, mtime_ns, None)
-        await db.commit()
 
     async def _reconcile_file(
         self,
