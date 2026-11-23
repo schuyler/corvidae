@@ -7,17 +7,20 @@ WebPlugin, so the panel's routes sit behind the console's authentication.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from context_panel import ContextPanelPlugin
 
+from corvidae.agent import Agent
 from corvidae.channel import ChannelRegistry, ReasoningHistory
 from corvidae.channels.web import WebPlugin
-from corvidae.context import ContextWindow, MessageType
+from corvidae.context import ContextWindow, MessageType, count_tokens, message_tokens
 from corvidae.hooks import TransportPlugin, create_plugin_manager, install_plugin_hookspecs
 from corvidae.outbound import OutboundProgress, OutboundThinking, OutboundToolStatus
 from corvidae.thinking import apply_reasoning_history
 from corvidae.tool_policy import ToolView
-from tests.test_web_plugin import TOKEN, _no_env_token, make_env, parse_side_body  # noqa: F401
+from tests.test_web_plugin import TOKEN, AgentStub, _no_env_token, make_env, parse_side_body  # noqa: F401
 
 PANEL = "/panel/context_panel"
 ENABLED = {"context_panel": {}}
@@ -29,6 +32,19 @@ class EchoTransport(TransportPlugin):
     transport = "testtx"
 
 
+class PanelAgentStub(AgentStub, Agent):
+    """An AgentStub that passes ``get_dependency(pm, "agent", Agent)``.
+
+    The panel reads ``mid_conversation_system_role`` off the registered agent;
+    the class attributes below shadow Agent's read-only properties so they can be set.
+    Agent.__init__ is not run (AgentStub's is), so no kernel state is built.
+    """
+
+    mid_conversation_system_role = "system"
+    # Agent.started is also a read-only property; AgentStub assigns it.
+    started = True
+
+
 async def panel_env(make_env, **kwargs):
     """A running web console with the context panel loaded and enabled."""
     plugin = ContextPanelPlugin()
@@ -37,6 +53,10 @@ async def panel_env(make_env, **kwargs):
         extra_config=kwargs.pop("extra_config", ENABLED),
         **kwargs,
     )
+    # Swap the shared stub for one that is an Agent, as the panel now requires.
+    env.pm.unregister(name="agent")
+    env.agent = PanelAgentStub(env.pm)
+    env.pm.register(env.agent, name="agent")
     return env, plugin
 
 
@@ -245,6 +265,17 @@ class TestChannelsAndWindow:
         assert body["cursor"]["count"] == 6
         assert body["cursor"]["digest"]
 
+    async def test_window_non_dict_row_carries_token_count(self, make_env):
+        env, _ = await panel_env(make_env)
+        win = seed(env, prompt="sp")
+        row = ("strange", "row")
+        win.messages.append(row)  # PRD 3.1.18.1: a row the kernel tolerates as-is
+        body = await open_window(env, "web:main")
+        last = body["rows"][-1]
+        assert last["type"] is None
+        assert last["msg"]["content"] == repr(row)
+        assert last["tokens"] == count_tokens(repr(row))
+
     async def test_window_unloaded_and_unregistered_channel(self, make_env):
         env, _ = await panel_env(make_env)
         env.registry.get_or_create("web", "pending")  # conversation is None
@@ -263,6 +294,32 @@ class TestChannelsAndWindow:
         full = await open_window(env, "web:main", all="1")
         assert len(full["rows"]) == 250
         assert full["first"] == 0
+
+    async def test_window_rows_and_head_carry_token_counts(self, make_env):
+        env, _ = await panel_env(make_env)
+        win = seed(env, prompt="the system prompt")
+        schemas = [{"type": "function", "function": {"name": "lookup"}}]
+        win.tool_view = ToolView(schemas=schemas)
+        win.append({"role": "user", "content": "hello"})
+        body = await open_window(env, "web:main")
+        assert body["system_prompt_tokens"] == count_tokens("the system prompt")
+        assert body["tools_tokens"] == count_tokens(json.dumps(schemas, default=str))
+        assert body["rows"][0]["tokens"] == message_tokens({"role": "user", "content": "hello"})
+
+    async def test_window_head_tokens_null_until_tools_resolve(self, make_env):
+        env, _ = await panel_env(make_env)
+        seed(env, prompt="sp")
+        body = await open_window(env, "web:main")
+        assert body["tools"] is None
+        assert body["tools_tokens"] is None
+
+    async def test_poll_rows_carry_token_counts(self, make_env):
+        env, _ = await panel_env(make_env)
+        win = seed(env, numbered(2))
+        cursor = (await open_window(env, "web:main"))["cursor"]
+        win.append({"role": "user", "content": "tail"})
+        body = await poll(env, "web:main", cursor)
+        assert body["rows"][0]["tokens"] == message_tokens({"role": "user", "content": "tail"})
 
     async def test_poll_never_carries_the_window(self, make_env):
         env, _ = await panel_env(make_env)
@@ -299,6 +356,8 @@ class TestRendered:
             frozenset(channel.pending_tool_call_ids),
             mid_conversation_system_role="system",
         )
+        assert body["total_tokens"] == sum(
+            message_tokens(m) for m in body["messages"])
 
     async def test_rendered_passes_the_channel_pending_tool_calls(self, make_env):
         """A call still in flight renders with its placeholder, not as a bare call."""
@@ -317,12 +376,12 @@ class TestRendered:
         assert body["messages"] == win.build_prompt(
             frozenset({"c9"}), mid_conversation_system_role="system")
 
-    async def test_rendered_uses_the_agents_mid_system_role(self, make_env, caplog):
+    async def test_rendered_uses_the_agents_mid_system_role(self, make_env):
         """The re-roling the issue wants visible, and the one thing no test reached.
 
-        Hardcoding "system" in ``_mid_system_role`` passed all 34 tests, because
-        the stub agent has no ``mid_conversation_system_role`` and every expected
-        body passed ``"system"`` explicitly (#695 review).
+        Hardcoding "system" in ``_mid_system_role`` once passed all 34 tests,
+        because every expected body passed ``"system"`` explicitly (#695
+        review); this test sets the agent's role to "user" so it cannot.
         """
         env, _ = await panel_env(make_env)
         env.agent.mid_conversation_system_role = "user"
@@ -340,22 +399,6 @@ class TestRendered:
         # The point of the finding: the mid-conversation row is re-roled as the
         # agent would send it, not as stored.
         assert [m["role"] for m in body["messages"]] == ["system", "user", "user"]
-        assert "no agent.mid_conversation_system_role" not in caplog.text
-
-    async def test_rendered_without_an_agent_says_which_role_it_assumed(
-        self, make_env, caplog,
-    ):
-        """A missing attribute is a rescue, so it is a warning naming the guess."""
-        env, _ = await panel_env(make_env)
-        env.pm.unregister(name="agent")
-        win = seed(env, prompt="p")
-        win.append({"role": "system", "content": "ctx"}, MessageType.CONTEXT)
-
-        body = await fetch(env, "rendered", channel="web:main")
-
-        assert body["messages"] == win.build_prompt(
-            frozenset(), mid_conversation_system_role="system")
-        assert "no agent.mid_conversation_system_role" in caplog.text
 
     async def test_rendered_unloaded_channel(self, make_env):
         env, _ = await panel_env(make_env)

@@ -22,14 +22,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from datetime import datetime, timezone
 
 from corvidae.context import MessageType
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.persistence import decode_message_row, parse_message_type
-from corvidae_cognition.memory import _format_age, _fts_match_query, _fused_keys
+from corvidae_cognition.fts import KeywordQuery, keyword_query, keyword_where
+from corvidae_cognition.memory import _format_age, _fused_keys
 from corvidae.tool import Tool, tool_to_schema
 
 logger = logging.getLogger("corvidae.tools.memory_tools")
@@ -220,29 +220,36 @@ class MemoryToolsPlugin(CorvidaePlugin):
         return None
 
     async def _keyword_rows(
-        self, db, query: str, match: str, where: str, params: list,
+        self, db, query: str, q: KeywordQuery, where: str, params: list,
     ) -> list[tuple] | None:
         """FTS5 keyword rows (id, summary, created_at, indexed, superseded_by,
         rank) best first, falling back to a LIKE scan when the FTS query
         fails. None when the scan fails too."""
+        # The keyword predicate: a MATCH over pieces (bm25 order), or a LIKE
+        # scan for a query of only short terms (recency order, no rank).
+        kw_where, kw_params = keyword_where(q, "memory_fts", "m.summary")
+        rank_col, order = (
+            ("memory_fts.rank", "rank") if q.match is not None
+            else ("0.0", "m.created_at DESC")
+        )
         sql = (
             "SELECT m.id, m.summary, m.created_at, m.indexed, m.superseded_by, "
-            "memory_fts.rank "
+            f"{rank_col} "
             "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
-            f"WHERE memory_fts MATCH ? AND {where} "
-            f"ORDER BY rank LIMIT {_SEARCH_LIMIT}"
+            f"WHERE {kw_where} AND {where} "
+            f"ORDER BY {order} LIMIT {_SEARCH_LIMIT}"
         )
         try:
-            async with db.execute(sql, (match, *params)) as cursor:
+            async with db.execute(sql, (*kw_params, *params)) as cursor:
                 return list(await cursor.fetchall())
         except Exception:
             logger.warning(
                 "search_memory FTS query failed; falling back to summary scan",
                 exc_info=True,
             )
-        # Degrade to a plain LIKE scan over summaries using the same word
-        # tokens, so a broken FTS index does not fail the search.
-        tokens = re.findall(r"\w+", query)[:20]
+        # Degrade to a plain LIKE scan over summaries using the same terms,
+        # so a broken FTS index does not fail the search.
+        tokens = q.terms[:20]
         like_sql = (
             "SELECT m.id, m.summary, m.created_at, m.indexed, "
             "m.superseded_by, 0.0 FROM memory m "
@@ -266,7 +273,7 @@ class MemoryToolsPlugin(CorvidaePlugin):
 
         Two lists over the same filters: an exact cosine scan of the records
         that have a vector (filtered before the cut, which a KNN can't do),
-        and the stopworded FTS5 search. They are fused by reciprocal rank as
+        and the FTS5 keyword search. They are fused by reciprocal rank as
         passive retrieval fuses them (#666), but on raw cosine with no
         recency decay: a deliberate search wants the best answer, and age is
         shown. A keyword hit outside the scan gets its cosine from its stored
@@ -291,17 +298,19 @@ class MemoryToolsPlugin(CorvidaePlugin):
             records[mid] = (summary, created_at, indexed, superseded_by)
             cosine[mid] = 1.0 - distance
 
-        # The keyword side, in bm25 order; common words left out.
+        # The keyword side, in bm25 order (recency for a LIKE-only query).
         fts_order: list[int] = []
-        match = _fts_match_query(query, stopwords=True)
-        if match is not None:
+        q = keyword_query(query, cap_per_paragraph=20)
+        if q.terms:
+            kw_where, kw_params = keyword_where(q, "memory_fts", "m.summary")
+            order = "rank" if q.match is not None else "m.created_at DESC"
             try:
                 async with db.execute(
                     "SELECT m.id, m.summary, m.created_at, m.indexed, m.superseded_by "
                     "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
-                    f"WHERE memory_fts MATCH ? AND {where} "
-                    f"ORDER BY rank LIMIT {_SEARCH_LIMIT}",
-                    (match, *params),
+                    f"WHERE {kw_where} AND {where} "
+                    f"ORDER BY {order} LIMIT {_SEARCH_LIMIT}",
+                    (*kw_params, *params),
                 ) as cursor:
                     keyword = await cursor.fetchall()
             except Exception:
@@ -369,9 +378,9 @@ class MemoryToolsPlugin(CorvidaePlugin):
             if db is None:
                 return "Error: memory schema not available"
 
-            # Build FTS match expression
-            match = _fts_match_query(query)
-            if match is None:
+            # Build the keyword query; no terms means nothing to search for.
+            q = keyword_query(query, cap_per_paragraph=20)
+            if not q.terms:
                 return "No results: query has no searchable terms."
 
             # The whole memory, narrowed to one channel only when asked. The
@@ -443,7 +452,7 @@ class MemoryToolsPlugin(CorvidaePlugin):
                         return "No memories found matching your query."
                     return _format_results(entries, max_tokens)
 
-            rows = await plugin._keyword_rows(db, query, match, where, params)
+            rows = await plugin._keyword_rows(db, query, q, where, params)
             if rows is None:
                 return "Error: search failed internally"
             if not rows:
@@ -455,6 +464,10 @@ class MemoryToolsPlugin(CorvidaePlugin):
                 for mid, summary, created_at, indexed, superseded_by, rank in rows
             ]
             return f"{KEYWORD_ONLY_NOTE}\n" + _format_results(entries, max_tokens)
+
+        # Read-only for forks (#1190): it only searches. recall_raw is not
+        # declared, because it bumps access stats.
+        search_memory.reads_only = True  # type: ignore[attr-defined]
 
         async def search_transcripts(
             query: str,
@@ -477,13 +490,19 @@ class MemoryToolsPlugin(CorvidaePlugin):
             if db is None:
                 return "Error: memory schema not available"
 
-            match = _fts_match_query(query)
-            if match is None:
+            # Build the keyword query; no terms means nothing to search for.
+            q = keyword_query(query, cap_per_paragraph=20)
+            if not q.terms:
                 return "No results: query has no searchable terms."
 
             # Optional filters, all bound parameters (channel is equality).
-            conditions = ["message_fts MATCH ?"]
-            params: list = [match]
+            kw_where, kw_params = keyword_where(
+                q, "message_fts", "message_fts.content_text"
+            )
+            conditions = [kw_where]
+            params: list = list(kw_params)
+            # bm25 order for a MATCH; newest first for a LIKE-only query.
+            order = "bm25(message_fts)" if q.match is not None else "m.id DESC"
             if channel is not None:
                 conditions.append("m.channel_id = ?")
                 params.append(channel)
@@ -494,15 +513,16 @@ class MemoryToolsPlugin(CorvidaePlugin):
                 conditions.append("m.timestamp < ?")
                 params.append(before_ts)
 
-            # One read-only query: bm25 order, a snippet window per hit.
+            # One read-only query: ranked, a snippet window per hit (64 tokens:
+            # under trigram a token is one character).
             try:
                 async with db.execute(
                     "SELECT m.id, m.channel_id, CAST(m.message AS BLOB), "
                     "m.message_type, m.timestamp, "
-                    "snippet(message_fts, 0, '**', '**', '…', 16) "
+                    "snippet(message_fts, 0, '**', '**', '…', 64) "
                     "FROM message_fts JOIN message_log m ON m.id = message_fts.rowid "
                     f"WHERE {' AND '.join(conditions)} "
-                    f"ORDER BY bm25(message_fts) LIMIT {_SEARCH_LIMIT}",
+                    f"ORDER BY {order} LIMIT {_SEARCH_LIMIT}",
                     params,
                 ) as cursor:
                     rows = await cursor.fetchall()
@@ -538,6 +558,8 @@ class MemoryToolsPlugin(CorvidaePlugin):
 
         # The output is other channels' raw text: fence it (#648).
         search_transcripts.returns_untrusted = True  # type: ignore[attr-defined]
+        # Read-only for forks (#1190): it only searches.
+        search_transcripts.reads_only = True  # type: ignore[attr-defined]
 
         async def recall_raw(
             memory_id: int | None = None,

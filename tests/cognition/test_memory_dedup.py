@@ -23,6 +23,8 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
+from fake_clock import install_kernel_clock
+from helpers import add_kernel_registry
 from corvidae.channel import Channel
 from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
@@ -136,6 +138,9 @@ async def build_dedup_env(config=None):
     await init_db(db)
 
     pm = create_plugin_manager()
+    # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+    add_kernel_registry(pm)
+    install_kernel_clock(pm)
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")

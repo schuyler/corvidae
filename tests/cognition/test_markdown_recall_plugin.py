@@ -1,37 +1,26 @@
 """Tests for the markdown-folder recall source plugin (#719).
 
-The end-to-end test goes through the real plugin manager and the real funnel,
-like the mixin's own tests: a folder of markdown files, a plain user message,
-and the funnel admitting a framed CONTEXT hit. The integration is exercised
-FTS5-only (no embedding profile configured) — the vector path is covered at
-the index level; here the point is the wiring (config, on_init, the startup
-reconcile, search/render, and the funnel hand-off).
+These tests go through the real plugin manager: a folder of markdown files and
+a plain user message. The integration is exercised FTS5-only (no embedding
+profile configured) — the vector path is covered at the index level; here the
+point is the wiring (config, on_init, the startup reconcile, search/render, and
+the ``before_compose`` contribution, which ``test_recall_contribution.py`` pins
+for a folder with hits).
 """
 
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
 import aiosqlite
 import pytest
-from corvidae_cognition.funnel import FunnelPlugin
 from corvidae_cognition.markdown_recall import MarkdownRecallPlugin
 from corvidae_cognition.markdown_recall.index import Hit
 
 from corvidae.channel import Channel
-from corvidae.context import ContextWindow, MessageType
+from corvidae.context import ContextWindow
 from corvidae.hooks import create_plugin_manager, install_plugin_hookspecs
+from fake_clock import install_kernel_clock
 from corvidae.persistence import PersistencePlugin, init_db
-
-
-class Clock:
-    """Fake monotonic clock; time moves only when a test sets ``t``."""
-
-    def __init__(self) -> None:
-        self.t = 0.0
-
-    def __call__(self) -> float:
-        return self.t
 
 
 def write_folder(root: Path, files: dict[str, str]) -> None:
@@ -41,7 +30,7 @@ def write_folder(root: Path, files: dict[str, str]) -> None:
 
 
 async def make(config: dict, root: Path, tmp_path: Path) -> SimpleNamespace:
-    """A funnel and the markdown-recall source on a real plugin manager.
+    """The markdown-recall source on a real plugin manager.
 
     ``db_path`` is always overridden to ``tmp_path`` so no test can write
     into the checkout's ``state/`` (the ``state_dir_guard`` autouse fixture
@@ -57,19 +46,17 @@ async def make(config: dict, root: Path, tmp_path: Path) -> SimpleNamespace:
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")
-    clock = Clock()
-    funnel = FunnelPlugin(now=clock)
-    pm.register(funnel, name="funnel")
+    # Kernel clock and idle tracker MarkdownRecallPlugin.on_start resolves.
+    install_kernel_clock(pm)
     source = MarkdownRecallPlugin()
     pm.register(source, name="markdown_recall")
     install_plugin_hookspecs(pm)
-    await funnel.on_init(pm=pm, config=config)
     await source.on_init(pm=pm, config=config)
     channel = Channel(transport="test", scope="recall")
     channel.conversation = ContextWindow(channel.id)
     return SimpleNamespace(
-        pm=pm, funnel=funnel, source=source, channel=channel,
-        conv=channel.conversation, clock=clock, db=db,
+        pm=pm, source=source, channel=channel,
+        conv=channel.conversation, db=db,
     )
 
 
@@ -87,31 +74,20 @@ async def build(tmp_path):
         await db.close()
 
 
-async def turn(env: SimpleNamespace) -> None:
-    await env.funnel.before_agent_turn(
+async def turn(env: SimpleNamespace) -> object:
+    """The turn's before_compose answer from the source."""
+    return await env.source.before_compose(
         channel=env.channel, trace_id="t", annotations={"origin": "user"}
     )
-
-
-async def settle() -> None:
-    for _ in range(8):
-        await asyncio.sleep(0)
 
 
 def user(env: SimpleNamespace, text: str) -> None:
     env.conv.append({"role": "user", "content": text})
 
 
-def context_text(env: SimpleNamespace) -> str:
-    return "\n".join(
-        m.get("content") or "" for m in env.conv.messages
-        if m.get("_message_type") == MessageType.CONTEXT
-    )
-
-
 async def test_search_returns_ranked_hits_and_render_is_stable(build, tmp_path):
-    # The funnel hand-off (on_funnel_ingest -> background search -> submit) is
-    # the mixin's behavior, covered by test_recall_mixin.py. Here: the NEW
+    # The before_compose hand-off is the mixin's behavior, covered by
+    # test_recall_mixin.py. Here: the
     # wiring — the plugin's search against the index, and render's stable line.
     root = tmp_path / "notes"
     write_folder(root, {
@@ -160,9 +136,7 @@ async def test_missing_folder_is_fail_soft(build, tmp_path):
     await env.source.on_start(config)
     await env.source._startup_task  # must not raise
     user(env, "anything at all")
-    await turn(env)
-    await settle()
-    assert context_text(env) == ""  # no index, no CONTEXT, no crash
+    assert await turn(env) is None  # no index, nothing contributed, no crash
 
 
 async def test_config_validation_names_the_key(build, tmp_path):
@@ -204,10 +178,10 @@ async def test_on_stop_closes_the_index(build, tmp_path):
     assert env.source._index._db is None, "connection should be closed"
 
 
-async def test_unconfigured_source_is_inert_in_funnel_ingest(tmp_path):
+async def test_unconfigured_source_is_inert_in_before_compose(tmp_path):
     """#739: an unconfigured plugin (no markdown_recall block) must not raise
-    in on_funnel_ingest. The gate is initialized, search returns None, and
-    the funnel never sees a result.
+    in before_compose. The gate is initialized, search returns None, and
+    nothing is contributed.
 
     Bypasses the make() helper, which always injects a markdown_recall block
     for the db_path override.
@@ -218,32 +192,24 @@ async def test_unconfigured_source_is_inert_in_funnel_ingest(tmp_path):
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")
-    clock = Clock()
-    funnel = FunnelPlugin(now=clock)
-    pm.register(funnel, name="funnel")
+    # Kernel clock and idle tracker MarkdownRecallPlugin.on_start resolves.
+    install_kernel_clock(pm)
     source = MarkdownRecallPlugin()
     pm.register(source, name="markdown_recall")
     install_plugin_hookspecs(pm)
-    await funnel.on_init(pm=pm, config={})
     await source.on_init(pm=pm, config={})  # no markdown_recall block
     channel = Channel(transport="test", scope="recall")
     channel.conversation = ContextWindow(channel.id)
 
-    # The gate must be initialized (not None), or on_funnel_ingest raises.
+    # The gate must be initialized (not None), or before_compose raises.
     assert source._recall_gate is not None, "gate must be initialized"
     # The index must be None (inert).
     assert source._index is None, "index must be None when unconfigured"
-    # on_funnel_ingest must not raise.
+    # before_compose must not raise, and contributes nothing.
     channel.conversation.append({"role": "user", "content": "hello"})
-    await funnel.before_agent_turn(channel=channel, trace_id="t", annotations={"origin": "user"})
-    for _ in range(8):
-        await asyncio.sleep(0)
-    # No CONTEXT was admitted (search returned None).
-    ctx_lines = [
-        m.get("content") or "" for m in channel.conversation.messages
-        if m.get("_message_type") == MessageType.CONTEXT
-    ]
-    assert ctx_lines == []
+    assert await source.before_compose(
+        channel=channel, trace_id="t", annotations={"origin": "user"}
+    ) is None
     # on_stop on an inert plugin must not raise.
     await source.on_stop()
     await db.close()

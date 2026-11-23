@@ -99,6 +99,11 @@ async def build_plugin_and_channel(
     pm.register(thinking_plugin, name="thinking")
     await thinking_plugin.on_init(pm=pm, config={})
 
+    # The Agent depends on the held store (#1176), which cuts an over-long
+    # entry through the spill and stamps entries from the kernel clock; both
+    # are resolved when needed, so a test installs its clock afterwards.
+    await add_kernel_held(pm)
+
     plugin = Agent()
     pm.register(plugin, name="agent")
     plugin.pm = pm
@@ -166,6 +171,11 @@ class FakeForkAgent:
     def fork_enabled(self, stage):
         return stage in self.stages
 
+    def waiting_messages(self):
+        """Accepted, unfinished user messages per channel id: none by default
+        (Agent.waiting_messages; critique waits on it, #1190 PR 2)."""
+        return {}
+
     async def view_inputs(self, channel_id):
         """The channel's ViewInputs: a fixed prompt, this agent's budget, the
         system mid role and the reasoning policy bound to ``reasoning_history``."""
@@ -184,21 +194,42 @@ class FakeForkAgent:
         )
 
     async def fork(self, channel, instruction, *, stage, cut=None, extra_body=None,
-                   snapshot=None):
+                   snapshot=None, max_tool_calls=None, yield_to_caller=None):
+        import json
+
         from corvidae.attribution import get_attribution
         from corvidae.fork import ForkResult
 
+        # ``max_tool_calls`` and ``yield_to_caller`` are Agent.fork's (#1190
+        # PR 2); both are recorded as passed (None: the caller left it out) so
+        # a test can assert what a caller asked for.
         self.calls.append({
             "instruction": instruction, "stage": stage, "cut": cut, "extra_body": extra_body,
             "attribution": dict(get_attribution()), "snapshot": snapshot,
+            "max_tool_calls": max_tool_calls, "yield_to_caller": yield_to_caller,
         })
         if self.error is not None and (self.fail_marker is None or self.fail_marker in instruction):
             raise self.error
+        # A combined critique fork (#1190 PR 2) names each lens in a
+        # "## Lens: <name>" section and expects one key per lens in the reply.
+        # A test that scripts the flat per-lens shape ({"objections": [...]})
+        # has the model give that answer for every lens in the instruction;
+        # text that is not that shape, or an instruction with no lens section
+        # (every other fork), is returned untouched.
+        text = self.text
+        names = re.findall(r"^## Lens: (\w+)$", instruction, re.MULTILINE)
+        if names:
+            try:
+                flat = json.loads(text)
+            except ValueError:
+                flat = None
+            if isinstance(flat, dict) and set(flat) == {"objections"}:
+                text = json.dumps({name: flat for name in names})
         # ``model`` (issue #299) is the model the fork was sent with; passed
         # only when set so tests that ignore it run on any ForkResult.
         extra = {"model": self.model} if self.model is not None else {}
         return ForkResult(
-            text=self.text, message={"role": "assistant", "content": self.text}, **extra
+            text=text, message={"role": "assistant", "content": text}, **extra
         )
 
 
@@ -493,3 +524,63 @@ def skip_warnings(caplog, row_id: int, channel_id: str) -> list[str]:
         and re.search(rf"\b{row_id}\b", r.getMessage())
         and channel_id in r.getMessage()
     ]
+
+
+async def add_kernel_held(pm):
+    """Register the held store (and the spill it cuts through) and return it (#1176).
+
+    The Agent depends on ``held``, so a test that builds its plugin manager by
+    hand registers one here. Both are resolved when needed, so the test's
+    clock and registry may be added before or after. Anything already
+    registered under those names is kept.
+    """
+    from corvidae.held import HeldContext
+    from corvidae.spill import NotificationSpill
+
+    if pm.get_plugin("spill") is None:
+        spill = NotificationSpill()
+        pm.register(spill, name="spill")
+        await spill.on_init(pm=pm, config={})
+    held = pm.get_plugin("held")
+    if held is None:
+        held = HeldContext()
+        pm.register(held, name="held")
+        await held.on_init(pm=pm, config={})
+    return held
+
+
+def add_kernel_registry(pm, registry=None):
+    """Register a ChannelRegistry as "registry" and return it (#1180).
+
+    A plugin resolves the kernel registry with ``get_dependency``, which
+    raises when none is registered, so a test that builds its plugin manager
+    by hand registers one here. When ``pm`` already has a "registry", that one
+    is returned and nothing new is registered.
+    """
+    from corvidae.channel import ChannelRegistry
+
+    existing = pm.get_plugin("registry")
+    if existing is not None:
+        return existing
+    registry = registry if registry is not None else ChannelRegistry({})
+    pm.register(registry, name="registry")
+    return registry
+
+
+async def memory_turn(memory, channel, trace_id=None, annotations=None):
+    """One turn's passive memory retrieval, end to end (#1176).
+
+    Memory contributes through ``before_compose``; the kernel's held store
+    admits what it contributed, through whatever policy is registered, and
+    announces the outcome on ``on_held_admitted``. This runs those two steps as
+    the agent loop does on a turn that can append: gather memory's answer,
+    then ``admit_for_turn`` with it. The test's plugin manager must register
+    the held store (``add_kernel_held``) and a registry and clock.
+    """
+    contribution = await memory.before_compose(
+        channel=channel, trace_id=trace_id, annotations=annotations or {}
+    )
+    await memory.pm.get_plugin("held").admit_for_turn(
+        channel, channel.conversation, trace_id=trace_id, origin=None,
+        contributions=[contribution] if contribution is not None else [],
+    )

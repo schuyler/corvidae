@@ -600,7 +600,7 @@ it fires, and the list can grow.
 
 - The core labels a false alarm with `label_escalation(row_id,
   "false_alarm")`.
-- A miss is recorded by the calibration path on a user correction, by
+- A miss is recorded by the corrections path on a user correction, by
   critique on a bad verdict for a periphery reply, and by the core with
   `label_escalation(row_id, "miss")` after `import_tail`.
 

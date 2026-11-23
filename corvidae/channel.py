@@ -122,6 +122,7 @@ def validate_agent_config(agent: dict) -> None:
     # (#850), so the same positivity rule applies here.
     for int_key in ("max_turns", "max_context_tokens"):
         _check_int_key(agent.get(int_key), f"agent.{int_key}")
+    _check_positive_int(agent.get("held_entry_max_chars"), "agent.held_entry_max_chars")
     parse_forks_config(agent)
 
 
@@ -161,6 +162,21 @@ def _check_seconds(value: object, where: str) -> None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise ValueError(
             f"{where} must be a positive number of seconds (e.g. 10 or 2.5), got "
+            f"{_short_repr(value)} ({type(value).__name__})"
+        )
+
+
+def _check_positive_int(value: object, where: str) -> None:
+    """Raise ValueError unless value is None or a positive whole number.
+
+    For ``agent.held_entry_max_chars`` (#1176): a character count, so a float,
+    a bool, zero or a negative is rejected naming the key and the value.
+    """
+    if value is None:
+        return
+    if type(value) is not int or value < 1:
+        raise ValueError(
+            f"{where} must be a positive whole number of characters (e.g. 8000), got "
             f"{_short_repr(value)} ({type(value).__name__})"
         )
 

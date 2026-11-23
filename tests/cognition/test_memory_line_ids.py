@@ -76,6 +76,14 @@ async def seed_before_window(db, channel_id: str, summary: str) -> int:
     return rid
 
 
+async def admit_earlier(memory, channel, conv, entries: list[str]) -> None:
+    """Put ``entries`` in the window as an earlier turn's memory CONTEXT row:
+    held for the channel and admitted by the store, through the funnel's policy."""
+    held = memory.pm.get_plugin("held")
+    await held.hold(channel, "memory", entries)
+    await held.admit_for_turn(channel, conv, trace_id=None, origin=None, contributions=[])
+
+
 async def retrieval_count(db, memory_id: int) -> int:
     async with db.execute(
         "SELECT retrieval_count FROM memory WHERE id = ?", (memory_id,)
@@ -117,9 +125,8 @@ class TestDedupeOnId:
         (#624): no new CONTEXT row, outcome dropped_dup, stats unmoved."""
         memory, _, channel, conv, db = await build_retrieval_env(STRONG)
         rid = await seed_before_window(db, channel.id, SUMMARY)
-        funnel = memory.pm.get_plugin("funnel")
         # The record as an earlier turn admitted it, five hours ago.
-        await funnel.admit(channel, conv, "memory", [f"(5h, memory {rid}) {SUMMARY}"])
+        await admit_earlier(memory, channel, conv, [f"(5h, memory {rid}) {SUMMARY}"])
 
         await ask(memory, channel, conv, QUERY)
 
@@ -132,9 +139,8 @@ class TestDedupeOnId:
         """Admitted as marginal earlier, strong now: still a duplicate."""
         memory, _, channel, conv, db = await build_retrieval_env(STRONG)
         rid = await seed_before_window(db, channel.id, SUMMARY)
-        funnel = memory.pm.get_plugin("funnel")
-        await funnel.admit(
-            channel, conv, "memory", [f"[marginal] (3h, memory {rid}) {SUMMARY}"],
+        await admit_earlier(
+            memory, channel, conv, [f"[marginal] (3h, memory {rid}) {SUMMARY}"],
         )
 
         await ask(memory, channel, conv, QUERY)
@@ -148,9 +154,8 @@ class TestDedupeOnId:
         present: the key's closing paren anchors it."""
         memory, _, channel, conv, db = await build_retrieval_env(STRONG)
         rid = await seed_before_window(db, channel.id, SUMMARY)
-        funnel = memory.pm.get_plugin("funnel")
-        await funnel.admit(
-            channel, conv, "memory", [f"(1h, memory {rid}0) something else"],
+        await admit_earlier(
+            memory, channel, conv, [f"(1h, memory {rid}0) something else"],
         )
 
         await ask(memory, channel, conv, QUERY)

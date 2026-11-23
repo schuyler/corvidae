@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from corvidae.admission import WorkRefusal
     from corvidae.channel import Channel
     from corvidae.context import ContextWindow, MessageType
+    from corvidae.held import BatchPlan, Contribution, HeldBatch
 
 T = TypeVar("T")
 
@@ -444,6 +445,15 @@ class _SeedHooksPlugin:
     async def transform_tool_result(self, result, **kwargs) -> str:
         return result
 
+    @hookimpl(trylast=True)
+    async def transform_held_admission(self, channel, conversation, batches) -> "list[BatchPlan]":
+        # The admit-all seed (#1176): one plan per batch, in the order offered,
+        # admitting every entry. A policy plugin's plain hookimpl runs before this one to dedupe, budget
+        # and reorder. Imported here because corvidae.held imports this module.
+        from corvidae.held import admit_all_plans
+
+        return admit_all_plans(batches)
+
 
 def _check_hook_arg_binding(pm: pluggy.PluginManager) -> None:
     """Guard against pluggy's silent-drop hookimpl arg-binding bug class.
@@ -685,9 +695,16 @@ class PolicyAHook:
             impls = caller.get_hookimpls() if caller is not None else []
             # Startup refuses a wrapper on a fail-soft hook (#1094), but a
             # manager that never ran that check -- a bare create_plugin_manager()
-            # in a test or a script -- can still hold one. Refuse it here with
-            # the same message rather than let zip(strict=True) below fail with a
-            # ValueError naming neither the hook nor the plugin (#1114).
+            # in a test or a script -- can still hold one. For wrapper=True,
+            # dispatch then goes to apluggy's _async_multicall and what happens
+            # depends on what the wrapper returns: its value replaces the
+            # aggregate, so a wrapper returning None dies with "TypeError:
+            # 'NoneType' object is not iterable", one returning a shorter list
+            # trips zip(strict=True), and one returning a list of the right
+            # length hands back its own values with no error at all. For
+            # hookwrapper=True, _async_multicall refuses in its setup phase, so
+            # the call dies with NotImplementedError instead. Both are refused
+            # here first, with the same message the startup check gives (#1114).
             for impl in impls:
                 _refuse_fail_soft_wrapper(impl, name)
             names = [impl.plugin_name for impl in reversed(impls)]
@@ -945,6 +962,39 @@ class TransportPlugin(CorvidaePlugin):
 
     async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Show intermediate assistant text. Default: no-op."""
+
+
+@dataclass(frozen=True)
+class TransportFacts:
+    """What a plugin may know about the transport that owns a channel (#1193).
+
+    Values only, so no plugin holds a reference to a transport plugin
+    (docs/plugin-guide.md, "Plugin boundaries").
+    """
+
+    #: The transport name, the ``transport`` half of the channel's id.
+    transport: str
+    #: ``TransportPlugin.conversational``: a chat transport.
+    conversational: bool
+    #: ``TransportPlugin.check_allowance``: the transport's default, or None.
+    check_allowance: float | None
+
+
+def owning_transport(pm, channel: Channel) -> TransportFacts | None:
+    """The facts of the loaded transport that owns ``channel``, or None.
+
+    The kernel's one answer to "which transport delivers here" (#1193): the
+    first loaded ``TransportPlugin`` whose ``owns`` is true. None for a
+    channel no transport claims (``internal:*``) or whose transport is not
+    loaded.
+    """
+    # Walk the loaded transports; only the kernel iterates the plugin manager.
+    for plugin in pm.get_plugins():
+        if isinstance(plugin, TransportPlugin) and plugin.owns(channel):
+            return TransportFacts(
+                plugin.transport, bool(plugin.conversational), plugin.check_allowance
+            )
+    return None
 
 
 class AgentSpec:
@@ -1218,15 +1268,15 @@ class AgentSpec:
         implementation that can fail should catch and log its own errors.
 
         The ``final`` firing runs under the channel's check allowance
-        (``corvidae.checks.run_checks``, #1162): every implementation runs
+        (``corvidae.checks.gather``, #1162): every implementation runs
         concurrently, an implementation that raises is logged and counts as
         no opinion while its siblings' verdicts stand, and the reply waits
         for verdicts no longer than the allowance. A verdict that arrives
-        later decides nothing; a ``Refusal`` among them reaches the
-        channel's window as a framed CONTEXT row at its next turn, and wakes
-        no turn. The other firings are dispatched as before, with no
-        allowance, and one raising implementation there still discards
-        every verdict.
+        later decides nothing; a refusal among them (``Refusal``, or a bare
+        ``False`` with no reason given) reaches the channel's window as a
+        framed CONTEXT row at its next turn, and wakes no turn. The other
+        firings are dispatched as before, with no allowance, and one raising
+        implementation there still discards every verdict.
 
         Four firing sites, two modes:
 
@@ -1259,6 +1309,52 @@ class AgentSpec:
         """
 
     @hookspec
+    async def should_execute_tool(
+        self,
+        channel: Channel,
+        tool_name: str,
+        arguments: dict,
+        trace_id: str | None,
+    ) -> bool | Refusal | None:
+        """Veto hook: decide whether one tool call runs (#148, PRD §3.5.12).
+
+        Grammar class: veto (broadcast; resolved with resolve_reject_wins).
+
+        Offered for every dispatched call, a subagent's and the fork tool's
+        included, once its arguments have parsed and validated against the
+        tool's schema, and before it runs. Return a ``Refusal(reason)`` to
+        refuse (a bare ``False`` refuses too, but gives no reason), None for no
+        opinion. Any refusal wins: the call does not run, and its result to
+        the model is the refusal, naming the tool, the reason and what to do
+        next, so the turn continues.
+
+        Runs under the channel's check allowance
+        (``corvidae.checks.gather``): every implementation runs
+        concurrently and the call waits no longer than the allowance, then
+        runs unchecked; the miss is recorded. A refusal that arrives later
+        refuses nothing but reaches the channel's window as a framed CONTEXT
+        row at its next turn, and wakes no turn. An implementation that raises
+        is logged at warning and counts as no refusal (fail open, PRD
+        principle 5); one that must refuse when it fails catches its own
+        failure and refuses.
+
+        A refusal bounds what the calling channel's participants can make the
+        agent do; refusing because of a *target* channel would be a channel
+        wall (PRD principle 14, §3.5.9).
+
+        All parameters are required (no defaults), so the arg-binding guard
+        catches an impl that re-declares one with a default.
+
+        Args:
+            channel: The calling channel (a subagent's or fork tool's calls
+                carry the channel that started it).
+            tool_name: The tool being called.
+            arguments: The call's arguments, validated against the tool's
+                schema. Model-written: treat them as untrusted.
+            trace_id: The trace the call belongs to, or None.
+        """
+
+    @hookspec
     async def on_message_admitted(
         self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:
@@ -1267,8 +1363,8 @@ class AgentSpec:
         Grammar class: observe (broadcast; return value ignored).
 
         Fired exactly once per admitted message, after reject-wins
-        resolution. Side effects only (e.g. OutcomeLogPlugin's
-        record_exchange).
+        resolution. Side effects only (e.g. outcome_log's admission
+        record).
 
         Args:
             channel: The Channel the message arrived on.
@@ -1741,6 +1837,88 @@ class AgentSpec:
             annotations: The annotations dict; producers of notifications
                 may stamp keys into it through ``on_notify``, and the dict
                 travels with the trace id through task cycles.
+        """
+
+    @hookspec
+    async def before_compose(
+        self,
+        channel: "Channel",
+        trace_id: str | None,
+        annotations: dict,
+    ) -> "Contribution | None":
+        """Offer context for this turn's prompt, under the check allowance (#1176).
+
+        Grammar class: observe (the kernel gathers it itself, never through
+        ``pm.ahook``).
+
+        Runs at step 6 of the agent loop, after ``before_agent_turn``. The
+        kernel calls every implementation concurrently with
+        ``corvidae.checks.gather`` and waits at most the channel's check
+        allowance. An answer in time is admitted into this turn's prompt as a
+        framed CONTEXT row; one that misses the allowance is held and admitted
+        at the channel's next turn, and wakes nothing. Return a
+        ``corvidae.held.Contribution`` (an empty one is allowed and closes the
+        source's records), or None for nothing. Any other value is logged at
+        WARNING and dropped.
+
+        Args:
+            channel: The Channel whose turn is being composed.
+            trace_id: The current turn's trace id, or None.
+            annotations: The turn's annotations dict.
+        """
+
+    @hookspec(firstresult=True)
+    async def transform_held_admission(
+        self,
+        channel: "Channel",
+        conversation: "ContextWindow",
+        batches: "list[HeldBatch]",
+    ) -> "list[BatchPlan] | None":
+        """Decide what of the held batches this turn admits (#1176).
+
+        Grammar class: transform (firstresult=True wrapper chain with a
+        trylast seed on _SeedHooksPlugin). The seed admits every entry of
+        every batch in the order offered. A wrapper (``@hookimpl(wrapper=True)``)
+        dedupes, budgets and reorders by returning a different plan list: the
+        list's order is the order rows are appended. A malformed plan (an
+        index out of range, a duplicated entry or batch) is logged at WARNING
+        and every batch is admitted as offered. The kernel frames what is
+        admitted whatever this hook returns.
+
+        Args:
+            channel: The Channel being admitted to.
+            conversation: Its ContextWindow, for dedupe against what the
+                window already holds.
+            batches: Every batch due this turn, in the order offered.
+
+        Returns:
+            One ``BatchPlan`` per batch it decides on.
+        """
+
+    @hookspec
+    async def on_held_admitted(
+        self,
+        channel: "Channel",
+        source: str,
+        trace_id: str | None,
+        admitted_keys: list[str],
+        duplicate_keys: list[str],
+    ) -> None:
+        """A held batch was offered to a turn and its outcome is known (#1176).
+
+        Grammar class: observe (broadcast; return value ignored).
+
+        Fires once per offered batch, one with nothing admitted included, so a
+        source can close its records. A key is the entry's key, or its text
+        when the batch has no keys. ``trace_id`` is the trace that produced
+        the batch, not the admitting turn's.
+
+        Args:
+            channel: The Channel admitted to.
+            source: The batch's source label.
+            trace_id: The producing trace id, or None.
+            admitted_keys: Keys of the entries appended to the window.
+            duplicate_keys: Keys of the entries policy marked duplicates.
         """
 
     @hookspec

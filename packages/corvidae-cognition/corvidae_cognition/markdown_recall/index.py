@@ -28,6 +28,12 @@ from typing import Any, Callable
 
 import aiosqlite
 
+from corvidae_cognition.fts import (
+    TOKENIZE_CLAUSE,
+    create_fts_table,
+    keyword_query,
+    keyword_where,
+)
 from corvidae_cognition.markdown_recall.chunking import chunk_page
 
 logger = logging.getLogger("corvidae.markdown_recall.index")
@@ -46,7 +52,9 @@ OVERFETCH = 3
 # (#863), so every chunk's text is different — reconcile() only re-chunks a
 # file whose content hash moved, so without this bump the fix would never
 # reach a page nobody edits again.
-CHUNKER_VERSION = "otterwiki-2"
+# otterwiki-3: chunks are sized in UTF-8 bytes and cut as spans of the source
+# (#1186), so every chunk boundary moves.
+CHUNKER_VERSION = "otterwiki-3"
 
 CHUNKS_DDL = """
 CREATE TABLE IF NOT EXISTS chunks (
@@ -59,9 +67,10 @@ CREATE TABLE IF NOT EXISTS chunks (
 )
 """
 
-CHUNKS_FTS_DDL = """
+CHUNKS_FTS_DDL = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-    text, content='chunks', content_rowid='rowid'
+    text, content='chunks', content_rowid='rowid',
+    {TOKENIZE_CLAUSE}
 )
 """
 
@@ -240,7 +249,7 @@ class MarkdownIndex:
             return db
 
         await db.execute(CHUNKS_DDL)
-        await db.execute(CHUNKS_FTS_DDL)
+        await create_fts_table(db, "chunks_fts", CHUNKS_FTS_DDL)
         await db.execute(CHUNKS_FTS_INSERT_TRIGGER)
         await db.execute(CHUNKS_FTS_DELETE_TRIGGER)
         await db.execute(MANIFEST_DDL)
@@ -250,6 +259,12 @@ class MarkdownIndex:
         # Always track the chunker version (and the encoder identity when
         # present), so a chunker bump rebuilds even an FTS-only index.
         await self._check_embedding_meta(db, identity)
+        # Commit the schema bookkeeping before anything else runs. Stamping
+        # embedding_meta is a DML, and this interpreter opens a write
+        # transaction on the first DML, so an uncommitted stamp would hold the
+        # write lock across the first embedding call of the pass that follows
+        # -- including a full rebuild's (corvidae#1211).
+        await db.commit()
         # The vector surface exists only with an embedding profile, a loadable
         # sqlite-vec extension, and no identity mismatch; anything else degrades
         # to FTS5-only. Text is canonical; vectors are a cache.
@@ -553,13 +568,31 @@ class MarkdownIndex:
         else:
             await db.execute("DROP TABLE IF EXISTS chunks_vec")
             self._vec_available = False
-        # Reindex every file from scratch.
-        async with db.execute("DELETE FROM chunks") as _c:
-            pass
-        async with db.execute("DELETE FROM manifest") as _c:
-            pass
+        # Commit the DDL before any embedding call. With no implicit BEGIN for
+        # DDL, aiosqlite's autocommit is off, so the DROP/CREATE above opens a
+        # transaction that would otherwise stay open until the first file's
+        # commit -- i.e. across this rebuild's first embedding call, which is
+        # the hold this change is about (corvidae#1211).
+        await db.commit()
+        # Reindex every file. No global DELETE FROM chunks / manifest here:
+        # this interpreter opens a write transaction on the first DML, so a
+        # wipe-then-commit would leave readers on an empty index for the length
+        # of the rebuild -- in WAL mode a read-only transaction keeps seeing the
+        # pre-transaction snapshot, which is what the uncommitted wipe used to
+        # give them -- and _embed() swallows provider failures, so wiping first
+        # can empty the index with a broken model and nothing to rebuild from.
+        # Each file's rows are dropped and replaced inside its own short
+        # transaction by _replace_file_chunks instead.
         for path, (size, mtime_ns) in files.items():
             await self._reconcile_file(db, path, size, mtime_ns, None)
+        # Rows for paths the walk no longer yields: the manifest is rewritten
+        # per file above, so this is the only place a stale row can still hide.
+        kept = list(files)
+        if not kept:  # reconcile() aborts on an empty walk; belt on the braces,
+            return    # because NOT IN () would delete every row in both tables
+        marks = ",".join("?" * len(kept))
+        await db.execute(f"DELETE FROM chunks WHERE path NOT IN ({marks})", kept)
+        await db.execute(f"DELETE FROM manifest WHERE path NOT IN ({marks})", kept)
         await db.commit()
 
     async def _reconcile_file(
@@ -593,6 +626,9 @@ class MarkdownIndex:
             await db.execute(
                 "UPDATE manifest SET mtime_ns=? WHERE path=?", (mtime_ns, path)
             )
+            # Commit the touch: leaving this DML open would hold the write
+            # lock across the next file's embedding call (corvidae#1211).
+            await db.commit()
             return
         text = data.decode("utf-8", errors="replace")
         chunks = chunk_page(path, text)
@@ -702,14 +738,16 @@ class MarkdownIndex:
     async def _fts_ids(
         self, db: aiosqlite.Connection, query: str, limit: int
     ) -> list[int]:
-        """Rowids matching ``query`` in bm25 order (a sanitized MATCH)."""
-        match = _fts_match(query)
-        if not match:
+        """Rowids matching ``query``: bm25 order over 3-character pieces, or
+        a LIKE scan (by rowid) for a query of only short terms."""
+        q = keyword_query(query)
+        if not q.terms:
             return []
+        where, params = keyword_where(q, "chunks_fts", "text")
+        order = "bm25(chunks_fts)" if q.match is not None else "rowid"
         async with db.execute(
-            "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? "
-            "ORDER BY bm25(chunks_fts) LIMIT ?",
-            (match, limit),
+            f"SELECT rowid FROM chunks_fts WHERE {where} ORDER BY {order} LIMIT ?",
+            (*params, limit),
         ) as cursor:
             return [row[0] for row in await cursor.fetchall()]
 
@@ -776,19 +814,3 @@ class MarkdownIndex:
             await self._db.close()
             self._db = None
             self._schema_ready = False
-
-
-def _fts_match(query: str) -> str:
-    """Sanitize a free-text query into an FTS5 MATCH expression.
-
-    Each token becomes a prefix term (``tok*``) so partial words match, and
-    the tokens are OR-joined so one good term carries the query when another
-    is a stopword. Returns "" when there is nothing to match.
-    """
-    tokens = [t for t in query.lower().split() if t]
-    if not tokens:
-        return ""
-    # A `"` inside a double-quoted FTS5 term is escaped by doubling it, so a
-    # query token that contains one (foo"bar) does not break the MATCH syntax.
-    escaped = [t.replace('"', '""') for t in tokens]
-    return " OR ".join(f'"{t}"*' for t in escaped)

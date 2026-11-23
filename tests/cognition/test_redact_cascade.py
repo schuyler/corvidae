@@ -37,6 +37,7 @@ from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from helpers import CORRUPT_MESSAGES, insert_raw_message
 from corvidae.hooks import create_plugin_manager
+from fake_clock import install_kernel_clock
 from corvidae.llm_plugin import LLMPlugin
 
 
@@ -54,6 +55,8 @@ async def make_full_db(path: str | None = None) -> aiosqlite.Connection:
 
     # Initialize memory schema via MemoryPlugin
     pm = create_plugin_manager()
+    # Kernel clock and idle tracker MemoryPlugin.on_start resolves.
+    install_kernel_clock(pm)
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")
@@ -524,6 +527,8 @@ class TestPrePhase1bDb:
 
         # 2. Simulate daemon startup: add memory schema including message_fts + backfill
         pm = create_plugin_manager()
+        # Kernel clock and idle tracker MemoryPlugin.on_start resolves.
+        install_kernel_clock(pm)
         persistence = PersistencePlugin()
         persistence.db = db
         pm.register(persistence, name="persistence")

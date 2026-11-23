@@ -3,7 +3,7 @@
 Compaction becomes memory formation: dialog leaving the active window is
 consolidated into first-person memory records (SQLite + sqlite-vec + FTS5),
 and inbound messages trigger retrieval whose results enter the window
-through the context-admission funnel (bootstrap-mapping §3.1).
+through the held-text store (before_compose) (bootstrap-mapping §3.1).
 
 This module owns the memory schema:
   - ``memory``: one row per consolidated first-person record, linked back
@@ -61,7 +61,7 @@ Config:
                                      # (0.60 under score/similarity)
       entry_target_tokens: 256       # size target for one consolidation
                                      # entry (positive int, #686); sent to
-                                     # the model as words and checked at
+                                     # the model as tokens and checked at
                                      # write time; static config
       consolidation_fork_prompt: ... # instruction for forked consolidation
                                      # (agent.forks, #51); static config
@@ -83,7 +83,6 @@ import hashlib
 import json
 import logging
 import math
-import re
 import sqlite3
 import time
 from bisect import bisect_left, bisect_right
@@ -125,10 +124,16 @@ from corvidae.fork import (
     view_call,
     window_db_ids,
 )
+from corvidae.held import Contribution
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm_plugin import parse_llm_config
 from corvidae_cognition.config_keys import read_count
-from corvidae_cognition.funnel import DEFAULT_BUDGET_TOKENS, Admission
+from corvidae_cognition.fts import (
+    TOKENIZE_CLAUSE,
+    create_fts_table,
+    keyword_query,
+    keyword_where,
+)
 from corvidae.persistence import (
     add_column_if_missing,
     decode_message_row,
@@ -137,9 +142,13 @@ from corvidae.persistence import (
     view_rows,
 )
 
+from corvidae.channel import ChannelRegistry
+from corvidae.clock import Clock
+from corvidae.idle import IdleTracker
+
 if TYPE_CHECKING:
-    from corvidae.clock import Clock, Timer
-    from corvidae.idle import IdleTracker, IdleWatch
+    from corvidae.clock import Timer
+    from corvidae.idle import IdleWatch
 
 logger = logging.getLogger("corvidae.memory")
 
@@ -215,20 +224,6 @@ CANDIDATES_CHOICES = ("hybrid", "vector")
 # shortcut: a constant with equal list weights; make it (or per-list
 # weights) a memory.retrieval key if the labelled set shows a need.
 RRF_C = 60
-# Common words the hybrid side's FTS query leaves out (#666), so a chatty
-# message can't buy fusion rank on "what" or "the". Matched lowercased.
-# shortcut: a small English list; a deployment conversing in another
-# language gets no stopwording, so extend it if one shows up.
-FTS_STOPWORDS = frozenset("""
-a about above after again all also am an and any are as at be because been
-before being both but by can could did do does doing done for from had has
-have having he her here hers him his how i if in into is it its just me
-more most my no not now of off on once only or other our ours out over own
-same she should so some such than that the their theirs them then there
-these they this those through to too under until up us very was we were
-what when where which while who whom why will with would yes you your yours
-ok okay oh hi hey thanks thank please
-""".split())
 # Honest similarity stand-in for a keyword hit whose cosine cannot be
 # measured (FTS5-degraded retrieval, or a hit with no stored vector). It is
 # logged as the similarity; it no longer sets the band (#409).
@@ -400,7 +395,7 @@ DEFAULT_CONSOLIDATION_FORK_PROMPT = (
 
 # Size target for one consolidation entry, in tokens (#686): 256 is the
 # memory admission budget (2048) divided by retrieval k (8). Sent to the
-# model as words and used as the write-time overrun threshold.
+# model as tokens and used as the write-time overrun threshold.
 DEFAULT_ENTRY_TARGET_TOKENS = 256
 
 # How a consolidation range gets its record (MemoryPlugin._live_record).
@@ -1281,7 +1276,7 @@ def _memory_line(candidate: dict) -> str:
 
 
 def _memory_key(candidate: dict) -> str:
-    """The funnel dedupe key for a memory line: ``memory <id>)`` (#624).
+    """The policy dedupe key for a memory line: ``memory <id>)`` (#624).
 
     It is the part of the line that names the record and never changes, so a
     record already in the window dedupes whatever its age or band reads now.
@@ -1324,17 +1319,55 @@ def _previous_reply(messages: list[dict]) -> str | None:
 
 
 def admitted_candidates(candidates: list[dict], degraded: bool) -> list[dict]:
-    """The candidates passive retrieval admits, before the funnel (#703, #802).
+    """The candidates passive retrieval admits, before the policy (#703, #802).
 
     The FTS5-degraded path has no relevance to gate on, so it admits what it
     found; otherwise a candidate banded ``weak`` is dropped with no fallback
     (#409), so a query with nothing above weak admits nothing. Shared by
-    ``before_agent_turn`` and ``scripts/eval_memory.py``, so the eval measures
+    ``before_compose`` and ``scripts/eval_memory.py``, so the eval measures
     what the daemon admits and the two cannot drift.
     """
     if degraded:
         return list(candidates)
     return [c for c in candidates if c["band"] != "weak"]
+
+
+def tail_is_plain_user_message(messages: list[dict]) -> bool:
+    """True when the window's last non-CONTEXT row is a plain user MESSAGE with text.
+
+    CONTEXT rows at the tail are looked through: before compose runs after every
+    ``before_agent_turn``, and a stamp (timepiece) or a pending row (signal)
+    appended there leaves CONTEXT below the user's message, which is still a
+    user turn. Retrieval is skipped on turns that a tool result, a notification
+    or an agent reply ends. Shared by memory and the recall sources.
+    """
+    # Walk back past trailing CONTEXT rows to the last row that is not one.
+    for tail in reversed(messages):
+        if tail.get("_message_type") == MessageType.CONTEXT:
+            continue
+        return (
+            tail.get("role") == "user"
+            and tail.get("_message_type", MessageType.MESSAGE) == MessageType.MESSAGE
+            and isinstance(tail.get("content"), str)
+            and bool(tail["content"].strip())
+        )
+    # An empty window (or one of CONTEXT only) has no user message.
+    return False
+
+
+@dataclass(frozen=True)
+class _Retrieval:
+    """What one passive retrieval decided, kept until the store announces its outcome."""
+
+    # The scored pool (ranked candidates, exclusions, banding path).
+    pool: RetrievalPool
+    # The candidates offered to the store, and one dedupe key per candidate.
+    selected: list[dict]
+    keys: list[str]
+    # The retrieval profile of the top-ranked candidate, and the candidate count.
+    top_score: float | None
+    top_similarity: float | None
+    hit_count: int
 
 
 def retrieval_query(messages: list[dict], query_context: str) -> str:
@@ -1344,7 +1377,7 @@ def retrieval_query(messages: list[dict], query_context: str) -> str:
     ``query_context: previous_reply`` by the agent's previous reply when the
     window holds one. Parts are joined by blank lines, so the FTS query's
     per-paragraph token cap gives each its own budget and a long reply cannot
-    crowd out the user's words. Shared by ``before_agent_turn`` and
+    crowd out the user's words. Shared by ``before_compose`` and
     ``scripts/eval_memory.py`` so the eval scores the query the daemon runs.
     shortcut: the reply is used whole, however long; trim or cap it if the
     labelled self-contained probes show it diluting short questions.
@@ -1374,33 +1407,6 @@ def _format_age(seconds: float) -> str:
     if seconds < 86400:
         return f"{int(seconds // 3600)}h"
     return f"{int(seconds // 86400)}d"
-
-
-def _fts_match_query(text: str, stopwords: bool = False) -> str | None:
-    """Build a safe FTS5 MATCH expression from free text.
-
-    Raw user text can be FTS5 syntax-invalid; quote each word token and OR
-    them. Returns None when the text has no word tokens. With ``stopwords``
-    (the hybrid side, #666), words in ``FTS_STOPWORDS`` are left out before
-    the cap, so the cap counts content words.
-
-    The 20-token cap applies per blank-line-separated paragraph, so a
-    coalesced burst (messages joined by blank lines, #398) keeps each
-    message's tokens; single-paragraph text is capped at 20 as always.
-    shortcut: a message or ``memory_search`` query that itself contains blank
-    lines gets 20 tokens per paragraph, and there is no total cap (a 100-message
-    burst gives ~2000 OR terms); add a cap if bursts that size ever appear.
-    """
-    # Cap each paragraph's tokens separately, then pool them all.
-    tokens: list[str] = []
-    for paragraph in re.split(r"\n\s*\n", text):
-        words = re.findall(r"\w+", paragraph)
-        if stopwords:
-            words = [w for w in words if w.lower() not in FTS_STOPWORDS]
-        tokens.extend(words[:20])
-    if not tokens:
-        return None
-    return " OR ".join(f'"{token}"' for token in tokens)
 
 
 def _fused_keys(
@@ -1457,9 +1463,8 @@ def _fused_keys(
 class ImportancePrior(Protocol):
     """Pluggable supplier of the consolidation-time importance prior (§3.1).
 
-    Held as ``MemoryPlugin.importance_prior`` and assignable by later
-    phases: the Phase 2 appraisal replaces the default rubric; a Phase 6
-    toggle adds a surprise term.
+    Held as ``MemoryPlugin.importance_prior`` and assignable, so a later
+    toggle can add a surprise term (PRD §3.7 Memory 2).
     """
 
     async def score(
@@ -1529,7 +1534,7 @@ CREATE TABLE IF NOT EXISTS memory (
     created_at REAL NOT NULL,
     summary TEXT NOT NULL,              -- first-person, epistemic framing preserved
     importance REAL NOT NULL,           -- the prior (WP1a.6); updated by use in Phase 1b
-    valence REAL,                       -- NULL until Phase 2 appraisal
+    valence REAL,                       -- no longer written (#1189); older rows keep theirs
     topic_tags TEXT,                    -- JSON array of strings
     participants TEXT,                  -- JSON array of sender strings
     msg_id_start INTEGER NOT NULL,      -- message_log id range (raw-dialog link)
@@ -1621,13 +1626,13 @@ def resolve_entry_target_tokens(config: dict) -> int:
 def entry_size_sentence(target_tokens: int) -> str:
     """The sentence asking for entries of about ``target_tokens`` tokens.
 
-    Stated in words (0.75 words per token, an English-prose estimate).
+    Stated in tokens, the unit the config key and the overrun check use, so
+    no per-language words-per-token ratio is involved (#1186).
     """
-    words = round(target_tokens * 0.75)
     return (
-        f"Keep each entry's narrative to about {words} words or fewer; if "
-        "one topic needs more, give it consecutive entries rather than one "
-        "long one."
+        f"Keep each entry's narrative to about {target_tokens} tokens or "
+        "fewer; if one topic needs more, give it consecutive entries rather "
+        "than one long one."
     )
 
 
@@ -1656,9 +1661,10 @@ CREATE TABLE IF NOT EXISTS embedding_meta (
 )
 """
 
-MEMORY_FTS_DDL = """
+MEMORY_FTS_DDL = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-    summary, content='memory', content_rowid='id'
+    summary, content='memory', content_rowid='id',
+    {TOKENIZE_CLAUSE}
 )
 """
 
@@ -1679,7 +1685,7 @@ END
 
 # The per-retrieval raw profile stream (§3.7 wants this accumulating from
 # day one). Each row is keyed by the turn's trace id, and the profile is
-# copied into exchange_log under the same id.
+# reported on the trace through on_trace_record (source "memory").
 RETRIEVAL_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS retrieval_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1698,8 +1704,7 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
 
 # One row per logged candidate of a passive retrieval (#407). Holds ids and
 # numbers only, never text. outcome is one of: admitted, dropped_weak,
-# dropped_budget, dropped_dup, cut, excluded_in_window, not_admitted (no
-# funnel registered, #654).
+# dropped_budget, dropped_dup, cut, excluded_in_window.
 RETRIEVAL_CANDIDATE_DDL = """
 CREATE TABLE IF NOT EXISTS retrieval_candidate (
     retrieval_id INTEGER NOT NULL,   -- retrieval_log.id
@@ -1806,8 +1811,10 @@ CREATE TABLE IF NOT EXISTS retention_meta (
 # uses plain DELETE because the FTS5 'delete' command is only valid for
 # external-content tables (verified empirically, SQLite 3.47.1 — plain DELETE
 # works correctly for regular FTS5 tables).
-MESSAGE_FTS_DDL = """
-CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(content_text)
+MESSAGE_FTS_DDL = f"""
+CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
+    content_text, {TOKENIZE_CLAUSE}
+)
 """
 
 MESSAGE_FTS_INSERT_TRIGGER = """
@@ -1875,7 +1882,8 @@ class MemoryPlugin(CorvidaePlugin):
             our on_start; schema creation retries lazily on first use.
     """
 
-    depends_on = frozenset({"persistence", "llm", "clock", "idle"})
+    # trace owns the hook the retrieval profile is reported on (#1179).
+    depends_on = frozenset({"persistence", "llm", "clock", "idle", "trace", "registry"})
     # The heartbeat owns the hook spec memory's beat section implements; it
     # is optional so a config without a heartbeat starts quietly (#1079).
     optional_depends_on = frozenset({"heartbeat"})
@@ -1925,9 +1933,9 @@ class MemoryPlugin(CorvidaePlugin):
         self._recency_from: str = RECENCY_FROM_CHOICES[0]
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold: float = 0.95
-        # Memory admission budget for raw-fallback pieces (#626; on_init sets).
-        self._memory_budget: int = DEFAULT_BUDGET_TOKENS
-        self._memory_budget_key: str = "funnel.budgets.memory"
+        # What each passive retrieval decided, until the store announces its
+        # outcome: (channel id, trace id) -> the selection and the pool's profile.
+        self._retrievals: dict[tuple[str, str | None], _Retrieval] = {}
         # Tracked background tasks (consolidation) — plugin-owned
         # asyncio.create_task, never the TaskQueue: every TaskQueue
         # completion triggers a full main-model turn (§2.3, trap #5).
@@ -1967,7 +1975,8 @@ class MemoryPlugin(CorvidaePlugin):
         # the process. It no longer carries cross-plugin atomicity: that is
         # the write connection's BEGIN IMMEDIATE transaction (#221).
         self._db_lock = asyncio.Lock()
-        # Pluggable importance prior; replaced by later phases (§3.1).
+        # Pluggable importance prior: the consolidation reply's own rating,
+        # else the rubric (§3.1).
         self.importance_prior: ImportancePrior = RubricPrior(
             lambda: self._llm().get_client("rubric"),
             lambda: self._rubric_prompt,
@@ -2125,20 +2134,6 @@ class MemoryPlugin(CorvidaePlugin):
         )
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold = float(self._memory_cfg.get("dup_threshold", 0.95))
-        # The memory admission budget, which raw-fallback pieces must fit
-        # (#626): the funnel's memory budget, else its default, else the
-        # funnel's built-in default. The key is kept for the warning.
-        funnel_cfg = config.get("funnel", {}) or {}
-        funnel_budgets = funnel_cfg.get("budgets", {}) or {}
-        if "memory" in funnel_budgets:
-            self._memory_budget = funnel_budgets["memory"]
-            self._memory_budget_key = "funnel.budgets.memory"
-        elif "default_budget" in funnel_cfg:
-            self._memory_budget = funnel_cfg["default_budget"]
-            self._memory_budget_key = "funnel.default_budget"
-        else:
-            self._memory_budget = DEFAULT_BUDGET_TOKENS
-            self._memory_budget_key = "funnel.budgets.memory (unset; the funnel default)"
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -2147,22 +2142,12 @@ class MemoryPlugin(CorvidaePlugin):
         Schema creation is deferred to first use when the persistence DB has
         not opened yet (hook-ordering dependent, same pattern as
         UsageLogPlugin). With the schema ready, spawns the message_fts
-        backfill and runs the retention check. Then, when the kernel clock
-        and idle tracker are both registered, registers the per-channel
-        consolidation watch and arms the retention timer.
+        backfill and runs the retention check. Then registers the per-channel
+        consolidation watch and arms the retention timer on the kernel clock
+        and idle tracker.
         """
-        # shortcut: hand-built test plugin managers omit the kernel clock; make it strict if a non-Runtime entry point appears
-        clock = self.pm.get_plugin("clock")
-        idle = self.pm.get_plugin("idle")
-        if clock is None or idle is None:
-            # Memory uses both objects or neither.
-            logger.warning(
-                "memory: no kernel clock/idle tracker registered; idle "
-                "consolidation and periodic retention are off"
-            )
-            clock = idle = None
-        self._clock = clock
-        self._idle = idle
+        self._clock = get_dependency(self.pm, "clock", Clock)
+        self._idle = get_dependency(self.pm, "idle", IdleTracker)
         try:
             db = await self._ensure_schema()
             if db is not None:
@@ -2175,8 +2160,6 @@ class MemoryPlugin(CorvidaePlugin):
                 await self._run_retention_if_due()
         except Exception:
             logger.warning("memory schema creation deferred", exc_info=True)
-        if self._clock is None or self._idle is None:
-            return
         # Consolidate each channel's tail once it has been quiet a period.
         self._idle_watch = self._idle.watch_channels(
             self._idle_consolidate_after,
@@ -2964,7 +2947,7 @@ class MemoryPlugin(CorvidaePlugin):
         """Store ``record``'s entries for ``rows`` and move the watermark, atomically.
 
         Each entry becomes its own row sharing the range, importance,
-        valence, participants and stamp. With no record only the watermark
+        participants and stamp. With no record only the watermark
         moves (a range with no dialog).
         The write is a compare-and-set on ``expected_wm``: False when another
         task already moved the watermark, True once committed.
@@ -2983,13 +2966,12 @@ class MemoryPlugin(CorvidaePlugin):
                 await self._set_watermark(wdb, channel_id, new_wm)
             return True
 
-        # The appraisal-driven prior (WP2.5) scores over the consolidated
-        # message-id range; pass the real channel when the registry has
-        # one, else a stub with empty runtime_overrides (sanctioned by
-        # WP2.3's duck-typed resolver) so config/default surfaces apply.
+        # The importance prior is offered the consolidated message-id range
+        # and the channel (the real one when the registry has it, else a stub
+        # with empty runtime_overrides), as the ImportancePrior protocol takes
+        # them; the default RubricPrior ignores both.
         msg_id_range = (rows[0][0], rows[-1][0])
-        registry = self.pm.get_plugin("registry")
-        channel = registry.get(channel_id) if registry is not None else None
+        channel = get_dependency(self.pm, "registry", ChannelRegistry).get(channel_id)
         if channel is None:
             channel = _StubChannel(channel_id)
         # The rubric call is its own kind of model call: without a mode its
@@ -3004,22 +2986,6 @@ class MemoryPlugin(CorvidaePlugin):
             )
         finally:
             reset_attribution(rubric_token)
-
-        # Valence: mean stage-2 valence over the range (NULL when none) —
-        # the §4.9-classifier deletion made real: affect is the appraisal
-        # already computed. Fail-soft when appraisal is absent.
-        valence: float | None = None
-        appraisal_plugin = self.pm.get_plugin("appraisal")
-        if appraisal_plugin is not None:
-            try:
-                valence = await appraisal_plugin.mean_valence(
-                    channel_id, msg_id_range
-                )
-            except Exception:
-                logger.warning(
-                    "mean-valence lookup failed; storing NULL valence",
-                    exc_info=True, extra={"channel_id": channel_id},
-                )
 
         # Date the record from when its source conversation happened,
         # not from when consolidation ran — imported history would
@@ -3086,7 +3052,6 @@ class MemoryPlugin(CorvidaePlugin):
                     summary=entry.narrative,
                     created_at=created_at,
                     importance=importance,
-                    valence=valence,
                     topic_tags=list(entry.topic_tags),
                     participants=list(record.participants),
                     msg_id_start=rows[0][0],
@@ -3171,7 +3136,7 @@ class MemoryPlugin(CorvidaePlugin):
 
     async def _insert_record(
         self, db: aiosqlite.Connection, *, channel_id: str, summary: str,
-        created_at: float, importance: float, valence: float | None,
+        created_at: float, importance: float,
         topic_tags: list[str], participants: list[str],
         msg_id_start: int, msg_id_end: int, embedding: list[float] | None,
         stamp: RecordStamp, exclude_ids: frozenset[int] = frozenset(),
@@ -3193,15 +3158,14 @@ class MemoryPlugin(CorvidaePlugin):
             )
         cursor = await db.execute(
             "INSERT INTO memory (channel_id, created_at, summary, "
-            "importance, valence, topic_tags, participants, "
+            "importance, topic_tags, participants, "
             "msg_id_start, msg_id_end, embedded, prompt_hash, mode, model, trigger) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 channel_id,
                 created_at,
                 summary,
                 importance,
-                valence,
                 json.dumps(topic_tags),
                 json.dumps(participants),
                 msg_id_start,
@@ -3357,7 +3321,7 @@ class MemoryPlugin(CorvidaePlugin):
         async with self._db_lock, self._write_txn() as wdb:
             memory_id = await self._insert_record(
                 wdb, channel_id=channel_id, summary=summary,
-                created_at=created_at, importance=importance, valence=None,
+                created_at=created_at, importance=importance,
                 topic_tags=[], participants=[],
                 msg_id_start=msg_id_start, msg_id_end=msg_id_end,
                 embedding=embedding, stamp=DIRECT_STAMP,
@@ -3441,8 +3405,7 @@ class MemoryPlugin(CorvidaePlugin):
             if stashed is not None and stashed[0] == watermark:
                 return "record", stashed[1]
         elif trigger in ("idle", "turn"):
-            registry = self.pm.get_plugin("registry")
-            channel = registry.get(channel_id) if registry is not None else None
+            channel = get_dependency(self.pm, "registry", ChannelRegistry).get(channel_id)
             conv = getattr(channel, "conversation", None)
             # Fork only what the record is stamped with: a message that
             # reached the window after range_end was fixed lies past the cut,
@@ -3586,7 +3549,7 @@ class MemoryPlugin(CorvidaePlugin):
         # stamped raw: no call wrote this text (#626).
         raw_stamp = dataclasses.replace(stamp, mode="raw")
         max_tokens = (
-            self._memory_budget - count_tokens(WORST_MEMORY_LINE_PREFIX) - 1
+            self._entry_target_tokens - count_tokens(WORST_MEMORY_LINE_PREFIX) - 1
         )
         if max_tokens < 1:
             # No memory line can fit this budget: splitting would only make
@@ -3594,9 +3557,9 @@ class MemoryPlugin(CorvidaePlugin):
             logger.warning(
                 "consolidation of channel %s, message ids %s: both replies "
                 "unusable; storing the raw transcript as one record, since "
-                "the memory budget (%s = %s tokens) is too small for any "
+                "memory.entry_target_tokens (%s tokens) is too small for any "
                 "memory line; raise it to make raw records admissible",
-                channel_id, span, self._memory_budget_key, self._memory_budget,
+                channel_id, span, self._entry_target_tokens,
             )
             pieces = [_dialog_transcript(seg_dialog)]
         else:
@@ -3604,9 +3567,8 @@ class MemoryPlugin(CorvidaePlugin):
             logger.warning(
                 "consolidation of channel %s, message ids %s: both replies "
                 "unusable; storing the raw transcript as %d record(s) sized "
-                "to the memory budget (%s = %s tokens)",
-                channel_id, span, len(pieces),
-                self._memory_budget_key, self._memory_budget,
+                "to memory.entry_target_tokens (%s tokens)",
+                channel_id, span, len(pieces), self._entry_target_tokens,
             )
         return Consolidation(
             entries=tuple(ConsolidationEntry(p, ()) for p in pieces),
@@ -3620,34 +3582,27 @@ class MemoryPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def before_agent_turn(self, channel, trace_id, annotations) -> None:
-        """Retrieve memories for the inbound user text and admit them.
+    async def before_compose(self, channel, trace_id, annotations) -> Contribution | None:
+        """Retrieve memories for the inbound user text and contribute them.
 
-        Runs only when the window tail is a plain user MESSAGE — retrieval
-        is skipped entirely on notification-triggered turns. Everything
-        here is fail-soft: retrieval trouble must never break the turn.
+        Runs only when the window's last non-CONTEXT row is a plain user
+        MESSAGE; retrieval is skipped entirely on notification-triggered
+        turns. Everything here is fail-soft: retrieval trouble must never break
+        the turn. The selection is stashed under ``(channel, trace_id)``;
+        ``on_held_admitted`` writes the records once the store has said what it
+        admitted.
 
-        ``trace_id``: when present, the retrieval profile is written
-        into retrieval_log.trace_id and copied into exchange_log via
-        the OutcomeLogPlugin's update_exchange (retrieval_top_score,
-        retrieval_top_similarity, retrieval_hit_count).
+        An empty ``Contribution`` is returned when every candidate is weak, so
+        the store still announces the outcome and the records close.
         """
         try:
             conv = getattr(channel, "conversation", None)
-            if conv is None or not conv.messages:
-                return
-            tail = conv.messages[-1]
-            if (
-                tail.get("role") != "user"
-                or tail.get("_message_type", MessageType.MESSAGE) != MessageType.MESSAGE
-                or not isinstance(tail.get("content"), str)
-                or not tail["content"].strip()
-            ):
-                return
+            if conv is None or not tail_is_plain_user_message(conv.messages):
+                return None
 
             db = await self._ensure_schema()
             if db is None:
-                return
+                return None
 
             # Query with every unanswered user message (a coalesced burst),
             # preceded by the agent's previous reply unless configured off
@@ -3659,7 +3614,6 @@ class MemoryPlugin(CorvidaePlugin):
             window_ids = window_db_ids(conv.messages)
             exclude = (channel.id, min(window_ids)) if window_ids else None
             pool = await self._retrieve_pool(query, exclude=exclude)
-            degraded = pool.degraded
             candidates = pool.ranked[: pool.k]
 
             # Drop weak-banded candidates, with no fallback (#409): a query
@@ -3667,42 +3621,68 @@ class MemoryPlugin(CorvidaePlugin):
             # has no relevance to gate on, so it admits its top k (flagged in
             # retrieval_log and marked marginal). The rule is shared with the
             # eval, which measures false admits against it (#802).
-            selected = admitted_candidates(candidates, degraded)
+            selected = admitted_candidates(candidates, pool.degraded)
 
             # One line per memory: "(age, memory <id>) summary", marked
             # "[marginal]" when the record banded moderate; each keyed on its
-            # record id for the funnel's dedupe.
+            # record id for the policy's dedupe.
             lines = [_memory_line(c) for c in selected]
             keys = [_memory_key(c) for c in selected]
 
-            # Admit through the funnel — never append CONTEXT directly
-            # (trap #8); the funnel dedupes against the window and budgets.
-            admitted_ids: list[int] = []
-            admission = Admission(admitted=[], duplicate=[])
-            # No funnel means nothing could be admitted (#654: logged as
-            # not_admitted, not as a budget drop).
-            no_funnel = False
-            if lines:
-                funnel = self.pm.get_plugin("funnel")
-                no_funnel = funnel is None
-                if funnel is None:
-                    logger.warning(
-                        "funnel plugin not registered; memory retrieval "
-                        "cannot admit context"
-                    )
-                else:
-                    admission = await funnel.admit_detailed(
-                        channel, conv, "memory", lines, keys=keys
-                    )
-                    admitted_lines = admission.admitted
-                    if admitted_lines:
-                        admitted_ids = [
-                            c["id"] for c, line in zip(selected, lines)
-                            if line in admitted_lines
-                        ]
+            # Keep what the event needs to write the records: the pool, the
+            # selection with its keys, and the top candidate's profile. Both
+            # profile values describe the top-ranked candidate (measured-first
+            # on the hybrid path, by score otherwise): its decayed score, and
+            # the raw similarity that band_on: similarity compares against the
+            # band thresholds.
+            self._retrievals[(channel.id, trace_id)] = _Retrieval(
+                pool=pool, selected=selected, keys=keys,
+                top_score=candidates[0]["score"] if candidates else None,
+                top_similarity=candidates[0]["similarity"] if candidates else None,
+                hit_count=len(candidates),
+            )
+            return Contribution("memory", lines, keys)
+        except Exception:
+            logger.warning(
+                "memory retrieval failed on channel %s (trace %s); turn proceeds "
+                "without it",
+                channel.id, trace_id,
+                exc_info=True, extra={"channel_id": channel.id},
+            )
+            return None
 
-            # Access stats — the write half of reconsolidation — move only
-            # for memories that actually entered the window.
+    @hookimpl
+    async def on_held_admitted(
+        self, channel, source: str, trace_id, admitted_keys: list[str],
+        duplicate_keys: list[str],
+    ) -> None:
+        """Write the retrieval's records once the store has said what it admitted.
+
+        Acts only on ``source == "memory"`` for a trace this plugin stashed a
+        selection for; any other event is another source's or trace's. Writes
+        access stats (the write half of reconsolidation, only for memories that
+        entered the window), the ``retrieval_log`` row, one
+        ``retrieval_candidate`` row per pool candidate, and reports the
+        retrieval profile on the trace through ``on_trace_record``. A key in
+        neither list was dropped (budget, a superseded batch, or the TTL).
+        """
+        # Only memory's own batch closes memory's records.
+        if source != "memory":
+            return
+        stash = self._retrievals.pop((channel.id, trace_id), None)
+        # No stash: this batch was not produced by a retrieval this process made.
+        if stash is None:
+            return
+        try:
+            db = await self._ensure_schema()
+            if db is None:
+                return
+            pool, selected, keys = stash.pool, stash.selected, stash.keys
+            admitted = set(admitted_keys)
+            duplicate = set(duplicate_keys)
+            admitted_ids = [c["id"] for c, key in zip(selected, keys) if key in admitted]
+
+            # Access stats move only for memories that actually entered the window.
             if admitted_ids:
                 now = time.time()
                 placeholders = ",".join("?" for _ in admitted_ids)
@@ -3713,13 +3693,6 @@ class MemoryPlugin(CorvidaePlugin):
                 )
 
             # Persist the retrieval profile (§3.7's day-one raw stream).
-            # Both values describe the top-ranked candidate (measured-first
-            # on the hybrid path, by score otherwise): its decayed score,
-            # and the raw similarity that band_on: similarity compares
-            # against the band thresholds.
-            top_score = candidates[0]["score"] if candidates else None
-            top_similarity = candidates[0]["similarity"] if candidates else None
-            hit_count = len(candidates)
             log_cursor = await db.execute(
                 "INSERT INTO retrieval_log (ts, channel_id, trace_id, top_score, "
                 "top_similarity, hit_count, admitted_count, degraded_to_fts, "
@@ -3728,11 +3701,11 @@ class MemoryPlugin(CorvidaePlugin):
                     time.time(),
                     channel.id,
                     trace_id,
-                    top_score,
-                    top_similarity,
-                    hit_count,
+                    stash.top_score,
+                    stash.top_similarity,
+                    stash.hit_count,
                     len(admitted_ids),
-                    1 if degraded else 0,
+                    1 if pool.degraded else 0,
                     pool.excluded_in_window,
                     pool.banding_path,
                 ),
@@ -3744,22 +3717,18 @@ class MemoryPlugin(CorvidaePlugin):
             # profile, so it is caught and warned about on its own.
             try:
                 rows = []
-                selected_ids = {c["id"] for c in selected}
+                key_of = {c["id"]: key for c, key in zip(selected, keys)}
                 for i, c in enumerate(pool.ranked):
                     if i >= pool.k:
                         outcome = "cut"
-                    elif c["id"] not in selected_ids:
+                    elif c["id"] not in key_of:
                         outcome = "dropped_weak"
+                    elif key_of[c["id"]] in admitted:
+                        outcome = "admitted"
+                    elif key_of[c["id"]] in duplicate:
+                        outcome = "dropped_dup"
                     else:
-                        line = lines[selected.index(c)]
-                        if line in admission.admitted:
-                            outcome = "admitted"
-                        elif line in admission.duplicate:
-                            outcome = "dropped_dup"
-                        elif no_funnel:
-                            outcome = "not_admitted"
-                        else:
-                            outcome = "dropped_budget"
+                        outcome = "dropped_budget"
                     rows.append((retrieval_id, c["id"], c["similarity"],
                                  c["score"], c["band"], i + 1, outcome,
                                  c["source"], c["z"],
@@ -3793,27 +3762,22 @@ class MemoryPlugin(CorvidaePlugin):
                 )
             await db.commit()
 
-            # Copy the retrieval profile into exchange_log under the key —
-            # best-effort; OutcomeLogPlugin may not be registered, or the
-            # row may not exist yet.
+            # Report the retrieval profile on the trace; observe dispatch
+            # logs a listener's failure, naming the hook and the plugin.
             if trace_id is not None:
-                outcome_log = self.pm.get_plugin("outcome_log")
-                if outcome_log is not None:
-                    try:
-                        await outcome_log.update_exchange(
-                            trace_id,
-                            retrieval_top_score=top_score,
-                            retrieval_top_similarity=top_similarity,
-                            retrieval_hit_count=hit_count,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "retrieval profile -> exchange_log copy failed",
-                            exc_info=True, extra={"channel_id": channel.id},
-                        )
+                await self.pm.ahook.on_trace_record(
+                    trace_id=trace_id, channel_id=channel.id, source="memory",
+                    origin=None, record={
+                        "retrieval_top_score": stash.top_score,
+                        "retrieval_top_similarity": stash.top_similarity,
+                        "retrieval_hit_count": stash.hit_count,
+                    },
+                )
         except Exception:
             logger.warning(
-                "memory retrieval failed; turn proceeds without it",
+                "memory retrieval records failed for channel %s (trace %s); the "
+                "turn is unaffected but this retrieval is not logged",
+                channel.id, trace_id,
                 exc_info=True, extra={"channel_id": channel.id},
             )
 
@@ -4296,7 +4260,7 @@ class MemoryPlugin(CorvidaePlugin):
     ) -> tuple[list[CandidateRow], list[int], set[int]]:
         """Add the FTS side to vec candidates for fusion (#666).
 
-        Runs the stopworded FTS search over the same records (``k ×
+        Runs the FTS search over the same records (``k ×
         VEC_OVERFETCH``, in-window rows flagged, not filtered), measures the
         real cosine of every FTS hit the KNN didn't return from its stored
         vector, and falls back to ``FTS_SIMILARITY_PROXY`` for a hit with no
@@ -4309,7 +4273,7 @@ class MemoryPlugin(CorvidaePlugin):
         try:
             fts_rows = await self._fts_candidates(
                 db, text, k * VEC_OVERFETCH, exclude,
-                flag_window=True, stopwords=True,
+                flag_window=True,
             )
             known = {row[0] for row in vec_rows}
             extra = [row for row in fts_rows if row[0] not in known]
@@ -4365,7 +4329,7 @@ class MemoryPlugin(CorvidaePlugin):
     async def _fts_candidates(
         self, db: aiosqlite.Connection, text: str, k: int,
         exclude: tuple[str, int] | None = None,
-        *, flag_window: bool = False, stopwords: bool = False,
+        *, flag_window: bool = False,
     ) -> list[CandidateRow]:
         """FTS5 keyword candidates with a fixed similarity proxy:
         (id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY,
@@ -4375,11 +4339,14 @@ class MemoryPlugin(CorvidaePlugin):
         LIMIT, so it applies before the cut to k. With ``flag_window`` (the
         hybrid side, #666) in-window rows are returned flagged instead, as
         the vec path does, with the LIMIT raised by their count so they
-        can't take every slot; ``stopwords`` drops common words from the
-        MATCH. Rows come back in bm25 order."""
-        match = _fts_match_query(text, stopwords=stopwords)
-        if match is None:
+        can't take every slot. Rows come back in bm25 order (newest first for
+        a query of only short terms, which has no rank)."""
+        q = keyword_query(text, cap_per_paragraph=20)
+        if not q.terms:
             return []
+        # MATCH over 3-character pieces, or LIKE for a short-terms-only query.
+        kw_where, kw_params = keyword_where(q, "memory_fts", "m.summary")
+        order = "rank" if q.match is not None else "m.created_at DESC"
         exclude_sql, exclude_params = _exclude_clause(exclude)
         if flag_window:
             # Fetch past the in-window rows (an upper bound, as for vec).
@@ -4395,9 +4362,9 @@ class MemoryPlugin(CorvidaePlugin):
                 "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at, "
                 + exclude_sql + " AS in_window "
                 "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
-                "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 "
-                "ORDER BY rank LIMIT ?",
-                (*exclude_params, match, limit),
+                f"WHERE {kw_where} AND m.indexed = 1 AND m.redacted = 0 "
+                f"ORDER BY {order} LIMIT ?",
+                (*exclude_params, *kw_params, limit),
             ) as cursor:
                 flagged = await cursor.fetchall()
             return [
@@ -4409,9 +4376,9 @@ class MemoryPlugin(CorvidaePlugin):
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at "
             "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
-            "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0"
-            " AND NOT " + exclude_sql + " ORDER BY rank LIMIT ?",
-            (match, *exclude_params, k),
+            f"WHERE {kw_where} AND m.indexed = 1 AND m.redacted = 0"
+            " AND NOT " + exclude_sql + f" ORDER BY {order} LIMIT ?",
+            (*kw_params, *exclude_params, k),
         ) as cursor:
             rows = await cursor.fetchall()
         return [
@@ -4428,15 +4395,16 @@ class MemoryPlugin(CorvidaePlugin):
         Same MATCH and status filters as ``_fts_candidates``, with the
         window condition un-negated. Count only: no scores without rows.
         """
-        match = _fts_match_query(text)
-        if match is None:
+        q = keyword_query(text, cap_per_paragraph=20)
+        if not q.terms:
             return 0
+        kw_where, kw_params = keyword_where(q, "memory_fts", "m.summary")
         exclude_sql, exclude_params = _exclude_clause(exclude)
         async with db.execute(
             "SELECT COUNT(*) FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
-            "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 AND "
+            f"WHERE {kw_where} AND m.indexed = 1 AND m.redacted = 0 AND "
             + exclude_sql,
-            (match, *exclude_params),
+            (*kw_params, *exclude_params),
         ) as cursor:
             (count,) = await cursor.fetchone()
         return count
@@ -4698,7 +4666,7 @@ class MemoryPlugin(CorvidaePlugin):
                     f"ALTER TABLE embedding_meta ADD COLUMN {col} "
                     f"TEXT NOT NULL DEFAULT ''"
                 )
-        await db.execute(MEMORY_FTS_DDL)
+        await create_fts_table(db, "memory_fts", MEMORY_FTS_DDL)
         await db.execute(MEMORY_FTS_INSERT_TRIGGER)
         await db.execute(MEMORY_FTS_UPDATE_TRIGGER)
         await db.execute(RETRIEVAL_LOG_DDL)
@@ -4720,7 +4688,7 @@ class MemoryPlugin(CorvidaePlugin):
         await add_column_if_missing(db, "retrieval_candidate", "fts_rank", "INTEGER")
         await db.execute(RETRIEVAL_CANDIDATE_INDEX_DDL)
         # Phase 1b: message_fts and retention_meta
-        await db.execute(MESSAGE_FTS_DDL)
+        await create_fts_table(db, "message_fts", MESSAGE_FTS_DDL)
         await db.execute(MESSAGE_FTS_INSERT_TRIGGER)
         await db.execute(MESSAGE_FTS_UPDATE_TRIGGER)
         await db.execute(RETENTION_META_DDL)

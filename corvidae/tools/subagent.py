@@ -33,6 +33,7 @@ from corvidae.tool_collection import DEFAULT_MAX_AGENT_DEPTH
 from corvidae.tool import (
     DEFAULT_TOOL_TIMEOUTS,
     MAX_TOOL_RESULT_CHARS,
+    ToolCheck,
     ToolContext,
     ToolTimeouts,
     dispatch_tool_call,
@@ -103,6 +104,7 @@ async def run_agent_loop(
     pm=None,
     max_result_chars: int = MAX_TOOL_RESULT_CHARS,
     call_timeouts: ToolTimeouts = DEFAULT_TOOL_TIMEOUTS,
+    check: ToolCheck | None = None,
 ) -> str:
     """Run the agent loop to completion. Mutates messages in place.
 
@@ -122,6 +124,8 @@ async def run_agent_loop(
             to this, its full text spilled where a tool in ``tools`` can read
             it, and a plain-text cut line put ahead of it.
         call_timeouts: Per-call tool time bounds (tools.call_timeout).
+        check: The Agent's per-call veto (should_execute_tool, #148), offered
+            every call with ``channel`` and the current attribution's trace.
 
     Returns:
         Final text content from the last LLM response, or a placeholder
@@ -150,6 +154,10 @@ async def run_agent_loop(
                 task_queue=task_queue,
                 pm=pm,
                 call_timeouts=call_timeouts,
+                check=check,
+                # The starting turn's trace: set_attribution merges, so the
+                # stage set around this loop keeps it.
+                trace_id=get_attribution().get("trace_id"),
             )
             content = tool_result.content
             # A long result is cut and spilled here (#575): this loop stores
@@ -332,6 +340,13 @@ class SubagentPlugin(CorvidaePlugin):
             {"role": "user", "content": instructions},
         ]
 
+        # Every call the subagent dispatches is offered to should_execute_tool
+        # through the Agent's check (#148). Duck-typed, as fork.py reaches the
+        # Agent; shortcut: a plugin manager with no Agent (hand-built tests)
+        # runs subagent calls unchecked; make it a dependency if another
+        # entry point appears.
+        check = getattr(self.pm.get_plugin("agent"), "check_tool_call", None)
+
         async def work():
             # Attribute the subagent's LLM calls to the subagent stage,
             # shadowing whatever attribution the enqueuing turn captured.
@@ -349,6 +364,7 @@ class SubagentPlugin(CorvidaePlugin):
                         max_turns=self._max_turns,
                         max_result_chars=max_result_chars,
                         call_timeouts=call_timeouts,
+                        check=check,
                     )
             finally:
                 reset_attribution(attribution_token)

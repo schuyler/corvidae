@@ -39,11 +39,13 @@ Origin ``webhook:<endpoint>`` in the cognition plugins, as for
 ``webhook_notify``:
 
 - appraisal: runs stage 2, as on every origin.
-- outcome_log: records the origin verbatim in ``exchange_log.origin``.
-- gates: non-``user``, so the decide gate may withhold a low-salience final
-  when ``gate.send.enforce`` is set, as for heartbeat and task.
+- outcome_log: records the origin verbatim on its outcome-log lines.
+- gates: non-``user``, so ``gate.send.quiet_origins`` can make it quiet, as
+  for heartbeat and task.
 - critique: judged like every main-loop turn (#1031).
-- funnel: keys stubs on its own origins only; unaffected.
+- held-text store: pairs a stub with its held text by (channel, origin) and
+  recognises its stubs by the ``held_stub`` annotation, so this origin is
+  unaffected.
 
 Endpoints are owned, not shared: every subscriber to an endpoint receives
 every delivery, so an endpoint listed in both this plugin and

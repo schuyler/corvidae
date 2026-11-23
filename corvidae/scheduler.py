@@ -62,6 +62,7 @@ from corvidae.tool import Tool, tool_to_schema
 from corvidae.cron import CronParseError, parse_cron, next_fire as cron_next_fire, cron_description
 from corvidae.scheduler_file import read_jobs as read_jobs_file
 from corvidae.scheduler_watch import FileWatcher
+from corvidae.system_locale import datetime_format
 
 logger = logging.getLogger(__name__)
 
@@ -156,30 +157,37 @@ class ScheduleRow:
 # Time parsing and arithmetic
 # ---------------------------------------------------------------------------
 
-# Unit suffixes accepted in durations, mapped to seconds.
-_UNIT_SECONDS: dict[str, float] = {}
-for _names, _secs in (
-    (("s", "sec", "secs", "second", "seconds"), 1.0),
-    (("m", "min", "mins", "minute", "minutes"), 60.0),
-    (("h", "hr", "hrs", "hour", "hours"), 3600.0),
-    (("d", "day", "days"), 86400.0),
-    (("w", "wk", "wks", "week", "weeks"), 604800.0),
-):
-    for _name in _names:
-        _UNIT_SECONDS[_name] = _secs
+# Unit letters accepted in durations, mapped to seconds.
+_UNIT_SECONDS: dict[str, float] = {
+    "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "w": 604800.0,
+}
 
-_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)\s*([a-z]+)")
-_DURATION_FULL = re.compile(r"^(?:\d+(?:\.\d+)?\s*[a-z]+\s*,?\s*)+$")
+_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)\s*([smhdw])")
+_DURATION_FULL = re.compile(r"^(?:\d+(?:\.\d+)?\s*[smhdw]\s*,?\s*)+$")
 _HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$")
 
 WHEN_FORMS_HELP = (
-    "a relative duration (20m, 2h, 3d, 1h30m), an ISO 8601 time "
+    "a relative duration (45s, 20m, 2h, 3d, 1w, 1h30m), an ISO 8601 time "
     "(2026-10-24T09:00 or 2026-10-24T09:00-07:00), or HH:MM for the next occurrence"
 )
 
+# The accepted duration forms, named in every "not a duration" error.
+_DURATION_FORMS_HELP = (
+    "a number with a unit letter s, m, h, d or w (45s, 20m, 2h, 1h30m, 1w), "
+    "or a bare number of seconds"
+)
+
+# Format of the reminder times shown to the user under the C locale; a real
+# locale replaces it (see corvidae.system_locale).
+_TIME_FORMAT = "%a %Y-%m-%d %H:%M %Z"
+
+# Fixed, numeric-only format for the structured log field next_fire_at, so
+# logs read the same under every locale.
+_LOG_TIME_FORMAT = "%Y-%m-%d %H:%M %Z"
+
 
 def parse_duration(text: str | int | float) -> float:
-    """Parse a duration like ``20m``, ``2h``, ``1h30m``, ``3 days`` to seconds.
+    """Parse a duration like ``20m``, ``2h``, ``1h30m``, ``1w`` to seconds.
 
     A bare number is seconds. Raises ValueError on anything else, or on a
     non-positive result.
@@ -189,20 +197,16 @@ def parse_duration(text: str | int | float) -> float:
         seconds = float(text)
     else:
         cleaned = str(text).strip().lower()
-        if cleaned.startswith("in "):
-            cleaned = cleaned[3:].strip()
         if re.fullmatch(r"\d+(?:\.\d+)?", cleaned):
             seconds = float(cleaned)
         elif _DURATION_FULL.match(cleaned):
             seconds = 0.0
             for amount, unit in _DURATION_PART.findall(cleaned):
-                if unit not in _UNIT_SECONDS:
-                    raise ValueError(f"unknown duration unit {unit!r} in {text!r}")
                 seconds += float(amount) * _UNIT_SECONDS[unit]
         else:
-            raise ValueError(f"not a duration: {text!r}")
+            raise ValueError(f"{text!r} is not a duration; use {_DURATION_FORMS_HELP}")
     if seconds <= 0:
-        raise ValueError(f"duration must be positive: {text!r}")
+        raise ValueError(f"duration must be positive, got {text!r}; use e.g. 20m")
     return seconds
 
 
@@ -333,7 +337,12 @@ def _cron_expr_from_spec(spec: str | None) -> str | None:
 
 def format_time(ts: float, tz: tzinfo) -> str:
     """Render a unix time in ``tz``, e.g. ``Fri 2026-10-23 14:22 PDT``."""
-    return datetime.fromtimestamp(ts, tz).strftime("%a %Y-%m-%d %H:%M %Z")
+    return datetime.fromtimestamp(ts, tz).strftime(datetime_format(_TIME_FORMAT))
+
+
+def _log_time(ts: float, tz: tzinfo) -> str:
+    """A fire time for log fields: numeric directives only, any locale."""
+    return datetime.fromtimestamp(ts, tz).strftime(_LOG_TIME_FORMAT)
 
 
 def format_duration(seconds: float) -> str:
@@ -514,7 +523,10 @@ def parse_job(raw: object, base_dir: Path) -> JobSpec:
             )
         weekday = None
     else:
-        interval = parse_duration(every)
+        try:
+            interval = parse_duration(every)
+        except ValueError as exc:
+            raise ValueError(f"job {name!r} 'every': {exc}") from exc
         cron_expr = None
         at = raw.get("at")
         if at is not None:
@@ -843,7 +855,7 @@ class SchedulerPlugin(CorvidaePlugin):
                     )
                     logger.info(
                         "scheduler: config job inserted",
-                        extra={"job": name, "next_fire_at": format_time(next_fire, self._tz)},
+                        extra={"job": name, "next_fire_at": _log_time(next_fire, self._tz)},
                     )
                     continue
                 reschedule = row.schedule_spec != schedule_spec or not row.enabled
@@ -859,7 +871,7 @@ class SchedulerPlugin(CorvidaePlugin):
                     self._stale_overdue.pop(row.id, None)
                     logger.info(
                         "scheduler: config job rescheduled",
-                        extra={"job": name, "next_fire_at": format_time(next_fire, self._tz)},
+                        extra={"job": name, "next_fire_at": _log_time(next_fire, self._tz)},
                     )
 
             # Disable jobs that are no longer configured (and not merely invalid).
@@ -917,7 +929,7 @@ class SchedulerPlugin(CorvidaePlugin):
                     )
                     logger.info("scheduler: cron job skipped ahead after downtime",
                                 extra={"schedule_id": row.id,
-                                       "next_fire_at": format_time(next_fire, self._tz)})
+                                       "next_fire_at": _log_time(next_fire, self._tz)})
                 elif overdue < row.interval_seconds:
                     # Recurring (interval), less than one slot behind: fire the missed slot once.
                     self._stale_overdue[row.id] = overdue
@@ -929,7 +941,7 @@ class SchedulerPlugin(CorvidaePlugin):
                     )
                     logger.info("scheduler: recurring job skipped ahead after downtime",
                                 extra={"schedule_id": row.id,
-                                       "next_fire_at": format_time(next_fire, self._tz)})
+                                       "next_fire_at": _log_time(next_fire, self._tz)})
             await db.commit()
 
     # ------------------------------------------------------------------

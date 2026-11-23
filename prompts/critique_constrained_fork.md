@@ -37,9 +37,3 @@ your response against them mechanically:
 
 Only object to concrete violations you can point at. An empty objections
 list is a good outcome, not a failure.
-
-Do not call tools. Respond with a single JSON object, nothing else:
-
-```json
-{"objections": [{"claim": "...", "objection": "...", "severity": 0.5}]}
-```

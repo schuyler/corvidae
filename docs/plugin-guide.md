@@ -123,14 +123,14 @@ Built-in `corvidae acp` (from `corvidae.channels.acp:acp_command`) starts an ACP
 
 ## Registering a redact scrubber
 
-`corvidae redact` (see "Operator redaction" in [design.md](design.md)) tombstones `message_log` rows and cascades to memory. A plugin package that copies conversation text into a table of its own registers a scrubber under the `corvidae.redact` entry-point group, so a redaction reaches that copy too. The kernel never names the table. Redaction is on hold pending an overhaul, because no scrubber can find a paraphrase ([redaction.md](redaction.md)); scrubbers still run, and still narrow the gap, so keep registering one.
+`corvidae redact` (see "Operator redaction" in [design.md](design.md)) tombstones `message_log` rows and cascades to memory. A plugin package that copies conversation text into a table or file of its own registers a scrubber under the `corvidae.redact` entry-point group, so a redaction reaches that copy too. The kernel never names the table. Redaction is on hold pending an overhaul, because no scrubber can find a paraphrase ([redaction.md](redaction.md)); scrubbers still run, and still narrow the gap, so keep registering one.
 
 ```toml
 [project.entry-points."corvidae.redact"]
-exchange_log = "corvidae_cognition.outcome_log:redact_exchange_log"
+outcome_log_jsonl = "corvidae_cognition.outcome_log:redact_outcomes_jsonl"
 ```
 
-The entry-point name labels the surface in the CLI output (`2 exchange_log rows`) and in skip notices. The object is an async function:
+The entry-point name labels the surface in the CLI output (`2 outcome_log_jsonl rows`) and in skip notices. The object is an async function:
 
 ```python
 async def redact_my_table(
@@ -168,7 +168,10 @@ relative to a stage. All three mean the same thing to pluggy.
 An observe hook may mutate an object it was handed (`after_persist_assistant`
 strips `reasoning_content` in place; `before_agent_turn` appends to
 `channel.conversation`), but its return value is never read. A transform
-returns the replacement and the core uses it.
+returns the replacement and the core uses it. `before_compose` is the one
+observe hook whose return value the kernel does read: it never broadcasts it
+through `pm.ahook`, and instead gathers each implementation's `Contribution`
+itself ([Contributing text for the next turn](#contributing-text-for-the-next-turn)).
 
 `resolve_channel` shows the other safe shape for `resolve_`: each
 implementer answers only for ids under its own `transport:` prefix and
@@ -224,7 +227,9 @@ transform), when it is an observation or a contribution point
 observability hook that pairs with an
 existing one (`on_llm_request` with `on_llm_response`). A single-consumer
 observation does not get a hookspec; it gets an entry in `annotations`, a return
-value on an existing hook, or waits for its second consumer. Pick the name
+value on an existing hook, or waits for its second consumer. An `annotations`
+entry is written by the producer when it creates the item, never added later
+([`annotations` is stamped at creation](#annotations-is-stamped-at-creation)). Pick the name
 from the table above. The test checks the prefix against the pluggy
 options; whether the core reads a hook's return value is not something
 pluggy exposes, so that half is checked in review.
@@ -268,7 +273,9 @@ declaration breaks one of these rules:
   `firstresult=True`; the others must not have it).
 - **One owner per hook.** A name declared by two plugins, or by a plugin
   and `AgentSpec`, is an error in either registration order. To share a
-  hook, depend on its owner and call it; any plugin can call any hook.
+  hook, name its owner in `depends_on` and call it; a plugin fires only
+  hooks whose owner it depends on, or the kernel's
+  ([Firing a hook depends on its owner](#firing-a-hook-depends-on-its-owner)).
 - **Transform seeds come from the owner.** A `transform_` hook needs an
   `@hookimpl(trylast=True)` on the owner itself that returns its input
   unchanged, which is what `_SeedHooksPlugin` provides for kernel transforms.
@@ -291,7 +298,9 @@ A plugin hook still has to earn its name under the admission rule in
 lives, not whether it should exist.
 
 Implementing a plugin's hook is the same as implementing a kernel hook:
-write a `@hookimpl` with the same name, and declare the dependency (see
+write a `@hookimpl` with the same name, and list the owner in
+`optional_depends_on`, or in `depends_on` if your plugin also fires the hook
+or cannot work without the owner (see
 [Plugin dependencies](#plugin-dependencies)). The hook's contract is
 documented by its owner, not in [Available hooks](#available-hooks).
 
@@ -300,169 +309,6 @@ At startup, a hookimpl whose name matches no spec is logged at WARNING
 declares`), since it will never be called. Usually that's a typo. The
 exception is an impl for a hook owned by one of your `optional_depends_on`
 plugins that isn't loaded: that's expected, and is logged at DEBUG.
-
-### Implementing `on_funnel_ingest`
-
-The funnel (cognition extra) owns `on_funnel_ingest`, the hook a source uses
-to hand it entries ahead of a turn. Use it when your entries are not ready
-when the funnel asks: you submit a promise, and the entries are admitted
-once it resolves, through the same dedupe, budget and framing as `admit()`.
-If you have the entries now, call `admit()` or `ingest()` instead. The funnel's `ponder` tool waits for
-the channel's in-flight promises, up to 5 s, so a slow recall can land before
-the model answers; a promise that resolves to `None` or no entries counts as
-finished with nothing. The full
-contract is under `FunnelPlugin` in
-[cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy).
-
-```python
-import asyncio
-
-from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae_cognition.funnel import Ingest  # cognition extra
-
-class RecallPlugin(CorvidaePlugin):
-    optional_depends_on = frozenset({"funnel"})
-
-    def __init__(self) -> None:
-        # The promise this plugin last submitted, per channel id.
-        self._promises: dict[str, asyncio.Future] = {}
-
-    @hookimpl
-    async def on_funnel_ingest(self, channel, trace_id, annotations, submit) -> None:
-        # Do not submit again while this channel's promise is pending: a newer submit cancels it.
-        old = self._promises.get(channel.id)
-        if old is not None and not old.done():
-            return
-        # Start the slow work in the background and hand the funnel the future.
-        promise = asyncio.ensure_future(self._recall(channel))
-        self._promises[channel.id] = promise
-        submit("recall", promise)
-
-    async def _recall(self, channel) -> Ingest | None:
-        # Resolve to the lines to admit, or to None when there is nothing to add.
-        lines = await search_notes(channel)  # your own lookup
-        return Ingest(entries=lines) if lines else None
-```
-
-- The hook must be `async`. It submits and returns; it never awaits a promise.
-- `submit(source, promise)` takes a source label, which becomes the frame
-  label, and an `asyncio.Future`. The future resolves to
-  `Ingest(entries, on_admitted=None)` or to `None`. `entries` are
-  pre-formatted lines, admitted as one frame in the order given.
-- One pending promise per `(channel, source)`. A newer submit cancels the
-  older, which is why the example checks before it submits.
-- A promise that raised is logged with its source and channel and dropped.
-  A promise its provider cancelled is dropped quietly. `None` admits nothing.
-- `on_admitted`, if given, is a sync callable. The funnel calls it with the
-  `Admission` (`admitted` and `duplicate` lists) after each admission attempt
-  that completes. A raise is logged and does not stop the drain.
-- `keys=`, if given, is one stable identity per entry (#725), the same
-  argument `admit()` takes. With keys, an entry is a duplicate when its key
-  already appears in this source's CONTEXT rows, so a page that re-renders
-  with a new age or score is not admitted twice. The match is containment, so
-  render the key into the line you admit (memory renders its record id;
-  a folder source can carry `<!--notes/page.md#intro-->`). A key list that is
-  not one per entry is rejected with a warning naming the source, both
-  lengths and the remedy, and the entries are admitted unkeyed: a promise has
-  no caller to raise at, and a result the turn is waiting for should not be
-  dropped over its keys.
-- A promise that is done when the turn starts is admitted that turn. One
-  still pending is admitted at the channel's next turn after it resolves,
-  whatever that turn's origin. Nothing wakes the channel for it.
-- `funnel.ingest_ttl`, when set, drops a queued stub-less payload (`ingest`) or a pending promise
-  older than it; an unresolved promise is cancelled, so your work should
-  tolerate cancellation. Shutdown cancels pending promises.
-- A promise submitted already done is admitted in that same turn, before the
-  model call, rather than waiting for the next sweep (#726). A promise that
-  finishes during a turn, after the funnel's sweep, is carried into that
-  turn's drain even if you submit again in the same collect: the finished
-  predecessor's result is admitted, not cancelled and replaced.
-
-### Writing a recall source
-
-If your plugin looks something up for each user turn (a wiki, a folder of
-notes) and wants the result in the window as CONTEXT, don't write the hook
-above yourself. `RecallSourceMixin` in `corvidae_cognition.recall` (cognition
-extra) already does the parts every such source repeats: it checks that the
-turn is a user turn, builds the query, keeps a cooldown and a single search
-in flight per channel, runs your search in the background under a timeout,
-catches and logs its failures, and submits the promise. You supply two methods.
-
-```python
-from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae_cognition.recall import RecallContext, RecallSourceMixin
-
-
-class NotesRecall(RecallSourceMixin, CorvidaePlugin):
-    # The funnel's frame label, and the key of funnel.budgets.<source_name>.
-    source_name = "notes"
-    # Your own agent.yaml block; the mixin reads cooldown and timeout from it.
-    config_key = "notes_recall"
-
-    @hookimpl
-    async def on_init(self, pm, config: dict) -> None:
-        await super().on_init(pm, config)
-        # Raises ValueError on a malformed block, which aborts startup.
-        self.init_recall(config)
-
-    async def search(self, query: str, ctx: RecallContext) -> list[dict] | None:
-        # Hits in rank order, or None or [] for none. May raise.
-        return await lookup(query)  # your own lookup
-
-    def render(self, hit: dict) -> str:
-        # One line per hit; render it the same way every time (see below).
-        return f"{hit['title']}: {hit['text']}"
-```
-
-The mixin is a helper, not a plugin: it has no entry point. Your class does,
-and `plugins.disabled` switches your source off by that name. The rest of the
-contract:
-
-- **When it searches.** Only when the window ends in a plain user message
-  with text. CONTEXT rows below that message are looked through, because the
-  funnel runs this hook last, after it may have appended CONTEXT under the
-  user's words. A turn that a tool result or an agent reply ends is skipped. The
-  query is memory's `retrieval_query` with `previous_reply` context: the
-  unanswered user messages, preceded by the agent's last reply.
-- **Settings.** `<config_key>.cooldown` (seconds, 0 or more, default 5) and
-  `<config_key>.timeout` (seconds, greater than 0, default 10). Put your own
-  keys in the same block; the mixin ignores them. No block gives the defaults and
-  logs nothing. A bad value raises `ValueError` naming the key, the value and
-  what is accepted. A top-level `cooldown` is not read.
-- **Cooldown and single-flight.** At most one search is in flight per channel,
-  and a channel is not searched again until `cooldown` seconds after the
-  last search started. A search that failed or timed out still counts as one.
-  While a search is pending the mixin does not submit again, because a newer
-  submit would cancel it. A turn skipped by either rule is not retried: the
-  next turn asks again.
-- **Fail-soft.** A search that raises, or runs past `timeout`, is logged at
-  WARNING with your source name, the channel and the traceback, and the turn goes
-  on without it. The funnel cancelling a promise (`funnel.ingest_ttl`,
-  shutdown) is not a failure and logs nothing. A hit whose `render` raises is
-  dropped with a warning and the others stand. `search` must not swallow
-  `CancelledError`.
-- **Size and freshness.** The mixin has no `k`, no bands and no score
-  threshold. What fits is `funnel.budgets.<source_name>`, an entry bigger than
-  the whole budget is dropped with a warning, and `funnel.ingest_ttl` ages out
-  a result nobody collected. Whether a hit is relevant enough to show is not
-  decided here (#674).
-- **Render stably.** `RecallSourceMixin` does not pass dedupe keys yet, so a
-  mixin source is deduped by whole-line containment, and a line that carries
-  something that changes (an age, a rank) re-admits the same hit every turn.
-  The funnel takes keys from a source that submits its own promise (#725), and
-  a keyed entry is deduped on the key instead.
-- **Without the funnel** nothing calls the hook and the source does nothing.
-  The mixin lists `funnel` in `optional_depends_on`, so that is logged at DEBUG.
-- **One timing limit** (#726, #624). A result is admitted at the turn after the
-  one that started its search, never the same turn: `RecallSourceMixin` always
-  submits an `asyncio.ensure_future`, which is not done at submit time, so the
-  mixin pays that turn of latency and a source that wants no wait must submit a
-  future it has already resolved. The mixin never submits while its own search
-  is pending, and a result that finishes between the funnel's sweep and its
-  collect is now carried to that turn's drain rather than lost on resubmit.
-- **Tests.** Pass a fake clock as `init_recall(config, now=clock)`. See
-  `tests/cognition/test_recall_mixin.py` for a source on a real plugin
-  manager with the real funnel.
 
 ## Subscribing to webhooks
 
@@ -649,6 +495,43 @@ class MyPlugin(CorvidaePlugin):
 
 The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwards only the arguments declared in the hookimpl signature, so a hookimpl that omits `config` is called with no arguments.
 
+#### Pre-flight checks: deliberate deviation vs. accidental mess
+
+`on_init` runs in the restart pre-flight (a second process alongside the
+live daemon), so it is the right place for validation that must pass
+before a restart is allowed. When a pre-flight check compares current
+state to an expected state, it should distinguish **deliberate
+deviation** from **accidental mess**:
+
+| Condition | Action |
+|-----------|--------|
+| Dirty tree (uncommitted changes) | **Refuse** — genuine risk of lost work |
+| Clean tree, expected state | **Pass** |
+| Clean tree, unexpected state (e.g., non-main branch) | **Pass** with a WARNING log line — deliberate and reproducible |
+| Missing checkout / not a repo | **Refuse** — genuine problem |
+
+A clean, reproducible state on a different branch is deliberate: the
+agent or operator chose to run this code. A dirty tree is not: a
+restart could lose work.
+
+The question to ask of any pre-flight check that compares current state
+to an expected state: **is this deviation deliberate and safe?** Refuse
+only when the answer is no. The git-branch row above is the one example
+worked out in full here; the table is meant to be read as that question
+applied to a checkout, not as a rule already proven across cases.
+
+**Status of this pattern.** The mechanism it relies on is in-tree:
+`corvidae_restart.preflight` runs the daemon's startup through
+`on_init` in a subprocess and returns exit code 0 or 1, so anything
+`on_init` raises blocks the restart — that is the code a plugin author
+is writing against. The *policy* above (which conditions deserve refusal
+versus a WARNING) is proposed from outside this repo and is **not
+implemented by any bundled plugin**: verified against `packages/` on
+2026-11-21, no plugin there inspects a git checkout at all. Treat it as a
+recommendation to apply when your plugin has a state-vs-expectation check to
+make, not
+as existing behaviour to imitate.
+
 ### Messaging
 
 | Hook | Type | When |
@@ -659,6 +542,7 @@ The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwa
 | `on_message_admitted(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message admits a USER message |
 | `on_message_rejected(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |
 | `should_send_response(channel, text: str, emission: str, trace_id: str \| None, annotations: dict)` | async broadcast, reject-wins | Outbound gate, before each emission (`final`, `progress`, `thinking`, `error`). Return False or a `Refusal(reason)` to withhold, None for no opinion. The `final` firing waits no longer than the channel's check allowance. See [Output gating](#output-gating). |
+| `should_execute_tool(channel, tool_name: str, arguments: dict, trace_id: str \| None)` | async broadcast, reject-wins | Before each tool call runs, on every dispatch path (a subagent's and the fork tool's included). Return a `Refusal(reason)` to refuse, None for no opinion. Waits no longer than the channel's check allowance. See [Refusing a tool call](#refusing-a-tool-call). |
 | `on_message_persisted(channel, trace_id: str, rowid: int \| None, text: str, annotations: dict)` | async broadcast | After the trace-originating message is persisted to the database. Fires once per originating item regardless of persistence outcome (`rowid` may be None). |
 | `send(channel, event: Outbound)` | async broadcast | Outbound delivery: `event` is an `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus` or `OutboundProgress` (`corvidae/outbound.py`). Transports receive it through `TransportPlugin` (see [Writing a transport](#writing-a-transport)). A non-transport plugin may implement `send` to observe every channel's events, as the context panel does |
 | `on_notify(channel, source: str, text: str, tool_call_id: str \| None, annotations: dict \| None)` | async broadcast | Notification injected into channel |
@@ -674,6 +558,9 @@ Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMe
 | `on_agent_response(channel, request_text: str, response_text: str, trace_id: str \| None, annotations: dict, logprobs: dict \| None)` | async broadcast | After agent produces a response. Fires for a final the output gate vetoed (or an empty one) too, after its assistant row is in the window and before the transport send; `final_was_unsent(channel)` tells the two apart |
 | `transform_system_prompt(channel, text: str) -> str \| None` | async `firstresult=True` wrapper chain | When a conversation's system prompt is composed (identity, then register): a new conversation, a restart, a compaction boundary, and the background views. Return the prompt with your section appended; see below |
 | `before_agent_turn(channel, trace_id: str \| None, annotations: dict)` | async broadcast | Before each LLM invocation |
+| `before_compose(channel, trace_id: str \| None, annotations: dict) -> Contribution \| None` | gathered under the check allowance (never `pm.ahook`) | Right after `before_agent_turn`, on every turn but a retry; return a `corvidae.held.Contribution` for this turn's prompt, or `None`. See [Contributing text for the next turn](#contributing-text-for-the-next-turn) |
+| `transform_held_admission(channel, conversation, batches: list[HeldBatch]) -> list[BatchPlan] \| None` | async `firstresult=True` wrapper chain with a seed in `_SeedHooksPlugin` | Once per admitting turn, with every held batch due; return one `BatchPlan` per batch. The seed admits everything. The kernel frames what is admitted whatever you return |
+| `on_held_admitted(channel, source: str, trace_id: str \| None, admitted_keys: list[str], duplicate_keys: list[str])` | async broadcast | Once per offered batch, after its plan is applied, one with nothing admitted included |
 | `after_persist_assistant(channel, message: dict)` | async broadcast | After assistant message is written to DB; plugins may mutate the in-memory dict |
 | `persist_message(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
 | `before_compaction(channel, compacted_ids: list[int], cut: int)` | async broadcast, awaited | After the compaction summary succeeded and before `replace_with_summary`. The window still holds the messages about to be dropped (`channel.conversation.messages[:cut]`; `cut` is moved off tool cycles where compaction can afford it, see design.md), so this is where to fork over that prefix (see "Forking the window"). Runs on the response path; failures are logged and never block compaction. |
@@ -684,7 +571,7 @@ Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMe
 hook fires. Mutations to `message` affect in-memory prompt construction
 only; they do not update the persisted record.
 
-`transform_system_prompt` — `text` is the identity and register as composed, or the identity alone when the register is empty. It runs on the composed prompt whatever the register's source, so a channel with its own `register_prompt`, or with `register_prompt: ""`, still goes through it. A wrapper that raises is logged at WARNING with the channel and the untransformed prompt is used. A transform that modifies the identity+register prefix is rejected with a WARNING; the untransformed prompt is used. Appending is the expected use. The result is re-resolved at compaction boundaries, so a plugin's section persists across compactions as long as the wrapper remains registered. To act only on chats, find the transport that owns the channel and read its `conversational` (`SilencePlugin` does this).
+`transform_system_prompt` — `text` is the identity and register as composed, or the identity alone when the register is empty. It runs on the composed prompt whatever the register's source, so a channel with its own `register_prompt`, or with `register_prompt: ""`, still goes through it. A wrapper that raises is logged at WARNING with the channel and the untransformed prompt is used. A transform that modifies the identity+register prefix is rejected with a WARNING; the untransformed prompt is used. Appending is the expected use. The result is re-resolved at compaction boundaries, so a plugin's section persists across compactions as long as the wrapper remains registered. To act only on chats, read `owning_transport(self.pm, channel)` and its `conversational` (`SilencePlugin` does this; [Plugin boundaries](#plugin-boundaries)).
 
 `before_agent_turn` — messages injected via `channel.conversation.append()` inside this hook are passed through `persist_message` and persisted to the DB, unless they already carry a `_db_id` (i.e. their producer persisted them itself).
 
@@ -726,7 +613,7 @@ class HeartbeatPlugin(CorvidaePlugin):
     model_visible_annotations = frozenset({"origin"})
 ```
 
-The Agent collects these once at startup (a plugin loaded later is not read) and, for a notification carrying a declared key, stores that key's value with the row and renders it in a kernel-built `[annotations: origin=heartbeat]` line. Only `origin` is declared today (scheduler producers, heartbeat, funnel, cross-channel send, restart). Declare a key only for short, plugin-chosen text, never payload: the value is sanitized but otherwise shown as given. The header's wording and the payload fence are the kernel's, and a plugin cannot change them ([design.md](design.md#provenance-header-and-fence)).
+The Agent collects these once at startup (a plugin loaded later is not read) and, for a notification carrying a declared key, stores that key's value with the row and renders it in a kernel-built `[annotations: origin=heartbeat]` line. Only `origin` is declared today (scheduler producers, heartbeat, the held-text store `held`, cross-channel send, restart). Declare a key only for short, plugin-chosen text, never payload: the value is sanitized but otherwise shown as given. The header's wording and the payload fence are the kernel's, and a plugin cannot change them ([design.md](design.md#provenance-header-and-fence)).
 
 `SchedulerPlugin` is the producer that stamps it for clock-driven items. A due reminder fires as
 
@@ -739,7 +626,7 @@ await self.pm.ahook.on_notify(
 
 and core carries `annotations` untouched to `on_message_persisted`, `before_agent_turn`, `on_agent_response`, every tool Task in the cycle, and the usage-log attribution. A notification like this, with no inherited `annotations["trace_id"]`, originates its own trace, so it also gets a fresh `max_turns` budget (reset only when no tool cycle is in flight).
 
-Producers that start a background task in `on_start` and inject notifications should wait for `pm.get_plugin("agent").started` before calling `on_notify`: `on_start` is broadcast to every plugin concurrently, and `Agent` starts after the broadcast.
+Producers that start a background task in `on_start` and inject notifications should wait until the Agent's `started` property is true before calling `on_notify`: `on_start` is broadcast to every plugin concurrently, and `Agent` starts after the broadcast. The Agent is a kernel plugin, so name it in `depends_on` and resolve it typed ([Plugin boundaries](#plugin-boundaries)): `get_dependency(self.pm, "agent", Agent).started`, with `Agent` from `corvidae.agent`.
 
 ### Observability
 
@@ -924,6 +811,7 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text, trace_id)` | reject-wins (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `should_send_response(channel, text, emission, trace_id, annotations)` | reject-wins (broadcast) | `bool \| Refusal \| None` | Any `False` or `Refusal` withholds the emission; anything else sends it |
+| `should_execute_tool(channel, tool_name, arguments, trace_id)` | reject-wins (broadcast), under the check allowance | `bool \| Refusal \| None` | Any `False` or `Refusal` refuses the call, and the refusal becomes its result; a raising implementation is no refusal |
 | `should_start_work(channel, kind, source_channel, trace_id, annotations)` | first refusal wins (called by hand) | `WorkRefusal \| None` | The first `WorkRefusal` stops the work and becomes the starting tool's result; anything else is no opinion |
 | `resolve_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and gives its remedy: a timeout or an HTTP error asks the user to try again, while an unreachable backend the daemon has scheduled a retry for says the answer will come when the model server is back. When no retry could be scheduled (no kernel clock registered), the unreachable message falls back to asking the user to try again rather than promising a retry that will not happen. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.providers.<name>.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
 | `resolve_compaction(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
@@ -1086,13 +974,16 @@ plugin has no special standing (#1026).
 | `corvidae.prompts` | `resolve_prompt` |
 | `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |
 | `corvidae.idle` | `IdleTracker`, `IdleWatch` |
+| `corvidae.held` | `HeldContext`, `Contribution`, `HeldBatch`, `BatchPlan`, `STUB_ANNOTATION`, `FRAME_HEADER`, `frame` (see [Contributing text for the next turn](#contributing-text-for-the-next-turn)) |
+| `corvidae.checks` | `gather`, `Gathered`, `resolve_check_allowance` (see [Say which phase a plugin acts in](#say-which-phase-a-plugin-acts-in)) |
 | `corvidae.spill` | `NotificationSpill` (see [Spilling a long notification](#spilling-a-long-notification)) |
 | `corvidae.llm`, `corvidae.thinking` | `LLMClient`; `apply_reasoning_history`: for offline operator commands that build the daemon's clients and apply its reasoning policy without a running plugin manager (`corvidae reconsolidate`). An ordinary plugin gets its client from `LLMPlugin` |
 | `corvidae.runtime` | `Runtime`: `load_config`, `setup_logging` and `load_plugins`, the startup steps the daemon and the restart pre-flight share, plus `arm_exit_bound()` — the exit watchdog with the configured `daemon.exit_timeout`, for a process whose exit is not `run()`'s to bound (the restart pre-flight, #757). For tools that check a config the way the daemon boots, not for ordinary plugins |
 | `corvidae.outbound` | `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus`, `OutboundProgress` (for senders and transports) |
 
-The kernel never imports a plugin outside it. A plugin that needs another
-plugin resolves it at runtime with `get_dependency(self.pm, "<name>", Type)`.
+The kernel never imports a plugin outside it. A plugin that needs a kernel
+plugin resolves it at runtime with `get_dependency(self.pm, "<name>", Type)`;
+it reaches any other plugin through hooks ([Plugin boundaries](#plugin-boundaries)).
 
 ## Acting on time and quiet
 
@@ -1223,6 +1114,216 @@ tool unregistered while it runs stays fenced. It is strict: only `True` counts
 MCP tools are declared by the client for every server, with no setting. See
 [design.md](design.md#untrusted-tool-results).
 
+### Declaring a tool read-only
+
+A tool that a fork may call declares itself read-only on the registered
+callable:
+
+```python
+async def search_notes(query: str) -> str:
+    "Search the notes index."
+    ...
+
+search_notes.reads_only = True
+```
+
+Declare it only when the tool changes no stored state, access statistics
+included, and sends nothing anywhere but the operator's
+configured model providers (an embedding call is fine; a web request is
+not). No tool is read-only by default, and the kernel takes your word for
+it: `corvidae.tool.declares_read_only(fn)` reads the attribute, and only
+`True` counts. MCP tools are never declared. A fork calls such a tool only
+when its caller passes `max_tool_calls` above 0 (see
+[Forking the window](#forking-the-window)). The call is not offered to
+the pre-tool-use check (`should_execute_tool`, once built) and fires no tool hook, and its result reaches the
+fork fenced as untrusted whatever `returns_untrusted` says. A tool that
+writes on some path (lazy schema creation, a statistics bump) is not
+read-only on that path, so guard the path or don't declare it.
+`docs/threat-model.md` ("Read-only tool calls in a fork") records what a
+wrong declaration costs.
+
+## Plugin boundaries
+
+How one plugin may reach another (#1178): the mechanism the PRD's §4
+decision log records for principle 1, which asks that no plugin depend on
+another without declaring it. The short form:
+**depend downward by type, sideways by hook.**
+
+### Hold a reference only to a kernel plugin
+
+A plugin may hold a reference to another plugin only when all three hold:
+
+1. the target is a kernel plugin (one under `corvidae/`: `agent`,
+   `registry`, `persistence`, `clock`, `idle`, `task`, `llm`, `tools`,
+   `spill` and the rest);
+2. it is named in the holder's `depends_on`;
+3. it is resolved with `get_dependency(self.pm, name, Type)`.
+
+Everything else goes through a hook, so a bare `pm.get_plugin(name)` has no
+use in a plugin. Walking `pm.get_plugins()` to find one, such as the
+`TransportPlugin` that owns a channel, is the same reach with no name: ask the
+kernel instead (`owning_transport(pm, channel)` from `corvidae.hooks` returns
+the owner's `TransportFacts` — `transport`, `conversational`,
+`check_allowance` — or None; #1193). The two cases differ for a reason. A call such as
+`clock.now()` needs a typed answer at once from a layer that is always
+loaded, and a hook would add broadcast semantics to something with one
+provider. A peer plugin may be absent, and which way a dependency between
+two peers points is a design choice that a string lookup hides.
+
+`tests/test_plugin_boundary.py` enforces the lookup half. It fails on a
+`get_plugin` call under `packages/` (tests excluded) that its `ALLOWED`
+list does not cover, and on an entry that covers more calls than remain.
+The list held the calls that predate the rule, each with the issue that
+removed it. It is empty now: the last, planning's read of `goals`, went in
+#1181, where planning owns `resolve_corvidae_planning_goals` and goals
+implements it. New work never adds an entry. A missing kernel plugin is not
+something a plugin works around:
+`get_dependency` raises naming it, and a test that builds a plugin manager
+by hand registers the kernel plugins its plugin uses (`add_kernel_registry`
+in `tests/helpers.py`, `install_kernel_clock` in `tests/fake_clock.py`;
+#1180).
+
+**Choosing a fallback.** A plugin may call `pm.has_plugin(name)` for a name
+in its own `optional_depends_on`, once (at `on_start` is the usual place), to
+decide which fallback to run when that peer is not loaded; it does not call
+`get_plugin` on a peer for this. Critique does it for `appraisal`: with
+appraisal registered it acts only through appraisal's hooks, and without it
+logs one INFO line and samples lenses itself (see "When nobody answers").
+
+### Firing a hook depends on its owner
+
+A hook does not remove a dependency; it points it. Firing a hook depends on
+its spec, and implementing one does not: with no spec and no implementation
+loaded, `pm.ahook.<name>` raises `AttributeError`; a spec with no
+implementation returns `[]` (observe) or `None` (`resolve_`); an
+implementation with no spec runs if something fires the hook, and is
+harmless because nothing does while its owner is absent.
+
+So **a plugin fires only hooks in `AgentSpec` or hooks whose owner it names
+in `depends_on`.** Startup validation then reports a missing owner by name
+instead of the first call failing. Implementing a plugin's hook needs no
+dependency; list the owner in `optional_depends_on` so a missing owner is
+logged at DEBUG (see [Plugin dependencies](#plugin-dependencies)).
+
+Who owns a spec follows from that:
+
+- **One caller, any number of implementers:** the caller owns it
+  ([Declaring hooks in a plugin](#declaring-hooks-in-a-plugin)).
+- **A plugin asking others for a value, with its own fallback:** the asker
+  owns a `resolve_` hook.
+- **Many callers:** a *protocol plugin* can own the hook. It declares the
+  spec and has next to no behaviour of its own, so depending on it costs a
+  caller nothing. It needs no implementation of its own hook, except that a
+  `transform_` hook still needs the owner's `trylast` seed (above). A
+  protocol plugin must live in a distribution every caller can depend on.
+  `trace` (`corvidae_cognition/trace.py`) is the first: it owns
+  `on_trace_record` and `resolve_trace_origin`. Its one behaviour is a
+  startup warning, when the optional sink `outcome_log` is not loaded,
+  naming the reporters whose records go unwritten.
+- **The kernel takes a hook when its callers span distributions that should
+  not depend on one another**, not because there are many of them.
+
+### Events and services
+
+Something one plugin wants from another has one of two shapes:
+
+- **An event** is an `on_` hook. The caller tells whoever listens and does
+  not care who that is.
+- **A service** is a `resolve_` hook. The caller needs one answer and
+  supplies its own fallback when the answer is `None`.
+
+A protocol plugin that declares both is a service interface written as
+hooks.
+
+An event or service can also be a *contribution* hook, where the asker owns
+the spec and the peers supply the content. Appraisal's three hooks are the
+example (cognition.md, "AppraisalPlugin"): `on_appraisal_prompts(channel,
+trigger)` collects `(lens, question)` offers from whoever implements it,
+and `on_appraisal_before_send` and `on_appraisal_idle` hand the scores back.
+Critique implements them and appraisal never names critique. Treat what a
+contribution hook returns as untrusted input: appraisal drops a malformed
+or duplicate offer, and a non-list result or non-string objection, with a
+warning.
+
+**No plugin reads another plugin's tables.** Table and column names are not
+a contract; raw SQL on a peer's table is a service call with no interface.
+Prefer pushing the data on an event, so no read is needed; otherwise ask
+through a `resolve_` hook the reader owns or depends on. The tree does not
+fully comply yet: critique's provenance check still searches memory's
+`message_fts`. The reads of `exchange_log` are gone: appraisal's went with
+the removal of the appraisal vector, and gates' went when it began asking
+`resolve_trace_origin`.
+
+**Hint the types on both sides.** The spec carries the return annotation, as
+the kernel's do (`resolve_channel(...) -> "Channel | None"` in
+`corvidae/hooks.py`). A shared return type lives in the owner's module, and
+implementations annotate the same type. `pm.ahook` is untyped, so the caller
+annotates the variable it assigns the result to, and the checker covers
+everything after that line. Nothing verifies that an implementation's
+annotation matches its spec; that is accepted, and no check is planned.
+
+### When nobody answers
+
+A caller whose optional provider is not loaded falls back, and principle 1
+already asks a plugin to document what the system does without the other.
+Two cases, two log levels:
+
+- **No provider loaded:** say so once, at startup, at INFO, naming the
+  plugin and the fallback, in the form `critique: no appraisal loaded,
+  lenses are chosen at random`. An absent optional plugin is a configuration
+  the operator chose, not a fault, and a warning on every call teaches the
+  operator to ignore warnings. `trace` is the deliberate exception: when
+  `outcome_log` is not loaded it warns once at start, at WARNING, because
+  the owner asked that a disabled outcome log not drop records silently.
+- **A loaded provider that failed:** WARNING, each time. That is a rescue in
+  the sense of AGENTS.md "Error handling and messages".
+
+A `None` guard that changes behaviour without either line is a bug. The
+held-text store has no such fallback to log: it is a kernel plugin and always
+present, and without the `funnel` policy it admits every held entry as offered.
+
+### `annotations` is stamped at creation
+
+A producer writes `annotations` when it creates an item, and nothing writes
+to it afterwards. The dict is copied at each hop, into tool tasks and
+notifications, so a key added later in a hook reaches some readers and not
+others. This is narrower than "never mutate what you are handed": a
+`transform_` hook still enriches before a handoff, and a contribution point
+such as `on_web_console_init(panels)` still has implementers append. If a
+plugin ever needs to enrich `annotations`, the form is a transform at item
+creation, before the first copy; none exists, and none is to be built
+without a second use.
+
+### Say which phase a plugin acts in
+
+A cognitive process meets a turn in one of three phases (#1176). A plugin's
+docs say which phase each of its activities runs in; one plugin may span
+phases.
+
+Any plugin that acts on a message turn may contribute CONTEXT, in whichever
+phase it acts. The phase decides when that CONTEXT reaches the model, what
+else the plugin may do, and what it owes.
+
+| Phase | Hook | Its CONTEXT reaches the model | It may also | It must |
+|---|---|---|---|---|
+| Before composition | `before_compose` | in the turn being composed if it answers within the channel's check allowance, else at the channel's next turn | nothing more; there is no output yet to judge | answer within the allowance ([Contributing text for the next turn](#contributing-text-for-the-next-turn)) |
+| Before effect | `should_send_response`, `should_execute_tool` | with what is sent back to the model (a held reply's objections arrive as CONTEXT), or at the next turn if the verdict is late | refuse; an in-time refusal ends the wait for the others | answer within the channel's check allowance ([Output gating](#output-gating), [Refusing a tool call](#refusing-a-tool-call)) |
+| Idle | idle watchers, background work | at the channel's next turn (`held.hold`), or in a turn it wakes (`held.hold_and_wake`) | nothing more; nothing is pending to stop | yield when a message arrives |
+
+Admission gating (`should_process_message`) comes before any of these: no
+exchange exists yet, so it is outside the model and is not a phase. An idle
+or timer callback that is upkeep never wakes a channel
+([Acting on time and quiet](#acting-on-time-and-quiet)); only an agency
+producer, such as the scheduler or the heartbeat, starts a turn. The two
+gathering phases are one kernel primitive, `corvidae.checks.gather`: it
+publishes to every implementation of a hook, waits for the answers up to the
+channel's check allowance, and hands an answer that misses it to the held-text
+store, which admits it at the channel's next turn. Idle has no gather. A
+plugin that adds its own hook can run it under the same allowance by calling
+`gather` with a `phase` and an `on_late` handler; the kernel's own callers are
+`Agent._compose_held` (before composition) and the reply and tool-call gates
+(before effect).
+
 ## Plugin dependencies
 
 Declare `depends_on` as a class attribute (a set of plugin names). `validate_dependencies()` raises `RuntimeError` at startup if any declared dependency is not registered, or if the dependency graph contains a cycle. The error message includes the full cycle path, e.g. `Dependency cycle detected: a -> b -> a`.
@@ -1244,11 +1345,18 @@ registry = tools_plugin.get_registry()
 
 `get_dependency` raises `RuntimeError` if the plugin is not found and `TypeError` if it is the wrong type.
 
-A plugin that uses another plugin when it's there and works without it
-declares `optional_depends_on` instead. A missing optional dependency is
-not an error, and optional dependencies aren't part of cycle detection.
-Look the plugin up with `pm.get_plugin(name)` and treat `None` as absent
-(it's `None` whether the plugin is disabled or not installed). The declaration is documentary: it only changes the log level of a hookimpl with no spec (above) and doesn't order loading, so look the plugin up when you use it, not in `__init__`:
+Only a kernel plugin is resolved this way ([Plugin boundaries](#plugin-boundaries)).
+A plugin reaches a non-kernel plugin through hooks, and lists in `depends_on`
+the owner of every plugin-owned hook it fires.
+
+A plugin that works with another plugin when it's there and without it
+otherwise declares `optional_depends_on` instead. A missing optional
+dependency is not an error, and optional dependencies aren't part of cycle
+detection. The declaration is documentary: it only changes the log level of
+a hookimpl with no spec (above) and doesn't order loading. Its use is to
+implement the optional plugin's hooks, not to look the plugin up.
+Say once at startup what your plugin does without it
+([When nobody answers](#when-nobody-answers)).
 
 ```python
 class ProfilerPanel(CorvidaePlugin):
@@ -1262,28 +1370,166 @@ class ProfilerPanel(CorvidaePlugin):
 If the owner is absent, the impl stays registered with no spec and is
 never called. See [Declaring hooks in a plugin](#declaring-hooks-in-a-plugin).
 
-## Injecting context before agent turns
+## Contributing text for the next turn
 
-`before_agent_turn` fires before every LLM call. Use it to inject contextual information (memory retrieval, current state, etc.) into the conversation. The hook receives the current turn's trace id and annotations dict:
+A plugin with text for the model (a recalled note, a reviewer's verdict, a heads-up) does not append CONTEXT to the window itself. It gives the text to the kernel's held-text store (`corvidae/held.py`, plugin `held`, #1176), which waits for a turn that can take it, frames it as data, appends it as one CONTEXT row per batch, persists the row with its id, and announces what went in. The store never places text between a tool call and its result. There are three routes, by when the text is ready:
+
+| Route | Use it when | The text reaches the model |
+|---|---|---|
+| `before_compose` returns a `Contribution` | you can answer for the turn being composed | in that turn's prompt if you answer within the channel's check allowance, else at the channel's next turn |
+| `held.hold(channel, source, entries)` | the text is ready outside a turn and can wait for any turn | at the channel's next turn, whatever its origin; wakes nothing |
+| `held.hold_and_wake(channel, origin, source, entries, stub_text=None, *, stub_text_wins=False)` | the text should also start a turn | one `on_notify` stub wakes the channel; the text is admitted at the turn of that `origin` |
+
+### `before_compose`
 
 ```python
-from corvidae.context import MessageType
+from corvidae.held import Contribution
 from corvidae.hooks import CorvidaePlugin, hookimpl
 
-class MemoryPlugin(CorvidaePlugin):
+class NotesPlugin(CorvidaePlugin):
     @hookimpl
-    async def before_agent_turn(self, channel, trace_id: str | None, annotations: dict) -> None:
-        notes = await self.fetch_relevant_notes(channel.id, trace_id)
-        if notes:
-            channel.conversation.append(
-                {"role": "user", "content": f"[Context]\n{notes}"},
-                message_type=MessageType.CONTEXT,
-            )
+    async def before_compose(self, channel, trace_id, annotations) -> Contribution | None:
+        # Look up what this turn needs; None (or an empty Contribution) when nothing.
+        notes = await search_notes(channel)  # your own lookup
+        if not notes:
+            return None
+        return Contribution(
+            source="notes",
+            entries=[n.line for n in notes],
+            keys=[n.key for n in notes],  # optional: one stable identity per entry
+        )
 ```
 
-Compaction summarizes only `MESSAGE` entries, but a `MessageType.CONTEXT` row in the range it drops leaves the window with it; CONTEXT in the retained tail stays.
+- The hook must be `async` and return a `corvidae.held.Contribution` or `None`. Anything else is logged at WARNING and dropped (the plugin is named only when the answer was late; an in-time one is logged with its type and the channel). An empty `Contribution` is allowed: it admits nothing but still fires `on_held_admitted`, so a source can close its records.
+- It runs on every turn but a retry, after `before_agent_turn` and the persist loop for that hook's injections. The kernel does not fire it with `pm.ahook`: `Agent` calls every implementation concurrently with `corvidae.checks.gather` and waits no longer than the channel's [check allowance](configuration.md#check-allowance). Await your lookup in the hook itself. An answer in time is in this turn's prompt. A late one is held as it arrives and admitted at the channel's next turn; it wakes nothing, and your coroutine is not cancelled, so tolerate running past the turn. A hook that raises is logged and counts as no opinion. The miss is a `check.missed` metric tagged `phase: before_compose`.
+- `source` is the frame label (`[CONTEXT from notes — …]`) and the key of `funnel.budgets.<source>`.
+- `keys`, if given, is one stable identity per entry. With the funnel loaded, an entry is then a duplicate when its key already appears in a CONTEXT row framed for your source, so a line that re-renders with a new age or score is not admitted twice. The match is containment, so render the key into the line (memory renders its record id; a folder source can carry `<!--notes/page.md#intro-->`), choose keys that cannot occur inside one another (memory's ends in a paren), and give exactly one per entry. A list of the wrong length is logged at WARNING naming the source and both lengths, and the entries are held unkeyed. Without keys, dedupe matches each entry's whole text against every CONTEXT row, so render stably.
+- A contribution is offered at one turn only. An entry the admission policy does not admit (over a budget, say) is dropped, not queued behind later turns, and a newer held contribution from your source replaces an older one still waiting (logged at WARNING), because the older is stale.
+- On a turn with a tool call outstanding on the channel, nothing is appended. The in-time contributions are held and admitted at the next turn that can append, so a message that arrives mid-call gets its recall one turn late.
 
-Prefer routing CONTEXT through the admission funnel instead of appending directly: `pm.get_plugin("funnel").admit(channel, conv, "<source>", entries)` gives you window dedupe, per-source token budgets (`admit_detailed(...)` takes the same arguments and also reports which entries were dropped as duplicates), and the mandatory data-not-instructions framing for free (see [FunnelPlugin](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy) in cognition.md; the funnel is part of the cognition extra, so check that `pm.get_plugin("funnel")` is not None). Direct appends bypass all three. Dedupe matches each entry's whole text against every CONTEXT row by default; if your lines carry something that changes from turn to turn (an age, a score), pass `keys=[...]`, one stable string per entry, and an entry is a duplicate when its key appears in a CONTEXT row framed for your source. Memory passes `memory <id>)`. Choose keys that can't occur inside one another, which is why memory's ends in a paren, and pass exactly one per entry: a length mismatch raises `ValueError`. Operators can also cap what your source holds in a window with `funnel.window_budgets.<source>` (see [configuration.md](configuration.md#funnel--context-admission-funnel)); entries the cap drops come back like budget drops, in neither `admitted` nor `duplicate`.
+`on_held_admitted(channel, source, trace_id, admitted_keys, duplicate_keys)` tells you what happened to a batch you contributed. It fires once per offered batch, one with nothing admitted included, after the admission is applied. A key is the entry's key, or its text when you gave none; a key in neither list was dropped. `trace_id` is the trace that produced the batch, not the admitting turn's, so stash what you need under `(channel.id, trace_id)` in `before_compose` and write your records here, as memory does for its access stats and retrieval log. Every source's batches arrive at every implementation, so return at once unless `source` is yours and you hold a stash for that trace.
+
+### `hold` and `hold_and_wake`
+
+```python
+from corvidae.held import HeldContext
+from corvidae.hooks import CorvidaePlugin, get_dependency
+
+class ReviewerPlugin(CorvidaePlugin):
+    # The store is a kernel plugin: name it, then resolve it by type (#1178).
+    depends_on = frozenset({"held"})
+
+    async def deliver(self, channel, findings: list[str]) -> None:
+        held = get_dependency(self.pm, "held", HeldContext)
+        # Wake the channel with one stub; the findings arrive at that turn.
+        await held.hold_and_wake(
+            channel, origin="review", source="review", entries=findings,
+            stub_text="Background review: findings are waiting.",
+        )
+```
+
+- Both are `async`; `entries` are pre-formatted lines, admitted as one frame in the order given. An empty list does nothing. `hold` wakes nothing.
+- `hold_and_wake` holds the entries for the channel's turn *of that origin*, and fires one `on_notify` stub (`tool_call_id=None`) to start it. While a stub for a `(channel, origin)` is pending, later batches for the pair queue behind it and fire no second stub, and the first stub's text stands. A batch passed with `stub_text_wins=True` (keyword-only, with a `stub_text`) replaces the pair's stub text instead: the queued stub's row, and any re-fire, carry the winner's text. Pass it only when the woken turn must read your text whatever else is pending; the pre-send revision is the one caller (#1222). `HeldContext.stub_text(channel_id, origin)` returns the pair's latest stub text, which the kernel writes into a stub's row when it builds it. With `stub_text=None` the stub reads `<n> pending <source> item(s)`. The stub's annotations are `{"origin": origin, "held_stub": True}`; `corvidae.held.STUB_ANNOTATION` is that key, and the kernel recognises a stub by it, never by origin (task completions and cross-channel notes carry origins too). Keep `origin` short: it shows in the notification header.
+- A stub whose turn cannot append (a tool call is outstanding) is deferred, not lost: the store re-fires it when the channel's next tool cycle ends. A stub that fails to fire, or whose turn raises before its batches are admitted, is retried the same way, logged at WARNING.
+- Kept batches keep their keys and creation time when a policy leaves some of their entries out.
+- An entry over `agent.held_entry_max_chars` (default 8000) is cut to that many characters and the rest goes to the notification spill, with a line saying where. It is never dropped.
+- Held text is in memory only. A restart drops it, and `on_stop` logs one WARNING per channel naming the count and sources.
+
+### What the kernel owns and what a policy owns
+
+The kernel always frames: every admitted batch is wrapped in the data-not-instructions header and footer (`corvidae.held.frame`), and no hook can remove it, whatever `transform_held_admission` returns. Late-check rows get the same frame. It also owns the ceiling above, the never-between-call-and-result rule, persistence and the announcement. It applies no admission budget and no expiry.
+
+`transform_held_admission(channel, conversation, batches)` is the policy hook (a `firstresult` hook with an admit-all seed). The store calls it once per admitting turn with every due batch, each a `HeldBatch(source, entries, keys, created, trace_id, once, origin)` (`created` is `Clock.monotonic()` when it was held, so a policy that wants a TTL reads it). It returns one `BatchPlan(batch, admit, duplicate, drop)` per batch it decides on, entry indexes in admission order; the order of the list is the order rows are appended. An entry it lists nowhere stays held when the batch was pushed (`hold`, `hold_and_wake`, a late check) and is dropped with a WARNING when it is a `once` contribution. A policy that raises, or returns a malformed plan (an index out of range, or listed twice), is logged at WARNING and the store admits every entry as offered. With no policy plugin loaded the same happens silently: `plugins.disabled: [funnel]` leaves held text framed and unbudgeted. The cognition `funnel` is the one policy that ships ([cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy)).
+
+### Writing a recall source
+
+If your plugin looks something up for each user turn (a wiki, a folder of
+notes) and wants the result in the prompt as CONTEXT, don't write the
+`before_compose` hook above yourself. `RecallSourceMixin` in
+`corvidae_cognition.recall` (cognition extra) already does the parts every such
+source repeats: it checks that the turn is a user turn, builds the query, keeps
+a cooldown and a single search in flight per channel, runs your search under a
+timeout, catches and logs its failures, and returns the `Contribution`. You
+supply two methods.
+
+```python
+from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae_cognition.recall import RecallContext, RecallSourceMixin
+
+
+class NotesRecall(RecallSourceMixin, CorvidaePlugin):
+    # The frame label, and the key of funnel.budgets.<source_name>.
+    source_name = "notes"
+    # Your own agent.yaml block; the mixin reads cooldown and timeout from it.
+    config_key = "notes_recall"
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
+        # Raises ValueError on a malformed block, which aborts startup.
+        self.init_recall(config)
+
+    async def search(self, query: str, ctx: RecallContext) -> list[dict] | None:
+        # Hits in rank order, or None or [] for none. May raise.
+        return await lookup(query)  # your own lookup
+
+    def render(self, hit: dict) -> str:
+        # One line per hit; render it the same way every time (see below).
+        return f"{hit['title']}: {hit['text']}"
+```
+
+The mixin is a helper, not a plugin: it has no entry point. Your class does,
+and `plugins.disabled` switches your source off by that name. The rest of the
+contract:
+
+- **When it searches.** Only when the window ends in a plain user message
+  with text. CONTEXT rows below that message are looked through, because
+  `before_compose` runs after `before_agent_turn`, where a plugin may have
+  appended CONTEXT (a timestamp, say) under the user's words. A turn that a tool result or an agent reply ends is skipped. The
+  query is memory's `retrieval_query` with `previous_reply` context: the
+  unanswered user messages, preceded by the agent's last reply.
+- **Settings.** `<config_key>.cooldown` (seconds, 0 or more, default 5) and
+  `<config_key>.timeout` (seconds, greater than 0, default 10). Put your own
+  keys in the same block; the mixin ignores them. No block gives the defaults and
+  logs nothing. A bad value raises `ValueError` naming the key, the value and
+  what is accepted. A top-level `cooldown` is not read.
+- **Cooldown and single-flight.** At most one search is in flight per channel,
+  and a channel is not searched again until `cooldown` seconds after the
+  last search started. A search that failed or timed out still counts as one.
+  A turn skipped by either rule is not retried: the next turn asks again.
+- **Fail-soft.** A search that raises, or runs past `timeout`, is logged at
+  WARNING with your source name, the channel and the traceback, and the turn goes
+  on without it. A gather cancelled at shutdown is not a failure and logs
+  nothing. A hit whose `render` raises is dropped with a warning and the
+  others stand. `search` must not swallow `CancelledError`.
+- **Same turn or the next.** The mixin awaits your search inside
+  `before_compose`, so a hit that comes back within the channel's check
+  allowance is in the same turn's prompt. A slower one is held and admitted
+  at the channel's next turn, and wakes nothing. `timeout` bounds the search
+  itself; it is not the allowance.
+- **Size and freshness.** The mixin has no `k`, no bands and no score
+  threshold. With the funnel loaded, what fits is
+  `funnel.budgets.<source_name>`, an entry bigger than the whole budget is
+  dropped with a warning, and `funnel.ingest_ttl` ages out a late result no
+  turn collected. Without it every hit is admitted as offered; the kernel's
+  only limit is `agent.held_entry_max_chars`. Whether a hit is relevant enough
+  to show is not decided here (#674).
+- **Render stably.** `RecallSourceMixin` passes no dedupe keys, so a mixin
+  source is deduped by whole-line containment, and a line that carries
+  something that changes (an age, a rank) re-admits the same hit every turn.
+  A source that writes its own `before_compose` can pass `keys=` on its
+  `Contribution`, and a keyed entry is deduped on the key instead.
+- **Leftovers are dropped.** A contribution is offered at one turn only, so a
+  hit the funnel skips for budget is dropped, not queued behind later turns.
+- **Tests.** Pass a fake clock as `init_recall(config, now=clock)`. See
+  `tests/cognition/test_recall_mixin.py` for a source on a real plugin
+  manager.
+
+## Injecting context before agent turns
+
+`before_agent_turn` fires before every LLM call, and a plugin may append to `channel.conversation` in it. Use it for state that is not text for the model to weigh as data, or when you must append directly; a row you append there is persisted by the `Agent` (unless it carries a `_db_id`), with no framing, dedupe or budget. For text from retrieval, a reviewer or any other source, use [Contributing text for the next turn](#contributing-text-for-the-next-turn) instead: the kernel frames it as data, keeps it clear of tool calls, and persists it.
+
+Compaction summarizes only `MESSAGE` entries, but a `MessageType.CONTEXT` row in the range it drops leaves the window with it; CONTEXT in the retained tail stays.
 
 ## Forking the window
 
@@ -1321,7 +1567,7 @@ class MyPlugin(CorvidaePlugin):
         return result.text
 ```
 
-- `Agent.fork(channel, instruction, *, stage, cut=None, extra_body=None)` returns
+- `Agent.fork(channel, instruction, *, stage, cut=None, extra_body=None, max_tool_calls=0, yield_to_caller=None)` returns
   `ForkResult(text, message, usage, model)`. `model` is the model the fork
   request was sent with (`LLMClient.request_model(body)`, so an
   `extra_body["model"]` override shows), for plugins that record how their
@@ -1335,7 +1581,8 @@ class MyPlugin(CorvidaePlugin):
   goes to that stage's profile: the one the operator maps it to under
   `llm.stages`, else the default chat profile. Name the stage, never a
   profile.
-- It sends the agent's tool schemas with `tool_choice: "none"` and the
+- It sends the agent's tool schemas with `tool_choice: "none"` (`"auto"`
+  while `max_tool_calls` leaves calls) and the
   channel's runtime overrides, so the render matches the main turn; the
   prefix is cached only if the stage's profile is the main turn's, or
   differs from it in sampler-side keys. Don't pass `reasoning_effort` or
@@ -1345,10 +1592,26 @@ class MyPlugin(CorvidaePlugin):
   `reasoning_budget_tokens` and `max_tokens` in its profile's `extra_body`.
   Where a runtime override and the stage profile set the same key, the
   profile wins on a fork (the override is not sent); your `extra_body` beats
-  the profile, and `tool_choice: "none"` beats everything (design.md,
+  the profile, and `tool_choice` (`"none"`, or `"auto"` while `max_tool_calls` leaves calls) beats everything (design.md,
   "Body precedence").
-- It mutates nothing, persists nothing, fires no hooks and never runs
-  tools: a reply with `tool_calls` (or a call written out as text) raises `ForkRefused`; no window or no
+- `max_tool_calls` (default 0) lets the fork call tools declared read-only
+  ([Declaring a tool read-only](#declaring-a-tool-read-only)), up to that
+  many calls in all. A call to any other tool is answered with a refusal and
+  never run. Every result is fenced as untrusted. The request after the cap
+  sends `tool_choice: "none"`, and reaching the cap logs a warning. A
+  malformed call, or a call id the fork has already seen, raises
+  `ForkRefused`. `ForkResult.usage` covers only the last request; each
+  request is metered on its own.
+- `yield_to_caller` (keyword-only, default `None`) is an async callback the
+  fork awaits after each tool round, before its next model request, outside
+  the lease, so a caller can hold the fork off the model while something else
+  needs it (critique waits for a user message on the channel). It is never
+  awaited before the first request or after the final reply. Raise from it to
+  abandon the fork: the exception propagates out of `fork`. It is a callback,
+  not a hook.
+- It mutates nothing, persists nothing and fires no hooks. With
+  `max_tool_calls=0` it runs no tools: a reply with `tool_calls` (or a call
+  written out as text) raises `ForkRefused`; no window or no
   client for the stage raises `ForkUnavailable`. Treat these as a miss: skip the live-window work and log it. Keep a non-fork path only for windowless work (seeding, imports), and for a range that has left the window or a stage whose output can't be skipped, as compaction does: for those use the view call below, not a prompt that describes the conversation.
 - Set your own `stage` attribution around the call; `Agent.fork` adds
   `mode="fork"`. Tag any standalone call you keep `mode="standalone"`.
@@ -1366,12 +1629,19 @@ class MyPlugin(CorvidaePlugin):
 
 A plugin adds a critique lens by implementing CritiquePlugin's
 `on_critique_init(config, add_lens)` and calling
-`add_lens(Lens(name, fork_prompt, appraisal_question, wakes=False))`.
-`fork_prompt` is the brief (critique appends the objections reply format);
-`appraisal_question` is one line the stage-2 appraisal fork answers to
-decide whether this lens is the one worth running on an exchange; `wakes`
+`add_lens(Lens(name, fork_prompt, appraisal_question, wakes=False,
+before_send=False))`.
+`fork_prompt` is the brief only: critique puts it in the lens's `## Lens: <name>` section and appends the reply format itself, one JSON key per lens, because every lens selected at a point shares one fork. Don't end the brief with a reply format of your own or tell the fork not to call tools;
+`appraisal_question` is one line the appraisal fork answers to
+decide whether this lens is worth running on an exchange (every lens that beats "none" runs); `wakes`
 says whether its non-empty objections wake the channel (default no: they
-wait as CONTEXT for the next turn). There are no thresholds, reply
+wait as CONTEXT for the next turn). `before_send` (default `False`) also
+offers the lens on a final draft before it is sent, scored by the same
+`appraisal_question`; leave it off unless the lens makes sense on text not
+yet sent. A before-send lens runs inline in the send check, and its
+objections go back to appraisal, which refuses the draft on them and holds it
+for one revising turn (#1149). Built-ins other
+than retention are always offered there. There are no thresholds, reply
 patterns or sample rate (#1078); a lens without a question is rejected with
 a warning.
 
@@ -1383,6 +1653,15 @@ a broad one steals exchanges from the others. Operators can reword it with
 `critique.lens.<name>.appraisal_question`. Declare
 `optional_depends_on = frozenset({"critique"})`. The full contract and
 rejections are in [cognition.md](cognition.md#critiqueplugin-lenses-other-plugins-add-on_critique_init).
+
+A lens that needs live context implements `transform_critique_prompt(channel,
+trace_id, lens_name, instruction)` and returns `instruction` with its text
+appended, or `None` for every other lens. `instruction` is one lens's section
+(its `## Lens: <name>` heading and brief), not the whole fork instruction,
+because the lenses at a point share one fork; the exchange quote and the reply
+format follow the sections and are not passed. A result that is not a string is
+ignored with a warning, and the fork uses the untransformed section
+([cognition.md](cognition.md#critiqueplugin-lens-context-from-other-plugins-transform_critique_prompt)).
 
 ### The view call
 
@@ -1684,6 +1963,7 @@ tools             (ToolCollectionPlugin) — entry point
 memory            (MemoryPlugin)        — entry point (cognition extra)
 memory_tools      (MemoryToolsPlugin)   — entry point (cognition extra)
 funnel            (FunnelPlugin)        — entry point (cognition extra)
+held              (HeldContext)         — entry point
 goals             (GoalsPlugin)         — entry point (cognition extra)
 agent             (Agent)               — entry point
 config_watcher    (ConfigWatcherPlugin) — entry point
@@ -1770,7 +2050,7 @@ For `should_send_response`, the Agent catches any exception, logs it at WARNING 
 
 `should_send_response(channel, text, emission, trace_id, annotations)` is the outbound mirror of `should_process_message`: return `False` to withhold, `None` for no opinion. `emission` is `final` (the reply), `progress` (text alongside dispatching tool calls), `thinking` (reasoning) or `error` (the LLM-error fallback); treat anything else as no opinion. `text` is exactly what would be sent. Where each fires and what a veto does to the stored row and the window is in [design.md](design.md#the-output-gate); in short, a vetoed final is kept in the window as `MessageType.UNSENT` and never sent, and any other veto suppresses only that send.
 
-**The final firing has a time limit (#1162).** Your `final` check runs alongside every other one, and the reply waits for verdicts no longer than the channel's check allowance ([configuration.md](configuration.md#check-allowance): 90 s on Signal, Discord, IRC and Zulip, 10 s on Web, ACP and CLI, else `agent.check_allowance_min`, 5 s by default). A check that takes longer is not cancelled, but its verdict no longer holds anything back: the reply has gone out. Return `corvidae.hooks.Refusal(reason)` instead of `False` when you can say why. A refusal that arrives late reaches the agent at the channel's next turn as a `[late check: <plugin>]` CONTEXT row carrying your reason, so the agent can correct itself; a late bare `False` is lost. A refusal that must hold on every channel has to decide within the minimum. Keep per-channel state safe against a check that is still running when the next turn starts. A plugin that adds its own veto hook can run it the same way with `corvidae.checks.run_checks`.
+**The final firing has a time limit (#1162).** Your `final` check runs alongside every other one, and the reply waits for verdicts no longer than the channel's check allowance ([configuration.md](configuration.md#check-allowance): 90 s on Signal, Discord, IRC and Zulip, 10 s on Web, ACP and CLI, else `agent.check_allowance_min`, 5 s by default). A check that takes longer is not cancelled, but its verdict no longer holds anything back: the reply has gone out. Return `corvidae.hooks.Refusal(reason)` instead of `False` when you can say why. A refusal that arrives late reaches the agent at the channel's next turn as a CONTEXT row, framed as data like all held text, around a `[late check: <plugin>]` text carrying your reason, so the agent can correct itself; a late bare `False` arrives as `no reason given`. A refusal that must hold on every channel has to decide within the minimum. Keep per-channel state safe against a check that is still running when the next turn starts. A refusal that arrives in time ends the wait for the other checks at once. A plugin that adds its own veto hook can run it the same way with `corvidae.checks.gather`.
 
 Origin is not a kernel parameter: read `annotations["origin"]` if your policy depends on it, and record the traces you see in `on_message_admitted` if you need to recognise user exchanges.
 
@@ -1785,6 +2065,26 @@ class QuietHoursPlugin(CorvidaePlugin):
 ```
 
 If you write a transport with history replay, skip `message_type == "unsent"` rows, and use `corvidae.context.unsent_marker_emission(content)` to hold back progress or thinking that a marker says was suppressed. Cognition's `GatePlugin` is the reference implementation ([cognition.md](cognition.md#gateplugin)).
+
+## Refusing a tool call
+
+`should_execute_tool(channel, tool_name, arguments, trace_id)` (#148) is offered every tool call before it runs: the main turn's, a subagent's and the fork tool's. `arguments` has already validated against the tool's schema, so a call with bad arguments never reaches you. `channel` is the calling channel; a subagent's calls carry the channel that started it. Return `corvidae.hooks.Refusal(reason)` to refuse, None for no opinion. A bare `False` refuses too, but the model is told no reason was given.
+
+Any refusal wins. The call does not run, and the model gets `Error: tool '<name>' was refused before it ran: <your reason>. It did not run. Don't retry it unchanged; use another approach, or ask the user.` as its result, so the turn goes on. Write `reason` for the model: say what you found and what would be allowed instead.
+
+- **Fail open.** If your implementation raises, the kernel logs it at WARNING and the call runs. If your check must refuse when it fails, catch your own failure and return a `Refusal`.
+- **Time limit.** Every check runs at once, and the call waits no longer than the channel's check allowance ([configuration.md](configuration.md#check-allowance)). After that the call runs unchecked, and the miss is a `check.missed` metric tagged with `hook: should_execute_tool` and `phase: before_effect`. A refusal that arrives late refuses nothing. It reaches the agent at the channel's next turn as a framed `[late check: <plugin>]` row saying the call ran unchecked, so the agent can undo or follow up; a late bare `False` arrives as `no reason given`. A refusal that must hold on every channel has to decide within `agent.check_allowance_min`. An in-time refusal ends the wait at once: the call is refused without waiting for slower sibling checks, and their later answers are discarded.
+- **Calling channel only.** Refuse because of who or what is on the calling channel, never because of a channel the call targets: a policy keyed on the target channel is a channel wall, which PRD principle 14 rules out.
+- **Untrusted input.** `arguments` are model-written and can carry injected text. A check that hands them to a model should frame them as data.
+
+```python
+class NoShellForGuestsPlugin(CorvidaePlugin):
+    @hookimpl
+    async def should_execute_tool(self, channel, tool_name, arguments, trace_id):
+        if tool_name == "shell" and self.guest_present(channel):
+            return Refusal("a guest is on this channel; ask the operator to run it")
+        return None
+```
 
 ## Async considerations
 
@@ -1903,7 +2203,7 @@ Registered by `SchedulerPlugin` (entry point name: `scheduler`). All five act on
 ## Bundled plugins
 
 The kernel's plugins follow. The cognition plugins (`MemoryPlugin`,
-`MemoryToolsPlugin`, `FunnelPlugin`, `AppraisalPlugin`, `CritiquePlugin`,
+`MemoryToolsPlugin`, `FunnelPlugin` (the admission policy for held text), `AppraisalPlugin`, `CritiquePlugin`,
 `OutcomeLogPlugin`, `GatePlugin`, `HeartbeatPlugin`) ship in the `cognition` extra and are described in
 [cognition.md](cognition.md), which has reference sections for the memory,
 funnel and outcome-log plugins.

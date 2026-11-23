@@ -163,7 +163,8 @@ bot, and it will not tell them so.
 - **DMs:** every message from an allowlisted user is answered.
 - **Servers and threads:** by default the bot answers only messages that
   @-mention it directly. `@everyone`, `@here`, and role pings do not count.
-  The mention is stripped before the model sees the text. Messages that do
+  The mention reaches the model as the bot's `@name`, so the text still says
+the message was addressed to it. Messages that do
   not mention it are not even delivered with content, and are ignored:
   the kernel never sees them, so nothing is appraised or stored. Each drop
   leaves one DEBUG line naming the channel (and the parent, for a thread)
@@ -234,7 +235,8 @@ What to expect:
 - The agent can decline to reply: with the `silence` plugin loaded, a final
   that contains `NO_REPLY` sends nothing (`silence.mode` `tool` or `both` adds an `end_turn` tool that leads to the same), which is
   how it stays quiet in a conversation that is not addressed to it.
-- A mention token is still stripped from the text.
+- A mention token reads as the mentioned user's `@name`, so the text keeps the
+  fact that a message was aimed at the bot (#1215).
 - If the intent is switched off in the portal, Discord refuses the
   connection with `PrivilegedIntentsRequired`; the message names the fix and
   appears in the usual `discord: connection error, retrying` log line.

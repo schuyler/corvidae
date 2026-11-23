@@ -9,6 +9,7 @@ deadline or the plugin's wake event is set.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -122,15 +123,60 @@ async def env(memdb):
 class TestParsing:
     @pytest.mark.parametrize("text,seconds", [
         ("20m", 1200), ("2h", 7200), ("3d", 259200), ("1h30m", 5400),
-        ("in 20 minutes", 1200), ("45s", 45), ("1w", 604800), (3600, 3600),
+        ("45s", 45), ("1w", 604800), (3600, 3600),
+        # #1186 R7: the compact grammar only, with today's separators.
+        ("1h 30m", 5400), ("1h, 30m", 5400), ("2H", 7200), ("1.5h", 5400),
+        ("3600", 3600),
     ])
     def test_durations(self, text, seconds):
         assert parse_duration(text) == seconds
 
-    @pytest.mark.parametrize("bad", ["", "soon", "0m", "5 fortnights", "-3h"])
+    # #1186 R7: English long forms and the "in " prefix are gone; a letter
+    # after the unit is not a separator ("3 hours" is not "3h" + "ours").
+    @pytest.mark.parametrize("bad", [
+        "", "soon", "0m", "5 fortnights", "-3h",
+        "in 3 hours", "3 hours",
+    ])
     def test_bad_durations(self, bad):
         with pytest.raises(ValueError):
             parse_duration(bad)
+
+    def test_long_form_error_names_the_accepted_form(self):
+        """#1186 R7: the error names the rejected text and the unit letters."""
+        with pytest.raises(ValueError) as err:
+            parse_duration("in 3 hours")
+        message = str(err.value)
+        assert "'in 3 hours'" in message
+        assert "s, m, h, d or w" in message
+        assert "20m" in message
+
+    def test_non_positive_error_names_value_and_remedy(self):
+        """#1186 R7: a zero duration names the value and an example."""
+        with pytest.raises(ValueError) as err:
+            parse_duration("0m")
+        message = str(err.value)
+        assert "'0m'" in message and "positive" in message and "20m" in message
+
+    def test_when_error_names_the_week_and_second_units(self):
+        """#1186 R7: WHEN_FORMS_HELP names every unit letter that parses."""
+        with pytest.raises(ValueError) as err:
+            parse_when("in 3 hours", T0, LA)
+        message = str(err.value)
+        assert "'in 3 hours'" in message
+        assert "1w" in message and "45s" in message
+
+    @pytest.mark.parametrize("bad_every", ["in 3 hours"])
+    def test_config_every_error_names_job_key_and_value(self, bad_every):
+        """#1186 R7: a bad config `every` names the job, the key and the value."""
+        with pytest.raises(ValueError) as err:
+            parse_job(
+                {"name": "standup", "channel": "irc:#lex", "prompt": "p",
+                 "every": bad_every}, Path("."),
+            )
+        message = str(err.value)
+        assert "'standup'" in message and "'every'" in message
+        assert repr(bad_every) in message
+        assert "s, m, h, d or w" in message
 
     def test_relative(self):
         assert parse_when("20m", T0, LA) == T0 + 1200
@@ -1028,3 +1074,36 @@ class TestWeekdayAnchor:
     def test_weekday_misuse_is_refused_by_name(self, job, message):
         with pytest.raises(ValueError, match=message):
             parse_job({"name": "bad", "channel": "irc:#lex", "prompt": "go", **job}, Path("."))
+
+
+# ---------------------------------------------------------------------------
+# #1186 R8: dates follow the system locale; logs keep one fixed format
+# ---------------------------------------------------------------------------
+
+
+class TestLocalizedTimes:
+    def test_real_locale_uses_the_localized_format(self, monkeypatch):
+        """R8: under a real locale format_time renders the localized format
+        (%A %x %H:%M %Z), not the C form. No de_DE is installed here, so the
+        process's LC_TIME stays C and %A/%x render C's long name and date."""
+        from corvidae import system_locale
+        from corvidae.scheduler import format_time
+
+        monkeypatch.setattr(system_locale, "time_locale", lambda: "de_DE")
+        expected = datetime.fromtimestamp(T0 + 1200, LA).strftime(
+            system_locale.LOCALIZED_DATETIME_FORMAT)
+        assert format_time(T0 + 1200, LA) == expected
+        assert expected != "Fri 2026-10-23 14:20 PDT"
+
+    async def test_log_field_next_fire_at_is_fixed_numeric(self, memdb, caplog, monkeypatch):
+        """R8: the structured log field next_fire_at has one numeric form
+        whatever the locale (no weekday name), so logs read the same on every host."""
+        from corvidae import system_locale
+
+        monkeypatch.setattr(system_locale, "time_locale", lambda: "de_DE")
+        with caplog.at_level("INFO"):
+            await Env(memdb, sched_config(jobs=[JOB])).init()
+        values = [r.next_fire_at for r in caplog.records if hasattr(r, "next_fire_at")]
+        assert values, "no log record carried next_fire_at"
+        for value in values:
+            assert re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:\d\d \S+", value), value

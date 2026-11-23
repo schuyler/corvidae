@@ -45,6 +45,7 @@ from threading import Lock
 from dataclasses import dataclass, field
 from typing import Any
 
+from corvidae.agent import Agent
 from corvidae.channel import ChannelRegistry, resolve_persisted_channel
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
@@ -235,6 +236,10 @@ class InotifyPingPlugin(CorvidaePlugin):
     on the basename, so the file can appear and settle after boot.
     """
 
+    # The Agent must be started before a ping is injected; the registry
+    # resolves the channel a ping goes to.
+    depends_on = frozenset({"agent", "registry"})
+
     # on_config_reload re-parses the whole section and re-arms, so declare the
     # section reloadable — otherwise config_watcher logs a false-positive
     # "restart-only" warning for inotify_ping.* changes that DO take effect live.
@@ -288,9 +293,7 @@ class InotifyPingPlugin(CorvidaePlugin):
         uses. Defensive getattr so a renamed attribute degrades to "proceed"
         rather than crashing startup.
         """
-        agent = self.pm.get_plugin("agent") if self.pm is not None else None
-        if agent is None:
-            return
+        agent = get_dependency(self.pm, "agent", Agent)
         if not getattr(agent, "started", True):
             event = getattr(agent, "_started_event", None)
             if event is not None:

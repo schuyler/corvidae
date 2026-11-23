@@ -150,9 +150,10 @@ def unsent_marker_text(emission: str, text: str) -> str:
     )
 
 
-#: Label a late-check row opens with (#1162). The Agent appends one, as a
-#: CONTEXT system row, at the channel's next turn after a veto check on a reply
-#: returned a refusal once its check allowance had run out.
+#: Label a late-check row opens with (#1162). The held store reuses it
+#: as ``LATE_CHECK_SOURCE`` and frames one, as a CONTEXT system row, at the
+#: channel's next turn after a veto check on a reply returned a refusal once
+#: its check allowance had run out.
 LATE_CHECK_LABEL = "late check"
 
 
@@ -171,6 +172,42 @@ def late_check_text(text: str, plugin: str, reason: str) -> str:
         "allowance ran out, so it did not affect whether that reply was sent. "
         f"It found: {reason}\n"
         "Decide whether to correct or follow up on that reply."
+    )
+
+
+#: What a refusal says for a bare ``False``, which carries no reason: in a
+#: tool refusal, and in a late-check row for a reply or a tool call.
+NO_REASON_GIVEN = "no reason given"
+
+
+def tool_refusal_text(tool_name: str, reasons: list[str]) -> str:
+    """The result a refused tool call returns to the model (#148).
+
+    Names the tool, every refusal's reason and what to do next, so the turn
+    can continue on another path (PRD §3.5.12).
+    """
+    return (
+        f"Error: tool '{tool_name}' was refused before it ran: "
+        f"{'; '.join(reasons)}. It did not run. Don't retry it unchanged; "
+        "use another approach, or ask the user."
+    )
+
+
+def late_tool_check_text(tool_name: str, arguments: dict, plugin: str, reason: str) -> str:
+    """The late-check row content for a refusal of a call that already ran (#148).
+
+    Quotes the call's arguments, cut like the reply excerpt, so the agent can
+    tell which call of that tool it was. The arguments are model-written.
+    """
+    excerpt = " ".join(json.dumps(arguments, ensure_ascii=False).split())
+    if len(excerpt) > _UNSENT_MARKER_EXCERPT_CHARS:
+        excerpt = excerpt[:_UNSENT_MARKER_EXCERPT_CHARS].rstrip() + "…"
+    return (
+        f"[{LATE_CHECK_LABEL}: {plugin}]\n\n"
+        f"A check on your call to tool '{tool_name}' with arguments {excerpt} "
+        "finished after its allowance ran out, so the call ran unchecked. "
+        f"It found: {reason}\n"
+        "Decide whether to undo or follow up on what that call did."
     )
 
 

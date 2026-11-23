@@ -4,11 +4,12 @@
 #
 # One question: does a withheld final stay withheld across a restart? A
 # heartbeat job on #p-withheld asks for a planted code; the decide gate
-# (gate.send.min_salience 1.0, so every non-user final is withheld) stores
-# the reply as an `unsent` row with its marker, and nothing reaches IRC.
+# (gate.send.quiet_origins: [heartbeat], so every heartbeat final is
+# withheld) stores the reply as an `unsent` row with its marker, and nothing
+# reaches IRC.
 # After a daemon restart the driver asks for the code: only a window that
 # reloaded the withheld row can answer, and a user-origin reply is never
-# withheld. appraisal, outcome_log and gates are on; the rest of the
+# withheld. appraisal, outcome_log and gates are on (and trace, which they need); the rest of the
 # cognition set stays off as in the default profile.
 
 llm:
@@ -51,8 +52,7 @@ scheduler:
 
 gate:
   send:
-    enforce: true
-    min_salience: 1.0     # withhold every non-user final
+    quiet_origins: [heartbeat]   # withhold every heartbeat final
 
 plugins:
   disabled:

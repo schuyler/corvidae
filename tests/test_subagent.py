@@ -469,6 +469,33 @@ class TestToolExclusionVerification:
         assert captured_kwargs.get("task_queue") is task_queue, \
             "work() must pass task_queue to run_agent_loop"
 
+    async def test_work_hands_run_agent_loop_the_agents_tool_check(self):
+        """Every call a subagent dispatches is offered to should_execute_tool
+        (#148, PRD §3.5.12): work() passes the Agent's check_tool_call."""
+        plugin = await _make_started_plugin()
+
+        class AgentStandIn:
+            async def check_tool_call(self, channel, tool_name, arguments, trace_id):
+                return None
+
+        agent = AgentStandIn()
+        plugin.pm.register(agent, name="agent")
+        task_queue = MagicMock(spec=TaskQueue)
+        task_queue.enqueue = AsyncMock()
+        ctx = ToolContext(channel=_make_channel(), tool_call_id="call-check", task_queue=task_queue)
+        captured_kwargs = {}
+
+        async def capture_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
+            captured_kwargs.update(kwargs)
+            return "done"
+
+        with patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
+             patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
+            await plugin._launch("instructions", "desc", ctx)
+            await task_queue.enqueue.call_args[0][0].work()
+
+        assert captured_kwargs.get("check") == agent.check_tool_call
+
     async def test_work_includes_other_tools_in_registry(self):
         """Tools other than subagent are passed to run_agent_loop."""
         # Register shell in addition to the excluded tools

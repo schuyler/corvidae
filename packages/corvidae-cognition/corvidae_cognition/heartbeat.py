@@ -42,6 +42,7 @@ from __future__ import annotations
 import logging
 import math
 
+from corvidae.channel import ChannelRegistry
 from corvidae.prompts import resolve_prompt
 from corvidae.hooks import (
     CorvidaePlugin,
@@ -148,9 +149,8 @@ class HeartbeatPlugin(CorvidaePlugin):
             self.pm = pm
         self._after: float | None = None
         self._idle: IdleTracker | None = None
-        # The kernel ChannelRegistry, duck-typed. The duck typing dates from
-        # a since-removed import allowlist (#1026); it could now be typed.
-        self._registry = None
+        # The kernel ChannelRegistry, resolved in on_start.
+        self._registry: ChannelRegistry | None = None
         self._watch: IdleWatch | None = None
 
     @hookimpl
@@ -171,8 +171,7 @@ class HeartbeatPlugin(CorvidaePlugin):
             logger.info("heartbeat: asleep (no heartbeat.after in config)")
             return
         self._idle = get_dependency(self.pm, "idle", IdleTracker)
-        # Declared in depends_on, so validate_dependencies guarantees it.
-        self._registry = self.pm.get_plugin("registry")
+        self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
         self._watch = self._idle.watch_system(self._after, self._beat, name="heartbeat")
 
     @hookimpl

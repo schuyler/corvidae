@@ -75,17 +75,18 @@ say so, and it still passes.
 
 `heartbeat_smoke` sends nothing. The profile declares a `heartbeat` job
 every 30 seconds on `internal:heartbeat`, a channel no transport owns, and
-turns `outcome_log` on. The probe passes when `exchange_log` has a
-`heartbeat`-origin row and `message_log` has an assistant reply on that
+turns `outcome_log` on. The probe passes when the outcome log
+(`<session db stem>.outcomes.jsonl`, beside the profile's session database) has a
+`heartbeat`-origin line and `message_log` has an assistant reply on that
 channel, while the bot has said nothing in `#p-heartbeat`.
 
 `withheld_restart` sends nothing until the restart. The profile turns on
-`appraisal`, `outcome_log` and `gates`, sets `gate.send.min_salience: 1.0`
-so the decide gate withholds every non-user final, and runs a `heartbeat`
+`appraisal`, `outcome_log` and `gates`, sets `gate.send.quiet_origins:
+[heartbeat]` so the decide gate withholds every heartbeat final, and runs a `heartbeat`
 job every 30 seconds on `irc:#p-withheld` whose prompt asks for the planted
 code `PELICAN-7731`. Before the restart the probe needs an `unsent` row on
 that channel, a `[not sent: final]` CONTEXT row right after it, an
-`exchange_log` row with a heartbeat origin and `outcomes.send.vetoed`, and
+outcome log line with a heartbeat origin and a gates `send` record with `vetoed` set, and
 silence on IRC. It then restarts the daemon, checks that the same row is
 still `unsent`, and asks for the code. The reply is user-origin, which the
 gate never withholds, and it can carry the code only if the withheld row

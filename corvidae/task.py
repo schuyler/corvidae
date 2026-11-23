@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 # Result string used when a task raises an unhandled exception.
 # Format with task_id=<str> and error=<exc or "(unknown error)">.
 TASK_FAILURE_TEMPLATE = "Task {task_id} failed: {error}"
+# Result string used when a task ends by cancellation (#504-2). Distinct
+# from the failure template so a cancel is never mistaken for a crash.
+# Format with task_id=<str>.
+TASK_CANCELLED_TEMPLATE = "Task {task_id} cancelled."
 # Number of completed task records shown in TaskQueue.status() output.
 STATUS_HISTORY_COUNT = 3
 
@@ -115,6 +119,9 @@ class TaskQueue:
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
         self._active_tasks: list[Task] = []
         self.completed: collections.deque[tuple[str, str]] = collections.deque(maxlen=completed_buffer)
+        # Strong refs to detached shutdown-notify coroutines (#504-2);
+        # entries are self-discarding on completion.
+        self._detached_notices: set[asyncio.Task] = set()
         # When set, every completion (success or failure) appends one JSON
         # line to this file, so results survive the in-memory deque's
         # eviction and a daemon restart. Audit side channel: a write
@@ -213,17 +220,54 @@ class TaskQueue:
                     extra={"task_id": task.task_id, "result_length": len(result)},
                 )
             except asyncio.CancelledError:
-                # Worker was cancelled while awaiting; don't orphan the work.
-                work_task.cancel()
-                try:
-                    self._active_tasks.remove(task)
-                except ValueError:
-                    pass
+                # The awaited work ended by cancellation (#504-2). Two
+                # sources, and the handler must tell them apart:
+                #   - the WORKER task was cancelled (daemon shutdown):
+                #     record synchronously, best-effort detached notify,
+                #     propagate so the worker can exit.
+                #   - the WORK was cancelled (timeout controller, future
+                #     task-level cancel API): fall through to the normal
+                #     completion tail — record, persist, deliver, keep
+                #     draining. Before this, both paths left the task in
+                #     neither .completed nor the JSONL (invisible loss),
+                #     and the unconditional re-raise killed the worker
+                #     forever (run_worker never respawns workers).
+                worker_cancelled = asyncio.current_task().cancelling() > 0
+                result = TASK_CANCELLED_TEMPLATE.format(task_id=task.task_id)
+                work_task.cancel()  # idempotent here; not-orphaned on shutdown
                 logger.info(
                     "task cancelled",
-                    extra={"task_id": task.task_id, "description": task.description},
+                    extra={
+                        "task_id": task.task_id,
+                        "description": task.description,
+                        "worker_cancelled": worker_cancelled,
+                    },
                 )
-                raise
+                if worker_cancelled:
+                    # Record before propagating: the durable surfaces must
+                    # show the loss even when the detached notify below
+                    # races shutdown. Same append-before-deliver ordering
+                    # discipline as the success path (#594-2).
+                    self.completed.append((task.task_id, result))
+                    self._persist_result(task, result)
+                    try:
+                        self._active_tasks.remove(task)
+                    except ValueError:
+                        pass
+                    # Awaiting on_complete here would raise CancelledError
+                    # again before delivery could complete; dispatch the
+                    # notification detached. Its durability is best-effort
+                    # (the invariant's explicit exception on this path):
+                    # .completed + JSONL are the referent. The strong
+                    # reference in _detached_notices keeps the coroutine
+                    # alive to completion or loop death — never GC'd, and
+                    # the coroutine is constructed only when it will run.
+                    self._dispatch_detached(on_complete, task, result)
+                    raise
+                # Work-level cancellation: fall through to the normal
+                # completion tail below (append -> persist -> on_complete),
+                # which removes the task from _active_tasks and keeps the
+                # worker alive for the next queue item.
             except Exception as exc:
                 logger.warning(
                     "task failed",
@@ -251,6 +295,58 @@ class TaskQueue:
             # option if that tradeoff changes.
             self._persist_result(task, result)
             await on_complete(task, result)
+
+    def _dispatch_detached(
+        self,
+        on_complete: Callable[[Task, str], Awaitable[None]],
+        task: Task,
+        result: str,
+    ) -> None:
+        """Schedule a completion notification without awaiting it (#504-2).
+
+        Used only on the shutdown-cancel path, where the current task is
+        cancelled and any await would re-raise before delivery. The
+        returned Task is held in _detached_notices (strong reference, so
+        it is never GC'd mid-flight) and discarded when done. If the loop
+        is already closing, the notification is dropped — the durable
+        records were written before this call.
+        """
+        coro = None
+        try:
+            coro = on_complete(task, result)
+            fut = asyncio.ensure_future(coro)
+        except Exception:
+            # Never throw from here: the caller is a CancelledError handler
+            # that must propagate CancelledError, and shutdown must not be
+            # masked by a notification problem. The durable records were
+            # written before this call.
+            if coro is not None:
+                close = getattr(coro, "close", None)
+                if close is not None:
+                    close()  # don't leave an unawaited-coroutine warning
+            logger.warning(
+                "detached task-notify dispatch failed",
+                extra={"task_id": task.task_id},
+                exc_info=True,
+            )
+            return
+        self._detached_notices.add(fut)
+        fut.add_done_callback(lambda f: self._notice_done(f, task))
+
+    def _notice_done(self, fut: asyncio.Task, task: Task) -> None:
+        """Release the strong ref and consume the result so a raised
+        exception never surfaces as an asyncio 'exception was never
+        retrieved' warning at GC time."""
+        self._detached_notices.discard(fut)
+        if fut.cancelled():
+            return
+        exc = fut.exception()
+        if exc is not None:
+            logger.warning(
+                "detached task-notify failed",
+                extra={"task_id": task.task_id},
+                exc_info=exc,
+            )
 
     def _persist_result(self, task: Task, result: str) -> None:
         """Append one JSONL record for a completed task (sync — see call site).

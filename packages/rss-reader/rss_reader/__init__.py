@@ -25,10 +25,12 @@ for the title, link and summary. Empty by default (no prompt).
 Origin ``rss:<feed-url>`` in the cognition plugins:
 
 - appraisal: runs stage 2, as on every origin.
-- outcome_log: records the origin verbatim in ``exchange_log.origin``.
-- gates: non-``user``, so the decide gate may withhold a low-salience final.
+- outcome_log: records the origin verbatim on its outcome-log lines.
+- gates: non-``user``, so ``gate.send.quiet_origins`` can make it quiet.
 - critique: judged like every main-loop turn (#1031).
-- funnel: keys stubs on its own origins only; unaffected.
+- held-text store: pairs a stub with its held text by (channel, origin) and
+  recognises its stubs by the ``held_stub`` annotation, so this origin is
+  unaffected.
 """
 
 from __future__ import annotations

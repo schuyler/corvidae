@@ -10,14 +10,14 @@ covers it):
 - R1  a plugin outside critique.py contributes a lens through the
       critique-owned ``on_critique_init`` hook; it runs when its vector wins,
       its outcome is recorded under its name and its objections reach the
-      funnel;
+      held store;
 - R2  contributions go through ``add_lens``; every problem is rejected with a
       WARNING naming the plugin and the lens, and the other lenses load;
 - R3  a lens is pure data; ``critique.lens.<name>.fork_prompt`` replaces the
       brief;
 - R6  same turns, same machinery: declined turns, forks off and an exchange
       out of the window all skip;
-- R7  an added lens only waits: ``funnel.ingest``, never ``ingest_and_wake``
+- R7  an added lens only waits: ``held.hold``, never ``hold_and_wake``
       (unless it declares ``wakes``, tests/cognition/test_critique_vector.py).
 
 The hook is driven the way the daemon drives it: a separate test plugin is
@@ -33,13 +33,14 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae_cognition.critique import FORKS_OFF_REASON, _JSON_TAIL
+from corvidae_cognition.critique import FORKS_OFF_REASON
 
 from helpers import FakeForkAgent, window_of
 from tests.cognition.test_critique import (
     FakeAppraisal,
     FixedRng,
     _fire,
+    _stage2_hook,
     _read_outcomes,
     _run_next_task,
     build_critique,
@@ -99,18 +100,18 @@ class Contributor(CorvidaePlugin):
 @contextlib.asynccontextmanager
 async def lens_env(
     tmp_path, *lenses, contributors=None, appraisal=..., chat_text=LENS_VERDICT,
-    with_funnel=False, config=None, rng=0.99,
+    with_held=False, config=None, rng=0.99,
 ):
     """critique's real wiring (``build_critique``) with the lenses held by one
     ``kb`` contributor, or ``contributors`` (name -> plugin), registered
     first; tears down on exit. ``appraisal=...`` is a quiet FakeAppraisal and
     ``None`` is no appraisal plugin. ``rng`` is every random draw."""
     if appraisal is ...:
-        appraisal = FakeAppraisal(stage2=QUIET)
+        appraisal = FakeAppraisal()
     if contributors is None:
         contributors = {"kb": Contributor(*lenses)}
     env = await build_critique(
-        tmp_path, appraisal, chat_text, with_funnel=with_funnel, config=config,
+        tmp_path, appraisal, chat_text, with_held=with_held, config=config,
         extra_plugins=contributors,
     )
     env.plugin._rng = FixedRng(value=rng)
@@ -135,9 +136,8 @@ async def _judged_turn(
     then every task critique queued."""
     await _fire(env, trace_id, origin=origin, response_text=reply)
     if stage2 is not NO_STAGE2:
-        [listener] = env.appraisal.stage2_listeners
-        await listener(
-            channel=env.channel, trace_id=trace_id, response_text=reply,
+        await _stage2_hook(
+            env, channel=env.channel, trace_id=trace_id, response_text=reply,
             annotations={} if origin == "user" else {"origin": origin},
             stage2=stage2,
         )
@@ -171,21 +171,21 @@ def _logged(caplog, *needles):
     ]
 
 
-def _watch_funnel(env):
-    """Spy on funnel.ingest and replace ingest_and_wake with a mock."""
-    env.funnel.ingest = Mock(wraps=env.funnel.ingest)
-    env.funnel.ingest_and_wake = AsyncMock()
+def _watch_held(env):
+    """Spy on held.hold and replace hold_and_wake with a mock."""
+    env.held.hold = AsyncMock(wraps=env.held.hold)
+    env.held.hold_and_wake = AsyncMock()
 
 
 def _ingested(env):
-    """Every entry the funnel was handed through ``ingest``, joined."""
+    """Every entry the store was handed through ``hold``, joined."""
     return "\n".join(
-        e for c in env.funnel.ingest.call_args_list for e in c.kwargs["entries"])
+        e for c in env.held.hold.call_args_list for e in c.kwargs["entries"])
 
 
 async def _no_outcome_for(env, trace_id, lens):
     """The exchange has no outcome recorded under ``lens``."""
-    outcomes = await _read_outcomes(env.db, trace_id) or {}
+    outcomes = await _read_outcomes(env.recorder, trace_id) or {}
     assert lens not in outcomes.get("critique", {})
 
 
@@ -197,9 +197,9 @@ async def _no_outcome_for(env, trace_id, lens):
 class TestContribution:
     async def test_contributed_lens_runs_records_and_delivers(self, tmp_path):
         """R1: a separate plugin's lens runs, is recorded under its name and
-        its objections reach the funnel."""
-        async with lens_env(tmp_path, _lens("mine"), with_funnel=True) as env:
-            _watch_funnel(env)
+        its objections reach the held store."""
+        async with lens_env(tmp_path, _lens("mine"), with_held=True) as env:
+            _watch_held(env)
             await _judged_turn(env, "kr1", stage2=_wins("mine"))
             # The lens's own brief went out as a fork, attributed to critique.
             _assert_ran(env, mine=1)
@@ -207,10 +207,10 @@ class TestContribution:
             assert call["stage"] == "critique"
             assert call["attribution"].get("trace_id") == "kr1"
             # The outcome sits in the critique envelope under the lens name.
-            outcomes = await _read_outcomes(env.db, "kr1")
+            outcomes = await _read_outcomes(env.recorder, "kr1")
             assert outcomes["critique"]["mine"]["objections"] == 1
             assert outcomes["critique"]["mine"]["sampled"] is False
-            # The objection was delivered to the funnel.
+            # The objection was delivered to the held store.
             assert LENS_OBJECTION in _ingested(env)
 
 
@@ -377,8 +377,10 @@ class TestTransformCritiquePrompt:
             by_lens = {n: next(c["instruction"] for c in env.fork_agent.calls
                                if f"LENSBRIEF-{n}:" in c["instruction"])
                        for n in ("mine", "ctl")}
-            # Its own lens's fork got the transformed text; None passed ctl's through.
-            assert by_lens["mine"].endswith("XFORM-MARK")
+            # Its own lens's section got the transformed text (the exchange
+            # and the reply format follow the section, #1190); None passed
+            # ctl's through.
+            assert "XFORM-MARK" in by_lens["mine"]
             assert "XFORM-MARK" not in by_lens["ctl"]
             assert xform.seen.count("mine") == 1
 
@@ -406,11 +408,12 @@ class TestLensIsData:
             assert not callable(getattr(full, f.name)), f.name
         assert dataclasses.is_dataclass(Lens)
 
-    async def test_fork_prompt_override_replaces_the_brief_keeps_the_tail(
+    async def test_fork_prompt_override_replaces_the_brief_only(
         self, tmp_path,
     ):
-        """R3: critique.lens.<name>.fork_prompt replaces the brief; the JSON
-        tail stays."""
+        """R3 as #1190 changes it (was: replaces the brief, keeps the JSON
+        tail): critique.lens.<name>.fork_prompt replaces the brief in the
+        lens's section; the reply format is critique's, once per fork."""
         async with lens_env(
             tmp_path, _lens("mine"),
             config={"critique": {"lens": {"mine": {"fork_prompt": "OPERATOR-BRIEF-9z"}}}},
@@ -418,7 +421,8 @@ class TestLensIsData:
             await _judged_turn(env, "kr3", stage2=_wins("mine"))
             [call] = [c for c in env.fork_agent.calls if "OPERATOR-BRIEF-9z" in c["instruction"]]
             assert "LENSBRIEF-mine:" not in call["instruction"]
-            assert _JSON_TAIL in call["instruction"]
+            assert "## Lens: mine\nOPERATOR-BRIEF-9z" in call["instruction"]
+            assert call["instruction"].lower().count("single json object") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -438,12 +442,11 @@ class TestSameMachinery:
                 "past_claims": [{"claim": "we agreed on Friday", "queries": ["Friday"]}],
                 "lenses": {"none": 1.0},
             }
-            [listener] = env.appraisal.stage2_listeners
-            # The malformed value may raise out of the listener; provenance
+            # The malformed value may raise out of the hook; provenance
             # must already be queued by then.
             try:
-                await listener(
-                    channel=env.channel, trace_id="kprov", response_text="resp",
+                await _stage2_hook(
+                    env, channel=env.channel, trace_id="kprov", response_text="resp",
                     annotations={"origin": "reminder"}, stage2=stage2)
             except TypeError:
                 pass
@@ -463,7 +466,10 @@ class TestSameMachinery:
     async def test_declined_turn_runs_no_lens(self, tmp_path, monkeypatch):
         """R6: a declined final (NO_REPLY) is never judged by a lens. With no
         appraisal plugin critique itself picks the lens at the response."""
-        async with lens_env(tmp_path, _lens("early"), appraisal=None) as env:
+        async with lens_env(
+            tmp_path, _lens("early"), appraisal=None,
+            config={"critique": {"fallback_rate": 1.0}},
+        ) as env:
             env.plugin._rng = FixedRng(value=0.5, choice_value="early")
             # Control: an ordinary final is judged.
             await _judged_turn(env, "kr6b0")
@@ -487,13 +493,20 @@ class TestSameMachinery:
     async def test_exchange_out_of_window_skips_with_the_existing_line(
         self, tmp_path, caplog,
     ):
-        """R6: an exchange that left the window skips with the existing line
-        naming lens and trace, and records no outcome."""
+        """R6 (#1190 I3): a reply that left the window before the idle fork
+        skips with a line naming lens, trace and the cause, and records no
+        outcome. At idle the containment check is on the reply row."""
         caplog.set_level("WARNING")
         async with lens_env(tmp_path, _lens("mine")) as env:
-            # Row 1, the exchange's originating row, is not in this window.
-            env.channel.conversation = window_of(env.channel.id, [2, 50])
-            await _judged_turn(env, "kr6d", stage2=_wins("mine"))
+            # The reply is recorded while it is in the window ...
+            await _fire(env, "kr6d", response_text="resp")
+            # ... then leaves it before appraisal's idle pass lands.
+            env.channel.conversation = window_of(env.channel.id, [1, 50])
+            await _stage2_hook(
+                env, channel=env.channel, trace_id="kr6d", response_text="resp",
+                annotations={}, stage2=_wins("mine"),
+            )
+            await _drain(env)
             _assert_ran(env, mine=0)
             assert _warnings(caplog, "mine", "kr6d", "not in the window"), caplog.text
             await _no_outcome_for(env, "kr6d", "mine")
@@ -506,15 +519,15 @@ class TestSameMachinery:
 
 class TestOnlyWaits:
     @pytest.mark.parametrize("origin", ["user", "reminder"])
-    async def test_objections_go_through_ingest_never_ingest_and_wake(
+    async def test_objections_go_through_hold_never_hold_and_wake(
         self, tmp_path, origin,
     ):
         """R7: a non-empty added-lens objection (a lens without ``wakes``)
-        goes through funnel.ingest and never ingest_and_wake, on every origin."""
+        goes through held.hold and never hold_and_wake, on every origin."""
         lens = _lens("mine")
-        async with lens_env(tmp_path, lens, with_funnel=True) as env:
-            _watch_funnel(env)
+        async with lens_env(tmp_path, lens, with_held=True) as env:
+            _watch_held(env)
             await _judged_turn(env, "kr7", origin=origin, stage2=_wins("mine"))
             _assert_ran(env, mine=1)
             assert LENS_OBJECTION in _ingested(env)
-            env.funnel.ingest_and_wake.assert_not_awaited()
+            env.held.hold_and_wake.assert_not_awaited()

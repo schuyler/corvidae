@@ -1011,8 +1011,12 @@ def test_query_context_flag_needs_snapshot_and_a_known_value(
 
 # #666: --candidates hybrid|vector scores fused vs vec-only on one snapshot.
 NAMED = "Yoz prefers shipping releases on Thursdays"
-DISTRACTORS = ["what about that one", "what about this", "what about it then",
-               "and what about those", "so what about them"]
+# #1186 (U1): near the query by cosine but sharing no 3-character piece with
+# it. Under the stub's hashed bag of words `velvet` lands in the bucket of
+# `what` and `aspen` in that of `about`; with no stopword list, distractors
+# that repeat `what about` would match the keyword side as well.
+DISTRACTORS = ["velvet aspen lantern", "vale aspen harbor", "velvet aspen meadow",
+               "vale aspen orchid", "velvet aspen timber"]
 
 
 @needs_vec

@@ -8,6 +8,7 @@ one?") retrieves records about the turn it refers to.
 
 import logging
 
+from helpers import memory_turn
 from corvidae_cognition.memory import (
     QUERY_CONTEXT_CHOICES,
     retrieval_query,
@@ -114,7 +115,7 @@ class TestBeforeAgentTurnQuery:
         conv.append(user("what scope did I buy?"))
         conv.append(assistant("The zephyr quasar nebula pulsar telescope."))
         conv.append(user("thanks, that worked"))
-        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+        await memory_turn(memory, channel=channel, trace_id=None)
 
         assert embedder.calls[-1][0].startswith("The zephyr quasar")
         recalled = " ".join(m["content"] for m in context_messages(conv))
@@ -129,7 +130,7 @@ class TestBeforeAgentTurnQuery:
 
         conv.append(assistant("The zephyr telescope."))
         conv.append(user("thanks, that worked"))
-        await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+        await memory_turn(memory, channel=channel, trace_id=None)
 
         assert embedder.calls[-1] == ["thanks, that worked"]
         await db.close()

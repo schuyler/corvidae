@@ -2,7 +2,7 @@
 
 A recall source (``corvidae_cognition.recall.RecallSourceMixin``) that searches
 a folder of markdown files for the turn the agent is about to take and hands
-the hits to the funnel as framed CONTEXT. The index is a cheap-to-rebuild cache
+the hits to the turn's prompt as framed CONTEXT. The index is a cheap-to-rebuild cache
 over the folder; the files are the source of truth. Startup and idle reconcile
 keep it current (the inotify directory watcher is a follow-up — it needs the
 #723 constant fix, extraction from the ping plugin, and recursion).
@@ -20,7 +20,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Sequence
 
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl, hookspec
 from corvidae.tuning import config_value
 from corvidae_cognition.markdown_recall.index import Hit, MarkdownIndex, _EncoderIdentity
 from corvidae_cognition.recall import RecallContext, RecallSourceMixin
@@ -34,22 +34,36 @@ DEFAULT_MAX_HITS = 5
 IDLE_QUIET_SECONDS = 30.0
 
 
+class MarkdownRecallSpec:
+    """Hooks the markdown_recall plugin owns."""
+
+    @hookspec(firstresult=True)
+    async def resolve_markdown_recall_search(self, query: str) -> str | None:
+        """Search the indexed roots for ``query`` and return the rendered hits.
+
+        One ``<path>: <text>`` entry per hit, newline-separated (a hit's text
+        may itself span lines), or "" for no hits. None means
+        there is nothing to search now: no index, or its schema is not built
+        yet (the search would create it). Never writes.
+        """
+
+
 class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
     """Recalls from a folder of markdown files on every plain user turn.
 
-    The folder is untrusted text under the funnel's framing (PRD principle 9);
-    the funnel is the only route its content reaches the window.
+    The folder is untrusted text under the held-text store's framing (PRD
+    principle 9); the store is the only route its content reaches the window.
     """
 
-    # Hard deps: the embedding client (llm) and the idle tracker (idle). The
-    # funnel is an optional dep declared by the mixin (a source without it does
-    # nothing, logged at DEBUG, not a stray hook).
+    # Hard deps: the embedding client (llm) and the idle tracker (idle).
     depends_on = frozenset({"llm", "idle"})
-    # The funnel's frame label and the funnel.budgets key.
+    # The store's frame label and the funnel.budgets key.
     source_name = "markdown_recall"
     # The agent.yaml block: root, db_path, max_hits, and the mixin's
     # cooldown/timeout.
     config_key = "markdown_recall"
+    # Owns the resolve_markdown_recall_search hook (#1190).
+    hookspecs = MarkdownRecallSpec
 
     def __init__(self) -> None:
         self._pm = None
@@ -63,7 +77,7 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
         await super().on_init(pm, config)  # stores self.pm and self.config
         self._pm = pm
         # The recall gate (cooldown/timeout) is always initialized, even
-        # when the plugin is inert: the mixin's on_funnel_ingest runs on
+        # when the plugin is inert: the mixin's before_compose runs on
         # every user turn and raises if _recall_gate is None (#739). An
         # inert source's search() returns None, so the gate is never
         # exercised.
@@ -114,17 +128,10 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
         # is empty), never a block.
         import asyncio
         self._startup_task = asyncio.ensure_future(self._reconcile())
-        # The idle tracker is a kernel component; if it is absent (a hand-built
-        # test manager) the startup reconcile still ran, so the source works —
-        # it just won't pick up out-of-band edits until the next startup.
-        idle = self.pm.get_plugin("idle")
-        if idle is None:
-            logger.debug(
-                "markdown recall: no idle tracker registered; out-of-band file "
-                "changes are picked up at the next startup only"
-            )
-            return
-        idle.watch_system(
+        # Pick up out-of-band edits whenever the system goes quiet.
+        from corvidae.idle import IdleTracker
+
+        get_dependency(self.pm, "idle", IdleTracker).watch_system(
             IDLE_QUIET_SECONDS, self._reconcile, name="markdown_recall.reconcile"
         )
 
@@ -151,6 +158,25 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
             # A failed reconcile keeps the old index; the next trigger retries.
             logger.warning("markdown recall: reconcile failed", exc_info=True)
 
+    @hookimpl
+    async def resolve_markdown_recall_search(self, query: str) -> str | None:
+        """Answer a search for other plugins (#1190).
+
+        None when there is no index or its schema is not built: search would
+        run ``_ensure_schema`` and create the file and tables. Otherwise the
+        top hits, one ``<path>: <render(hit)>`` entry each (newline-separated;
+        a hit may span lines).
+
+        shortcut: reads the index's private ``_schema_ready``; add a public
+        ``ready()`` on MarkdownIndex if a second caller appears.
+        """
+        # Nothing to search yet: report that rather than create the schema.
+        if self._index is None or not self._index._schema_ready:
+            return None
+        # The top hits, rendered one per line.
+        hits = await self._index.search(query, k=self._max_hits)
+        return "\n".join(f"{hit.path}: {self.render(hit)}" for hit in hits)
+
     # -- the mixin contract -----------------------------------------------
 
     async def search(self, query: str, ctx: RecallContext) -> Sequence[Hit] | None:
@@ -160,11 +186,11 @@ class MarkdownRecallPlugin(RecallSourceMixin, CorvidaePlugin):
         return await self._index.search(query, k=self._max_hits)
 
     def render(self, hit: Hit) -> str:
-        """Render one hit as the line the funnel admits.
+        """Render one hit as the line the store admits.
 
         ``hit.text`` already carries the chunker's ``[section_path]`` prefix, so
         it is the line as-is (adding the prefix again would double it). Stable
-        for a given chunk's content: the funnel dedupes on whole text, so a line
+        for a given chunk's content: the funnel's policy dedupes on whole text, so a line
         that changes between turns would defeat it. An edit changes the text and
         so the line — the new content re-surfaces.
         """

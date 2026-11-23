@@ -308,3 +308,31 @@ class TestSplitInvariantsProperty:
         rng = random.Random(1000 + n)
         for _ in range(300):
             _assert_invariants(_random_text(rng, n), n)
+
+
+# ---------------------------------------------------------------------------
+# #1186 R5: full-width terminals end a sentence with no whitespace after them
+# ---------------------------------------------------------------------------
+
+
+class TestFullWidthSentenceBoundary:
+    def test_cjk_paragraph_breaks_at_sentence_ends(self):
+        """A long unspaced CJK paragraph splits after 。！？ instead of
+        mid-word at the byte limit; no chunk is over the limit and the chunks
+        rejoin to the text."""
+        text = "我喜欢吃苹果。你呢？我也是！今天天气很好。我们去公园散步吧？"
+        result = split_message(text, max_len=36)
+        assert len(result) > 1
+        assert all(len(part.encode("utf-8")) <= 36 for part in result)
+        assert "".join(result) == text
+        # Every cut is at a sentence end (the last chunk ends the text).
+        assert all(part[-1] in "。！？" for part in result), result
+
+    def test_latin_sentence_tier_is_unchanged(self):
+        """The .!? + whitespace tier still keeps the whitespace on the
+        sentence before the cut (guard for the shared separator rewrite)."""
+        text = "One. Two!  Three? Four."
+        result = split_message(text, max_len=11)
+        assert "".join(result) == text
+        assert all(len(part.encode("utf-8")) <= 11 for part in result)
+        assert result[0].startswith("One. Two!")

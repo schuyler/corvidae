@@ -23,6 +23,7 @@ import statistics
 import time
 
 import pytest
+from helpers import memory_turn
 from corvidae_cognition.memory import (
     DEFAULT_BAND_MODERATE_Z,
     DEFAULT_BAND_STRONG_Z,
@@ -104,7 +105,7 @@ async def seed_corpus(db, channel_id: str, target_age_days: float = 0.0) -> int:
 async def ask(memory, channel, conv, text: str) -> None:
     """Append the user message and run passive retrieval."""
     conv.append({"role": "user", "content": text})
-    await memory.before_agent_turn(channel=channel, trace_id=None, annotations={})
+    await memory_turn(memory, channel=channel, trace_id=None)
 
 
 def recalled(conv) -> str:

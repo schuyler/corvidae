@@ -78,8 +78,10 @@ agent:
                                   # exchange: keep it only for the current exchange (since the
                                   # last user message); pair with the server's preserve_thinking off.
   # max_turns: 10                   # max consecutive tool-calling turns per exchange (message or scheduled firing)
-  # check_allowance_min: 5          # seconds: the least a veto check may delay a reply on any channel,
+  # check_allowance_min: 5          # seconds: the least a veto check may delay a reply or tool call on any channel,
   #                                 # and what a channel gets when its transport declares no allowance
+  # held_entry_max_chars: 8000      # characters: one held entry (a late check, a contribution for the next
+  #                                 # turn) over this is cut and the rest spilled to a file, never dropped
   # max_tool_result_chars: 100000   # deprecated: use tools.max_result_chars (longer results are cut and spilled)
   # compaction_threshold: 0.8       # compact when token estimate exceeds this × max_context_tokens
   # compaction_retention: 0.5       # after compaction, retain this fraction of token budget
@@ -108,17 +110,15 @@ agent:
   #   # participants (see docs/configuration.md "Runtime-tunable gate parameters"):
   #   # - critique.provenance.enabled
   #   # - critique.sample_below_rate
-  #   # - gate.engagement.enforce        # can silence or un-silence the agent
-  #   # - gate.engagement.threshold
-  #   # - gate.send.enforce
-  #   # - gate.send.min_salience
+  #   # - critique.fallback_rate
 
 # Autobiographical memory (optional; see docs/configuration.md)
 # memory:
 #   consolidate_after_tokens: 4000    # new window tokens that start a consolidation fork at the end of a
 #                                     # turn (agent.forks on for consolidation; positive integer; restart)
-#   entry_target_tokens: 256          # size target for one consolidation entry, in tokens: asked for as
-#                                     # round(n*0.75) words; overruns are stored in full and logged
+#   entry_target_tokens: 256          # size target for one consolidation entry, in tokens (asked for
+#                                     # as n tokens, not words); overruns are stored in full and logged; also the
+#                                     # size of a raw-transcript record when both consolidation replies fail
 #                                     # (positive integer; changes prompt_hash; restart)
 #   half_life_days: 30                # retrieval recency decay (e-folding time, days)
 #   heartbeat_limit: 5                # newest memories a heartbeat beat reviews, every channel's; 0 = none
@@ -141,20 +141,21 @@ agent:
 #                                     # agent's rebuilt view; replaces the removed consolidation_prompt
 #                                     # (still set: startup warning, ignored)
 
-# Context-admission funnel (optional; see docs/configuration.md)
+# Admission policy for held text (optional; see docs/configuration.md). The kernel frames and
+# appends held text; the funnel decides what of it a turn admits: dedupe, budgets, caps, TTL.
 # funnel:
-#   default_budget: 512               # tokens per admission when the source has no override
+#   default_budget: 512               # tokens per held batch offered to a turn when the source has no override
 #   budgets:
 #     memory: 512                     # per-source override of default_budget
 #   window_budgets:                   # cap on one source's CONTEXT in a window (unset: no cap);
 #     memory: 4096                    # compaction frees what it drops (non-negative integer; reloadable)
-#   ingest_ttl: 600                   # seconds a queued or pending ingest may wait before it is dropped (unset: never; reloadable)
+#   ingest_ttl: 600                   # seconds a held batch (not a hold_and_wake stub batch) may wait before it is dropped (unset: never; reloadable)
 
 # Markdown-folder recall source (optional; cognition extra, see
 # docs/configuration.md "markdown_recall"). Searches a folder of markdown
-# files for the turn the agent is about to take and hands the hits to the
-# funnel as framed CONTEXT. The files are untrusted text; the funnel is the
-# only route to the window.
+# files for the turn the agent is about to take and contributes the hits to
+# that turn's prompt as framed CONTEXT. The files are untrusted text; the
+# kernel's held-text store frames them and is the only route to the window.
 # markdown_recall:
 #   root: state/markdown_recall       # the folder to mirror (relative to the workspace)
 #   db_path: state/markdown_recall/index.db  # the SQLite index (vec0 + FTS5); the files are the source of truth
@@ -166,20 +167,24 @@ agent:
 # Static config: set_settings can't change these.
 # appraisal:
 #   stage2_fork_prompt: "..."         # prompts/appraisal_fork.md
+#   before_send_fork_prompt: "..."    # prompts/appraisal_before_send_fork.md (scores a final draft before it is sent)
 # critique:
 #   provenance:
 #     fork_prompt: "..."              # prompts/critique_provenance_fork.md
+#   max_tool_calls: 3                 # read-only tool calls the after-the-exchange critique fork may make (0 = none; static, #1190)
+#   fork_timeout: 120                 # seconds the whole lens fork may take, pauses included; past it the lens is a logged miss (static, #1190)
 #   sample_below_rate: 0.05           # chance a random lens runs when "none" wins the critique vector
+#   fallback_rate: 0.25               # without the appraisal plugin: chance one random lens runs at each of the two points (before send, after the exchange)
 #   retention:                        # #742: defaults to markdown_recall's root
 #     root: values/                   # the knowledge base the lens files into; inert with neither
 #   lens:
 #     # Each lens (the built-ins predictive, constrained, adversarial,
 #     # retention, proactivity, and those plugins add) has two static keys
-#     # (#1078). The stage-2 appraisal fork scores each lens's question; the
-#     # top one runs.
+#     # (#1078). The stage-2 appraisal fork scores each lens's question; every
+#     # lens above "none" runs, together in one fork.
 #     # predictive:
 #     #   appraisal_question: "..."     # one line the fork answers to score the lens
-#     #   fork_prompt: "..."            # prompts/critique_<lens>_fork.md
+#     #   fork_prompt: "..."            # prompts/critique_<lens>_fork.md (the brief only; critique adds the reply format)
 #     # planning:                     # the planning extra's lens (#1067)
 #     #   appraisal_question: "..."
 #     # alignment:                    # the alignment extra's lens (#914)
@@ -191,16 +196,14 @@ agent:
 #     # critique.lens.<dimension>, critique.lens.<name>.<dimension>, critique.lens.<name>.sample_rate,
 #     # critique.proactivity.* (now critique.lens.proactivity.*).
 
-# Engagement and decide gates (optional; cognition extra, see
-# docs/configuration.md "gate.*"). Runtime-tunable per channel via set_settings.
+# The decide gate (optional; cognition extra, see docs/configuration.md
+# "gate.*"). Runtime-tunable per channel via set_settings. The engagement
+# gate and the salience floor were removed (#1185): gate.engagement.*,
+# gate.send.enforce and gate.send.min_salience log a startup warning and
+# are ignored.
 # gate:
-#   engagement:
-#     enforce: false                  # shadow mode: record would_reject, admit everything
-#     threshold: 0.2                  # inbound salience below this would reject
 #   send:
-#     enforce: true                   # withhold non-user finals below min_salience
-#     min_salience: 0.15              # a reply to a user is never withheld
-#     allow_progress: true            # false suppresses text sent alongside tool calls
+#     allow_progress: true           # false suppresses text sent alongside tool calls
 #     allow_thinking: true            # false suppresses reasoning
 #     quiet_origins: []               # origins whose turns never reply, e.g. [webhook:github];
 #                                     # speak_up lets one turn through; set_settings can
@@ -364,7 +367,7 @@ agent:
 #   jobs:                              # synced by name on start and reload
 #     - name: morning-checkin          # unique; removing it disables the job durably
 #       channel: signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f
-#       every: 1d                      # required: 30s, 20m, 6h, 1d, 7d, 1h30m
+#       every: 1d                      # required: 30s, 20m, 6h, 1d, 7d, 1w, 1h30m (unit letters s m h d w only)
 #       at: "08:30"                    # optional anchor: HH:MM, or an ISO datetime
 #       prompt: "Good-morning check-in: ask how they slept and what is on today."   # or prompt_file: path
 #     - name: weekly-review
@@ -484,7 +487,7 @@ channels:
   # acp:*:                          # every ACP session (ids are minted per session)
   #   max_turns: 30
   # signal:*:
-  #   check_allowance: 120          # seconds a veto check may delay a reply here (Signal declares 90);
+  #   check_allowance: 120          # seconds a veto check may delay a reply or tool call here (Signal declares 90);
   #                                 # never below agent.check_allowance_min
   # irc:#lex:
   #   register_prompt: "This is #lex, a small channel of regulars; keep it brief."
@@ -524,7 +527,8 @@ channels:
 # timepiece:
 #   interval_minutes: 10               # minutes between stamps per channel (number > 0)
 #   timezone: America/Los_Angeles      # IANA name; default the daemon's local time
-#   format: "%A %Y-%m-%d at %H:%M %Z"  # strftime format
+#   format: "%A %Y-%m-%d at %H:%M %Z"  # strftime format; unset = the system locale's form
+#                                      # (under C/POSIX this one); set, it always wins
 
 # --- inotify pings (requires --extra inotify; Linux only) ---
 # Notifies a channel when a watched file (e.g. a background job's log) is

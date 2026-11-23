@@ -160,7 +160,7 @@ class TestPerChannelRequireMention:
                 make_message("just chatting"),
                 make_message(f"<@{BOT_ID}> hi", mentions=[BOT_MENTION]),
             )
-            assert _delivered(h) == ["hi"]
+            assert _delivered(h) == ["@Alfred hi"]
         finally:
             await h.plugin.on_stop()
 
