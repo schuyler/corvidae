@@ -257,3 +257,72 @@ async def test_eviction_marks_the_rows_it_strands(log):
     ) as cur:
         row = await cur.fetchone()
     assert row["reconstructable"] == 0
+
+
+async def _blocks(log):
+    db = await log._conn()
+    async with db.execute(
+        "SELECT sha256, length(text) AS n FROM fork_block ORDER BY created_at"
+    ) as cur:
+        return list(await cur.fetchall())
+
+
+async def test_the_budget_counts_what_eviction_subtracts(log):
+    # The budget is stated in stored bytes, independently of bytes_used(): if
+    # the loop subtracts a different quantity from the one it measured, one
+    # drop frees almost nothing and the loop deletes every block (reported by
+    # Lex, 2026-11-23).
+    for n in range(3):
+        await log.record(
+            stage="appraisal",
+            channel_id="discord:1",
+            messages=MESSAGES,
+            system_prompt=f"version {n}\n" + "a line of a system prompt\n" * 800,
+        )
+    blocks = await _blocks(log)
+    assert len(blocks) == 3
+    stored = sum(b["n"] for b in blocks)
+    await log.evict(max_bytes=stored - 1)
+
+    assert len(await _blocks(log)) == 2
+
+
+async def test_only_the_rows_that_named_the_dropped_text_are_stranded(log):
+    import os
+
+    ids = [
+        await log.record(
+            stage="appraisal",
+            channel_id="discord:1",
+            messages=MESSAGES,
+            system_prompt=os.urandom(2048).hex(),
+        )
+        for _ in range(2)
+    ]
+    before = {b["sha256"] for b in await _blocks(log)}
+    assert len(before) == 2
+    await log.evict(max_bytes=sum(b["n"] for b in await _blocks(log)) - 1)
+
+    after = {b["sha256"] for b in await _blocks(log)}
+    assert len(after) == 1
+    db = await log._conn()
+    for fork_id in ids:
+        async with db.execute(
+            "SELECT system_sha256, reconstructable FROM fork_log WHERE id = ?",
+            (fork_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        kept = row["system_sha256"] in after
+        assert row["reconstructable"] == (1 if kept else 0)
+
+
+async def test_a_row_names_the_system_text_it_used(log):
+    fork_id = await log.record(
+        stage="appraisal",
+        channel_id="discord:1",
+        messages=MESSAGES,
+        system_prompt="you are a test",
+    )
+    row = await _row(log, fork_id)
+    assert row["system_sha256"] is not None
+    assert await log.read_block(row["system_sha256"]) == "you are a test"
