@@ -22,9 +22,9 @@ design's reading, individually vetoable.
 | R5.3 | After the exchange, the fork makes no model call while a user message waits on its channel, and resumes when none waits. A fork whose channel compacts before it resumes is a miss (agent-accepted). | A waiting message before a request → the request is not sent until it clears; a compaction during the pause → the lens(es) skip with a warning, nothing recorded. |
 | R5.4 | Every finding names the reply it judges (agent-accepted; PRD Critique 4). | Each held CONTEXT entry from a lens or provenance quotes the start of the reply (or says it is the draft before send). |
 | R5.5 | An operator-set deadline bounds the whole critique fork, tool calls included; on expiry critique logs a warning naming stage, channel and trace, and records a miss (stated, 7099974748). "Records a miss" is read as the tree's existing miss: a logged skip, no outcome record (inferred). | A fork that runs past the deadline is cancelled; warning carries channel/trace; no outcome recorded for its lenses. |
-| R6′ | Markdown search reaches a fork only as a main-loop tool declared read-only (stated, 7099929016 + 7099974748). Consolidated requirement 6 (the fork searches markdown_recall's folders) stands unless the owner defers it. **Open: the owner was asked whether this PR builds the tool; until answered, the plan below includes it as §7, separable.** | A `search_notes` tool, registered by markdown_recall, declared read-only, is offered and callable in an idle critique fork. |
+| R6′ | Markdown search is out of this PR; moved to #1224 (stated, 2026-11-23). | — |
 | R7 | Provenance stays a check, not a lens (stated, 7092480536). | Provenance selection, evidence and fork unchanged; only its finding text gains the reply reference (R5.4). |
-| R9 | Docs: **PRD Critique 1** ("The top share runs" / "each when its question wins" → every lens above "none"; wording for owner approval via the review loop, as with the other #1190 PRD edits), `configuration.md` (two keys; the brief-only `fork_prompt` contract; selection text at :450), `cognition.md`, `plugin-guide.md` and the `transform_critique_prompt` hookspec docstring (implementers now get one lens section), the documented copies `prompts/critique_*_fork.md` (drop the old tail), `threat-model.md` (the markdown tool, if §7 lands), `agent.yaml.example`, `design.md` (the `Agent.fork` parameter). | — |
+| R9 | Docs: **PRD Critique 1** ("The top share runs" / "each when its question wins" → every lens above "none"; wording for owner approval via the review loop, as with the other #1190 PRD edits), `configuration.md` (two keys; the brief-only `fork_prompt` contract; selection text at :450), `cognition.md`, `plugin-guide.md` and the `transform_critique_prompt` hookspec docstring (implementers now get one lens section), the documented copies `prompts/critique_*_fork.md` (drop the old tail), `agent.yaml.example`, `design.md` (the `Agent.fork` parameter). | — |
 
 Inferred (vetoable):
 - **I1.** R5.5's deadline applies to lens forks at both points, not to the provenance fork (the issue is about the tool-using fork; provenance is untouched by R7).
@@ -165,17 +165,6 @@ passes `on your draft «<quote(draft)>»: ` (the draft is quoted because on
 prefix goes into those returned texts. The outcome record is unchanged (it
 already carries `trace_id`).
 
-### 7. Markdown search tool (R6′; separable, pending the owner)
-
-markdown_recall registers one main-loop tool, `search_notes(query: str) -> str`,
-declared `reads_only = True`, wrapping its own `resolve_markdown_recall_search`
-(no hook round trip inside the plugin). `None` from the search → the result
-"No notes are indexed yet; try again later."; `""` → "No notes matched." Untrusted output declared
-(`returns_untrusted = True`, as `search_transcripts` does), so the main loop fences it; inside a fork the kernel
-frames it anyway. `threat-model.md`: the main agent and forks can now search
-the configured roots on demand (previously recall only). Main-loop tool, so
-`tools.disabled` can remove it.
-
 ## Rejected alternatives
 
 - **Trim the fork's tool list / fork-only tools.** Breaks prefix parity (owner, 7099929016).
@@ -197,7 +186,6 @@ the configured roots on demand (previously recall only). Main-loop tool, so
 
 ## Open (for the owner at the design gate)
 
-- **R6′:** §7 in this PR, or defer to its own issue.
 - **Kernel contract:** `Agent.fork` gains `before_request` (§4). R5.3 cannot be met from the caller alone, because the loop is inside `fork`.
 - **I1:** the provenance fork gets no deadline (R7 leaves it alone; its provider timeout defaults to none).
 
