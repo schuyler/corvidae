@@ -51,11 +51,11 @@ async def _consolidate_one_window(tmp_path):
 
     await memory._consolidate_range(channel.id, ids[-1], "idle")
     await memory.wait_for_background_tasks()
-    return memory, agent
+    return memory, agent, db
 
 
 async def test_the_consolidation_fork_writes_a_fork_log_row(tmp_path):
-    memory, agent = await _consolidate_one_window(tmp_path)
+    memory, agent, db = await _consolidate_one_window(tmp_path)
     # Supporting, not load-bearing: both hold even if the capture were deleted.
     # They pin the premise — a fork really ran, and nothing was silently swallowed.
     assert len(agent.calls) == 1, "the fork the capture hangs off never ran"
@@ -97,6 +97,8 @@ async def test_the_consolidation_fork_writes_a_fork_log_row(tmp_path):
         )
     finally:
         await log_db.close()
+        # the harness handle: sibling fixtures close theirs
+        await db.close()
 
     chain = await memory._fork_log.log.resolve_chain(fork_id)
     assert chain is not None and len(chain) == block_count, (
@@ -110,5 +112,6 @@ async def test_the_recorder_closes_cleanly(tmp_path):
     """Not a capture check: the recorder opened a file handle on a real database,
     and the sibling harnesses close theirs. A leaked handle is how a WAL file ends
     up locked for the next test in the process."""
-    memory, _agent = await _consolidate_one_window(tmp_path)
+    memory, _agent, db = await _consolidate_one_window(tmp_path)
     await memory._fork_log.close()
+    await db.close()

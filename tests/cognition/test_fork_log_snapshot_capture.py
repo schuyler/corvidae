@@ -60,6 +60,12 @@ async def _compaction_fork_blocked_on_the_gate(tmp_path):
         channel=channel, compacted_ids=ids[:4], cut=len(ids[:4])
     )
 
+    # The fork is in flight, not finished: GatedForkAgent appends its call only
+    # after the gate opens, so an empty call list here means nothing has been
+    # recorded yet. Without this, a fork that completed early would record the
+    # 4-block live window and the test would pass without exercising a divergence.
+    assert agent.calls == [], "the compaction fork finished before the window moved"
+
     # The live window moves while the fork is in flight. This is the whole point:
     # the snapshot and the live window now describe different prompts.
     channel.conversation = window_of(channel.id, ids, contents=LIVE_MESSAGES)
@@ -69,8 +75,13 @@ async def _compaction_fork_blocked_on_the_gate(tmp_path):
     return memory, channel, db, agent
 
 
+async def _close(*handles):
+    for h in handles:
+        await h.close()
+
+
 async def test_the_snapshot_fork_records_the_snapshot_it_rendered(tmp_path):
-    memory, channel, _db, agent = await _compaction_fork_blocked_on_the_gate(tmp_path)
+    memory, channel, db, agent = await _compaction_fork_blocked_on_the_gate(tmp_path)
     assert len(agent.calls) == 1, "the compaction fork never ran; nothing was captured"
 
     log_db = await aiosqlite.connect(str(tmp_path / "sessions.db"))
@@ -83,19 +94,23 @@ async def test_the_snapshot_fork_records_the_snapshot_it_rendered(tmp_path):
         assert rows, (
             "the snapshot path captured nothing; fork_log has no consolidation row"
         )
-        fork_id, _stage, _point, block_count = rows[-1]
+        fork_id = rows[-1][0]
 
         async with log_db.execute(
             "SELECT digest FROM fork_digest WHERE fork_id = ? ORDER BY ordinal", (fork_id,)
         ) as cur:
             stored = [bytes(r[0]) for r in await cur.fetchall()]
     finally:
-        await log_db.close()
+        await _close(log_db, db)
 
     # The fake records the fork's own snapshot, so the comparison is against what
     # was actually sent rather than against a list this test assembled.
     sent = agent.calls[0]["snapshot"]
     assert sent is not None, "the fork ran without a snapshot; this is not the #628 path"
+    assert [m["content"] for m in sent.conv.messages] == SNAPSHOT_MESSAGES, (
+        "the snapshot the fork was sent is not the pre-compaction window this"
+        " test set up"
+    )
     expected = [digest_of(m) for m in sent.conv.messages]
     live = [digest_of(m) for m in channel.conversation.messages]
     assert len(expected) != len(live), (
@@ -107,5 +122,8 @@ async def test_the_snapshot_fork_records_the_snapshot_it_rendered(tmp_path):
         " — a capture that reads the live window describes a prompt that was never sent"
     )
     assert stored != live, "the row describes the live window, not the snapshot"
-    assert block_count == len(stored), "block_count and the stored digests disagree"
+    # block_count is not checked against len(stored) here: both are written from
+    # the same list in one call, so that equality cannot fail and would be a
+    # decoration. The sibling consolidation test pins claim-vs-digest drift,
+    # which has a cause (a partial digest write) rather than being tautological.
     assert memory._fork_log.write_failures == 0, "the capture counted a silent failure"
