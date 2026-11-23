@@ -1,6 +1,6 @@
 # #1190 PR 2 — critique runs every selected lens in one fork, with read-only tools after the exchange
 
-Read against `main` at `ccf960b`. PR 1 (#1205, `bec8554`) gave `Agent.fork` a
+Read against `main` at `ccf960b`; re-checked after rebasing on `c6b9349` (#1221 merged): `on_appraisal_before_send` returns `_run_before_send`'s objection texts, the no-appraisal fallback calls `_run_before_send` with one random lens and refuses through `PreSendHold`, and `_record_and_register` has lost `waking_allowed`. §2 and §6 hold as written; the fallback passes a one-lens list. PR 1 (#1205, `bec8554`) gave `Agent.fork` a
 capped loop over read-only tools. This PR wires critique onto it. Red waits
 for PR #1221 (#1149 + #1169 part 2) to merge, which changes the
 before-send return contract (`on_appraisal_before_send` returns objection
