@@ -79,6 +79,7 @@ def _script(client, replies: list[dict]):
 
 
 def _call_reply(*calls):
+    """A scripted model reply carrying ``calls`` as structured tool calls."""
     return _make_tool_call_response(list(calls))
 
 
@@ -86,6 +87,7 @@ def _call_reply(*calls):
 
 
 def test_declares_read_only_is_true_only_for_exactly_true():
+    """A1: only the exact ``True`` declaration counts; absent or truthy does not."""
     from corvidae.tool import declares_read_only
 
     async def plain():
@@ -106,11 +108,44 @@ def test_declares_read_only_is_true_only_for_exactly_true():
     assert declares_read_only(truthy) is False
 
 
+@pytest.fixture
+def keyed_agent(forking_agent):
+    """``forking_agent`` with a fence key on the window, as production sets one.
+
+    The main loop frames tool results with the window's fence key; the shared
+    fixture leaves it None, which ``provenance.frame`` cannot hash.
+    """
+    plugin, channel, client = forking_agent
+    channel.conversation.fence_key = b"k" * 32
+    return plugin, channel, client
+
+
+def test_mcp_tool_is_never_declared_read_only():
+    """A1: the MCP client builds tools without the read-only declaration."""
+    from unittest.mock import MagicMock
+
+    from corvidae.mcp_client import _make_tool, _McpServerState
+    from corvidae.tool import declares_read_only
+
+    # A minimal server state and MCP tool definition, as test_mcp_client does.
+    server = _McpServerState(
+        name="fs", session=MagicMock(), prefix="fs", timeout_seconds=30.0, mcp_tools=[]
+    )
+    mcp_tool = MagicMock()
+    mcp_tool.name = "search"
+    mcp_tool.description = ""
+    mcp_tool.input_schema = {"type": "object", "properties": {}}
+
+    tool = _make_tool(server, mcp_tool)
+
+    assert declares_read_only(tool.fn) is False
+
+
 # A3 -------------------------------------------------------------------------
 
 
-async def test_fork_frames_every_result_as_untrusted_data(forking_agent):
-    plugin, channel, client = forking_agent
+async def test_fork_frames_every_result_as_untrusted_data(keyed_agent):
+    plugin, channel, client = keyed_agent
     lookup, writer = _make_tools([])
     _install_tools(plugin, lookup=lookup, writer=writer)
     seen = _script(client, [
@@ -140,9 +175,9 @@ async def test_fork_frames_every_result_as_untrusted_data(forking_agent):
 
 
 async def test_cap_limits_calls_and_the_next_request_sends_tool_choice_none(
-    forking_agent, caplog
+    keyed_agent, caplog
 ):
-    plugin, channel, client = forking_agent
+    plugin, channel, client = keyed_agent
     calls: list = []
     lookup, writer = _make_tools(calls)
     _install_tools(plugin, lookup=lookup, writer=writer)
@@ -177,8 +212,8 @@ async def test_cap_limits_calls_and_the_next_request_sends_tool_choice_none(
     assert warnings[0].trace_id == "trace-1190"
 
 
-async def test_tool_call_in_a_reply_sent_with_tool_choice_none_is_refused(forking_agent):
-    plugin, channel, client = forking_agent
+async def test_tool_call_in_a_reply_sent_with_tool_choice_none_is_refused(keyed_agent):
+    plugin, channel, client = keyed_agent
     lookup, writer = _make_tools([])
     _install_tools(plugin, lookup=lookup, writer=writer)
     _script(client, [
@@ -193,8 +228,8 @@ async def test_tool_call_in_a_reply_sent_with_tool_choice_none_is_refused(forkin
 # A5 -------------------------------------------------------------------------
 
 
-async def test_cap_zero_tool_call_reply_raises_fork_refused(forking_agent):
-    plugin, channel, client = forking_agent
+async def test_cap_zero_tool_call_reply_raises_fork_refused(keyed_agent):
+    plugin, channel, client = keyed_agent
     calls: list = []
     lookup, writer = _make_tools(calls)
     _install_tools(plugin, lookup=lookup, writer=writer)
@@ -207,8 +242,8 @@ async def test_cap_zero_tool_call_reply_raises_fork_refused(forking_agent):
 # A6 -------------------------------------------------------------------------
 
 
-async def test_undeclared_tool_is_refused_by_result_and_not_invoked(forking_agent):
-    plugin, channel, client = forking_agent
+async def test_undeclared_tool_is_refused_by_result_and_not_invoked(keyed_agent):
+    plugin, channel, client = keyed_agent
     calls: list = []
     lookup, writer = _make_tools(calls)
     _install_tools(plugin, lookup=lookup, writer=writer)
@@ -225,6 +260,8 @@ async def test_undeclared_tool_is_refused_by_result_and_not_invoked(forking_agen
     assert tool_msg["tool_call_id"] == "c1"
     assert "writer" in tool_msg["content"]
     assert "not available in a fork" in tool_msg["content"]
+    # A refusal is a tool result too, so it reaches the model framed (A3).
+    assert " begins]" in tool_msg["content"]
 
 
 def _calls_with(**override):
@@ -240,8 +277,8 @@ def _calls_with(**override):
     _calls_with(function="lookup"),
     _calls_with(id=""),
 ], ids=["no-name", "no-arguments", "non-str-arguments", "function-not-dict", "empty-id"])
-async def test_malformed_call_raises_fork_refused(forking_agent, bad):
-    plugin, channel, client = forking_agent
+async def test_malformed_call_raises_fork_refused(keyed_agent, bad):
+    plugin, channel, client = keyed_agent
     calls: list = []
     lookup, writer = _make_tools(calls)
     _install_tools(plugin, lookup=lookup, writer=writer)
@@ -251,8 +288,8 @@ async def test_malformed_call_raises_fork_refused(forking_agent, bad):
     assert calls == []
 
 
-async def test_id_duplicated_across_replies_raises_fork_refused(forking_agent):
-    plugin, channel, client = forking_agent
+async def test_id_duplicated_across_replies_raises_fork_refused(keyed_agent):
+    plugin, channel, client = keyed_agent
     calls: list = []
     lookup, writer = _make_tools(calls)
     _install_tools(plugin, lookup=lookup, writer=writer)
@@ -265,8 +302,8 @@ async def test_id_duplicated_across_replies_raises_fork_refused(forking_agent):
         await plugin.fork(channel, INSTRUCTION, stage="consolidation", max_tool_calls=3)
 
 
-async def test_id_duplicated_within_a_reply_raises_fork_refused(forking_agent):
-    plugin, channel, client = forking_agent
+async def test_id_duplicated_within_a_reply_raises_fork_refused(keyed_agent):
+    plugin, channel, client = keyed_agent
     lookup, writer = _make_tools([])
     _install_tools(plugin, lookup=lookup, writer=writer)
     _script(client, [
@@ -292,8 +329,8 @@ class _Spy:
         return result
 
 
-async def test_fork_tool_calls_fire_no_hooks_and_are_attributed(forking_agent, caplog):
-    plugin, channel, client = forking_agent
+async def test_fork_tool_calls_fire_no_hooks_and_are_attributed(keyed_agent, caplog):
+    plugin, channel, client = keyed_agent
     calls: list = []
     lookup, writer = _make_tools(calls)
     _install_tools(plugin, lookup=lookup, writer=writer)
