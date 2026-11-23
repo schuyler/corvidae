@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS fork_log (
     window_last_rowid INTEGER,
     window_cut INTEGER,
     prompt_sha256 BLOB NOT NULL,
+    block_count INTEGER NOT NULL DEFAULT 0,
     renderer_sha TEXT,
     findings_json TEXT,
     verdict TEXT,
@@ -142,6 +143,9 @@ class ForkLog:
         self._db_path = db_path
         self._sample_every = max(1, sample_every)
         self._seen = 0
+        #: Forks whose row could not be written. Non-zero means the corpus has
+        #: a hole the queries cannot see, so the caller escalates it.
+        self.write_failures = 0
         self._db: aiosqlite.Connection | None = None
 
     async def open(self) -> None:
@@ -162,6 +166,7 @@ class ForkLog:
     LATE_COLUMNS = {
         "point": "TEXT",
         "trace_id": "TEXT",
+        "block_count": "INTEGER NOT NULL DEFAULT 0",
         "lens_id": "TEXT",
         "profile": "TEXT",
         "model": "TEXT",
@@ -283,11 +288,11 @@ class ForkLog:
                 ts, stage, point, channel_id, trace_id, lens_id, profile, model,
                 question_sha256, question_text, instruction,
                 window_first_rowid, window_last_rowid, window_cut,
-                prompt_sha256, renderer_sha, findings_json, verdict, label,
+                prompt_sha256, block_count, renderer_sha, findings_json, verdict, label,
                 latency_ms, prompt_tokens, completion_tokens, cached_tokens,
                 snapshot_sha256, system_sha256, chain_parent, chain_from,
                 reconstructable
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 time.time(),
                 stage,
@@ -304,6 +309,7 @@ class ForkLog:
                 last,
                 cut,
                 prompt_sha256(messages),
+                len(messages),
                 renderer_sha,
                 _dumps(list(findings) if findings is not None else None),
                 verdict,
@@ -412,8 +418,15 @@ class ForkLog:
             blocks = None if inherit is None or len(inherit) != base else inherit
         if blocks is None:
             return None
-        memo[fork_id] = [*blocks, *own]
-        return memo[fork_id]
+        resolved = [*blocks, *own]
+        async with db.execute(
+            "SELECT block_count FROM fork_log WHERE id = ?", (fork_id,)
+        ) as cur:
+            claim = await cur.fetchone()
+        if claim is not None and claim["block_count"] != len(resolved):
+            return None
+        memo[fork_id] = resolved
+        return resolved
 
     async def mark_unreconstructable(self, fork_ids: Iterable[int]) -> None:
         db = await self._conn()

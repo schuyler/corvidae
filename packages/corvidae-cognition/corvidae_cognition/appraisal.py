@@ -568,9 +568,14 @@ class AppraisalPlugin(CorvidaePlugin):
             )
             self._last_fork[channel.id] = (fork_id, blocks_in)
         except Exception:
-            logger.warning(
-                "appraisal: could not record a %s fork for %s (#1204)",
-                stage, channel.id, exc_info=True,
+            log.write_failures += 1
+            # A corpus that stopped growing is a hole in every later query, so
+            # the first failure on a channel is an ERROR, not a warning.
+            logger.log(
+                logging.ERROR if log.write_failures == 1 else logging.WARNING,
+                "appraisal: could not record a %s fork for %s, %s write"
+                " failure(s) so far (#1204)",
+                stage, channel.id, log.write_failures, exc_info=True,
             )
 
     @hookimpl

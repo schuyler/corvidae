@@ -177,3 +177,20 @@ async def test_a_gap_after_the_first_ordinal_is_refused(log):
 # "no rows" and "lost rows" are indistinguishable from the chain alone. Closing
 # it needs the row to remember how many blocks it claimed - store the chain
 # length at write, compare it at read, which subsumes both guards above.
+
+
+async def test_a_chain_shorter_than_the_row_claims_is_refused(log):
+    """Hole B: a 4-block prompt that resolves to 3 must not look intact."""
+    root = await log.record(
+        stage="appraisal",
+        channel_id="discord:1",
+        messages=CHILD,
+        digests=[digest_of(b) for b in CHILD],
+    )
+    db = await log._conn()
+    # a digest row lost to damage or a partial write
+    await db.execute(
+        "DELETE FROM fork_digest WHERE fork_id = ? AND ordinal = ?", (root, 3)
+    )
+    await db.commit()
+    assert await log.resolve_chain(root) is None
