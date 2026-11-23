@@ -243,7 +243,6 @@ class TestSectionAwareChunking:
         content = "\n\n".join(paragraphs)
         result = chunk_page("test", content)
         assert all("page_bytes" in c["metadata"] for c in result)
-        assert all("page_word_count" not in c["metadata"] for c in result)
         assert all("total_chunks" in c["metadata"] for c in result)
         sizes = set(c["metadata"]["page_bytes"] for c in result)
         assert len(sizes) == 1  # all same

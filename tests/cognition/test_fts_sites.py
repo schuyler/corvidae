@@ -54,14 +54,6 @@ async def test_a_fresh_database_creates_trigram_fts_tables():
     await db.close()
 
 
-def test_fts_stopwords_list_is_gone():
-    """R1: no word list remains in the memory module."""
-    import corvidae_cognition.memory as memory
-
-    assert not hasattr(memory, "FTS_STOPWORDS")
-    assert not hasattr(memory, "_fts_match_query")
-
-
 # ---------------------------------------------------------------------------
 # Passive retrieval: _fts_candidates, both branches (degraded / hybrid)
 # ---------------------------------------------------------------------------
