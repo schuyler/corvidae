@@ -3,8 +3,11 @@
 Verifies that the PlanningLensPlugin:
 - contributes one sample-rate lens named ``planning`` through on_critique_init
 - asks for its findings in critique's objection format, not one of its own
-- appends the real goal list (GoalsPlugin.open_goals) to its own lens's
-  fork instruction through transform_critique_prompt, and only its own
+- appends the real goal list to its own lens's fork instruction through
+  transform_critique_prompt, and only its own, reading it through the
+  hook it owns (resolve_corvidae_planning_goals), which goals implements
+  (#1181)
+- reports an absent goals plugin once at startup, not on every fork
 """
 
 import logging
@@ -13,8 +16,17 @@ from unittest.mock import AsyncMock, Mock
 import aiosqlite
 import pytest
 
+from corvidae.hooks import (
+    create_plugin_manager,
+    install_plugin_hookspecs,
+    report_orphan_hookimpls,
+)
 from corvidae_cognition.goals import GOALS_DDL, GoalsPlugin
 from corvidae_planning import PlanningLensPlugin
+
+# The name planning's entry point registers it under; its hooks carry it.
+PLANNING_NAME = "corvidae_planning"
+HOOK = "resolve_corvidae_planning_goals"
 
 
 async def _contributed(plugin):
@@ -31,13 +43,15 @@ async def goals(tmp_path):
     db = await aiosqlite.connect(str(tmp_path / "goals.db"))
     await db.execute(GOALS_DDL)
     await db.commit()
-    # A real plugin manager: goals resolves "clock" with get_dependency (#1180).
-    from corvidae.hooks import create_plugin_manager
+    # A real plugin manager: goals resolves "clock" with get_dependency
+    # (#1180), and registers under its entry-point name so planning's hook
+    # reaches it the way it does at startup (#1181).
     from fake_clock import install_kernel_clock
 
     pm = create_plugin_manager()
     install_kernel_clock(pm, start=1000.0)
     plugin = GoalsPlugin(pm=pm)
+    pm.register(plugin, name="goals")
     plugin._require_db = AsyncMock(return_value=db)
     plugin.db = db
     try:
@@ -58,11 +72,15 @@ async def _add_goal(goals, text, retired=False):
 
 
 def _planning(goals):
-    """A PlanningLensPlugin whose plugin manager resolves "goals" to ``goals``
-    (None: the goals plugin is not loaded)."""
+    """A PlanningLensPlugin registered beside ``goals`` on its real plugin
+    manager, with hookspecs installed as at startup (None: goals is not
+    loaded, so planning is alone on a fresh manager)."""
+    pm = goals.pm if goals is not None else create_plugin_manager()
     plugin = PlanningLensPlugin()
-    plugin.pm = Mock()
-    plugin.pm.get_plugin.side_effect = lambda name: goals if name == "goals" else None
+    pm.register(plugin, name=PLANNING_NAME)
+    install_plugin_hookspecs(pm)
+    # on_init is what sets pm in production; set it the same way.
+    plugin.pm = pm
     return plugin
 
 
@@ -152,11 +170,45 @@ class TestTransformCritiquePrompt:
         assert "goal list" in warning
         assert "t1" in warning and "irc:#test" in warning
 
-    async def test_goals_not_loaded_runs_without_the_list(self, caplog):
+    async def test_goals_not_loaded_runs_without_the_list_quietly(self, caplog):
+        """With no goals implementation the fork runs unlisted, and nothing
+        is logged per fork: the absence is reported once, at startup."""
         with caplog.at_level(logging.WARNING):
             result = await _transform(_planning(None))
         assert result is None
-        [warning] = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-        assert "goals plugin is not loaded" in warning
-        assert "t1" in warning and "irc:#test" in warning
-        assert "plugins.disabled" in warning
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+class TestStartupReport:
+    """An absent goals plugin is reported once at on_start, at INFO (#1181)."""
+
+    async def test_goals_absent_logs_one_info_line(self, caplog):
+        planning = _planning(None)
+        with caplog.at_level(logging.DEBUG, logger="corvidae_planning"):
+            await planning.on_start({})
+        [record] = [r for r in caplog.records if r.name == "corvidae_planning"]
+        assert record.levelno == logging.INFO
+        message = record.getMessage()
+        assert "planning" in message
+        assert "goals" in message
+        assert "goal list" in message
+
+    async def test_goals_loaded_logs_nothing(self, goals, caplog):
+        planning = _planning(goals)
+        with caplog.at_level(logging.DEBUG, logger="corvidae_planning"):
+            await planning.on_start({})
+        assert [r for r in caplog.records if r.name == "corvidae_planning"] == []
+
+
+class TestGoalsImplementsTheHook:
+    """Goals implements planning's hook without depending on planning."""
+
+    async def test_planning_absent_reports_the_hookimpl_at_debug(self, goals, caplog):
+        """With planning not loaded, goals' implementation is an expected
+        orphan: DEBUG, not WARNING, because goals lists corvidae_planning
+        in optional_depends_on."""
+        install_plugin_hookspecs(goals.pm)
+        with caplog.at_level(logging.DEBUG):
+            report_orphan_hookimpls(goals.pm)
+        about_hook = [r for r in caplog.records if HOOK in r.getMessage()]
+        assert [r.levelno for r in about_hook] == [logging.DEBUG]

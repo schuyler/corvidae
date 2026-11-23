@@ -35,11 +35,7 @@ DYNAMIC = "<dynamic>"
 # The calls that predate the rule: file (relative to the repo) -> plugin name
 # -> (how many calls, the issue that removes them). Lower a count, or delete
 # the entry, in the change that removes a call.
-ALLOWED: dict[str, dict[str, tuple[int, str]]] = {
-    "packages/corvidae-planning/corvidae_planning/__init__.py": {
-        "goals": (1, "#1181"),
-    },
-}
+ALLOWED: dict[str, dict[str, tuple[int, str]]] = {}
 
 
 def _plugin_sources() -> list[Path]:
