@@ -493,13 +493,20 @@ class TestSameMachinery:
     async def test_exchange_out_of_window_skips_with_the_existing_line(
         self, tmp_path, caplog,
     ):
-        """R6: an exchange that left the window skips with the existing line
-        naming lens and trace, and records no outcome."""
+        """R6 (#1190 I3): a reply that left the window before the idle fork
+        skips with a line naming lens, trace and the cause, and records no
+        outcome. At idle the containment check is on the reply row."""
         caplog.set_level("WARNING")
         async with lens_env(tmp_path, _lens("mine")) as env:
-            # Row 1, the exchange's originating row, is not in this window.
-            env.channel.conversation = window_of(env.channel.id, [2, 50])
-            await _judged_turn(env, "kr6d", stage2=_wins("mine"))
+            # The reply is recorded while it is in the window ...
+            await _fire(env, "kr6d", response_text="resp")
+            # ... then leaves it before appraisal's idle pass lands.
+            env.channel.conversation = window_of(env.channel.id, [1, 2])
+            await _stage2_hook(
+                env, channel=env.channel, trace_id="kr6d", response_text="resp",
+                annotations={}, stage2=_wins("mine"),
+            )
+            await _drain(env)
             _assert_ran(env, mine=0)
             assert _warnings(caplog, "mine", "kr6d", "not in the window"), caplog.text
             await _no_outcome_for(env, "kr6d", "mine")

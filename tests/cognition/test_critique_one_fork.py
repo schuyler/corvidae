@@ -102,7 +102,8 @@ async def _env_with(tmp_path, agent, *lenses, config=None, with_held=False):
 @pytest.fixture
 def fast_poll(monkeypatch):
     """Poll the waiting-message count every 10 ms instead of every second."""
-    monkeypatch.setattr(critique_module, "YIELD_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        critique_module, "YIELD_POLL_SECONDS", 0.01, raising=False)
 
 
 async def _trigger(env, point, vector, trace_id="kp"):
