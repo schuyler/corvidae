@@ -1548,7 +1548,7 @@ design, not requirement. The requirements are outcomes:
    turns (principles 2 and 4). It changes no stored state and fires
    no hooks of its own. The only calls it may make are to tools their
    plugin declares read-only: tools that change no stored state,
-   access statistics included, and sends nothing anywhere but the
+   access statistics included, and send nothing anywhere but the
    operator's configured model providers. No tool is read-only unless its
    plugin says so. Such a call is not offered for refusal (§3.5.12), and
    its result reaches the fork framed as data, whatever the tool declares

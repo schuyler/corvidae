@@ -1594,7 +1594,7 @@ class MyPlugin(CorvidaePlugin):
   `reasoning_budget_tokens` and `max_tokens` in its profile's `extra_body`.
   Where a runtime override and the stage profile set the same key, the
   profile wins on a fork (the override is not sent); your `extra_body` beats
-  the profile, and `tool_choice: "none"` beats everything (design.md,
+  the profile, and `tool_choice` (`"none"`, or `"auto"` while `max_tool_calls` leaves calls) beats everything (design.md,
   "Body precedence").
 - `max_tool_calls` (default 0) lets the fork call tools declared read-only
   ([Declaring a tool read-only](#declaring-a-tool-read-only)), up to that
