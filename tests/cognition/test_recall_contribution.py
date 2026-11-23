@@ -1,6 +1,6 @@
 """RED tests for #1176: recall sources contribute through ``before_compose``.
 
-Spec: docs/1176-gather-and-held-text-design.md, section 6 (callers,
+Spec: the #1176 design doc in PR #1212's history, section 6 (callers,
 RecallSourceMixin) and requirements R2.3, R3.1. ``on_funnel_ingest`` and its
 promise go; the mixin's ``before_compose`` awaits the search itself (the
 gather's allowance bounds the turn's wait) and returns

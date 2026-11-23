@@ -1,6 +1,6 @@
 """RED tests for #1176: the funnel as the held-text admission policy plugin.
 
-Spec: docs/1176-gather-and-held-text-design.md, section 5 (the funnel becomes
+Spec: the #1176 design doc in PR #1212's history, section 5 (the funnel becomes
 the policy plugin) and the requirements table (R5.1 to R5.3). The kernel's
 ``held`` plugin hands policy every due batch in one ``transform_held_admission``
 call and appends whatever policy admits; the funnel keeps dedupe, budgets,

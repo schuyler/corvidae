@@ -448,7 +448,7 @@ class _SeedHooksPlugin:
     @hookimpl(trylast=True)
     async def transform_held_admission(self, channel, conversation, batches) -> "list[BatchPlan]":
         # The admit-all seed (#1176): one plan per batch, in the order offered,
-        # admitting every entry. A policy plugin wraps this to dedupe, budget
+        # admitting every entry. A policy plugin's plain hookimpl runs before this one to dedupe, budget
         # and reorder. Imported here because corvidae.held imports this module.
         from corvidae.held import admit_all_plans
 

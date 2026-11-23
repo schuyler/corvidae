@@ -1,6 +1,6 @@
 """RED tests for #1176: memory's retrieval as a before-compose contribution.
 
-Spec: docs/1176-gather-and-held-text-design.md, section 6 (callers, memory)
+Spec: the #1176 design doc in PR #1212's history, section 6 (callers, memory)
 and requirements R2.2, R3.9, R5.4. Memory's retrieval moves out of
 ``before_agent_turn`` into ``before_compose``, which returns a
 ``Contribution("memory", lines, keys)``. What the store then admitted is

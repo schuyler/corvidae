@@ -14,8 +14,8 @@ What the store decides, and what it leaves to policy:
   (``on_held_admitted``). It never places text between a tool call and its
   result: the agent calls ``admit_for_turn`` only on a turn that can append.
 * Dedupe, budgets and order are ``transform_held_admission``'s: the kernel's
-  trylast seed admits every entry as offered, a policy plugin
-  wraps it. No hook can remove the frame.
+  trylast seed admits every entry as offered, and a policy plugin's
+  plain hookimpl runs before it. No hook can remove the frame.
 * The store never expires text: each batch carries its creation time on the
   kernel clock, and a policy that wants a TTL reads it.
 
@@ -429,7 +429,7 @@ class HeldContext(CorvidaePlugin):
                 "held: transform_held_admission returned a malformed plan on channel %s "
                 "(%s); every held entry is admitted as offered. Fix the "
                 "transform_held_admission implementation of the policy plugin that "
-                "wraps the seed",
+                "answers before the seed",
                 channel.id, problem, extra={"channel": channel.id},
             )
             return admit_all_plans(batches)
