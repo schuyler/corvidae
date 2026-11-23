@@ -174,7 +174,8 @@ def late_check_text(text: str, plugin: str, reason: str) -> str:
     )
 
 
-#: What a tool refusal says for a bare ``False``, which carries no reason.
+#: What a refusal says for a bare ``False``, which carries no reason: in a
+#: tool refusal, and in a late-check row for a reply or a tool call.
 NO_REASON_GIVEN = "no reason given"
 
 

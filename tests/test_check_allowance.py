@@ -28,7 +28,7 @@ from corvidae.channel import (
     validate_agent_config,
 )
 from corvidae.checks import CHECK_MISSED_METRIC, resolve_check_allowance
-from corvidae.context import LATE_CHECK_LABEL, MessageType
+from corvidae.context import LATE_CHECK_LABEL, NO_REASON_GIVEN, MessageType
 from corvidae.hooks import Refusal, TransportPlugin, create_plugin_manager, hookimpl
 from corvidae.outbound import OutboundMessage
 from corvidae.trace import mint_trace_id
@@ -367,8 +367,10 @@ class TestLateRefusal:
             for m, t in rows
         )
 
-    async def test_late_bare_false_delivers_nothing(self, env):
-        """A late veto with no text has nothing to say; only the miss counts."""
+    async def test_late_bare_false_reaches_the_next_turn(self, env):
+        """A late veto with no text still reaches the channel (#1201): one
+        late row naming the plugin and saying no reason was given, as a late
+        tool veto's does (PRD §3.1.21)."""
         plugin, channel, db, clock, metrics = env
         gate = ClockGate(clock, [(60, False)])
         plugin.pm.register(gate, name="clock_gate")
@@ -382,7 +384,10 @@ class TestLateRefusal:
         drained = await _start_turn(plugin, channel, text="next message")
         await asyncio.wait_for(drained, 1)
 
-        assert _late_rows(channel.conversation.messages) == []
+        late = _late_rows(channel.conversation.messages)
+        assert len(late) == 1
+        assert "clock_gate" in late[0]["content"]
+        assert NO_REASON_GIVEN in late[0]["content"]
         assert len(metrics.named(CHECK_MISSED_METRIC)) == 1
 
     @pytest.mark.parametrize("cancelled", [False, True], ids=["pending", "pending-cleared"])

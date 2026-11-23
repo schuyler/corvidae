@@ -1458,10 +1458,10 @@ check runs until it answers or the allowance runs out. #1176 tracks that.
   replaces the list. The caller resolves the result with `resolve_reject_wins`.
 
 A veto may return `corvidae.hooks.Refusal(reason)` instead of `False`. In time
-the two are the same. Late, a bare `False` has nothing to say; for a `Refusal`
-the Agent's `on_late` stores `late_check_text(reply, plugin, reason)` (a
-`[late check: <plugin>]` row quoting the reply's first 40 characters) in
-`Agent._late_checks[channel.id]`. Step 6 of the channel's next turn appends
+the two are the same. Late, for either, the Agent's `on_late` stores
+`late_check_text(reply, plugin, reason)` (a `[late check: <plugin>]` row
+quoting the reply's first 40 characters), with the reason `no reason given`
+for a bare `False` (#1201), in `Agent._late_checks[channel.id]`. Step 6 of the channel's next turn appends
 those rows as CONTEXT, after the turn's incoming rows and before
 `before_agent_turn`, and the loop that persists that hook's injections
 persists them. It does so only when the channel has no call outstanding: no
@@ -1506,8 +1506,7 @@ scope, so time spent checking never counts against `tools.call_timeout`.
   unchecked, quoting the arguments as JSON cut to 40 characters. It drains
   like a reply's late row (above). A subagent or fork-tool call's row goes to
   the calling channel's next main turn. A late bare `False` gets the reason
-  `no reason given`, as in time (a reply's late bare `False` is still
-  dropped).
+  `no reason given`, as in time, and so does a reply's.
 
 **An unsent final releases transport state.** An unsent final never
 reaches `send_message`, where transports end the turn (Discord and Signal

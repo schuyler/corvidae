@@ -1193,16 +1193,18 @@ class Agent(CorvidaePlugin):
         """The final firing of should_send_response, under the check allowance.
 
         Returns True when ``text`` may be sent. Verdicts that arrive in time
-        resolve reject-wins; a Refusal that arrives later is held for the
-        channel's next turn (_drain_late_checks).
+        resolve reject-wins; a refusal (``Refusal`` or bare ``False``) that
+        arrives later is held for the channel's next turn (_drain_late_checks).
         """
         assert self._registry is not None
 
         async def on_late(plugin_name: str, verdict: object) -> None:
-            # Only a refusal has anything to say; the miss is already counted.
-            if isinstance(verdict, Refusal):
+            # A late refusal still reaches the channel, a bare False included
+            # (it refuses with no reason, #1201); the miss is already counted.
+            if verdict is False or isinstance(verdict, Refusal):
+                reason = verdict.reason if isinstance(verdict, Refusal) else NO_REASON_GIVEN
                 self._late_checks.setdefault(channel.id, []).append(
-                    late_check_text(text, plugin_name, verdict.reason)
+                    late_check_text(text, plugin_name, reason)
                 )
 
         results = await run_checks(
