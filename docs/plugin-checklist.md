@@ -217,7 +217,9 @@ For an in-repo plugin (step 2) the same code goes in
    cut the text first, call `spill.notify` (`depends_on = frozenset({"spill"})`)
    instead: it cuts, writes the full text to a file, and the kernel marks the
    header, so a cut payload never reaches the model without saying so
-   (plugin-guide, "Spilling a long notification"). Origin
+   (plugin-guide, "Spilling a long notification"). To hand text to the model
+   as framed CONTEXT instead of a notification, use the held-text store
+   (plugin-guide, "Contributing text for the next turn"). Origin
    is a convention in `annotations["origin"]`, and cognition plugins key on it (critique,
    gates, funnel, appraisal, outcome log): when you introduce a new origin,
    read those consumers and say in your plugin docstring what each does with it.

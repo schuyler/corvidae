@@ -26,8 +26,9 @@ against their source on 2026-11-17:
 - critique: every main-loop turn with a trace is judged (#1031), so the
   woken turn is, whatever its origin. A note from a correction carries
   origin "critique", so the woken turn's findings never wake another turn.
-- funnel: origin keys the deferred-registration queue as (channel.id,
-  origin); a woken turn with no origin drains only the next-turn queue.
+- held-text store: origin keys the stub batches as (channel.id, origin); a
+  woken turn with no origin admits only the batches held for any turn (text
+  held with ``hold``).
 - gates: no origin reads as "task", so a user chain's woken turn is withheld
   only if "task" is quiet; a reminder chain's is never withheld; a
   ``gate.send.quiet_origins`` origin stays quiet on the channel it sends to.

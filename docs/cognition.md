@@ -31,7 +31,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 |---|---|---|
 | `MemoryPlugin` | `memory` | Consolidates conversation (at turn ends, on idle, and at compaction) into durable memories and retrieves them into context; owns `sqlite-vec` |
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory`, `search_transcripts` and `recall_raw` tools for the model |
-| `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget; gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
+| `FunnelPlugin` | `funnel` | The admission policy for held text: dedupes it against the window, budgets it per source and drops it past a TTL (the kernel's `held` store frames and appends it); gives the agent `ponder`, a wait of at most 5 s for in-flight recall |
 | `AppraisalPlugin` | `appraisal` | Appraises each exchange once the agent has answered, in a fork of the window: the reply's claims about the past and the critique vector |
 | `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss), the retention lens when a knowledge base root is known (`critique.retention.root`, else markdown_recall's root), the proactivity lens (permission asked for something the agent owns, #1126), the provenance check, and the lenses other plugins contribute through `on_critique_init` |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a list of the open ones in every heartbeat beat |
@@ -355,8 +355,13 @@ after a redact run on a database you suspect is damaged.
 Why retrieved memories come back vague, and what we propose to do about
 it, is written up in [memory-retrieval-fidelity.md](memory-retrieval-fidelity.md).
 
-`before_agent_turn` runs when the window tail is a plain user MESSAGE
-(notification-triggered turns skip retrieval entirely). The query is every
+Retrieval runs in `before_compose` (#1176), under the channel's check allowance,
+when the window's last non-CONTEXT row is a plain user MESSAGE (CONTEXT rows
+below it, such as a timestamp stamped by `before_agent_turn`, are looked
+through; notification-triggered turns skip retrieval entirely). Memory returns
+its lines as a `Contribution`: a retrieval that finishes within the allowance
+is in the same turn's prompt, and a slower one is held and admitted at the
+channel's next turn. The query is every
 unanswered user message in the window (`unanswered_user_messages`), joined
 by blank lines: a coalesced burst (#398) is retrieved for as a whole, and
 one message is just itself. Ahead of them, as its own paragraph, goes the
@@ -429,7 +434,7 @@ over-fetch and the channel's in-window count, and reads only the nearest
 rows. A KNN failure for any other reason logs `retrieval KNN query failed;
 degrading to FTS5`, separate from the embedding warning, so the operator is
 not sent to the embed server for a fault in the query — and a degraded query
-ranks the FTS rows by the decayed score, never through the hybrid fusion. Only `before_agent_turn` passes it; `scripts/eval_memory.py`
+ranks the FTS rows by the decayed score, never through the hybrid fusion. Only `before_compose` passes it; `scripts/eval_memory.py`
 and `search_memory` see everything. It is not a scope: other channels'
 records, and this channel's once their rows leave the window, are
 retrieved normally. Known limit: the bound assumes the window is a
@@ -480,13 +485,18 @@ computed), which is what the z thresholds are refitted from; the starting
 values rest on six probes. The `(age)` shown always runs from
 `created_at`. Winners enter the window as `(age, memory <id>) summary`
 lines, or `[marginal] (age, memory <id>) summary` for a moderate record,
-through the admission funnel — never by direct CONTEXT append. The id is
+through the kernel's held-text store — never by direct CONTEXT append: memory's
+`before_compose` returns them as a `Contribution` (source `memory`) and the
+store frames and appends them. The id is
 the record's `memory.id`, the one `recall_raw` takes; its tool description
 says where ids appear, so a model shown a memory can replay its dialog
-(#632). Each line goes to the funnel keyed on `memory <id>)`, so a record
-already in the window is not admitted again when its age or band reads
+(#632). Each line carries the key `memory <id>)`, so with the funnel loaded a
+record already in the window is not admitted again when its age or band reads
 differently now (#624); the closing paren keeps `memory 12` from matching
-`memory 123`. Admitted memories get their access statistics
+`memory 123`. Memory writes its records from `on_held_admitted`, once the
+store has said what the turn admitted (a retrieval whose lines were held
+because a tool call was outstanding writes them at the later turn). Admitted
+memories get their access statistics
 bumped (`retrieval_count`, `last_retrieved_at` — the write half of
 reconsolidation), and every retrieval writes a `retrieval_log` row
 (the top-ranked candidate's decayed score and raw similarity,
@@ -527,16 +537,17 @@ and numbers, never text:
 `(retrieval_id, memory_id)` is the key, and an index on `memory_id` makes
 per-record lookups cheap. A candidate's `outcome` is one of:
 
-- `admitted`: the funnel appended its line to the window.
-- `dropped_weak`: banded weak, so it was never offered to the funnel. Since
+- `admitted`: the held-text store appended its line to the window.
+- `dropped_weak`: banded weak, so it was never offered to the store. Since
   #409 this holds even when every candidate is weak: that retrieval admits
   nothing.
-- `dropped_budget`: offered to the funnel, but the `memory` source's token
-  budget, or what was left under its window cap
-  (`funnel.window_budgets.memory`), had no room for it. The funnel's log
-  line says which limit bound.
-- `not_admitted`: selected, but no funnel plugin is registered, so nothing
-  could be admitted (#654).
+- `dropped_budget`: offered, but neither admitted nor marked a duplicate. The
+  usual cause is the `memory` source's token budget, or what was left under
+  its window cap (`funnel.window_budgets.memory`), having no room for it; the
+  funnel's log line says which limit bound. The same outcome records a line
+  the store dropped for another reason: a newer memory contribution replaced
+  it while it was held, or `funnel.ingest_ttl` expired it. With no funnel
+  loaded, nothing is budgeted and every offered line is admitted.
 - `dropped_dup`: offered, but the window's memory CONTEXT already held that
   record (its `memory <id>)` key, #624), whatever its age or band read then.
   A record whose own range is still in this channel's window is
@@ -576,7 +587,7 @@ in-window record the keyword query matches, found with one extra
 count but no `excluded_in_window` rows, and the count is not limited to
 records that would have made the top k.
 
-Only passive retrieval (`before_agent_turn`) logs. A direct `retrieve()`
+Only passive retrieval (`before_compose`) logs; the records are written from `on_held_admitted`. A direct `retrieve()`
 or `_retrieve_pool()` call (`scripts/eval_memory.py`) and `search_memory`
 write no `retrieval_log` rows. There is
 no `filtered` outcome: redacted, superseded and demoted records have no
@@ -666,7 +677,7 @@ What it does:
   nothing, so what the gate does admit is counted as false admits, split by
   the band that showed it — `strong` is shown bare, `moderate` as
   `[marginal]`. Recall@k and MRR stay `null` for it. The gate is the
-  daemon's own, `admitted_candidates`, shared with `before_agent_turn`, so
+  daemon's own, `admitted_candidates`, shared with `before_compose`, so
   a threshold fitted from these counts is the one the daemon applies: on
   the degraded path the top k is admitted ungated, otherwise every
   candidate above the weak band. A negative probe whose pool degraded is
@@ -770,7 +781,7 @@ The pool file is written once, after the last query:
 gate applied to them (`admitted_candidates`, #802). A candidate outside the
 top k was never offered to the gate, so it is not admitted. The gate drops
 weak-band entries (all of them, so an all-weak pool admits nothing, #409) and
-keeps the top k on a degraded pool; the funnel then admits the survivors,
+keeps the top k on a degraded pool; the held-text store then admits the survivors,
 with no window exclusion. A negative probe carries its `false_admits` counts
 and `null` metrics. It holds ids and scores but
 no memory text beyond the labels' own `text`, `context` and `query`; look the
@@ -990,17 +1001,24 @@ architecture.
 
 ### FunnelPlugin
 
-`funnel.py` — the context-admission funnel. Entry
-point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
+`funnel.py` — the admission policy for held text. Entry point name:
+`"funnel"`. The kernel's `held` store (`corvidae/held.py`) holds text for a
+channel's next turn, frames it as data and appends it, and the funnel decides
+*what* of the held text a turn admits. It implements
+`transform_held_admission`, which the store calls once per admitting turn with
+every due batch. For each batch, in the order offered:
 
-1. **Dedupe** against CONTEXT already in the window. By default an entry
-   is a duplicate when its exact text appears in any CONTEXT row. A caller
-   can pass `keys=`, one per entry (memory passes `memory <id>)`); then an
+1. **TTL.** With `funnel.ingest_ttl` set, a batch with no origin (not a
+   stub batch from `hold_and_wake`) older than the TTL on the kernel clock is
+   dropped whole.
+2. **Dedupe** against CONTEXT already in the window. By default an entry
+   is a duplicate when its exact text appears in any CONTEXT row. A batch
+   may carry `keys`, one per entry (memory's are `memory <id>)`); then an
    entry is a duplicate when its key appears in a CONTEXT row framed for
    the same source, so a stable identity dedupes even when the rendered
    line changes, and another source quoting the line suppresses nothing
    (#624).
-2. **Budget** per source (`funnel.default_budget`, default 512 tokens;
+3. **Budget** per source (`funnel.default_budget`, default 512 tokens;
    `funnel.budgets.<source>` overrides), in given order, skipping any
    entry that would overrun what is left of the budget, so one large
    entry never blocks smaller ones after it; drops logged rather than
@@ -1013,35 +1031,26 @@ point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
    key. shortcut: new entries are charged without their frame, so the
    window can pass the cap by one frame; charge it if caps under ~200
    tokens matter.
-3. **Frame** every admitted batch in explicit data-not-instructions
-   wrapping with a source label (injection defense, written once here).
-4. **Append + persist** one CONTEXT message at the tail through
-   `persist_message`, with the rowid attached, so the window matches
-   its reload. Stale CONTEXT retires by aging past the compaction boundary.
 
-Callers: memory retrieval (and optionally date/time grounding). The
-funnel also owns deferred registration: non-tool-call notification
-payloads queue per `(channel, origin)` via `ingest_and_wake()`, one
-stub notification wakes the channel per pending pair, and the drain in
-`before_agent_turn` admits everything queued for the triggering
-exchange's origin. Entries the budget dropped stay queued for the next
-drain (as do entries the window cap held back), except an entry larger
-than its source's whole budget or window cap: it can never fit, so the drain drops it with a warning that names
-the channel, the source and `funnel.budgets.<source>` or
-`funnel.window_budgets.<source>`. `ingest()` queues without a stub: those payloads wake
-nothing and are admitted at the channel's next turn, whatever its origin
-(user turns included), before the origin-matched drain.
+Entries admitted from an earlier batch of the same source in the same call
+count as already in the window, for dedupe and the cap. An entry too large to
+fit the source's whole budget or cap is dropped with a warning naming the key
+to raise. A budget skip on a contribution (a batch offered at one turn only) is
+a drop; on a pushed batch (`hold`, `hold_and_wake`, a late check) the entry is
+left unlisted, so the store keeps it for a later turn.
 
-The funnel also takes pull-path promises (#717). A provider implements
-`on_funnel_ingest` and submits, per source, an `asyncio.Future` that
-resolves to an `Ingest` (entries, optional per-entry dedupe keys, plus an
-optional callback) or to `None`.
-A promise that is done when the turn sweeps it is admitted that turn; one
-still pending is admitted at the channel's next turn after it resolves,
-whatever that turn's origin. `funnel.ingest_ttl` (unset by default, so
-nothing expires) bounds how long a stub-less payload or a pending promise
-may wait; see [configuration.md](configuration.md#funnel--context-admission-funnel).
-The hook's contract is under `FunnelPlugin` in the reference below.
+The kernel, not the funnel, does the rest: it frames every admitted batch in
+the data-not-instructions wrapper with a source label (so disabling the funnel
+removes none of that), appends one CONTEXT message at the tail through
+`persist_message` with the rowid attached, cuts an entry over
+`agent.held_entry_max_chars`, and never places text between a tool call and its
+result. Stale CONTEXT retires by aging past the compaction boundary.
+
+Callers are every source that contributes or holds text: memory retrieval and
+the recall sources (through `before_compose`), critique's findings and any plugin that calls
+`held.hold` or `held.hold_and_wake`. The funnel also gives the agent the
+`ponder` tool. The held store is in memory by design: text still held at
+shutdown is dropped, with a WARNING. The reference below has the details.
 
 ## Plugin reference
 
@@ -1049,10 +1058,10 @@ The hook's contract is under `FunnelPlugin` in the reference below.
 
 Autobiographical memory: consolidates dialog (at turn ends, on idle, and at compaction) into first-person
 memory records (SQLite + sqlite-vec + FTS5) and retrieves them into the
-prompt through the admission funnel. Entry point name: `"memory"`;
+prompt as a `before_compose` contribution that the held-text store frames and appends. Entry point name: `"memory"`;
 `depends_on = {"persistence", "llm", "clock", "idle", "trace", "registry"}`. Absorbs the removed `DreamPlugin`.
 
-Implements six hooks and two kernel timers:
+Implements seven hooks and two kernel timers:
 
 - `on_start` — creates the memory schema on the persistence connection
   (retried lazily on first use; on_start ordering is LIFO across plugins),
@@ -1067,7 +1076,7 @@ Implements six hooks and two kernel timers:
   `compacted_ids` range above the per-channel watermark, using the stashed
   fork record when there is one for that range and watermark, else catch-up
   (after the drop the range has left the window).
-- `before_agent_turn` — embeds the inbound user text, preceded by the
+- `before_compose` — embeds the inbound user text, preceded by the
   agent's previous reply (`memory.retrieval.query_context`), fuses the KNN
   with an FTS5 search (`memory.retrieval.candidates`), leaves out this
   channel's records still wholly in its window, scores candidates
@@ -1076,9 +1085,15 @@ Implements six hooks and two kernel timers:
   retrieval), bands them (strong/moderate/weak; by default on the z of the
   record's cosine against the whole memory, `memory.retrieval.band_on`),
   drops weak ones (on the FTS5-degraded path, where every hit is moderate,
-  it admits the top k), admits the rest through the funnel, bumps access
-  stats for admitted records, and writes a `retrieval_log` row plus one
-  `retrieval_candidate` row per logged candidate.
+  it admits the top k), and returns the rest as a `Contribution` keyed on
+  `memory <id>)`. An empty `Contribution` goes back when every candidate is
+  weak, so the store still announces the outcome. It stashes the pool and
+  selection under `(channel, trace_id)`.
+- `on_held_admitted` — for `source == "memory"` and a trace it stashed a
+  selection for, bumps access stats for the admitted records and writes the
+  `retrieval_log` row, one `retrieval_candidate` row per logged candidate and
+  the retrieval profile on the trace (`on_trace_record`). Any other source's
+  or trace's event is ignored.
 - `on_agent_response` — the turn trigger: with `agent.forks` on for
   `consolidation`, no tool calls pending and no turn or idle consolidation
   already in flight for the channel, fixes `range_end` at the window's
@@ -1163,15 +1178,16 @@ A malformed consolidation reply is retried once; if the retry is also
 unusable, the range is stored as its raw transcript rather than being
 dropped (the LLM call has already been paid for). The transcript is split
 on message lines (a message longer than a piece is cut by characters) into
-records that each fit the memory admission budget as a retrieved memory
-line (`funnel.budgets.memory`, else `funnel.default_budget`, else 512,
-read at startup; each piece leaves room for the longest
+records that each fit `memory.entry_target_tokens` as a retrieved memory
+line (default 256, read at startup; memory reads no `funnel` key since #1176,
+so these pieces are smaller than the old default of 512 tokens; each piece leaves room for the longest
 `[marginal] (age, memory <id>) ` prefix, a five-digit day count and a
 twelve-digit id), so a raw record can actually be admitted (#626). The pieces are
 records of one consolidation (shared range, importance and stamp) stamped
-`mode = raw`. A budget too small for any memory line keeps the transcript
-as one record, with a warning naming the key. One raw piece can fill the
-whole memory budget for a turn.
+`mode = raw`. A target too small for any memory line keeps the transcript
+as one record, with a warning naming `memory.entry_target_tokens`. The target
+alone sizes a raw piece, so if `funnel.budgets.memory` is set below it the funnel
+drops a raw piece, as too large to ever fit, when it is offered.
 
 ### MemoryToolsPlugin (`packages/corvidae-cognition/corvidae_cognition/memory_tools.py`)
 
@@ -1287,148 +1303,118 @@ by `MemoryPlugin`; only the agent's active access surface is absent.
 
 ### FunnelPlugin (`packages/corvidae-cognition/corvidae_cognition/funnel.py`)
 
-The context-admission funnel — the single chokepoint for tail CONTEXT
-admission. Entry point name: `"funnel"`. Exposes
-`admit(channel, conv, source, entries, budget_tokens=None, keys=None) -> list[str]`
-(the admitted entries; empty when nothing was appended):
-dedupes against CONTEXT already in the window (on each entry's whole text
-against every CONTEXT row, or, with `keys`, one per entry, on its key
-against rows framed for the same source; a length mismatch raises
-`ValueError`), budgets tokens per source and, when
-`funnel.window_budgets.<source>` is set, to what is left under that
-source's window cap (drops are logged, never silent), wraps everything in explicit
-data-not-instructions framing with a source label, appends one CONTEXT
-message at the tail, and persists it with the rowid attached.
+The admission policy for held text. Entry point name: `"funnel"`;
+`depends_on = frozenset({"held", "clock"})`, both resolved by type when first
+needed (not in `on_init`). The funnel holds nothing and appends nothing: the
+kernel's `held` store (`corvidae/held.py`, [design.md](design.md#held-text-and-before_compose))
+does, and asks the funnel once per admitting turn, through the hook
+`transform_held_admission(channel, conversation, batches)`, what to admit. The
+funnel answers with one `BatchPlan(batch, admit, duplicate, drop)` per batch,
+in the order offered, by the three steps in the overview above (TTL, dedupe,
+budget with window cap). Its config keys are `funnel.default_budget`,
+`funnel.budgets.<source>`, `funnel.window_budgets.<source>` and
+`funnel.ingest_ttl` ([configuration.md](configuration.md#funnel--admission-policy-for-held-text));
+all four are re-read on config reload (`reloadable_keys`).
 
-`admit_detailed(...)` takes the same arguments and returns an `Admission`
-(frozen dataclass): `admitted` (the entries appended, in input order) and
-`duplicate` (the entries dropped because the window's CONTEXT already
-carried them). An entry in neither list was dropped by the budget or the
-window cap.
-`admit()` is `admit_detailed(...).admitted`. Memory retrieval uses the
-detailed form to label `dropped_dup` versus `dropped_budget` in the
-candidate log.
+What it removed with #1176: `admit()`, `admit_detailed()` and `Admission`,
+`ingest()` and `ingest_and_wake()`, the `on_funnel_ingest` hook with its
+`FunnelSpec`, `Ingest` and `submit` promises, and the per-turn expire, sweep,
+drain and collect steps. A plugin that held or admitted text through them now
+returns a `Contribution` from `before_compose` or calls `held.hold` and
+`held.hold_and_wake` ([plugin-guide.md](plugin-guide.md#contributing-text-for-the-next-turn)).
 
-**Without this plugin:** the agent has no `ponder` tool, and sources that route through the funnel (memory
-retrieval) log a warning and admit nothing.
+**Without this plugin** (`plugins.disabled: [funnel]`): the agent has no
+`ponder` tool, and the store's seed policy admits every held entry as offered:
+no dedupe, no budget, no window cap, no TTL. The frame, the persistence and the
+`agent.held_entry_max_chars` cut stay, because the kernel owns them. Nothing
+logs a warning for the missing policy, and goals, critique and memory start
+without it.
 
-`ingest_and_wake(channel, origin, source, entries)` is the deferred
-admission path for notification producers without a `tool_call_id`:
-`origin` is stamped into the wake stub's `annotations["origin"]` (see
-[Traces](plugin-guide.md#traces)) so `before_agent_turn`'s drain, and any
-plugin gating eligibility off that origin, never has to infer it from
-stub text. The `'user'|'reminder'|'critique'|'heartbeat'|'task'`
-taxonomy is a convention cognition plugins (AppraisalPlugin,
-CritiquePlugin, OutcomeLogPlugin) share over this key — not a core
-concept. Critique judges every main-loop turn whatever its origin (#1031)
-and reads only `'critique'`, to keep a correction's findings from waking
-another turn. GatePlugin recognizes `'user'` by subscribing to
-`on_message_admitted` rather than by a value in `annotations`; `'task'` is the default OutcomeLogPlugin
-applies when `annotations["origin"]` is absent on a notification-born
-trace. `stub_text=` replaces the default "N pending … item(s)" stub text
-(the provenance check's use). `ingest(channel, source, entries)` is the
-no-wake variant: no stub, no origin.
-
-`ingest` and `ingest_and_wake` are the push path. The pull path is the
-hook `on_funnel_ingest(channel, trace_id, annotations, submit)`, owned by
-the funnel (`FunnelSpec`) and called last in each `before_agent_turn`.
-Implementers call `submit(source, promise)`, where `promise` is an
-`asyncio.Future` resolving to `Ingest(entries, on_admitted=None)` or `None`:
-
-- Submit and return. The hook must be `async`, and it must not await a
-  promise. Implementers should list `funnel` in `optional_depends_on`, so
-  a disabled funnel is logged at DEBUG rather than WARNING. With the funnel
-  disabled, nothing calls the hook.
-- At most one pending promise per `(channel, source)`. A newer submit
-  cancels the older one, and an older promise that had already finished is
-  admitted this turn instead of being lost, so submitting again is safe.
-- Each turn runs four steps in order, none of which returns early:
-  **expire** (only when `funnel.ingest_ttl` is set: queued stub-less payloads and
-  pending promises older than it are dropped, and unresolved promises are
-  cancelled); **sweep** (each finished promise leaves the pending set, and
-  an `Ingest` it resolved to joins the channel's next-turn queue carrying
-  the promise's submit time, so the TTL counts from submission); **drain**
-  (the stub-less queue, then the origin-keyed one, through the usual
-  dedupe, budget, framing and persist); **collect** (call the hook).
-- A promise that raised is logged at WARNING with its source and channel
-  and dropped. A promise its provider cancelled is dropped at DEBUG. `None`
-  admits nothing. `on_admitted(Admission)`, when given, runs after each admission
-  attempt that completes; a raise in it is logged and does not stop the drain.
-- On shutdown, `on_stop` cancels every pending promise. Queued payloads are
-  dropped with the process, as before.
-
-Two limits. Expiry runs at the channel's next turn, with no timer, so a
-pending promise on a channel that takes no further turn keeps running
-until then or until shutdown. And a promise that finishes after the turn's
-sweep, while its provider submits again in that same collect, is carried to
-the turn's own drain rather than lost: the finished result is admitted from
-collect, alongside the newer promise's (which is swept next turn).
+**Origin and the wake stub.** `held.hold_and_wake(channel, origin, source,
+entries, stub_text=None)` stamps `origin` into the wake stub's
+`annotations["origin"]` (see [Traces](plugin-guide.md#traces)), together with
+the kernel's `held_stub` key, so the turn the stub triggers, and any plugin
+gating eligibility off that origin, never has to infer it from stub text. The
+`'user'|'reminder'|'critique'|'heartbeat'|'task'` taxonomy is a convention
+cognition plugins (AppraisalPlugin, CritiquePlugin, OutcomeLogPlugin) share
+over this key — not a core concept. Critique judges every main-loop turn
+whatever its origin (#1031) and reads only `'critique'`, to keep a correction's
+findings from waking another turn. GatePlugin recognizes `'user'` by
+subscribing to `on_message_admitted` rather than by a value in `annotations`;
+`'task'` is the default OutcomeLogPlugin applies when `annotations["origin"]` is
+absent on a notification-born trace. `stub_text=` replaces the default "N
+pending … item(s)" stub text (the provenance check's use). `held.hold(channel,
+source, entries)` is the no-wake variant: no stub, no origin, admitted at the
+channel's next turn whatever its origin.
 
 **`ponder` tool.** The funnel registers one tool, `ponder()`, which takes no
-arguments: a bounded wait for recall already in flight. Every
-`on_funnel_ingest` submission for a turn is made in that turn's
-`before_agent_turn`, before the model call, so when the agent can call a tool
-the channel's pending promises are the recall in flight for it. `ponder` waits for
-those, as they stood when it was called:
+arguments: a bounded wait for recall already in flight. The store keeps the
+stragglers of each turn's `before_compose` gather (the implementations that
+had not answered within the check allowance, as futures), and the gather runs
+before the model call, so when the agent can call a tool the channel's
+stragglers are the recall still coming in for it. `ponder` waits on
+`held.in_flight(channel_id)`, as it stood when it was called:
 
 - **Nothing in flight: it returns at once.** "Nothing is being recalled for
-  this channel", since waiting cannot bring more. If a promise already finished
-  with entries and the next turn's sweep has not admitted it yet, it returns
+  this channel", since waiting cannot bring more. If a straggler already
+  finished with entries and the next turn has not admitted it yet, it returns
   "Recall already landed".
-- **Otherwise it waits** for the first promise with entries ("Recall landed after
-  Xs") or until every one has settled without any ("Recall finished after Xs with nothing
-  to add"). The funnel knows because it holds the promises in `_pending`: a
-  `None` result, an `Ingest` with no entries, a failure and a cancellation all
-  count as a finished recall. It cannot tell "no hits" from a timeout or a
-  failure, which the recall mixin both resolves to `None` (it logs failures).
+- **Otherwise it waits** for the first straggler that brought entries ("Recall
+  landed after Xs") or until every one has settled without any ("Recall
+  finished after Xs with nothing to add"). A straggler's future is `True` only
+  when its late answer was a non-empty `Contribution` and the store has
+  already held it, so "landed" never precedes the hold; an empty answer, a
+  raise and a cancellation all count as a finished recall with nothing. It
+  cannot tell "no hits" from a failure, which the recall mixin both resolves
+  to `None` (it logs failures).
 - **A timeout of 5 s** (`PONDER_TIMEOUT_SECONDS`, a constant, not config) keeps a
   slow source from stalling the agent: "Still waiting on recall". The recalls
   keep running, because the wait uses `asyncio.wait`, which does not cancel what
   it waits on, and are admitted at the first turn after they resolve.
-- **Only recall promises count.** `ingest` and `ingest_and_wake` arrivals
-  neither end nor lengthen the wait: `ingest_and_wake` starts a turn of its own
-  through its stub, and `ingest` payloads wait for the next turn.
+- **Only before-compose stragglers count.** `hold` and `hold_and_wake` arrivals
+  neither end nor lengthen the wait: `hold_and_wake` starts a turn of its own
+  through its stub, and `hold` text waits for the next turn.
 - **Held turn, busy channel.** Like any tool call, a ponder keeps its call id
   pending: the kernel holds the next assistant turn until the result lands,
   and the channel counts as busy, so idle work (heartbeat, consolidation)
   stays off while it runs. That is intended. A message that arrives during a
-  ponder still gets a turn, as it does during any tool call, and that turn can
-  submit or supersede promises, which the waiting ponder does not follow. A waiting ponder
+  ponder still gets a turn and its own gather, as it does during any tool call,
+  which the waiting ponder does not follow. A waiting ponder
   also occupies a worker of the shared task queue (see the threat model).
-- **The tool admits nothing.** Its result says what happened; the next turn's
-  sweep and drain admit whatever landed, within the source's budget and the
-  funnel's dedupe and TTL.
-- On shutdown, `on_stop` cancels every pending promise, so a waiting ponder
-  returns.
+- **The tool admits nothing.** Its result says what happened; the next turn
+  admits whatever landed, within the source's budget and the funnel's dedupe
+  and TTL.
+- At shutdown the kernel clock cancels the implementations still running; their
+  futures settle empty, so a waiting ponder returns.
 
 The model sees only the first docstring line (`tool_to_schema` keeps one line),
 so that line carries the guidance: pause for a moment (up to 5 seconds) to let
-your recollections catch up, and it returns at once if none are still coming in. No recall source
-uses the pull path in-tree yet (the first, #711, and moving memory onto it,
-#721, are open), and memory's own retrieval runs before the model call, so
-today `ponder` always finds nothing in flight and returns at once. A recall
-source is the plugin-guide's [Writing a recall
+your recollections catch up, and it returns at once if none are still coming in.
+Memory's retrieval and the recall sources both run in `before_compose`, so a
+retrieval that is slower than the channel's check allowance is the recall `ponder`
+waits for; one that answered in time is already in the prompt and `ponder`
+finds nothing in flight. A recall source is the plugin-guide's [Writing a recall
 source](plugin-guide.md#writing-a-recall-source).
 
 Remove the tool with `tools.disabled: [ponder]`, or per channel with
 `channels.<id>.tools.disabled: [ponder]`. `plugins.disabled: [funnel]` removes it
-too but aborts startup unless `goals` is disabled as well, since goals depends
-on the funnel.
+too, and starts cleanly: goals no longer depends on the funnel (#1176).
 
 ### Recall sources (`packages/corvidae-cognition/corvidae_cognition/recall.py`)
 
 Not a plugin: a helper for plugins that recall something on each user turn
-and hand it to the funnel through the pull path (#718, part of #711). It has
+and contribute it to the turn's prompt (#718, part of #711). It has
 no entry point and no config of its own. `RecallSourceMixin` implements
-`on_funnel_ingest` so a source supplies only `search(query, ctx)` and
+`before_compose` so a source supplies only `search(query, ctx)` and
 `render(hit)`; the how-to is in
 [plugin-guide.md](plugin-guide.md#writing-a-recall-source).
 
 - **Gate.** A turn is searched for only when the window ends in a user
-  MESSAGE with text, looking through trailing CONTEXT rows (the funnel's drain
-  and other sources append there before this hook runs). The query is
-  `retrieval_query(messages, "previous_reply")` from `memory.py`, so a source
-  sees what memory sees. Memory's own copy of the tail test is untouched.
+  MESSAGE with text, looking through trailing CONTEXT rows (a plugin's
+  `before_agent_turn` injection, such as a timestamp, sits there before this hook
+  runs). The query is `retrieval_query(messages, "previous_reply")` from
+  `memory.py`, so a source sees what memory sees. Memory uses the same tail test,
+  `tail_is_plain_user_message`.
 - **`SearchGate`.** One cooldown and one in-flight slot per channel, on an
   injectable clock. `try_start` records a start and `finish` releases the slot;
   the cooldown runs from the start, so a failed or timed-out search counts.
@@ -1436,13 +1422,19 @@ no entry point and no config of its own. `RecallSourceMixin` implements
   (default 5 s, 0 allowed) and `timeout` (default 10 s) from the source's own
   block and raises `ValueError` for anything else, naming the key, the rejected
   value and the accepted range.
-- **Failure.** A search that raises or times out resolves its promise to
-  `None` and logs at WARNING (logger `corvidae.recall`) with the source, the
-  channel and the traceback. A promise the funnel cancels is not logged.
+- **Failure.** A search that raises or times out contributes nothing (`None`) and logs at
+  WARNING (logger `corvidae.recall`) with the source, the channel and the
+  traceback. A gather cancelled at shutdown is not logged.
+- **Timing.** The mixin awaits the search inside `before_compose`, so a hit
+  that comes back within the channel's check allowance is in the same turn's
+  prompt, and a slower one is held and admitted at the channel's next turn
+  (#1176). It passes no dedupe keys, so the funnel dedupes it on whole-line
+  text.
 
 Nothing here decides relevance (#674) or sizes the result: the funnel's
-per-source budget does. Threat model: the mixin adds no route for untrusted
-text, because everything it hands over is framed by the funnel; a source that
+per-source budget does, when the funnel is loaded. Threat model: the mixin adds
+no route for untrusted text, because everything it hands over is framed by the
+kernel's held-text store; a source that
 reads from outside (an MCP tool, a folder) records its own entry in
 [threat-model.md](threat-model.md).
 
@@ -1528,7 +1520,7 @@ snapshot it again with `--snapshot-from`.
 
 Keeps the agent's open goals in SQLite and shows them to the heartbeat. Entry
 point name: `"goals"`; `depends_on = frozenset({"persistence", "memory",
-"funnel", "clock"})`. Owns the `goals` table in `sessions.db` (`id`, `text`,
+"clock"})`. Owns the `goals` table in `sessions.db` (`id`, `text`,
 `created_at`, `updated_at`, `retired_at`, `memory_id`, `status`,
 `position`, `origin_channel`), created in `on_start` when the DB is open
 and on first use otherwise. An existing table gains the three newer
@@ -1561,7 +1553,7 @@ in-progress goal, otherwise take the first goal that is neither blocked nor
 waiting. That pick rule is a prompt, not a framework rule, and the heartbeat
 still decides whether a beat warrants action at all.
 
-The plugin owns a hook spec (`GoalsSpec`, as the funnel owns `FunnelSpec`):
+The plugin owns a hook spec (`GoalsSpec`):
 `on_goals_state_changed(goal_id, kind, old_status, new_status,
 origin_channel, actor_channel, conclusion)`. It fires after a status change
 or a retirement commits, outside the database lock, and not for a no-op
@@ -1605,8 +1597,8 @@ at all adds no list. The timestamp is the latest `updated_at` over all
 rows, retired ones included, not the current time, so the text changes only
 when a goal does. The supersession clause is what lets an older beat still
 in the beat channel's window be read as stale: the latest list is current.
-The list is not sent through the funnel, so no funnel budget can drop it
-and leave a stale copy standing.
+The list is not held text and does not go through the held-text store, so no
+funnel budget can drop it and leave a stale copy standing.
 
 **Visibility:** goals are agent-wide. Every channel sees every goal, as it
 sees every memory. A goal added or retired on one channel reaches the
@@ -1940,8 +1932,8 @@ model makes both language judgments; the code only fetches evidence:
    isn't exactly one well-formed verdict per claim, in order, fails the
    fork: an empty or partial answer can't pass as "all supported". Each
    unsupported verdict becomes an objection quoting the claim from our
-   list, with the judge's reason, and reaches the funnel tagged
-   `[provenance]`. Stylistic objections queue through `ingest` and wait for
+   list, with the judge's reason, and reaches the held-text store tagged
+   `[provenance]`. Stylistic objections queue through `held.hold` and wait for
 the channel's next turn. Provenance objections wake the channel with a
 stub whose text tells the agent the default is to send nothing: reply
 exactly `NO_REPLY`, and reply in the channel only if its earlier reply
@@ -1949,7 +1941,7 @@ could lead the other party to take an incorrect action. With a
 retention root (`critique.retention.root`, else markdown_recall's root), retention findings wake the channel too, and
 every critique wake (provenance included) uses one stub that adds how to
 file them: read the named file under the root and append only what is
-missing. The funnel keeps one pending stub per channel and origin, so the
+missing. The held-text store keeps one pending stub per channel and origin, so the
 first wake's text governs everything queued behind it. That is why the stub
 depends on configuration only, never on which lens woke: it is the retention
 note when a root is set and the provenance note otherwise. While the
@@ -2208,7 +2200,7 @@ and records nothing. A lens that ran reports, in a critique record,
 
 (`detail` only when there are objections), merged beside the stylistic
 run's keys. Its objections, tagged `[<name>]`, re-enter through
-`funnel.ingest` as framed CONTEXT at the channel's next turn and wake
+`held.hold` as framed CONTEXT at the channel's next turn and wake
 nothing, unless the lens declares `wakes=True` (PRD §3.7 Critique 4): a
 waking lens's objections re-enter at the turn its stub triggers, under the
 same silence default as provenance's, and still wake nothing on a
@@ -2255,7 +2247,7 @@ and withholds no final from an origin that is not quiet.
 
 **Origin.** Read from propagated state, never inferred: `annotations["origin"]`
 when a producer stamped one (the scheduler stamps `reminder`,
-`HeartbeatPlugin` stamps `heartbeat`, the funnel stamps `critique`), else `user` for a trace the
+`HeartbeatPlugin` stamps `heartbeat`, critique's `hold_and_wake` stamps `critique`), else `user` for a trace the
 plugin saw in `on_message_admitted` (a bounded LRU of 1024), else the origin `resolve_trace_origin` returns for the trace (so a user exchange whose trace
 fell out of the LRU during a long tool cycle is still `user`), else `task`.
 Tool cycles carry the item's annotations forward, so an exchange keeps its origin

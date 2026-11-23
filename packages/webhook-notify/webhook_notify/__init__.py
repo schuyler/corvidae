@@ -35,7 +35,9 @@ Origin ``webhook:<endpoint>`` in the cognition plugins:
 - gates: non-``user``, so ``gate.send.quiet_origins`` can make it quiet, as
   for heartbeat and task.
 - critique: judged like every main-loop turn (#1031).
-- funnel: keys stubs on its own origins only; unaffected.
+- held-text store: pairs a stub with its held text by (channel, origin) and
+  recognises its stubs by the ``held_stub`` annotation, so this origin is
+  unaffected.
 
 Channels resolve at flush, not in ``on_start``, deliberately: the ingress may
 deliver before this plugin starts, and the registry is resolved in ``on_init``

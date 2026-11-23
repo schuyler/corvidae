@@ -168,7 +168,10 @@ relative to a stage. All three mean the same thing to pluggy.
 An observe hook may mutate an object it was handed (`after_persist_assistant`
 strips `reasoning_content` in place; `before_agent_turn` appends to
 `channel.conversation`), but its return value is never read. A transform
-returns the replacement and the core uses it.
+returns the replacement and the core uses it. `before_compose` is the one
+observe hook whose return value the kernel does read: it never broadcasts it
+through `pm.ahook`, and instead gathers each implementation's `Contribution`
+itself ([Contributing text for the next turn](#contributing-text-for-the-next-turn)).
 
 `resolve_channel` shows the other safe shape for `resolve_`: each
 implementer answers only for ids under its own `transport:` prefix and
@@ -306,172 +309,6 @@ At startup, a hookimpl whose name matches no spec is logged at WARNING
 declares`), since it will never be called. Usually that's a typo. The
 exception is an impl for a hook owned by one of your `optional_depends_on`
 plugins that isn't loaded: that's expected, and is logged at DEBUG.
-
-### Implementing `on_funnel_ingest`
-
-The funnel (cognition extra) owns `on_funnel_ingest`, the hook a source uses
-to hand it entries ahead of a turn. Use it when your entries are not ready
-when the funnel asks: you submit a promise, and the entries are admitted
-once it resolves, through the same dedupe, budget and framing as `admit()`.
-If you have the entries now, submit a future you have already resolved; it is
-admitted that same turn (below). Do not call `admit()` or `ingest()` on the
-funnel object: only two calls that predate the rule do
-([The funnel](#the-funnel-two-existing-calls)). The funnel's `ponder` tool waits for
-the channel's in-flight promises, up to 5 s, so a slow recall can land before
-the model answers; a promise that resolves to `None` or no entries counts as
-finished with nothing. The full
-contract is under `FunnelPlugin` in
-[cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy).
-
-```python
-import asyncio
-
-from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae_cognition.funnel import Ingest  # cognition extra
-
-class RecallPlugin(CorvidaePlugin):
-    optional_depends_on = frozenset({"funnel"})
-
-    def __init__(self) -> None:
-        # The promise this plugin last submitted, per channel id.
-        self._promises: dict[str, asyncio.Future] = {}
-
-    @hookimpl
-    async def on_funnel_ingest(self, channel, trace_id, annotations, submit) -> None:
-        # Do not submit again while this channel's promise is pending: a newer submit cancels it.
-        old = self._promises.get(channel.id)
-        if old is not None and not old.done():
-            return
-        # Start the slow work in the background and hand the funnel the future.
-        promise = asyncio.ensure_future(self._recall(channel))
-        self._promises[channel.id] = promise
-        submit("recall", promise)
-
-    async def _recall(self, channel) -> Ingest | None:
-        # Resolve to the lines to admit, or to None when there is nothing to add.
-        lines = await search_notes(channel)  # your own lookup
-        return Ingest(entries=lines) if lines else None
-```
-
-- The hook must be `async`. It submits and returns; it never awaits a promise.
-- `submit(source, promise)` takes a source label, which becomes the frame
-  label, and an `asyncio.Future`. The future resolves to
-  `Ingest(entries, on_admitted=None)` or to `None`. `entries` are
-  pre-formatted lines, admitted as one frame in the order given.
-- One pending promise per `(channel, source)`. A newer submit cancels the
-  older, which is why the example checks before it submits.
-- A promise that raised is logged with its source and channel and dropped.
-  A promise its provider cancelled is dropped quietly. `None` admits nothing.
-- `on_admitted`, if given, is a sync callable. The funnel calls it with the
-  `Admission` (`admitted` and `duplicate` lists) after each admission attempt
-  that completes. A raise is logged and does not stop the drain.
-- `keys=`, if given, is one stable identity per entry (#725), the same
-  argument `admit()` takes. With keys, an entry is a duplicate when its key
-  already appears in this source's CONTEXT rows, so a page that re-renders
-  with a new age or score is not admitted twice. The match is containment, so
-  render the key into the line you admit (memory renders its record id;
-  a folder source can carry `<!--notes/page.md#intro-->`). A key list that is
-  not one per entry is rejected with a warning naming the source, both
-  lengths and the remedy, and the entries are admitted unkeyed: a promise has
-  no caller to raise at, and a result the turn is waiting for should not be
-  dropped over its keys.
-- A promise that is done when the turn starts is admitted that turn. One
-  still pending is admitted at the channel's next turn after it resolves,
-  whatever that turn's origin. Nothing wakes the channel for it.
-- `funnel.ingest_ttl`, when set, drops a queued stub-less payload (`ingest`) or a pending promise
-  older than it; an unresolved promise is cancelled, so your work should
-  tolerate cancellation. Shutdown cancels pending promises.
-- A promise submitted already done is admitted in that same turn, before the
-  model call, rather than waiting for the next sweep (#726). A promise that
-  finishes during a turn, after the funnel's sweep, is carried into that
-  turn's drain even if you submit again in the same collect: the finished
-  predecessor's result is admitted, not cancelled and replaced.
-
-### Writing a recall source
-
-If your plugin looks something up for each user turn (a wiki, a folder of
-notes) and wants the result in the window as CONTEXT, don't write the hook
-above yourself. `RecallSourceMixin` in `corvidae_cognition.recall` (cognition
-extra) already does the parts every such source repeats: it checks that the
-turn is a user turn, builds the query, keeps a cooldown and a single search
-in flight per channel, runs your search in the background under a timeout,
-catches and logs its failures, and submits the promise. You supply two methods.
-
-```python
-from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae_cognition.recall import RecallContext, RecallSourceMixin
-
-
-class NotesRecall(RecallSourceMixin, CorvidaePlugin):
-    # The funnel's frame label, and the key of funnel.budgets.<source_name>.
-    source_name = "notes"
-    # Your own agent.yaml block; the mixin reads cooldown and timeout from it.
-    config_key = "notes_recall"
-
-    @hookimpl
-    async def on_init(self, pm, config: dict) -> None:
-        await super().on_init(pm, config)
-        # Raises ValueError on a malformed block, which aborts startup.
-        self.init_recall(config)
-
-    async def search(self, query: str, ctx: RecallContext) -> list[dict] | None:
-        # Hits in rank order, or None or [] for none. May raise.
-        return await lookup(query)  # your own lookup
-
-    def render(self, hit: dict) -> str:
-        # One line per hit; render it the same way every time (see below).
-        return f"{hit['title']}: {hit['text']}"
-```
-
-The mixin is a helper, not a plugin: it has no entry point. Your class does,
-and `plugins.disabled` switches your source off by that name. The rest of the
-contract:
-
-- **When it searches.** Only when the window ends in a plain user message
-  with text. CONTEXT rows below that message are looked through, because the
-  funnel runs this hook last, after it may have appended CONTEXT under the
-  user's words. A turn that a tool result or an agent reply ends is skipped. The
-  query is memory's `retrieval_query` with `previous_reply` context: the
-  unanswered user messages, preceded by the agent's last reply.
-- **Settings.** `<config_key>.cooldown` (seconds, 0 or more, default 5) and
-  `<config_key>.timeout` (seconds, greater than 0, default 10). Put your own
-  keys in the same block; the mixin ignores them. No block gives the defaults and
-  logs nothing. A bad value raises `ValueError` naming the key, the value and
-  what is accepted. A top-level `cooldown` is not read.
-- **Cooldown and single-flight.** At most one search is in flight per channel,
-  and a channel is not searched again until `cooldown` seconds after the
-  last search started. A search that failed or timed out still counts as one.
-  While a search is pending the mixin does not submit again, because a newer
-  submit would cancel it. A turn skipped by either rule is not retried: the
-  next turn asks again.
-- **Fail-soft.** A search that raises, or runs past `timeout`, is logged at
-  WARNING with your source name, the channel and the traceback, and the turn goes
-  on without it. The funnel cancelling a promise (`funnel.ingest_ttl`,
-  shutdown) is not a failure and logs nothing. A hit whose `render` raises is
-  dropped with a warning and the others stand. `search` must not swallow
-  `CancelledError`.
-- **Size and freshness.** The mixin has no `k`, no bands and no score
-  threshold. What fits is `funnel.budgets.<source_name>`, an entry bigger than
-  the whole budget is dropped with a warning, and `funnel.ingest_ttl` ages out
-  a result nobody collected. Whether a hit is relevant enough to show is not
-  decided here (#674).
-- **Render stably.** `RecallSourceMixin` does not pass dedupe keys yet, so a
-  mixin source is deduped by whole-line containment, and a line that carries
-  something that changes (an age, a rank) re-admits the same hit every turn.
-  The funnel takes keys from a source that submits its own promise (#725), and
-  a keyed entry is deduped on the key instead.
-- **Without the funnel** nothing calls the hook and the source does nothing.
-  The mixin lists `funnel` in `optional_depends_on`, so that is logged at DEBUG.
-- **One timing limit** (#726, #624). A result is admitted at the turn after the
-  one that started its search, never the same turn: `RecallSourceMixin` always
-  submits an `asyncio.ensure_future`, which is not done at submit time, so the
-  mixin pays that turn of latency and a source that wants no wait must submit a
-  future it has already resolved. The mixin never submits while its own search
-  is pending, and a result that finishes between the funnel's sweep and its
-  collect is now carried to that turn's drain rather than lost on resubmit.
-- **Tests.** Pass a fake clock as `init_recall(config, now=clock)`. See
-  `tests/cognition/test_recall_mixin.py` for a source on a real plugin
-  manager with the real funnel.
 
 ## Subscribing to webhooks
 
@@ -721,6 +558,9 @@ Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMe
 | `on_agent_response(channel, request_text: str, response_text: str, trace_id: str \| None, annotations: dict, logprobs: dict \| None)` | async broadcast | After agent produces a response. Fires for a final the output gate vetoed (or an empty one) too, after its assistant row is in the window and before the transport send; `final_was_unsent(channel)` tells the two apart |
 | `transform_system_prompt(channel, text: str) -> str \| None` | async `firstresult=True` wrapper chain | When a conversation's system prompt is composed (identity, then register): a new conversation, a restart, a compaction boundary, and the background views. Return the prompt with your section appended; see below |
 | `before_agent_turn(channel, trace_id: str \| None, annotations: dict)` | async broadcast | Before each LLM invocation |
+| `before_compose(channel, trace_id: str \| None, annotations: dict) -> Contribution \| None` | gathered under the check allowance (never `pm.ahook`) | Right after `before_agent_turn`, on every turn but a retry; return a `corvidae.held.Contribution` for this turn's prompt, or `None`. See [Contributing text for the next turn](#contributing-text-for-the-next-turn) |
+| `transform_held_admission(channel, conversation, batches: list[HeldBatch]) -> list[BatchPlan] \| None` | async `firstresult=True` wrapper chain with a seed in `_SeedHooksPlugin` | Once per admitting turn, with every held batch due; return one `BatchPlan` per batch. The seed admits everything. The kernel frames what is admitted whatever you return |
+| `on_held_admitted(channel, source: str, trace_id: str \| None, admitted_keys: list[str], duplicate_keys: list[str])` | async broadcast | Once per offered batch, after its plan is applied, one with nothing admitted included |
 | `after_persist_assistant(channel, message: dict)` | async broadcast | After assistant message is written to DB; plugins may mutate the in-memory dict |
 | `persist_message(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
 | `before_compaction(channel, compacted_ids: list[int], cut: int)` | async broadcast, awaited | After the compaction summary succeeded and before `replace_with_summary`. The window still holds the messages about to be dropped (`channel.conversation.messages[:cut]`; `cut` is moved off tool cycles where compaction can afford it, see design.md), so this is where to fork over that prefix (see "Forking the window"). Runs on the response path; failures are logged and never block compaction. |
@@ -1134,6 +974,8 @@ plugin has no special standing (#1026).
 | `corvidae.prompts` | `resolve_prompt` |
 | `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |
 | `corvidae.idle` | `IdleTracker`, `IdleWatch` |
+| `corvidae.held` | `HeldContext`, `Contribution`, `HeldBatch`, `BatchPlan`, `STUB_ANNOTATION`, `FRAME_HEADER`, `frame` (see [Contributing text for the next turn](#contributing-text-for-the-next-turn)) |
+| `corvidae.checks` | `gather`, `Gathered`, `resolve_check_allowance` (see [Say which phase a plugin acts in](#say-which-phase-a-plugin-acts-in)) |
 | `corvidae.spill` | `NotificationSpill` (see [Spilling a long notification](#spilling-a-long-notification)) |
 | `corvidae.llm`, `corvidae.thinking` | `LLMClient`; `apply_reasoning_history`: for offline operator commands that build the daemon's clients and apply its reasoning policy without a running plugin manager (`corvidae reconsolidate`). An ordinary plugin gets its client from `LLMPlugin` |
 | `corvidae.runtime` | `Runtime`: `load_config`, `setup_logging` and `load_plugins`, the startup steps the daemon and the restart pre-flight share, plus `arm_exit_bound()` — the exit watchdog with the configured `daemon.exit_timeout`, for a process whose exit is not `run()`'s to bound (the restart pre-flight, #757). For tools that check a config the way the daemon boots, not for ordinary plugins |
@@ -1328,8 +1170,7 @@ two peers points is a design choice that a string lookup hides.
 `get_plugin` call under `packages/` (tests excluded) that its `ALLOWED`
 list does not cover, and on an entry that covers more calls than remain.
 The list holds the calls that predate the rule, each with the issue that
-removes it: `goals` (#1181) and the funnel (#1176,
-below). A missing kernel plugin is not something a plugin works around:
+removes it: today one, `planning` looking up `goals` (#1181). A missing kernel plugin is not something a plugin works around:
 `get_dependency` raises naming it, and a test that builds a plugin manager
 by hand registers the kernel plugins its plugin uses (`add_kernel_registry`
 in `tests/helpers.py`, `install_kernel_clock` in `tests/fake_clock.py`;
@@ -1431,9 +1272,9 @@ Two cases, two log levels:
 - **A loaded provider that failed:** WARNING, each time. That is a rescue in
   the sense of AGENTS.md "Error handling and messages".
 
-A `None` guard that changes behaviour without either line is a bug. Today's
-funnel fallbacks predate this: memory logs a missing funnel at WARNING on
-each retrieval, and critique logs it at DEBUG on each undelivered verdict.
+A `None` guard that changes behaviour without either line is a bug. The
+held-text store has no such fallback to log: it is a kernel plugin and always
+present, and without the `funnel` policy it admits every held entry as offered.
 
 ### `annotations` is stamped at creation
 
@@ -1453,44 +1294,29 @@ A cognitive process meets a turn in one of three phases (#1176). A plugin's
 docs say which phase each of its activities runs in; one plugin may span
 phases.
 
-Any plugin that acts on a message turn may append CONTEXT, in whichever
+Any plugin that acts on a message turn may contribute CONTEXT, in whichever
 phase it acts. The phase decides when that CONTEXT reaches the model, what
 else the plugin may do, and what it owes.
 
-| Phase | Hook today | Its CONTEXT reaches the model | It may also | It must |
+| Phase | Hook | Its CONTEXT reaches the model | It may also | It must |
 |---|---|---|---|---|
-| Before composition | `before_agent_turn` | in the turn being composed, or a later turn if it is late | nothing more; there is no output yet to judge | not delay the turn |
-| Before effect | `should_send_response`, `should_execute_tool` | with what is sent back to the model (a held reply's objections arrive as CONTEXT), or at the next turn if the verdict is late | refuse | answer within the channel's check allowance ([Output gating](#output-gating), [Refusing a tool call](#refusing-a-tool-call)) |
-| Idle | idle watchers, background work | at the channel's next turn, or in a turn it wakes | nothing more; nothing is pending to stop | yield when a message arrives |
+| Before composition | `before_compose` | in the turn being composed if it answers within the channel's check allowance, else at the channel's next turn | nothing more; there is no output yet to judge | answer within the allowance ([Contributing text for the next turn](#contributing-text-for-the-next-turn)) |
+| Before effect | `should_send_response`, `should_execute_tool` | with what is sent back to the model (a held reply's objections arrive as CONTEXT), or at the next turn if the verdict is late | refuse; an in-time refusal ends the wait for the others | answer within the channel's check allowance ([Output gating](#output-gating), [Refusing a tool call](#refusing-a-tool-call)) |
+| Idle | idle watchers, background work | at the channel's next turn (`held.hold`), or in a turn it wakes (`held.hold_and_wake`) | nothing more; nothing is pending to stop | yield when a message arrives |
 
 Admission gating (`should_process_message`) comes before any of these: no
 exchange exists yet, so it is outside the model and is not a phase. An idle
 or timer callback that is upkeep never wakes a channel
 ([Acting on time and quiet](#acting-on-time-and-quiet)); only an agency
 producer, such as the scheduler or the heartbeat, starts a turn. The two
-gathering phases are built twice today, in the kernel's `run_checks` and in
-the funnel's promises; #1176 proposes making them one kernel primitive
-(not built), and the
-"must" for the first phase describes the funnel's behaviour today.
-
-### The funnel: two existing calls
-
-Admitting CONTEXT through the funnel (cognition extra) has no hook for a
-push. Two calls that predate the rule look the funnel up with
-`pm.get_plugin("funnel")`: memory calls `admit_detailed()` on it, and
-critique calls `ingest()` or `ingest_and_wake()`. They stay on the
-allowlist with #1176 as the reason, because #1176 proposes moving holding
-and admitting CONTEXT into the kernel behind a kernel-owned hook. Nothing
-there is decided or built yet. The exception covers those two calls and no
-others.
-
-New work does not call the funnel object. A source that contributes
-entries to a turn implements the funnel's own hook, `on_funnel_ingest`, or
-uses `RecallSourceMixin` ([Implementing `on_funnel_ingest`](#implementing-on_funnel_ingest),
-[Writing a recall source](#writing-a-recall-source)); implementing a hook
-needs no reference to its owner. A plugin that must push CONTEXT into the
-funnel outside a turn, as critique's verdicts do, has no compliant route
-today. Wait for #1176, or raise the need with the owner on an issue.
+gathering phases are one kernel primitive, `corvidae.checks.gather`: it
+publishes to every implementation of a hook, waits for the answers up to the
+channel's check allowance, and hands an answer that misses it to the held-text
+store, which admits it at the channel's next turn. Idle has no gather. A
+plugin that adds its own hook can run it under the same allowance by calling
+`gather` with a `phase` and an `on_late` handler; the kernel's own callers are
+`Agent._compose_held` (before composition) and the reply and tool-call gates
+(before effect).
 
 ## Plugin dependencies
 
@@ -1538,28 +1364,166 @@ class ProfilerPanel(CorvidaePlugin):
 If the owner is absent, the impl stays registered with no spec and is
 never called. See [Declaring hooks in a plugin](#declaring-hooks-in-a-plugin).
 
-## Injecting context before agent turns
+## Contributing text for the next turn
 
-`before_agent_turn` fires before every LLM call. Use it to inject contextual information (memory retrieval, current state, etc.) into the conversation. The hook receives the current turn's trace id and annotations dict:
+A plugin with text for the model (a recalled note, a reviewer's verdict, a heads-up) does not append CONTEXT to the window itself. It gives the text to the kernel's held-text store (`corvidae/held.py`, plugin `held`, #1176), which waits for a turn that can take it, frames it as data, appends it as one CONTEXT row per batch, persists the row with its id, and announces what went in. The store never places text between a tool call and its result. There are three routes, by when the text is ready:
+
+| Route | Use it when | The text reaches the model |
+|---|---|---|
+| `before_compose` returns a `Contribution` | you can answer for the turn being composed | in that turn's prompt if you answer within the channel's check allowance, else at the channel's next turn |
+| `held.hold(channel, source, entries)` | the text is ready outside a turn and can wait for any turn | at the channel's next turn, whatever its origin; wakes nothing |
+| `held.hold_and_wake(channel, origin, source, entries, stub_text=None)` | the text should also start a turn | one `on_notify` stub wakes the channel; the text is admitted at the turn of that `origin` |
+
+### `before_compose`
 
 ```python
-from corvidae.context import MessageType
+from corvidae.held import Contribution
 from corvidae.hooks import CorvidaePlugin, hookimpl
 
-class MemoryPlugin(CorvidaePlugin):
+class NotesPlugin(CorvidaePlugin):
     @hookimpl
-    async def before_agent_turn(self, channel, trace_id: str | None, annotations: dict) -> None:
-        notes = await self.fetch_relevant_notes(channel.id, trace_id)
-        if notes:
-            channel.conversation.append(
-                {"role": "user", "content": f"[Context]\n{notes}"},
-                message_type=MessageType.CONTEXT,
-            )
+    async def before_compose(self, channel, trace_id, annotations) -> Contribution | None:
+        # Look up what this turn needs; None (or an empty Contribution) when nothing.
+        notes = await search_notes(channel)  # your own lookup
+        if not notes:
+            return None
+        return Contribution(
+            source="notes",
+            entries=[n.line for n in notes],
+            keys=[n.key for n in notes],  # optional: one stable identity per entry
+        )
 ```
 
-Compaction summarizes only `MESSAGE` entries, but a `MessageType.CONTEXT` row in the range it drops leaves the window with it; CONTEXT in the retained tail stays.
+- The hook must be `async` and return a `corvidae.held.Contribution` or `None`. Anything else is logged at WARNING naming your plugin and dropped. An empty `Contribution` is allowed: it admits nothing but still fires `on_held_admitted`, so a source can close its records.
+- It runs on every turn but a retry, after `before_agent_turn` and the persist loop for that hook's injections. The kernel does not fire it with `pm.ahook`: `Agent` calls every implementation concurrently with `corvidae.checks.gather` and waits no longer than the channel's [check allowance](configuration.md#check-allowance). Await your lookup in the hook itself. An answer in time is in this turn's prompt. A late one is held as it arrives and admitted at the channel's next turn; it wakes nothing, and your coroutine is not cancelled, so tolerate running past the turn. A hook that raises is logged and counts as no opinion. The miss is a `check.missed` metric tagged `phase: before_compose`.
+- `source` is the frame label (`[CONTEXT from notes — …]`) and the key of `funnel.budgets.<source>`.
+- `keys`, if given, is one stable identity per entry. With the funnel loaded, an entry is then a duplicate when its key already appears in a CONTEXT row framed for your source, so a line that re-renders with a new age or score is not admitted twice. The match is containment, so render the key into the line (memory renders its record id; a folder source can carry `<!--notes/page.md#intro-->`), choose keys that cannot occur inside one another (memory's ends in a paren), and give exactly one per entry. A list of the wrong length is logged at WARNING naming the source and both lengths, and the entries are held unkeyed. Without keys, dedupe matches each entry's whole text against every CONTEXT row, so render stably.
+- A contribution is offered at one turn only. An entry the admission policy does not admit (over a budget, say) is dropped, not queued behind later turns, and a newer held contribution from your source replaces an older one still waiting (logged at WARNING), because the older is stale.
+- On a turn with a tool call outstanding on the channel, nothing is appended. The in-time contributions are held and admitted at the next turn that can append, so a message that arrives mid-call gets its recall one turn late.
 
-Prefer routing CONTEXT through the admission funnel instead of appending directly: it gives you window dedupe, per-source token budgets, and the mandatory data-not-instructions framing for free (see [FunnelPlugin](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy) in cognition.md). Direct appends bypass all three. Reach it through its hook: implement `on_funnel_ingest`, or use `RecallSourceMixin` ([Implementing `on_funnel_ingest`](#implementing-on_funnel_ingest), [Writing a recall source](#writing-a-recall-source)). The funnel is part of the cognition extra; without it nothing calls the hook. Memory's existing call to `admit_detailed(...)` on the funnel object (it also reports which entries were dropped as duplicates) predates the rule; new work does not call the funnel object ([The funnel](#the-funnel-two-existing-calls)). The dedupe keys and window budgets below apply to a hook source as to that call, except that a promise with a bad key list is logged rather than raised (see the hook's contract). Dedupe matches each entry's whole text against every CONTEXT row by default; if your lines carry something that changes from turn to turn (an age, a score), pass `keys=[...]`, one stable string per entry, and an entry is a duplicate when its key appears in a CONTEXT row framed for your source. Memory passes `memory <id>)`. Choose keys that can't occur inside one another, which is why memory's ends in a paren, and pass exactly one per entry: a length mismatch raises `ValueError`. Operators can also cap what your source holds in a window with `funnel.window_budgets.<source>` (see [configuration.md](configuration.md#funnel--context-admission-funnel)); entries the cap drops come back like budget drops, in neither `admitted` nor `duplicate`.
+`on_held_admitted(channel, source, trace_id, admitted_keys, duplicate_keys)` tells you what happened to a batch you contributed. It fires once per offered batch, one with nothing admitted included, after the admission is applied. A key is the entry's key, or its text when you gave none; a key in neither list was dropped. `trace_id` is the trace that produced the batch, not the admitting turn's, so stash what you need under `(channel.id, trace_id)` in `before_compose` and write your records here, as memory does for its access stats and retrieval log. Every source's batches arrive at every implementation, so return at once unless `source` is yours and you hold a stash for that trace.
+
+### `hold` and `hold_and_wake`
+
+```python
+from corvidae.held import HeldContext
+from corvidae.hooks import CorvidaePlugin, get_dependency
+
+class ReviewerPlugin(CorvidaePlugin):
+    # The store is a kernel plugin: name it, then resolve it by type (#1178).
+    depends_on = frozenset({"held"})
+
+    async def deliver(self, channel, findings: list[str]) -> None:
+        held = get_dependency(self.pm, "held", HeldContext)
+        # Wake the channel with one stub; the findings arrive at that turn.
+        await held.hold_and_wake(
+            channel, origin="review", source="review", entries=findings,
+            stub_text="Background review: findings are waiting.",
+        )
+```
+
+- Both are `async`; `entries` are pre-formatted lines, admitted as one frame in the order given. An empty list does nothing. `hold` wakes nothing.
+- `hold_and_wake` holds the entries for the channel's turn *of that origin*, and fires one `on_notify` stub (`tool_call_id=None`) to start it. While a stub for a `(channel, origin)` is pending, later batches for the pair queue behind it and fire no second stub. With `stub_text=None` the stub reads `<n> pending <source> item(s)`. The stub's annotations are `{"origin": origin, "held_stub": True}`; `corvidae.held.STUB_ANNOTATION` is that key, and the kernel recognises a stub by it, never by origin (task completions and cross-channel notes carry origins too). Keep `origin` short: it shows in the notification header.
+- A stub whose turn cannot append (a tool call is outstanding) is deferred, not lost: the store re-fires it when the channel's next tool cycle ends. A stub that fails to fire is retried the same way, logged at WARNING.
+- Kept batches keep their keys and creation time when a policy leaves some of their entries out.
+- An entry over `agent.held_entry_max_chars` (default 8000) is cut to that many characters and the rest goes to the notification spill, with a line saying where. It is never dropped.
+- Held text is in memory only. A restart drops it, and `on_stop` logs one WARNING per channel naming the count and sources.
+
+### What the kernel owns and what a policy owns
+
+The kernel always frames: every admitted batch is wrapped in the data-not-instructions header and footer (`corvidae.held.frame`), and no hook can remove it, whatever `transform_held_admission` returns. Late-check rows get the same frame. It also owns the ceiling above, the never-between-call-and-result rule, persistence and the announcement. It applies no admission budget and no expiry.
+
+`transform_held_admission(channel, conversation, batches)` is the policy hook (a `firstresult` hook with an admit-all seed). The store calls it once per admitting turn with every due batch, each a `HeldBatch(source, entries, keys, created, trace_id, once, origin)` (`created` is `Clock.monotonic()` when it was held, so a policy that wants a TTL reads it). It returns one `BatchPlan(batch, admit, duplicate, drop)` per batch it decides on, entry indexes in admission order; the order of the list is the order rows are appended. An entry it lists nowhere stays held when the batch was pushed (`hold`, `hold_and_wake`, a late check) and is dropped with a WARNING when it is a `once` contribution. A policy that raises, or returns a malformed plan (an index out of range, or listed twice), is logged at WARNING and the store admits every entry as offered. With no policy plugin loaded the same happens silently: `plugins.disabled: [funnel]` leaves held text framed and unbudgeted. The cognition `funnel` is the one policy that ships ([cognition.md](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy)).
+
+### Writing a recall source
+
+If your plugin looks something up for each user turn (a wiki, a folder of
+notes) and wants the result in the prompt as CONTEXT, don't write the
+`before_compose` hook above yourself. `RecallSourceMixin` in
+`corvidae_cognition.recall` (cognition extra) already does the parts every such
+source repeats: it checks that the turn is a user turn, builds the query, keeps
+a cooldown and a single search in flight per channel, runs your search under a
+timeout, catches and logs its failures, and returns the `Contribution`. You
+supply two methods.
+
+```python
+from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae_cognition.recall import RecallContext, RecallSourceMixin
+
+
+class NotesRecall(RecallSourceMixin, CorvidaePlugin):
+    # The frame label, and the key of funnel.budgets.<source_name>.
+    source_name = "notes"
+    # Your own agent.yaml block; the mixin reads cooldown and timeout from it.
+    config_key = "notes_recall"
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
+        # Raises ValueError on a malformed block, which aborts startup.
+        self.init_recall(config)
+
+    async def search(self, query: str, ctx: RecallContext) -> list[dict] | None:
+        # Hits in rank order, or None or [] for none. May raise.
+        return await lookup(query)  # your own lookup
+
+    def render(self, hit: dict) -> str:
+        # One line per hit; render it the same way every time (see below).
+        return f"{hit['title']}: {hit['text']}"
+```
+
+The mixin is a helper, not a plugin: it has no entry point. Your class does,
+and `plugins.disabled` switches your source off by that name. The rest of the
+contract:
+
+- **When it searches.** Only when the window ends in a plain user message
+  with text. CONTEXT rows below that message are looked through, because
+  `before_compose` runs after `before_agent_turn`, where a plugin may have
+  appended CONTEXT (a timestamp, say) under the user's words. A turn that a tool result or an agent reply ends is skipped. The
+  query is memory's `retrieval_query` with `previous_reply` context: the
+  unanswered user messages, preceded by the agent's last reply.
+- **Settings.** `<config_key>.cooldown` (seconds, 0 or more, default 5) and
+  `<config_key>.timeout` (seconds, greater than 0, default 10). Put your own
+  keys in the same block; the mixin ignores them. No block gives the defaults and
+  logs nothing. A bad value raises `ValueError` naming the key, the value and
+  what is accepted. A top-level `cooldown` is not read.
+- **Cooldown and single-flight.** At most one search is in flight per channel,
+  and a channel is not searched again until `cooldown` seconds after the
+  last search started. A search that failed or timed out still counts as one.
+  A turn skipped by either rule is not retried: the next turn asks again.
+- **Fail-soft.** A search that raises, or runs past `timeout`, is logged at
+  WARNING with your source name, the channel and the traceback, and the turn goes
+  on without it. A gather cancelled at shutdown is not a failure and logs
+  nothing. A hit whose `render` raises is dropped with a warning and the
+  others stand. `search` must not swallow `CancelledError`.
+- **Same turn or the next.** The mixin awaits your search inside
+  `before_compose`, so a hit that comes back within the channel's check
+  allowance is in the same turn's prompt. A slower one is held and admitted
+  at the channel's next turn, and wakes nothing. `timeout` bounds the search
+  itself; it is not the allowance.
+- **Size and freshness.** The mixin has no `k`, no bands and no score
+  threshold. With the funnel loaded, what fits is
+  `funnel.budgets.<source_name>`, an entry bigger than the whole budget is
+  dropped with a warning, and `funnel.ingest_ttl` ages out a late result no
+  turn collected. Without it every hit is admitted as offered; the kernel's
+  only limit is `agent.held_entry_max_chars`. Whether a hit is relevant enough
+  to show is not decided here (#674).
+- **Render stably.** `RecallSourceMixin` passes no dedupe keys, so a mixin
+  source is deduped by whole-line containment, and a line that carries
+  something that changes (an age, a rank) re-admits the same hit every turn.
+  A source that writes its own `before_compose` can pass `keys=` on its
+  `Contribution`, and a keyed entry is deduped on the key instead.
+- **Leftovers are dropped.** A contribution is offered at one turn only, so a
+  hit the funnel skips for budget is dropped, not queued behind later turns.
+- **Tests.** Pass a fake clock as `init_recall(config, now=clock)`. See
+  `tests/cognition/test_recall_mixin.py` for a source on a real plugin
+  manager.
+
+## Injecting context before agent turns
+
+`before_agent_turn` fires before every LLM call, and a plugin may append to `channel.conversation` in it. Use it for state that is not text for the model to weigh as data, or when you must append directly; a row you append there is persisted by the `Agent` (unless it carries a `_db_id`), with no framing, dedupe or budget. For text from retrieval, a reviewer or any other source, use [Contributing text for the next turn](#contributing-text-for-the-next-turn) instead: the kernel frames it as data, keeps it clear of tool calls, and persists it.
+
+Compaction summarizes only `MESSAGE` entries, but a `MessageType.CONTEXT` row in the range it drops leaves the window with it; CONTEXT in the retained tail stays.
 
 ## Forking the window
 
@@ -1976,6 +1940,7 @@ tools             (ToolCollectionPlugin) — entry point
 memory            (MemoryPlugin)        — entry point (cognition extra)
 memory_tools      (MemoryToolsPlugin)   — entry point (cognition extra)
 funnel            (FunnelPlugin)        — entry point (cognition extra)
+held              (HeldContext)         — entry point
 goals             (GoalsPlugin)         — entry point (cognition extra)
 agent             (Agent)               — entry point
 config_watcher    (ConfigWatcherPlugin) — entry point
@@ -2062,7 +2027,7 @@ For `should_send_response`, the Agent catches any exception, logs it at WARNING 
 
 `should_send_response(channel, text, emission, trace_id, annotations)` is the outbound mirror of `should_process_message`: return `False` to withhold, `None` for no opinion. `emission` is `final` (the reply), `progress` (text alongside dispatching tool calls), `thinking` (reasoning) or `error` (the LLM-error fallback); treat anything else as no opinion. `text` is exactly what would be sent. Where each fires and what a veto does to the stored row and the window is in [design.md](design.md#the-output-gate); in short, a vetoed final is kept in the window as `MessageType.UNSENT` and never sent, and any other veto suppresses only that send.
 
-**The final firing has a time limit (#1162).** Your `final` check runs alongside every other one, and the reply waits for verdicts no longer than the channel's check allowance ([configuration.md](configuration.md#check-allowance): 90 s on Signal, Discord, IRC and Zulip, 10 s on Web, ACP and CLI, else `agent.check_allowance_min`, 5 s by default). A check that takes longer is not cancelled, but its verdict no longer holds anything back: the reply has gone out. Return `corvidae.hooks.Refusal(reason)` instead of `False` when you can say why. A refusal that arrives late reaches the agent at the channel's next turn as a `[late check: <plugin>]` CONTEXT row carrying your reason, so the agent can correct itself; a late bare `False` arrives as `no reason given`. A refusal that must hold on every channel has to decide within the minimum. Keep per-channel state safe against a check that is still running when the next turn starts. A plugin that adds its own veto hook can run it the same way with `corvidae.checks.run_checks`.
+**The final firing has a time limit (#1162).** Your `final` check runs alongside every other one, and the reply waits for verdicts no longer than the channel's check allowance ([configuration.md](configuration.md#check-allowance): 90 s on Signal, Discord, IRC and Zulip, 10 s on Web, ACP and CLI, else `agent.check_allowance_min`, 5 s by default). A check that takes longer is not cancelled, but its verdict no longer holds anything back: the reply has gone out. Return `corvidae.hooks.Refusal(reason)` instead of `False` when you can say why. A refusal that arrives late reaches the agent at the channel's next turn as a CONTEXT row, framed as data like all held text, around a `[late check: <plugin>]` text carrying your reason, so the agent can correct itself; a late bare `False` arrives as `no reason given`. A refusal that must hold on every channel has to decide within the minimum. Keep per-channel state safe against a check that is still running when the next turn starts. A refusal that arrives in time ends the wait for the other checks at once. A plugin that adds its own veto hook can run it the same way with `corvidae.checks.gather`.
 
 Origin is not a kernel parameter: read `annotations["origin"]` if your policy depends on it, and record the traces you see in `on_message_admitted` if you need to recognise user exchanges.
 
@@ -2085,7 +2050,7 @@ If you write a transport with history replay, skip `message_type == "unsent"` ro
 Any refusal wins. The call does not run, and the model gets `Error: tool '<name>' was refused before it ran: <your reason>. It did not run. Don't retry it unchanged; use another approach, or ask the user.` as its result, so the turn goes on. Write `reason` for the model: say what you found and what would be allowed instead.
 
 - **Fail open.** If your implementation raises, the kernel logs it at WARNING and the call runs. If your check must refuse when it fails, catch your own failure and return a `Refusal`.
-- **Time limit.** Every check runs at once, and the call waits no longer than the channel's check allowance ([configuration.md](configuration.md#check-allowance)). After that the call runs unchecked, and the miss is a `check.missed` metric tagged with `hook: should_execute_tool`. A refusal that arrives late refuses nothing. It reaches the agent at the channel's next turn as a `[late check: <plugin>]` row saying the call ran unchecked, so the agent can undo or follow up; a late bare `False` arrives as `no reason given`. A refusal that must hold on every channel has to decide within `agent.check_allowance_min`. The kernel doesn't yet stop waiting at the first refusal (#1176), so a fast refusal still waits for slower sibling checks, up to the allowance.
+- **Time limit.** Every check runs at once, and the call waits no longer than the channel's check allowance ([configuration.md](configuration.md#check-allowance)). After that the call runs unchecked, and the miss is a `check.missed` metric tagged with `hook: should_execute_tool` and `phase: before_effect`. A refusal that arrives late refuses nothing. It reaches the agent at the channel's next turn as a framed `[late check: <plugin>]` row saying the call ran unchecked, so the agent can undo or follow up; a late bare `False` arrives as `no reason given`. A refusal that must hold on every channel has to decide within `agent.check_allowance_min`. An in-time refusal ends the wait at once: the call is refused without waiting for slower sibling checks, and their later answers are discarded.
 - **Calling channel only.** Refuse because of who or what is on the calling channel, never because of a channel the call targets: a policy keyed on the target channel is a channel wall, which PRD principle 14 rules out.
 - **Untrusted input.** `arguments` are model-written and can carry injected text. A check that hands them to a model should frame them as data.
 
@@ -2215,7 +2180,7 @@ Registered by `SchedulerPlugin` (entry point name: `scheduler`). All five act on
 ## Bundled plugins
 
 The kernel's plugins follow. The cognition plugins (`MemoryPlugin`,
-`MemoryToolsPlugin`, `FunnelPlugin`, `AppraisalPlugin`, `CritiquePlugin`,
+`MemoryToolsPlugin`, `FunnelPlugin` (the admission policy for held text), `AppraisalPlugin`, `CritiquePlugin`,
 `OutcomeLogPlugin`, `GatePlugin`, `HeartbeatPlugin`) ship in the `cognition` extra and are described in
 [cognition.md](cognition.md), which has reference sections for the memory,
 funnel and outcome-log plugins.

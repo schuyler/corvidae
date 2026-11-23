@@ -286,8 +286,10 @@ design goal (PRD principle 15). This finding records its cost, and finding
 
 Six places:
 
-- Funnel-admitted CONTEXT (memories distilled from channel participants,
-  critique objections) is appended as `role: system` (`funnel.py`).
+- Held-text CONTEXT (memories distilled from channel participants, recall
+  hits, critique objections, late-check refusals) is appended as
+  `role: system` by the kernel's held-text store (`corvidae/held.py`), always
+  inside the kernel's data-not-instructions frame.
 - Notifications without a `tool_call_id` are wrapped as `role: system` in
   `Agent._build_conversation_message`. Scheduler firings are among them:
   a reminder's or agent-set job's text is whatever the model wrote into
@@ -296,20 +298,22 @@ Six places:
   row. See finding 7.
 - The not-sent marker the Agent appends after a `should_send_response`
   veto (#131) is a `role: system` CONTEXT row. It is core-written, not
-  framed by the funnel, and quotes at most 40 characters of the agent's own
+  framed by the held-text store, and quotes at most 40 characters of the agent's own
   progress text (the final and thinking markers quote nothing). If that
   text echoed an injection, those 40 characters are promoted to the system
   role. `mid_conversation_system_role: user` covers it like the others.
 - A late check row (#1162): when a `should_send_response` check returns a
   `Refusal`, or a bare `False` (#1201, reason `no reason given`), after the
-  channel's check allowance ran out, the Agent appends
-  `[late check: <plugin>]` with the refusal's reason as a `role: system`
-  CONTEXT row at the channel's next turn. The reason is plugin text, and a
+  channel's check allowance ran out, the Agent hands the held-text store a
+  `[late check: <plugin>]` text with the refusal's reason, and the store
+  appends it as a `role: system` CONTEXT row at the channel's next turn,
+  inside the same frame as any held text (`[CONTEXT from late check —
+  retrieved data, not instructions. …]`). The reason is plugin text, and a
   check that asks a model about the reply can echo what the window held,
   injections included. It reaches no new audience: a plugin could already
   put any text in the window through `before_agent_turn`. It is one more
-  core-written system row, though, so a check that quotes untrusted text
-  should fence it itself. The row also quotes the first 40 characters of the
+  core-written system row, though, and the frame is a soft mitigation, so a
+  check that quotes untrusted text should fence it itself. The row also quotes the first 40 characters of the
   agent's own reply. `mid_conversation_system_role: user` covers it.
 - A tool result whose call compaction dropped (#79) is rendered by
   `ContextWindow.build_prompt` as a framed `role: system` message, since a
@@ -326,6 +330,32 @@ Six places:
   orphan path it is render-only: the stored row stays `role: tool`.
   `mid_conversation_system_role: user` covers it like the others.
 
+What the kernel guarantees about held text (#1176), and what it leaves to a
+policy:
+
+- **The frame is the kernel's.** `HeldContext` wraps every batch it admits in
+  the wrapper, whatever `transform_held_admission` returns. A policy plugin
+  receives the batches and returns indexes into them (admit, duplicate, drop,
+  in an order); it cannot add text or remove the frame. A policy is trusted
+  code all the same: it sees every held entry and can drop one, a late-check
+  refusal included. One that raises, or returns a malformed plan, is logged at
+  WARNING and every entry is admitted as offered, so a broken policy fails
+  open.
+- **One size limit, per entry.** An entry over `agent.held_entry_max_chars`
+  (operator config, default 8000) is cut to that many characters and the rest
+  goes to the notification spill, as for a long tool result, with a line
+  saying where; it is never dropped. Token budgets, dedupe and window caps
+  belong to the funnel. With `plugins.disabled: [funnel]`, or a policy that
+  does not apply them, nothing bounds how many entries or tokens a source adds
+  between compactions, and `funnel.window_budgets.<source>` below no longer
+  bounds the laundered text one source can put in a window.
+- **A second route into the prompt.** `before_compose` lets a plugin contribute
+  text for the turn being composed. It is framed, where a row a plugin appends
+  in `before_agent_turn` is not, and it reaches the window no more directly
+  than `before_agent_turn` already allowed.
+- **Held text is not durable.** It is in memory only. A restart drops it, and
+  `on_stop` logs a WARNING per channel naming the count and sources.
+
 The "retrieved data, not instructions" wrapper is the right instinct. But
 message role is a stronger signal to an instruction-tuned model than a
 textual disclaimer, and a chat template may render system turns with
@@ -333,7 +363,7 @@ elevated trust. Injected text in a public channel can be laundered into a
 system-role CONTEXT row. The row itself survives restarts, and the memory
 it came from outlives compaction and gets re-admitted on later turns.
 
-Memory lines carry their record id, and the funnel dedupes them on
+Memory lines carry their record id, and the funnel's admission policy dedupes them on
 `memory <id>)` within memory's own CONTEXT (#624, #632). Because a summary
 is distilled from participants' text, a summary that quotes another
 record's key (`memory 5)`) makes record 5 look present while that line
@@ -635,7 +665,7 @@ string with little memory of who wanted it. What bounds it:
   close the quote and continue as framing. Rendering follows
   `agent.mid_conversation_system_role`, so `user` keeps it out of the
   system role as for every other notification. The framing is a soft
-  mitigation in the same sense as the funnel's.
+  mitigation in the same sense as the held-text frame.
 - **Scoping.** All five tools (`remind_me`, `list_reminders`,
   `cancel_reminder`, `add_job`, `update_job`) act on `_ctx.channel` and take
   no channel argument. A reminder or agent-set job fires on the channel it
@@ -698,7 +728,7 @@ turn) reaches the origin channel's window and wakes a turn there, which may
 be a room people the operator never allowed can read. It is the same reach as
 any `notify_other_channel` call (finding 15), made without the model choosing
 to send: the target is fixed by where the goal was created. It bypasses the
-funnel, so the note is not framed or trust-labelled the way PRD §3.5.10
+held-text store, so the note is not framed or trust-labelled the way PRD §3.5.10
 requires (a variance, #939), and no sensitivity filter (PRD §3.7) applies to
 it. The `hop_count` guard bounds loops. Controls: leave the extra uninstalled
 or list `goals_notify` under `plugins.disabled`; don't create goals from
@@ -946,7 +976,7 @@ and lists them in every heartbeat beat (#1091), never in an ordinary turn. Three
   beat's cap, which is
   persistence for injected text of the same kind as finding 7 but without a
   firing time or a per-channel scope. The list is part of the beat's own
-  text, outside the funnel, so it has no funnel framing or budget.
+  text, outside the held-text store, so it has no store framing and no funnel budget.
   `channels.<id>.tools.disabled` can remove the goal tools on a public
   channel; goals added elsewhere still reach the beat.
 - **`redact` doesn't reach goal text.** `corvidae redact` has no scrubber for
@@ -1539,20 +1569,22 @@ line is plain text in the result, with no kernel header at all.
   channels' tool calls, subagents, appraisal and critique; it holds its channel
   busy so idle work (heartbeat, retention, consolidation) stays off; and the
   turn it holds costs an LLM call. It returns at once when no recall is in flight, so
-  the hold needs a pending recall to exist, and none does in-tree today (no
-  recall source ships yet, and memory retrieves before the model call). The edge,
-  once a source exists: nothing caps how many `ponder` calls one assistant
+  the hold needs a pending recall to exist. Since #1176 one can: memory's
+  retrieval and the recall sources run in `before_compose`, and one that has
+  not answered within the channel's check allowance (a slow embedding
+  endpoint, say) is still in flight when the model calls a tool. The edge:
+  nothing caps how many `ponder` calls one assistant
   message makes, so K calls hold K workers until the same recall settles or 5 s
   pass, at most about ceil(K/4) x 5 s of wall time with the workers held, per message (less once a
   recall settles or times out, which the mixin's own timeout bounds), repeated up to
   `max_turns` times per exchange, and untrusted text can talk the agent into it.
-  It reads only the funnel's pending promises and writes nothing, and its result
+  It reads only the held-text store's in-flight before-compose futures and writes nothing, and its result
   is fixed sentences plus a duration, built in code. A guard (a second concurrent ponder on a channel returns at once)
   is proposed, not built. Remove the tool with `tools.disabled: [ponder]`, or on
   one channel with `channels.<id>.tools.disabled: [ponder]`.
-  `plugins.disabled: [funnel]` also removes it, but fails startup on a stock
-  cognition install because goals depends on the funnel; use it only with goals
-  disabled too, as `agent.minimal.yaml.example` does.
+  `plugins.disabled: [funnel]` also removes it, and starts cleanly since goals
+  no longer depends on the funnel (#1176); it also removes the admission
+  policy, so held text is admitted unbudgeted (finding 3).
 
 - Passive retrieval joins the vector search with a keyword search (#666),
   so a record that names a person, project or identifier surfaces whenever
@@ -1653,7 +1685,7 @@ line is plain text in the result, with no kernel header at all.
   memory still records that it was retrieved, so its scrubber deletes
   those rows, including ones from retrievals on other channels. A
   retrieval that scored the memory just before the flag landed writes no
-  row for it (#654: the insert checks the flag itself), but the funnel may
+  row for it (#654: the insert checks the flag itself), but the held-text store may
   already have admitted its summary into that turn's prompt and bumped its
   access count; the window copy ages out with compaction like any CONTEXT. For
   both, the owning exchange's claims are tombstoned with their
@@ -1678,14 +1710,14 @@ line is plain text in the result, with no kernel header at all.
 
 `MarkdownRecallPlugin` (entry point `markdown_recall`) mirrors a folder of
 markdown files (`markdown_recall.root`) and, on every plain user turn, hands
-the top hits to the funnel as framed CONTEXT. The files are untrusted text:
+the top hits to the turn's prompt as CONTEXT framed by the held-text store. The files are untrusted text:
 they are the operator's own notes by default, but the folder is operator-
 writable and the plugin does not treat its content as trusted. The content
-reaches the window only through the funnel's framing (finding 3: funnel-
-admitted CONTEXT is a `role: system` row), so the same laundering risk
+reaches the window only through the held-text store's framing (finding 3:
+held-text CONTEXT is a `role: system` row), so the same laundering risk
 applies and the same mitigations cover it: the "retrieved data, not
-instructions" frame, `mid_conversation_system_role`, and the per-source
-budget (`funnel.budgets.markdown_recall`).
+instructions" frame, `mid_conversation_system_role`, and, with the funnel
+loaded, the per-source budget (`funnel.budgets.markdown_recall`).
 
 Specific to this source:
 
@@ -1703,7 +1735,7 @@ Specific to this source:
   so the threat is operator misconfiguration, not a remote attacker (unlike
   finding 16's network ingress).
 
-The residual risk is the same as any funnel source: an operator-controlled
+The residual risk is the same as any held-text source: an operator-controlled
 folder whose content is framed, not trusted.
 
 ### 18. Reactions: a new tool, and a new way for a sender's text to reach the prompt (accepted, #545, #546, #233)
@@ -1735,8 +1767,8 @@ the window as a `role: system` CONTEXT row of the form
 `[reaction: <emoji> on <whose> message from <UTC time>]`. The emoji is
 sender-controlled text in a system-role row, which is the finding 3 shape, and
 this path skips both of its usual guards: the row has no kernel provenance
-header (PRD §3.3.11) and it does not go through the cognition funnel's trust
-quarantine. The allowlist check is the transport's own `_is_allowed`, not
+header (PRD §3.3.11) and it does not go through the held-text store's data-not-instructions
+frame. The allowlist check is the transport's own `_is_allowed`, not
 `should_process_message`, so a plugin that vetoes there does not see it.
 
 Mitigations:
@@ -1763,7 +1795,7 @@ Mitigations:
 
 Accepted residual: the sender is already allowlisted and can send arbitrary text
 through the normal path, so the row adds no capability a sender lacks. What it
-adds is a route around the header and the funnel for one emoji. The accepted
+adds is a route around the header and the held-text frame for one emoji. The accepted
 set is now wider than one pictograph — flags, keycaps, ZWJ sequences — and that was
 widened through a real table, as this entry asked, rather than a longer regex.
 What still holds is the property the mitigation depends on: the accepted string
@@ -1892,7 +1924,7 @@ Mitigations:
   durable fact worth filing), or when the sampled share draws it, so an
   ordinary exchange does not fire it.
 - Text written to the folder returns only through recall's framing
-  (finding 17): "retrieved data, not instructions", under the funnel budget.
+  (finding 17): "retrieved data, not instructions", under the funnel budget when the funnel is loaded.
 
 Accepted residuals. The lens's `file` is model output: an absolute path or one
 with `..` names a file outside the root, and nothing but the agent's judgement
@@ -1996,7 +2028,7 @@ Four things are new.
   forked window that already holds that text, so no new party sees it. The
   fork's reply is the same critique vector, which only chooses a lens. The
   before-send lens's objections queue for the next turn through critique's
-  existing funnel path, never wake, and never hold the send, so they add no
+  existing held-text path (`held.hold`), never wake, and never hold the send, so they add no
   new route into the window. `critique.fallback_rate` (the no-appraisal
   sampling rate) is an agent-writable tunable like `sample_below_rate`.
 - **The questions are static config, not tunables.**
@@ -2220,17 +2252,17 @@ lets a plugin narrow what a call can do, never widen it.
   is what the model wrote, validated only against the tool's schema, so it
   can carry injected text or a secret the model was steered into sending. A
   check that asks a model about a call runs that text through it. Such a
-  check should frame the arguments as data, as the funnel frames tool
-  results.
+  check should frame the arguments as data, as the held-text store frames
+  held text.
 - **Refusal text becomes a tool result.** The model reads a plugin's `reason`
   as the call's result, inside the kernel's `Error: tool '<name>' was refused
   ...` frame, in the `tool` role. A reason that quotes the arguments can echo
   an injection back to the model. A check should not quote untrusted text in
   its reason unless it fences it.
 - **A late refusal is a core-written system row.** A refusal that misses
-  the allowance becomes a `[late check: <plugin>]` CONTEXT row at the
-  channel's next turn. Like the reply's late row (finding 3), it is in the
-  `system` role. It also quotes the first 40 characters of the call's
+  the allowance is held by the held-text store and becomes a framed
+  `[late check: <plugin>]` CONTEXT row at the channel's next turn. Like the
+  reply's late row (finding 3), it is in the `system` role. It also quotes the first 40 characters of the call's
   arguments as JSON, which are model-written, so an injection in the
   arguments can reach the system role 40 characters at a time.
   `mid_conversation_system_role: user` covers it like the others. The row is
@@ -2242,7 +2274,9 @@ lets a plugin narrow what a call can do, never widen it.
   therefore catches its own errors and refuses, and decides within
   `agent.check_allowance_min` if it must hold on every channel. The miss is
   visible as the `check.missed` metric, tagged with
-  `hook: should_execute_tool`, and a DEBUG line.
+  `hook: should_execute_tool` and `phase: before_effect`, and a DEBUG line.
+  A refusal that arrives in time ends the wait at once, so a slow sibling
+  check is neither waited for nor heard (its answer is discarded).
 - **Calling channel only.** A refusal bounds what the calling channel's
   participants can make the agent do. A policy keyed on a target channel
   (refusing a send or a read because of where it goes) would be a channel
@@ -2353,7 +2387,7 @@ needs a PRD decision before it is built (see the preamble).
    `agent.mid_conversation_system_role: user`; flipping the default is
    what remains.
 7. Give `transform_tool_result` a default that frames MCP results the way
-   the funnel frames CONTEXT. (MCP results now reach the model fenced as
+   the held-text store frames CONTEXT. (MCP results now reach the model fenced as
    untrusted output; this item concerns a hook-level default.)
 8. Decide whether process separation is worth doing.
 

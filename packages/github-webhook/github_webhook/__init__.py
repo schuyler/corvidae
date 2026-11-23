@@ -43,7 +43,9 @@ Origin ``webhook:<endpoint>`` in the cognition plugins, as for
 - gates: non-``user``, so ``gate.send.quiet_origins`` can make it quiet, as
   for heartbeat and task.
 - critique: judged like every main-loop turn (#1031).
-- funnel: keys stubs on its own origins only; unaffected.
+- held-text store: pairs a stub with its held text by (channel, origin) and
+  recognises its stubs by the ``held_stub`` annotation, so this origin is
+  unaffected.
 
 Endpoints are owned, not shared: every subscriber to an endpoint receives
 every delivery, so an endpoint listed in both this plugin and
