@@ -15,21 +15,21 @@ design's reading, individually vetoable.
 
 | # | Outcome | Acceptance criterion |
 |---|---|---|
-| S1 | At each point, every offered lens whose share is higher than "none"'s is selected; "none" wins ties; when "none" wins, `critique.sample_below_rate` still draws one random lens (stated, 7100065231). Without appraisal, `critique.fallback_rate` still draws one random lens per point (unchanged). | Vector `{predictive: .4, constrained: .35, none: .25}` selects both; `{predictive: .3, none: .3, …}` selects none of them; selection record lists every selected lens. |
+| S1 | At each point, every offered lens whose share is higher than "none"'s is selected; "none" wins ties; when "none" wins, `critique.sample_below_rate` still draws one random lens (stated, 7100065231). Without appraisal, `critique.fallback_rate` still draws one random lens per point (unchanged). | Offered predictive, constrained, adversarial: `{predictive: .4, constrained: .35, adversarial: 0, none: .25}` selects predictive and constrained; `{predictive: .3, constrained: .2, adversarial: .2, none: .3}` selects none; the selection record lists every selected lens. |
 | R1 | The selected lenses at a point go into **one** fork. The fork returns objections per lens, so each lens's wake setting and its outcome record survive (stated / agent-accepted). | Two selected lenses → exactly one `Agent.fork` call; a waking lens's objections wake and a non-waking lens's wait, from the same fork; each lens's record is written as today. |
 | R5.1 | Tool calls per idle critique fork are capped by an operator-set key, default 3; reaching the cap forces the verdict and logs a warning naming stage, channel and trace (stated; the warning is PR 1's). | Fork called with `max_tool_calls` = configured value (3 when unset). |
 | R5.2 | The before-send fork calls no tools (agent-accepted). | Before-send fork called with `max_tool_calls=0`. |
 | R5.3 | After the exchange, the fork makes no model call while a user message waits on its channel, and resumes when none waits. A fork whose channel compacts before it resumes is a miss (agent-accepted). | A waiting message before a request → the request is not sent until it clears; a compaction during the pause → the lens(es) skip with a warning, nothing recorded. |
 | R5.4 | Every finding names the reply it judges (agent-accepted; PRD Critique 4). | Each held CONTEXT entry from a lens or provenance quotes the start of the reply (or says it is the draft before send). |
-| R5.5 | An operator-set deadline bounds the whole critique fork, tool calls included; on expiry critique logs a warning naming stage, channel and trace, and records a miss (stated, 7099974748). | A fork that runs past the deadline is cancelled; warning carries channel/trace; no outcome recorded for its lenses. |
-| R6′ | Markdown search reaches a fork only as a main-loop tool declared read-only (stated, 7099929016 + 7099974748). **Open for the owner: build that tool in this PR, or defer.** See "Open" below. | — |
-| R7 | Provenance unchanged (stated, 7092480536). | Provenance path untouched. |
-| R9 | Docs: `configuration.md` (two keys), `cognition.md`, `plugin-guide.md` (a lens brief's reply format is critique's), `threat-model.md` if markdown tool lands, `agent.yaml.example`, `design.md` (the `Agent.fork` parameter). | — |
+| R5.5 | An operator-set deadline bounds the whole critique fork, tool calls included; on expiry critique logs a warning naming stage, channel and trace, and records a miss (stated, 7099974748). "Records a miss" is read as the tree's existing miss: a logged skip, no outcome record (inferred). | A fork that runs past the deadline is cancelled; warning carries channel/trace; no outcome recorded for its lenses. |
+| R6′ | Markdown search reaches a fork only as a main-loop tool declared read-only (stated, 7099929016 + 7099974748). Consolidated requirement 6 (the fork searches markdown_recall's folders) stands unless the owner defers it. **Open: the owner was asked whether this PR builds the tool; until answered, the plan below includes it as §7, separable.** | A `search_notes` tool, registered by markdown_recall, declared read-only, is offered and callable in an idle critique fork. |
+| R7 | Provenance stays a check, not a lens (stated, 7092480536). | Provenance selection, evidence and fork unchanged; only its finding text gains the reply reference (R5.4). |
+| R9 | Docs: **PRD Critique 1** ("The top share runs" / "each when its question wins" → every lens above "none"; wording for owner approval via the review loop, as with the other #1190 PRD edits), `configuration.md` (two keys; the brief-only `fork_prompt` contract; selection text at :450), `cognition.md`, `plugin-guide.md` and the `transform_critique_prompt` hookspec docstring (implementers now get one lens section), the documented copies `prompts/critique_*_fork.md` (drop the old tail), `threat-model.md` (the markdown tool, if §7 lands), `agent.yaml.example`, `design.md` (the `Agent.fork` parameter). | — |
 
 Inferred (vetoable):
 - **I1.** R5.5's deadline applies to lens forks at both points, not to the provenance fork (the issue is about the tool-using fork; provenance is untouched by R7).
-- **I2.** The deadline counts running time only: time paused under R5.3 does not count (otherwise a busy channel turns every resumed fork into a miss, defeating the "resume" ruling).
-- **I3.** R5.3 also governs the fork's *first* request (PRD Critique 1: after the exchange "critique does not start while a message waits on its channel").
+- **I2.** The deadline is wall-clock over the whole fork, paused time included ("the whole critique fork"). Cost: on a channel busy for longer than the deadline, a paused fork becomes a logged miss. Excluding pauses was considered and rejected: a paused fork holds a TaskQueue worker (4 by default, `task.py:461`) with no wall-clock bound, so a few busy channels would stall subagent and provenance tasks.
+- **I3.** R5.3 also governs the fork's start (PRD Critique 1: after the exchange "critique does not start while a message waits on its channel"): critique waits *before* the fork renders, so the rendered window never includes a turn that arrived after the reply.
 - **I4.** Both new keys are static operator config, not runtime tunables: the agent must not raise its own cap or deadline.
 
 ## Plan
@@ -70,7 +70,7 @@ appended. Both are wrong for a combined, tool-using fork. Briefs become
 brief-only (the built-in constants drop `_JSON_TAIL`; added lenses no longer
 get it appended), and critique appends one reply-format tail per fork:
 
-- `point="idle"` with cap > 0: "You may search memory or notes with the tools you have, at most N calls, before you answer. Then respond with a single JSON object, nothing else: `{"<lens>": {"objections": [...]}, …}` — one key per lens above."
+- `point="idle"` with cap > 0: "You may search with the read-only tools you have, at most N calls, before you answer. Then respond with a single JSON object, nothing else: `{"<lens>": {"objections": [...]}, …}` — one key per lens above."
 - otherwise: same JSON instruction, prefixed "Do not call tools."
 
 Reply schema `{"type": "object", "properties": {<lens>: OBJECTION_SCHEMA}, "required": [<lenses>]}`, built per fork.
@@ -114,34 +114,55 @@ confirms on a real server before merge.
 before_request: Callable[[], Awaitable[None]] | None = None
 ```
 
-awaited before every model request in the loop, the first included, outside
-`lease_scope`. If it raises, the exception propagates out of `fork` (the
+awaited before every model request in the loop after the first, outside
+`lease_scope`. (The first request follows the render with no await between;
+the caller waits before calling `fork`, I3.) If it raises, the exception propagates out of `fork` (the
 `finally` still logs "stage done", `ok=False`). It is a caller callback, not a
 hook: the fork still fires no hooks (PRD §3.8 item 1).
 
-Critique's callback (idle point only, I3): while
-`agent.waiting_messages().get(channel.id)` is non-zero, sleep
-`YIELD_POLL_SECONDS` (module constant, 1.0) and loop. After any wait, if
-`self._compactions[channel.id]` differs from its value when the fork started,
-raise `_ForkStale`; `_fork_lenses` catches it and skips every lens with
-"the channel compacted while the fork waited". Before send passes no callback.
+Critique's wait (idle point only): `_wait_quiet(channel)` loops while
+`agent.waiting_messages().get(channel.id)` is non-zero, sleeping
+`YIELD_POLL_SECONDS` (module constant, 1.0). `_fork_lenses` awaits it before
+building the instruction and running the containment check (I3), and passes
+a callback that awaits it again, then compares
+`self._compactions.get(channel.id, 0)` with the value taken at fork start on
+**every** call, raising `_ForkStale` on a change. `_fork_lenses` catches
+`_ForkStale` and skips every lens with "the channel compacted while the fork
+ran". Before send passes no callback and does not wait.
 
 ### 5. Deadline (R5.5)
 
 New key `critique.fork_timeout` (seconds, positive finite number, default
 120), static config. `_fork_lenses` wraps `agent.fork` in
-`asyncio.timeout(deadline)`; on `TimeoutError` every lens skips with
-`_skip_lens(…, "the fork exceeded critique.fork_timeout (<n> s)")`, which
-names lens, channel and trace. I2: the callback extends the timeout by the
-time it paused (`cm.reschedule(cm.when() + paused)`). Validation as for the cap.
+`asyncio.timeout(deadline)` (wall clock, including pauses, I2; the pre-render
+wait is inside it too). On `TimeoutError` with `cm.expired()`, every lens
+skips with `_skip_lens(…, "the fork exceeded critique.fork_timeout (<n> s)")`,
+which names lens, channel and trace; a `TimeoutError` raised from inside the
+request (a provider timeout) is reported as a fork failure, as today.
+Validation as for the cap.
 
 ### 6. Findings name their reply (R5.4)
 
-`_format_objection(o, reply)` prefixes the line with the reply reference:
-idle and provenance: `on your reply «<quote(reply)>»: `; before send:
-`on the draft you were about to send: `. `_record_and_register` gains a
-`reply_ref: str` argument its three callers supply. The outcome record is
-unchanged (it already carries `trace_id`).
+`_format_objection(o, reply_ref: str)` prefixes the line with `reply_ref`:
+idle and provenance pass `on your reply «<quote(reply)>»: `; before send
+passes `on your draft «<quote(draft)>»: ` (the draft is quoted because on
+#1221's late path the reply was sent and the finding lands a turn later).
+`_record_and_register` gains `reply_ref` from its two callers after the fold
+(`_run_lenses`, provenance). Under #1221, `_run_before_send` returns
+`_format_objection` texts rather than registering them, so the before-send
+prefix goes into those returned texts. The outcome record is unchanged (it
+already carries `trace_id`).
+
+### 7. Markdown search tool (R6′; separable, pending the owner)
+
+markdown_recall registers one main-loop tool, `search_notes(query: str) -> str`,
+declared `reads_only = True`, wrapping its own `resolve_markdown_recall_search`
+(no hook round trip inside the plugin). `None` from the search → the result
+"No notes are indexed yet; try again later." Untrusted output declared
+(`untrusted=True`), so the main loop fences it; inside a fork the kernel
+frames it anyway. `threat-model.md`: the main agent and forks can now search
+the configured roots on demand (previously recall only). Main-loop tool, so
+`tools.disabled` can remove it.
 
 ## Rejected alternatives
 
@@ -161,4 +182,10 @@ unchanged (it already carries `trace_id`).
 
 ## Open (for the owner at the design gate)
 
-- **R6′:** add a read-only `search_notes` main-loop tool to markdown_recall (wrapping `resolve_markdown_recall_search`), with a threat-model entry, in this PR — or defer to its own issue. Least scope says defer.
+- **R6′:** §7 in this PR, or defer to its own issue.
+- **Kernel contract:** `Agent.fork` gains `before_request` (§4). R5.3 cannot be met from the caller alone, because the loop is inside `fork`.
+- **I1:** the provenance fork gets no deadline (R7 leaves it alone; its provider timeout defaults to none).
+
+## Review log
+
+- Design round 1 (cold): FAIL. Important: R6 unplanned → §7 added, still open to the owner; PRD Critique 1 edit missing → added to R9; I2 reschedule could not work → I2 flipped to wall clock (also fixes the worker-starvation edge). Edges fixed: wait before render (I3), staleness check on every callback, `cm.expired()`, before-send findings quote the draft. Cosmetics fixed: §6 against #1221, hookspec docstring and prompt copies in R9, R7 wording, S1 example, `.get`.
