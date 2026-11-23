@@ -164,8 +164,8 @@ one is a bug even if its tests pass.
 
 7. **Cheap, always-on perception gates expensive cognition.** Appraisal,
    a fast first pass, scores which critique lenses an exchange warrants,
-   and the slower critique runs the lenses those scores select, plus a
-   small sampled share that measures what selection misses.
+   and the slower critique runs the lenses those scores select, plus an
+   operator-set sampled share that measures what selection misses.
    Epistemic checks stay independent of the appraisal scores: the
    provenance check fires on any claim about the past and is judged against
    records, never on generator confidence. Thresholds ship as commented
@@ -1955,7 +1955,7 @@ record that holds the reasoning.
 | Operator-only `redact` is the one deletion path; it stays in the kernel | principle 4; §3.7 Memory 8 |
 | Knowledge graph not part of the shipped memory: extraction is noisy, n-hop context is expensive, and at personal scale a graph duplicates facts plus vector and FTS retrieval; a graph plugin isn't precluded | diverges from Persyn §4.3 |
 | No emotion classifier and no appraisal vector: appraisal scores which critique lenses a reply warrants and lists its claims about the past; the five-dimension vector (valence, stakes, ambiguity, commitment density, novelty), the correction flag, the importance prior built from them and the memory valence tag were removed as unused, and memory scores importance itself; the readout head is retargeted at lens selection, not dropped | principle 7; §3.7 Appraisal, Memory 2; diverges from Persyn §4.9; #1189, #141; owner, 2026-11-23 |
-| Appraisal is the fast first pass and heads the chain: it scores the lenses its peers offer, before a reply is sent and after the exchange, and critique, the slower second pass, runs only the lenses it selects from those scores; with no appraisal plugin, critique samples one random lens on an operator-set share of replies, one share for both points, below every reply by default | principle 7; §3.7 Appraisal, Critique 1; #1169; owner, 2026-11-23 |
+| Appraisal is the fast first pass and heads the chain: it scores the lenses its peers offer, before a reply is sent and after the exchange, and critique, the slower second pass, runs the lenses it selects from those scores, plus a sampled share of exchanges when none is selected; with no appraisal plugin, critique samples one random lens on an operator-set share of replies, one share for both points, below every reply by default | principle 7; §3.7 Appraisal, Critique 1; #1169; owner, 2026-11-23 |
 | The agent behaves the same whatever language a message is written in: nothing decides by matching one language's words or assuming one script's conventions | #1185; #1186; owner, 2026-11-22 |
 | Core mints the exchange key | §3.7 Appraisal 1–2 |
 | Origin is stamped and propagated, never inferred. Critique eligibility does not depend on origin: every main-loop turn is judged, and the recursion brake is delivery (objections on a `critique`-origin turn wake nothing) | §3.1.4; §3.7 Critique 3–4; #1031; owner, 2026-11-17 |
@@ -1976,7 +1976,7 @@ record that holds the reasoning.
 | Reminders and jobs the agent sets act on the calling channel only, with origin `reminder`; cross-channel reach is §3.5.9's alone, so the scheduler is not a second, unaudited path between channels or around the critique of reminders. Supersedes "a reminder may target any channel" | §3.9.7; #814; owner, 2026-11-17 |
 | A decline is signalled by a plugin-chosen mechanism (token, tool or both) and enforced by a veto that acts on the agent's signal, not a gate; a signal followed by sent text is not a decline | #791, #795, #797, #799, #806 |
 | Model endpoints may be remote; a profile's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each profile sends | #217 |
-| Critique is gated: a lens runs when the appraisal fork's critique vector selects it (or the sampled share draws it, which is all of selection when no appraisal plugin is loaded), the provenance check on every claim about the past, never unconditionally per reply unless the operator sets the sampled share to every reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
+| Critique is gated: a lens runs when the appraisal fork's critique vector selects it (or the sampled share draws it, the only path when no appraisal plugin is loaded), the provenance check on every claim about the past, never unconditionally per reply unless the operator sets the sampled share to every reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
 | No inline refine step: the sent reply is the candidate, and correction arrives on a later turn | principle 3; §3.7 Critique 4; the Persyn spec's own deferred-deliberation default |
 | Operator-seeded goals allowed | §3.7 Goals; diverges from the Persyn spec |
 | Goals enter the window only in the heartbeat's beat, as a capped list of the frontmost open or in-progress goals; the list carries as-of framing, so a later list supersedes every earlier one | §3.7 Goals; #1091; 2026-11-19 |
