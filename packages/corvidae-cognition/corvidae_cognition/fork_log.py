@@ -217,6 +217,9 @@ class ForkLog:
             snapshot_sha = await self.store_block(
                 json.dumps(list(messages), ensure_ascii=False)
             )
+        # No digests means the send cannot be identified later: say so on the
+        # row instead of letting an empty chain look like an empty prompt.
+        reconstructable = 0 if digests is None else 1
         first, last = (None, None) if window is None else window
         cur = await db.execute(
             """INSERT INTO fork_log (
@@ -225,8 +228,9 @@ class ForkLog:
                 window_first_rowid, window_last_rowid, window_cut,
                 prompt_sha256, renderer_sha, findings_json, verdict, label,
                 latency_ms, prompt_tokens, completion_tokens, cached_tokens,
-                snapshot_sha256, system_sha256, chain_parent, chain_from
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                snapshot_sha256, system_sha256, chain_parent, chain_from,
+                reconstructable
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 time.time(),
                 stage,
@@ -254,6 +258,7 @@ class ForkLog:
                 system_sha,
                 chain_parent,
                 chain_from,
+                reconstructable,
             ),
         )
         fork_id = int(cur.lastrowid)

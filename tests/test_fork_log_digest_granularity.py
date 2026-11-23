@@ -74,20 +74,53 @@ async def _chain_for(log: ForkLog, messages) -> list[bytes]:
     return chain
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a digest list over content cannot distinguish two sends that differ in role or tool_calls",
-)
 @pytest.mark.parametrize(
-    "left, right",
-    [(SYSTEM_ROLE_FLIP, SYSTEM_ROLE_FLIPPED), (TOOL_CALL_ONLY, NO_TOOL_CALL)],
-    ids=["role-flip", "tool-call-only"],
+    "blocks",
+    [SYSTEM_ROLE_FLIP, SYSTEM_ROLE_FLIPPED, TOOL_CALL_ONLY, NO_TOOL_CALL],
+    ids=["role-flip", "role-flipped", "tool-call-only", "no-tool-call"],
 )
-async def test_a_resolved_chain_identifies_which_prompt_was_sent(log, left, right):
-    assert prompt_sha256(left) != prompt_sha256(right)
-    assert await _chain_for(log, left) != await _chain_for(log, right)
+async def test_a_content_only_digest_list_is_refused(log, blocks):
+    """The finding: content alone cannot identify the send, so it is not taken.
+
+    ``record()`` compares the list against the rendered blocks and refuses a
+    mismatch, which is what stops a row describing a send that never happened.
+    """
+    with pytest.raises(ValueError, match="do not describe"):
+        await log.record(
+            stage="critique",
+            channel_id="internal:test",
+            messages=blocks,
+            digests=[digest_of(block.get("content") or "") for block in blocks],
+        )
 
 
-async def test_the_prompt_hash_does_notice_both(log):
-    assert prompt_sha256(SYSTEM_ROLE_FLIP) != prompt_sha256(SYSTEM_ROLE_FLIPPED)
-    assert prompt_sha256(TOOL_CALL_ONLY) != prompt_sha256(NO_TOOL_CALL)
+@pytest.mark.parametrize(
+    "blocks",
+    [SYSTEM_ROLE_FLIP, SYSTEM_ROLE_FLIPPED, TOOL_CALL_ONLY, NO_TOOL_CALL],
+    ids=["role-flip", "role-flipped", "tool-call-only", "no-tool-call"],
+)
+async def test_whole_block_digests_identify_the_send(log, blocks):
+    fork_id = await log.record(
+        stage="critique",
+        channel_id="internal:test",
+        messages=blocks,
+        digests=[digest_of(block) for block in blocks],
+    )
+    chain = await log.resolve_chain(fork_id)
+    assert chain == [digest_of(block) for block in blocks]
+
+
+async def test_two_sends_differing_only_in_role_do_not_share_a_chain(log):
+    left = await log.record(
+        stage="critique",
+        channel_id="internal:test",
+        messages=SYSTEM_ROLE_FLIP,
+        digests=[digest_of(b) for b in SYSTEM_ROLE_FLIP],
+    )
+    right = await log.record(
+        stage="critique",
+        channel_id="internal:test",
+        messages=SYSTEM_ROLE_FLIPPED,
+        digests=[digest_of(b) for b in SYSTEM_ROLE_FLIPPED],
+    )
+    assert await log.resolve_chain(left) != await log.resolve_chain(right)

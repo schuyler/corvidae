@@ -234,6 +234,30 @@ async def test_an_evicted_ancestor_makes_its_descendants_unreconstructable(log):
     assert await log.resolve_chain(first) is None
 
 
+async def test_a_row_without_digests_cannot_claim_reconstructability(log):
+    fork_id = await log.record(
+        stage="appraisal", channel_id="discord:1", messages=MESSAGES
+    )
+    row = await _row(log, fork_id)
+    assert row["reconstructable"] == 0
+    assert await log.resolve_chain(fork_id) is None
+
+
+async def test_a_wrong_chain_offset_is_refused(log):
+    from corvidae_cognition.fork_log import digest_of
+
+    first = await _fork(log, B[:2])
+    with pytest.raises(ValueError, match="does not resolve"):
+        await log.record(
+            stage="appraisal",
+            channel_id="discord:1",
+            messages=B[:3],
+            digests=[digest_of(B[2])],
+            chain_parent=first,
+            chain_from=7,
+        )
+
+
 async def test_digests_that_do_not_describe_the_blocks_are_refused(log):
     from corvidae_cognition.fork_log import digest_of
 
@@ -280,11 +304,14 @@ async def test_the_budget_counts_what_eviction_subtracts(log):
 async def test_only_the_rows_that_named_the_dropped_text_are_stranded(log):
     import os
 
+    from corvidae_cognition.fork_log import digest_of
+
     ids = [
         await log.record(
             stage="appraisal",
             channel_id="discord:1",
             messages=MESSAGES,
+            digests=[digest_of(b) for b in MESSAGES],
             system_prompt=os.urandom(2048).hex(),
         )
         for _ in range(2)
