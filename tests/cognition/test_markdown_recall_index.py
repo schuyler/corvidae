@@ -484,3 +484,186 @@ class TestMultiRoot:
                 get_identity=lambda: IDENTITY,
             )
 
+
+
+async def test_reconcile_does_not_hold_write_lock_across_embedding(tmp_path):
+    """No embedding call may run while the index write lock is held (#1211).
+
+    Reproduces the 2026-11-22 wedge in miniature. Measured on this host
+    (Python 3.14.3 / sqlite 3.50.4, aiosqlite's default ``isolation_level=''``)
+    a single DML statement opens an implicit write transaction that stays open
+    until COMMIT: an external writer with ``timeout=0.0`` answers
+    ``database is locked``. Two paths reach that state -- ``_ensure_schema``
+    stamps ``embedding_meta`` and ``_rebuild_all`` deletes every row before its
+    first embedding call, and ``_reconcile_file``'s mtime-only touch returns
+    without committing, so the next file's embedding runs under that open
+    transaction. Either one can hold the lock for the length of a model call
+    (the live incident: 646 s for a 49-text embed), and every other writer to
+    this database gives up at its busy timeout. Each embed probes the lock from
+    a second connection: ``acquired`` is clean, ``locked`` is the defect.
+    """
+    import aiosqlite
+
+    db_path = tmp_path / "index.db"
+    root = tmp_path / "notes"
+    root.mkdir()
+    (root / "a.md").write_text("# A\n\nalpha beta gamma")
+    (root / "b.md").write_text("# B\n\nbravo charlie delta echo")
+    (root / "c.md").write_text("# C\n\ncharlie delta echo")
+    (root / "d.md").write_text("# D\n\ndelta echo foxtrot")
+
+    probe: list[str] = []
+
+    async def _probe_write_lock(path) -> str:
+        """'acquired' when no write lock is held; 'locked' when it is."""
+        other = await aiosqlite.connect(str(path), timeout=0.0)
+        try:
+            try:
+                await other.execute(
+                    "UPDATE manifest SET mtime_ns = mtime_ns WHERE path = ?",
+                    ("__probe__",),
+                )
+                await other.commit()
+            except Exception as exc:  # noqa: BLE001 - recorded as the finding
+                if "locked" in str(exc) or "busy" in str(exc):
+                    return "locked"
+                raise
+        finally:
+            await other.close()
+        return "acquired"
+
+    class ProbingEmbed(FakeEmbed):
+        async def embed(self, texts: list[str], kind: str = "document"):
+            outcome = await super().embed(texts, kind)
+            probe.append(await _probe_write_lock(db_path))
+            return outcome
+
+    embed = ProbingEmbed()
+    identity = _EncoderIdentity(
+        model="fake-encoder", dimensions=8, document_prefix="", query_prefix=""
+    )
+    index = MarkdownIndex(
+        root=root,
+        db_path=db_path,
+        get_client=lambda: embed,
+        get_identity=lambda: identity,
+    )
+    await index.reconcile()  # pass 1: every file indexed
+    await index.close()
+    probe.clear()
+    embed.calls = 0
+
+    # Scenario 1, the rebuild path. _ensure_schema() latches the identity on
+    # first connect, so an encoder change is seen only by a fresh open -- which
+    # is also how it happens in the daemon, after a restart with a reconfigured
+    # embedding profile.
+    identity = _EncoderIdentity(
+        model="other-encoder", dimensions=8, document_prefix="", query_prefix=""
+    )
+    index = MarkdownIndex(
+        root=root,
+        db_path=db_path,
+        get_client=lambda: embed,
+        get_identity=lambda: identity,
+    )
+    await index.reconcile()
+    # Exactly one embed per file: the rebuild used to run its per-file loop
+    # twice, so every file was embedded twice (#1211 review round 1). The
+    # count is what catches that, not the row counts -- the second loop
+    # rewrote the same rows.
+    assert embed.calls == 4, f"expected one embed per file (4), calls={embed.calls}"
+    assert probe and all(p == "acquired" for p in probe), (
+        f"embedding held the write lock (rebuild path) in "
+        f"{sum(1 for p in probe if p == 'locked')} of {len(probe)} calls: {probe}"
+    )
+
+    # Scenario 2, the incremental path: an mtime-only touch commits no work and
+    # returns, so without a commit the next edited file's embedding call runs
+    # inside that write transaction. Touched and edited files alternate so the
+    # defect is caught whatever order the walk yields.
+    probe.clear()
+    embed.calls = 0
+    for name, content in (
+        ("a.md", "# A\n\nalpha beta gamma hotel"),
+        ("b.md", "# B\n\nbravo charlie delta india"),
+        ("c.md", None),
+        ("d.md", "# D\n\ndelta echo foxtrot juliet"),
+    ):
+        if content is None:
+            (root / name).touch()
+        else:
+            (root / name).write_text(content)
+    await index.reconcile()
+    await index.close()
+    assert embed.calls >= 1, f"scenario 2 expected an embed, calls={embed.calls}"
+    assert probe and all(p == "acquired" for p in probe), (
+        f"embedding held the write lock (mtime-touch path) in "
+        f"{sum(1 for p in probe if p == 'locked')} of {len(probe)} calls: {probe}"
+    )
+
+
+async def test_rebuild_keeps_existing_chunks_readable(tmp_path):
+    """A rebuild must not leave readers on an empty index (corvidae#1211).
+
+    The first shape of the fix committed ``DELETE FROM chunks`` before
+    re-embedding, which is worse than the lock it removed: in WAL mode a
+    read-only transaction keeps seeing the pre-transaction snapshot, so the old
+    uncommitted wipe let readers see the whole previous index for the length of
+    a rebuild, while a committed wipe shows them nothing. And ``_embed``
+    swallows provider failures, so wiping first can empty the index with a
+    broken model and nothing to rebuild from. Rows are now replaced per file by
+    ``_replace_file_chunks``, so this asserts the previous index is still there
+    mid-rebuild, counted from a second connection.
+    """
+    import aiosqlite
+
+    db_path = tmp_path / "index.db"
+    root = tmp_path / "notes"
+    root.mkdir()
+    for name in ("a.md", "b.md", "c.md"):
+        (root / name).write_text(f"# {name}\n\n{name} content words here")
+
+    state = {"identity": _EncoderIdentity(
+        model="fake-encoder", dimensions=8, document_prefix="", query_prefix=""
+    )}
+    seen: list[int] = []
+
+    class ReadingEmbed(FakeEmbed):
+        async def embed(self, texts: list[str], kind: str = "document"):
+            outcome = await super().embed(texts, kind)
+            other = await aiosqlite.connect(str(db_path))
+            try:
+                async with other.execute("SELECT count(*) FROM chunks") as cursor:
+                    seen.append((await cursor.fetchone())[0])
+            finally:
+                await other.close()
+            return outcome
+
+    embed = ReadingEmbed()
+    index = MarkdownIndex(
+        root=root,
+        db_path=db_path,
+        get_client=lambda: embed,
+        get_identity=lambda: state["identity"],
+    )
+    await index.reconcile()
+    await index.close()
+    before = len(seen)
+    assert before >= 3, f"pass 1 should have indexed every file, probes={seen}"
+
+    seen.clear()
+    state["identity"] = _EncoderIdentity(
+        model="other-encoder", dimensions=8, document_prefix="", query_prefix=""
+    )
+    index = MarkdownIndex(
+        root=root,
+        db_path=db_path,
+        get_client=lambda: embed,
+        get_identity=lambda: state["identity"],
+    )
+    await index.reconcile()
+    await index.close()
+    assert seen and all(count >= 3 for count in seen), (
+        f"a reader saw the index partly or fully wiped mid-rebuild: "
+        f"{seen} (pass-1 probes={before})"
+    )

@@ -259,6 +259,12 @@ class MarkdownIndex:
         # Always track the chunker version (and the encoder identity when
         # present), so a chunker bump rebuilds even an FTS-only index.
         await self._check_embedding_meta(db, identity)
+        # Commit the schema bookkeeping before anything else runs. Stamping
+        # embedding_meta is a DML, and this interpreter opens a write
+        # transaction on the first DML, so an uncommitted stamp would hold the
+        # write lock across the first embedding call of the pass that follows
+        # -- including a full rebuild's (corvidae#1211).
+        await db.commit()
         # The vector surface exists only with an embedding profile, a loadable
         # sqlite-vec extension, and no identity mismatch; anything else degrades
         # to FTS5-only. Text is canonical; vectors are a cache.
@@ -562,13 +568,31 @@ class MarkdownIndex:
         else:
             await db.execute("DROP TABLE IF EXISTS chunks_vec")
             self._vec_available = False
-        # Reindex every file from scratch.
-        async with db.execute("DELETE FROM chunks") as _c:
-            pass
-        async with db.execute("DELETE FROM manifest") as _c:
-            pass
+        # Commit the DDL before any embedding call. With no implicit BEGIN for
+        # DDL, aiosqlite's autocommit is off, so the DROP/CREATE above opens a
+        # transaction that would otherwise stay open until the first file's
+        # commit -- i.e. across this rebuild's first embedding call, which is
+        # the hold this change is about (corvidae#1211).
+        await db.commit()
+        # Reindex every file. No global DELETE FROM chunks / manifest here:
+        # this interpreter opens a write transaction on the first DML, so a
+        # wipe-then-commit would leave readers on an empty index for the length
+        # of the rebuild -- in WAL mode a read-only transaction keeps seeing the
+        # pre-transaction snapshot, which is what the uncommitted wipe used to
+        # give them -- and _embed() swallows provider failures, so wiping first
+        # can empty the index with a broken model and nothing to rebuild from.
+        # Each file's rows are dropped and replaced inside its own short
+        # transaction by _replace_file_chunks instead.
         for path, (size, mtime_ns) in files.items():
             await self._reconcile_file(db, path, size, mtime_ns, None)
+        # Rows for paths the walk no longer yields: the manifest is rewritten
+        # per file above, so this is the only place a stale row can still hide.
+        kept = list(files)
+        if not kept:  # reconcile() aborts on an empty walk; belt on the braces,
+            return    # because NOT IN () would delete every row in both tables
+        marks = ",".join("?" * len(kept))
+        await db.execute(f"DELETE FROM chunks WHERE path NOT IN ({marks})", kept)
+        await db.execute(f"DELETE FROM manifest WHERE path NOT IN ({marks})", kept)
         await db.commit()
 
     async def _reconcile_file(
@@ -602,6 +626,9 @@ class MarkdownIndex:
             await db.execute(
                 "UPDATE manifest SET mtime_ns=? WHERE path=?", (mtime_ns, path)
             )
+            # Commit the touch: leaving this DML open would hold the write
+            # lock across the next file's embedding call (corvidae#1211).
+            await db.commit()
             return
         text = data.decode("utf-8", errors="replace")
         chunks = chunk_page(path, text)
