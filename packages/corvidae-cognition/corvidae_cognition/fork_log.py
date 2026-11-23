@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS fork_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
     stage TEXT NOT NULL,
+    point TEXT,
     channel_id TEXT NOT NULL,
     trace_id TEXT,
     lens_id TEXT,
@@ -183,6 +184,7 @@ class ForkLog:
         *,
         stage: str,
         channel_id: str,
+        point: str | None = None,
         messages: Sequence[dict],
         instruction: str | None = None,
         question: str | None = None,
@@ -232,17 +234,18 @@ class ForkLog:
         first, last = (None, None) if window is None else window
         cur = await db.execute(
             """INSERT INTO fork_log (
-                ts, stage, channel_id, trace_id, lens_id, profile, model,
+                ts, stage, point, channel_id, trace_id, lens_id, profile, model,
                 question_sha256, question_text, instruction,
                 window_first_rowid, window_last_rowid, window_cut,
                 prompt_sha256, renderer_sha, findings_json, verdict, label,
                 latency_ms, prompt_tokens, completion_tokens, cached_tokens,
                 snapshot_sha256, system_sha256, chain_parent, chain_from,
                 reconstructable
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 time.time(),
                 stage,
+                point,
                 channel_id,
                 trace_id,
                 lens_id,

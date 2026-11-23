@@ -516,6 +516,7 @@ class AppraisalPlugin(CorvidaePlugin):
         *,
         channel,
         stage: str,
+        point: str | None = None,
         blocks: list[dict],
         instruction: str,
         trace_id: str | None,
@@ -548,6 +549,7 @@ class AppraisalPlugin(CorvidaePlugin):
             chained = parent_blocks and shared == len(parent_blocks)
             fork_id = await log.record(
                 stage=stage,
+                point=point,
                 channel_id=channel.id,
                 messages=blocks,
                 digests=blocks_in,
@@ -882,6 +884,7 @@ class AppraisalPlugin(CorvidaePlugin):
             await self._record_fork(
                 channel=channel,
                 stage="appraisal",
+                point="after-send",
                 blocks=list(conv.messages) if conv is not None else [],
                 instruction=instruction,
                 trace_id=trace_id,
@@ -1032,6 +1035,16 @@ class AppraisalPlugin(CorvidaePlugin):
             result = await agent.fork(
                 channel, instruction, stage="appraisal",
                 extra_body=_extra_body_with_lenses(names, claims=False),
+            )
+            before_conv = channel.conversation
+            await self._record_fork(
+                channel=channel,
+                stage="appraisal",
+                point="before-send",
+                blocks=list(before_conv.messages) if before_conv is not None else [],
+                instruction=instruction,
+                trace_id=trace_id,
+                result=result,
             )
             return _lens_vector(
                 _parse_json_block(result.text).get("lenses"), names, trace_id,
