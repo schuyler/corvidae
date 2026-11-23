@@ -127,6 +127,10 @@ async def make_env(tmp_path, monkeypatch):
         pm.register(funnel, name="funnel")
         await funnel.on_init(pm=pm, config=config)
 
+        # Memory reports on the trace protocol plugin's hook; Runtime's
+        # install_plugin_hookspecs below installs its specs.
+        from corvidae_cognition.trace import TracePlugin
+        pm.register(TracePlugin(pm), name="trace")
         memory = MemoryPlugin()
         pm.register(memory, name="memory")
         await memory.on_init(pm=pm, config=config)

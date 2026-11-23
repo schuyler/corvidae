@@ -185,7 +185,7 @@ def _ingested(env):
 
 async def _no_outcome_for(env, trace_id, lens):
     """The exchange has no outcome recorded under ``lens``."""
-    outcomes = await _read_outcomes(env.db, trace_id) or {}
+    outcomes = await _read_outcomes(env.recorder, trace_id) or {}
     assert lens not in outcomes.get("critique", {})
 
 
@@ -207,7 +207,7 @@ class TestContribution:
             assert call["stage"] == "critique"
             assert call["attribution"].get("trace_id") == "kr1"
             # The outcome sits in the critique envelope under the lens name.
-            outcomes = await _read_outcomes(env.db, "kr1")
+            outcomes = await _read_outcomes(env.recorder, "kr1")
             assert outcomes["critique"]["mine"]["objections"] == 1
             assert outcomes["critique"]["mine"]["sampled"] is False
             # The objection was delivered to the funnel.

@@ -24,7 +24,7 @@ Three layers:
    abstraction.
 
 This document covers the kernel: the `corvidae` package. The cognition
-plugins (memory, funnel, appraisal, critique, outcome log) are a second
+plugins (memory, funnel, appraisal, critique, trace, outcome log) are a second
 distribution in the same repository, `corvidae-cognition`, installed with
 the `cognition` extra and documented in [cognition.md](cognition.md). The
 kernel never imports them; the kernel modules they import are mapped in
@@ -675,11 +675,12 @@ ten children per level is still many tasks.
 `on_llm_response` into `on_metrics` events: `llm.tokens.*`,
 `llm.latency_ms`, `llm.errors`, and `llm.lease_wait_ms` for a call that waited for or took a lease or that shutdown failed, each tagged with the call's `lease_key`: `unleased:<stage>` for a chat call made with no key; an embedding call carries the enclosing scope's key, or `""` outside any scope), `UsageLogPlugin` (one `usage_log` row
 per call), and `MetricsJsonlPlugin` (JSONL event sink, config
-`daemon.metrics_jsonl`). `outcome_log.py` owns the `exchange_log` table:
-one row per exchange, written by `OutcomeLogPlugin`'s hookimpls at
-message admission/rejection/persistence and updated in place as memory
-retrieval, appraisal, critique, the gates and the silence plugin record
-their outcomes. All sinks are
+`daemon.metrics_jsonl`). `outcome_log.py` appends one JSON line per trace record to
+`<session db stem>.outcomes.jsonl` beside the session database: its own
+admission/rejection/persistence events, and whatever memory, appraisal,
+critique, the gates and the silence plugin report through `on_trace_record`
+([cognition.md](cognition.md#outcomelogplugin)). It no longer writes the
+`exchange_log` table. All sinks are
 fail-soft.
 
 **Call timing and queue wait (PRD §3.10.6).** Each `usage_log` row records
@@ -741,6 +742,9 @@ CREATE TABLE usage_log (
     lease_wait_ms REAL          -- ms the call waited for a lease before it was sent (#364); 0.0 when it did not wait; NULL when it took none (no heads, embedding) and on older rows
 );
 
+-- History only: nothing creates or writes this table now. The outcome log is
+-- <session db stem>.outcomes.jsonl (cognition.md, OutcomeLogPlugin); a database
+-- written before that change keeps these rows, and `corvidae redact` still scrubs them.
 CREATE TABLE exchange_log (
     trace_id TEXT PRIMARY KEY,      -- one exchange = what one trace covers (see plugin-guide.md's Traces section)
     channel_id TEXT NOT NULL,
@@ -1100,8 +1104,7 @@ CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 
 Plugins keep their own tables on the same connection, created lazily on
 first use because the `on_start` broadcast is concurrent: `memory` and
-friends ([MemoryPlugin](cognition.md#memoryplugin)), `exchange_log` (OutcomeLogPlugin),
-`usage_log` (UsageLogPlugin), and `schedule`
+friends ([MemoryPlugin](cognition.md#memoryplugin)), `usage_log` (UsageLogPlugin), and `schedule`
 ([SchedulerPlugin](#schedulerplugin)).
 
 **Connections to the database file.** Most plugins write on the one
@@ -1267,8 +1270,8 @@ absorbed item, not one.
 
 `on_agent_response`'s `request_text` is the text of the message that owns
 the turn: for a coalesced burst, the last message. An absorbed trace's
-`exchange_log` row (when the outcome log is loaded) is written at
-persistence and no response ever completes it, because no reply carries
+outcome log lines (when the outcome log is loaded) are written at
+persistence and no response ever completes the trace, because no reply carries
 that trace.
 
 1. **`_build_conversation_message`** — converts a `QueueItem` into a
@@ -2175,9 +2178,14 @@ creates schema; schema is daemon-owned.
   scrubber registered under the `corvidae.redact` entry-point group, once
   per channel, over the message ids it tombstoned (contract in
   [plugin-guide.md](plugin-guide.md#registering-a-redact-scrubber)). The
-  kernel doesn't know the tables. The cognition extra registers
+  kernel doesn't know the tables or files. The cognition extra registers
+  `outcome_log_jsonl` (`corvidae_cognition.outcome_log:redact_outcomes_jsonl`),
+  which scrubs the conversation text in `<session db stem>.outcomes.jsonl`
+  the same way (it rewrites the file through a temp file and `os.replace`, so
+  stop the daemon first; the CLI prints `<N> outcome_log_jsonl rows`), and
   `exchange_log` (`corvidae_cognition.outcome_log:redact_exchange_log`),
-  which scrubs the conversation text that table holds. The
+  which scrubs the same text in the history rows of a database that predates
+  the file. For the history rows, the
   exchange that owns a redacted id X (in that channel, the row with the
   largest `message_rowid <= X`) has every `appraisal.stage2.past_claims`
   claim and query replaced with the tombstone text. The number of claims
@@ -5329,7 +5337,7 @@ The kernel's entry points (`[project.entry-points.corvidae]` in the root
 `compaction`, `thinking`, `runtime_settings`, `tools`, `metrics`,
 `usage_log`, `metrics_jsonl`, `scheduler`, `agent`,
 `config_watcher`. The cognition extra adds `memory`, `memory_tools`,
-`funnel`, `outcome_log`, `appraisal`, `critique`, `goals` and `silence` from
+`funnel`, `trace`, `outcome_log`, `appraisal`, `critique`, `goals` and `silence` from
 `packages/corvidae-cognition/pyproject.toml`.
 
 `register_planned` imports and instantiates each entry point inside a
@@ -5446,12 +5454,13 @@ SubagentPlugin      → "llm", "tools"
 McpClientPlugin     → "clock"       (background reconnect loop)
 CompactionPlugin    → "llm"         (LLMPlugin); soft-uses "agent" for forks
 ThinkingPlugin      → "registry"    (ChannelRegistry)
-MemoryPlugin        → "persistence", "llm", "clock", "idle"; soft-uses "agent", "registry" for forks  (cognition extra)
+MemoryPlugin        → "persistence", "llm", "clock", "idle", "trace"; soft-uses "agent", "registry" for forks  (cognition extra)
 MemoryToolsPlugin   → "memory"      (MemoryPlugin)                                (cognition extra)
-CritiquePlugin      → "task", "llm"; soft-uses "agent" for forks                  (cognition extra)
-OutcomeLogPlugin    → "persistence"                                               (cognition extra)
-AppraisalPlugin     → "persistence"; soft-uses "agent" for forks                  (cognition extra)
-SilencePlugin       → none; soft-uses "outcome_log" to record declines          (cognition extra)
+CritiquePlugin      → "task", "llm", "trace"; soft-uses "agent" for forks                  (cognition extra)
+TracePlugin         → none; optional "outcome_log" (startup warning only)          (cognition extra)
+OutcomeLogPlugin    → "persistence", "trace"                                      (cognition extra)
+AppraisalPlugin     → "persistence", "trace"; soft-uses "agent" for forks                  (cognition extra)
+SilencePlugin       → "trace"; declines are reported through it                  (cognition extra)
 HeartbeatPlugin     → "idle", "registry"; no hard dependency on "memory"            (cognition extra)
 UsageLogPlugin      → "persistence"
 SchedulerPlugin     → "registry", "persistence", "clock"
@@ -5531,7 +5540,8 @@ packages/corvidae-cognition/   # the cognition extra (docs/cognition.md)
     ├── critique.py       # CritiquePlugin
     ├── goals.py          # GoalsPlugin (goals table, add/update/retire_goal)
     ├── silence.py        # SilencePlugin (NO_REPLY veto, decline record, system-prompt instruction, end_turn tool)
-    └── outcome_log.py    # OutcomeLogPlugin (exchange_log)
+    ├── trace.py          # TracePlugin (on_trace_record, resolve_trace_origin; startup warning)
+    └── outcome_log.py    # OutcomeLogPlugin (<db stem>.outcomes.jsonl)
 ```
 
 ## Known Risks

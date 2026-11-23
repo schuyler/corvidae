@@ -41,6 +41,7 @@ from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin, TaskQueue
 
+from tests.cognition.trace_helpers import TraceRecorder
 from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, window_of
 
 
@@ -122,6 +123,17 @@ async def _seed_fts(path, contents):
     await db.close()
 
 
+def _register_trace(pm) -> TraceRecorder:
+    """Register the trace plugin and a recorder on ``pm``. The hookspecs are
+    left to install_plugin_hookspecs, which every caller runs afterwards."""
+    from corvidae_cognition.trace import TracePlugin
+
+    recorder = TraceRecorder()
+    pm.register(TracePlugin(), name="trace")
+    pm.register(recorder, name="trace_recorder")
+    return recorder
+
+
 async def build_critique(
     tmp_path, appraisal=None, chat_text=OBJECTION_VERDICT, fts_contents=(),
     with_funnel=False, config=None, fork=True, extra_plugins=None,
@@ -149,6 +161,9 @@ async def build_critique(
     persistence.db = db
     pm.register(persistence, name="persistence")
 
+    # The trace protocol plugin and a listener on it; the specs themselves
+    # come from install_plugin_hookspecs below, as in the daemon.
+    recorder = _register_trace(pm)
     outcome = OutcomeLogPlugin()
     pm.register(outcome, name="outcome_log")
     await outcome.on_init(pm=pm, config={})
@@ -196,7 +211,7 @@ async def build_critique(
     return SimpleNamespace(
         pm=pm, db=db, db_path=db_path, plugin=plugin, task=task_plugin,
         outcome=outcome, llm=llm, stub=stub, funnel=funnel, channel=channel,
-        appraisal=appraisal, fork_agent=fork_agent,
+        appraisal=appraisal, fork_agent=fork_agent, recorder=recorder,
     )
 
 
@@ -211,12 +226,25 @@ async def _run_next_task(task_plugin):
     return task
 
 
-async def _read_outcomes(db, key):
-    async with db.execute(
-        "SELECT outcomes FROM exchange_log WHERE trace_id = ?", (key,)
-    ) as cursor:
-        row = await cursor.fetchone()
-    return json.loads(row[0]) if row and row[0] else None
+async def _read_outcomes(recorder, key):
+    """The critique records fired for trace ``key``, merged in order with the
+    last write per top-level key winning; None when it fired none."""
+    records = [r["record"] for r in recorder.by_source("critique") if r["trace_id"] == key]
+    if not records:
+        return None
+    merged: dict = {}
+    for record in records:
+        merged.update(record)
+    return merged
+
+
+async def _admit(env, trace_id, origin):
+    """Admit the exchange the way a user message does; other origins have
+    no admission to record."""
+    if origin == "user":
+        await env.outcome.on_message_admitted(
+            channel=env.channel, trace_id=trace_id, sender="u", text="x",
+        )
 
 
 async def _fire(env, trace_id="k", origin="user", response_text="resp",
@@ -229,7 +257,7 @@ async def _fire(env, trace_id="k", origin="user", response_text="resp",
     for the trace right after the response (#1078): the appraisal listener
     runs with it, as the daemon's stage-2 task would. None: stage 2 never
     lands."""
-    await env.outcome.record_exchange(trace_id, env.channel.id, origin=origin)
+    await _admit(env, trace_id, origin)
     if env.appraisal is not None:
         env.appraisal._originating_text[trace_id] = originating_text
     # A lens forks only while the exchange's originating row is known and in
@@ -448,7 +476,7 @@ class TestLensSelection:
                     vector={"none": 1.0})
         assert env.task.task_queue.queue.qsize() == 1
         await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "ksamp")
+        outcomes = await _read_outcomes(env.recorder, "ksamp")
         assert outcomes["critique"]["sampled_below_threshold"] is True
         await _teardown(env)
 
@@ -490,7 +518,7 @@ class TestExecution:
         await _fire(env, "kempty", origin="user", vector={"predictive": 1.0})
         await _run_next_task(env.task)
         env.pm.ahook_raise.on_notify.assert_not_awaited()
-        outcomes = await _read_outcomes(env.db, "kempty")
+        outcomes = await _read_outcomes(env.recorder, "kempty")
         assert outcomes["critique"]["objections"] == 0
         # The lens fork carried the exchange attribution.
         assert env.stub.chat_calls == []
@@ -510,7 +538,7 @@ class TestExecution:
         env.funnel.ingest_and_wake = AsyncMock()
         await _fire(env, "kfull", origin="user", vector={"predictive": 1.0})
         await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "kfull")
+        outcomes = await _read_outcomes(env.recorder, "kfull")
         assert outcomes["critique"]["objections"] == 1
         # Registered without a stub: no wake of any kind.
         ingest.assert_called_once()
@@ -611,7 +639,7 @@ class TestRetentionRootFromRecall:
         env = await self._env(tmp_path, {"root": "values/"})
         await _fire(env, "krec", origin="user", vector={"retention": 1.0})
         await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "krec")
+        outcomes = await _read_outcomes(env.recorder, "krec")
         assert "retention" in outcomes["critique"]["lenses"]
         instructions = [c["instruction"] for c in env.fork_agent.calls]
         assert any("knowledge base root is «values/»" in t for t in instructions), instructions
@@ -726,7 +754,7 @@ async def _provenance_env(tmp_path, chat_text=OBJECTION_VERDICT, with_funnel=Fal
 
 async def _begin_exchange(env, trace_id, origin_rowid, origin="user"):
     """Record the exchange and persist its originating row."""
-    await env.outcome.record_exchange(trace_id, env.channel.id, origin=origin)
+    await _admit(env, trace_id, origin)
     await env.plugin.on_message_persisted(
         channel=env.channel, trace_id=trace_id, rowid=origin_rowid,
         text="when is it due?", annotations={},
@@ -856,7 +884,7 @@ class TestProvenanceTrigger:
             )
             await _fire(env, "kst", response_text=CLAIM_REPLY, vector={"predictive": 1.0})
             await _run_next_task(env.task)
-            outcomes = await _read_outcomes(env.db, "kst")
+            outcomes = await _read_outcomes(env.recorder, "kst")
             assert outcomes["critique"]["lenses"] == ["predictive"]
             # Stage 2 listed no claims, so no provenance task was queued.
             assert env.task.task_queue.queue.empty()
@@ -1082,7 +1110,7 @@ class TestProvenanceCritic:
             assert call["stage"] == "critique"
             assert call["attribution"]["stage"] == "critique"
             assert env.stub.chat_calls == []
-            outcomes = await _read_outcomes(env.db, "kp")
+            outcomes = await _read_outcomes(env.recorder, "kp")
             assert outcomes["provenance"] == {
                 "claims": 1, "candidates": 1, "supported": 0, "objections": 1,
                 "detail": [{"claim": "the quarterly audit deadline is Thursday",
@@ -1281,6 +1309,7 @@ async def _real_path_env(tmp_path, replies, past_claims):
 
     pm = agent.pm
     cfg = {"daemon": {"session_db": db_path}, "critique": {"sample_below_rate": 0.0}}
+    recorder = _register_trace(pm)
     outcome = OutcomeLogPlugin()
     pm.register(outcome, name="outcome_log")
     await outcome.on_init(pm=pm, config=cfg)
@@ -1342,7 +1371,7 @@ async def _real_path_env(tmp_path, replies, past_claims):
     agent._mark_started()
     return SimpleNamespace(
         agent=agent, channel=channel, db=db, gathered=gathered,
-        plugins=plugins, forks=forks,
+        plugins=plugins, forks=forks, recorder=recorder,
     )
 
 
@@ -1391,7 +1420,7 @@ class TestProvenanceRealPath:
             assert _candidate_rowids(env.gathered[trace_id]) == [[]]
             [fork] = _real_provenance_forks(env)
             assert CLAIM["claim"] in fork["instruction"]
-            outcomes = await _read_outcomes(env.db, trace_id)
+            outcomes = await _read_outcomes(env.recorder, trace_id)
             assert outcomes["provenance"]["objections"] == 1
         finally:
             await _real_path_teardown(env)

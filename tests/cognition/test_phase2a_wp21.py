@@ -5,10 +5,10 @@ WP2.1 section, PASSED re-review #1 at HEAD bb03fa5). Covers:
 
   1. mint_trace_id() shape.
   2. USER message: the transport-supplied key reaches the gate hook,
-     admitted -> exchange_log row origin='user', message_rowid populated
+     admitted -> outcome_log records origin='user', message_rowid populated
      after the turn.
-  3. Gate plugin returns False -> on_message_rejected fires, exchange_log
-     row exists with null message_rowid and outcomes {"gate": "rejected"}.
+  3. Gate plugin returns False -> on_message_rejected fires, outcome_log
+     records a {"event": "rejected"} line with no message_rowid.
   4. Tool cycle: Task stamped with key+origin; tool-result notification
      turn inherits the same key (no second exchange row); final
      on_agent_response carries originating_text.
@@ -18,10 +18,8 @@ WP2.1 section, PASSED re-review #1 at HEAD bb03fa5). Covers:
      firings) — folded into test 4's assertion and a dedicated multi-tool
      count test.
   7. before_agent_turn receives (channel, trace_id, origin); retrieval
-     profile lands in exchange_log under the key.
+     profile reaches the trace record under the key.
   8. usage_log rows carry the trace id (attribution wiring).
-  9. upsert_exchange write-order independence.
-  10. Atomic JSON merge for outcomes/appraisal columns (json_patch).
 
 All tests are new and live only in this file, per the WP2.1 red-author's
 instructions (no edits to shared conftest/other test files).
@@ -38,6 +36,7 @@ from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
 
 from corvidae.outbound import OutboundMessage
 from helpers import build_plugin_and_channel, drain, drain_task_queue, sent
+from tests.cognition.trace_helpers import add_trace, outcomes_file, read_outcomes
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call,
@@ -58,6 +57,8 @@ async def _setup_outcome_log(pm, db):
     """
     from corvidae_cognition.outcome_log import OutcomeLogPlugin
 
+    # outcome_log depends on the trace protocol plugin.
+    add_trace(pm)
     plugin = OutcomeLogPlugin()
     pm.register(plugin, name="outcome_log")
     await plugin.on_init(pm, {})
@@ -80,13 +81,12 @@ async def _setup_usage_log(pm):
     return plugin
 
 
-async def _fetch_exchange_row(db, trace_id):
-    async with db.execute(
-        "SELECT channel_id, origin, message_rowid, outcomes, appraisal "
-        "FROM exchange_log WHERE trace_id = ?",
-        (trace_id,),
-    ) as cursor:
-        return await cursor.fetchone()
+def _trace_lines(db_path, trace_id) -> list[dict]:
+    """The outcomes-file lines written for ``trace_id``, in order."""
+    return [
+        line for line in read_outcomes(outcomes_file(db_path))
+        if line["trace_id"] == trace_id
+    ]
 
 
 class _KeyCapturePlugin:
@@ -212,7 +212,7 @@ class TestMintTraceId:
 
 
 # ---------------------------------------------------------------------------
-# 2. USER message admission: key minted before gate, exchange_log row,
+# 2. USER message admission: key minted before gate, outcome_log records,
 #    message_rowid populated after the turn.
 # ---------------------------------------------------------------------------
 
@@ -241,8 +241,9 @@ class TestUserMessageAdmission:
 
         await db.close()
 
-    async def test_admitted_message_creates_exchange_log_row_with_user_origin(self):
-        plugin, channel, db = await build_plugin_and_channel()
+    async def test_admitted_message_is_recorded_with_user_origin(self, tmp_path):
+        db_path = str(tmp_path / "sessions.db")
+        plugin, channel, db = await build_plugin_and_channel(db_path=db_path)
         await _setup_outcome_log(plugin.pm, db)
 
         mock_client = MagicMock()
@@ -259,15 +260,16 @@ class TestUserMessageAdmission:
         assert len(gate.seen_keys) == 1
         key = gate.seen_keys[0]
 
-        row = await _fetch_exchange_row(db, key)
-        assert row is not None, "expected an exchange_log row for the admitted message"
-        channel_id, origin, message_rowid, outcomes, appraisal = row
-        assert origin == "user"
+        lines = _trace_lines(db_path, key)
+        admitted = [l for l in lines if l["record"] == {"event": "admitted"}]
+        assert len(admitted) == 1, "expected an admitted record for the message"
+        assert admitted[0]["origin"] == "user"
 
         await db.close()
 
-    async def test_message_rowid_populated_after_turn_matches_persisted_user_row(self):
-        plugin, channel, db = await build_plugin_and_channel()
+    async def test_message_rowid_populated_after_turn_matches_persisted_user_row(self, tmp_path):
+        db_path = str(tmp_path / "sessions.db")
+        plugin, channel, db = await build_plugin_and_channel(db_path=db_path)
         await _setup_outcome_log(plugin.pm, db)
 
         mock_client = MagicMock()
@@ -282,8 +284,10 @@ class TestUserMessageAdmission:
         await drain(plugin, channel)
 
         key = gate.seen_keys[0]
-        row = await _fetch_exchange_row(db, key)
-        message_rowid = row[2]
+        [persisted_line] = [
+            l for l in _trace_lines(db_path, key) if l["record"].get("event") == "persisted"
+        ]
+        message_rowid = persisted_line["record"]["message_rowid"]
         assert message_rowid is not None
 
         async with db.execute(
@@ -300,8 +304,8 @@ class TestUserMessageAdmission:
 
 
 # ---------------------------------------------------------------------------
-# 3. Gate rejection: on_message_rejected fires, exchange_log row exists
-#    with null message_rowid and outcomes {"gate": "rejected"}.
+# 3. Gate rejection: on_message_rejected fires, outcome_log records the
+#    rejection and never a message_rowid.
 # ---------------------------------------------------------------------------
 
 
@@ -330,8 +334,9 @@ class TestGateRejection:
 
         await db.close()
 
-    async def test_rejected_message_exchange_log_row_has_null_rowid_and_gate_outcome(self):
-        plugin, channel, db = await build_plugin_and_channel()
+    async def test_rejected_message_is_recorded_with_no_rowid(self, tmp_path):
+        db_path = str(tmp_path / "sessions.db")
+        plugin, channel, db = await build_plugin_and_channel(db_path=db_path)
         await _setup_outcome_log(plugin.pm, db)
 
         mock_client = MagicMock()
@@ -348,14 +353,12 @@ class TestGateRejection:
         assert len(gate.seen_keys) == 1
         key = gate.seen_keys[0]
 
-        row = await _fetch_exchange_row(db, key)
-        assert row is not None, "rejected exchange must still get a row (§3.2 offline corpus)"
-        channel_id, origin, message_rowid, outcomes, appraisal = row
-        assert message_rowid is None
-
-        import json as _json
-        outcomes_dict = _json.loads(outcomes) if outcomes else {}
-        assert outcomes_dict.get("gate") == "rejected"
+        records = [l["record"] for l in _trace_lines(db_path, key)]
+        assert {"event": "rejected"} in records, (
+            "rejected exchange must still be recorded (§3.2 offline corpus)"
+        )
+        # A rejected message is never persisted, so no rowid is ever recorded.
+        assert [r for r in records if r.get("event") == "persisted"] == []
 
         await db.close()
 
@@ -433,8 +436,9 @@ class TestToolCyclePropagation:
         await task_plugin.on_stop()
         await db.close()
 
-    async def test_tool_result_turn_inherits_same_key_no_second_exchange_row(self):
-        plugin, channel, db = await build_plugin_and_channel()
+    async def test_tool_result_turn_inherits_same_key_no_second_exchange_record(self, tmp_path):
+        db_path = str(tmp_path / "sessions.db")
+        plugin, channel, db = await build_plugin_and_channel(db_path=db_path)
         outcome_log = await _setup_outcome_log(plugin.pm, db)
 
         async def my_plugin_tool(query: str) -> str:
@@ -470,11 +474,13 @@ class TestToolCyclePropagation:
 
         key = gate.seen_keys[0]
 
-        async with db.execute(
-            "SELECT COUNT(*) FROM exchange_log WHERE trace_id = ?", (key,)
-        ) as cursor:
-            (count,) = await cursor.fetchone()
-        assert count == 1, "tool-result turn must not mint/insert a second exchange row"
+        events = [l["record"].get("event") for l in _trace_lines(db_path, key)]
+        assert events.count("admitted") == 1, (
+            "tool-result turn must not admit a second exchange under the key"
+        )
+        assert events.count("persisted") == 1, (
+            "tool-result turn must not persist a second originating row"
+        )
 
         await task_plugin.on_stop()
         await db.close()
@@ -555,7 +561,7 @@ class TestStandaloneNotificationAndPersistedFiring:
 
         assert len(recorder.persisted) == 1
         assert recorder.persisted[0]["trace_id"] is not None
-        # origin='task' must be recorded on the exchange_log row for this key.
+        # origin='task' is recorded for this key by the test below.
 
         await db.close()
 
@@ -580,8 +586,9 @@ class TestStandaloneNotificationAndPersistedFiring:
 
         await db.close()
 
-    async def test_standalone_notification_exchange_log_row_has_task_origin(self):
-        plugin, channel, db = await build_plugin_and_channel()
+    async def test_standalone_notification_is_recorded_with_task_origin(self, tmp_path):
+        db_path = str(tmp_path / "sessions.db")
+        plugin, channel, db = await build_plugin_and_channel(db_path=db_path)
         await _setup_outcome_log(plugin.pm, db)
 
         recorder = _AdmissionRecorderPlugin()
@@ -599,9 +606,10 @@ class TestStandaloneNotificationAndPersistedFiring:
         await drain(plugin, channel)
 
         key = recorder.persisted[0]["trace_id"]
-        row = await _fetch_exchange_row(db, key)
-        assert row is not None
-        assert row[1] == "task"
+        [persisted_line] = [
+            l for l in _trace_lines(db_path, key) if l["record"].get("event") == "persisted"
+        ]
+        assert persisted_line["origin"] == "task"
 
         await db.close()
 
@@ -687,31 +695,34 @@ class TestBeforeAgentTurnEnrichment:
 
         await db.close()
 
-    async def test_retrieval_profile_lands_in_exchange_log_under_the_key(self):
-        """MemoryPlugin.before_agent_turn (updated for WP2.1 point 8) writes
-        retrieval_top_score/retrieval_hit_count into exchange_log under the
-        trace id via update_exchange."""
-        plugin, channel, db = await build_plugin_and_channel()
+    async def test_retrieval_profile_reaches_the_trace_record_under_the_key(self, tmp_path):
+        """MemoryPlugin.before_agent_turn (updated for WP2.1 point 8) reports
+        retrieval_top_score/retrieval_hit_count through on_trace_record under
+        the trace id; outcome_log writes them to the outcomes file."""
+        db_path = str(tmp_path / "sessions.db")
+        plugin, channel, db = await build_plugin_and_channel(db_path=db_path)
         await _setup_outcome_log(plugin.pm, db)
 
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
 
         # A minimal before_agent_turn implementer standing in for MemoryPlugin,
-        # exercising the same update_exchange call point-8 requires. This
+        # firing the same on_trace_record call point-8 requires. This
         # avoids pulling in the full MemoryPlugin/embedding stack for this
         # narrow assertion (retrieval-profile persistence under the key),
         # while still proving the enriched hookspec carries what a real
-        # consumer needs to perform the write.
-        outcome_log = plugin.pm.get_plugin("outcome_log")
+        # consumer needs to perform the report.
+        pm = plugin.pm
 
         class _StandInRetrievalProfiler:
             @hookimpl
             async def before_agent_turn(self, channel, trace_id, annotations):
                 if trace_id is None:
                     return
-                await outcome_log.update_exchange(
-                    trace_id, retrieval_top_score=0.75, retrieval_hit_count=2,
+                await pm.ahook.on_trace_record(
+                    trace_id=trace_id, channel_id=channel.id, source="memory",
+                    origin=None,
+                    record={"retrieval_top_score": 0.75, "retrieval_hit_count": 2},
                 )
 
         plugin.pm.register(_StandInRetrievalProfiler(), name="stand_in_profiler")
@@ -725,13 +736,10 @@ class TestBeforeAgentTurnEnrichment:
         await drain(plugin, channel)
 
         key = gate.seen_keys[0]
-        async with db.execute(
-            "SELECT retrieval_top_score, retrieval_hit_count FROM exchange_log "
-            "WHERE trace_id = ?",
-            (key,),
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row == (0.75, 2)
+        memory_records = [
+            l["record"] for l in _trace_lines(db_path, key) if l["source"] == "memory"
+        ]
+        assert memory_records == [{"retrieval_top_score": 0.75, "retrieval_hit_count": 2}]
 
         await db.close()
 
@@ -824,334 +832,5 @@ class TestUsageLogAttributionWiring:
             row = await cursor.fetchone()
         assert row is not None
         assert row[0] == gate.seen_keys[0]
-
-        await db.close()
-
-
-# ---------------------------------------------------------------------------
-# 9. upsert_exchange write-order independence
-# ---------------------------------------------------------------------------
-
-
-class TestUpsertExchangeWriteOrderIndependence:
-    async def test_upsert_before_insert_creates_row_with_columns(self):
-        plugin, channel, db = await build_plugin_and_channel()
-        outcome_log = await _setup_outcome_log(plugin.pm, db)
-
-        await outcome_log.upsert_exchange(
-            "ex-upsert-1", "irc:#general", origin="user", probe_score=0.42,
-        )
-
-        async with db.execute(
-            "SELECT channel_id, origin, probe_score FROM exchange_log "
-            "WHERE trace_id = ?",
-            ("ex-upsert-1",),
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row == ("irc:#general", "user", 0.42)
-
-        await db.close()
-
-    async def test_later_record_exchange_insert_or_ignore_does_not_clobber_upsert(self):
-        plugin, channel, db = await build_plugin_and_channel()
-        outcome_log = await _setup_outcome_log(plugin.pm, db)
-
-        await outcome_log.upsert_exchange(
-            "ex-upsert-2", "irc:#general", origin="user", probe_score=0.9,
-        )
-        # A later hook-driven record_exchange for the same key must not
-        # clobber the upsert-created row (INSERT OR IGNORE).
-        await outcome_log.record_exchange("ex-upsert-2", "other-channel", origin="task")
-
-        async with db.execute(
-            "SELECT channel_id, origin, probe_score FROM exchange_log "
-            "WHERE trace_id = ?",
-            ("ex-upsert-2",),
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row == ("irc:#general", "user", 0.9)
-
-        await db.close()
-
-    async def test_reverse_order_also_converges(self):
-        """record_exchange first, then upsert_exchange for the same key:
-        the upsert's UPDATE half still applies its columns."""
-        plugin, channel, db = await build_plugin_and_channel()
-        outcome_log = await _setup_outcome_log(plugin.pm, db)
-
-        await outcome_log.record_exchange("ex-upsert-3", "irc:#general", origin="user")
-        await outcome_log.upsert_exchange(
-            "ex-upsert-3", "irc:#general", origin="user", probe_score=0.5,
-        )
-
-        async with db.execute(
-            "SELECT channel_id, probe_score FROM exchange_log WHERE trace_id = ?",
-            ("ex-upsert-3",),
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row == ("irc:#general", 0.5)
-
-        await db.close()
-
-
-# ---------------------------------------------------------------------------
-# 10. Atomic JSON merge (json_patch) for outcomes/appraisal columns
-# ---------------------------------------------------------------------------
-
-
-class TestAtomicJsonMerge:
-    async def test_two_concurrent_outcomes_writers_both_keys_survive(self):
-        plugin, channel, db = await build_plugin_and_channel()
-        outcome_log = await _setup_outcome_log(plugin.pm, db)
-
-        await outcome_log.record_exchange("ex-merge-1", "irc:#general", origin="user")
-
-        # Two "concurrent" fire-and-forget writers merging disjoint
-        # top-level keys into outcomes.
-        await outcome_log.update_exchange(
-            "ex-merge-1", outcomes={"engagement": {"salience": 0.6}},
-        )
-        await outcome_log.update_exchange(
-            "ex-merge-1", outcomes={"gate": "rejected"},
-        )
-
-        import json as _json
-
-        async with db.execute(
-            "SELECT outcomes FROM exchange_log WHERE trace_id = ?",
-            ("ex-merge-1",),
-        ) as cursor:
-            (outcomes_raw,) = await cursor.fetchone()
-        outcomes = _json.loads(outcomes_raw)
-        assert outcomes.get("engagement") == {"salience": 0.6}
-        assert outcomes.get("gate") == "rejected"
-
-    async def test_two_appraisal_writers_stage1_out_not_erased_by_stage2(self):
-        """First writer merges stage1_out; a later stage2 writer must not
-        erase it (tranche-2 important 2 regression)."""
-        plugin, channel, db = await build_plugin_and_channel()
-        outcome_log = await _setup_outcome_log(plugin.pm, db)
-
-        await outcome_log.record_exchange("ex-merge-2", "irc:#general", origin="user")
-
-        await outcome_log.update_exchange(
-            "ex-merge-2", appraisal={"stage1_out": {"novelty": 0.3}},
-        )
-        await outcome_log.update_exchange(
-            "ex-merge-2", appraisal={"stage2": {"valence": -0.1}},
-        )
-
-        import json as _json
-
-        async with db.execute(
-            "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
-            ("ex-merge-2",),
-        ) as cursor:
-            (appraisal_raw,) = await cursor.fetchone()
-        appraisal = _json.loads(appraisal_raw)
-        assert appraisal.get("stage1_out") == {"novelty": 0.3}
-        assert appraisal.get("stage2") == {"valence": -0.1}
-
-    async def test_merge_column_rejects_scalar_value(self):
-        """A scalar for a merge column (outcomes/appraisal) is a ValueError —
-        distinguishing merge-columns from plain-set columns."""
-        plugin, channel, db = await build_plugin_and_channel()
-        outcome_log = await _setup_outcome_log(plugin.pm, db)
-
-        await outcome_log.record_exchange("ex-merge-3", "irc:#general", origin="user")
-
-        with pytest.raises(ValueError):
-            await outcome_log.update_exchange("ex-merge-3", outcomes="not-a-dict")
-
-    async def test_plain_set_column_rejects_dict_value(self):
-        """A dict for a non-merge column (e.g. origin) is a ValueError."""
-        plugin, channel, db = await build_plugin_and_channel()
-        outcome_log = await _setup_outcome_log(plugin.pm, db)
-
-        await outcome_log.record_exchange("ex-merge-4", "irc:#general", origin="user")
-
-        with pytest.raises(ValueError):
-            await outcome_log.update_exchange("ex-merge-4", origin={"nested": "dict"})
-
-    async def test_upsert_exchange_merge_columns_use_atomic_json_patch(self):
-        """upsert_exchange's guarded UPDATE half also merges outcomes/
-        appraisal atomically (not read-merge-write)."""
-        plugin, channel, db = await build_plugin_and_channel()
-        outcome_log = await _setup_outcome_log(plugin.pm, db)
-
-        await outcome_log.upsert_exchange(
-            "ex-merge-5", "irc:#general", origin="user",
-            appraisal={"stage1": {"novelty": 0.2}},
-        )
-        await outcome_log.upsert_exchange(
-            "ex-merge-5", "irc:#general", origin="user",
-            appraisal={"stage1_out": {"novelty": 0.4}},
-        )
-
-        import json as _json
-
-        async with db.execute(
-            "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
-            ("ex-merge-5",),
-        ) as cursor:
-            (appraisal_raw,) = await cursor.fetchone()
-        appraisal = _json.loads(appraisal_raw)
-        assert appraisal.get("stage1") == {"novelty": 0.2}
-        assert appraisal.get("stage1_out") == {"novelty": 0.4}
-
-    async def test_truly_concurrent_writers_via_gather_all_disjoint_keys_survive(self):
-        """Fires many merges concurrently via asyncio.gather, each writing a
-        DISTINCT top-level key into the SAME row's outcomes column, then
-        asserts ALL keys survive.
-
-        Why this discriminates atomic vs non-atomic implementations (Red TDD
-        Review, "Important, WP2.1" finding: the sibling tests in this class
-        only exercise json_patch merge *semantics* under sequential —
-        individually awaited — calls, which a naive read-then-write
-        implementation would also pass, because each call's read-modify-write
-        cycle fully completes before the next call starts. No sequential test
-        can distinguish "one atomic UPDATE ... SET x = json_patch(x, ?)" from
-        "SELECT x; merge in Python; UPDATE x = ?" — both produce a correct
-        final row when calls never overlap.
-
-        A non-atomic implementation of update_exchange has (at minimum) two
-        awaited round trips per call: an `await db.execute("SELECT
-        outcomes...")` to read the current value, then Python-side dict merge,
-        then `await db.execute("UPDATE ... SET outcomes = ?")` to write the
-        merged result back. Each `await` is a point where the event loop may
-        switch to another coroutine. When N such calls are launched together
-        via asyncio.gather, their SELECT/merge/UPDATE sequences can interleave
-        on the shared aiosqlite connection: writer B's SELECT can run before
-        writer A's UPDATE has committed, so B's in-memory merge is built from
-        a base that doesn't yet contain A's key. B's subsequent UPDATE then
-        overwrites the row with a value that never included A's key — a
-        classic lost update. With enough concurrent writers targeting the
-        same row, this race becomes overwhelmingly likely to manifest at
-        least once (this test uses 12 writers merging 12 distinct keys,
-        chosen to keep the flake probability of a buggy implementation
-        accidentally passing negligible while keeping runtime small).
-
-        A genuinely atomic single-statement implementation
-        (`UPDATE exchange_log SET outcomes = json_patch(COALESCE(outcomes,
-        '{}'), ?) WHERE trace_id = ?`) has no read-then-write gap for
-        another coroutine to interleave into: the merge happens inside SQLite
-        itself, in the single SQL statement dispatched to aiosqlite's
-        executor thread. Regardless of what order the coroutines' `await
-        db.execute(...)` calls actually reach the executor in, each statement
-        fully reads-and-merges-and-writes atomically before the next one
-        starts, so all N keys survive no matter the interleaving. This test
-        therefore fails under a read-merge-write implementation (some keys
-        missing) and passes under a single-statement json_patch
-        implementation (all keys present) — the discrimination the sibling
-        sequential tests in this class cannot provide.
-        """
-        plugin, channel, db = await build_plugin_and_channel()
-        outcome_log = await _setup_outcome_log(plugin.pm, db)
-
-        await outcome_log.record_exchange("ex-merge-gather", "irc:#general", origin="user")
-
-        writer_count = 12
-        await asyncio.gather(
-            *(
-                outcome_log.update_exchange(
-                    "ex-merge-gather",
-                    outcomes={f"writer_{i}": {"seq": i}},
-                )
-                for i in range(writer_count)
-            )
-        )
-
-        import json as _json
-
-        async with db.execute(
-            "SELECT outcomes FROM exchange_log WHERE trace_id = ?",
-            ("ex-merge-gather",),
-        ) as cursor:
-            (outcomes_raw,) = await cursor.fetchone()
-        outcomes = _json.loads(outcomes_raw)
-
-        missing = [f"writer_{i}" for i in range(writer_count) if f"writer_{i}" not in outcomes]
-        assert not missing, (
-            f"lost update(s) detected under concurrent asyncio.gather writers: "
-            f"missing keys {missing} — a non-atomic read-merge-write "
-            f"update_exchange drops keys from writers whose SELECT raced "
-            f"another writer's not-yet-committed UPDATE. Got: {outcomes!r}"
-        )
-        for i in range(writer_count):
-            assert outcomes[f"writer_{i}"] == {"seq": i}
-
-        await db.close()
-
-    async def test_merge_uses_single_update_statement_no_select_then_update(self):
-        """Structural proof of atomicity: spies on the real aiosqlite
-        Connection.execute (the exact object OutcomeLogPlugin._resolve_db()
-        returns -- persistence.db, the same connection instance the test
-        fixture created and that update_exchange operates on) during a
-        single update_exchange(..., outcomes={...}) call, and asserts the
-        merge path issues exactly one write statement and never issues a
-        SELECT against exchange_log first.
-
-        Why this discriminates atomic vs non-atomic implementations: this
-        complements the asyncio.gather race test above with a deterministic,
-        non-probabilistic check that does not depend on the scheduler
-        actually interleaving two coroutines' awaits in an unlucky order. A
-        read-merge-write implementation of the json_patch merge for a
-        merge-column kwarg MUST, by construction, issue a SELECT to fetch the
-        current column value before it can merge in Python and issue the
-        UPDATE -- there is no way to merge "the new fragment" into "the
-        existing envelope" without first reading the existing envelope
-        somehow, and the design explicitly forbids reading it into Python
-        (WP2.1 point 7: "single atomic SQL statement... NOT read-merge-
-        write"). A single-statement `UPDATE ... SET outcomes =
-        json_patch(COALESCE(outcomes, '{}'), ?) WHERE trace_id = ?`
-        performs the read, merge, and write entirely inside SQLite as part of
-        one `execute()` call from Python's perspective -- there is exactly
-        one call to the connection's execute for the merge, and it is never
-        preceded by a SELECT. Spying on `db.execute` and asserting "no SELECT
-        text, exactly one execute call whose SQL contains UPDATE" therefore
-        catches a naive implementation deterministically, independent of
-        scheduling luck.
-        """
-        plugin, channel, db = await build_plugin_and_channel()
-        outcome_log = await _setup_outcome_log(plugin.pm, db)
-
-        await outcome_log.record_exchange("ex-merge-spy", "irc:#general", origin="user")
-
-        executed_sql: list[str] = []
-        real_execute = db.execute
-
-        def spying_execute(sql, *args, **kwargs):
-            executed_sql.append(sql)
-            return real_execute(sql, *args, **kwargs)
-
-        db.execute = spying_execute
-        try:
-            await outcome_log.update_exchange(
-                "ex-merge-spy", outcomes={"engagement": {"salience": 0.9}},
-            )
-        finally:
-            db.execute = real_execute
-
-        selects = [sql for sql in executed_sql if sql.strip().upper().startswith("SELECT")]
-        assert not selects, (
-            f"update_exchange issued a SELECT before its UPDATE -- this is "
-            f"the read-then-write shape a non-atomic implementation has; an "
-            f"atomic json_patch UPDATE never reads the column into Python. "
-            f"Statements executed: {executed_sql!r}"
-        )
-
-        write_statements = [
-            sql for sql in executed_sql if sql.strip().upper().startswith(("UPDATE", "INSERT"))
-        ]
-        assert len(write_statements) == 1, (
-            f"expected exactly one write statement for a single "
-            f"update_exchange(..., outcomes=...) call (the atomic json_patch "
-            f"merge is one UPDATE), got {len(write_statements)}: "
-            f"{write_statements!r}"
-        )
-        assert "json_patch" in write_statements[0].lower(), (
-            f"expected the merge-column UPDATE to use SQLite's json_patch() "
-            f"for an atomic in-database merge, got: {write_statements[0]!r}"
-        )
 
         await db.close()

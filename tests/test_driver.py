@@ -211,6 +211,9 @@ def test_kv_cache_reused_true_when_most_of_the_prefix_was_reused():
 
 
 def _withheld_db(tmp_path, rows, exchanges=()):
+    """A sessions.db with message_log rows, plus outcome_log's JSONL beside
+    it: for each (trace, channel, origin, send) one persisted line carrying
+    the origin and, when ``send`` is not None, one gates line with it."""
     import json
     import sqlite3
 
@@ -220,19 +223,24 @@ def _withheld_db(tmp_path, rows, exchanges=()):
         "CREATE TABLE message_log (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, "
         "message TEXT, timestamp REAL, message_type TEXT)"
     )
-    db.execute("CREATE TABLE exchange_log (trace_id TEXT, channel_id TEXT, origin TEXT, outcomes TEXT)")
     for channel_id, msg, mtype in rows:
         db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, 0, ?)",
             (channel_id, json.dumps(msg), mtype),
         )
-    for channel_id, origin, outcomes in exchanges:
-        db.execute(
-            "INSERT INTO exchange_log VALUES ('t', ?, ?, ?)",
-            (channel_id, origin, json.dumps(outcomes)),
-        )
     db.commit()
     db.close()
+    lines = []
+    for trace_id, channel_id, origin, sends in exchanges:
+        lines.append({"ts": 0, "trace_id": trace_id, "channel_id": channel_id,
+                      "source": "outcome_log", "origin": origin,
+                      "record": {"event": "persisted", "message_rowid": 1}})
+        for send in sends:
+            lines.append({"ts": 0, "trace_id": trace_id, "channel_id": channel_id,
+                          "source": "gates", "origin": None, "record": {"send": send}})
+    path.with_suffix(".outcomes.jsonl").write_text(
+        "".join(json.dumps(line) + "\n" for line in lines)
+    )
     return path
 
 
@@ -256,11 +264,27 @@ def test_vetoed_heartbeat_count(tmp_path):
 
     ch = "irc:#p-withheld"
     path = _withheld_db(tmp_path, [], exchanges=[
-        (ch, "heartbeat", {"send": {"vetoed": True}}),
-        (ch, "heartbeat", {"send": {"vetoed": False}}),
-        (ch, "user", {"send": {"vetoed": True}}),
+        ("t1", ch, "heartbeat", [{"vetoed": True}]),
+        ("t2", ch, "heartbeat", [{"vetoed": False}]),
+        ("t3", ch, "user", [{"vetoed": True}]),
+        # The trace's last send decides, as the table's merge did.
+        ("t4", ch, "heartbeat", [{"vetoed": True}, {"vetoed": False}]),
+        ("t5", "irc:#other", "heartbeat", [{"vetoed": True}]),
     ])
     assert vetoed_heartbeat_count(path, ch) == 1
+
+
+def test_heartbeat_exchange_count(tmp_path):
+    from harness.driver import heartbeat_exchange_count
+
+    ch = "internal:heartbeat"
+    path = _withheld_db(tmp_path, [], exchanges=[
+        ("t1", ch, "heartbeat", []),
+        ("t2", ch, "heartbeat", [{"vetoed": True}]),
+        ("t3", ch, "user", []),
+        ("t4", "irc:#other", "heartbeat", []),
+    ])
+    assert heartbeat_exchange_count(path, ch) == 2
 
 
 def test_withheld_restart_verdict_names_first_failing_stage():

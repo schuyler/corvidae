@@ -31,7 +31,7 @@ sender-controlled data (PRD §3.3.11).
 Origin ``webhook:<endpoint>`` in the cognition plugins:
 
 - appraisal: runs stage 2, as on every origin.
-- outcome_log: records the origin verbatim in ``exchange_log.origin``.
+- outcome_log: records the origin verbatim on its outcome-log lines.
 - gates: non-``user``, so ``gate.send.quiet_origins`` can make it quiet, as
   for heartbeat and task.
 - critique: judged like every main-loop turn (#1031).

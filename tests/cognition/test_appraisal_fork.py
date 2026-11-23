@@ -32,11 +32,10 @@ async def _run(tmp_path, agent, window_rowids=(41, 42), rowid=41, config=None, o
         env.appraisal.config = new_config
         await env.appraisal.on_config_reload(new_config)
     env.channel.runtime_overrides.update(overrides or {})
-    await env.outcome.record_exchange("k", env.channel.id, origin="user")
     await env.appraisal.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=rowid, text="is the heater the culprit?", annotations={})
     await env.appraisal._run_stage2(env.channel, "k", "is the heater the culprit?", "yes, brownout", None)
-    stored = ((await _read_appraisal(env.db, "k")) or {}).get("stage2")
+    stored = ((await _read_appraisal(env.recorder, "k")) or {}).get("stage2")
     await _teardown(env)
     return env, stored
 

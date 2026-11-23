@@ -159,7 +159,7 @@ class TestRecorded:
         env = await _env(tmp_path, chat_text=VERDICT)
         try:
             await _turn(env, "kp7", {"proactivity": 1.0})
-            outcomes = await _read_outcomes(env.db, "kp7")
+            outcomes = await _read_outcomes(env.recorder, "kp7")
             assert "proactivity" not in outcomes
             assert outcomes["critique"]["lenses"] == ["proactivity"]
             scrubbed = json.loads(_scrub_outcomes_detail(json.dumps(outcomes), "[X]"))

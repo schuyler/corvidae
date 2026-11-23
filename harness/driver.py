@@ -616,16 +616,27 @@ def reminder_verdict(set_row: bool, fired: bool, replied: bool) -> tuple[bool, s
     return True, "reminder set by tool, fired as a reminder notification, token delivered unprompted"
 
 
+def _outcome_lines(db_path: Path) -> list[dict]:
+    """outcome_log's JSONL records beside `db_path` (`<stem>.outcomes.jsonl`);
+    [] when the file is absent."""
+    path = Path(db_path).with_suffix(".outcomes.jsonl")
+    if not path.exists():
+        return []
+    return [json.loads(raw) for raw in path.read_text(encoding="utf-8").splitlines() if raw.strip()]
+
+
+def _heartbeat_traces(lines: list[dict], channel_id: str) -> set[str]:
+    """Traces on `channel_id` whose outcome_log record carries origin 'heartbeat'."""
+    return {
+        line["trace_id"] for line in lines
+        if line.get("source") == "outcome_log" and line.get("channel_id") == channel_id
+        and line.get("origin") == "heartbeat"
+    }
+
+
 def heartbeat_exchange_count(db_path: Path, channel_id: str) -> int:
-    """exchange_log rows with origin 'heartbeat' on `channel_id`."""
-    if not table_exists(db_path, "exchange_log"):
-        return 0
-    rows = _query(
-        db_path,
-        "SELECT COUNT(*) FROM exchange_log WHERE channel_id = ? AND origin = 'heartbeat'",
-        (channel_id,),
-    )
-    return rows[0][0] if rows else 0
+    """Heartbeat-origin traces on `channel_id`, from outcome_log's records."""
+    return len(_heartbeat_traces(_outcome_lines(db_path), channel_id))
 
 
 def assistant_rows(db_path: Path, channel_id: str) -> int:
@@ -667,17 +678,17 @@ def has_final_marker_after(db_path: Path, channel_id: str, rowid: int) -> bool:
 
 
 def vetoed_heartbeat_count(db_path: Path, channel_id: str) -> int:
-    """exchange_log rows on `channel_id` whose decide-gate record vetoed a
-    heartbeat-origin final."""
-    if not table_exists(db_path, "exchange_log"):
-        return 0
-    rows = _query(
-        db_path,
-        "SELECT COUNT(*) FROM exchange_log WHERE channel_id = ? AND origin = 'heartbeat' "
-        "AND json_extract(outcomes, '$.send.vetoed') = 1",
-        (channel_id,),
-    )
-    return rows[0][0] if rows else 0
+    """Heartbeat-origin traces on `channel_id` whose last gates `send`
+    record vetoed the final (the last record per key wins, as the old
+    exchange_log merge did)."""
+    lines = _outcome_lines(db_path)
+    traces = _heartbeat_traces(lines, channel_id)
+    last_send: dict[str, dict] = {}
+    for line in lines:
+        record = line.get("record") or {}
+        if line.get("source") == "gates" and line.get("trace_id") in traces and "send" in record:
+            last_send[line["trace_id"]] = record["send"]
+    return sum(1 for send in last_send.values() if send.get("vetoed"))
 
 
 def withheld_restart_verdict(
@@ -688,7 +699,7 @@ def withheld_restart_verdict(
     stages = [
         (withheld, "no unsent row on the channel within timeout"),
         (marked, "the unsent row has no [not sent: final] marker after it"),
-        (recorded, "exchange_log has no vetoed heartbeat decision"),
+        (recorded, "the outcome log has no vetoed heartbeat decision"),
         (silent, "the bot sent a withheld reply to IRC"),
         (survived, "the unsent row did not survive the restart as unsent"),
         (recalled, "after the restart the bot did not recall the withheld token "
@@ -1477,7 +1488,7 @@ async def probe_reminder_restart(ctx: RunContext) -> ProbeResult:
 
 async def probe_heartbeat_smoke(ctx: RunContext) -> ProbeResult:
     """The config heartbeat job on internal:heartbeat runs a full exchange
-    (exchange_log row with origin 'heartbeat', an assistant row) and its
+    (an outcome-log record with origin 'heartbeat', an assistant row) and its
     reply reaches no transport: the bot says nothing on IRC."""
     channel = HEARTBEAT_CHANNEL
     if not ctx.channel_ready.get(channel):

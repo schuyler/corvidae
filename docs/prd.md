@@ -1394,11 +1394,14 @@ deciding only what to newly append and in what order.
    the check looks for, and how it chooses among the three, is the
    plugin's choice.
 
-**Outcome log.** One outcome-log row per trace (origin, originating
-row id, retrieval profile, appraisal, outcomes),
-written at admission or rejection and merged in place by every writer
-atomically. Rejected messages keep their row
-with a null row id.
+**Outcome log.** The outcome log keeps every record reported about a
+trace (origin, originating row id, retrieval profile, lens scores,
+outcomes), from admission or rejection on, and never overwrites one, so
+each exchange can be reconstructed from its records; operator redaction
+alone may tombstone text in them. A rejected message
+keeps its records with no row id. Plugins report records as an event that
+other plugins may also hear. When the outcome log is disabled, the operator
+is told at startup which records are not kept.
 
 **Corrections.** A user correction in conversation ("no, I told you X") produces a
 correction record, and the operator's corrections-export command emits a curatable
@@ -1507,7 +1510,7 @@ personality" otherwise only half-delivers.
 person, terms, due, status, episode links, attached to dossiers, broken
 ones persisting as facts about the relationship) let retrieval surface
 what the agent has promised. Endogenous goal candidates (curiosity:
-unresolved high-surprise episodes from the outcome log; care: dormant
+unresolved high-surprise episodes; care: dormant
 commitments and long-quiet valued relationships) reach the heartbeat only
 as inputs, behind the act-if-warranted and output gates.
 
@@ -1950,6 +1953,7 @@ record that holds the reasoning.
 |---|---|
 | apluggy entry points, not a hand-written registration order; `depends_on` validated at startup | principle 1; §3.1.13 |
 | Depend downward by type, sideways by hook: a plugin holds a reference only to a kernel plugin, named in its `depends_on` and resolved with `get_dependency`, and reaches any other plugin through hooks; it fires only hooks in `AgentSpec` or hooks whose owner it names in `depends_on` | principle 1; `docs/plugin-guide.md` "Plugin boundaries"; #1178; owner, 2026-11-22 |
+| The outcome log keeps every record reported about a trace, never overwriting one, instead of one row per trace merged in place; reporters reach it through an event any plugin may hear, and a disabled outcome log is reported at startup | §3.7 Outcome log; #1179; owner, 2026-11-23 |
 | A bundled plugin is replaced by naming an installed entry point that subclasses it in `plugins.replace`, never by an import path; a replacement that fails to load falls back loudly to the bundled plugin | principle 1; §3.1.14; #1107, operator, 2026-11-20 |
 | Single-turn dispatch; multi-turn reasoning emerges from notifications | principle 3; §3.1.2 |
 | Only startup is fatal, on named paths; after start, no channel content can fail its turns repeatedly. Enforced by a prompt build that cannot fail plus a wedge breaker, not by cataloguing per-turn call sites: catching exceptions doesn't stop a deterministic failure from recurring every turn | principle 5; §3.1.17–18; #352, #353 |

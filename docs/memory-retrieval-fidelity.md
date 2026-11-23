@@ -324,7 +324,7 @@ winner; tokens admitted per retrieval is the cost column.
   under-counts. Summing matches what near-dup merge does and the
   retention job tolerates inflation better than starvation, so sum,
   but it is a choice.
-- **What happens to `exchange_log` rows** that reference superseded
+- **What happens to outcome log lines** (and old `exchange_log` rows) that reference superseded
   record ids, if anything does. To check before writing the supersede
   step.
 

@@ -28,7 +28,7 @@ from corvidae.trace import mint_trace_id
 
 MINIMAL_DISABLED_PLUGINS = [
     "memory", "memory_tools", "funnel", "appraisal", "critique", "outcome_log",
-    "gates", "silence", "skills", "heartbeat", "goals",
+    "gates", "silence", "skills", "heartbeat", "goals", "trace",
 ]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

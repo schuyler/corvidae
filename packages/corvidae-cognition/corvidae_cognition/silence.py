@@ -9,8 +9,9 @@ things:
   * It vetoes a final emission that carries the ``NO_REPLY`` token — an
     exact reply, or a reply that embeds it — so nothing reaches the
     transport and the window records it as unsent.
-  * It records every decline (a vetoed ``NO_REPLY`` or an empty final) in
-    ``exchange_log.outcomes`` as ``{"silence": "no_reply" | "empty"}``.
+  * It reports every decline (a vetoed ``NO_REPLY`` or an empty final) on
+    ``on_trace_record`` (source ``silence``) as
+    ``{"silence": "no_reply" | "empty"}``.
 
 ``silence.mode`` (#797) adds a second way to ask for silence. In ``tool`` and
 ``both`` modes the plugin also registers an ``end_turn(reason)`` tool: a
@@ -18,7 +19,7 @@ tool-trained model takes a tool call more readily than a magic string. The
 tool's result tells the model to echo ``NO_REPLY``, which the veto then
 withholds, so the follow-up model call the loop makes after any tool result
 cannot leak text when the model complies. The call is recorded as
-``{"silence": "tool", "silence_reason": ...}``; the row means the tool was
+``{"silence": "tool", "silence_reason": ...}``; the record means the tool was
 called, not that nothing was sent.
 
 With the plugin disabled there is no instruction and no veto.
@@ -129,8 +130,8 @@ class SilencePlugin(CorvidaePlugin):
     """The right to silence: the instruction on conversational transports
     (via transform_system_prompt), the NO_REPLY veto, and the decline record."""
 
-    # Records through outcome_log when present; absent, nothing is recorded.
-    optional_depends_on = frozenset({"outcome_log"})
+    # Declines are reported through the trace protocol plugin's hook (#1179).
+    depends_on = frozenset({"trace"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -204,8 +205,8 @@ class SilencePlugin(CorvidaePlugin):
             trace_id = get_attribution().get("trace_id")
             if trace_id is None:
                 logger.warning(
-                    "silence: end_turn on %s has no trace id; no exchange_log row "
-                    "recorded", channel.id, extra={"channel": channel.id},
+                    "silence: end_turn on %s has no trace id; no trace record "
+                    "reported", channel.id, extra={"channel": channel.id},
                 )
             else:
                 plugin._ended.add(trace_id)
@@ -225,21 +226,15 @@ class SilencePlugin(CorvidaePlugin):
         return False
 
     def _record(self, trace_id: str, channel_id: str, outcomes: dict) -> None:
-        """Write ``outcomes`` to exchange_log from a tracked fire-and-forget
-        task, so the reply path never waits on the write connection."""
-        outcome_log = self.pm.get_plugin("outcome_log")
-        if outcome_log is None:
-            return
+        """Report ``outcomes`` on the trace from a tracked fire-and-forget
+        task, so the reply path never waits on a listener. Observe dispatch
+        logs a listener's failure, naming the hook and the plugin."""
 
         async def _write() -> None:
-            try:
-                await outcome_log.upsert_exchange(trace_id, channel_id, outcomes=outcomes)
-            except Exception:
-                logger.warning(
-                    "silence outcome write failed for %s on %s; the decline is "
-                    "not in exchange_log", trace_id, channel_id, exc_info=True,
-                    extra={"trace_id": trace_id, "channel": channel_id},
-                )
+            await self.pm.ahook.on_trace_record(
+                trace_id=trace_id, channel_id=channel_id, source="silence",
+                origin=None, record=outcomes,
+            )
 
         task = asyncio.create_task(_write())
         self._record_tasks.add(task)
@@ -320,8 +315,8 @@ class SilencePlugin(CorvidaePlugin):
             return
         if trace_id is None:
             logger.warning(
-                "silence: a %s decline on %s has no trace id; no exchange_log row "
-                "recorded", kind, channel.id, extra={"channel": channel.id},
+                "silence: a %s decline on %s has no trace id; no trace record "
+                "reported", kind, channel.id, extra={"channel": channel.id},
             )
             return
         self._record(trace_id, channel.id, {"silence": kind})
