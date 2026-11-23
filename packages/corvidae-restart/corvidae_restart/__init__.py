@@ -46,6 +46,7 @@ import sys
 import time
 from pathlib import Path
 
+import corvidae
 from corvidae.agent import Agent
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
@@ -94,6 +95,10 @@ async def run_preflight(config_path: Path, timeout: float) -> tuple[int, str]:
         "corvidae_restart.preflight",
         "--config",
         str(config_path),
+        # The code this process is running, so the child can refuse a venv
+        # whose corvidae resolves elsewhere (#1008).
+        "--expect-corvidae",
+        str(Path(corvidae.__file__).resolve().parent),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,

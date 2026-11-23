@@ -2038,3 +2038,49 @@ async def test_a_non_string_llm_key_refuses_the_reload(tmp_path, caplog):
     assert "config reload failed" in caplog.text
     # The old config is still what the plugin holds.
     assert plugin.config["llm"]["profiles"]["main"]["model"] == "m1"
+
+
+async def test_a_scalar_daemon_section_refuses_the_reload_naming_it(tmp_path, caplog):
+    """#850: `daemon: 5` reloads nothing and says what is wrong, not a TypeError.
+
+    The scalar is truthy on purpose: a falsy one (`daemon: 0`) is also refused by
+    the next step's `parse_shutdown_timeouts`, so it would pass with this step
+    broken. On the pre-fix `validate_daemon_config` the truthy scalar raises
+    TypeError, which the watcher does not catch, and nothing is logged.
+    """
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    config_file = tmp_path / "agent.yaml"
+    base = "llm:\n  providers:\n    main: {base_url: http://localhost}\n  profiles:\n    main: {model: m1}\n"
+    config_file.write_text(base)
+
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {
+                "providers": {"main": {"base_url": "http://localhost"}},
+                "profiles": {"main": {"model": "m1"}},
+            },
+        },
+    )
+
+    config_file.write_text(base + "daemon: 5\n")
+
+    dispatched: list[dict] = []
+
+    async def capture(config: dict) -> None:
+        dispatched.append(config)
+
+    plugin._dispatch_config_reload = capture
+
+    with caplog.at_level("ERROR"):
+        await plugin._reload_config()
+
+    assert dispatched == [], "a rejected reload must dispatch nothing"
+    assert "daemon must be a mapping" in caplog.text
+    assert "got 5 (int)" in caplog.text

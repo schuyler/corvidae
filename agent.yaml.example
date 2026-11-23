@@ -21,7 +21,6 @@ llm:
       # max_retries: 3                   # max retry attempts on transient errors (429, 500, 502, 503, 504)
       # retry_base_delay: 2.0            # base delay in seconds for exponential backoff
       # retry_max_delay: 60.0            # maximum delay cap in seconds
-      # model_not_loaded_wait: 60.0      # seconds to wait out "model is not loaded" (llama-server router)
       # timeout: null                    # HTTP timeout in seconds per request (null means no timeout)
     # embedding:                         # optional: embedding servers are usually separate endpoints
     #   base_url: http://localhost:8082/v1

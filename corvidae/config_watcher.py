@@ -294,9 +294,12 @@ class ConfigWatcherPlugin(CorvidaePlugin):
 
         # Step 3c: Reject removed daemon idle keys (#165), same as startup.
         try:
-            validate_daemon_config(new_config.get("daemon") or {})
-        except ValueError:
-            logger.exception("config reload failed: invalid daemon config in %s", self._config_path)
+            validate_daemon_config(new_config.get("daemon"))
+        except ValueError as exc:
+            logger.error(
+                "config reload failed: %s in %s; reload skipped, running config unchanged",
+                exc, self._config_path, exc_info=True,
+            )
             return
 
         # Step 3d: Validate the channels section without applying it, so a

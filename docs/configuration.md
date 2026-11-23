@@ -126,7 +126,6 @@ A provider key written on a profile, a profile key written on a provider, a key 
 | `llm.providers.<name>.max_retries` | integer | `3` | Maximum retry attempts on transient HTTP errors (429, 500, 502, 503, 504) and connection failures. Set to 0 to disable retries. After they run out, the turn sends the error reply and then retries itself (5 s doubling to 60 s) until the backend answers. |
 | `llm.providers.<name>.retry_base_delay` | float | `2.0` | Base delay in seconds for exponential backoff between retry attempts. |
 | `llm.providers.<name>.retry_max_delay` | float | `60.0` | Maximum delay cap in seconds for exponential backoff. |
-| `llm.providers.<name>.model_not_loaded_wait` | float | `60.0` | Total seconds to keep retrying when the server answers HTTP 400 "model is not loaded" (a llama-server router running `--no-models-autoload` with another model swapped in). Separate from `max_retries`; uses the same backoff, with at least 1 s between attempts (the last sleep is cut short to fit the remaining wait). Must be a finite, non-negative number, or startup fails. The turn waits for this long before replying, so set it a little longer than a model swap takes. `0` disables. When it runs out, the reply names the unloaded model instead of the generic error, and the turn then retries itself (5 s doubling to 60 s) until the model is loaded. |
 | `llm.providers.<name>.timeout` | float | `null` | Total HTTP timeout in seconds per LLM request. `null` means no timeout: the request waits as long as the server takes, and a connect to a host that drops packets waits until the OS gives up. |
 
 ### Profile keys (`llm.profiles.<name>`)
@@ -408,6 +407,12 @@ Stage-1 appraisal, which scored every inbound message and every final from Engli
 The importance-prior weights `appraisal.prior.w_stakes`, `appraisal.prior.w_valence` and `appraisal.prior.w_novelty` were removed with the appraisal vector they weighted (#1189): memory scores a record's importance itself, from the consolidation reply's rating or else the rubric. They are warned the same way and otherwise ignored; a `set_settings` write to one succeeds and changes nothing. Stage 2 keeps `appraisal.stage2_fork_prompt` (above).
 
 `critique.provenance.enabled` (default `true`) switches the provenance check. It has no other tunables; its instruction is the static `critique.provenance.fork_prompt`. Stage-2 appraisal detects the past claims and a fork of the window judges them, so the check needs the `appraisal` plugin and `agent.forks` covering `critique`. See [cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy).
+
+The wait for an unloaded router model (`llama-server` answering 400 "model is
+not loaded") is fixed at 60 s. `llm.providers.<name>.model_not_loaded_wait` was
+an operator key until #956: it decided only how long the reply waited before
+naming the unloaded model, and the turn retries itself afterwards anyway. A
+config that still sets it now fails startup, naming the key.
 
 ### The critique fork's bounds (#1190)
 
@@ -1409,7 +1414,7 @@ The block has no keys. `context_panel: {}` or an empty `context_panel:` enables 
 
 Requires the restart extra (`--extra restart` on your `uv sync` line). Without it the `restart` tool does not exist.
 
-`RestartPlugin` provides a `restart` tool that the agent can call to restart the daemon after plugin, prompt, or config changes. A loop guard prevents restart loops: no restart until a human has messaged since boot, a minimum uptime, and a maximum number of restarts per time window. A pre-flight check boots the daemon's startup as far as plugin `on_init` (logging, config sections, channels, plugin loading, hook and dependency checks) before the daemon is killed, and refuses the restart if that fails, with the kernel's `Config error:` line or a `pre-flight failed:` line naming the exception. It skips `on_start` and CLI overrides; see the threat model's "Pre-flight" section. After the restart, a notification is delivered to the originating channel (or the home channel as fallback) with the reason, downtime, and plugin list.
+`RestartPlugin` provides a `restart` tool that the agent can call to restart the daemon after plugin, prompt, or config changes. A loop guard prevents restart loops: no restart until a human has messaged since boot, a minimum uptime, and a maximum number of restarts per time window. A pre-flight check boots the daemon's startup as far as plugin `on_init` (logging, config sections, channels, plugin loading, hook and dependency checks) before the daemon is killed, and refuses the restart if that fails, with the kernel's `Config error:` line or a `pre-flight failed:` line naming the exception. It refuses it in a third case too: a non-daemon thread a plugin left running after `on_stop` (#757), where the line names the thread and says whether this process has an exit bound — with `daemon.exit_timeout` set to 0 or null it has none, and the restart tool kills it at its own preflight timeout (#854). It also refuses when the venv's `corvidae` does not resolve to the code the running daemon is using, which an editable install of a workspace package from another checkout causes; the line names both paths and says to re-run the deployment's requirements install (#1008). It skips `on_start` and CLI overrides; see the threat model's "Pre-flight" section. After the restart, a notification is delivered to the originating channel (or the home channel as fallback) with the reason, downtime, and plugin list.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

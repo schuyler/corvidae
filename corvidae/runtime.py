@@ -250,7 +250,7 @@ class Runtime:
             # failure here still cleans up under the configured bound.
             self.shutdown_timeouts = parse_shutdown_timeouts(config.get("daemon"))
             validate_agent_config(config.get("agent", {}))
-            validate_daemon_config(config.get("daemon") or {})
+            validate_daemon_config(config.get("daemon"))
             # The llm profiles, defaults and stage map: a bad block exits
             # here, before any plugin loads.
             parse_llm_config(config.get("llm"))
@@ -561,7 +561,9 @@ class Runtime:
             # thread before raising would still hold interpreter exit open,
             # so arm the same bound as the shutdown path (#757).
             if exit_watchdog:
-                arm_exit_watchdog(self.shutdown_timeouts.exit)
+                arm_exit_watchdog(
+                    self.shutdown_timeouts.exit, phase="the failed startup"
+                )
             raise
         _starting = False
         loop.add_signal_handler(signal.SIGTERM, _handle_stop_signal)
