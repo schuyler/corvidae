@@ -16,7 +16,7 @@ from importlib.metadata import entry_points
 from corvidae.commands.redact import redact_messages
 
 from cognition.test_redact_cascade import insert_message, make_full_db
-from tests.cognition.trace_helpers import outcomes_file, read_outcomes
+from tests.cognition.trace_helpers import outcomes_file
 
 CLAIMS = [
     {"claim": "The kestrel nests at Brannan Street", "queries": ["kestrel Brannan", "nest"]},
@@ -64,8 +64,17 @@ async def _db_with_dialog(tmp_path):
 
 
 def _records(path, trace_id, source):
-    return [l["record"] for l in read_outcomes(path)
-            if l["trace_id"] == trace_id and l["source"] == source]
+    """One trace's records from one source; lines that do not parse (the
+    corrupt-line test keeps one) are skipped."""
+    records = []
+    for raw in path.read_text().splitlines():
+        try:
+            line = json.loads(raw)
+        except ValueError:
+            continue
+        if line["trace_id"] == trace_id and line["source"] == source:
+            records.append(line["record"])
+    return records
 
 
 class TestScrub:
