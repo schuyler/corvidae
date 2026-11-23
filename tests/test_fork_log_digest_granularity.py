@@ -1,46 +1,93 @@
-"""Digest granularity: a block digest has to describe the rendered block, not
-just its text (#1204 review follow-up).
+"""A block digest has to describe the rendered block, not just its text (#1204).
 
-`digest_of(text)` hashes a string, so a call site can only hand it
-`message["content"]`. The chain it feeds is a list of rendered *messages*,
-where `role` and `tool_calls` are part of what was sent — and `context.py`'s
-`mid_conversation_system_role` makes a role-only difference a real occurrence
-in this codebase, not a hypothetical. Two prompts differing only in a role then
-yield identical digest lists while `prompt_sha256` differs, so a reconstructed
-chain can describe a prompt whose hash does not match the row's: exactly the
-mismatch this table exists to catch.
+`digest_of(text: str)` can only be fed `message["content"]`, so a call site has
+no way to put `role` or `tool_calls` into the digest list. Two prompts that
+differ only there therefore share a digest list and differ in `prompt_sha256` —
+and nothing in the module compares a reconstructed chain against the row's
+prompt hash, so no check fires: the row simply describes a send that was not
+the one recorded.
 
-Test 1 is strict-xfail: it fails against the current implementation (the
-function cannot take a rendered block at all) and flips to XPASS when
-`digest_of` accepts one. Tests 2 and 3 pin the asymmetry that makes it a
-correctness finding rather than a nit.
+The property under test is the one `fork_digest` exists for — that a resolved
+chain identifies which prompt was sent — asserted through the public API rather
+than against `digest_of`'s signature, so the test flips to passing whether the
+fix lands in `digest_of` or at the call sites.
+
+`context.py:433` (`mid_conversation_system_role`) renders non-leading system
+messages under a configured role, which is a role-only difference at constant
+content. I claim no frequency: 0 message contents in 24h of my own store were
+shared across two roles (probe 12:10:30Z), and system prompts are not in
+`message_log` at all, so that probe cannot see this path either.
 """
+
+from __future__ import annotations
 
 import pytest
 
-from corvidae_cognition.fork_log import digest_of, prompt_sha256
+from corvidae_cognition.fork_log import ForkLog, digest_of, prompt_sha256
 
-USER_X = [{"role": "system", "content": "S"}, {"role": "user", "content": "x"}]
-ASSISTANT_X = [{"role": "system", "content": "S"}, {"role": "assistant", "content": "x"}]
+pytestmark = pytest.mark.timeout(30)
+
+# Same content, different send. A role flip and a tool-call are the two shapes
+# this codebase produces.
+SYSTEM_ROLE_FLIP = [
+    {"role": "system", "content": "frame"},
+    {"role": "user", "content": "same words"},
+]
+SYSTEM_ROLE_FLIPPED = [
+    {"role": "system", "content": "frame"},
+    {"role": "assistant", "content": "same words"},
+]
+TOOL_CALL_ONLY = [
+    {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "name": "shell"}]},
+]
+NO_TOOL_CALL = [{"role": "assistant", "content": None}]
+
+
+@pytest.fixture
+async def log(tmp_path):
+    log = ForkLog(str(tmp_path / "sessions.db"))
+    await log.open()
+    try:
+        yield log
+    finally:
+        await log.close()
+
+
+async def _chain_for(log: ForkLog, messages) -> list[bytes]:
+    """One fork, digests as a caller must compute them: content only.
+
+    The `or ""` is load-bearing and part of the finding: a call site that passes
+    `block["content"]` straight through raises on a tool-call block, whose
+    content is None (measured: AttributeError from digest_of, 12:18:10Z). A
+    caller that avoids the crash collapses it to the empty string, which is what
+    the parametrized tool-call case below then pins — two different sends, the
+    same digest list.
+    """
+    fork_id = await log.record(
+        stage="critique",
+        channel_id="internal:test",
+        messages=messages,
+        digests=[digest_of(block["content"] or "") for block in messages],
+    )
+    chain = await log.resolve_chain(fork_id)
+    assert chain is not None, "a single-fork chain should always resolve"
+    return chain
 
 
 @pytest.mark.xfail(
     strict=True,
-    reason="digest_of(text) cannot take a rendered block, so role and tool_calls are invisible to the chain",
+    reason="a digest list over content cannot distinguish two sends that differ in role or tool_calls",
 )
-def test_a_block_digest_distinguishes_a_role_change():
-    left = [digest_of(block) for block in USER_X]
-    right = [digest_of(block) for block in ASSISTANT_X]
-    assert left != right
+@pytest.mark.parametrize(
+    "left, right",
+    [(SYSTEM_ROLE_FLIP, SYSTEM_ROLE_FLIPPED), (TOOL_CALL_ONLY, NO_TOOL_CALL)],
+    ids=["role-flip", "tool-call-only"],
+)
+async def test_a_resolved_chain_identifies_which_prompt_was_sent(log, left, right):
+    assert prompt_sha256(left) != prompt_sha256(right)
+    assert await _chain_for(log, left) != await _chain_for(log, right)
 
 
-def test_hashing_content_alone_collides_across_that_role_change():
-    # What the current signature forces a call site to do, and the collision it
-    # produces: identical block lists for two prompts that are not the same send.
-    left = [digest_of(block["content"]) for block in USER_X]
-    right = [digest_of(block["content"]) for block in ASSISTANT_X]
-    assert left == right
-
-
-def test_the_prompt_hash_does_notice_a_role_change():
-    assert prompt_sha256(USER_X) != prompt_sha256(ASSISTANT_X)
+async def test_the_prompt_hash_does_notice_both(log):
+    assert prompt_sha256(SYSTEM_ROLE_FLIP) != prompt_sha256(SYSTEM_ROLE_FLIPPED)
+    assert prompt_sha256(TOOL_CALL_ONLY) != prompt_sha256(NO_TOOL_CALL)
