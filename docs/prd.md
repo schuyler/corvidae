@@ -80,8 +80,8 @@ one is a bug even if its tests pass.
    another plugin (marking one it works without as optional), so no
    plugin's behaviour changes silently when another is absent, and
    documents what the system does without it. The cognition plugins
-   (memory, retention, funnel, appraisal, critique, outcome log, memory
-   tools, goals, trust, sensitivity) are a second distribution behind an
+   (memory, retention, the funnel's admission policy, appraisal, critique,
+   outcome log, memory tools, goals, trust, sensitivity) are a second distribution behind an
    optional install; the kernel installs, boots, and passes its tests
    without them and without the vector extension. Heavy third-party clients
    that only one transport needs are optional installs too (the ACP and
@@ -105,11 +105,12 @@ one is a bug even if its tests pass.
 3. **Background cognition avoids blocking the main turn.** The point is
    interactivity. The agent loop is single-turn dispatch: one LLM call per
    queue item, tool calls as tasks, results re-entering as notifications.
-   Appraisal, critique, consolidation, and retention run opportunistically
-   as silent tasks or plugin-owned tasks, and shape the *next* turn.
+   Appraisal and critique after the exchange, consolidation, and retention
+   run opportunistically as silent tasks or plugin-owned tasks, and shape
+   the *next* turn.
    Background work runs in the gaps between main turns. Deferral is bounded
    so interactivity can't starve it: an exchange's own background work
-   (stage-2 appraisal, critique) forks the exchange's prefix and runs under
+   (appraisal, critique) forks the exchange's prefix and runs under
    its channel's lease (§3.13.4), so that lease never orders it behind
    its own channel's other calls, and where another queue is waiting for the head it takes
    its turn in FIFO order, so traffic on other channels can't starve it
@@ -117,10 +118,11 @@ one is a bug even if its tests pass.
    the operator leaves without one (§3.13.5) that guarantee does not
    hold. Background work does not hold back
    its own channel's next main turn, and its results shape a later turn.
-   The exception is a check that runs before a reply is sent or before a
-   tool call runs (§3.7 Output gate 7; §3.5.12), which may delay that
-   reply or call for no longer than the channel's check allowance
-   (§3.13.5).
+   There are two exceptions (§3.1.21). What plugins contribute to a turn
+   before it is composed may delay composing it, and a check that runs
+   before a reply is sent or before a tool call runs (§3.7 Output gate 7;
+   §3.5.12) may delay that reply or call; each delays it for no longer
+   than the channel's check allowance (§3.13.5).
    What a fork costs on a given backend is measured, not assumed (§3.8.6).
    Other background work (upkeep) waits its turn for a head when every
    head is leased, and upkeep past its latency bound
@@ -160,8 +162,10 @@ one is a bug even if its tests pass.
    against operator-authored fixtures run in CI; LLM-judged suites run out
    of band and are tracked as benchmarks, never as gates.
 
-7. **Cheap, always-on perception gates expensive cognition.** The appraisal
-   signal feeds consolidation strength.
+7. **Cheap, always-on perception gates expensive cognition.** Appraisal,
+   a fast first pass, scores which critique lenses an exchange warrants,
+   and the slower critique runs the lenses those scores select, plus an
+   operator-set sampled share that measures what selection misses.
    Epistemic checks stay independent of the appraisal scores: the
    provenance check fires on any claim about the past and is judged against
    records, never on generator confidence. Thresholds ship as commented
@@ -180,9 +184,9 @@ one is a bug even if its tests pass.
 9. **The operator is trusted; everyone else is text.** Prompt injection is
    the threat, not other tenants. Anything that arrived from a channel, a
    web page, an MCP server, or a memory distilled from those is data, and
-   is framed as such at one chokepoint: the kernel's prompt build
-   (§3.3.11), plus the funnel's own framing of what it retrieves (§3.7
-   Funnel). The operator decides the trust
+   is framed as such at one chokepoint, the kernel's: its prompt build
+   (§3.3.11) and the one framing it gives all text it holds for a turn,
+   whoever offered it (§3.1.22). The operator decides the trust
    boundary, not the architecture: transports are default-deny with silent
    refusal, so the operator decides who may reach the agent (the
    allowlists, plus anyone the agent messages first, unless the operator
@@ -484,8 +488,9 @@ one is a bug even if its tests pass.
     a notification or a retry stops the run and keeps its place, and the
     channel queue never coalesces notification items. Batching before the
     queue is allowed: a producer may merge a burst into one notification,
-    and the funnel holds notification payloads outside the queue and admits
-    them per channel and origin at the turn their one stub triggers (§3.7).
+    and the kernel holds notification payloads outside the queue and admits
+    them per channel and origin at the turn their one stub triggers (item
+    22).
     A coalesced burst is one exchange for the turn limit (item 3). The last
     message's trace owns the turn: every turn hook, usage record and reply
     carries it, and the earlier messages' traces get admission and
@@ -498,6 +503,38 @@ one is a bug even if its tests pass.
     warning. The result of work already started is never offered. The
     kernel gives no verdict of its own, and lets plugins read how much
     accepted work is waiting.
+21. Plugins act on a turn at three points. Before compose, before the
+    model call, a plugin may contribute context for the turn; there is
+    nothing yet to judge. Before effect, once the model has produced a
+    reply or a tool call and before the reply is sent or the call runs, a
+    plugin may let it through or object to it (§3.7 Output gate 7;
+    §3.5.12).
+    At idle, when no message waits on the channel, a plugin's work can
+    only inform a later turn. At the first two points the kernel offers
+    the turn, or the reply or call, to plugins and waits for their answers for no longer than the
+    channel's check allowance (§3.13.5), counted from when it offers them,
+    and goes on as soon as every answer has arrived; before effect, a
+    refusal that arrives in time ends the wait at once. Waiting costs no
+    work while no answer has arrived. An answer that arrives once the
+    allowance has run out is not discarded for being late: it
+    reaches the channel at its next turn as framed CONTEXT (item 22) and
+    wakes no turn, and the miss is recorded, naming the point.
+22. The kernel holds text bound for a channel's window until a turn
+    admits it at the tail (principle 2): contributions to a turn and late
+    answers (item 21), non-tool-call notification payloads, and anything else a
+    plugin offers for that turn. A notification payload is held outside
+    the queue and admitted at the turn its stub triggers, coalesced per
+    `(channel, origin)`, so a critique verdict cannot ride a reminder's
+    stub; a held payload leaves the queue at admission, and the pending
+    flag clears when a drain is attempted. A payload can instead be held
+    without a stub; it is admitted at the channel's next turn, whatever
+    that turn's origin, and wakes nothing. The kernel appends and persists
+    what it admits as one CONTEXT row, which carries its row id, and frames
+    it as data, not instructions, labelled with where it came from, in one
+    form whoever offered it (principle 9). Which held entries are
+    admitted, and in what order, is an admission policy plugin's choice
+    (§3.7 Funnel); with none loaded, every entry is admitted as offered.
+    The kernel never expires held text; a policy plugin may.
 
 ### 3.2 Transports
 
@@ -704,7 +741,7 @@ Per transport:
    agent's view (evals, and any path built without it; a replay sends the
    request the running agent would, so it is not one); it paraphrases other people's
    messages and tool output and persists as `user`, under the same
-   data-not-instructions framing the funnel uses, for the reason
+   data-not-instructions framing the kernel gives held text (§3.1.22), for the reason
    `docs/threat-model.md` finding 3 gives for CONTEXT. The role is
    persisted with the summary row, so a reload renders the same prompt.
    The harness compaction probe asserts that the model answers the person
@@ -727,7 +764,7 @@ Per transport:
    always keeps reasoning. Any other value, or the retired setting, fails
    at startup and on reload.
 7. The operator sets, to `system` or `user`, the role under which every
-   non-leading system message is sent (funnel CONTEXT, notifications
+   non-leading system message is sent (held CONTEXT, notifications
    without a tool-call id, framed orphan results, framed late results). It
    is a prompt-build rewrite only; the window and the database keep
    `role: system`. `user` is what strict templates need and what keeps
@@ -1001,8 +1038,8 @@ Per transport:
    capability the operator can lock (principle 15). `docs/threat-model.md`
    records what speaking anywhere costs (principle 9).
 10. Notes to another channel's context: any turn can leave information for
-    another channel. The note is admitted through the funnel at the tail of
-    the target channel's window (§3.7 Funnel), framed as the agent's own
+    another channel. The note is held for the target channel and admitted
+    at the tail of its window (§3.1.22), framed as the agent's own
     note and labelled with the channel it came from, persisted like any
     CONTEXT row (principle 4), and retires past the compaction boundary
     (principle 2). It is information, not an instruction: the target
@@ -1097,7 +1134,7 @@ Per transport:
 This section adapts Persyn's BOOTSTRAP specification, the external
 reference, through principles 1–3; the decision log records where it
 diverges. The output of every subsystem here enters the main window
-only through the funnel.
+only as text the kernel holds, admits and frames (§3.1.22).
 
 **Memory.**
 
@@ -1127,8 +1164,7 @@ only through the funnel.
    trigger of the call that produced it, so the records a given prompt or trigger wrote can be
    found; a record no consolidation call produced is marked as such.
    It is scored by a pluggable importance prior (the consolidation's own
-   rating when it gave one, else a cheap-model rubric, by default; the
-   appraisal vector when appraisal is registered and covers the range;
+   rating when it gave one, else a cheap-model rubric, by default;
    a surprise term as a toggle, below).
    Surprise modulates encoding strength only, never entry into the raw
    log.
@@ -1155,7 +1191,7 @@ only through the funnel.
    indexed records, or on score or raw similarity where configured, drop
    weak (a query with nothing above weak admits nothing), annotate
    conflicts between records with opposed claims and prefer the later
-   one, and admit through the funnel as `(age, memory <id>) summary`
+   one, and contribute them to the turn (§3.1.21) as `(age, memory <id>) summary`
    lines, marked `[marginal] (age, memory <id>) summary` when moderate. Admitted records get their
    access statistics bumped; every retrieval writes a retrieval-record row and the exchange's retrieval
    profile. Retrieval spans the agent's whole memory; there is no
@@ -1200,53 +1236,60 @@ only through the funnel.
     statistics; replay respects redaction tombstones, and both return
     their output fenced as untrusted.
 
-**Funnel.** The single admission chokepoint for tail CONTEXT: dedupe
-against CONTEXT already in the window, on the entry's key when its source
+**Funnel.** The admission policy for the CONTEXT the kernel holds
+(§3.1.22): dedupe against CONTEXT already in the window, on the entry's key when its source
 gives one (matched against that source's CONTEXT; memory gives its record
 id), else on its text; per-source token budgets
 (operator-set, with a default) and an optional
 per-source ceiling on what one window holds
 (operator-set), admitting in priority order,
-skipping entries that don't fit, drops logged; data-not-instructions
-framing of retrieved data, labelled with where it came from, written
-once here (everything else is framed by the kernel, §3.3.11); append and persist one CONTEXT row, which carries its row id. Non-tool-call notification payloads are ingested by the funnel and admitted at the turn their stub triggers, coalesced per `(channel, origin)`, so a critique verdict cannot ride a reminder's stub; an ingested payload leaves the queue at admission, and the pending flag clears when a drain is attempted. A payload can instead be ingested without a stub; it is admitted at the channel's next turn, whatever that turn's origin, and wakes nothing. A source can also hand the funnel a promise of entries before a turn; the funnel admits it through the same path once it resolves. A stub-less payload or promise older than an operator-set time-to-live is dropped. Salience
+skipping entries that don't fit, drops logged. A stub-less payload or
+contribution older than an operator-set time-to-live is dropped. Salience
 arbitration across sources is a policy swap inside the funnel (a toggle,
 below),
 deciding only what to newly append and in what order.
 
 **Appraisal.**
 
-1. Stage 2 runs post-acceptance, off the response path, in a silent task
-   that judges the exchange as the agent saw it (§3.8): the fuller vector
-   (valence, stakes, ambiguity, commitment density, novelty), the
-   importance prior, the memory record's valence tag. A tier-2 readout
-   head over the embedding replaces the model call where a trained head
-   matches it.
-2. Vectors are persisted per exchange to the outcome log.
+1. Appraisal is the fast first pass: it scores which critique lenses a
+   reply warrants (the critique vector, Critique 1) and lists the claims
+   about the past it makes (Critique 2). It runs at both points critique
+   does: before the reply is sent, within the channel's check allowance
+   (§3.1.21; §3.13.5), and after the exchange, off the response path in a silent
+   task. Each time it judges the reply as the agent saw it (§3.8). A
+   tier-2 readout head over the embedding replaces the model call for
+   lens selection where a trained head matches it; listing claims stays
+   with the model call.
+2. Its lens scores are persisted per exchange to the outcome log, naming
+   the point at which they were made.
 3. Every parameter is a commented best-guess constant resolved at
    decision time through both tuning surfaces.
 
 **Critique.**
 
-1. After an exchange ends, critique checks it with lenses, without delaying
-   the reply. A check that runs before a reply is sent is the pre-send
-   check (Output gate 7), which may delay it. Critique does not start
-   while a message waits on its channel (principle 3). Each lens checks for one kind of problem and is offered to
-   the stage-2 appraisal fork with a one-line appraisal question. The
-   fork scores each offered lens's question, and "none", for the exchange:
-   the critique vector. The top share runs, and "none" wins ties. The
+1. Critique checks a reply with lenses at two points: before it is sent,
+   as part of the pre-send check (Output gate 7), which may delay it; and
+   after the exchange ends, without delaying the reply. After the
+   exchange, critique does not start while a message waits on its channel
+   (principle 3). Each lens checks for one kind of problem and is offered
+   to the appraisal fork with a one-line appraisal question for each
+   point at which it runs. At each point the fork scores each offered
+   lens's question, and "none", for the exchange: the critique vector. The top share runs, and "none" wins ties. The
    built-in lenses check for a misread request (predictive), commitments
    the agent cannot keep (constrained) or objections the agent dismissed
-   (adversarial), each when its question wins. When "none" wins, or there is
-   no vector, a tunable, operator-set share of exchanges
+   (adversarial), each when its question wins. When "none" wins, or appraisal
+   ran and gave no vector, a tunable, operator-set share of exchanges
    is checked by one random offered lens, built-ins and plugin lenses
    alike, which bounds and measures what selection misses. With no
-   appraisal plugin, one random offered lens runs. A lens is added without
-   changing critique; it declares its appraisal question, and the
-   question is operator-configurable. Every lens judges the exchange as
+   appraisal plugin, one random offered lens checks a tunable,
+   operator-set share of replies at each point, one share for both
+   points, which the operator can set to every reply and which by default
+   is less than every reply. A lens is added without
+   changing critique; it declares its appraisal questions, and the
+   questions are operator-configurable. Every lens judges the exchange as
    the agent saw it (§3.8).
 2. The provenance check runs on any claim about the past, independent of
-   the appraisal scores. Stage-2 appraisal (a model) lists the claims. The
+   the appraisal scores. Appraisal (a model) lists the claims. The
    provenance critic (a model) judges whether any record supports each
    claim, and its evidence is what the agent had when it wrote the reply:
    the window up to the reply (the system prompt, the exchange's
@@ -1410,7 +1453,7 @@ records carry no trust tag and nothing is quarantined. The most intimate
 write-side channel is the agent's own consolidation path: a prior
 instance's note re-enters with the authority of an internal voice. `self`
 facts need no gate of their own: they are memory-tier data, re-entering
-only through the funnel's framing, and trust inheritance plus the
+only through the kernel's framing of held text, and trust inheritance plus the
 provenance-gate exclusion already answer a poisoned one. The self-model
 below is the exception, because it is the one agent-authored write outside
 that framing. Epistemic framing at consolidation plus the append-only log, reachable
@@ -1436,19 +1479,19 @@ on skill writes is a lock the operator can apply (principle 15); the idle
 scan watches skill-directory writes either way.
 
 **Interoception and the self-model.** The system computes rich state about
-itself (retrieval profile, appraisal vector, output entropy, window fill)
+itself (retrieval profile, output entropy, window fill)
 and consumes nearly all of it subcortically: admitted memory lines carry
 their own relevance band, but the aggregate retrieval profile, the
-appraisal vector, the entropy summary, and window fill reach the model only
+entropy summary, and window fill reach the model only
 through the interoception line. The interoception line is one compact
-funnel-admitted CONTEXT line per turn exposing that state so the agent can
+CONTEXT line per turn, held and admitted by the kernel (§3.1.22), exposing that state so the agent can
 perceive and narrate its own condition instead of confabulating it: a few
 tokens, never load-bearing, absent signals degrade to an absent line, and
 its eval is whether self-reports become accurate against the outcome log,
 which records window fill. The self-model is a compact block compiled from
 `self` facts into the stable prompt region, refreshed rarely (a legitimate,
 infrequent cache break, the same argument as the skills index). Because the
-stable region is the one prompt position the funnel's data framing does not
+stable region is the one prompt position the kernel's data framing of held text does not
 reach, the compile reads only `self` facts whose inherited trust meets a
 configured floor, and each refresh notifies the operator with the diff of
 the block: a review after the fact, not an approval before it. The
@@ -1500,7 +1543,7 @@ design, not requirement. The requirements are outcomes:
    turns (principles 2 and 4). It mutates nothing, persists nothing, fires
    no hooks, dispatches no tools, and refuses any reply
    carrying a tool call, structured or written out as text.
-2. Background judgment of an exchange (stage-2 appraisal, the critique
+2. Background judgment of an exchange (appraisal, the critique
    lenses, the provenance check) sees what the agent saw when it wrote the
    reply: the window up to the reply and nothing written after it, never a
    rebuilt copy of the conversation, because a rebuilt context loses the
@@ -1791,7 +1834,7 @@ requirements until decided.
    go to waiting queues in FIFO order unless a scheduler plugin replaces
    the order (item 7).
 4. A fork runs under the lease that holds its prefix. Exchange-scoped
-   background work (stage-2 appraisal, critique) forks the conversation
+   background work (appraisal, critique) forks the conversation
    (§3.8), so it runs under the lease of the queue whose head holds that
    prefix. Under the kernel's default order (item 7) a fork's calls keep
    that head as any of its queue's calls do: while no other queue waits.
@@ -1811,7 +1854,8 @@ requirements until decided.
    config defines which classes exist and what each one's bound is.
    A channel also has a check allowance: how long a check may delay a
    reply before it is sent (§3.7 Output gate 7) or a tool call before it
-   runs (§3.5.12). It is a setting of its own and not the latency bound:
+   runs (§3.5.12), and how long contributions may delay composing a turn
+   (§3.1.21). It is a setting of its own and not the latency bound:
    a transport may declare the allowance its channels default to, and
    the operator can set a channel another. It is never below a minimum,
    small but not zero, which the operator can change and which a channel
@@ -1910,12 +1954,13 @@ record that holds the reasoning.
 | Demote, don't delete; usage-weighted retention; near-duplicate merge at consolidation | §3.7 Memory 3, 6; diverges from the Persyn spec's culling |
 | Operator-only `redact` is the one deletion path; it stays in the kernel | principle 4; §3.7 Memory 8 |
 | Knowledge graph not part of the shipped memory: extraction is noisy, n-hop context is expensive, and at personal scale a graph duplicates facts plus vector and FTS retrieval; a graph plugin isn't precluded | diverges from Persyn §4.3 |
-| Emotion classifier replaced by appraisal valence | §3.7 Appraisal; diverges from Persyn §4.9 |
+| No emotion classifier and no appraisal vector: appraisal scores which critique lenses a reply warrants and lists its claims about the past; the five-dimension vector (valence, stakes, ambiguity, commitment density, novelty), the correction flag, the importance prior built from them and the memory valence tag were removed as unused, and memory scores importance itself; the readout head is retargeted at lens selection, not dropped | principle 7; §3.7 Appraisal, Memory 2; diverges from Persyn §4.9; #1189, #141; owner, 2026-11-23 |
+| Appraisal is the fast first pass and heads the chain: it scores the lenses its peers offer, before a reply is sent and after the exchange, and critique, the slower second pass, runs the lenses it selects from those scores, plus a sampled share of exchanges when none is selected; with no appraisal plugin, critique samples one random lens on an operator-set share of replies, one share for both points, below every reply by default | principle 7; §3.7 Appraisal, Critique 1; #1169; owner, 2026-11-23 |
 | The agent behaves the same whatever language a message is written in: nothing decides by matching one language's words or assuming one script's conventions | #1185; #1186; owner, 2026-11-22 |
 | Core mints the exchange key | §3.7 Appraisal 1–2 |
 | Origin is stamped and propagated, never inferred. Critique eligibility does not depend on origin: every main-loop turn is judged, and the recursion brake is delivery (objections on a `critique`-origin turn wake nothing) | §3.1.4; §3.7 Critique 3–4; #1031; owner, 2026-11-17 |
 | Two grades on a queue item: kernel-certified `metadata`, never a hook argument, and plugin-owned `annotations`; non-human items (and a person's message whose transport supplies a name or addressing) get a code-built header, and outside payloads a fence derived from the stored row; foreign-origin items are framed, never withheld (no silence default) | §3.1.4; §3.3.11; #555 |
-| Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
+| Silent tasks require no `tool_call_id` | principle 3; §3.1.22 |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
 | Every provider keeps warm context heads, and the operator declares how many; queues lease heads and switch at call boundaries (drain or yield, latency classes); no spend or rate caps for now; single-slot is a deployment choice, not architecture; the lease order is pluggable (release on drain superseded 2026-11-15, row below) | principle 16; §3.13; #296; operator, 2026-11-02 |
@@ -1931,7 +1976,7 @@ record that holds the reasoning.
 | Reminders and jobs the agent sets act on the calling channel only, with origin `reminder`; cross-channel reach is §3.5.9's alone, so the scheduler is not a second, unaudited path between channels or around the critique of reminders. Supersedes "a reminder may target any channel" | §3.9.7; #814; owner, 2026-11-17 |
 | A decline is signalled by a plugin-chosen mechanism (token, tool or both) and enforced by a veto that acts on the agent's signal, not a gate; a signal followed by sent text is not a decline | #791, #795, #797, #799, #806 |
 | Model endpoints may be remote; a profile's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each profile sends | #217 |
-| Critique is gated: a lens runs when the appraisal fork's critique vector selects it (or the sampled share draws it), the provenance check on every claim about the past, never unconditionally per reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
+| Critique is gated: a lens runs when the appraisal fork's critique vector selects it (or the sampled share draws it, the only path when no appraisal plugin is loaded), the provenance check on every claim about the past, never unconditionally per reply unless the operator sets the sampled share to every reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
 | No inline refine step: the sent reply is the candidate, and correction arrives on a later turn | principle 3; §3.7 Critique 4; the Persyn spec's own deferred-deliberation default |
 | Operator-seeded goals allowed | §3.7 Goals; diverges from the Persyn spec |
 | Goals enter the window only in the heartbeat's beat, as a capped list of the frontmost open or in-progress goals; the list carries as-of framing, so a later list supersedes every earlier one | §3.7 Goals; #1091; 2026-11-19 |
@@ -1977,7 +2022,9 @@ record that holds the reasoning.
 | Identity is agent-wide and heads every prompt written in the agent's voice; channel register is appended after it and never replaces it; the subagent's prompt is persona-neutral (§3.5.7) | operator directive, 2026-11-01; #380; #388 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
-| Checks before a reply is sent and before a tool call runs share one per-channel allowance, a setting of its own with no tie to latency bounds: a transport's default, which the operator can override, never below a minimum that is small but not zero, which the operator can change and which a channel whose transport declares none gets; the allowance counts from when a check starts, so time a call or reply spends waiting for anything else never spends it; a refusal that must hold on every channel decides within the minimum | principle 3; §3.5.12; §3.7 Output gate 7; §3.13.5; #1075, #1149; operator, 2026-11-22 |
+| Checks before a reply is sent and before a tool call runs, and the wait for contributions before a turn is composed, share one per-channel allowance, a setting of its own with no tie to latency bounds: a transport's default, which the operator can override, never below a minimum that is small but not zero, which the operator can change and which a channel whose transport declares none gets; the allowance counts from when a check (or the wait) starts, so time a call or reply spends waiting for anything else never spends it; a refusal that must hold on every channel decides within the minimum | principle 3; §3.1.21; §3.5.12; §3.7 Output gate 7; §3.13.5; #1075, #1149, #1176; operator, 2026-11-22; owner, 2026-11-23 |
+| Cognition meets a turn at three points: before compose (contributions), before effect (verdicts on a reply or tool call) and idle (work that informs a later turn). The kernel waits at the first two under the check allowance, ends early when every answer is in or, before effect, on the first refusal, and never busy-waits; every point is best-effort; blocking checks, a likely later need, must not be precluded, and this document is amended when they are taken up | principle 3; §3.1.21; #1176; owner, 2026-11-22 and 2026-11-23 |
+| The kernel holds text for a channel's next turn, admits it at the tail and frames it one way whoever offered it, so principle 9 has one framing chokepoint; it has no admission budget and never expires held text. Dedupe, budgets, order and expiry are admission policy, a replaceable plugin (the funnel), and with none loaded entries are admitted as offered | principle 1; principle 9; §3.1.22; §3.7 Funnel; #1176; owner, 2026-11-22 and 2026-11-23 |
 | A check that misses its allowance is not discarded: what it returns late reaches the channel at its next turn and wakes no turn, because the work is done and the result may still be useful in the main window, as critique after the fact already is; the agent decides whether to correct course | §3.5.12; §3.7 Output gate 7; #148, #1149; operator, 2026-11-22 |
 | A plugin can refuse a tool call before it runs: any refusal wins, the refusal is the call's result so the turn continues, and an implementation that raises counts as no refusal; admitted ahead of the trust plugin (#138), with the pre-tool-use check (#1075) as its first consumer | principle 5; §3.5.12; §3.1.11; #148 (#1076 closed as its duplicate); operator, 2026-11-22 |
 | A reply may be checked before it is sent, ending in send, held back for a revision, or withheld; a revision is not held back again, a present limit and not a principle; a held-back draft is not judged after the fact, its revision is; the check delays a reply only within its channel's check allowance, and the reply sends unchecked when it runs out | principle 3; §3.7 Critique 1 and 3, Output gate 4 and 7; §3.13.5; #1149; operator, 2026-11-21 and 2026-11-22 |
