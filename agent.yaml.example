@@ -117,8 +117,8 @@ agent:
 # memory:
 #   consolidate_after_tokens: 4000    # new window tokens that start a consolidation fork at the end of a
 #                                     # turn (agent.forks on for consolidation; positive integer; restart)
-#   entry_target_tokens: 256          # size target for one consolidation entry, in tokens: asked for as
-#                                     # round(n*0.75) words; overruns are stored in full and logged; also the
+#   entry_target_tokens: 256          # size target for one consolidation entry, in tokens (asked for
+#                                     # as n tokens, not words); overruns are stored in full and logged; also the
 #                                     # size of a raw-transcript record when both consolidation replies fail
 #                                     # (positive integer; changes prompt_hash; restart)
 #   half_life_days: 30                # retrieval recency decay (e-folding time, days)
@@ -368,7 +368,7 @@ agent:
 #   jobs:                              # synced by name on start and reload
 #     - name: morning-checkin          # unique; removing it disables the job durably
 #       channel: signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f
-#       every: 1d                      # required: 30s, 20m, 6h, 1d, 7d, 1h30m
+#       every: 1d                      # required: 30s, 20m, 6h, 1d, 7d, 1w, 1h30m (unit letters s m h d w only)
 #       at: "08:30"                    # optional anchor: HH:MM, or an ISO datetime
 #       prompt: "Good-morning check-in: ask how they slept and what is on today."   # or prompt_file: path
 #     - name: weekly-review
@@ -528,7 +528,8 @@ channels:
 # timepiece:
 #   interval_minutes: 10               # minutes between stamps per channel (number > 0)
 #   timezone: America/Los_Angeles      # IANA name; default the daemon's local time
-#   format: "%A %Y-%m-%d at %H:%M %Z"  # strftime format
+#   format: "%A %Y-%m-%d at %H:%M %Z"  # strftime format; unset = the system locale's form
+#                                      # (under C/POSIX this one); set, it always wins
 
 # --- inotify pings (requires --extra inotify; Linux only) ---
 # Notifies a channel when a watched file (e.g. a background job's log) is

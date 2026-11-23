@@ -44,7 +44,7 @@ and because the agent is one identity across channels (PRD principle 14) it
 crosses channels too.
 
 The former requirement's completeness check makes the gap concrete: it
-searches the two FTS indexes for one sample word from the redacted text.
+searches the two FTS indexes for one sample term (3 or more characters, with a letter) from the redacted text.
 That finds a verbatim copy in those two indexes and nothing else.
 
 ## What the shipped command does
