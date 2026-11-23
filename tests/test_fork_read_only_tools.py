@@ -156,7 +156,8 @@ async def test_fork_frames_every_result_as_untrusted_data(keyed_agent):
     await plugin.fork(channel, INSTRUCTION, stage="consolidation", max_tool_calls=2)
 
     # lookup does not declare returns_untrusted, yet its result is framed.
-    (tool_msg,) = _tool_msgs(seen[1]["messages"])
+    # The window already renders tool rows of its own; take the fork's by id.
+    (tool_msg,) = [m for m in _tool_msgs(seen[1]["messages"]) if m["tool_call_id"] == "c1"]
     row = {
         "role": "tool", "tool_call_id": "c1", "content": "RAW-LOOKUP-CONTENT",
         PROVENANCE_KEY: encode(ItemMetadata(tool="lookup", untrusted=True), {}),
@@ -256,7 +257,8 @@ async def test_undeclared_tool_is_refused_by_result_and_not_invoked(keyed_agent)
 
     assert result.text == "verdict"
     assert [name for name, _ in calls] == []
-    (tool_msg,) = _tool_msgs(seen[1]["messages"])
+    # The window already renders tool rows of its own; take the fork's by id.
+    (tool_msg,) = [m for m in _tool_msgs(seen[1]["messages"]) if m["tool_call_id"] == "c1"]
     assert tool_msg["tool_call_id"] == "c1"
     assert "writer" in tool_msg["content"]
     assert "not available in a fork" in tool_msg["content"]
@@ -276,7 +278,12 @@ def _calls_with(**override):
     _calls_with(function={"name": "lookup", "arguments": {"a": 1}}),
     _calls_with(function="lookup"),
     _calls_with(id=""),
-], ids=["no-name", "no-arguments", "non-str-arguments", "function-not-dict", "empty-id"])
+    _calls_with(id=7),
+    "not-a-call",
+], ids=[
+    "no-name", "no-arguments", "non-str-arguments", "function-not-dict",
+    "empty-id", "non-str-id", "call-not-dict",
+])
 async def test_malformed_call_raises_fork_refused(keyed_agent, bad):
     plugin, channel, client = keyed_agent
     calls: list = []
