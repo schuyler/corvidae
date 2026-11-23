@@ -85,8 +85,8 @@ CHAN_ID = 333333333333333333
 THREAD_ID = 444444444444444444
 DM_CHAN_ID = 555555555555555555
 
-BOT_MENTION = SimpleNamespace(id=BOT_ID)
-OTHER_MENTION = SimpleNamespace(id=OTHER_ID)
+BOT_MENTION = SimpleNamespace(id=BOT_ID, display_name="Alfred")
+OTHER_MENTION = SimpleNamespace(id=OTHER_ID, display_name="Lex")
 
 TYPING_REFRESH_FOR_TESTS = 0.05
 
@@ -772,7 +772,7 @@ class TestInboundFiltering:
 
     async def test_require_mention_false_admits_unmentioned_guild_message(self):
         """require_mention: false: an unmentioned guild message from an allowed
-        user is processed with its text intact; a mention is still stripped."""
+        user is processed with its text intact; a mention is named."""
         h = await _start_plugin(discord_overrides={"require_mention": False})
         try:
             await _deliver(
@@ -780,7 +780,7 @@ class TestInboundFiltering:
                 make_message("just chatting"),
                 make_message(f"<@{BOT_ID}> hi", mentions=[BOT_MENTION]),
             )
-            assert _delivered(h) == ["just chatting", "hi"]
+            assert _delivered(h) == ["just chatting", "@Alfred hi"]
         finally:
             await h.plugin.on_stop()
 
@@ -812,13 +812,13 @@ class TestInboundFiltering:
             await h.plugin.on_stop()
 
     @pytest.mark.parametrize("prefix", ["<@{id}>", "<@!{id}>"])
-    async def test_mention_is_stripped_from_text(self, prefix):
-        """R7: both mention forms are removed from the text the agent sees."""
+    async def test_mention_is_named_in_the_text(self, prefix):
+        """R7/#1215: both mention forms read as the bot's name."""
         h = await _start_plugin()
         try:
             content = prefix.format(id=BOT_ID) + " hi"
             await _deliver(h, make_message(content, mentions=[BOT_MENTION]))
-            assert _delivered(h) == ["hi"]
+            assert _delivered(h) == ["@Alfred hi"]
         finally:
             await h.plugin.on_stop()
 
@@ -832,13 +832,37 @@ class TestInboundFiltering:
         finally:
             await h.plugin.on_stop()
 
-    async def test_other_mentions_are_left_in_text(self):
-        """Only the bot's own mention token is stripped."""
+    async def test_other_users_are_named_too(self):
+        """#1215: every mention reads as a name, not one format per user."""
         h = await _start_plugin()
         try:
             content = f"<@{BOT_ID}> ask <@{OTHER_ID}> x"
             await _deliver(h, make_message(content, mentions=[BOT_MENTION, OTHER_MENTION]))
-            assert _delivered(h) == [f"ask <@{OTHER_ID}> x"]
+            assert _delivered(h) == ["@Alfred ask @Lex x"]
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_a_mention_without_a_name_reads_as_you(self):
+        """#1215: a mention Discord gave no name for still reads as a name."""
+        h = await _start_plugin()
+        try:
+            await _deliver(
+                h,
+                make_message(f"<@{BOT_ID}> hi", mentions=[SimpleNamespace(id=BOT_ID)]),
+            )
+            assert _delivered(h) == ["@you hi"]
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_a_mention_mid_sentence_keeps_its_spaces(self):
+        """#1215: naming the token leaves the sentence, and its spaces, intact."""
+        h = await _start_plugin()
+        try:
+            await _deliver(
+                h,
+                make_message(f"hey <@{BOT_ID}> can you look", mentions=[BOT_MENTION]),
+            )
+            assert _delivered(h) == ["hey @Alfred can you look"]
         finally:
             await h.plugin.on_stop()
 
