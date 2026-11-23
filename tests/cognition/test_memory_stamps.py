@@ -15,6 +15,8 @@ import time
 import aiosqlite
 import pytest
 
+from fake_clock import DEFAULT_START, install_kernel_clock
+from helpers import add_kernel_registry
 from corvidae_cognition.memory import (
     DEFAULT_ENTRY_TARGET_TOKENS,
     MemoryPlugin,
@@ -154,7 +156,8 @@ async def fork_env(tmp_path):
     memory, persistence, stub, channel, db = await build_consolidation_env(
         config, db_path=str(tmp_path / "s.db")
     )
-    memory.pm.register(_Registry(channel), name="registry")
+    # The builder already registered the kernel registry; add the channel to it.
+    add_kernel_registry(memory.pm).channels[channel.id] = channel
     ids = await seed_dialog(persistence, channel, DIALOG)
     channel.conversation = window_of(channel.id, ids, contents=[c for _, c in DIALOG])
     yield memory, channel, db, ids
@@ -294,6 +297,9 @@ async def test_non_str_prompt_rejected_at_init(key, value):
 
     memory = MemoryPlugin()
     pm = create_plugin_manager()
+    # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+    add_kernel_registry(pm)
+    install_kernel_clock(pm)
     config = config_with(EMBED_CONFIG, **{key: value})
     with pytest.raises(ValueError) as excinfo:
         await memory.on_init(pm=pm, config=config)
@@ -356,9 +362,9 @@ async def test_pre_change_db_gains_columns_without_rewriting_rows(tmp_path):
         await raw.execute("PRAGMA journal_mode=wal")
         await raw.execute(PRE_CHANGE_MEMORY_DDL)
         # A current retention run, so on_start's retention job doesn't demote
-        # the old-looking seeded rows and change what R3 must leave alone.
+        # the old-looking seeded rows (on the plugin's FakeClock, so seed from its start) and change what R3 must leave alone.
         await raw.execute("CREATE TABLE retention_meta (last_run REAL NOT NULL DEFAULT 0)")
-        await raw.execute("INSERT INTO retention_meta (last_run) VALUES (?)", (time.time(),))
+        await raw.execute("INSERT INTO retention_meta (last_run) VALUES (?)", (DEFAULT_START,))
         for i in (1, 2):
             await raw.execute(
                 "INSERT INTO memory (channel_id, created_at, summary, importance, "
@@ -417,7 +423,8 @@ async def test_fork_records_store_idle_and_compaction_triggers(tmp_path):
             config, db_path=str(tmp_path / f"{trigger}.db")
         )
         try:
-            memory.pm.register(_Registry(channel), name="registry")
+            # The builder already registered the kernel registry; add the channel to it.
+            add_kernel_registry(memory.pm).channels[channel.id] = channel
             ids = await seed_dialog(persistence, channel, DIALOG)
             channel.conversation = window_of(
                 channel.id, ids, contents=[c for _, c in DIALOG]

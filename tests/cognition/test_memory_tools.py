@@ -31,6 +31,8 @@ import pytest
 
 # PRIMARY IMPORT FAILURE — all tests below fail at collection time with
 # ModuleNotFoundError: No module named 'corvidae.tools.memory_tools'
+from fake_clock import install_kernel_clock
+from helpers import add_kernel_registry
 from corvidae_cognition.memory_tools import MemoryToolsPlugin
 
 from corvidae.channel import Channel
@@ -87,6 +89,9 @@ async def build_tools_env(config=None):
     await init_db(db)
 
     pm = create_plugin_manager()
+    # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+    add_kernel_registry(pm)
+    install_kernel_clock(pm)
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")
@@ -715,6 +720,9 @@ class TestMessageFtsBackfill:
 
         # Now initialize the memory stack (schema + backfill)
         pm = create_plugin_manager()
+        # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+        add_kernel_registry(pm)
+        install_kernel_clock(pm)
         persistence = PersistencePlugin()
         persistence.db = db
         pm.register(persistence, name="persistence")
@@ -765,6 +773,9 @@ class TestMessageFtsBackfill:
 
         # Initialize memory to create schema (including message_fts)
         pm = create_plugin_manager()
+        # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+        add_kernel_registry(pm)
+        install_kernel_clock(pm)
         persistence = PersistencePlugin()
         persistence.db = db
         pm.register(persistence, name="persistence")

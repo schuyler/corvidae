@@ -13,6 +13,8 @@ import json
 import aiosqlite
 import pytest
 
+from fake_clock import install_kernel_clock
+from helpers import add_kernel_registry
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
 from corvidae_cognition.funnel import FunnelPlugin
@@ -73,6 +75,9 @@ async def build_stack(db_path):
     await init_db(db)
 
     pm = create_plugin_manager()
+    # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+    add_kernel_registry(pm)
+    install_kernel_clock(pm)
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")

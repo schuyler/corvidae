@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
+from fake_clock import install_kernel_clock
+from helpers import add_kernel_registry
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel
 from corvidae.context import MessageType
@@ -97,6 +99,9 @@ async def build_consolidation_env(config=None, db_path=":memory:"):
         await db.execute("PRAGMA journal_mode=wal")
 
     pm = create_plugin_manager()
+    # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+    add_kernel_registry(pm)
+    install_kernel_clock(pm)
     persistence = PersistencePlugin()
     persistence.db = db
     pm.register(persistence, name="persistence")
@@ -998,6 +1003,9 @@ async def test_removed_consolidation_prompt_warns_naming_replacement(caplog, val
     (#380, #388, O2)."""
     config = {**EMBED_CONFIG, "memory": {**EMBED_CONFIG["memory"], "consolidation_prompt": value}}
     pm = create_plugin_manager()
+    # Kernel plugins the memory plugin resolves with get_dependency (#1180).
+    add_kernel_registry(pm)
+    install_kernel_clock(pm)
     memory = MemoryPlugin()
 
     with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
