@@ -194,3 +194,32 @@ async def test_a_chain_shorter_than_the_row_claims_is_refused(log):
     )
     await db.commit()
     assert await log.resolve_chain(root) is None
+
+
+async def test_rows_written_before_block_count_existed_are_backfilled(tmp_path):
+    """A defaulted column lies about old rows; the ladder backfills it."""
+    import aiosqlite
+
+    path = str(tmp_path / "legacy.db")
+    log = ForkLog(path)
+    await log.open()
+    fork_id = await log.record(
+        stage="appraisal",
+        channel_id="discord:1",
+        messages=CHILD,
+        digests=[digest_of(b) for b in CHILD],
+    )
+    await log.close()
+
+    # Rewind the row to what an older build wrote: no count, digests intact.
+    db = await aiosqlite.connect(path)
+    await db.execute("UPDATE fork_log SET block_count = 0 WHERE id = ?", (fork_id,))
+    await db.commit()
+    await db.close()
+
+    log = ForkLog(path)
+    await log.open()
+    try:
+        assert len(await log.resolve_chain(fork_id)) == len(CHILD)
+    finally:
+        await log.close()

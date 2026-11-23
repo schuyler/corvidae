@@ -436,3 +436,23 @@ async def test_the_before_send_fork_is_recorded_with_its_own_point(tmp_path):
         assert ("appraisal", "before-send") in rows
     finally:
         await _teardown(env)
+
+
+async def test_a_failed_capture_logs_an_error_and_counts_it(tmp_path, caplog):
+    """#1204: a fork whose row cannot be written must not fail silently."""
+    import logging
+
+    env, _spy = await _before_send_env(tmp_path)
+    try:
+        async def boom(**kwargs):
+            raise RuntimeError("disk full")
+
+        env.appraisal._fork_log.record = boom
+        with caplog.at_level(logging.ERROR, logger="corvidae.appraisal"):
+            result = await _send(env, "a reply")
+        assert result is None, "a capture failure must not hold or alter the send"
+        assert env.appraisal._fork_log.write_failures == 1
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("could not record" in r.getMessage() for r in errors)
+    finally:
+        await _teardown(env)

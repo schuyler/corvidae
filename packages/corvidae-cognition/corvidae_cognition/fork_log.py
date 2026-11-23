@@ -199,6 +199,15 @@ class ForkLog:
             if name not in have:
                 await db.execute(f"ALTER TABLE fork_log ADD COLUMN {name} {decl}")
                 logger.info("fork_log: added column %s to an existing table", name)
+        # A defaulted column lies about rows written before it existed: they
+        # claim zero blocks, which the length check would read as damage. This
+        # runs every open so a rewound row is repaired too; it is idempotent.
+        await db.execute(
+            "UPDATE fork_log SET block_count = coalesce(chain_from, 0) +"
+            " (SELECT count(*) FROM fork_digest"
+            "  WHERE fork_digest.fork_id = fork_log.id)"
+            " WHERE block_count = 0"
+        )
 
     async def close(self) -> None:
         if self._db is not None:
