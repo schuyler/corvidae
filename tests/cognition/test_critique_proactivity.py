@@ -227,7 +227,7 @@ class TestKeys:
         try:
             await _turn(env, "kp10", {"proactivity": 1.0})
             [call] = env.fork_agent.calls
-            assert call["instruction"].startswith("OPERATOR-PROACTIVITY-3v")
+            assert "## Lens: proactivity\nOPERATOR-PROACTIVITY-3v" in call["instruction"]
         finally:
             await _teardown(env)
 

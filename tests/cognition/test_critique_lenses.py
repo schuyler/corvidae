@@ -501,7 +501,7 @@ class TestSameMachinery:
             # The reply is recorded while it is in the window ...
             await _fire(env, "kr6d", response_text="resp")
             # ... then leaves it before appraisal's idle pass lands.
-            env.channel.conversation = window_of(env.channel.id, [1, 2])
+            env.channel.conversation = window_of(env.channel.id, [1, 50])
             await _stage2_hook(
                 env, channel=env.channel, trace_id="kr6d", response_text="resp",
                 annotations={}, stage2=_wins("mine"),

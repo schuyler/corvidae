@@ -1671,8 +1671,8 @@ class TestRetentionWakeNeedsARoot:
             "file": "people/yoz.md", "content": "- runs ARDC tech",
         }
         await env.plugin._record_and_register(
-            env.channel, "kwr", {"critique": {"lenses": ["retention"], "objections": 1}},
-            [objection], wake=False, origin=None,
+            env.channel, "kwr", [{"critique": {"lenses": ["retention"], "objections": 1}}],
+            [objection], wake=False, origin=None, reply_ref="",
         )
 
     async def test_with_a_root_the_finding_wakes_the_channel(self, tmp_path):

@@ -35,7 +35,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, fields as dc_fields, replace
 from enum import Enum
 from functools import partial
@@ -2162,6 +2162,7 @@ class Agent(CorvidaePlugin):
         extra_body: dict | None = None,
         snapshot: WindowSnapshot | None = None,
         max_tool_calls: int = 0,
+        yield_to_caller: Callable[[], Awaitable[None]] | None = None,
     ) -> ForkResult:
         """Run one fork of the channel's window (GitHub issue #51).
 
@@ -2192,6 +2193,17 @@ class Agent(CorvidaePlugin):
         result reaches the model framed as untrusted data, whatever the tool
         declares, and runs with no hooks (``pm=None``). Attribution gains
         ``mode="fork"`` for the whole loop; the caller sets ``stage``.
+
+        ``yield_to_caller`` is a cooperative yield for a caller that must keep
+        the fork off the model while something else needs it (a stage waits
+        for a user message on the channel, #1190). It is awaited at each round
+        boundary of the tool loop, after the round's tool results and before
+        the next model request, outside ``lease_scope``; never before the
+        first request (the render and that request have no await between) and
+        never after the final reply. The fork continues when it returns; an
+        exception it raises propagates out of ``fork`` (``stage done`` then
+        logs ``ok=False``). It is a callback, not a hook: the fork still fires
+        no hooks.
         ``ForkResult.usage`` is the last request's only; every request is
         metered at the client regardless.
 
@@ -2364,6 +2376,10 @@ class Agent(CorvidaePlugin):
                             "trace_id": trace_id, "max_tool_calls": max_tool_calls,
                         },
                     )
+                # Round boundary: hand control to the caller before the next
+                # request (it may pause the fork or raise to end it).
+                if yield_to_caller is not None:
+                    await yield_to_caller()
             if looks_like_tool_call(message.get("content") or ""):
                 raise ForkRefused(f"fork on {channel.id} wrote a tool call as text")
             ok = True
