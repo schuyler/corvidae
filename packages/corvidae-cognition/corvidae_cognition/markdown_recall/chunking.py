@@ -6,72 +6,135 @@ Vendored from schuyler/otterwiki-semantic-search (MIT, same author) per the
 
 import re
 
+from corvidae.channels.split import split_message
+
 from corvidae_cognition.markdown_recall.frontmatter import parse_frontmatter
 
-TARGET_WORDS = 150
-OVERLAP_WORDS = 35
-MIN_CHUNK_WORDS = 300  # Pages below this are a single chunk
-STUB_WORDS = 50
+# Sizes are UTF-8 bytes (#1186 R4): bytes per token is far steadier across
+# scripts than characters or whitespace words, and unspaced text has no words.
+# Converted from the old word sizes at ~6 bytes per word.
+TARGET_BYTES = 900  # was TARGET_WORDS = 150
+OVERLAP_BYTES = 200  # was OVERLAP_WORDS = 35
+MIN_CHUNK_BYTES = 1800  # was MIN_CHUNK_WORDS = 300; pages below are one chunk
+STUB_BYTES = 300  # was STUB_WORDS = 50
 MAX_PREFIX_DEPTH = 3
 
 HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$')
 
-
-def _split_sentences(text):
-    """Split text on sentence boundaries."""
-    parts = re.split(r'(?<=[.!?])\s+(?=[A-Z])|\n', text)
-    return [p for p in parts if p.strip()]
-
-
-def _word_count(text):
-    return len(text.split())
+# One sentence piece: lazily up to a boundary. A boundary is a Latin
+# terminal plus whitespace, a full-width terminal plus optional whitespace,
+# a newline, or the end of the text. No condition on what follows (#1186 R5).
+_SENTENCE_RE = re.compile(r'.*?(?:(?<=[.!?])\s+|(?<=[\u3002\uff01\uff1f])\s*|\n|\Z)')
 
 
-def _chunk_text(text: str) -> list:
-    """Split text into chunks by paragraph/sentence boundaries. No overlap."""
-    paragraphs = re.split(r'\n\n+', text)
-    paragraphs = [p.strip() for p in paragraphs if p.strip()]
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentence pieces that concatenate to ``text`` exactly."""
+    return [p for p in _SENTENCE_RE.findall(text) if p]
 
-    chunks = []
-    current_text_parts = []
 
-    for para in paragraphs:
-        para_wc = _word_count(para)
+def _size(text: str) -> int:
+    """Size of ``text`` in UTF-8 bytes; the unit of every chunking constant."""
+    return len(text.encode("utf-8"))
 
-        # If a single paragraph is too large, split on sentences
-        if para_wc > TARGET_WORDS * 2:
-            # Flush current accumulation first
-            if current_text_parts:
-                chunks.append("\n\n".join(current_text_parts))
-                current_text_parts = []
 
-            sentences = _split_sentences(para)
-            sent_acc = []
-            sent_wc = 0
-            for sent in sentences:
-                sw = _word_count(sent)
-                if sent_wc + sw > TARGET_WORDS and sent_acc:
-                    chunks.append(" ".join(sent_acc))
-                    sent_acc = []
-                    sent_wc = 0
-                sent_acc.append(sent)
-                sent_wc += sw
-            if sent_acc:
-                chunks.append(" ".join(sent_acc))
-            continue
+def _pack(text: str, units: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Greedily pack unit spans into chunk spans of about TARGET_BYTES.
 
-        word_total = sum(_word_count(w) for w in current_text_parts) + para_wc
+    A chunk runs from its first unit's start to its last unit's end, so
+    whatever separated the units in the source is kept exactly.
+    """
+    spans: list[tuple[int, int]] = []
+    cur_start = cur_end = -1
+    for start, end in units:
+        # Close the open chunk when adding this unit would pass the target.
+        if cur_end >= 0 and _size(text[cur_start:end]) > TARGET_BYTES:
+            spans.append((cur_start, cur_end))
+            cur_start = -1
+        if cur_start < 0:
+            cur_start = start
+        cur_end = end
+    if cur_end >= 0:
+        spans.append((cur_start, cur_end))
+    return spans
 
-        if word_total > TARGET_WORDS and current_text_parts:
-            chunks.append("\n\n".join(current_text_parts))
-            current_text_parts = []
 
-        current_text_parts.append(para)
+def _trim(text: str, start: int, end: int) -> tuple[int, int]:
+    """Shrink a span past whitespace at both edges."""
+    while start < end and text[start].isspace():
+        start += 1
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    return start, end
 
-    if current_text_parts:
-        chunks.append("\n\n".join(current_text_parts))
 
-    return chunks
+def _sentence_units(text: str, base: int) -> list[tuple[int, int]]:
+    """Offsets (into the section text) of a paragraph's sentence units.
+
+    ``base`` is the paragraph's start. A piece over 2 x TARGET_BYTES is cut
+    with split_message, which inserts and loses nothing, so offsets simply
+    accumulate over the cuts.
+    """
+    units: list[tuple[int, int]] = []
+    pos = base
+    for piece in _split_sentences(text):
+        # An over-long piece (a long unpunctuated line) is cut further.
+        parts = (
+            split_message(piece, TARGET_BYTES)
+            if _size(piece) > TARGET_BYTES * 2
+            else [piece]
+        )
+        for part in parts:
+            if part.strip():
+                units.append((pos, pos + len(part)))
+            pos += len(part)
+    return units
+
+
+def _chunk_spans(text: str) -> list[tuple[int, int]]:
+    """Split section text into chunk spans (start, end) by paragraph and
+    sentence boundaries. No overlap; the spans are slices of ``text``."""
+    chunks: list[tuple[int, int]] = []
+    pending: list[tuple[int, int]] = []  # paragraph units awaiting packing
+
+    for m in re.finditer(r'\S(?:.|\n(?!\n))*', text):
+        # Paragraphs are runs between blank lines, edges trimmed.
+        start, end = _trim(text, m.start(), m.end())
+        if _size(text[start:end]) > TARGET_BYTES * 2:
+            # A huge paragraph: flush the pending ones, then split it into
+            # sentence units and pack those on their own.
+            chunks.extend(_pack(text, pending))
+            pending = []
+            sentences = _sentence_units(text[start:end], start)
+            chunks.extend(_pack(text, sentences))
+        else:
+            pending.append((start, end))
+    chunks.extend(_pack(text, pending))
+    return [_trim(text, s, e) for s, e in chunks]
+
+
+def _overlap_start(text: str, prev_start: int, start: int, max_bytes: int) -> int:
+    """Offset where chunk ``start`` is widened back to, for overlap.
+
+    The smallest offset >= prev_start with text[o:start] at most max_bytes.
+    A cut inside a run of non-whitespace moves forward to the first word
+    start inside the overlap (spaced text overlaps on a word); unspaced text
+    keeps the code-point cut.
+    """
+    o = start
+    size = 0
+    # Walk back one code point at a time while the overlap still fits.
+    while o > prev_start:
+        width = _size(text[o - 1])
+        if size + width > max_bytes:
+            break
+        size += width
+        o -= 1
+    # A cut mid-word moves to the first whitespace-then-word boundary, if any.
+    if 0 < o < start and not text[o - 1].isspace() and not text[o].isspace():
+        for j in range(o + 1, start):
+            if text[j - 1].isspace() and not text[j].isspace():
+                return j
+    return o
 
 
 FENCE_RE = re.compile(r'^\s*(`{3,}|~{3,})')
@@ -188,7 +251,7 @@ def _render_stub(section):
 
 
 def _merge_stub_sections(sections):
-    """Merge stub sections (text < STUB_WORDS) forward or backward.
+    """Merge stub sections (text < STUB_BYTES) forward or backward.
 
     Only non-preamble (level > 0) sections are candidates for merging.
     Returns new list of section dicts with stubs merged.
@@ -205,7 +268,7 @@ def _merge_stub_sections(sections):
 
     for section in sections:
         is_stub = (section["level"] > 0
-                   and _word_count(section["text"]) < STUB_WORDS)
+                   and _size(section["text"]) < STUB_BYTES)
 
         if is_stub:
             pending_stubs.append(section)
@@ -228,7 +291,7 @@ def _merge_stub_sections(sections):
         if stub_text:
             # Find last substantial non-preamble section in merged
             for idx in range(len(merged) - 1, -1, -1):
-                if merged[idx]["level"] > 0 and _word_count(merged[idx]["text"]) >= STUB_WORDS:
+                if merged[idx]["level"] > 0 and _size(merged[idx]["text"]) >= STUB_BYTES:
                     merged[idx] = dict(merged[idx])
                     merged[idx]["text"] = (merged[idx]["text"] + "\n\n" + stub_text
                                            if merged[idx]["text"] else stub_text)
@@ -269,7 +332,7 @@ def chunk_page(pagepath, content):
             meta["title"] = str(frontmatter["title"])
 
     page_title = frontmatter.get("title", pagepath) if frontmatter else pagepath
-    page_word_count = _word_count(body)
+    page_bytes = _size(body)
 
     # Split body into sections, annotate with paths, merge stubs
     sections = _split_into_sections(body)
@@ -293,24 +356,18 @@ def chunk_page(pagepath, content):
         sec_text = sec["text"].strip()
 
         # For short sections / short total body, keep as single chunk
-        if page_word_count < MIN_CHUNK_WORDS or _word_count(sec_text) < MIN_CHUNK_WORDS:
+        if page_bytes < MIN_CHUNK_BYTES or _size(sec_text) < MIN_CHUNK_BYTES:
             all_chunks.append((prefix + sec_text, section, section_path))
         else:
-            raw_chunks = _chunk_text(sec_text)
-            if not raw_chunks:
-                continue
-
-            # Apply overlap within section only
-            if len(raw_chunks) > 1:
-                overlapped = [raw_chunks[0]]
-                for i in range(1, len(raw_chunks)):
-                    prev_words = raw_chunks[i - 1].split()
-                    overlap_words = prev_words[-OVERLAP_WORDS:]
-                    overlapped.append(" ".join(overlap_words) + "\n\n" + raw_chunks[i])
-                raw_chunks = overlapped
-
-            for chunk_text in raw_chunks:
-                all_chunks.append((prefix + chunk_text, section, section_path))
+            spans = _chunk_spans(sec_text)
+            for i, (start, end) in enumerate(spans):
+                # Widen later chunks backwards over the source (within the
+                # section only); nothing is inserted.
+                if i > 0:
+                    start = _overlap_start(
+                        sec_text, spans[i - 1][0], start, OVERLAP_BYTES
+                    )
+                all_chunks.append((prefix + sec_text[start:end], section, section_path))
 
     total_chunks = len(all_chunks)
 
@@ -323,7 +380,7 @@ def chunk_page(pagepath, content):
                 "chunk_index": i,
                 "section": section,
                 "section_path": section_path,
-                "page_word_count": page_word_count,
+                "page_bytes": page_bytes,
                 "total_chunks": total_chunks,
             },
         }
