@@ -263,7 +263,7 @@ class ForkLog:
         )
         fork_id = int(cur.lastrowid)
         if digests:
-            await self._check_digests(
+            digests = await self._check_digests(
                 messages, digests, chain_parent=chain_parent, chain_from=chain_from
             )
             await db.executemany(
@@ -281,8 +281,8 @@ class ForkLog:
         *,
         chain_parent: int | None,
         chain_from: int,
-    ) -> None:
-        """Refuse a digest list that does not describe the blocks being sent."""
+    ) -> Sequence[bytes]:
+        """Check a digest list, returning the tail this row stores."""
         prefix: list[bytes] = []
         if chain_from:
             if chain_parent is None:
@@ -292,10 +292,22 @@ class ForkLog:
                 raise ValueError("fork_log: chain_parent does not resolve")
             prefix = parent
         expected = [digest_of(block) for block in messages]
+        # Two shapes are legal: the tail this row appends, or the whole list the
+        # caller already has. Anything else is a length mistake, not a content
+        # mistake, and the two deserve different messages.
+        if len(digests) == len(expected):
+            digests = digests[chain_from:]
+        elif len(digests) != len(expected) - chain_from:
+            raise ValueError(
+                "fork_log: digests have the wrong length: pass the blocks this"
+                f" row appends ({len(expected) - chain_from}) or the whole"
+                f" prompt ({len(expected)}), got {len(digests)}"
+            )
         if [*prefix, *digests] != expected:
             raise ValueError(
                 "fork_log: digests do not describe the rendered blocks"
             )
+        return digests
 
     async def resolve_chain(
         self, fork_id: int, _memo: dict[int, list[bytes]] | None = None

@@ -343,3 +343,38 @@ async def test_a_row_names_the_system_text_it_used(log):
     row = await _row(log, fork_id)
     assert row["system_sha256"] is not None
     assert await log.read_block(row["system_sha256"]) == "you are a test"
+
+
+async def test_the_whole_prompt_list_is_accepted_for_a_chained_row(log):
+    from corvidae_cognition.fork_log import digest_of
+
+    first = await _fork(log, B[:2])
+    fork_id = await log.record(
+        stage="appraisal",
+        channel_id="discord:1",
+        messages=B[:3],
+        digests=[digest_of(b) for b in B[:3]],
+        chain_parent=first,
+        chain_from=2,
+    )
+    assert await log.resolve_chain(fork_id) == [digest_of(b) for b in B[:3]]
+    db = await log._conn()
+    async with db.execute(
+        "SELECT count(*) AS n FROM fork_digest WHERE fork_id = ?", (fork_id,)
+    ) as cur:
+        assert (await cur.fetchone())["n"] == 1  # the tail only, not the prompt
+
+
+async def test_a_wrong_length_says_length_not_content(log):
+    from corvidae_cognition.fork_log import digest_of
+
+    first = await _fork(log, B[:2])
+    with pytest.raises(ValueError, match="wrong length"):
+        await log.record(
+            stage="appraisal",
+            channel_id="discord:1",
+            messages=B[:4],
+            digests=[digest_of(B[3])],
+            chain_parent=first,
+            chain_from=2,
+        )
