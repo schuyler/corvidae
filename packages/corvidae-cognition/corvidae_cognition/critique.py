@@ -1251,6 +1251,7 @@ class CritiquePlugin(CorvidaePlugin):
         if log is not None:
             await log.record(**kwargs)
 
+    @hookimpl
     async def on_stop(self) -> None:
         log = getattr(self, "_fork_log", None)
         if log is not None:

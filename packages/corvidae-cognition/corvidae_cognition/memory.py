@@ -2213,6 +2213,7 @@ class MemoryPlugin(CorvidaePlugin):
         if log is not None:
             await log.record(**kwargs)
 
+    @hookimpl
     async def on_stop(self) -> None:
         """Cancel the watches and timers, then tracked background tasks."""
         # First, before any await: no trigger may spawn after this point.
